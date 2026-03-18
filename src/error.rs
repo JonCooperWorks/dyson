@@ -1,0 +1,153 @@
+// ===========================================================================
+// Error types — every fallible operation in Dyson flows through DysonError.
+//
+// LEARNING OVERVIEW
+//
+// What this file does:
+//   Defines a single, unified error enum (`DysonError`) that every module in
+//   Dyson uses for its `Result` types.  Having one error type across the
+//   entire crate means callers never need to juggle multiple error types or
+//   write ad-hoc conversions — `?` just works everywhere.
+//
+// Why one enum instead of per-module errors?
+//   Dyson is a pipeline: config → skill/tool → LLM → agent loop → UI.
+//   Errors bubble across module boundaries constantly (an MCP tool error
+//   surfaces through the agent loop into the UI).  A single enum avoids
+//   the nested-error-type problem where you end up with
+//   `AgentError(ToolError(McpError(IoError)))`.  The trade-off is a
+//   slightly larger enum, but the ergonomic win is massive.
+//
+// How thiserror works here:
+//   The `#[derive(thiserror::Error)]` macro auto-generates `Display` and
+//   `Error` impls.  `#[from]` attributes generate `From<T>` impls so
+//   `std::io::Error`, `reqwest::Error`, and `serde_json::Error` can be
+//   converted with `?` automatically.  Variants like `Tool` and `Mcp` use
+//   named fields instead of `#[from]` because they carry extra context
+//   (which tool failed, which server).
+// ===========================================================================
+
+
+// ---------------------------------------------------------------------------
+// DysonError
+// ---------------------------------------------------------------------------
+
+/// Unified error type for the entire Dyson crate.
+///
+/// Every `Result<T>` in this crate is shorthand for `Result<T, DysonError>`.
+/// Variants are grouped by subsystem so match arms read naturally:
+///
+/// ```ignore
+/// match err {
+///     DysonError::Llm(msg) => /* LLM provider issue */,
+///     DysonError::Tool { tool, message } => /* a tool failed */,
+///     DysonError::Config(msg) => /* bad config */,
+///     _ => /* infrastructure: IO, HTTP, JSON */,
+/// }
+/// ```
+#[derive(Debug, thiserror::Error)]
+pub enum DysonError {
+    /// An error from the LLM provider (API rejection, rate limit, etc.).
+    #[error("LLM error: {0}")]
+    Llm(String),
+
+    /// A tool failed during execution.
+    ///
+    /// `tool` is the tool's registered name (e.g. "bash"), `message` is
+    /// the human-readable explanation.  The agent loop catches these and
+    /// sends the message back to the LLM as an error tool_result so it
+    /// can retry or adjust.
+    #[error("Tool error [{tool}]: {message}")]
+    Tool { tool: String, message: String },
+
+    /// An MCP (Model Context Protocol) server returned an error or
+    /// the transport failed.
+    #[error("MCP error [{server}]: {message}")]
+    Mcp { server: String, message: String },
+
+    /// Configuration is missing, malformed, or contradictory.
+    #[error("Config error: {0}")]
+    Config(String),
+
+    /// Filesystem or other I/O failure.
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// HTTP transport failure (reqwest).
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    /// JSON serialization or deserialization failure.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// The operation was cancelled (e.g. Ctrl-C during a tool call).
+    #[error("Cancelled")]
+    Cancelled,
+}
+
+// ---------------------------------------------------------------------------
+// From impls for types that don't use #[from]
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Convenience type alias
+// ---------------------------------------------------------------------------
+
+/// Crate-wide result type.  Every function that can fail returns this.
+pub type Result<T> = std::result::Result<T, DysonError>;
+
+// ---------------------------------------------------------------------------
+// Display helpers
+// ---------------------------------------------------------------------------
+
+impl DysonError {
+    /// Convenience constructor for tool errors.
+    pub fn tool(tool: impl Into<String>, message: impl Into<String>) -> Self {
+        DysonError::Tool {
+            tool: tool.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Convenience constructor for MCP errors.
+    pub fn mcp(server: impl Into<String>, message: impl Into<String>) -> Self {
+        DysonError::Mcp {
+            server: server.into(),
+            message: message.into(),
+        }
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_display_messages() {
+        let e = DysonError::Llm("rate limited".into());
+        assert_eq!(e.to_string(), "LLM error: rate limited");
+
+        let e = DysonError::tool("bash", "command not found");
+        assert_eq!(e.to_string(), "Tool error [bash]: command not found");
+
+        let e = DysonError::mcp("github", "connection refused");
+        assert_eq!(e.to_string(), "MCP error [github]: connection refused");
+
+        let e = DysonError::Config("missing API key".into());
+        assert_eq!(e.to_string(), "Config error: missing API key");
+
+        let e = DysonError::Cancelled;
+        assert_eq!(e.to_string(), "Cancelled");
+    }
+
+    #[test]
+    fn io_error_converts() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        let dyson_err: DysonError = io_err.into();
+        assert!(dyson_err.to_string().contains("gone"));
+    }
+}

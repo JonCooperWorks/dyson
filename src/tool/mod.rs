@@ -1,0 +1,224 @@
+// ===========================================================================
+// Tool trait — the fundamental unit of capability in Dyson.
+//
+// LEARNING OVERVIEW
+//
+// What this file does:
+//   Defines the `Tool` trait that every callable capability implements,
+//   plus the supporting types `ToolContext` and `ToolOutput`.  Whether it's
+//   a bash shell, a file reader, or an MCP remote tool — they all implement
+//   this one trait.
+//
+// Module layout:
+//   mod.rs  — Tool trait, ToolContext, ToolOutput (this file)
+//   bash.rs — Shell execution tool
+//
+// How tools fit into the architecture:
+//
+//   Skill (owns tools)
+//     │
+//     ├── Arc<dyn Tool>  ─── BashTool
+//     ├── Arc<dyn Tool>  ─── ReadFileTool      (future)
+//     └── Arc<dyn Tool>  ─── McpRemoteTool     (future)
+//           │
+//           ▼
+//   Agent (flat lookup: HashMap<name, Arc<dyn Tool>>)
+//     │
+//     ▼
+//   Sandbox.check(name, input, ctx)  ← gates every call
+//     │
+//     ▼
+//   tool.run(input, ctx)  → ToolOutput
+//     │
+//     ▼
+//   Sandbox.after(name, input, &mut output)  ← post-processing
+//
+// Why Arc<dyn Tool>?
+//   Tools are *owned* by skills but *looked up* by the agent's flat
+//   HashMap.  We need shared ownership without lifetime gymnastics.
+//   Arc<dyn Tool> is the natural choice: tools are created once and
+//   never mutated, so the Arc overhead is negligible (no contention).
+//
+// Why async?
+//   Tools do I/O: bash spawns processes, MCP tools make network calls,
+//   file tools hit the filesystem.  Making `run()` async means the
+//   tokio runtime can multiplex tool execution efficiently.  Even for
+//   fast tools (read a small file), the overhead of an async call is
+//   trivial compared to the I/O itself.
+// ===========================================================================
+
+pub mod bash;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
+
+use crate::error::Result;
+
+// ---------------------------------------------------------------------------
+// Tool trait
+// ---------------------------------------------------------------------------
+
+/// A single callable capability — the fundamental building block of Dyson.
+///
+/// Every tool has a name, a description (shown to the LLM so it knows when
+/// to use it), a JSON schema for its input, and an async `run` method.
+///
+/// ## Object safety
+///
+/// This trait is object-safe thanks to `async_trait` (which boxes the
+/// returned future).  Tools are stored as `Arc<dyn Tool>` throughout Dyson.
+///
+/// ## Implementing a new tool
+///
+/// ```ignore
+/// struct MyTool;
+///
+/// #[async_trait]
+/// impl Tool for MyTool {
+///     fn name(&self) -> &str { "my_tool" }
+///     fn description(&self) -> &str { "Does something useful" }
+///     fn input_schema(&self) -> serde_json::Value {
+///         serde_json::json!({
+///             "type": "object",
+///             "properties": {
+///                 "input": { "type": "string" }
+///             },
+///             "required": ["input"]
+///         })
+///     }
+///     async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+///         let val = input["input"].as_str().unwrap_or("default");
+///         Ok(ToolOutput::success(format!("Got: {val}")))
+///     }
+/// }
+/// ```
+#[async_trait]
+pub trait Tool: Send + Sync {
+    /// The tool's unique name, used for dispatch and display.
+    ///
+    /// Must be a valid identifier (lowercase, underscores) — it appears in
+    /// the LLM's tool_use blocks and in log output.
+    fn name(&self) -> &str;
+
+    /// Human-readable description shown to the LLM.
+    ///
+    /// The LLM uses this to decide *when* to call the tool.  Be specific
+    /// about what the tool does and when it's appropriate.
+    fn description(&self) -> &str;
+
+    /// JSON Schema for the tool's input parameters.
+    ///
+    /// Sent to the LLM as part of the tool definition so it knows what
+    /// arguments to provide.  Must be a valid JSON Schema object.
+    fn input_schema(&self) -> serde_json::Value;
+
+    /// Execute the tool with the given input and context.
+    ///
+    /// `input` is the JSON object the LLM provided (validated against
+    /// `input_schema` by the LLM, but always validate defensively).
+    /// `ctx` provides the working directory, environment, and cancellation
+    /// token.
+    ///
+    /// Returns `ToolOutput` on success (which may still indicate a
+    /// "tool-level error" via `is_error`), or `DysonError` for
+    /// infrastructure failures.
+    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput>;
+}
+
+// ---------------------------------------------------------------------------
+// ToolContext — ambient state available to every tool call.
+// ---------------------------------------------------------------------------
+
+/// Runtime context passed to every tool invocation.
+///
+/// Tools should use this instead of querying the environment directly.
+/// This makes tools testable (inject a fake working dir, mock env) and
+/// ensures consistent behavior across the agent session.
+pub struct ToolContext {
+    /// The working directory for this agent session.
+    ///
+    /// Bash commands run here.  File paths are resolved relative to this.
+    /// Set once at startup from the process CWD.
+    pub working_dir: PathBuf,
+
+    /// Environment variables available to child processes.
+    ///
+    /// Tools like bash pass these to spawned commands.  Populated from
+    /// the agent config and any skill-specific env vars.
+    pub env: HashMap<String, String>,
+
+    /// Cancellation token for cooperative cancellation.
+    ///
+    /// Long-running tools (bash commands, MCP calls) should poll this
+    /// token and abort promptly when it fires.  Triggered by Ctrl-C
+    /// in the terminal.
+    pub cancellation: CancellationToken,
+}
+
+impl ToolContext {
+    /// Create a context with the current working directory and no extra env.
+    ///
+    /// Useful for testing and simple setups where you don't need custom
+    /// environment variables.
+    pub fn from_cwd() -> Result<Self> {
+        Ok(Self {
+            working_dir: std::env::current_dir()?,
+            env: HashMap::new(),
+            cancellation: CancellationToken::new(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ToolOutput — what a tool returns to the agent.
+// ---------------------------------------------------------------------------
+
+/// The result of a tool execution, sent back to the LLM.
+///
+/// `content` is the main output text.  `is_error` indicates whether the
+/// tool itself considers this an error (not to be confused with
+/// `DysonError`, which means the tool *couldn't run at all*).
+///
+/// Example: a bash command that exits with code 1 returns
+/// `ToolOutput { content: "command not found", is_error: true }`.
+/// A bash command that exits 0 returns `is_error: false`.
+/// A bash command that can't even be spawned returns `Err(DysonError::Io(...))`.
+pub struct ToolOutput {
+    /// The text content to send back to the LLM.
+    pub content: String,
+
+    /// Whether this is a tool-level error.
+    ///
+    /// The LLM sees this flag in the `tool_result` content block and can
+    /// decide to retry, try a different approach, or report the error.
+    pub is_error: bool,
+
+    /// Optional structured metadata (not sent to the LLM).
+    ///
+    /// Used for internal tracking: timing info, exit codes, byte counts,
+    /// etc.  Skills can inspect this in their `after_tool()` hook.
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl ToolOutput {
+    /// Create a successful (non-error) output.
+    pub fn success(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: false,
+            metadata: None,
+        }
+    }
+
+    /// Create an error output.
+    pub fn error(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: true,
+            metadata: None,
+        }
+    }
+}

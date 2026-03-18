@@ -1,0 +1,170 @@
+// ===========================================================================
+// LLM client — the provider-agnostic interface to language models.
+//
+// LEARNING OVERVIEW
+//
+// What this file does:
+//   Defines the `LlmClient` trait and supporting types (`CompletionConfig`,
+//   `ToolDefinition`) that abstract over LLM providers.  The agent loop
+//   calls `client.stream(...)` without knowing whether it's talking to
+//   Anthropic, OpenAI, or a local model.
+//
+// Module layout:
+//   mod.rs       — LlmClient trait, CompletionConfig, ToolDefinition (this file)
+//   stream.rs    — StreamEvent and StopReason enums
+//   anthropic.rs — Anthropic Messages API implementation
+//   openai.rs    — OpenAI Chat Completions API (also Codex, Ollama, etc.)
+//   claude_code.rs — Claude Code CLI subprocess (no API key needed)
+//
+// Why a trait?
+//   Dyson is designed to support multiple LLM providers.  The trait boundary
+//   means you can add OpenAI, Ollama, or any other provider by implementing
+//   one trait.  The agent loop, skills, tools, and UI are completely
+//   unaffected.
+//
+// Why streaming returns a Stream, not a callback?
+//   Rust's `Stream` trait (from futures) composes naturally with async/await.
+//   The stream handler can `while let Some(event) = stream.next().await`
+//   and process events one by one.  This is more ergonomic and testable
+//   than callbacks.  For testing, you can create a stream from a Vec of
+//   events.
+// ===========================================================================
+
+pub mod anthropic;
+pub mod claude_code;
+pub mod openai;
+pub mod stream;
+
+use std::pin::Pin;
+
+use async_trait::async_trait;
+use futures::Stream;
+
+use crate::error::Result;
+use crate::llm::stream::StreamEvent;
+use crate::message::Message;
+
+// ---------------------------------------------------------------------------
+// CompletionConfig
+// ---------------------------------------------------------------------------
+
+/// Per-request configuration for an LLM completion.
+///
+/// Passed to [`LlmClient::stream()`] on each call.  The agent builds this
+/// from [`AgentSettings`](crate::config::AgentSettings) at startup but can
+/// adjust per-turn (e.g., lower temperature for tool-heavy tasks).
+#[derive(Debug, Clone)]
+pub struct CompletionConfig {
+    /// Model identifier (e.g., "claude-sonnet-4-20250514").
+    pub model: String,
+
+    /// Maximum tokens to generate in this response.
+    pub max_tokens: u32,
+
+    /// Sampling temperature.  `None` means use the provider's default.
+    ///
+    /// Lower = more deterministic, higher = more creative.
+    /// Tool-heavy tasks often benefit from lower temperature (0.0–0.3).
+    pub temperature: Option<f64>,
+}
+
+// ---------------------------------------------------------------------------
+// ToolDefinition
+// ---------------------------------------------------------------------------
+
+/// A tool definition sent to the LLM so it knows what tools are available.
+///
+/// Built from [`Tool::name()`], [`Tool::description()`], and
+/// [`Tool::input_schema()`] at agent startup.  Sent as part of every
+/// LLM request.
+#[derive(Debug, Clone)]
+pub struct ToolDefinition {
+    /// Tool name (must match what the LLM sends back in tool_use blocks).
+    pub name: String,
+
+    /// Human-readable description of what the tool does.
+    pub description: String,
+
+    /// JSON Schema for the tool's input parameters.
+    pub input_schema: serde_json::Value,
+}
+
+// ---------------------------------------------------------------------------
+// LlmClient trait
+// ---------------------------------------------------------------------------
+
+/// Provider-agnostic interface for streaming LLM completions.
+///
+/// Each provider (Anthropic, OpenAI, local) implements this trait.  The
+/// agent loop calls `stream()` and consumes the resulting event stream
+/// without knowing anything about the underlying API.
+///
+/// ## Why async?
+///
+/// LLM calls are network I/O — building the HTTP request, streaming the
+/// response.  Async lets the tokio runtime do other work (handle Ctrl-C,
+/// run the UI) while waiting for the first token.
+///
+/// ## Why Pin<Box<dyn Stream>>?
+///
+/// Streams in Rust are typically `!Unpin` (they contain internal state
+/// that can't be moved).  `Pin<Box<...>>` is the standard way to return
+/// a dynamically-dispatched, heap-allocated stream.  The `Send` bound
+/// ensures the stream can be consumed from the tokio runtime.
+#[async_trait]
+pub trait LlmClient: Send + Sync {
+    /// Start a streaming completion.
+    ///
+    /// ## Parameters
+    ///
+    /// - `messages`: The conversation history (user messages, assistant
+    ///   responses, tool results).
+    /// - `system`: The system prompt (passed separately, not as a message).
+    /// - `tools`: Available tool definitions (the LLM decides which to use).
+    /// - `config`: Model, max_tokens, temperature.
+    ///
+    /// ## Returns
+    ///
+    /// A stream of `StreamEvent`s that the stream handler consumes.
+    /// The stream ends with `StreamEvent::MessageComplete`.  Errors
+    /// during streaming are emitted as `StreamEvent::Error` or as
+    /// `Err(...)` items in the stream.
+    async fn stream(
+        &self,
+        messages: &[Message],
+        system: &str,
+        tools: &[ToolDefinition],
+        config: &CompletionConfig,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>>;
+}
+
+// ---------------------------------------------------------------------------
+// Client factory
+// ---------------------------------------------------------------------------
+
+/// Create an LLM client from agent settings.
+///
+/// Used by controllers to create a client per session/message without
+/// duplicating the provider-matching logic.
+pub fn create_client(settings: &crate::config::AgentSettings) -> Box<dyn LlmClient> {
+    match settings.provider {
+        crate::config::LlmProvider::Anthropic => Box::new(
+            anthropic::AnthropicClient::new(
+                &settings.api_key,
+                settings.base_url.as_deref(),
+            ),
+        ),
+        crate::config::LlmProvider::OpenAi => Box::new(
+            openai::OpenAiClient::new(
+                &settings.api_key,
+                settings.base_url.as_deref(),
+            ),
+        ),
+        crate::config::LlmProvider::ClaudeCode => Box::new(
+            claude_code::ClaudeCodeClient::new(
+                settings.base_url.as_deref(),
+                vec![], // MCP servers go through the skill system, not CLI args
+            ),
+        ),
+    }
+}

@@ -1,0 +1,30 @@
+{
+  "agent": {
+    "provider": "openai",
+    "model": "llama-3.2-3b-instruct",
+    "base_url": "http://localhost:9000",
+    "api_key": "not-needed",
+    "max_iterations": 20,
+    "max_tokens": 8192
+  },
+  "controllers": [
+    {
+      "type": "telegram",
+      "bot_token": {
+        "resolver": "insecure_env",
+        "name": "TELEGRAM_API_KEY"
+      },
+      "allowed_chat_ids": [
+        {
+          "resolver": "insecure_env",
+          "name": "TELEGRAM_ALLOWED_CHAT_IDS"
+        }
+      ]
+    }
+  ],
+  "skills": {
+    "builtin": {
+      "tools": []
+    }
+  }
+}
