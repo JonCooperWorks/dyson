@@ -299,12 +299,14 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                // /clear — reset conversation context for this chat.
+                // /clear — rotate conversation history and start fresh.
+                // The old history is preserved as a timestamped file
+                // for review or RAG indexing.
                 if text == "/clear" {
                     agents.lock().await.remove(&chat_id.0);
-                    let _ = chat_store.delete(&chat_id.0.to_string());
+                    let _ = chat_store.rotate(&chat_id.0.to_string());
                     let _ = bot.send_message(chat_id, "Context cleared.").await;
-                    tracing::info!(chat_id = chat_id.0, "conversation cleared");
+                    tracing::info!(chat_id = chat_id.0, "conversation rotated and cleared");
                     continue;
                 }
 
