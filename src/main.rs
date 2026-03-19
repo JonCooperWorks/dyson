@@ -311,9 +311,13 @@ fn install_to_path(base: &PathBuf) -> anyhow::Result<()> {
     let current_exe = std::env::current_exe()?;
 
     // Copy binary into ~/.dyson/bin/ (our own managed copy).
+    // Remove the old file first — on Linux you can't overwrite a running
+    // binary ("Text file busy"), but you can unlink it and create a new
+    // file at the same path.
     let bin_dir = base.join("bin");
     std::fs::create_dir_all(&bin_dir)?;
     let installed_bin = bin_dir.join("dyson");
+    let _ = std::fs::remove_file(&installed_bin);
     std::fs::copy(&current_exe, &installed_bin)?;
 
     #[cfg(unix)]
