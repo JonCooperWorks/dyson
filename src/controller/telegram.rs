@@ -435,11 +435,10 @@ impl Output for TelegramOutput {
         Ok(())
     }
 
-    fn tool_use_start(&mut self, _id: &str, name: &str) -> Result<(), DysonError> {
-        self.force_flush_text()?;
-        self.text_buffer.clear();
-        self.current_message_id = None;
-        self.send_message(&format!("🔧 {name}"))?;
+    fn tool_use_start(&mut self, _id: &str, _name: &str) -> Result<(), DysonError> {
+        // Don't send tool call notifications to Telegram — they're noisy,
+        // especially with providers like Claude Code that run many internal
+        // tool calls.  The user only needs the final text response.
         Ok(())
     }
 
@@ -447,15 +446,7 @@ impl Output for TelegramOutput {
         Ok(())
     }
 
-    fn tool_result(&mut self, output: &ToolOutput) -> Result<(), DysonError> {
-        let label = if output.is_error {
-            "❌ Error"
-        } else {
-            "✅ Result"
-        };
-        let content = truncate_for_telegram(&output.content);
-        let text = format!("{label}\n```\n{content}\n```");
-        self.send_message(&text)?;
+    fn tool_result(&mut self, _output: &ToolOutput) -> Result<(), DysonError> {
         Ok(())
     }
 
