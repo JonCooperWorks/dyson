@@ -49,10 +49,11 @@ pub fn apply_overrides(
     if let Some(provider_str) = provider {
         settings.agent.provider = match provider_str.to_lowercase().as_str() {
             "anthropic" => LlmProvider::Anthropic,
-            "openai" | "gpt" | "codex" => LlmProvider::OpenAi,
+            "openai" | "gpt" => LlmProvider::OpenAi,
             "claude-code" | "claude_code" | "cc" => LlmProvider::ClaudeCode,
+            "codex" | "codex-cli" => LlmProvider::Codex,
             other => anyhow::bail!(
-                "unknown provider '{other}'.  Use 'anthropic', 'openai', or 'claude-code'."
+                "unknown provider '{other}'.  Use 'anthropic', 'openai', 'claude-code', or 'codex'."
             ),
         };
     }

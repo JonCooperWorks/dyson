@@ -972,7 +972,7 @@ impl StreamParserState {
 ///
 /// Tell me more about Cargo.toml
 /// ```
-fn format_prompt(messages: &[Message], tools: &[ToolDefinition]) -> String {
+pub(crate) fn format_prompt(messages: &[Message], tools: &[ToolDefinition]) -> String {
     // Single user message with no history and no tools — just return the text.
     if messages.len() == 1 && tools.is_empty() {
         if let Some(ContentBlock::Text { text }) = messages[0].content.first() {

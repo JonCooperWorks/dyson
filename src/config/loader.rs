@@ -268,8 +268,9 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
         if let Some(provider) = agent.provider {
             settings.agent.provider = match provider.to_lowercase().as_str() {
                 "anthropic" => crate::config::LlmProvider::Anthropic,
-                "openai" | "gpt" | "codex" => crate::config::LlmProvider::OpenAi,
+                "openai" | "gpt" => crate::config::LlmProvider::OpenAi,
                 "claude-code" | "claude_code" | "cc" => crate::config::LlmProvider::ClaudeCode,
+                "codex" | "codex-cli" => crate::config::LlmProvider::Codex,
                 other => {
                     tracing::warn!(provider = other, "unknown provider, defaulting to anthropic");
                     crate::config::LlmProvider::Anthropic
@@ -510,7 +511,9 @@ fn resolve_secrets_in_value(value: &mut serde_json::Value, secrets: &SecretRegis
 
 /// Ensure we have an API key (unless using Claude Code).
 fn resolve_api_key(settings: &mut Settings, secrets: &SecretRegistry) -> Result<()> {
-    if settings.agent.provider == crate::config::LlmProvider::ClaudeCode {
+    if settings.agent.provider == crate::config::LlmProvider::ClaudeCode
+        || settings.agent.provider == crate::config::LlmProvider::Codex
+    {
         return Ok(());
     }
 
@@ -522,7 +525,7 @@ fn resolve_api_key(settings: &mut Settings, secrets: &SecretRegistry) -> Result<
     let env_fallback = match settings.agent.provider {
         crate::config::LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
         crate::config::LlmProvider::OpenAi => "OPENAI_API_KEY",
-        crate::config::LlmProvider::ClaudeCode => unreachable!(),
+        crate::config::LlmProvider::ClaudeCode | crate::config::LlmProvider::Codex => unreachable!(),
     };
 
     settings.agent.api_key = secrets.resolve_or_env_fallback(

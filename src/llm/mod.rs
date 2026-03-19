@@ -32,6 +32,7 @@
 
 pub mod anthropic;
 pub mod claude_code;
+pub mod codex;
 pub mod openai;
 pub mod stream;
 
@@ -179,6 +180,7 @@ pub trait LlmClient: Send + Sync {
 /// | `Anthropic`    | No              | No                | Dyson's tool system |
 /// | `OpenAi`       | No              | No                | Dyson's tool system |
 /// | `ClaudeCode`   | Yes (MCP server)| Yes (forwarded)   | Claude Code built-in + workspace via MCP |
+/// | `Codex`        | Yes (MCP server)| Yes (forwarded)   | Codex built-in + workspace via MCP |
 ///
 /// ## Why workspace is passed here (not at stream time)
 ///
@@ -209,6 +211,13 @@ pub fn create_client(
             claude_code::ClaudeCodeClient::new(
                 settings.base_url.as_deref(),
                 vec![], // MCP servers go through the skill system, not CLI args
+                workspace,
+                dangerous_no_sandbox,
+            ),
+        ),
+        crate::config::LlmProvider::Codex => Box::new(
+            codex::CodexClient::new(
+                settings.base_url.as_deref(),
                 workspace,
                 dangerous_no_sandbox,
             ),

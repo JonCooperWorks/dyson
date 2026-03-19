@@ -226,6 +226,8 @@ pub enum LlmProvider {
     OpenAi,
     /// Locally installed `claude` CLI (no API key needed).
     ClaudeCode,
+    /// Locally installed `codex` CLI (OpenAI Codex, no API key needed).
+    Codex,
 }
 
 // ---------------------------------------------------------------------------
