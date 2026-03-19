@@ -152,14 +152,51 @@ pub struct ClaudeCodeClient {
 impl ClaudeCodeClient {
     /// Create a new Claude Code client.
     ///
-    /// `claude_path` is optional — pass `None` to use "claude" from PATH.
+    /// `claude_path` is optional — pass `None` to resolve automatically.
+    /// Resolution order: explicit path > `which claude` > fallback "claude".
+    ///
+    /// We resolve the absolute path at startup so that service environments
+    /// (systemd, launchd) work even with a minimal PATH.
     /// `mcp_configs` is a list of MCP server JSON configs to forward.
     pub fn new(claude_path: Option<&str>, mcp_configs: Vec<String>) -> Self {
+        let resolved = match claude_path {
+            Some(p) => p.to_string(),
+            None => resolve_claude_path(),
+        };
+
         Self {
-            claude_path: claude_path.unwrap_or("claude").to_string(),
+            claude_path: resolved,
             mcp_configs,
         }
     }
+}
+
+/// Resolve the absolute path to the `claude` binary.
+///
+/// Uses `which claude` to find it on the current PATH.  This is important
+/// for service environments (systemd, launchd) where PATH is minimal and
+/// won't include npm global bin directories.  By resolving at startup
+/// (which happens before daemonizing or during the first run), we capture
+/// the full path while the user's PATH is still available.
+fn resolve_claude_path() -> String {
+    std::process::Command::new("which")
+        .arg("claude")
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    tracing::info!(path = path, "resolved claude binary path");
+                    return Some(path);
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| {
+            tracing::warn!("could not resolve claude path — falling back to 'claude'");
+            "claude".to_string()
+        })
 }
 
 // ---------------------------------------------------------------------------

@@ -369,14 +369,21 @@ fn install_systemd_service(base: &PathBuf, config_path: &PathBuf) -> anyhow::Res
 
     #[cfg(target_os = "linux")]
     {
-        // Find the dyson binary.
-        let dyson_bin = std::env::current_exe()
-            .unwrap_or_else(|_| PathBuf::from("dyson"));
+        // Use the installed copy at ~/.dyson/bin/dyson (created by install_to_path)
+        // rather than the current exe, so the service survives the original
+        // binary being moved or deleted.
+        let dyson_bin = base.join("bin").join("dyson");
 
         let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
         let home = std::env::var("HOME").unwrap_or_default();
+        let path = std::env::var("PATH").unwrap_or_default();
 
         // Build the service unit file.
+        //
+        // We capture the current PATH so that binaries like `claude` (installed
+        // via npm into ~/.local/bin or ~/.nvm/...) are found in the service
+        // environment.  Without this, systemd's minimal PATH won't include
+        // npm global directories and claude-code provider will fail to spawn.
         let unit = format!(
             "[Unit]\n\
              Description=Dyson AI Agent\n\
@@ -389,12 +396,14 @@ fn install_systemd_service(base: &PathBuf, config_path: &PathBuf) -> anyhow::Res
              RestartSec=5\n\
              WorkingDirectory={home}\n\
              Environment=HOME={home}\n\
+             Environment=PATH={path}\n\
              \n\
              [Install]\n\
              WantedBy=default.target\n",
             dyson_bin = dyson_bin.display(),
             config_path = config_path.display(),
             home = home,
+            path = path,
         );
 
         // Try user service first (no sudo needed).
@@ -443,6 +452,7 @@ fn install_systemd_service(base: &PathBuf, config_path: &PathBuf) -> anyhow::Res
                  RestartSec=5\n\
                  WorkingDirectory={home}\n\
                  Environment=HOME={home}\n\
+                 Environment=PATH={path}\n\
                  \n\
                  [Install]\n\
                  WantedBy=multi-user.target\n",
@@ -450,6 +460,7 @@ fn install_systemd_service(base: &PathBuf, config_path: &PathBuf) -> anyhow::Res
                 dyson_bin = dyson_bin.display(),
                 config_path = config_path.display(),
                 home = home,
+                path = path,
             );
 
             // Write via sudo tee.
