@@ -10,6 +10,7 @@ overview, then dive into the component that interests you.
 | [LLM Clients](llm-clients.md) | Anthropic, OpenAI, and Claude Code streaming. SSE parsing, thinking tokens, provider abstraction |
 | [Tools & Skills](tools-and-skills.md) | Tool trait, Skill trait, BuiltinSkill, adding new tools |
 | [Sandbox](sandbox.md) | OS sandbox (Seatbelt/bubblewrap), Docker sandbox, Allow/Deny/Redirect, composition |
+| [Chat Persistence](chat-persistence.md) | ChatStore trait, per-chat agents, `/clear` and `/memory` commands |
 | [Configuration](configuration.md) | dyson.json format, provider selection, env var resolution |
 | [Secrets](secrets.md) | Per-secret scheme routing, InsecureEnvironmentVariable, adding resolvers |
 

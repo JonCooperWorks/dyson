@@ -1,3 +1,5 @@
+pub mod chat_store;
+
 // ===========================================================================
 // Persistence — OpenClaw-compatible agent memory and identity.
 //

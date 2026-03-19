@@ -208,6 +208,16 @@ impl Agent {
         self.messages.clear();
     }
 
+    /// Get the current conversation messages (for persistence).
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// Replace the conversation history (for restoring from persistence).
+    pub fn set_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+    }
+
     /// Run the agent loop for a single user message.
     ///
     /// Appends the user message to the conversation history, then loops:

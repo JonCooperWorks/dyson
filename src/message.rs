@@ -125,7 +125,7 @@ pub enum ContentBlock {
 /// 3. Tool result messages (one per tool call, with role=User)
 ///
 /// Then back to step 2 if the LLM made tool calls.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,

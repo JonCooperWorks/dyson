@@ -217,9 +217,24 @@ impl super::Controller for TelegramController {
 
         // Per-chat agents — persistent conversation context.
         // Each chat gets its own agent that remembers previous messages.
-        // /clear resets a chat's agent.
+        // /clear resets a chat's agent and deletes persisted history.
         let agents: Arc<Mutex<HashMap<i64, crate::agent::Agent>>> =
             Arc::new(Mutex::new(HashMap::new()));
+
+        // Chat store — persists conversation history to disk so it
+        // survives restarts.  Uses the ChatStore trait so the backend
+        // can be swapped (JSON files, database, RAG, etc.).
+        let chats_dir = crate::persistence::Workspace::resolve_path(
+            settings.workspace_path.as_deref(),
+        )
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            std::path::PathBuf::from(home).join(".dyson")
+        })
+        .join("chats");
+        let chat_store: Arc<dyn crate::persistence::chat_store::ChatStore> =
+            Arc::new(crate::persistence::chat_store::JsonChatStore::new(chats_dir)?);
+
 
         // Manual polling loop instead of teloxide::repl.
         // teloxide::repl swallows SIGINT and can't be Ctrl-C'd.
@@ -287,6 +302,7 @@ impl super::Controller for TelegramController {
                 // /clear — reset conversation context for this chat.
                 if text == "/clear" {
                     agents.lock().await.remove(&chat_id.0);
+                    let _ = chat_store.delete(&chat_id.0.to_string());
                     let _ = bot.send_message(chat_id, "Context cleared.").await;
                     tracing::info!(chat_id = chat_id.0, "conversation cleared");
                     continue;
@@ -329,7 +345,10 @@ impl super::Controller for TelegramController {
                 let settings_clone = current_settings.clone();
                 let prompt_clone = controller_prompt.clone();
                 let agents_clone = agents.clone();
+                let store_clone = chat_store.clone();
                 tokio::spawn(async move {
+                    let chat_key = chat_id.0.to_string();
+
                     // Get or create the per-chat agent.
                     let mut agents_map = agents_clone.lock().await;
                     if !agents_map.contains_key(&chat_id.0) {
@@ -337,7 +356,18 @@ impl super::Controller for TelegramController {
                             &settings_clone,
                             prompt_clone.as_deref(),
                         ).await {
-                            Ok(agent) => {
+                            Ok(mut agent) => {
+                                // Restore conversation history from disk.
+                                if let Ok(messages) = store_clone.load(&chat_key) {
+                                    if !messages.is_empty() {
+                                        tracing::info!(
+                                            chat_id = chat_id.0,
+                                            messages = messages.len(),
+                                            "restored chat history"
+                                        );
+                                        agent.set_messages(messages);
+                                    }
+                                }
                                 agents_map.insert(chat_id.0, agent);
                             }
                             Err(e) => {
@@ -356,7 +386,11 @@ impl super::Controller for TelegramController {
                         let _ = bot_clone.send_message(chat_id, format!("Error: {e}")).await;
                     }
 
-                    // Drop the lock before the task ends.
+                    // Persist conversation history to disk after each turn.
+                    if let Err(e) = store_clone.save(&chat_key, agent.messages()) {
+                        tracing::error!(error = %e, "failed to save chat history");
+                    }
+
                     drop(agents_map);
                 });
             }
