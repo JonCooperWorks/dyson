@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+git pull origin master
 echo "=== Stopping dyson service ==="
 systemctl --user stop dyson 2>/dev/null || true
 systemctl --user disable dyson 2>/dev/null || true
