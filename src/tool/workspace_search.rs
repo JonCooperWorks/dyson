@@ -20,7 +20,7 @@ impl Tool for WorkspaceSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search across all workspace files for a text pattern. \
+        "Search across all workspace files for a pattern (regex supported). \
          Returns matching filenames and lines. Case-insensitive."
     }
 
@@ -30,7 +30,7 @@ impl Tool for WorkspaceSearchTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Text pattern to search for (case-insensitive substring match)"
+                    "description": "Regex pattern to search for (case-insensitive). Falls back to literal substring if not valid regex."
                 }
             },
             "required": ["pattern"]

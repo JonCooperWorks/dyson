@@ -79,7 +79,8 @@ pub trait Workspace: Send + Sync {
 
     /// Search files for a pattern, returning (filename, matching_lines) pairs.
     ///
-    /// Case-insensitive substring match across all loaded files.
+    /// Supports regex patterns (case-insensitive).  If the pattern is not
+    /// valid regex, falls back to literal substring match.
     fn search(&self, pattern: &str) -> Vec<(String, Vec<String>)>;
 
     /// Build the system prompt fragment from workspace files.
