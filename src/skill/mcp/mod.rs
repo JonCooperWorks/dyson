@@ -44,6 +44,7 @@
 // ===========================================================================
 
 pub mod protocol;
+pub mod serve;
 pub mod transport;
 
 use std::sync::Arc;

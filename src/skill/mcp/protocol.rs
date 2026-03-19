@@ -72,14 +72,14 @@ impl JsonRpcNotification {
 }
 
 /// A JSON-RPC 2.0 response (success or error).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct JsonRpcResponse {
     pub id: Option<u64>,
     pub result: Option<serde_json::Value>,
     pub error: Option<JsonRpcError>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct JsonRpcError {
     pub code: i64,
     pub message: String,
@@ -91,7 +91,7 @@ pub struct JsonRpcError {
 // ---------------------------------------------------------------------------
 
 /// Tool definition returned by `tools/list`.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct McpToolDef {
     pub name: String,
     #[serde(default)]

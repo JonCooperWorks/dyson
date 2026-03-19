@@ -158,7 +158,11 @@ pub trait LlmClient: Send + Sync {
 ///
 /// Used by controllers to create a client per session/message without
 /// duplicating the provider-matching logic.
-pub fn create_client(settings: &crate::config::AgentSettings) -> Box<dyn LlmClient> {
+pub fn create_client(
+    settings: &crate::config::AgentSettings,
+    workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    dangerous_no_sandbox: bool,
+) -> Box<dyn LlmClient> {
     match settings.provider {
         crate::config::LlmProvider::Anthropic => Box::new(
             anthropic::AnthropicClient::new(
@@ -176,6 +180,8 @@ pub fn create_client(settings: &crate::config::AgentSettings) -> Box<dyn LlmClie
             claude_code::ClaudeCodeClient::new(
                 settings.base_url.as_deref(),
                 vec![], // MCP servers go through the skill system, not CLI args
+                workspace,
+                dangerous_no_sandbox,
             ),
         ),
     }

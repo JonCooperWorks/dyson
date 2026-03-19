@@ -50,7 +50,11 @@ pub async fn run(
     let workspace: std::sync::Arc<tokio::sync::RwLock<Box<dyn dyson::workspace::Workspace>>> =
         std::sync::Arc::new(tokio::sync::RwLock::new(workspace));
 
-    let client = dyson::llm::create_client(&agent_settings);
+    let client = dyson::llm::create_client(
+        &agent_settings,
+        Some(std::sync::Arc::clone(&workspace)),
+        settings.dangerous_no_sandbox,
+    );
     let sandbox = dyson::sandbox::create_sandbox(
         &settings.sandbox,
         settings.dangerous_no_sandbox,

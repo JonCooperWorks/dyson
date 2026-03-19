@@ -103,15 +103,19 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Stream;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::RwLock;
 
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use crate::message::{ContentBlock, Message, Role};
+use crate::skill::mcp::serve::McpHttpServer;
+use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
 // ClaudeCodeClient
@@ -147,6 +151,20 @@ pub struct ClaudeCodeClient {
     /// Each entry is a JSON string that Claude Code parses as MCP server
     /// config.  Passed as `--mcp-config <json>` on the command line.
     mcp_configs: Vec<String>,
+
+    /// Workspace to expose as MCP tools to Claude Code.
+    ///
+    /// When `Some`, the client starts an in-process HTTP MCP server before
+    /// spawning `claude -p` and passes `--mcp-config <tempfile>` so Claude
+    /// Code discovers our workspace tools (view, search, update).
+    workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
+
+    /// Whether sandbox enforcement is disabled.
+    ///
+    /// Plumbed through to `McpHttpServer` for future sandbox gating of
+    /// MCP tool calls.  Today workspace tools are in-memory and don't
+    /// need sandboxing, but the hook is here.
+    dangerous_no_sandbox: bool,
 }
 
 impl ClaudeCodeClient {
@@ -158,7 +176,12 @@ impl ClaudeCodeClient {
     /// We resolve the absolute path at startup so that service environments
     /// (systemd, launchd) work even with a minimal PATH.
     /// `mcp_configs` is a list of MCP server JSON configs to forward.
-    pub fn new(claude_path: Option<&str>, mcp_configs: Vec<String>) -> Self {
+    pub fn new(
+        claude_path: Option<&str>,
+        mcp_configs: Vec<String>,
+        workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
+        dangerous_no_sandbox: bool,
+    ) -> Self {
         let resolved = match claude_path {
             Some(p) => p.to_string(),
             None => resolve_claude_path(),
@@ -167,6 +190,8 @@ impl ClaudeCodeClient {
         Self {
             claude_path: resolved,
             mcp_configs,
+            workspace,
+            dangerous_no_sandbox,
         }
     }
 }
@@ -263,6 +288,60 @@ impl LlmClient for ClaudeCodeClient {
             "spawning claude CLI"
         );
 
+        // -- Start MCP server if workspace is available --
+        //
+        // The server runs as a tokio task on 127.0.0.1:random_port.
+        // We write the config to a temp file (not CLI args) to keep the
+        // URL out of `ps` output.  The temp file and server task are held
+        // by the stream closure and cleaned up when the stream is dropped.
+        let mut _mcp_server_handle: Option<tokio::task::JoinHandle<()>> = None;
+        let mut _mcp_config_file: Option<tempfile::NamedTempFile> = None;
+        let mut mcp_config_path: Option<std::path::PathBuf> = None;
+
+        if let Some(ref workspace) = self.workspace {
+            let server = Arc::new(McpHttpServer::new(
+                Arc::clone(workspace),
+                self.dangerous_no_sandbox,
+            ));
+
+            let (port, handle) = server.start().await.map_err(|e| {
+                DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
+            })?;
+
+            // Write MCP config to a temp file.
+            let config_json = serde_json::json!({
+                "mcpServers": {
+                    "dyson-workspace": {
+                        "type": "url",
+                        "url": format!("http://127.0.0.1:{port}/mcp")
+                    }
+                }
+            });
+
+            let tmp = tempfile::Builder::new()
+                .prefix("dyson-mcp-")
+                .suffix(".json")
+                .tempfile()
+                .map_err(|e| {
+                    DysonError::Llm(format!("failed to create MCP config temp file: {e}"))
+                })?;
+
+            std::fs::write(tmp.path(), serde_json::to_vec(&config_json).unwrap())
+                .map_err(|e| {
+                    DysonError::Llm(format!("failed to write MCP config temp file: {e}"))
+                })?;
+
+            tracing::info!(
+                port = port,
+                config_path = %tmp.path().display(),
+                "MCP server started for Claude Code"
+            );
+
+            mcp_config_path = Some(tmp.path().to_path_buf());
+            _mcp_config_file = Some(tmp);
+            _mcp_server_handle = Some(handle);
+        }
+
         // -- Build the command --
         let mut cmd = tokio::process::Command::new(&self.claude_path);
         cmd.arg("-p")
@@ -283,6 +362,11 @@ impl LlmClient for ClaudeCodeClient {
         // Forward MCP server configs if any.
         for mcp_json in &self.mcp_configs {
             cmd.arg("--mcp-config").arg(mcp_json);
+        }
+
+        // Add the workspace MCP config file if we started a server.
+        if let Some(ref path) = mcp_config_path {
+            cmd.arg("--mcp-config").arg(path);
         }
 
         // -- Spawn the process --
@@ -328,6 +412,13 @@ impl LlmClient for ClaudeCodeClient {
             // of the stream.  Moving it into the stream closure ensures
             // it's not dropped (and killed) prematurely.
             let _child = child;
+
+            // Keep the MCP server task and config temp file alive for
+            // the duration of the stream.  When the stream is dropped:
+            // - The JoinHandle is aborted (server stops)
+            // - The NamedTempFile is deleted
+            let _mcp_handle = _mcp_server_handle;
+            let _mcp_config = _mcp_config_file;
 
             // Use the BufReader directly with next_line() instead of
             // LinesStream, which avoids type inference issues inside
