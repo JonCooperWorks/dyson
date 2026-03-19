@@ -220,6 +220,9 @@ fn cmd_init(noinput: bool, daemonize: bool, path: Option<PathBuf>) -> anyhow::Re
     let _ = dyson::persistence::Workspace::load(&workspace_dir)?;
     eprintln!("  created workspace at {}", workspace_dir.display());
 
+    // Install binary to PATH.
+    install_to_path(&base)?;
+
     if daemonize {
         install_systemd_service(&base, &config_path)?;
     } else {
@@ -229,6 +232,59 @@ fn cmd_init(noinput: bool, daemonize: bool, path: Option<PathBuf>) -> anyhow::Re
         eprintln!();
         eprintln!("to install as a service:");
         eprintln!("  dyson init --noinput --daemonize");
+    }
+
+    Ok(())
+}
+
+/// Copy the dyson binary into ~/.dyson/bin/ and symlink to ~/.local/bin/
+/// so it's on PATH without modifying shell configs.
+///
+/// ~/.local/bin/ is on PATH by default on most Linux distros (via
+/// systemd's user environment) and on macOS if the user has it configured.
+/// If ~/.local/bin/ doesn't exist, we create it — the user may need to
+/// add it to PATH manually (we print instructions).
+fn install_to_path(base: &PathBuf) -> anyhow::Result<()> {
+    let current_exe = std::env::current_exe()?;
+
+    // Copy binary into ~/.dyson/bin/ (our own managed copy).
+    let bin_dir = base.join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+    let installed_bin = bin_dir.join("dyson");
+    std::fs::copy(&current_exe, &installed_bin)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&installed_bin, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    eprintln!("  installed binary to {}", installed_bin.display());
+
+    // Symlink into ~/.local/bin/ so it's on PATH.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let local_bin = PathBuf::from(&home).join(".local/bin");
+    std::fs::create_dir_all(&local_bin)?;
+
+    let symlink_path = local_bin.join("dyson");
+
+    // Remove existing symlink/file if present.
+    if symlink_path.exists() || symlink_path.is_symlink() {
+        std::fs::remove_file(&symlink_path)?;
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&installed_bin, &symlink_path)?;
+
+    eprintln!("  symlinked {} -> {}", symlink_path.display(), installed_bin.display());
+
+    // Check if ~/.local/bin is actually on PATH.
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    if !path_var.split(':').any(|p| PathBuf::from(p) == local_bin) {
+        eprintln!();
+        eprintln!("  note: {} is not on your PATH.", local_bin.display());
+        eprintln!("  add this to your shell config (~/.bashrc or ~/.zshrc):");
+        eprintln!("    export PATH=\"$HOME/.local/bin:$PATH\"");
     }
 
     Ok(())
