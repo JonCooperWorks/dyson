@@ -35,8 +35,7 @@ use crate::tool::ToolContext;
 /// Passthrough sandbox that allows every tool call without restriction.
 ///
 /// Selected via `--dangerous-no-sandbox` CLI flag.  Does not modify
-/// inputs or outputs.  Does not log anything (use `AuditSandbox` for
-/// that in the future).
+/// inputs or outputs.  Logs every tool call for observability.
 ///
 /// ## Why this exists instead of just `Option<Box<dyn Sandbox>>`
 ///
@@ -51,10 +50,11 @@ impl Sandbox for DangerousNoSandbox {
     /// Always allows the call with the original input, unchanged.
     async fn check(
         &self,
-        _tool_name: &str,
+        tool_name: &str,
         input: &serde_json::Value,
         _ctx: &ToolContext,
     ) -> Result<SandboxDecision> {
+        tracing::info!(tool = tool_name, input = %input, "tool call allowed (no sandbox)");
         Ok(SandboxDecision::Allow {
             input: input.clone(),
         })
