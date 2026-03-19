@@ -51,6 +51,7 @@
 pub mod composite;
 pub mod docker;
 pub mod no_sandbox;
+pub mod os;
 
 use async_trait::async_trait;
 
@@ -182,7 +183,31 @@ pub fn create_sandbox(
     let disabled = &config.disabled;
     let mut sandboxes: Vec<Box<dyn Sandbox>> = Vec::new();
 
-    // Docker sandbox.
+    // OS sandbox (default — always on unless explicitly disabled).
+    //
+    // Uses the operating system's native sandboxing:
+    // - macOS: sandbox-exec (Seatbelt) — denies network, restricts writes
+    // - Linux: falls back to unsandboxed (with warning) until bwrap support
+    if !disabled.iter().any(|s| s == "os") {
+        let working_dir = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "/tmp".to_string());
+
+        let profile = config
+            .os_profile
+            .as_deref()
+            .unwrap_or("default");
+
+        tracing::info!(profile = profile, "OS sandbox enabled");
+        sandboxes.push(Box::new(os::OsSandbox::named_profile(
+            profile,
+            &working_dir,
+        )));
+    } else {
+        tracing::info!("OS sandbox disabled via config");
+    }
+
+    // Docker sandbox (optional — only if configured).
     if !disabled.iter().any(|s| s == "docker") {
         if let Some(ref docker_config) = config.docker {
             tracing::info!(
@@ -202,11 +227,7 @@ pub fn create_sandbox(
     // if !disabled.contains("network") { ... }
     // if !disabled.contains("audit") { ... }
 
-    if sandboxes.is_empty() {
-        tracing::info!("no sandboxes configured — all tool calls allowed");
-    } else {
-        tracing::info!(count = sandboxes.len(), "sandbox pipeline built");
-    }
+    tracing::info!(count = sandboxes.len(), "sandbox pipeline built");
 
     Box::new(composite::CompositeSandbox::new(sandboxes))
 }

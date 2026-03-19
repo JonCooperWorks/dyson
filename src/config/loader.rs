@@ -119,6 +119,8 @@ struct JsonSandbox {
     /// Sandbox names to disable.
     #[serde(default)]
     disabled: Vec<String>,
+    /// OS sandbox profile: "default", "strict", "permissive".
+    os_profile: Option<String>,
     /// Docker sandbox config.
     docker: Option<JsonDockerSandbox>,
 }
@@ -336,6 +338,7 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
     if let Some(sb) = root.sandbox {
         settings.sandbox = SandboxConfig {
             disabled: sb.disabled,
+            os_profile: sb.os_profile,
             docker: sb.docker.map(|d| DockerSandboxConfig {
                 container: d.container,
             }),

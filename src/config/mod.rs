@@ -102,11 +102,20 @@ pub struct Settings {
 pub struct SandboxConfig {
     /// Sandbox names to disable.  Everything not in this list is active.
     ///
-    /// Known sandboxes: "docker"
+    /// Known sandboxes: "os", "docker"
     /// Future: "file", "network", "audit", "ratelimit"
     pub disabled: Vec<String>,
 
-    /// Docker sandbox settings (if not disabled).
+    /// OS sandbox profile: "default", "strict", or "permissive".
+    ///
+    /// The OS sandbox is enabled by default.  The profile controls how
+    /// restrictive it is:
+    /// - "default" — deny network, allow writes to cwd + /tmp
+    /// - "strict" — deny network, deny all writes outside cwd
+    /// - "permissive" — allow everything (just wraps in sandbox-exec)
+    pub os_profile: Option<String>,
+
+    /// Docker sandbox settings (optional, only if configured).
     pub docker: Option<DockerSandboxConfig>,
 }
 
@@ -121,6 +130,7 @@ impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             disabled: vec![],
+            os_profile: None, // uses "default"
             docker: None,
         }
     }
