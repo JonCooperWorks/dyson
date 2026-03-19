@@ -291,12 +291,10 @@ impl LlmClient for ClaudeCodeClient {
         // -- Start MCP server if workspace is available --
         //
         // The server runs as a tokio task on 127.0.0.1:random_port.
-        // We write the config to a temp file (not CLI args) to keep the
-        // URL out of `ps` output.  The temp file and server task are held
+        // We pass the config as a JSON CLI arg.  The server task is held
         // by the stream closure and cleaned up when the stream is dropped.
         let mut _mcp_server_handle: Option<tokio::task::JoinHandle<()>> = None;
-        let mut _mcp_config_file: Option<tempfile::NamedTempFile> = None;
-        let mut mcp_config_path: Option<std::path::PathBuf> = None;
+        let mut mcp_config_json: Option<String> = None;
 
         if let Some(ref workspace) = self.workspace {
             let server = Arc::new(McpHttpServer::new(
@@ -308,8 +306,7 @@ impl LlmClient for ClaudeCodeClient {
                 DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
             })?;
 
-            // Write MCP config to a temp file.
-            let config_json = serde_json::json!({
+            let config = serde_json::json!({
                 "mcpServers": {
                     "dyson-workspace": {
                         "type": "url",
@@ -318,27 +315,9 @@ impl LlmClient for ClaudeCodeClient {
                 }
             });
 
-            let tmp = tempfile::Builder::new()
-                .prefix("dyson-mcp-")
-                .suffix(".json")
-                .tempfile()
-                .map_err(|e| {
-                    DysonError::Llm(format!("failed to create MCP config temp file: {e}"))
-                })?;
+            tracing::info!(port = port, "MCP server started for Claude Code");
 
-            std::fs::write(tmp.path(), serde_json::to_vec(&config_json).unwrap())
-                .map_err(|e| {
-                    DysonError::Llm(format!("failed to write MCP config temp file: {e}"))
-                })?;
-
-            tracing::info!(
-                port = port,
-                config_path = %tmp.path().display(),
-                "MCP server started for Claude Code"
-            );
-
-            mcp_config_path = Some(tmp.path().to_path_buf());
-            _mcp_config_file = Some(tmp);
+            mcp_config_json = Some(config.to_string());
             _mcp_server_handle = Some(handle);
         }
 
@@ -364,9 +343,9 @@ impl LlmClient for ClaudeCodeClient {
             cmd.arg("--mcp-config").arg(mcp_json);
         }
 
-        // Add the workspace MCP config file if we started a server.
-        if let Some(ref path) = mcp_config_path {
-            cmd.arg("--mcp-config").arg(path);
+        // Add the workspace MCP config as a CLI arg.
+        if let Some(ref json) = mcp_config_json {
+            cmd.arg("--mcp-config").arg(json);
         }
 
         // -- Spawn the process --
@@ -413,12 +392,9 @@ impl LlmClient for ClaudeCodeClient {
             // it's not dropped (and killed) prematurely.
             let _child = child;
 
-            // Keep the MCP server task and config temp file alive for
-            // the duration of the stream.  When the stream is dropped:
-            // - The JoinHandle is aborted (server stops)
-            // - The NamedTempFile is deleted
+            // Keep the MCP server task alive for the duration of the
+            // stream.  When the stream is dropped the task is aborted.
             let _mcp_handle = _mcp_server_handle;
-            let _mcp_config = _mcp_config_file;
 
             // Use the BufReader directly with next_line() instead of
             // LinesStream, which avoids type inference issues inside
