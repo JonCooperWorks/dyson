@@ -114,7 +114,7 @@
 //   Sequence:
 //     1. ClaudeCodeClient::stream() is called
 //     2. If workspace is Some, start McpHttpServer on 127.0.0.1:random_port
-//     3. Build MCP config JSON: {"mcpServers":{"dyson-workspace":{"type":"url","url":"http://127.0.0.1:{port}/mcp"}}}
+//     3. Build MCP config JSON: {"mcpServers":{"dyson-workspace":{"type":"sse","url":"http://127.0.0.1:{port}/mcp"}}}
 //     4. Pass as --mcp-config '<json>' CLI arg
 //     5. Claude Code connects to the server, discovers tools
 //     6. During its agent loop, Claude Code can call workspace_view etc.
@@ -391,14 +391,14 @@ impl LlmClient for ClaudeCodeClient {
             // Build the MCP config JSON that tells Claude Code how to
             // connect to our server.  The format matches Claude Code's
             // `--mcp-config` flag:
-            //   {"mcpServers":{"<name>":{"type":"url","url":"<url>"}}}
+            //   {"mcpServers":{"<name>":{"type":"sse","url":"<url>"}}}
             //
-            // "type": "url" tells Claude Code this is an HTTP MCP server
+            // "type": "sse" tells Claude Code this is an HTTP MCP server
             // (as opposed to "stdio" which would spawn a subprocess).
             let config = serde_json::json!({
                 "mcpServers": {
                     "dyson-workspace": {
-                        "type": "url",
+                        "type": "sse",
                         "url": format!("http://127.0.0.1:{port}/mcp")
                     }
                 }
