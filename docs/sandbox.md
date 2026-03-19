@@ -1,13 +1,15 @@
 # Sandbox
 
-The sandbox is the security gate between the LLM and tool execution.  Every
-tool call passes through the sandbox before running.  The sandbox can allow,
+The sandbox is the security gate between the LLM and tool execution. Every
+tool call passes through the sandbox before running. The sandbox can allow,
 deny, or redirect calls — giving you a hook to enforce policies, route tools
 to containers, or audit everything the agent does.
 
 **Key files:**
 - `src/sandbox/mod.rs` — `Sandbox` trait, `SandboxDecision`
 - `src/sandbox/no_sandbox.rs` — `DangerousNoSandbox` (passthrough)
+- `src/sandbox/docker.rs` — `DockerSandbox` (route bash to a container)
+- `src/sandbox/composite.rs` — `CompositeSandbox` (chain multiple sandboxes)
 
 ---
 
@@ -57,79 +59,164 @@ pub enum SandboxDecision {
 
 ---
 
-## The Three Decisions
+## Implementations
 
-### Allow
+### DangerousNoSandbox
 
-The most common decision.  The tool call proceeds.  The input in `Allow` may
-be the original input unchanged, or a rewritten version:
-
-```rust
-// Pass through unchanged
-SandboxDecision::Allow { input: input.clone() }
-
-// Rewrite: add safety flags
-let mut safe_input = input.clone();
-safe_input["command"] = json!(format!("{} --dry-run", input["command"].as_str().unwrap()));
-SandboxDecision::Allow { input: safe_input }
-```
-
-### Deny
-
-The tool call is blocked entirely.  The deny reason is sent back to the LLM
-as an error `tool_result` so it can understand why and try something else:
+Passthrough — allows every tool call unchanged. Selected via
+`--dangerous-no-sandbox`. The name is intentionally alarming.
 
 ```rust
-SandboxDecision::Deny {
-    reason: "bash command 'rm -rf /' denied by sandbox policy".into()
+impl Sandbox for DangerousNoSandbox {
+    async fn check(&self, _, input: &Value, _) -> Result<SandboxDecision> {
+        Ok(SandboxDecision::Allow { input: input.clone() })
+    }
 }
 ```
 
-The LLM sees: `{"type":"tool_result","content":"Denied by sandbox: bash command 'rm -rf /' denied by sandbox policy","is_error":true}`
+### DockerSandbox
 
-### Redirect
-
-The call is transparently rerouted to a different tool.  The LLM doesn't
-know the redirect happened — it gets back a normal tool_result for its
-original tool_use:
+Routes bash commands through a Docker container. The LLM thinks it's
+running commands on the host — they actually run inside an isolated
+container.
 
 ```rust
-// Route file reads to S3 instead of the local filesystem
-SandboxDecision::Redirect {
-    tool_name: "s3_read_file".into(),
-    input: json!({ "bucket": "my-bucket", "key": path }),
-}
+let sandbox = DockerSandbox::new("dyson-sandbox");
 ```
 
-This is the key innovation.  It doesn't just block things — it can
-transparently swap tool implementations.
+What happens:
+
+```
+LLM says:  bash {"command": "cat /etc/passwd"}
+
+check() rewrites to:
+  docker exec dyson-sandbox bash -c 'cat /etc/passwd'
+
+BashTool runs the docker exec on your host.
+Output comes from inside the container — not your machine.
+```
+
+Start the container:
+```bash
+docker run -d --name dyson-sandbox \
+  -v $(pwd):/workspace \
+  -w /workspace \
+  --network none \
+  --memory 512m \
+  ubuntu:24.04 sleep infinity
+```
+
+Security properties:
+- Filesystem isolation — can't read host files outside mounts
+- Process isolation — can't see or kill host processes
+- Network isolation (with `--network none`)
+- Resource limits (with `--memory`, `--cpus`)
+
+Non-bash tools (MCP, web_search, etc.) pass through unchanged — they're
+network I/O, not host access.
+
+### CompositeSandbox
+
+Chains multiple sandboxes into a pipeline. Each sandbox gets a turn.
+First `Deny` wins. `Allow` passes the (possibly rewritten) input to the
+next sandbox.
+
+```rust
+let sandbox = CompositeSandbox::new(vec![
+    Box::new(AuditSandbox::new("audit.log")),
+    Box::new(FileSandbox::block(vec!["/etc/shadow", "/root"])),
+    Box::new(DockerSandbox::new("dyson-sandbox")),
+]);
+```
 
 ---
 
-## DangerousNoSandbox
+## How Composition Works
 
-The "I know what I'm doing" passthrough:
+```
+CompositeSandbox([AuditSandbox, FileSandbox, DockerSandbox])
+
+Tool call: bash {"command": "cat /etc/shadow"}
+  │
+  ▼
+AuditSandbox.check("bash", {"command": "cat /etc/shadow"})
+  → Allow { input unchanged }     ← logs it, doesn't block
+  │
+  ▼
+FileSandbox.check("bash", {"command": "cat /etc/shadow"})
+  → Deny { "/etc/shadow is restricted" }
+  │
+  ▼
+STOP — first Deny wins.  DockerSandbox never runs.
+```
+
+Another example — rewrite chaining:
+
+```
+CompositeSandbox([AuditSandbox, DockerSandbox])
+
+Tool call: bash {"command": "ls"}
+  │
+  ▼
+AuditSandbox.check("bash", {"command": "ls"})
+  → Allow { input unchanged }
+  │
+  ▼
+DockerSandbox.check("bash", {"command": "ls"})
+  → Allow { input: {"command": "docker exec sandbox bash -c 'ls'"} }
+  │
+  ▼
+Final: Allow with rewritten input.
+BashTool runs: docker exec sandbox bash -c 'ls'
+```
+
+### Pipeline rules
+
+| Event | Behavior |
+|-------|----------|
+| `Deny` | Stop immediately, return denial |
+| `Redirect` | Stop immediately, return redirect |
+| `Allow { input }` | Pass (possibly rewritten) input to next sandbox |
+| All sandboxes allow | Return final Allow with accumulated rewrites |
+| `after()` | All sandboxes run in order, each can mutate output |
+
+### Ordering guidelines
+
+| Position | What to put here | Why |
+|----------|-----------------|-----|
+| First | Sandboxes that DENY (blacklists, path blocks) | Fail fast |
+| Middle | Sandboxes that REWRITE (Docker, path remapping) | Transform before execution |
+| First or last | Sandboxes that OBSERVE (audit) | Log original input or final rewritten input |
+
+---
+
+## How Sandboxes Know What To Do
+
+A sandbox receives `(tool_name: &str, input: &Value)` — just a string and
+a JSON blob. It pattern-matches on the tool name:
 
 ```rust
-pub struct DangerousNoSandbox;
-
-impl Sandbox for DangerousNoSandbox {
-    async fn check(&self, _: &str, input: &Value, _: &ToolContext) -> Result<SandboxDecision> {
-        Ok(SandboxDecision::Allow { input: input.clone() })
-    }
-    // after() uses the default no-op
+match tool_name {
+    "bash" => /* rewrite for docker */,
+    "read_file" => /* check path restrictions */,
+    "web_fetch" => /* check URL whitelist */,
+    _ => /* don't recognize it, pass through */,
 }
 ```
 
-Selected via `--dangerous-no-sandbox` CLI flag.  Required in Phase 1 because
-no other sandbox exists yet.  The name is intentionally alarming.
+Sandboxes that don't recognize a tool name return
+`Allow { input: input.clone() }` — pass through, let the next sandbox
+in the chain decide. This means each sandbox is small and focused:
 
-### Why not `Option<Box<dyn Sandbox>>`?
+| Sandbox | Cares about | Ignores |
+|---------|------------|---------|
+| DockerSandbox | `"bash"` | everything else |
+| FileSandbox | `"read_file"`, `"write_file"` | everything else |
+| NetworkSandbox | `"web_fetch"`, `"web_search"` | everything else |
+| AuditSandbox | everything | nothing (logs all) |
 
-Making the sandbox mandatory (not optional) means the agent loop always has
-the same code path: `sandbox.check()` → `tool.run()` → `sandbox.after()`.
-No `if let Some(sandbox)` branching.  When you add a real sandbox, you just
-swap the impl — zero changes to the agent loop.
+Composing them gives you full coverage without any single sandbox
+needing to know about all tools.
 
 ---
 
@@ -137,94 +224,12 @@ swap the impl — zero changes to the agent loop.
 
 | Sandbox | `check()` behavior | `after()` behavior |
 |---------|-------------------|-------------------|
-| `ContainerSandbox` | Redirect bash/python to Docker exec | None |
-| `BlacklistSandbox` | Deny specific tools or command patterns | None |
-| `S3Sandbox` | Redirect read_file/write_file to S3 ops | None |
+| `BlacklistSandbox` | Deny commands matching regex patterns | None |
+| `FileSandbox` | Deny/rewrite file paths outside allowed dirs | None |
+| `NetworkSandbox` | Deny URLs not in whitelist | None |
+| `S3Sandbox` | Redirect file read/write to S3 | None |
 | `AuditSandbox` | Allow everything | Log all calls to a file |
-| `CompositeSandbox` | Chain multiple sandboxes (first Deny wins) | Chain all afters |
-
-### ContainerSandbox (example design)
-
-```rust
-struct ContainerSandbox {
-    container_id: String,
-    mount_map: HashMap<PathBuf, PathBuf>,  // host → container
-}
-
-impl Sandbox for ContainerSandbox {
-    async fn check(&self, tool: &str, input: &Value, _: &ToolContext) -> Result<SandboxDecision> {
-        match tool {
-            "bash" => {
-                // Rewrite: run inside the container
-                let cmd = input["command"].as_str().unwrap();
-                Ok(SandboxDecision::Allow {
-                    input: json!({
-                        "command": format!("docker exec {} bash -c '{}'", self.container_id, cmd)
-                    })
-                })
-            }
-            "read_file" => {
-                // Rewrite path to container mount
-                // ...
-            }
-            _ => Ok(SandboxDecision::Allow { input: input.clone() })
-        }
-    }
-}
-```
-
-### CompositeSandbox (example design)
-
-```rust
-struct CompositeSandbox {
-    sandboxes: Vec<Box<dyn Sandbox>>,
-}
-
-impl Sandbox for CompositeSandbox {
-    async fn check(&self, tool: &str, input: &Value, ctx: &ToolContext) -> Result<SandboxDecision> {
-        let mut current_input = input.clone();
-
-        for sandbox in &self.sandboxes {
-            match sandbox.check(tool, &current_input, ctx).await? {
-                SandboxDecision::Deny { reason } => return Ok(SandboxDecision::Deny { reason }),
-                SandboxDecision::Redirect { .. } => return Ok(/* redirect */),
-                SandboxDecision::Allow { input } => current_input = input,
-            }
-        }
-
-        Ok(SandboxDecision::Allow { input: current_input })
-    }
-}
-```
-
----
-
-## Integration with the Agent Loop
-
-The sandbox sits in the hot path of every tool call:
-
-```
-Agent.execute_tool_call(call)
-  │
-  ├── sandbox.check(name, input, ctx)
-  │     │
-  │     ├── Allow { input }
-  │     │     tool.run(input, ctx) → ToolOutput
-  │     │     sandbox.after(name, input, &mut output)
-  │     │
-  │     ├── Deny { reason }
-  │     │     ToolOutput::error("Denied by sandbox: {reason}")
-  │     │
-  │     └── Redirect { tool_name, input }
-  │           tools[tool_name].run(input, ctx) → ToolOutput
-  │           sandbox.after(tool_name, input, &mut output)
-  │
-  └── output.tool_result(&tool_output)
-      Message::tool_result(call.id, content, is_error)
-```
-
-The sandbox is `Send + Sync` because the agent may process tool calls from
-multiple sessions in the future.
+| `RateLimitSandbox` | Deny after N calls per minute | None |
 
 ---
 
