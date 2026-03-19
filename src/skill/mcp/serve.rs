@@ -297,7 +297,12 @@ impl McpHttpServer {
     /// connection (MCP over HTTP uses request/response, not streaming).
     pub async fn start(self: Arc<Self>) -> Result<(u16, JoinHandle<()>)> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let port = listener.local_addr()?.port();
+        let addr = listener.local_addr()?;
+        assert!(
+            addr.ip().is_loopback(),
+            "MCP server must bind to loopback only — got {addr}"
+        );
+        let port = addr.port();
 
         tracing::info!(port = port, "MCP HTTP server listening");
 

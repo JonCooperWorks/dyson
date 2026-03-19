@@ -47,6 +47,7 @@ use teloxide::types::{ChatId, MessageId};
 use tokio::sync::Mutex;
 
 use serde::Deserialize;
+use zeroize::Zeroize;
 
 use crate::config::{ControllerConfig, Settings};
 use crate::controller::Output;
@@ -98,6 +99,11 @@ struct TelegramControllerConfig {
     /// resolves to `"123456"` (a string), not `123456` (a number).
     #[serde(default, deserialize_with = "deserialize_chat_ids")]
     allowed_chat_ids: Vec<i64>,
+    /// Explicitly acknowledge that the bot accepts messages from any chat.
+    /// Required when `allowed_chat_ids` is empty, to prevent accidental
+    /// open access from config errors.
+    #[serde(default)]
+    allow_all_chats: bool,
 }
 
 /// Deserialize chat IDs from a mix of numbers and strings.
@@ -136,8 +142,15 @@ where
 
 /// Telegram bot controller.
 pub struct TelegramController {
+    /// Zeroized on drop to avoid leaving secrets in memory.
     bot_token: String,
     allowed_chat_ids: Vec<i64>,
+}
+
+impl Drop for TelegramController {
+    fn drop(&mut self) {
+        self.bot_token.zeroize();
+    }
 }
 
 impl TelegramController {
@@ -156,12 +169,26 @@ impl TelegramController {
                 Err(e) => {
                     tracing::error!(
                         error = %e,
-                        config = %config.config,
                         "failed to parse telegram controller config — is bot_token set?"
                     );
                     return None;
                 }
             };
+
+        if tg_config.allowed_chat_ids.is_empty() && !tg_config.allow_all_chats {
+            tracing::error!(
+                "Telegram controller has no allowed_chat_ids and allow_all_chats is not set. \
+                 Either add chat IDs to allowed_chat_ids or set \"allow_all_chats\": true \
+                 to explicitly allow messages from any chat."
+            );
+            return None;
+        }
+
+        if tg_config.allowed_chat_ids.is_empty() {
+            tracing::warn!(
+                "Telegram bot will accept messages from ANY chat (allow_all_chats is set)"
+            );
+        }
 
         Some(Self {
             bot_token: tg_config.bot_token,
@@ -373,7 +400,8 @@ impl super::Controller for TelegramController {
                             }
                         }
                     }
-                    let agent = agents_map.get_mut(&chat_id.0).unwrap();
+                    let agent = agents_map.get_mut(&chat_id.0)
+                        .expect("agent must exist — just inserted above");
 
                     let mut output = TelegramOutput::new(bot_clone.clone(), chat_id);
 

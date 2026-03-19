@@ -214,9 +214,12 @@ pub fn create_sandbox(
                 container = docker_config.container,
                 "docker sandbox enabled"
             );
-            sandboxes.push(Box::new(docker::DockerSandbox::new(
-                &docker_config.container,
-            )));
+            match docker::DockerSandbox::new(&docker_config.container) {
+                Ok(sandbox) => sandboxes.push(Box::new(sandbox)),
+                Err(e) => {
+                    tracing::error!(error = %e, "invalid docker sandbox config — skipping");
+                }
+            }
         }
     } else {
         tracing::info!("docker sandbox disabled via config");

@@ -115,10 +115,21 @@ pub struct DockerSandbox {
 }
 
 impl DockerSandbox {
-    pub fn new(container: &str) -> Self {
-        Self {
-            container: container.to_string(),
+    pub fn new(container: &str) -> crate::error::Result<Self> {
+        // Validate container name to prevent shell injection.
+        // Docker container names: [a-zA-Z0-9][a-zA-Z0-9_.-]*
+        if container.is_empty()
+            || !container
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+        {
+            return Err(crate::error::DysonError::Config(format!(
+                "invalid Docker container name: '{container}'"
+            )));
         }
+        Ok(Self {
+            container: container.to_string(),
+        })
     }
 }
 
@@ -223,7 +234,7 @@ mod tests {
 
     #[tokio::test]
     async fn rewrites_bash_commands() {
-        let sandbox = DockerSandbox::new("my-container");
+        let sandbox = DockerSandbox::new("my-container").unwrap();
         let ctx = ToolContext::from_cwd().unwrap();
         let input = serde_json::json!({"command": "ls -la"});
 
@@ -240,7 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn escapes_single_quotes() {
-        let sandbox = DockerSandbox::new("test-box");
+        let sandbox = DockerSandbox::new("test-box").unwrap();
         let ctx = ToolContext::from_cwd().unwrap();
         let input = serde_json::json!({"command": "echo 'hello world'"});
 
@@ -259,7 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_bash_tools_pass_through() {
-        let sandbox = DockerSandbox::new("test-box");
+        let sandbox = DockerSandbox::new("test-box").unwrap();
         let ctx = ToolContext::from_cwd().unwrap();
         let input = serde_json::json!({"query": "search something"});
 
@@ -277,7 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_command_passes_through() {
-        let sandbox = DockerSandbox::new("test-box");
+        let sandbox = DockerSandbox::new("test-box").unwrap();
         let ctx = ToolContext::from_cwd().unwrap();
         let input = serde_json::json!({"command": ""});
 
@@ -289,5 +300,14 @@ mod tests {
             }
             other => panic!("expected Allow, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejects_invalid_container_names() {
+        assert!(DockerSandbox::new("").is_err());
+        assert!(DockerSandbox::new("foo; rm -rf /").is_err());
+        assert!(DockerSandbox::new("foo bar").is_err());
+        assert!(DockerSandbox::new("$(evil)").is_err());
+        assert!(DockerSandbox::new("valid-name_1.0").is_ok());
     }
 }

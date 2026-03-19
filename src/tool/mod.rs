@@ -224,6 +224,20 @@ pub struct ToolOutput {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// Validate a workspace file path to prevent path traversal.
+///
+/// Rejects absolute paths and parent-directory components (`..`).
+pub fn validate_workspace_path(path: &str) -> std::result::Result<(), String> {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        return Err(format!("absolute paths are not allowed: '{path}'"));
+    }
+    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(format!("path traversal is not allowed: '{path}'"));
+    }
+    Ok(())
+}
+
 impl ToolOutput {
     /// Create a successful (non-error) output.
     pub fn success(content: impl Into<String>) -> Self {

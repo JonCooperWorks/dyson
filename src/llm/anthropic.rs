@@ -67,6 +67,8 @@ use async_trait::async_trait;
 use futures::Stream;
 use tokio_stream::StreamExt;
 
+use zeroize::Zeroize;
+
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
@@ -85,12 +87,19 @@ pub struct AnthropicClient {
     client: reqwest::Client,
 
     /// Anthropic API key (sent as `x-api-key` header).
+    /// Zeroized on drop to avoid leaving secrets in memory.
     api_key: String,
 
     /// Base URL for the API (default: "https://api.anthropic.com").
     ///
     /// Configurable for testing with mock servers or for proxied setups.
     base_url: String,
+}
+
+impl Drop for AnthropicClient {
+    fn drop(&mut self) {
+        self.api_key.zeroize();
+    }
 }
 
 impl AnthropicClient {

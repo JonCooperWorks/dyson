@@ -166,6 +166,9 @@ struct JsonChatHistory {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Maximum config file size (1 MB). Prevents DoS from huge config files.
+const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
+
 /// Load settings from a dyson.json file, falling back to defaults.
 ///
 /// ## Resolution order
@@ -177,9 +180,7 @@ struct JsonChatHistory {
 pub fn load_settings(path: Option<&Path>) -> Result<Settings> {
     let json_root = match path {
         Some(p) => {
-            let content = std::fs::read_to_string(p).map_err(|e| {
-                DysonError::Config(format!("cannot read config {}: {e}", p.display()))
-            })?;
+            let content = read_config_file(p)?;
             Some(serde_json::from_str::<JsonRoot>(&content)?)
         }
         None => try_discover_config()?,
@@ -197,12 +198,30 @@ pub fn load_settings(path: Option<&Path>) -> Result<Settings> {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// Read a config file with a size limit to prevent DoS.
+fn read_config_file(path: &Path) -> Result<String> {
+    let metadata = std::fs::metadata(path).map_err(|e| {
+        DysonError::Config(format!("cannot read config {}: {e}", path.display()))
+    })?;
+    if metadata.len() > MAX_CONFIG_SIZE {
+        return Err(DysonError::Config(format!(
+            "config file {} is too large ({} bytes, max {} bytes)",
+            path.display(),
+            metadata.len(),
+            MAX_CONFIG_SIZE,
+        )));
+    }
+    std::fs::read_to_string(path).map_err(|e| {
+        DysonError::Config(format!("cannot read config {}: {e}", path.display()))
+    })
+}
+
 /// Try to find a dyson.json in standard locations.
 fn try_discover_config() -> Result<Option<JsonRoot>> {
     // 1. Current directory.
     let cwd_path = Path::new("dyson.json");
     if cwd_path.exists() {
-        let content = std::fs::read_to_string(cwd_path)?;
+        let content = read_config_file(cwd_path)?;
         return Ok(Some(serde_json::from_str::<JsonRoot>(&content)?));
     }
 
@@ -210,7 +229,7 @@ fn try_discover_config() -> Result<Option<JsonRoot>> {
     if let Some(home) = std::env::var_os("HOME") {
         let global_path = Path::new(&home).join(".config/dyson/dyson.json");
         if global_path.exists() {
-            let content = std::fs::read_to_string(&global_path)?;
+            let content = read_config_file(&global_path)?;
             return Ok(Some(serde_json::from_str::<JsonRoot>(&content)?));
         }
     }

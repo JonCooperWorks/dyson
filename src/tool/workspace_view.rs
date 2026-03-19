@@ -45,6 +45,9 @@ impl Tool for WorkspaceViewTool {
 
         match input.get("file").and_then(|v| v.as_str()) {
             Some(file) => {
+                if let Err(msg) = super::validate_workspace_path(file) {
+                    return Ok(ToolOutput::error(msg));
+                }
                 match ws.get(file) {
                     Some(content) => Ok(ToolOutput::success(content)),
                     None => {

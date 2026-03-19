@@ -141,23 +141,47 @@ impl Tool for BashTool {
             .spawn()
             .map_err(|e| DysonError::tool("bash", format!("failed to spawn: {e}")))?;
 
-        // -- Wait with timeout --
+        // -- Wait with timeout, killing the process if it exceeds the deadline --
         //
-        // `wait_with_output()` takes ownership of the child and reads all
-        // of stdout/stderr into memory.  We wrap it in `tokio::time::timeout`
-        // for a hard deadline.
-        //
-        // Caveat: if the timeout fires, the child process may still be
-        // running (wait_with_output's future is dropped but the OS process
-        // isn't automatically killed).  For Phase 1, we accept this — the
-        // process will be orphaned.  A robust solution would take the
-        // stdout/stderr handles, use `child.wait()` in a select! with
-        // `child.kill()` on the timeout branch.
-        let result = tokio::time::timeout(self.timeout, child.wait_with_output()).await;
+        // We take stdout/stderr handles before waiting so we can still
+        // kill the child on timeout (wait_with_output takes ownership).
+        let mut child = child;
+        let mut stdout_handle = child.stdout.take();
+        let mut stderr_handle = child.stderr.take();
+
+        let result = tokio::select! {
+            status = child.wait() => {
+                // Read captured output after the process exits.
+                let mut stdout_bytes = Vec::new();
+                let mut stderr_bytes = Vec::new();
+                if let Some(ref mut h) = stdout_handle {
+                    let _ = tokio::io::AsyncReadExt::read_to_end(h, &mut stdout_bytes).await;
+                }
+                if let Some(ref mut h) = stderr_handle {
+                    let _ = tokio::io::AsyncReadExt::read_to_end(h, &mut stderr_bytes).await;
+                }
+                Some((status, stdout_bytes, stderr_bytes))
+            }
+            _ = tokio::time::sleep(self.timeout) => {
+                // Timeout expired — kill the child to avoid orphaned processes.
+                let _ = child.kill().await;
+                let _ = child.wait().await; // reap the zombie
+                tracing::warn!(
+                    timeout_secs = self.timeout.as_secs(),
+                    "bash command timed out — process killed"
+                );
+                None
+            }
+        };
 
         match result {
             // Command completed within the timeout.
-            Ok(Ok(output)) => {
+            Some((Ok(status), stdout_bytes, stderr_bytes)) => {
+                let output = std::process::Output {
+                    status,
+                    stdout: stdout_bytes,
+                    stderr: stderr_bytes,
+                };
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -192,18 +216,13 @@ impl Tool for BashTool {
                 })
             }
 
-            // Command completed but wait_with_output returned an IO error
-            // (e.g., pipe broken).
-            Ok(Err(e)) => Err(DysonError::tool("bash", format!("process error: {e}"))),
+            // Command completed but wait returned an IO error.
+            Some((Err(e), _, _)) => Err(DysonError::tool("bash", format!("process error: {e}"))),
 
-            // Timeout expired.
-            Err(_) => {
-                tracing::warn!(
-                    timeout_secs = self.timeout.as_secs(),
-                    "bash command timed out"
-                );
+            // Timeout — process was killed above.
+            None => {
                 Ok(ToolOutput::error(format!(
-                    "Command timed out after {} seconds",
+                    "Command timed out after {} seconds and was killed",
                     self.timeout.as_secs()
                 )))
             }

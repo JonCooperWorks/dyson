@@ -57,6 +57,8 @@ use async_trait::async_trait;
 use futures::Stream;
 use tokio_stream::StreamExt;
 
+use zeroize::Zeroize;
+
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
@@ -76,8 +78,15 @@ use crate::message::{ContentBlock, Message, Role};
 /// - vLLM: `http://localhost:8000`
 pub struct OpenAiClient {
     client: reqwest::Client,
+    /// Zeroized on drop to avoid leaving secrets in memory.
     api_key: String,
     base_url: String,
+}
+
+impl Drop for OpenAiClient {
+    fn drop(&mut self) {
+        self.api_key.zeroize();
+    }
 }
 
 impl OpenAiClient {

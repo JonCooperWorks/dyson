@@ -69,6 +69,9 @@ impl Tool for WorkspaceUpdateTool {
         if file.is_empty() {
             return Ok(ToolOutput::error("file is required"));
         }
+        if let Err(msg) = super::validate_workspace_path(&file) {
+            return Ok(ToolOutput::error(msg));
+        }
         if content.is_empty() {
             return Ok(ToolOutput::error("content is required"));
         }
