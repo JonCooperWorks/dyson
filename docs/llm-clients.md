@@ -24,6 +24,10 @@ pub trait LlmClient: Send + Sync {
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>>;
+
+    /// Whether this provider runs its own internal tool-use loop.
+    /// Default: false.  Claude Code overrides to true.
+    fn handles_tools_internally(&self) -> bool { false }
 }
 ```
 
@@ -188,6 +192,39 @@ data: [DONE]
 | `Role::User` + `Text` | `{"role":"user","content":"..."}` |
 | `Role::Assistant` + `ToolUse` | `{"role":"assistant","content":null,"tool_calls":[...]}` |
 | `Role::User` + `ToolResult` | `{"role":"tool","tool_call_id":"...","content":"..."}` |
+
+---
+
+## Claude Code Client
+
+`ClaudeCodeClient` in `src/llm/claude_code.rs`.
+
+Unlike Anthropic and OpenAI, Claude Code is not a raw API — it's a full agent
+with its own tool-use loop.  Dyson spawns `claude -p --output-format stream-json`
+as a subprocess and streams the output.
+
+### Key difference: internal tool execution
+
+Claude Code has built-in tools (Bash, Read, Write, Edit, Grep, etc.) and
+executes them inside its own subprocess.  The streaming output includes
+ToolUse events for these internal calls, but they are **informational only**.
+Dyson displays them to the user (so they can see what Claude Code is doing)
+but does not re-execute them.
+
+This is controlled by `handles_tools_internally()` returning `true`.  The
+agent loop checks this flag and:
+- Skips sending Dyson's tool definitions (Claude Code has its own)
+- Breaks after one iteration regardless of tool_calls in the stream
+
+Without this, Dyson would see the internal tool calls, try to execute them
+(failing because they're not in Dyson's tool registry), and loop up to
+`max_iterations` times — spawning a new `claude -p` process each iteration.
+
+### Conversation history
+
+The `claude -p` command is stateless — each invocation is a fresh session.
+For multi-turn context, Dyson formats the entire conversation history into
+a single text prompt via `format_prompt()`.
 
 ---
 

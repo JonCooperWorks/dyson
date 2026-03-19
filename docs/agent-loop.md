@@ -92,6 +92,28 @@ then loops:
      Back to step 1 — LLM sees tool results on next iteration
 ```
 
+### Internal-tools providers (Claude Code)
+
+Some providers run their own internal agent loop with built-in tools.  Claude
+Code, for example, has Bash, Read, Write, Edit, etc. and executes them inside
+the `claude -p` subprocess.  The streaming output includes `ToolUseStart` and
+`ToolUseComplete` events for these internal tool calls, but Dyson must NOT
+re-execute them — they already ran.
+
+The `LlmClient` trait exposes `handles_tools_internally()` (default `false`).
+When a provider returns `true`:
+
+1. **Tool definitions are not sent** — the provider has its own tools, so
+   Dyson passes an empty `&[]` instead of `self.tool_definitions`.
+2. **The loop breaks after one iteration** — even if `tool_calls` is non-empty,
+   the agent treats it like a text-only response and breaks.  ToolUse stream
+   events are still rendered to output (so the user sees what the provider is
+   doing), but Dyson does not attempt to execute them.
+
+Without this check, Dyson would try to re-execute every internal tool call,
+fail (the tools aren't in Dyson's registry), push error results, and spawn
+another subprocess — repeating up to `max_iterations` times.
+
 ### Iteration limit
 
 The `max_iterations` guard prevents infinite loops.  If the LLM keeps

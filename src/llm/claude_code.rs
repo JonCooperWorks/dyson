@@ -191,6 +191,16 @@ impl LlmClient for ClaudeCodeClient {
     /// | `--model <model>` | Model selection |
     /// | `--system-prompt <prompt>` | System prompt |
     /// | `--no-session-persistence` | Don't save this to Claude Code's history |
+    /// Claude Code runs its own agent loop with built-in tools (Bash, Read,
+    /// Write, etc.).  Dyson should NOT re-execute those tool calls — they
+    /// already ran inside the `claude -p` subprocess.  ToolUse stream events
+    /// are still emitted for display purposes (so the user sees what Claude
+    /// Code is doing), but the agent loop skips execution and breaks after
+    /// a single iteration.
+    fn handles_tools_internally(&self) -> bool {
+        true
+    }
+
     async fn stream(
         &self,
         messages: &[Message],

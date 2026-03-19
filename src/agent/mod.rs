@@ -226,12 +226,21 @@ impl Agent {
             tracing::debug!(iteration = iteration, "starting LLM turn");
 
             // -- Stream LLM response --
+            //
+            // When the provider handles tools internally (e.g., Claude Code),
+            // don't send Dyson's tool definitions — the provider has its own.
+            let tools_for_llm = if self.client.handles_tools_internally() {
+                &[]
+            } else {
+                self.tool_definitions.as_slice()
+            };
+
             let stream = self
                 .client
                 .stream(
                     &self.messages,
                     &self.system_prompt,
-                    &self.tool_definitions,
+                    tools_for_llm,
                     &self.config,
                 )
                 .await?;
@@ -243,7 +252,13 @@ impl Agent {
             self.messages.push(assistant_msg.clone());
 
             // -- If no tool calls, the LLM is done --
-            if tool_calls.is_empty() {
+            //
+            // Also break when the provider handles tools internally (e.g.,
+            // Claude Code).  In that case, ToolUse events in the stream are
+            // informational — the provider already executed them.  Without
+            // this check, Dyson would try to re-execute every tool call and
+            // loop until max_iterations, spawning a new subprocess each time.
+            if tool_calls.is_empty() || self.client.handles_tools_internally() {
                 // Extract the final text from the assistant message.
                 for block in &assistant_msg.content {
                     if let crate::message::ContentBlock::Text { text } = block {
@@ -389,12 +404,22 @@ mod tests {
         /// Responses to return, in order.  Each call to `stream()` pops
         /// the first entry.
         responses: std::sync::Mutex<Vec<Vec<StreamEvent>>>,
+        /// Simulate a provider that handles tools internally (like Claude Code).
+        internal_tools: bool,
     }
 
     impl MockLlm {
         fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
             Self {
                 responses: std::sync::Mutex::new(responses),
+                internal_tools: false,
+            }
+        }
+
+        fn with_internal_tools(responses: Vec<Vec<StreamEvent>>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses),
+                internal_tools: true,
             }
         }
     }
@@ -414,6 +439,10 @@ mod tests {
                 .unwrap()
                 .remove(0);
             Ok(Box::pin(tokio_stream::iter(events.into_iter().map(Ok))))
+        }
+
+        fn handles_tools_internally(&self) -> bool {
+            self.internal_tools
         }
     }
 
@@ -515,5 +544,45 @@ mod tests {
 
         // Conversation should have: user, assistant (tool_use), tool_result, assistant (text)
         assert_eq!(agent.messages.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn internal_tools_provider_skips_tool_execution() {
+        // Simulate a provider like Claude Code that handles tools internally.
+        // The stream includes tool events, but the agent loop should NOT try
+        // to execute them — it should break after one iteration.
+        let llm = MockLlm::with_internal_tools(vec![vec![
+            StreamEvent::TextDelta("I'll check. ".into()),
+            StreamEvent::ToolUseStart {
+                id: "cc_1".into(),
+                name: "bash".into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "cc_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+            StreamEvent::TextDelta("Here are the files.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]]);
+
+        let settings = AgentSettings {
+            api_key: "test".into(),
+            ..Default::default()
+        };
+
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new())];
+        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings).unwrap();
+        let mut output = MockOutput::new();
+
+        let result = agent.run("list files", &mut output).await.unwrap();
+
+        // Should get the final text, NOT an error from trying to execute "bash".
+        assert_eq!(result, "Here are the files.");
+        // Only 2 messages: user + assistant (no tool_result messages).
+        assert_eq!(agent.messages.len(), 2);
     }
 }

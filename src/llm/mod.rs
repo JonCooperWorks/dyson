@@ -136,6 +136,18 @@ pub trait LlmClient: Send + Sync {
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>>;
+
+    /// Whether this provider runs its own internal tool-use loop.
+    ///
+    /// When `true`, the agent loop will NOT attempt to execute tool calls
+    /// from the stream.  The provider (e.g., Claude Code) already executed
+    /// them internally — the ToolUse stream events are informational only
+    /// (displayed to the user but not re-executed by Dyson).
+    ///
+    /// Default is `false` (standard behavior: Dyson executes tool calls).
+    fn handles_tools_internally(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
