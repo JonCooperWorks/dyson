@@ -204,6 +204,21 @@ impl Agent {
     }
 
     /// Clear conversation history, starting fresh.
+    ///
+    /// Resets the agent to a blank slate by dropping all accumulated
+    /// messages.  This is the in-memory half of the `/clear` flow — the
+    /// caller (e.g. the Telegram controller) is responsible for also
+    /// rotating persisted history via [`ChatStore::rotate`] so old
+    /// conversations are archived rather than lost.
+    ///
+    /// ## Full `/clear` flow (Telegram)
+    ///
+    /// 1. Remove the [`Agent`] from the in-memory map (drops all state).
+    /// 2. Call [`ChatStore::rotate`] to rename the on-disk history file
+    ///    with a timestamp, preserving it for review or RAG indexing.
+    /// 3. Reply "Context cleared." to the user.
+    /// 4. The next incoming message creates a fresh `Agent` with an empty
+    ///    history.
     pub fn clear(&mut self) {
         self.messages.clear();
     }
