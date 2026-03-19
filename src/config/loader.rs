@@ -55,7 +55,8 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::config::{
-    BuiltinSkillConfig, ControllerConfig, McpConfig, McpTransportConfig, Settings, SkillConfig,
+    BuiltinSkillConfig, ControllerConfig, DockerSandboxConfig, McpConfig, McpTransportConfig,
+    SandboxConfig, Settings, SkillConfig,
 };
 use crate::error::{DysonError, Result};
 use crate::secret::{SecretRegistry, SecretValue};
@@ -70,6 +71,7 @@ struct JsonRoot {
     agent: Option<JsonAgent>,
     skills: Option<JsonSkills>,
     controllers: Option<Vec<serde_json::Value>>,
+    sandbox: Option<JsonSandbox>,
     /// MCP servers — each becomes a Skill that provides tools.
     ///
     /// ```json
@@ -102,6 +104,28 @@ struct JsonSkills {
 #[derive(Debug, Deserialize)]
 struct JsonBuiltinSkill {
     tools: Option<Vec<String>>,
+}
+
+/// The `"sandbox"` object.
+///
+/// ```json
+/// "sandbox": {
+///   "disabled": ["docker"],
+///   "docker": { "container": "dyson-sandbox" }
+/// }
+/// ```
+#[derive(Debug, Deserialize)]
+struct JsonSandbox {
+    /// Sandbox names to disable.
+    #[serde(default)]
+    disabled: Vec<String>,
+    /// Docker sandbox config.
+    docker: Option<JsonDockerSandbox>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonDockerSandbox {
+    container: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +330,16 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                 }));
             }
         }
+    }
+
+    // -- Sandbox --
+    if let Some(sb) = root.sandbox {
+        settings.sandbox = SandboxConfig {
+            disabled: sb.disabled,
+            docker: sb.docker.map(|d| DockerSandboxConfig {
+                container: d.container,
+            }),
+        };
     }
 
     // -- Controllers --

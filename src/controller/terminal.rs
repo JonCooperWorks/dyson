@@ -55,8 +55,10 @@ impl super::Controller for TerminalController {
 
     async fn run(&self, settings: &Settings) -> crate::Result<()> {
         let client = crate::llm::create_client(&settings.agent);
-        let sandbox: Box<dyn crate::sandbox::Sandbox> =
-            Box::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+        let sandbox = crate::sandbox::create_sandbox(
+            &settings.sandbox,
+            settings.dangerous_no_sandbox,
+        );
         let skills = crate::skill::create_skills(settings).await;
         let mut agent = Agent::new(client, sandbox, skills, &settings.agent)?;
         let mut output = TerminalOutput::new();

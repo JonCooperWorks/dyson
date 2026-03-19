@@ -156,3 +156,57 @@ pub trait Sandbox: Send + Sync {
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Sandbox factory — build from config + CLI flags.
+// ---------------------------------------------------------------------------
+
+/// Build the sandbox from config.
+///
+/// If `dangerous_no_sandbox` is true (from CLI flag), returns
+/// `DangerousNoSandbox` regardless of config.  This is the only way to
+/// disable all sandboxes — it cannot be done from config.
+///
+/// Otherwise, builds a `CompositeSandbox` with all non-disabled sandboxes.
+/// If the composite has no sandboxes (all disabled via config), it still
+/// functions — it just allows everything (like an empty pipeline).
+pub fn create_sandbox(
+    config: &crate::config::SandboxConfig,
+    dangerous_no_sandbox: bool,
+) -> Box<dyn Sandbox> {
+    if dangerous_no_sandbox {
+        tracing::warn!("all sandboxes disabled via --dangerous-no-sandbox");
+        return Box::new(no_sandbox::DangerousNoSandbox);
+    }
+
+    let disabled = &config.disabled;
+    let mut sandboxes: Vec<Box<dyn Sandbox>> = Vec::new();
+
+    // Docker sandbox.
+    if !disabled.iter().any(|s| s == "docker") {
+        if let Some(ref docker_config) = config.docker {
+            tracing::info!(
+                container = docker_config.container,
+                "docker sandbox enabled"
+            );
+            sandboxes.push(Box::new(docker::DockerSandbox::new(
+                &docker_config.container,
+            )));
+        }
+    } else {
+        tracing::info!("docker sandbox disabled via config");
+    }
+
+    // Future sandboxes go here:
+    // if !disabled.contains("file") { ... }
+    // if !disabled.contains("network") { ... }
+    // if !disabled.contains("audit") { ... }
+
+    if sandboxes.is_empty() {
+        tracing::info!("no sandboxes configured — all tool calls allowed");
+    } else {
+        tracing::info!(count = sandboxes.len(), "sandbox pipeline built");
+    }
+
+    Box::new(composite::CompositeSandbox::new(sandboxes))
+}

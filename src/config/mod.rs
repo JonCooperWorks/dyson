@@ -65,6 +65,65 @@ pub struct Settings {
     /// Multiple controllers can run concurrently (e.g., terminal + Telegram).
     /// If empty, defaults to a single terminal controller.
     pub controllers: Vec<ControllerConfig>,
+
+    /// Sandbox configuration.
+    pub sandbox: SandboxConfig,
+
+    /// Whether `--dangerous-no-sandbox` was passed on the CLI.
+    ///
+    /// This is the ONLY way to disable all sandboxes.  It cannot be set
+    /// from config — only from the command line, as a conscious decision.
+    pub dangerous_no_sandbox: bool,
+}
+
+// ---------------------------------------------------------------------------
+// SandboxConfig
+// ---------------------------------------------------------------------------
+
+/// Configures which sandboxes are active.
+///
+/// By default, ALL sandboxes are enabled.  You disable specific ones
+/// in the config.  `DangerousNoSandbox` (disable everything) is only
+/// available via the `--dangerous-no-sandbox` CLI flag — it cannot be
+/// set from config, because config files can be committed to repos and
+/// shared, and "no sandbox" should always be a conscious, local decision.
+///
+/// ```json
+/// {
+///   "sandbox": {
+///     "disabled": ["docker"],
+///     "docker": {
+///       "container": "dyson-sandbox"
+///     }
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct SandboxConfig {
+    /// Sandbox names to disable.  Everything not in this list is active.
+    ///
+    /// Known sandboxes: "docker"
+    /// Future: "file", "network", "audit", "ratelimit"
+    pub disabled: Vec<String>,
+
+    /// Docker sandbox settings (if not disabled).
+    pub docker: Option<DockerSandboxConfig>,
+}
+
+/// Docker sandbox configuration.
+#[derive(Debug, Clone)]
+pub struct DockerSandboxConfig {
+    /// Container name or ID to exec into.
+    pub container: String,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            disabled: vec![],
+            docker: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +284,8 @@ impl Default for Settings {
                 tools: vec![],
             })],
             controllers: vec![],
+            sandbox: SandboxConfig::default(),
+            dangerous_no_sandbox: false,
         }
     }
 }

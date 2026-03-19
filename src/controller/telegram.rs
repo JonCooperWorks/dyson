@@ -237,8 +237,10 @@ impl super::Controller for TelegramController {
 
                 // Build a fresh agent per message.
                 let client = crate::llm::create_client(&agent_settings);
-                let sandbox: Box<dyn crate::sandbox::Sandbox> =
-                    Box::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+                let sandbox = crate::sandbox::create_sandbox(
+                    &settings_inner.sandbox,
+                    settings_inner.dangerous_no_sandbox,
+                );
                 let skills = crate::skill::create_skills(&settings_inner).await;
 
                 let mut agent = match Agent::new(client, sandbox, skills, &agent_settings) {

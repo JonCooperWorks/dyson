@@ -17,7 +17,7 @@
       "allowed_chat_ids": [
         {
           "resolver": "insecure_env",
-          "name": "TELEGRAM_ALLOWED_CHAT_IDS"
+          "name": "TELEGRAM_ALLOWED_CHAT_ID"
         }
       ]
     }

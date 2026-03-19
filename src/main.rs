@@ -83,15 +83,6 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // -- Require sandbox acknowledgment --
-    if !cli.dangerous_no_sandbox {
-        anyhow::bail!(
-            "Dyson requires a sandbox mode.  In Phase 1, only --dangerous-no-sandbox is \
-             available.\n\n\
-             Usage: dyson --dangerous-no-sandbox [prompt]"
-        );
-    }
-
     // -- Load config --
     let mut settings = loader::load_settings(cli.config.as_deref())?;
 
@@ -109,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(base_url) = cli.base_url {
         settings.agent.base_url = Some(base_url);
     }
+    settings.dangerous_no_sandbox = cli.dangerous_no_sandbox;
 
     tracing::info!(
         model = settings.agent.model,
@@ -123,8 +115,10 @@ async fn main() -> anyhow::Result<()> {
     // system entirely: create a one-off agent, run it, print, exit.
     if let Some(prompt) = cli.prompt {
         let client = dyson::llm::create_client(&settings.agent);
-        let sandbox: Box<dyn dyson::sandbox::Sandbox> =
-            Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+        let sandbox = dyson::sandbox::create_sandbox(
+            &settings.sandbox,
+            settings.dangerous_no_sandbox,
+        );
         let skills = dyson::skill::create_skills(&settings).await;
         let mut agent = dyson::agent::Agent::new(client, sandbox, skills, &settings.agent)?;
         let mut output = dyson::controller::terminal::TerminalOutput::new();
