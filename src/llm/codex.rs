@@ -21,20 +21,25 @@
 //
 //   Dyson spawns: codex exec \
 //       --json \
-//       --dangerously-bypass-approvals-and-sandbox \
+//       --full-auto \                     (or --dangerously-bypass-approvals-and-sandbox)
 //       --ephemeral \
+//       --skip-git-repo-check \
 //       --model <model> \
 //       -c developer_instructions="<system>" \
+//       -c mcp_servers.dyson-workspace.url=<url> \
 //       "<prompt>"
 //
 //   The key flags:
 //     exec                                Non-interactive mode
 //     --json                              Emit JSONL events to stdout
+//     --full-auto                         Skip approval prompts, keep sandbox
 //     --dangerously-bypass-approvals-and-sandbox
-//                                         Skip permission prompts (non-interactive)
+//                                         Only when --dangerous-no-sandbox is set
 //     --ephemeral                         Don't persist session files
+//     --skip-git-repo-check               Don't require a git repo
 //     --model                             Model selection
 //     -c developer_instructions="..."     Inject system prompt
+//     -c mcp_servers.dyson-workspace.url  Register workspace MCP server
 //
 //   Codex writes JSONL events to stdout.  Each line is a JSON object with
 //   a "type" field that determines the event kind.
@@ -65,8 +70,8 @@
 //
 // Conversation history:
 //   `codex exec` is stateless.  Multi-turn context is formatted into
-//   a single prompt string, identical to the Claude Code approach.
-//   We reuse the same `format_prompt()` logic.
+//   a single prompt string using the shared `format_prompt()` utility
+//   in `llm/mod.rs`.
 // ===========================================================================
 
 use std::pin::Pin;
@@ -111,8 +116,8 @@ pub struct CodexClient {
     /// Workspace to expose as MCP tools to Codex.
     ///
     /// When `Some`, each call to `stream()` will start an in-process HTTP
-    /// MCP server, register it with Codex via `codex mcp add`, and pass
-    /// the workspace tools.  When `None`, no MCP server is started.
+    /// MCP server and register it with Codex via `-c mcp_servers...` config
+    /// override.  When `None`, no MCP server is started.
     workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
 
     /// Whether sandbox enforcement is disabled.
@@ -227,13 +232,9 @@ impl LlmClient for CodexClient {
 
         // -- Start MCP server if workspace is available --
         //
-        // Codex supports MCP via `codex mcp` subcommands, but for per-session
-        // config we can't easily register servers dynamically.  Instead, we
-        // pass MCP config via environment variable or config override.
-        //
-        // For now, workspace tools are injected via the developer_instructions
-        // system prompt (similar to how Claude Code gets them via --mcp-config).
-        // TODO: Use Codex's MCP support when stable.
+        // Codex supports MCP natively.  We start an in-process HTTP MCP server
+        // and register it via `-c mcp_servers.dyson-workspace.url=<url>` config
+        // override (similar to how Claude Code gets workspace via --mcp-config).
         let mut _mcp_server_handle: Option<tokio::task::JoinHandle<()>> = None;
         let mut mcp_url: Option<String> = None;
 

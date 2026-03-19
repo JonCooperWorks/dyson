@@ -5,10 +5,12 @@ provider handles request serialization, SSE parsing, and tool call
 accumulation internally — the agent loop sees only a stream of `StreamEvent`s.
 
 **Key files:**
-- `src/llm/mod.rs` — `LlmClient` trait, `CompletionConfig`, `ToolDefinition`
+- `src/llm/mod.rs` — `LlmClient` trait, `CompletionConfig`, `ToolDefinition`, shared utilities
 - `src/llm/stream.rs` — `StreamEvent`, `StopReason`
 - `src/llm/anthropic.rs` — Anthropic Messages API (Claude models)
-- `src/llm/openai.rs` — OpenAI Chat Completions API (GPT, Codex, Claude Code, Ollama, etc.)
+- `src/llm/openai.rs` — OpenAI Chat Completions API (GPT, Ollama, etc.)
+- `src/llm/claude_code.rs` — Claude Code CLI subprocess (no API key needed)
+- `src/llm/codex.rs` — Codex CLI subprocess (no API key needed)
 
 ---
 
@@ -26,7 +28,7 @@ pub trait LlmClient: Send + Sync {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>>;
 
     /// Whether this provider runs its own internal tool-use loop.
-    /// Default: false.  Claude Code overrides to true.
+    /// Default: false.  Claude Code and Codex override to true.
     fn handles_tools_internally(&self) -> bool { false }
 }
 ```
@@ -46,8 +48,18 @@ Returns a `Stream` of `StreamEvent`s.  The stream ends with
 
 ## Provider Comparison
 
-Both providers implement the same `LlmClient` trait, but their SSE formats
-differ significantly:
+All four providers implement the same `LlmClient` trait.  Anthropic and OpenAI
+are API-based; Claude Code and Codex are CLI-subprocess-based.
+
+| Aspect | Anthropic | OpenAI | Claude Code | Codex |
+|--------|-----------|--------|-------------|-------|
+| Transport | HTTP API | HTTP API | CLI subprocess | CLI subprocess |
+| Auth | `x-api-key` header | `Bearer` token | CLI's stored auth | CLI's stored auth |
+| API key needed? | Yes | Yes | No | No |
+| Tool execution | Dyson | Dyson | Internal | Internal |
+| `handles_tools_internally` | `false` | `false` | `true` | `true` |
+
+### API Clients (Anthropic vs OpenAI)
 
 | Aspect | Anthropic | OpenAI |
 |--------|-----------|--------|
@@ -137,8 +149,6 @@ The `SseParser` struct handles three concerns:
 
 Works with any OpenAI-compatible endpoint:
 - **OpenAI** — `https://api.openai.com` (default)
-- **Codex CLI** — local server endpoint
-- **Claude Code** — OpenAI-compatible proxy
 - **Ollama** — `http://localhost:11434`
 - **Together** — `https://api.together.xyz`
 - **vLLM** — `http://localhost:8000`
@@ -224,7 +234,35 @@ Without this, Dyson would see the internal tool calls, try to execute them
 
 The `claude -p` command is stateless — each invocation is a fresh session.
 For multi-turn context, Dyson formats the entire conversation history into
-a single text prompt via `format_prompt()`.
+a single text prompt via the shared `format_prompt()` utility in `llm/mod.rs`.
+
+---
+
+## Codex Client
+
+`CodexClient` in `src/llm/codex.rs`.
+
+Similar to Claude Code, Codex is a full agent with its own tool-use loop.
+Dyson spawns `codex exec --json` as a subprocess and streams JSONL events.
+
+### Sandbox gating
+
+Codex has two approval modes:
+- **`--full-auto`** (default) — skips approval prompts but keeps Codex's
+  workspace sandbox active
+- **`--dangerously-bypass-approvals-and-sandbox`** — only used when Dyson's
+  `--dangerous-no-sandbox` flag is set
+
+### Workspace via MCP
+
+When a workspace is configured, Dyson starts an in-process HTTP MCP server
+and registers it with Codex via `-c mcp_servers.dyson-workspace.url=<url>`
+config override.
+
+### Conversation history
+
+Like Claude Code, `codex exec` is stateless.  Multi-turn context uses the
+same shared `format_prompt()` utility.
 
 ---
 
@@ -243,7 +281,7 @@ the `Output` trait.  This means:
 - Developers can inspect thinking by running with `RUST_LOG=debug`
 - The thinking tokens are not included in conversation history messages
 
-All three LLM clients (Anthropic, OpenAI, Claude Code) handle thinking tokens.
+All four LLM clients (Anthropic, OpenAI, Claude Code, Codex) handle thinking tokens.
 
 ---
 
@@ -258,25 +296,32 @@ dyson --dangerous-no-sandbox "hello"
 # OpenAI
 dyson --dangerous-no-sandbox --provider openai "hello"
 
-# Codex CLI local server
-dyson --dangerous-no-sandbox --provider openai --base-url http://localhost:3000 "hello"
+# Claude Code CLI
+dyson --dangerous-no-sandbox --provider claude-code "hello"
 
-# Ollama
+# Codex CLI
+dyson --dangerous-no-sandbox --provider codex "hello"
+
+# Ollama (via OpenAI-compatible endpoint)
 dyson --dangerous-no-sandbox --provider openai --base-url http://localhost:11434 "hello"
 ```
 
-Or in `dyson.toml`:
+Or in `dyson.json`:
 
-```toml
-[agent]
-provider = "openai"          # "anthropic" or "openai"
-base_url = "http://localhost:11434"
-model = "llama3.1"
+```json
+{
+  "agent": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-20250514"
+  }
+}
 ```
 
 The API key is resolved from the provider-specific environment variable:
 - Anthropic: `ANTHROPIC_API_KEY`
 - OpenAI: `OPENAI_API_KEY`
+- Claude Code: no API key needed (uses CLI's stored auth)
+- Codex: no API key needed (uses CLI's stored auth)
 
 ---
 
@@ -285,7 +330,7 @@ The API key is resolved from the provider-specific environment variable:
 1. Create `src/llm/my_provider.rs`
 2. Implement `LlmClient` — the only method is `stream()`
 3. Add a `MyProvider` variant to `LlmProvider` in `src/config/mod.rs`
-4. Wire it up in `main.rs`'s client construction match
+4. Wire it up in `create_client()` in `src/llm/mod.rs`
 
 The stream must emit `StreamEvent`s in the correct order.  The stream handler
 doesn't care about provider-specific details — it just pattern-matches on

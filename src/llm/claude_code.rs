@@ -26,9 +26,10 @@
 //       --output-format stream-json \
 //       --verbose \
 //       --include-partial-messages \
-//       --tools "" \
+//       --no-session-persistence \
+//       --dangerously-skip-permissions \
 //       --model <model> \
-//       --system-prompt <system>
+//       --append-system-prompt <system>
 //
 //   The key flags:
 //     -p                          Print mode (non-interactive, pipe-friendly)
@@ -37,8 +38,10 @@
 //     --include-partial-messages  Emit raw Anthropic streaming events
 //                                 (content_block_delta, etc.) for true
 //                                 token-by-token streaming
-//     --dangerously-skip-permissions  Let Claude Code run tools without
-//                                     prompting (Dyson is non-interactive)
+//     --dangerously-skip-permissions  Always required: claude -p is
+//                                     non-interactive and cannot answer
+//                                     permission prompts
+//     --no-session-persistence    Don't save to Claude Code's history
 //     --append-system-prompt      Add our prompt ON TOP of Claude Code's
 //                                 built-in prompt (preserves OS info, etc.)
 //     --model                     Model selection
@@ -321,10 +324,10 @@ impl LlmClient for ClaudeCodeClient {
     /// | `--output-format stream-json` | Newline-delimited JSON events |
     /// | `--verbose` | Required for stream-json (CLI enforces this) |
     /// | `--include-partial-messages` | Raw Anthropic streaming events |
-    /// | `--tools ""` | Disable Claude Code's built-in tools |
-    /// | `--model <model>` | Model selection |
-    /// | `--system-prompt <prompt>` | System prompt |
+    /// | `--dangerously-skip-permissions` | Non-interactive — can't answer prompts |
     /// | `--no-session-persistence` | Don't save this to Claude Code's history |
+    /// | `--model <model>` | Model selection |
+    /// | `--append-system-prompt <prompt>` | System prompt (on top of built-in) |
     /// Claude Code runs its own agent loop with built-in tools (Bash, Read,
     /// Write, etc.).  Dyson should NOT re-execute those tool calls — they
     /// already ran inside the `claude -p` subprocess.  ToolUse stream events

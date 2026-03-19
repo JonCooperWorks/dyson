@@ -509,7 +509,7 @@ fn resolve_secrets_in_value(value: &mut serde_json::Value, secrets: &SecretRegis
     }
 }
 
-/// Ensure we have an API key (unless using Claude Code).
+/// Ensure we have an API key (unless using Claude Code or Codex).
 fn resolve_api_key(settings: &mut Settings, secrets: &SecretRegistry) -> Result<()> {
     if settings.agent.provider == crate::config::LlmProvider::ClaudeCode
         || settings.agent.provider == crate::config::LlmProvider::Codex

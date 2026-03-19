@@ -166,9 +166,9 @@ pub trait LlmClient: Send + Sync {
 /// ## Parameters
 ///
 /// - `settings`: Agent configuration (provider, model, API key, base URL).
-/// - `workspace`: Shared workspace reference, used only by `ClaudeCodeClient`.
-///   When `Some`, the Claude Code client starts an in-process HTTP MCP server
-///   that exposes workspace tools (view, search, update) to the `claude` CLI.
+/// - `workspace`: Shared workspace reference, used by `ClaudeCodeClient` and
+///   `CodexClient`.  When `Some`, the client starts an in-process HTTP MCP server
+///   that exposes workspace tools (view, search, update) to the CLI subprocess.
 ///   Ignored by Anthropic and OpenAI clients (they use Dyson's own tool system).
 /// - `dangerous_no_sandbox`: Whether `--dangerous-no-sandbox` was passed on
 ///   the CLI.  Forwarded to `ClaudeCodeClient` → `McpHttpServer` for future
@@ -190,7 +190,7 @@ pub trait LlmClient: Send + Sync {
 /// state.  All LLM turns within a session share the same workspace.  Passing
 /// it at construction time simplifies the `LlmClient` trait (stream() doesn't
 /// need workspace-awareness) and keeps the workspace coupling isolated to
-/// the Claude Code backend.
+/// the CLI-subprocess backends (Claude Code and Codex).
 pub fn create_client(
     settings: &crate::config::AgentSettings,
     workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,

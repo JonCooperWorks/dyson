@@ -62,7 +62,7 @@ User types "list the files"
 
 ```
 Agent
-  ├── client: Box<dyn LlmClient>          ← Anthropic or OpenAI
+  ├── client: Box<dyn LlmClient>          ← Anthropic, OpenAI, Claude Code, or Codex
   ├── sandbox: Box<dyn Sandbox>            ← gates every tool call
   ├── skills: Vec<Box<dyn Skill>>          ← own tools + lifecycle
   │     └── BuiltinSkill
@@ -89,7 +89,7 @@ interfaces — it never knows the concrete types behind them.
 | `Tool` | `src/tool/mod.rs` | A single callable capability (bash, file read, MCP remote) |
 | `Skill` | `src/skill/mod.rs` | A bundle of tools with lifecycle hooks and prompt fragments |
 | `Sandbox` | `src/sandbox/mod.rs` | Gate tool calls: allow, deny, or redirect |
-| `Output` | `src/ui/mod.rs` | Render agent events to the user (terminal, JSON, etc.) |
+| `Output` | `src/controller/mod.rs` | Render agent events to the user (terminal, JSON, etc.) |
 
 ### Trait relationships
 
