@@ -27,6 +27,9 @@ use async_trait::async_trait;
 use crate::skill::Skill;
 use crate::tool::Tool;
 use crate::tool::bash::BashTool;
+use crate::tool::workspace_view::WorkspaceViewTool;
+use crate::tool::workspace_search::WorkspaceSearchTool;
+use crate::tool::workspace_update::WorkspaceUpdateTool;
 
 // ---------------------------------------------------------------------------
 // BuiltinSkill
@@ -34,9 +37,18 @@ use crate::tool::bash::BashTool;
 
 /// Skill that provides Dyson's built-in tools.
 ///
-/// Phase 1: just bash.  Future phases add read_file, write_file, edit_file,
-/// web_search, and more.  The system prompt fragment describes what tools
-/// are available and gives the LLM usage guidance.
+/// Currently provides:
+/// - **bash**: Shell command execution
+/// - **workspace_view**: View/list workspace files (SOUL.md, MEMORY.md, etc.)
+/// - **workspace_search**: Search across workspace files
+/// - **workspace_update**: Update workspace files (set or append content)
+///
+/// The workspace tools give the agent runtime access to its identity and
+/// memory files through the `Workspace` trait, enabling it to read and
+/// evolve its own personality, memory, and journals.
+///
+/// The system prompt fragment describes what tools are available and gives
+/// the LLM usage guidance.
 pub struct BuiltinSkill {
     /// The built-in tools, stored as Arc for shared ownership with the agent.
     tools: Vec<Arc<dyn Tool>>,
@@ -50,7 +62,12 @@ pub struct BuiltinSkill {
 impl BuiltinSkill {
     /// Create a new BuiltinSkill with all default tools.
     pub fn new() -> Self {
-        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(BashTool::default())];
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(BashTool::default()),
+            Arc::new(WorkspaceViewTool),
+            Arc::new(WorkspaceSearchTool),
+            Arc::new(WorkspaceUpdateTool),
+        ];
 
         // Build the system prompt dynamically from the loaded tools.
         let tool_list: Vec<String> = tools
@@ -107,11 +124,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn has_bash_tool() {
+    fn has_builtin_tools() {
         let skill = BuiltinSkill::new();
         let tools = skill.tools();
-        assert_eq!(tools.len(), 1);
+        assert_eq!(tools.len(), 4);
         assert_eq!(tools[0].name(), "bash");
+        assert_eq!(tools[1].name(), "workspace_view");
+        assert_eq!(tools[2].name(), "workspace_search");
+        assert_eq!(tools[3].name(), "workspace_update");
     }
 
     #[test]

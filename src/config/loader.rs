@@ -55,8 +55,8 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::config::{
-    BuiltinSkillConfig, ControllerConfig, DockerSandboxConfig, McpConfig, McpTransportConfig,
-    SandboxConfig, Settings, SkillConfig,
+    BuiltinSkillConfig, ControllerConfig, DockerSandboxConfig, McpConfig,
+    McpTransportConfig, SandboxConfig, Settings, SkillConfig,
 };
 use crate::error::{DysonError, Result};
 use crate::secret::{SecretRegistry, SecretValue};
@@ -73,6 +73,7 @@ struct JsonRoot {
     controllers: Option<Vec<serde_json::Value>>,
     sandbox: Option<JsonSandbox>,
     workspace: Option<JsonWorkspace>,
+    chat_history: Option<JsonChatHistory>,
     /// MCP servers — each becomes a Skill that provides tools.
     ///
     /// ```json
@@ -132,10 +133,33 @@ struct JsonDockerSandbox {
 }
 
 /// The `"workspace"` object.
+///
+/// Supports both new-style `backend` + `connection_string` and legacy `path`:
+/// ```json
+/// { "workspace": { "backend": "openclaw", "connection_string": "~/.dyson" } }
+/// { "workspace": { "path": "~/.dyson" } }
+/// ```
 #[derive(Debug, Deserialize)]
 struct JsonWorkspace {
-    /// Path to the workspace directory.
+    /// Backend type: "openclaw" (default).
+    backend: Option<String>,
+    /// Connection string (path for openclaw).  Supports secret resolution.
+    connection_string: Option<SecretValue>,
+    /// Legacy: plain path.  Falls back to this if connection_string is absent.
     path: Option<String>,
+}
+
+/// The `"chat_history"` object.
+///
+/// ```json
+/// { "chat_history": { "backend": "disk", "connection_string": "~/.dyson/chats" } }
+/// ```
+#[derive(Debug, Deserialize)]
+struct JsonChatHistory {
+    /// Backend type: "disk" (default).
+    backend: Option<String>,
+    /// Connection string (directory path for disk).  Supports secret resolution.
+    connection_string: Option<SecretValue>,
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +379,29 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
 
     // -- Workspace --
     if let Some(ws) = root.workspace {
-        settings.workspace_path = ws.path;
+        if let Some(backend) = ws.backend {
+            settings.workspace.backend = backend;
+        }
+        // connection_string takes priority, then fall back to legacy path.
+        if let Some(ref cs) = ws.connection_string {
+            if let Ok(resolved) = secrets.resolve(cs) {
+                settings.workspace.connection_string = resolved;
+            }
+        } else if let Some(path) = ws.path {
+            settings.workspace.connection_string = path;
+        }
+    }
+
+    // -- Chat history --
+    if let Some(ch) = root.chat_history {
+        if let Some(backend) = ch.backend {
+            settings.chat_history.backend = backend;
+        }
+        if let Some(ref cs) = ch.connection_string {
+            if let Ok(resolved) = secrets.resolve(cs) {
+                settings.chat_history.connection_string = resolved;
+            }
+        }
     }
 
     // -- Controllers --

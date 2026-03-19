@@ -61,7 +61,7 @@ pub fn apply_overrides(
     }
     settings.dangerous_no_sandbox = dangerous_no_sandbox;
     if let Some(ws) = workspace {
-        settings.workspace_path = Some(ws);
+        settings.workspace.connection_string = ws;
     }
     Ok(())
 }

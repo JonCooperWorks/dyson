@@ -207,8 +207,8 @@ impl super::Controller for TelegramController {
                 let p = std::path::PathBuf::from("dyson.json");
                 if p.exists() { Some(p) } else { None }
             });
-        let workspace_path = crate::persistence::Workspace::resolve_path(
-            settings.workspace_path.as_deref(),
+        let workspace_path = crate::workspace::OpenClawWorkspace::resolve_path(
+            Some(settings.workspace.connection_string.as_str()),
         );
         let mut reloader = crate::config::hot_reload::HotReloader::new(
             config_path.as_deref(),
@@ -221,19 +221,13 @@ impl super::Controller for TelegramController {
         let agents: Arc<Mutex<HashMap<i64, crate::agent::Agent>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
-        // Chat store — persists conversation history to disk so it
-        // survives restarts.  Uses the ChatStore trait so the backend
-        // can be swapped (JSON files, database, RAG, etc.).
-        let chats_dir = crate::persistence::Workspace::resolve_path(
-            settings.workspace_path.as_deref(),
-        )
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            std::path::PathBuf::from(home).join(".dyson")
-        })
-        .join("chats");
-        let chat_store: Arc<dyn crate::persistence::chat_store::ChatStore> =
-            Arc::new(crate::persistence::chat_store::JsonChatStore::new(chats_dir)?);
+        // Chat store — persists conversation history via the configured
+        // backend.  Uses the ChatHistory trait so the backend can be
+        // swapped (disk, database, RAG, etc.).
+        let chat_store: Arc<dyn crate::chat_history::ChatHistory> = {
+            let store = crate::chat_history::create_chat_history(&settings.chat_history)?;
+            Arc::from(store)
+        };
 
 
         // Manual polling loop instead of teloxide::repl.
@@ -407,11 +401,9 @@ fn save_memory_note(
     settings: &Settings,
     note: &str,
 ) -> crate::Result<()> {
-    let mut workspace = crate::persistence::Workspace::load_default(
-        settings.workspace_path.as_deref(),
-    )?;
+    let mut workspace = crate::workspace::create_workspace(&settings.workspace)?;
 
-    let today = crate::persistence::Workspace::today_date();
+    let today = crate::workspace::OpenClawWorkspace::today_date();
     let entry = format!("\n- [{today}] {note}");
 
     workspace.append("MEMORY.md", &entry);

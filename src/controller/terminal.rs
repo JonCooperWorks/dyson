@@ -67,8 +67,8 @@ impl super::Controller for TerminalController {
                 if p.exists() { Some(p) } else { None }
             });
 
-        let workspace_path = crate::persistence::Workspace::resolve_path(
-            settings.workspace_path.as_deref(),
+        let workspace_path = crate::workspace::OpenClawWorkspace::resolve_path(
+            Some(settings.workspace.connection_string.as_str()),
         );
 
         let mut reloader = crate::config::hot_reload::HotReloader::new(

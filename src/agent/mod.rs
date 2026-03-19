@@ -134,6 +134,7 @@ impl Agent {
         sandbox: Box<dyn Sandbox>,
         skills: Vec<Box<dyn Skill>>,
         settings: &AgentSettings,
+        workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
     ) -> Result<Self> {
         // -- Flatten tools from all skills --
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
@@ -187,7 +188,8 @@ impl Agent {
             temperature: None, // use provider default
         };
 
-        let tool_context = ToolContext::from_cwd()?;
+        let mut tool_context = ToolContext::from_cwd()?;
+        tool_context.workspace = workspace;
 
         Ok(Self {
             client,
@@ -208,13 +210,13 @@ impl Agent {
     /// Resets the agent to a blank slate by dropping all accumulated
     /// messages.  This is the in-memory half of the `/clear` flow — the
     /// caller (e.g. the Telegram controller) is responsible for also
-    /// rotating persisted history via [`ChatStore::rotate`] so old
+    /// rotating persisted history via [`ChatHistory::rotate`] so old
     /// conversations are archived rather than lost.
     ///
     /// ## Full `/clear` flow (Telegram)
     ///
     /// 1. Remove the [`Agent`] from the in-memory map (drops all state).
-    /// 2. Call [`ChatStore::rotate`] to rename the on-disk history file
+    /// 2. Call [`ChatHistory::rotate`] to rename the on-disk history file
     ///    with a timestamp, preserving it for review or RAG indexing.
     /// 3. Reply "Context cleared." to the user.
     /// 4. The next incoming message creates a fresh `Agent` with an empty
@@ -522,7 +524,7 @@ mod tests {
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new())];
         let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
-        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings).unwrap();
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None).unwrap();
         let mut output = MockOutput::new();
 
         let result = agent.run("hi", &mut output).await.unwrap();
@@ -566,7 +568,7 @@ mod tests {
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new())];
         let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
-        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings).unwrap();
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None).unwrap();
         let mut output = MockOutput::new();
 
         let result = agent.run("run echo test_output", &mut output).await.unwrap();
@@ -605,7 +607,7 @@ mod tests {
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new())];
         let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
-        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings).unwrap();
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None).unwrap();
         let mut output = MockOutput::new();
 
         let result = agent.run("list files", &mut output).await.unwrap();
