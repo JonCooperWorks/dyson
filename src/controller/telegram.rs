@@ -229,7 +229,7 @@ impl super::Controller for TelegramController {
             }
             // Poll for updates with a timeout, racing against Ctrl-C.
             let updates = tokio::select! {
-                result = bot.get_updates().offset(offset as i32).timeout(10).send() => {
+                result = bot.get_updates().offset(offset as i32).timeout(30).send() => {
                     match result {
                         Ok(updates) => updates,
                         Err(e) => {
