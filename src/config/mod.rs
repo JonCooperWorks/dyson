@@ -40,6 +40,7 @@
 //   4. Hardcoded defaults
 // ===========================================================================
 
+pub mod hot_reload;
 pub mod loader;
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,10 @@ pub struct Settings {
 
     /// Sandbox configuration.
     pub sandbox: SandboxConfig,
+
+    /// Workspace directory for persistent state (SOUL.md, MEMORY.md, etc.).
+    /// Default: ~/.dyson/
+    pub workspace_path: Option<String>,
 
     /// Whether `--dangerous-no-sandbox` was passed on the CLI.
     ///
@@ -296,6 +301,7 @@ impl Default for Settings {
             controllers: vec![],
             sandbox: SandboxConfig::default(),
             dangerous_no_sandbox: false,
+            workspace_path: None,
         }
     }
 }

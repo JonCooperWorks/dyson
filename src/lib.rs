@@ -38,6 +38,7 @@ pub mod controller;
 pub mod error;
 pub mod llm;
 pub mod message;
+pub mod persistence;
 pub mod sandbox;
 pub mod secret;
 pub mod skill;

@@ -45,7 +45,6 @@ use teloxide::types::{ChatId, MessageId};
 
 use serde::Deserialize;
 
-use crate::agent::Agent;
 use crate::config::{ControllerConfig, Settings};
 use crate::controller::Output;
 use crate::error::DysonError;
@@ -193,75 +192,117 @@ impl super::Controller for TelegramController {
 
         let bot = teloxide::Bot::new(&self.bot_token);
         let allowed_ids = self.allowed_chat_ids.clone();
+        let mut current_settings = settings.clone();
+        let controller_prompt = self.system_prompt().map(|s| s.to_string());
 
-        // Clone full settings for skill creation inside the closure.
-        let mut settings_inner = settings.clone();
+        // Hot reload: watch config + workspace files.
+        let config_path = std::env::args()
+            .skip_while(|a| a != "--config" && a != "-c")
+            .nth(1)
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let p = std::path::PathBuf::from("dyson.json");
+                if p.exists() { Some(p) } else { None }
+            });
+        let workspace_path = crate::persistence::Workspace::resolve_path(
+            settings.workspace_path.as_deref(),
+        );
+        let mut reloader = crate::config::hot_reload::HotReloader::new(
+            config_path.as_deref(),
+            workspace_path.as_deref(),
+        );
 
-        // Append the controller's system prompt to the agent settings.
-        if let Some(prompt) = self.system_prompt() {
-            settings_inner.agent.system_prompt.push_str("\n\n");
-            settings_inner.agent.system_prompt.push_str(prompt);
-        }
+        // Manual polling loop instead of teloxide::repl.
+        // teloxide::repl swallows SIGINT and can't be Ctrl-C'd.
+        let mut offset: i64 = 0;
 
-        let agent_settings = settings_inner.agent.clone();
+        loop {
+            // Check for config/workspace changes each poll cycle.
+            if let Ok((changed, new_settings)) = reloader.check() {
+                if changed {
+                    if let Some(s) = new_settings {
+                        current_settings = s;
+                        current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
+                    }
+                    tracing::info!("config/workspace reloaded");
+                }
+            }
+            // Poll for updates with a timeout, racing against Ctrl-C.
+            let updates = tokio::select! {
+                result = bot.get_updates().offset(offset as i32).timeout(10).send() => {
+                    match result {
+                        Ok(updates) => updates,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "getUpdates failed — retrying");
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    eprintln!("\nshutting down");
+                    break;
+                }
+            };
 
-        teloxide::repl(bot, move |msg: Message, bot: Bot| {
-            let agent_settings = agent_settings.clone();
-            let settings_inner = settings_inner.clone();
-            let allowed_ids = allowed_ids.clone();
+            for update in &updates {
+                offset = i64::from(update.id.0) + 1;
 
-            async move {
+                // Extract text message.
+                let msg = match &update.kind {
+                    teloxide::types::UpdateKind::Message(m) => m.clone(),
+                    _ => continue,
+                };
+
                 let text = match msg.text() {
                     Some(t) if !t.is_empty() => t.to_string(),
-                    _ => return Ok(()),
+                    _ => continue,
                 };
 
                 let chat_id = msg.chat.id;
 
-                // /whoami — reply with the chat ID so users can
-                // bootstrap their allowed_chat_ids config.
-                // This runs BEFORE access control so you can always
-                // discover your chat ID, even on a locked-down bot.
+                // /whoami — respond immediately, no LLM needed.
                 if text == "/whoami" {
-                    let _ = bot.send_message(chat_id, format!("Your chat ID: `{}`", chat_id.0)).await;
-                    return Ok(());
+                    let _ = bot.send_message(chat_id, chat_id.0.to_string()).await;
+                    continue;
                 }
 
                 // Access control.
                 if !allowed_ids.is_empty() && !allowed_ids.contains(&chat_id.0) {
                     tracing::warn!(chat_id = chat_id.0, "unauthorized chat — ignoring");
-                    return Ok(());
+                    continue;
                 }
 
                 tracing::info!(chat_id = chat_id.0, "telegram message received");
 
-                // Build a fresh agent per message.
-                let client = crate::llm::create_client(&agent_settings);
-                let sandbox = crate::sandbox::create_sandbox(
-                    &settings_inner.sandbox,
-                    settings_inner.dangerous_no_sandbox,
-                );
-                let skills = crate::skill::create_skills(&settings_inner).await;
+                // Spawn the agent run in a background task so the polling
+                // loop doesn't block.  Without this, a slow LLM response
+                // freezes the entire bot — no new messages are received
+                // until the current one finishes.
+                let bot_clone = bot.clone();
+                let settings_clone = current_settings.clone();
+                let prompt_clone = controller_prompt.clone();
+                tokio::spawn(async move {
+                    let mut agent = match crate::controller::build_agent(
+                        &settings_clone,
+                        prompt_clone.as_deref(),
+                    ).await {
+                        Ok(a) => a,
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to create agent");
+                            return;
+                        }
+                    };
 
-                let mut agent = match Agent::new(client, sandbox, skills, &agent_settings) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to create agent");
-                        return Ok(());
+                    let mut output = TelegramOutput::new(bot_clone.clone(), chat_id);
+
+                    if let Err(e) = agent.run(&text, &mut output).await {
+                        tracing::error!(error = %e, "agent run failed");
+                        let _ = bot_clone.send_message(chat_id, format!("Error: {e}")).await;
                     }
-                };
-
-                let mut output = TelegramOutput::new(bot.clone(), chat_id);
-
-                if let Err(e) = agent.run(&text, &mut output).await {
-                    tracing::error!(error = %e, "agent run failed");
-                    let _ = bot.send_message(chat_id, format!("Error: {e}")).await;
-                }
-
-                Ok(())
+                });
             }
-        })
-        .await;
+        }
 
         Ok(())
     }

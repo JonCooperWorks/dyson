@@ -72,6 +72,7 @@ struct JsonRoot {
     skills: Option<JsonSkills>,
     controllers: Option<Vec<serde_json::Value>>,
     sandbox: Option<JsonSandbox>,
+    workspace: Option<JsonWorkspace>,
     /// MCP servers — each becomes a Skill that provides tools.
     ///
     /// ```json
@@ -128,6 +129,13 @@ struct JsonSandbox {
 #[derive(Debug, Deserialize)]
 struct JsonDockerSandbox {
     container: String,
+}
+
+/// The `"workspace"` object.
+#[derive(Debug, Deserialize)]
+struct JsonWorkspace {
+    /// Path to the workspace directory.
+    path: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +351,11 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                 container: d.container,
             }),
         };
+    }
+
+    // -- Workspace --
+    if let Some(ws) = root.workspace {
+        settings.workspace_path = ws.path;
     }
 
     // -- Controllers --

@@ -122,6 +122,48 @@ pub trait Controller: Send {
 }
 
 // ---------------------------------------------------------------------------
+// Agent builder — shared logic for all controllers.
+// ---------------------------------------------------------------------------
+
+/// Build an agent from settings, loading the workspace into the system
+/// prompt and applying any controller-specific prompt fragments.
+///
+/// Every controller should use this instead of building agents manually.
+/// This ensures the workspace (SOUL.md, MEMORY.md, etc.) is always loaded.
+pub async fn build_agent(
+    settings: &Settings,
+    controller_prompt: Option<&str>,
+) -> crate::Result<crate::agent::Agent> {
+    // Load the persistent workspace.
+    let workspace = crate::persistence::Workspace::load_default(
+        settings.workspace_path.as_deref(),
+    )?;
+
+    // Compose the system prompt: base + workspace + controller.
+    let mut agent_settings = settings.agent.clone();
+
+    let ws_prompt = workspace.system_prompt();
+    if !ws_prompt.is_empty() {
+        agent_settings.system_prompt.push_str("\n\n");
+        agent_settings.system_prompt.push_str(&ws_prompt);
+    }
+
+    if let Some(prompt) = controller_prompt {
+        agent_settings.system_prompt.push_str("\n\n");
+        agent_settings.system_prompt.push_str(prompt);
+    }
+
+    let client = crate::llm::create_client(&agent_settings);
+    let sandbox = crate::sandbox::create_sandbox(
+        &settings.sandbox,
+        settings.dangerous_no_sandbox,
+    );
+    let skills = crate::skill::create_skills(settings).await;
+
+    crate::agent::Agent::new(client, sandbox, skills, &agent_settings)
+}
+
+// ---------------------------------------------------------------------------
 // Output trait
 // ---------------------------------------------------------------------------
 

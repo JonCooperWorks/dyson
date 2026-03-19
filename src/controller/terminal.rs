@@ -31,7 +31,6 @@
 
 use std::io::Write;
 
-use crate::agent::Agent;
 use crate::config::Settings;
 use crate::controller::Output;
 use crate::error::DysonError;
@@ -54,14 +53,28 @@ impl super::Controller for TerminalController {
     }
 
     async fn run(&self, settings: &Settings) -> crate::Result<()> {
-        let client = crate::llm::create_client(&settings.agent);
-        let sandbox = crate::sandbox::create_sandbox(
-            &settings.sandbox,
-            settings.dangerous_no_sandbox,
-        );
-        let skills = crate::skill::create_skills(settings).await;
-        let mut agent = Agent::new(client, sandbox, skills, &settings.agent)?;
+        let mut current_settings = settings.clone();
+        let mut agent = super::build_agent(&current_settings, None).await?;
         let mut output = TerminalOutput::new();
+
+        // Hot reload: watch config file + workspace files.
+        let config_path = std::env::args()
+            .skip_while(|a| a != "--config" && a != "-c")
+            .nth(1)
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let p = std::path::PathBuf::from("dyson.json");
+                if p.exists() { Some(p) } else { None }
+            });
+
+        let workspace_path = crate::persistence::Workspace::resolve_path(
+            settings.workspace_path.as_deref(),
+        );
+
+        let mut reloader = crate::config::hot_reload::HotReloader::new(
+            config_path.as_deref(),
+            workspace_path.as_deref(),
+        );
 
         eprintln!(
             "Dyson v{} — type /exit to quit",
@@ -70,6 +83,21 @@ impl super::Controller for TerminalController {
         eprintln!();
 
         loop {
+            // Check for config/workspace changes before each turn.
+            if let Ok((changed, new_settings)) = reloader.check() {
+                if changed {
+                    if let Some(s) = new_settings {
+                        current_settings = s;
+                        current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
+                    }
+                    eprintln!("[reloaded]");
+                    match super::build_agent(&current_settings, None).await {
+                        Ok(a) => agent = a,
+                        Err(e) => eprintln!("[reload error: {e}]"),
+                    }
+                }
+            }
+
             eprint!("> ");
             std::io::stderr().flush()?;
 
