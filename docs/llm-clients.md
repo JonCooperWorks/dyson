@@ -228,6 +228,25 @@ a single text prompt via `format_prompt()`.
 
 ---
 
+## Thinking / Reasoning Tokens
+
+Some models emit internal reasoning tokens before the visible response:
+- **Anthropic** (extended thinking): `content_block_start` with type `"thinking"`,
+  followed by `thinking_delta` events
+- **OpenAI** (o-series, DeepSeek): `reasoning_content` field in the delta object
+
+Dyson captures these as `StreamEvent::ThinkingDelta` and **logs them** at
+debug level (`tracing::debug!`) but does **not** send them to the user via
+the `Output` trait.  This means:
+
+- Terminal and Telegram users see only the final response
+- Developers can inspect thinking by running with `RUST_LOG=debug`
+- The thinking tokens are not included in conversation history messages
+
+All three LLM clients (Anthropic, OpenAI, Claude Code) handle thinking tokens.
+
+---
+
 ## Provider Selection
 
 The provider is selected via CLI flags or config:

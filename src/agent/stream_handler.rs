@@ -114,6 +114,15 @@ pub async fn process_stream(
         let event = event_result?;
 
         match event {
+            // -- Thinking fragment --
+            //
+            // Models with extended thinking (Claude, o-series, DeepSeek, etc.)
+            // emit reasoning tokens before the visible response.  We log them
+            // for debugging but don't surface them to the user.
+            StreamEvent::ThinkingDelta(text) => {
+                tracing::debug!(thinking = text, "model thinking");
+            }
+
             // -- Text fragment --
             StreamEvent::TextDelta(text) => {
                 output.text_delta(&text)?;
@@ -317,5 +326,32 @@ mod tests {
         let mut output = MockOutput::new();
         let result = process_stream(stream, &mut output).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn thinking_deltas_are_not_sent_to_output() {
+        // Thinking tokens should be logged but NOT appear in the output
+        // text or in the message content blocks.
+        let stream = events_to_stream(vec![
+            StreamEvent::ThinkingDelta("Let me think...".into()),
+            StreamEvent::ThinkingDelta("The answer is 42.".into()),
+            StreamEvent::TextDelta("The answer is 42.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+        ]);
+
+        let mut output = MockOutput::new();
+        let (message, tool_calls) = process_stream(stream, &mut output).await.unwrap();
+
+        // Only the TextDelta should appear in output — thinking is suppressed.
+        assert_eq!(output.text, "The answer is 42.");
+        assert!(tool_calls.is_empty());
+        // Message should have one text block (not thinking).
+        assert_eq!(message.content.len(), 1);
+        match &message.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "The answer is 42."),
+            other => panic!("expected Text, got: {other:?}"),
+        }
     }
 }

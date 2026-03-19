@@ -413,6 +413,18 @@ impl OpenAiSseParser {
         for choice in choices {
             let delta = &choice["delta"];
 
+            // -- Thinking / reasoning content --
+            //
+            // Models like OpenAI o-series and DeepSeek emit reasoning tokens
+            // in a separate "reasoning_content" field before the visible
+            // response.  We capture these as ThinkingDelta events so they
+            // can be logged without being shown to the user.
+            if let Some(thinking) = delta["reasoning_content"].as_str() {
+                if !thinking.is_empty() {
+                    events.push(Ok(StreamEvent::ThinkingDelta(thinking.to_string())));
+                }
+            }
+
             // -- Text content --
             if let Some(text) = delta["content"].as_str() {
                 if !text.is_empty() {
@@ -587,6 +599,35 @@ mod tests {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
             }
             other => panic!("expected MessageComplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_reasoning_content_as_thinking() {
+        // OpenAI o-series and DeepSeek models emit reasoning_content in deltas.
+        // These should become ThinkingDelta events, not TextDelta.
+        let events = parse_sse(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Let me think...\"},\"finish_reason\":null}]}\n\n\
+             data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"The answer.\"},\"finish_reason\":null}]}\n\n\
+             data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        );
+
+        let thinking: Vec<_> = events.iter().filter(|e| {
+            matches!(e.as_ref().unwrap(), StreamEvent::ThinkingDelta(_))
+        }).collect();
+        assert_eq!(thinking.len(), 1);
+        match thinking[0].as_ref().unwrap() {
+            StreamEvent::ThinkingDelta(t) => assert_eq!(t, "Let me think..."),
+            other => panic!("expected ThinkingDelta, got: {other:?}"),
+        }
+
+        let text: Vec<_> = events.iter().filter(|e| {
+            matches!(e.as_ref().unwrap(), StreamEvent::TextDelta(_))
+        }).collect();
+        assert_eq!(text.len(), 1);
+        match text[0].as_ref().unwrap() {
+            StreamEvent::TextDelta(t) => assert_eq!(t, "The answer."),
+            other => panic!("expected TextDelta, got: {other:?}"),
         }
     }
 

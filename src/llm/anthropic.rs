@@ -263,6 +263,14 @@ struct SseParser {
     /// an entry.  Each `input_json_delta` appends to the JSON string.
     /// On `content_block_stop`, we parse the JSON and emit ToolUseComplete.
     tool_buffers: HashMap<usize, ToolUseBuffer>,
+
+    /// Content block indices that are "thinking" blocks.
+    ///
+    /// Anthropic's extended thinking emits thinking content as regular
+    /// content_block_delta events with type "thinking_delta".  We track
+    /// which blocks are thinking so we can emit ThinkingDelta instead of
+    /// TextDelta for their content.
+    thinking_blocks: std::collections::HashSet<usize>,
 }
 
 /// State for a single in-progress tool_use content block.
@@ -278,6 +286,7 @@ impl SseParser {
         Self {
             line_buffer: String::new(),
             tool_buffers: HashMap::new(),
+            thinking_blocks: std::collections::HashSet::new(),
         }
     }
 
@@ -386,6 +395,11 @@ impl SseParser {
                     return Some(StreamEvent::ToolUseStart { id, name });
                 }
 
+                // Track thinking blocks so we can route their deltas correctly.
+                if block_type == "thinking" {
+                    self.thinking_blocks.insert(index);
+                }
+
                 None
             }
 
@@ -400,9 +414,18 @@ impl SseParser {
                 let delta_type = delta["type"].as_str()?;
 
                 match delta_type {
+                    "thinking_delta" => {
+                        let text = delta["thinking"].as_str()?.to_string();
+                        Some(StreamEvent::ThinkingDelta(text))
+                    }
                     "text_delta" => {
                         let text = delta["text"].as_str()?.to_string();
-                        Some(StreamEvent::TextDelta(text))
+                        // Check if this text block is inside a thinking content block.
+                        if self.thinking_blocks.contains(&index) {
+                            Some(StreamEvent::ThinkingDelta(text))
+                        } else {
+                            Some(StreamEvent::TextDelta(text))
+                        }
                     }
                     "input_json_delta" => {
                         let partial = delta["partial_json"].as_str()?;
@@ -610,6 +633,43 @@ mod tests {
         assert_eq!(events2.len(), 1);
         match events2[0].as_ref().unwrap() {
             StreamEvent::TextDelta(text) => assert_eq!(text, "Hi"),
+            other => panic!("expected TextDelta, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_thinking_block_as_thinking_delta() {
+        // Anthropic extended thinking: a content_block_start with type "thinking"
+        // followed by thinking_delta events.
+        let sse = "\
+            event: content_block_start\n\
+            data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n\
+            event: content_block_delta\n\
+            data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me reason...\"}}\n\n\
+            event: content_block_stop\n\
+            data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+            event: content_block_start\n\
+            data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+            event: content_block_delta\n\
+            data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"The answer.\"}}\n\n";
+
+        let events = parse_sse(sse);
+
+        let thinking: Vec<_> = events.iter().filter(|e| {
+            matches!(e.as_ref().unwrap(), StreamEvent::ThinkingDelta(_))
+        }).collect();
+        assert_eq!(thinking.len(), 1);
+        match thinking[0].as_ref().unwrap() {
+            StreamEvent::ThinkingDelta(t) => assert_eq!(t, "Let me reason..."),
+            other => panic!("expected ThinkingDelta, got: {other:?}"),
+        }
+
+        let text: Vec<_> = events.iter().filter(|e| {
+            matches!(e.as_ref().unwrap(), StreamEvent::TextDelta(_))
+        }).collect();
+        assert_eq!(text.len(), 1);
+        match text[0].as_ref().unwrap() {
+            StreamEvent::TextDelta(t) => assert_eq!(t, "The answer."),
             other => panic!("expected TextDelta, got: {other:?}"),
         }
     }

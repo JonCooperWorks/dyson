@@ -91,6 +91,13 @@ pub enum StopReason {
 /// ```
 #[derive(Debug)]
 pub enum StreamEvent {
+    /// A fragment of the model's internal reasoning / thinking.
+    ///
+    /// Some models (Claude with extended thinking, OpenAI o-series, DeepSeek,
+    /// etc.) emit reasoning tokens before the visible response.  These are
+    /// logged for debugging but NOT shown to the user.
+    ThinkingDelta(String),
+
     /// A fragment of text output.
     ///
     /// Printed to the terminal immediately as it arrives.  Multiple

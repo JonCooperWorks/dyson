@@ -350,6 +350,10 @@ impl LlmClient for ClaudeCodeClient {
             // stream_event content_block deltas (same as Anthropic SSE).
             let mut tool_buffers: HashMap<usize, ToolUseBuffer> = HashMap::new();
 
+            // Track thinking block indices so their text_delta events
+            // are emitted as ThinkingDelta instead of TextDelta.
+            let mut thinking_blocks: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
             // Read lines from the subprocess stdout.
             //
             // `read_line()` appends to a buffer and returns the number
@@ -402,10 +406,21 @@ impl LlmClient for ClaudeCodeClient {
                             "content_block_delta" => {
                                 let delta = &inner["delta"];
                                 match delta["type"].as_str().unwrap_or("") {
+                                    "thinking_delta" => {
+                                        if let Some(text) = delta["thinking"].as_str() {
+                                            yield Ok(StreamEvent::ThinkingDelta(text.to_string()));
+                                        }
+                                    }
                                     "text_delta" => {
                                         if let Some(text) = delta["text"].as_str() {
-                                            got_stream_deltas = true;
-                                            yield Ok(StreamEvent::TextDelta(text.to_string()));
+                                            // Route text from thinking blocks as ThinkingDelta.
+                                            let idx = inner["index"].as_u64().unwrap_or(0) as usize;
+                                            if thinking_blocks.contains(&idx) {
+                                                yield Ok(StreamEvent::ThinkingDelta(text.to_string()));
+                                            } else {
+                                                got_stream_deltas = true;
+                                                yield Ok(StreamEvent::TextDelta(text.to_string()));
+                                            }
                                         }
                                     }
                                     "input_json_delta" => {
@@ -423,14 +438,18 @@ impl LlmClient for ClaudeCodeClient {
 
                             "content_block_start" => {
                                 let block = &inner["content_block"];
-                                if block["type"].as_str() == Some("tool_use") {
-                                    let idx = inner["index"].as_u64().unwrap_or(0) as usize;
+                                let block_type = block["type"].as_str().unwrap_or("");
+                                let idx = inner["index"].as_u64().unwrap_or(0) as usize;
+
+                                if block_type == "tool_use" {
                                     let id = block["id"].as_str().unwrap_or("").to_string();
                                     let name = block["name"].as_str().unwrap_or("").to_string();
                                     tool_buffers.insert(idx, ToolUseBuffer {
                                         id: id.clone(), name: name.clone(), json: String::new(),
                                     });
                                     yield Ok(StreamEvent::ToolUseStart { id, name });
+                                } else if block_type == "thinking" {
+                                    thinking_blocks.insert(idx);
                                 }
                             }
 
