@@ -83,6 +83,11 @@ enum Commands {
         #[arg(long)]
         daemonize: bool,
 
+        /// Import an existing OpenClaw workspace directory.
+        /// Copies its contents into ~/.dyson/workspace/.
+        #[arg(long)]
+        import_openclaw: Option<PathBuf>,
+
         /// Directory to initialize.  Default: ~/.dyson
         #[arg(long)]
         path: Option<PathBuf>,
@@ -132,7 +137,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { noinput, daemonize, path } => cmd_init(noinput, daemonize, path),
+        Commands::Init { noinput, daemonize, import_openclaw, path } => {
+            cmd_init(noinput, daemonize, import_openclaw, path)
+        }
         Commands::Listen {
             config,
             dangerous_no_sandbox,
@@ -167,7 +174,12 @@ async fn main() -> anyhow::Result<()> {
 // dyson init
 // ---------------------------------------------------------------------------
 
-fn cmd_init(noinput: bool, daemonize: bool, path: Option<PathBuf>) -> anyhow::Result<()> {
+fn cmd_init(
+    noinput: bool,
+    daemonize: bool,
+    import_openclaw: Option<PathBuf>,
+    path: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let home = std::env::var("HOME")?;
     let base = path.unwrap_or_else(|| PathBuf::from(&home).join(".dyson"));
 
@@ -215,10 +227,15 @@ fn cmd_init(noinput: bool, daemonize: bool, path: Option<PathBuf>) -> anyhow::Re
         eprintln!("  {} already exists — skipping", config_path.display());
     }
 
-    // Create default workspace files.
-    // Workspace::load() creates defaults if they don't exist.
+    // Import OpenClaw workspace if requested.
+    if let Some(ref source) = import_openclaw {
+        import_openclaw_workspace(source, &workspace_dir)?;
+    }
+
+    // Create default workspace files (only creates files that don't exist,
+    // so imported files are preserved).
     let _ = dyson::persistence::Workspace::load(&workspace_dir)?;
-    eprintln!("  created workspace at {}", workspace_dir.display());
+    eprintln!("  workspace ready at {}", workspace_dir.display());
 
     // Install binary to PATH.
     install_to_path(&base)?;
@@ -234,6 +251,52 @@ fn cmd_init(noinput: bool, daemonize: bool, path: Option<PathBuf>) -> anyhow::Re
         eprintln!("  dyson init --noinput --daemonize");
     }
 
+    Ok(())
+}
+
+/// Copy an OpenClaw workspace directory into the Dyson workspace.
+///
+/// Copies all .md files from the source root and the memory/ subdirectory.
+/// Existing files in the destination are overwritten.
+fn import_openclaw_workspace(source: &PathBuf, dest: &PathBuf) -> anyhow::Result<()> {
+    if !source.exists() {
+        anyhow::bail!("OpenClaw workspace not found: {}", source.display());
+    }
+
+    eprintln!("  importing OpenClaw workspace from {}...", source.display());
+
+    let mut count = 0;
+
+    // Copy top-level .md files.
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".md") {
+                std::fs::copy(entry.path(), dest.join(&name))?;
+                count += 1;
+            }
+        }
+    }
+
+    // Copy memory/ directory.
+    let source_memory = source.join("memory");
+    if source_memory.exists() {
+        let dest_memory = dest.join("memory");
+        std::fs::create_dir_all(&dest_memory)?;
+        for entry in std::fs::read_dir(&source_memory)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(".md") {
+                    std::fs::copy(entry.path(), dest_memory.join(&name))?;
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    eprintln!("  imported {count} files");
     Ok(())
 }
 
@@ -462,9 +525,10 @@ async fn cmd_listen(
     let mut controllers: Vec<Box<dyn Controller>> = Vec::new();
 
     if settings.controllers.is_empty() {
-        controllers.push(Box::new(
-            dyson::controller::terminal::TerminalController,
-        ));
+        anyhow::bail!(
+            "no controllers configured.  Add a controller to the \"controllers\" array in dyson.json.\n\
+             Use 'dyson run \"prompt\"' for single-shot mode."
+        );
     } else {
         for config in &settings.controllers {
             match config.controller_type.as_str() {
