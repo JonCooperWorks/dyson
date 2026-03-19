@@ -7,6 +7,8 @@
 
 use std::collections::HashMap;
 
+use regex::RegexBuilder;
+
 use crate::error::Result;
 use crate::workspace::Workspace;
 use crate::workspace::openclaw::chrono_today;
@@ -64,13 +66,19 @@ impl Workspace for InMemoryWorkspace {
     }
 
     fn search(&self, pattern: &str) -> Vec<(String, Vec<String>)> {
-        let pattern_lower = pattern.to_lowercase();
+        let re = RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build();
+
         let mut results = Vec::new();
 
         for (name, content) in &self.files {
             let matching_lines: Vec<String> = content
                 .lines()
-                .filter(|line| line.to_lowercase().contains(&pattern_lower))
+                .filter(|line| match &re {
+                    Ok(re) => re.is_match(line),
+                    Err(_) => line.to_lowercase().contains(&pattern.to_lowercase()),
+                })
                 .map(|line| line.to_string())
                 .collect();
 
@@ -145,6 +153,27 @@ mod tests {
         let results = ws.search("rust");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "MEMORY.md");
+    }
+
+    #[test]
+    fn search_supports_regex() {
+        let ws = InMemoryWorkspace::new()
+            .with_file("MEMORY.md", "learned Rust in 2026\nlearned Go in 2025\nforgot Java");
+
+        let results = ws.search(r"learned\s+\w+\s+in\s+\d{4}");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.len(), 2);
+    }
+
+    #[test]
+    fn search_falls_back_on_invalid_regex() {
+        let ws = InMemoryWorkspace::new()
+            .with_file("MEMORY.md", "open bracket [ here\nno bracket here");
+
+        let results = ws.search("[");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1.len(), 1);
+        assert!(results[0].1[0].contains("open bracket"));
     }
 
     #[test]

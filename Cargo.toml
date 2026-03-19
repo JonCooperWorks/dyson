@@ -22,3 +22,7 @@ pin-project-lite = "0.2"
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 teloxide = { version = "0.13", default-features = false, features = ["macros", "rustls"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+regex = "1"

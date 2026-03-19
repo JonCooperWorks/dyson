@@ -30,6 +30,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use regex::RegexBuilder;
+
 use crate::error::{DysonError, Result};
 use crate::workspace::Workspace;
 
@@ -288,13 +290,19 @@ impl Workspace for OpenClawWorkspace {
     }
 
     fn search(&self, pattern: &str) -> Vec<(String, Vec<String>)> {
-        let pattern_lower = pattern.to_lowercase();
+        let re = RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build();
+
         let mut results = Vec::new();
 
         for (name, content) in &self.files {
             let matching_lines: Vec<String> = content
                 .lines()
-                .filter(|line| line.to_lowercase().contains(&pattern_lower))
+                .filter(|line| match &re {
+                    Ok(re) => re.is_match(line),
+                    Err(_) => line.to_lowercase().contains(&pattern.to_lowercase()),
+                })
                 .map(|line| line.to_string())
                 .collect();
 
@@ -515,6 +523,31 @@ mod tests {
         let (name, lines) = &results.iter().find(|(n, _)| n == "MEMORY.md").unwrap();
         assert_eq!(name, "MEMORY.md");
         assert_eq!(lines.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_supports_regex() {
+        let (dir, mut ws) = temp_workspace();
+        ws.set("MEMORY.md", "learned Rust in 2026\nlearned Go in 2025\nforgot Java");
+        // Regex: lines containing "learned" followed by a year
+        let results = ws.search(r"learned\s+\w+\s+in\s+\d{4}");
+        let (_, lines) = results.iter().find(|(n, _)| n == "MEMORY.md").unwrap();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("Rust"));
+        assert!(lines[1].contains("Go"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_falls_back_on_invalid_regex() {
+        let (dir, mut ws) = temp_workspace();
+        ws.set("MEMORY.md", "open bracket [ here\nno bracket here");
+        // "[" is invalid regex — should fall back to literal substring match
+        let results = ws.search("[");
+        let (_, lines) = results.iter().find(|(n, _)| n == "MEMORY.md").unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("open bracket"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

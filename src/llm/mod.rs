@@ -156,9 +156,42 @@ pub trait LlmClient: Send + Sync {
 
 /// Create an LLM client from agent settings.
 ///
-/// Used by controllers to create a client per session/message without
-/// duplicating the provider-matching logic.
-pub fn create_client(settings: &crate::config::AgentSettings) -> Box<dyn LlmClient> {
+/// Factory function that dispatches on `settings.provider` to construct
+/// the appropriate client implementation.  Used by controllers to create
+/// a client per session/message without duplicating provider-matching logic.
+///
+/// ## Parameters
+///
+/// - `settings`: Agent configuration (provider, model, API key, base URL).
+/// - `workspace`: Shared workspace reference, used only by `ClaudeCodeClient`.
+///   When `Some`, the Claude Code client starts an in-process HTTP MCP server
+///   that exposes workspace tools (view, search, update) to the `claude` CLI.
+///   Ignored by Anthropic and OpenAI clients (they use Dyson's own tool system).
+/// - `dangerous_no_sandbox`: Whether `--dangerous-no-sandbox` was passed on
+///   the CLI.  Forwarded to `ClaudeCodeClient` → `McpHttpServer` for future
+///   sandbox enforcement of MCP tool calls.  No effect on Anthropic/OpenAI
+///   clients (their sandbox is applied by the agent loop, not the LLM client).
+///
+/// ## Provider behavior
+///
+/// | Provider       | workspace used? | sandbox flag used? | Tools |
+/// |----------------|-----------------|-------------------|-------|
+/// | `Anthropic`    | No              | No                | Dyson's tool system |
+/// | `OpenAi`       | No              | No                | Dyson's tool system |
+/// | `ClaudeCode`   | Yes (MCP server)| Yes (forwarded)   | Claude Code built-in + workspace via MCP |
+///
+/// ## Why workspace is passed here (not at stream time)
+///
+/// The workspace Arc is part of the client's configuration, not per-request
+/// state.  All LLM turns within a session share the same workspace.  Passing
+/// it at construction time simplifies the `LlmClient` trait (stream() doesn't
+/// need workspace-awareness) and keeps the workspace coupling isolated to
+/// the Claude Code backend.
+pub fn create_client(
+    settings: &crate::config::AgentSettings,
+    workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    dangerous_no_sandbox: bool,
+) -> Box<dyn LlmClient> {
     match settings.provider {
         crate::config::LlmProvider::Anthropic => Box::new(
             anthropic::AnthropicClient::new(
@@ -176,6 +209,8 @@ pub fn create_client(settings: &crate::config::AgentSettings) -> Box<dyn LlmClie
             claude_code::ClaudeCodeClient::new(
                 settings.base_url.as_deref(),
                 vec![], // MCP servers go through the skill system, not CLI args
+                workspace,
+                dangerous_no_sandbox,
             ),
         ),
     }
