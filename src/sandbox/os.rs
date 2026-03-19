@@ -70,13 +70,30 @@
 //   - "strict"  — deny network, deny all file writes outside cwd
 //   - "permissive" — allow everything (just logs, no restrictions)
 //
-// Linux support (future):
-//   On Linux, this would use bubblewrap (bwrap) or firejail:
-//     bwrap --ro-bind / / --dev /dev --bind /tmp /tmp \
-//           --unshare-net bash -c '<command>'
+// Linux: bubblewrap (bwrap)
 //
-//   For now, the Linux path falls back to running commands unsandboxed
-//   with a warning.
+//   On Linux, we use bubblewrap — a lightweight, unprivileged sandbox
+//   that creates Linux namespaces for filesystem, network, and PID
+//   isolation.  No root required.  Used by Flatpak in production.
+//
+//   Install: apt install bubblewrap  (or: dnf install bubblewrap)
+//
+//   The equivalent of macOS's deny-network profile:
+//     bwrap --ro-bind / / --dev /dev --proc /proc \
+//           --tmpfs /tmp --bind <cwd> <cwd> \
+//           --unshare-net --unshare-pid \
+//           --die-with-parent \
+//           bash -c '<command>'
+//
+//   Flags:
+//     --ro-bind / /       Mount root filesystem read-only
+//     --dev /dev          Mount a new /dev (needed for /dev/null etc.)
+//     --proc /proc        Mount a new /proc (needed for process info)
+//     --tmpfs /tmp        Writable /tmp (isolated from host /tmp)
+//     --bind <cwd> <cwd>  Make the working directory writable
+//     --unshare-net       New network namespace (no network access)
+//     --unshare-pid       New PID namespace (can't see host processes)
+//     --die-with-parent   Kill sandbox if Dyson exits
 // ===========================================================================
 
 use async_trait::async_trait;
@@ -123,12 +140,16 @@ const PROFILE_STRICT: &str = "\
 
 /// Sandbox using the operating system's native sandboxing.
 ///
-/// On macOS: wraps commands in `sandbox-exec -p <profile>`.
-/// On Linux: falls back to unsandboxed execution (with warning).
+/// On macOS: wraps commands in `sandbox-exec -p <profile>` (Seatbelt).
+/// On Linux: wraps commands in `bwrap` (bubblewrap) with namespace isolation.
 ///
 /// This is the DEFAULT sandbox — enabled automatically.
 pub struct OsSandbox {
-    /// The Seatbelt profile string to apply.
+    /// The profile to apply.
+    ///
+    /// On macOS: a Seatbelt S-expression string.
+    /// On Linux: a profile name ("default", "strict", "permissive")
+    ///           that maps to bwrap flag combinations.
     profile: String,
 
     /// The working directory to allow writes to.
@@ -138,27 +159,29 @@ pub struct OsSandbox {
 impl OsSandbox {
     /// Create with the default profile (deny network, restrict writes).
     pub fn default_profile(working_dir: &str) -> Self {
-        Self {
-            profile: PROFILE_DEFAULT.to_string(),
-            working_dir: working_dir.to_string(),
-        }
+        Self::named_profile("default", working_dir)
     }
 
     /// Create with the strict profile (deny network + all writes outside cwd).
     pub fn strict_profile(working_dir: &str) -> Self {
-        Self {
-            profile: PROFILE_STRICT.to_string(),
-            working_dir: working_dir.to_string(),
-        }
+        Self::named_profile("strict", working_dir)
     }
 
     /// Create with a named profile.
+    ///
+    /// On macOS, the name maps to a Seatbelt S-expression profile.
+    /// On Linux, the name maps to a set of bwrap flags.
     pub fn named_profile(name: &str, working_dir: &str) -> Self {
+        #[cfg(target_os = "macos")]
         let profile = match name {
             "strict" => PROFILE_STRICT.to_string(),
             "permissive" | "none" => "(version 1)(allow default)".to_string(),
-            _ => PROFILE_DEFAULT.to_string(), // "default" or anything else
+            _ => PROFILE_DEFAULT.to_string(),
         };
+
+        #[cfg(not(target_os = "macos"))]
+        let profile = name.to_string();
+
         Self {
             profile,
             working_dir: working_dir.to_string(),
@@ -190,20 +213,7 @@ impl Sandbox for OsSandbox {
 
         #[cfg(target_os = "macos")]
         {
-            // Escape single quotes in the command.
-            let escaped = command.replace('\'', "'\\''");
-
-            // Build the sandbox-exec command.
-            //
-            // -p passes the profile as a string.
-            // -D WORKING_DIR=<path> sets the parameter used in the profile
-            //    to allow writes to the project directory.
-            let sandboxed = format!(
-                "sandbox-exec -p '{}' -D WORKING_DIR='{}' bash -c '{}'",
-                self.profile.replace('\'', "'\\''"),
-                self.working_dir.replace('\'', "'\\''"),
-                escaped,
-            );
+            let sandboxed = build_seatbelt_command(command, &self.profile, &self.working_dir);
 
             tracing::debug!(
                 original = command,
@@ -217,12 +227,16 @@ impl Sandbox for OsSandbox {
 
         #[cfg(target_os = "linux")]
         {
-            // Future: wrap with bwrap or firejail.
-            tracing::warn!(
-                "OS sandbox not yet implemented on Linux — running unsandboxed"
+            let sandboxed = build_bwrap_command(command, &self.profile, &self.working_dir);
+
+            tracing::debug!(
+                original = command,
+                profile = self.profile,
+                "bash command wrapped in OS sandbox (Linux bwrap)"
             );
+
             return Ok(SandboxDecision::Allow {
-                input: input.clone(),
+                input: serde_json::json!({ "command": sandboxed }),
             });
         }
 
@@ -238,6 +252,61 @@ impl Sandbox for OsSandbox {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Command builders — pure functions, testable on any platform.
+// ---------------------------------------------------------------------------
+
+/// Build a macOS sandbox-exec command string.
+///
+/// Not gated by #[cfg] so it can be tested on any platform.
+/// Only *executed* on macOS.
+pub fn build_seatbelt_command(command: &str, profile: &str, working_dir: &str) -> String {
+    let escaped = command.replace('\'', "'\\''");
+    format!(
+        "sandbox-exec -p '{}' -D WORKING_DIR='{}' bash -c '{}'",
+        profile.replace('\'', "'\\''"),
+        working_dir.replace('\'', "'\\''"),
+        escaped,
+    )
+}
+
+/// Build a Linux bwrap command string.
+///
+/// Not gated by #[cfg] so it can be tested on any platform.
+/// Only *executed* on Linux.
+///
+/// Profile controls which flags are used:
+/// - `"default"` — read-only root, writable cwd + /tmp, no network
+/// - `"strict"` — read-only root, writable cwd only, no network, no PID
+/// - `"permissive"` — writable root, no namespace isolation
+pub fn build_bwrap_command(command: &str, profile: &str, working_dir: &str) -> String {
+    let escaped = command.replace('\'', "'\\''");
+    let working_dir = working_dir.replace('\'', "'\\''");
+
+    match profile {
+        "strict" => format!(
+            "bwrap --ro-bind / / --dev /dev --proc /proc \
+             --bind '{working_dir}' '{working_dir}' \
+             --unshare-net --unshare-pid \
+             --die-with-parent \
+             bash -c '{escaped}'"
+        ),
+        "permissive" => format!(
+            "bwrap --bind / / --dev /dev --proc /proc \
+             --die-with-parent \
+             bash -c '{escaped}'"
+        ),
+        _ => format!(
+            "bwrap --ro-bind / / --dev /dev --proc /proc \
+             --tmpfs /tmp \
+             --bind '{working_dir}' '{working_dir}' \
+             --unshare-net --unshare-pid \
+             --die-with-parent \
+             bash -c '{escaped}'"
+        ),
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -246,6 +315,97 @@ impl Sandbox for OsSandbox {
 mod tests {
     use super::*;
     use crate::tool::ToolContext;
+
+    // -----------------------------------------------------------------------
+    // Seatbelt command builder tests (run on ALL platforms)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn seatbelt_default_profile() {
+        let cmd = build_seatbelt_command("ls -la", PROFILE_DEFAULT, "/workspace");
+        assert!(cmd.starts_with("sandbox-exec -p '"));
+        assert!(cmd.contains("ls -la"));
+        assert!(cmd.contains("WORKING_DIR='/workspace'"));
+        assert!(cmd.contains("deny network"));
+    }
+
+    #[test]
+    fn seatbelt_strict_profile() {
+        let cmd = build_seatbelt_command("pwd", PROFILE_STRICT, "/home/user");
+        assert!(cmd.contains("sandbox-exec"));
+        assert!(cmd.contains("pwd"));
+        assert!(cmd.contains("WORKING_DIR='/home/user'"));
+    }
+
+    #[test]
+    fn seatbelt_escapes_quotes() {
+        let cmd = build_seatbelt_command("echo 'hello'", PROFILE_DEFAULT, "/workspace");
+        // The single quotes in the command should be escaped.
+        assert!(cmd.contains("'\\''"));
+    }
+
+    #[test]
+    fn seatbelt_escapes_working_dir_quotes() {
+        let cmd = build_seatbelt_command("ls", PROFILE_DEFAULT, "/path/with 'quotes");
+        assert!(cmd.contains("'\\''"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Bwrap command builder tests (run on ALL platforms)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bwrap_default_profile() {
+        let cmd = build_bwrap_command("ls -la", "default", "/workspace");
+        assert!(cmd.starts_with("bwrap"));
+        assert!(cmd.contains("--ro-bind / /"));
+        assert!(cmd.contains("--dev /dev"));
+        assert!(cmd.contains("--proc /proc"));
+        assert!(cmd.contains("--tmpfs /tmp"));
+        assert!(cmd.contains("--bind '/workspace' '/workspace'"));
+        assert!(cmd.contains("--unshare-net"));
+        assert!(cmd.contains("--unshare-pid"));
+        assert!(cmd.contains("--die-with-parent"));
+        assert!(cmd.contains("bash -c 'ls -la'"));
+    }
+
+    #[test]
+    fn bwrap_strict_profile() {
+        let cmd = build_bwrap_command("pwd", "strict", "/home/user");
+        assert!(cmd.contains("--ro-bind / /"));
+        assert!(cmd.contains("--bind '/home/user' '/home/user'"));
+        assert!(cmd.contains("--unshare-net"));
+        assert!(cmd.contains("--unshare-pid"));
+        // Strict: no --tmpfs /tmp (no writable /tmp)
+        assert!(!cmd.contains("--tmpfs /tmp"));
+    }
+
+    #[test]
+    fn bwrap_permissive_profile() {
+        let cmd = build_bwrap_command("ls", "permissive", "/workspace");
+        // Permissive: writable bind, no unshare
+        assert!(cmd.contains("--bind / /"));
+        assert!(!cmd.contains("--ro-bind"));
+        assert!(!cmd.contains("--unshare-net"));
+        assert!(!cmd.contains("--unshare-pid"));
+        assert!(cmd.contains("--die-with-parent"));
+    }
+
+    #[test]
+    fn bwrap_escapes_quotes() {
+        let cmd = build_bwrap_command("echo 'hello'", "default", "/workspace");
+        assert!(cmd.contains("'\\''"));
+    }
+
+    #[test]
+    fn bwrap_escapes_working_dir_quotes() {
+        let cmd = build_bwrap_command("ls", "default", "/path/with 'quotes");
+        assert!(cmd.contains("'\\''"));
+    }
+
+    // -----------------------------------------------------------------------
+    // OsSandbox trait tests (run on ALL platforms — test the check() method)
+    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn wraps_bash_commands() {
@@ -257,17 +417,12 @@ mod tests {
         match decision {
             SandboxDecision::Allow { input } => {
                 let cmd = input["command"].as_str().unwrap();
+                assert!(cmd.contains("ls -la"));
+                // Platform-specific wrapper should be present.
                 #[cfg(target_os = "macos")]
-                {
-                    assert!(cmd.contains("sandbox-exec"));
-                    assert!(cmd.contains("ls -la"));
-                    assert!(cmd.contains("WORKING_DIR"));
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    // On non-macOS, passes through unchanged.
-                    assert!(cmd.contains("ls -la"));
-                }
+                assert!(cmd.contains("sandbox-exec"));
+                #[cfg(target_os = "linux")]
+                assert!(cmd.contains("bwrap"));
             }
             other => panic!("expected Allow, got: {other:?}"),
         }
@@ -289,25 +444,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn escapes_single_quotes() {
+    async fn empty_command_passes_through() {
         let sandbox = OsSandbox::default_profile("/workspace");
         let ctx = ToolContext::from_cwd().unwrap();
-        let input = serde_json::json!({"command": "echo 'hello'"});
+        let input = serde_json::json!({"command": ""});
 
         let decision = sandbox.check("bash", &input, &ctx).await.unwrap();
         match decision {
             SandboxDecision::Allow { input } => {
-                let cmd = input["command"].as_str().unwrap();
-                assert!(cmd.contains("'\\''"));
+                assert_eq!(input["command"], "");
             }
             other => panic!("expected Allow, got: {other:?}"),
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Execution tests — only run on the native platform.
+    // These verify the sandbox actually enforces restrictions.
+    // -----------------------------------------------------------------------
+
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn actually_blocks_network() {
-        // Integration test: verify sandbox-exec actually blocks network.
+    async fn macos_actually_blocks_network() {
         use crate::tool::bash::BashTool;
         use crate::tool::Tool;
 
@@ -320,8 +478,28 @@ mod tests {
             SandboxDecision::Allow { input } => {
                 let tool = BashTool::default();
                 let output = tool.run(input, &ctx).await.unwrap();
-                // The command should fail because network is denied.
-                assert!(output.is_error, "expected network to be blocked");
+                assert!(output.is_error, "expected network to be blocked by seatbelt");
+            }
+            _ => panic!("expected Allow"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_actually_blocks_network() {
+        use crate::tool::bash::BashTool;
+        use crate::tool::Tool;
+
+        let sandbox = OsSandbox::default_profile("/tmp");
+        let ctx = ToolContext::from_cwd().unwrap();
+        let input = serde_json::json!({"command": "curl -s --max-time 2 https://example.com"});
+
+        let decision = sandbox.check("bash", &input, &ctx).await.unwrap();
+        match decision {
+            SandboxDecision::Allow { input } => {
+                let tool = BashTool::default();
+                let output = tool.run(input, &ctx).await.unwrap();
+                assert!(output.is_error, "expected network to be blocked by bwrap");
             }
             _ => panic!("expected Allow"),
         }
