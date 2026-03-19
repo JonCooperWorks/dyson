@@ -13,6 +13,21 @@
 //   mod.rs        — McpSkill (Skill impl) + McpRemoteTool (Tool impl)
 //   protocol.rs   — JSON-RPC message types (requests, responses, tool defs)
 //   transport.rs  — Stdio transport (spawn process, read/write JSON-RPC)
+//   serve.rs      — HTTP MCP server (Dyson serves tools TO Claude Code)
+//
+// Two directions of MCP:
+//
+//   1. Dyson as MCP CLIENT (this file + transport.rs):
+//      Dyson connects to external MCP servers (GitHub, filesystem, etc.),
+//      discovers their tools, and wraps them as `Arc<dyn Tool>` for the
+//      agent loop.  Configured via `mcp_servers` in dyson.json.
+//
+//   2. Dyson as MCP SERVER (serve.rs):
+//      When using Claude Code as the LLM backend, Dyson starts an HTTP
+//      MCP server that exposes workspace tools (view, search, update)
+//      to Claude Code.  This lets Claude Code's agent loop access the
+//      workspace without Dyson needing to intercept tool calls.
+//      See serve.rs for the full architecture documentation.
 //
 // How it works:
 //

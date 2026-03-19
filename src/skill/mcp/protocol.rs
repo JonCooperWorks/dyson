@@ -23,6 +23,20 @@
 //   - The server responds with its capabilities and tool list
 //   - The client sends `initialized` notification (no response)
 //   - Then tools/list, tools/call as needed
+//
+// Dual usage — client AND server:
+//   These types are shared between Dyson's MCP client (mod.rs, connecting
+//   to external MCP servers) and Dyson's MCP server (serve.rs, exposing
+//   workspace tools to Claude Code).  This is why some types derive both
+//   `Deserialize` and `Serialize`:
+//
+//   - JsonRpcRequest, JsonRpcNotification: Serialize only (client builds)
+//   - JsonRpcResponse, JsonRpcError: Deserialize + Serialize (client
+//     parses them; server produces them)
+//   - McpToolDef: Deserialize + Serialize (client parses from external
+//     server; our server serializes for Claude Code)
+//   - McpToolResult, McpContent: Deserialize only (client parses from
+//     external server; our server builds raw JSON instead)
 // ===========================================================================
 
 use serde::{Deserialize, Serialize};
@@ -72,6 +86,15 @@ impl JsonRpcNotification {
 }
 
 /// A JSON-RPC 2.0 response (success or error).
+///
+/// Used in two contexts:
+/// - **Client side** (mod.rs): Deserialized from MCP server responses
+///   when Dyson connects to external MCP servers.
+/// - **Server side** (serve.rs): Serialized to produce JSON responses
+///   when Dyson acts as an MCP server for Claude Code.
+///
+/// Both `Deserialize` and `Serialize` are needed because the same type
+/// is used on both sides of the MCP protocol.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct JsonRpcResponse {
     pub id: Option<u64>,
@@ -79,6 +102,16 @@ pub struct JsonRpcResponse {
     pub error: Option<JsonRpcError>,
 }
 
+/// A JSON-RPC 2.0 error object, nested inside `JsonRpcResponse.error`.
+///
+/// Standard error codes:
+/// - `-32700`: Parse error (invalid JSON)
+/// - `-32601`: Method not found
+/// - `-32602`: Invalid params
+/// - `-32603`: Internal error
+///
+/// Derives both `Deserialize` (for parsing remote MCP server errors) and
+/// `Serialize` (for producing error responses in the MCP HTTP server).
 #[derive(Debug, Deserialize, Serialize)]
 pub struct JsonRpcError {
     pub code: i64,
@@ -90,7 +123,17 @@ pub struct JsonRpcError {
 // MCP-specific types
 // ---------------------------------------------------------------------------
 
-/// Tool definition returned by `tools/list`.
+/// Tool definition as exchanged in `tools/list` responses.
+///
+/// Used in two contexts:
+/// - **Client side** (mod.rs): Deserialized from external MCP server
+///   `tools/list` responses to discover remote tools.
+/// - **Server side** (serve.rs): Serialized into the MCP HTTP server's
+///   `tools/list` response to advertise workspace tools to Claude Code.
+///
+/// The `Serialize` derive was added alongside the MCP HTTP server to
+/// support the server-side use case.  Previously only `Deserialize`
+/// was needed (Dyson was MCP-client-only).
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct McpToolDef {
     pub name: String,

@@ -98,6 +98,38 @@
 //   used in this mode — Claude Code is the agent, Dyson is the transport.
 //   The stream-json output includes tool_use and tool_result events so
 //   Dyson can display what Claude Code is doing.
+//
+// Workspace tools via MCP:
+//
+//   Claude Code has its own tools, but it doesn't have Dyson's workspace
+//   tools (workspace_view, workspace_search, workspace_update).  These
+//   let the agent read/search/update its identity files (SOUL.md, etc.)
+//   and memory/journal.
+//
+//   To bridge this gap, ClaudeCodeClient starts an in-process HTTP MCP
+//   server (see skill/mcp/serve.rs) before spawning `claude -p`.  The
+//   server exposes the workspace tools as MCP tools, and the config is
+//   passed via `--mcp-config '<json>'` on the command line.
+//
+//   Sequence:
+//     1. ClaudeCodeClient::stream() is called
+//     2. If workspace is Some, start McpHttpServer on 127.0.0.1:random_port
+//     3. Build MCP config JSON: {"mcpServers":{"dyson-workspace":{"type":"url","url":"http://127.0.0.1:{port}/mcp"}}}
+//     4. Pass as --mcp-config '<json>' CLI arg
+//     5. Claude Code connects to the server, discovers tools
+//     6. During its agent loop, Claude Code can call workspace_view etc.
+//     7. When the stream ends, the server task is dropped (aborted)
+//
+//   This means Claude Code gets the full Dyson workspace experience
+//   without Dyson needing to intercept or re-implement Claude Code's
+//   tool execution loop.
+//
+// Sandbox plumbing:
+//
+//   The `dangerous_no_sandbox` flag is passed from the CLI through
+//   Settings → create_client() → ClaudeCodeClient → McpHttpServer.
+//   Today it has no effect (workspace tools are in-memory), but the
+//   hook is in place for future sandbox enforcement of MCP tool calls.
 // ===========================================================================
 
 use std::collections::HashMap;
@@ -154,28 +186,56 @@ pub struct ClaudeCodeClient {
 
     /// Workspace to expose as MCP tools to Claude Code.
     ///
-    /// When `Some`, the client starts an in-process HTTP MCP server before
-    /// spawning `claude -p` and passes `--mcp-config <tempfile>` so Claude
-    /// Code discovers our workspace tools (view, search, update).
+    /// When `Some`, each call to `stream()` will:
+    /// 1. Start an `McpHttpServer` on 127.0.0.1:random_port (tokio task)
+    /// 2. Build MCP config JSON pointing to `http://127.0.0.1:{port}/mcp`
+    /// 3. Pass it to `claude -p` via `--mcp-config '<json>'`
+    /// 4. Claude Code connects back to our server, discovers tools
+    /// 5. The server lives until the stream is dropped (turn complete)
+    ///
+    /// This gives Claude Code access to workspace_view, workspace_search,
+    /// and workspace_update as structured MCP tools with proper JSON schemas.
+    ///
+    /// When `None`, no MCP server is started and Claude Code runs without
+    /// workspace tools.  This happens in tests or when no workspace is configured.
     workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
 
-    /// Whether sandbox enforcement is disabled.
+    /// Whether sandbox enforcement is disabled (`--dangerous-no-sandbox`).
     ///
     /// Plumbed through to `McpHttpServer` for future sandbox gating of
-    /// MCP tool calls.  Today workspace tools are in-memory and don't
-    /// need sandboxing, but the hook is here.
+    /// MCP tool calls.  Today workspace tools are pure in-memory operations
+    /// (reading/writing a HashMap behind an RwLock) that don't need
+    /// sandboxing, but the hook is here so that:
+    ///
+    /// 1. Adding sandbox enforcement later requires zero API changes
+    /// 2. The flag flows consistently through the full chain:
+    ///    CLI → Settings → create_client() → ClaudeCodeClient → McpHttpServer
     dangerous_no_sandbox: bool,
 }
 
 impl ClaudeCodeClient {
     /// Create a new Claude Code client.
     ///
-    /// `claude_path` is optional — pass `None` to resolve automatically.
-    /// Resolution order: explicit path > `which claude` > fallback "claude".
+    /// ## Parameters
     ///
-    /// We resolve the absolute path at startup so that service environments
-    /// (systemd, launchd) work even with a minimal PATH.
-    /// `mcp_configs` is a list of MCP server JSON configs to forward.
+    /// - `claude_path`: Path to the `claude` binary.  Pass `None` to auto-
+    ///   resolve via `which claude`, falling back to bare `"claude"`.  The
+    ///   path is resolved at construction time so service environments
+    ///   (systemd, launchd) work even with a minimal PATH.
+    ///
+    /// - `mcp_configs`: Additional MCP server configs to pass via
+    ///   `--mcp-config`.  Each entry is a raw JSON string.  Currently
+    ///   always empty — external MCP servers go through Dyson's skill
+    ///   system, not CLI args.  Kept for future direct pass-through.
+    ///
+    /// - `workspace`: If `Some`, the client will start an in-process HTTP
+    ///   MCP server per `stream()` call, exposing workspace_view,
+    ///   workspace_search, and workspace_update to Claude Code.  Pass
+    ///   `None` to skip MCP server creation (no workspace tools).
+    ///
+    /// - `dangerous_no_sandbox`: Whether the `--dangerous-no-sandbox` CLI
+    ///   flag was passed.  Forwarded to `McpHttpServer` for future sandbox
+    ///   enforcement.  No effect today (workspace tools are in-memory).
     pub fn new(
         claude_path: Option<&str>,
         mcp_configs: Vec<String>,
@@ -290,9 +350,31 @@ impl LlmClient for ClaudeCodeClient {
 
         // -- Start MCP server if workspace is available --
         //
-        // The server runs as a tokio task on 127.0.0.1:random_port.
-        // We pass the config as a JSON CLI arg.  The server task is held
-        // by the stream closure and cleaned up when the stream is dropped.
+        // When the user has a workspace configured, we spin up an in-process
+        // HTTP MCP server that exposes workspace tools to Claude Code.
+        //
+        // How this works:
+        //   1. Create McpHttpServer with shared workspace Arc
+        //   2. Start it on 127.0.0.1:0 (OS picks a free port)
+        //   3. Build MCP config JSON with the server's URL
+        //   4. Later, pass it via `--mcp-config '<json>'` to claude CLI
+        //
+        // The server runs as a tokio task (JoinHandle).  We move the handle
+        // into the async_stream closure so it stays alive for exactly the
+        // duration of the LLM turn.  When the stream is dropped (turn ends
+        // or is cancelled), the handle is dropped, which aborts the task,
+        // which stops the server and frees the port.
+        //
+        // Why a new server per turn?
+        //   Each `stream()` call spawns a fresh `claude -p` process.
+        //   Binding a TCP socket takes ~0.1ms, negligible vs a multi-second
+        //   LLM turn.  A per-turn server simplifies lifecycle management:
+        //   no shutdown coordination, no stale connections, no port leaks.
+        //
+        // Why pass config as CLI arg (not temp file)?
+        //   Simpler.  No file I/O, no cleanup, no race conditions.  The
+        //   JSON is small (~100 bytes).  The tradeoff is it's visible in
+        //   `ps` output, but it's just a loopback URL — no secrets.
         let mut _mcp_server_handle: Option<tokio::task::JoinHandle<()>> = None;
         let mut mcp_config_json: Option<String> = None;
 
@@ -306,6 +388,13 @@ impl LlmClient for ClaudeCodeClient {
                 DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
             })?;
 
+            // Build the MCP config JSON that tells Claude Code how to
+            // connect to our server.  The format matches Claude Code's
+            // `--mcp-config` flag:
+            //   {"mcpServers":{"<name>":{"type":"url","url":"<url>"}}}
+            //
+            // "type": "url" tells Claude Code this is an HTTP MCP server
+            // (as opposed to "stdio" which would spawn a subprocess).
             let config = serde_json::json!({
                 "mcpServers": {
                     "dyson-workspace": {
@@ -338,12 +427,19 @@ impl LlmClient for ClaudeCodeClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
 
-        // Forward MCP server configs if any.
+        // Forward any additional MCP server configs.  These come from the
+        // `mcp_configs` field (currently always empty — reserved for future
+        // direct pass-through of external MCP servers).
         for mcp_json in &self.mcp_configs {
             cmd.arg("--mcp-config").arg(mcp_json);
         }
 
-        // Add the workspace MCP config as a CLI arg.
+        // Pass the workspace MCP server config as a CLI arg.
+        //
+        // This is the key integration point: Claude Code will parse this
+        // JSON, connect to our HTTP MCP server, run the initialize/
+        // tools_list handshake, and then have access to workspace_view,
+        // workspace_search, and workspace_update as structured tools.
         if let Some(ref json) = mcp_config_json {
             cmd.arg("--mcp-config").arg(json);
         }
@@ -393,7 +489,17 @@ impl LlmClient for ClaudeCodeClient {
             let _child = child;
 
             // Keep the MCP server task alive for the duration of the
-            // stream.  When the stream is dropped the task is aborted.
+            // stream.  The underscore prefix prevents "unused" warnings
+            // while still binding the value (so it's not dropped early).
+            //
+            // Lifecycle:
+            //   - Stream created → JoinHandle moved here → server running
+            //   - Stream consumed (turn complete) → closure dropped
+            //   - JoinHandle dropped → tokio aborts the task → server stops
+            //   - TCP port freed, connections closed
+            //
+            // This ensures the MCP server lives exactly as long as the
+            // `claude -p` subprocess needs it.
             let _mcp_handle = _mcp_server_handle;
 
             // Use the BufReader directly with next_line() instead of
