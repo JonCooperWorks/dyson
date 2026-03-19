@@ -102,11 +102,12 @@ pub async fn process_stream(
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
     // Buffer for accumulating text deltas into a single Text content block.
-    //
-    // Text arrives as many small fragments ("Hello", " ", "world", "!").
-    // We concatenate them into one string and flush it as a ContentBlock
-    // when we hit a non-text event or the stream ends.
     let mut current_text = String::new();
+
+    // Timing and token counting.
+    let stream_start = std::time::Instant::now();
+    let mut first_token_time: Option<std::time::Instant> = None;
+    let mut token_count: usize = 0;
 
     tokio::pin!(stream);
 
@@ -114,44 +115,33 @@ pub async fn process_stream(
         let event = event_result?;
 
         match event {
-            // -- Thinking fragment --
-            //
-            // Models with extended thinking (Claude, o-series, DeepSeek, etc.)
-            // emit reasoning tokens before the visible response.  We log them
-            // for debugging but don't surface them to the user.
             StreamEvent::ThinkingDelta(text) => {
                 tracing::debug!(thinking = text, "model thinking");
             }
 
-            // -- Text fragment --
             StreamEvent::TextDelta(text) => {
+                if first_token_time.is_none() {
+                    first_token_time = Some(std::time::Instant::now());
+                    let ttft_ms = first_token_time.unwrap().duration_since(stream_start).as_millis();
+                    tracing::info!(ttft_ms = ttft_ms, "first token received");
+                }
+                // Rough token count: split on whitespace boundaries.
+                // Not exact, but good enough for tok/s estimation.
+                token_count += text.split_whitespace().count().max(1);
                 output.text_delta(&text)?;
                 current_text.push_str(&text);
             }
 
-            // -- Tool call starting --
-            //
-            // Flush any accumulated text as a content block before the
-            // tool_use block.  This preserves the ordering: text blocks
-            // and tool_use blocks interleave correctly.
             StreamEvent::ToolUseStart { ref id, ref name } => {
                 flush_text(&mut current_text, &mut content_blocks);
+                tracing::info!(tool = name, id = id, "tool call started");
                 output.tool_use_start(id, name)?;
             }
 
-            // -- Partial tool input JSON --
-            //
-            // The real accumulation happens inside the AnthropicClient's
-            // SSE parser.  We receive these for logging/display only.
-            StreamEvent::ToolUseInputDelta(_) => {
-                // Nothing to do — the LLM client accumulates internally.
-            }
+            StreamEvent::ToolUseInputDelta(_) => {}
 
-            // -- Tool call fully formed --
-            //
-            // Add the tool_use content block and record the call for
-            // the agent loop to execute.
             StreamEvent::ToolUseComplete { id, name, input } => {
+                tracing::info!(tool = name, id = id, "tool call complete");
                 content_blocks.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -161,22 +151,34 @@ pub async fn process_stream(
                 output.tool_use_complete()?;
             }
 
-            // -- Message complete --
-            //
-            // The LLM is done generating.  Flush any remaining text.
             StreamEvent::MessageComplete { .. } => {
+                let elapsed = stream_start.elapsed();
+                let elapsed_ms = elapsed.as_millis();
+                let tok_per_sec = if elapsed.as_secs_f64() > 0.0 {
+                    token_count as f64 / elapsed.as_secs_f64()
+                } else {
+                    0.0
+                };
+                let ttft_ms = first_token_time
+                    .map(|t| t.duration_since(stream_start).as_millis())
+                    .unwrap_or(0);
+                tracing::info!(
+                    duration_ms = elapsed_ms,
+                    ttft_ms = ttft_ms,
+                    tokens = token_count,
+                    tok_per_sec = format!("{tok_per_sec:.1}"),
+                    tool_calls = tool_calls.len(),
+                    "stream complete"
+                );
                 flush_text(&mut current_text, &mut content_blocks);
             }
 
-            // -- Stream error --
             StreamEvent::Error(e) => {
                 return Err(e);
             }
         }
     }
 
-    // In case the stream ended without a MessageComplete event
-    // (shouldn't happen with well-behaved APIs, but defensive coding).
     flush_text(&mut current_text, &mut content_blocks);
 
     let message = Message::assistant(content_blocks);

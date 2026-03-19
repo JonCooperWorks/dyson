@@ -255,7 +255,12 @@ impl Agent {
         let mut final_text = String::new();
 
         for iteration in 0..self.max_iterations {
-            tracing::debug!(iteration = iteration, "starting LLM turn");
+            tracing::info!(
+                iteration = iteration,
+                model = self.config.model,
+                messages = self.messages.len(),
+                "starting LLM call"
+            );
 
             // -- Stream LLM response --
             //
@@ -276,6 +281,8 @@ impl Agent {
                     &self.config,
                 )
                 .await?;
+
+            tracing::info!("streaming response");
 
             // -- Process the stream into a message + tool calls --
             let (assistant_msg, tool_calls) =
@@ -303,7 +310,24 @@ impl Agent {
 
             // -- Execute tool calls through the sandbox --
             for call in &tool_calls {
+                tracing::info!(tool = call.name, id = call.id, "executing tool call");
+                let tool_start = std::time::Instant::now();
                 let result = self.execute_tool_call(call, output).await;
+                let tool_ms = tool_start.elapsed().as_millis();
+                match &result {
+                    Ok(out) => tracing::info!(
+                        tool = call.name,
+                        duration_ms = tool_ms,
+                        is_error = out.is_error,
+                        "tool call finished"
+                    ),
+                    Err(e) => tracing::error!(
+                        tool = call.name,
+                        duration_ms = tool_ms,
+                        error = %e,
+                        "tool call failed"
+                    ),
+                }
 
                 // Build the tool_result message.
                 let tool_result_msg = match result {
