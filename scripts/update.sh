@@ -11,7 +11,7 @@ echo "=== Building dyson ==="
 cargo build --release
 
 echo "=== Installing ==="
-dyson init --noinput --daemonize
+./target/release/dyson init --noinput --daemonize
 
 echo "=== Done ==="
 systemctl --user status dyson
