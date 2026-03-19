@@ -311,19 +311,10 @@ fn install_to_path(base: &PathBuf) -> anyhow::Result<()> {
     let current_exe = std::env::current_exe()?;
 
     // Copy binary into ~/.dyson/bin/ (our own managed copy).
-    //
-    // On Linux you can't overwrite a running binary ("Text file busy").
-    // Even unlinking can fail if current_exe IS the installed binary
-    // (running via the symlink).  The safe approach: copy to a temp file
-    // in the same directory, then rename over the old one.  rename(2) is
-    // atomic on the same filesystem and replaces the directory entry
-    // without touching the running inode.
     let bin_dir = base.join("bin");
     std::fs::create_dir_all(&bin_dir)?;
     let installed_bin = bin_dir.join("dyson");
-    let tmp_bin = bin_dir.join(".dyson.tmp");
-    std::fs::copy(&current_exe, &tmp_bin)?;
-    std::fs::rename(&tmp_bin, &installed_bin)?;
+    std::fs::copy(&current_exe, &installed_bin)?;
 
     #[cfg(unix)]
     {
@@ -378,6 +369,23 @@ fn install_systemd_service(base: &PathBuf, config_path: &PathBuf) -> anyhow::Res
 
     #[cfg(target_os = "linux")]
     {
+        // Refuse to install if the service is already running.
+        // Use scripts/update.sh to stop, rebuild, and reinstall.
+        let status = std::process::Command::new("systemctl")
+            .args(["--user", "is-active", "dyson"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if let Ok(s) = status {
+            if s.success() {
+                anyhow::bail!(
+                    "dyson service is running. Stop it first:\n  \
+                     systemctl --user stop dyson\n\n\
+                     Or use scripts/update.sh to handle the full cycle."
+                );
+            }
+        }
+
         // Use the installed copy at ~/.dyson/bin/dyson (created by install_to_path)
         // rather than the current exe, so the service survives the original
         // binary being moved or deleted.
