@@ -254,6 +254,46 @@ impl ClaudeCodeClient {
             dangerous_no_sandbox,
         }
     }
+
+    /// Build the CLI arguments for `claude -p`.
+    ///
+    /// Extracted as a method so the flag logic is unit-testable without
+    /// spawning a subprocess.
+    fn build_args(
+        &self,
+        model: &str,
+        system: &str,
+        mcp_config_json: Option<&str>,
+    ) -> Vec<String> {
+        let mut args = vec![
+            "-p".to_string(),
+            "--output-format".to_string(),
+            "stream-json".to_string(),
+            "--verbose".to_string(),
+            "--include-partial-messages".to_string(),
+            "--no-session-persistence".to_string(),
+            // Always required: claude -p is non-interactive and cannot answer
+            // permission prompts.  Without this flag Claude Code blocks or
+            // refuses to run tools.
+            "--dangerously-skip-permissions".to_string(),
+            "--model".to_string(),
+            model.to_string(),
+            "--append-system-prompt".to_string(),
+            system.to_string(),
+        ];
+
+        for mcp_json in &self.mcp_configs {
+            args.push("--mcp-config".to_string());
+            args.push(mcp_json.clone());
+        }
+
+        if let Some(json) = mcp_config_json {
+            args.push("--mcp-config".to_string());
+            args.push(json.to_string());
+        }
+
+        args
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -383,38 +423,19 @@ impl LlmClient for ClaudeCodeClient {
         }
 
         // -- Build the command --
+        let args = self.build_args(
+            &config.model,
+            system,
+            mcp_config_json.as_deref(),
+        );
+
         let mut cmd = tokio::process::Command::new(&self.claude_path);
-        cmd.arg("-p")
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--verbose")
-            .arg("--include-partial-messages")
-            .arg("--no-session-persistence")
-            .arg("--dangerously-skip-permissions")
-            .arg("--model")
-            .arg(&config.model)
-            .arg("--append-system-prompt")
-            .arg(system)
-            .stdin(Stdio::piped())
+        for arg in &args {
+            cmd.arg(arg);
+        }
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-
-        // Forward any additional MCP server configs.  These come from the
-        // `mcp_configs` field (currently always empty — reserved for future
-        // direct pass-through of external MCP servers).
-        for mcp_json in &self.mcp_configs {
-            cmd.arg("--mcp-config").arg(mcp_json);
-        }
-
-        // Pass the workspace MCP server config as a CLI arg.
-        //
-        // This is the key integration point: Claude Code will parse this
-        // JSON, connect to our HTTP MCP server, run the initialize/
-        // tools_list handshake, and then have access to workspace_view,
-        // workspace_search, and workspace_update as structured tools.
-        if let Some(ref json) = mcp_config_json {
-            cmd.arg("--mcp-config").arg(json);
-        }
 
         // -- Spawn the process --
         let mut child = cmd.spawn().map_err(|e| {
@@ -1049,5 +1070,57 @@ mod tests {
         state.parse_line(r#"{"type":"assistant","message":{"content":[]}}"#);
 
         assert!(state.tool_buffers.is_empty(), "tool_buffers should be cleared on turn boundary");
+    }
+
+    // -----------------------------------------------------------------------
+    // build_args tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_args_always_includes_skip_permissions() {
+        // claude -p is non-interactive — it MUST always pass
+        // --dangerously-skip-permissions regardless of the sandbox flag.
+        let client = ClaudeCodeClient::new(
+            Some("/usr/bin/claude"),
+            vec![],
+            None,
+            false, // sandbox NOT disabled
+        );
+        let args = client.build_args("sonnet", "be helpful", None);
+        assert!(
+            args.contains(&"--dangerously-skip-permissions".to_string()),
+            "must always include --dangerously-skip-permissions for non-interactive mode"
+        );
+    }
+
+    #[test]
+    fn build_args_includes_model_and_system_prompt() {
+        let client = ClaudeCodeClient::new(Some("claude"), vec![], None, false);
+        let args = client.build_args("claude-opus-4-20250514", "You are Dyson", None);
+        assert!(args.contains(&"claude-opus-4-20250514".to_string()));
+        assert!(args.contains(&"You are Dyson".to_string()));
+        assert!(args.contains(&"--append-system-prompt".to_string()));
+    }
+
+    #[test]
+    fn build_args_includes_mcp_config() {
+        let client = ClaudeCodeClient::new(Some("claude"), vec![], None, false);
+        let mcp_json = r#"{"mcpServers":{"test":{"type":"sse","url":"http://localhost:1234"}}}"#;
+        let args = client.build_args("sonnet", "", Some(mcp_json));
+        assert!(args.contains(&"--mcp-config".to_string()));
+        assert!(args.contains(&mcp_json.to_string()));
+    }
+
+    #[test]
+    fn build_args_forwards_extra_mcp_configs() {
+        let extra = r#"{"mcpServers":{"extra":{"type":"stdio"}}}"#.to_string();
+        let client = ClaudeCodeClient::new(
+            Some("claude"),
+            vec![extra.clone()],
+            None,
+            false,
+        );
+        let args = client.build_args("sonnet", "", None);
+        assert!(args.contains(&extra));
     }
 }

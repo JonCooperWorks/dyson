@@ -148,6 +148,51 @@ impl CodexClient {
             dangerous_no_sandbox,
         }
     }
+
+    /// Build the CLI arguments for `codex exec`.
+    ///
+    /// Extracted as a method so the sandbox-gating logic is unit-testable
+    /// without spawning a subprocess.
+    fn build_args(
+        &self,
+        model: &str,
+        system: &str,
+        prompt: &str,
+        mcp_url: Option<&str>,
+    ) -> Vec<String> {
+        let mut args = vec![
+            "exec".to_string(),
+            "--json".to_string(),
+            "--ephemeral".to_string(),
+            "--skip-git-repo-check".to_string(),
+        ];
+
+        // Only bypass all approvals and sandboxing when explicitly requested
+        // via --dangerous-no-sandbox.  Otherwise use --full-auto which keeps
+        // Codex's workspace sandbox active but skips most approval prompts.
+        if self.dangerous_no_sandbox {
+            args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+        } else {
+            args.push("--full-auto".to_string());
+        }
+
+        args.push("--model".to_string());
+        args.push(model.to_string());
+
+        if !system.is_empty() {
+            args.push("-c".to_string());
+            args.push(format!("developer_instructions={system}"));
+        }
+
+        if let Some(url) = mcp_url {
+            args.push("-c".to_string());
+            args.push(format!("mcp_servers.dyson-workspace.url={url}"));
+        }
+
+        args.push(prompt.to_string());
+
+        args
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -208,40 +253,18 @@ impl LlmClient for CodexClient {
         }
 
         // -- Build the command --
+        let args = self.build_args(
+            &config.model,
+            system,
+            &prompt,
+            mcp_url.as_deref(),
+        );
+
         let mut cmd = tokio::process::Command::new(&self.codex_path);
-        cmd.arg("exec")
-            .arg("--json")
-            .arg("--ephemeral")
-            .arg("--skip-git-repo-check");
-
-        // Only bypass all approvals and sandboxing when explicitly requested
-        // via --dangerous-no-sandbox.  Otherwise use --full-auto which keeps
-        // Codex's workspace sandbox active but skips most approval prompts.
-        if self.dangerous_no_sandbox {
-            cmd.arg("--dangerously-bypass-approvals-and-sandbox");
-        } else {
-            cmd.arg("--full-auto");
+        for arg in &args {
+            cmd.arg(arg);
         }
-
-        cmd.arg("--model")
-            .arg(&config.model);
-
-        // Inject system prompt via developer_instructions config override.
-        if !system.is_empty() {
-            cmd.arg("-c").arg(format!("developer_instructions={system}"));
-        }
-
-        // If we have an MCP server running, tell Codex about it.
-        // Codex doesn't have a --mcp-config CLI flag, so we register via
-        // config override.  The config path is mcp_servers.<name>.url.
-        if let Some(ref url) = mcp_url {
-            cmd.arg("-c")
-                .arg(format!("mcp_servers.dyson-workspace.url={url}"));
-        }
-
-        // The prompt goes as a positional argument.
-        cmd.arg(&prompt)
-            .stdin(Stdio::null())
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
 
@@ -947,5 +970,77 @@ mod tests {
         let mut state = StreamParserState::new();
         let events = state.parse_line("not valid json at all");
         assert!(events.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // build_args tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_args_uses_full_auto_by_default() {
+        let client = CodexClient::new(Some("codex"), None, false);
+        let args = client.build_args("o3", "", "hello", None);
+        assert!(
+            args.contains(&"--full-auto".to_string()),
+            "should use --full-auto when sandbox is enabled"
+        );
+        assert!(
+            !args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
+            "should NOT bypass sandbox when flag is not set"
+        );
+    }
+
+    #[test]
+    fn build_args_bypasses_sandbox_when_flag_set() {
+        let client = CodexClient::new(Some("codex"), None, true);
+        let args = client.build_args("o3", "", "hello", None);
+        assert!(
+            args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
+            "should bypass sandbox when --dangerous-no-sandbox is set"
+        );
+        assert!(
+            !args.contains(&"--full-auto".to_string()),
+            "should NOT use --full-auto when bypassing sandbox"
+        );
+    }
+
+    #[test]
+    fn build_args_includes_model() {
+        let client = CodexClient::new(Some("codex"), None, false);
+        let args = client.build_args("o4-mini", "", "test", None);
+        assert!(args.contains(&"o4-mini".to_string()));
+    }
+
+    #[test]
+    fn build_args_includes_system_prompt() {
+        let client = CodexClient::new(Some("codex"), None, false);
+        let args = client.build_args("o3", "You are Dyson", "test", None);
+        assert!(args.contains(&"developer_instructions=You are Dyson".to_string()));
+    }
+
+    #[test]
+    fn build_args_skips_empty_system_prompt() {
+        let client = CodexClient::new(Some("codex"), None, false);
+        let args = client.build_args("o3", "", "test", None);
+        assert!(
+            !args.iter().any(|a| a.starts_with("developer_instructions=")),
+            "should not include developer_instructions for empty system prompt"
+        );
+    }
+
+    #[test]
+    fn build_args_includes_mcp_url() {
+        let client = CodexClient::new(Some("codex"), None, false);
+        let args = client.build_args("o3", "", "test", Some("http://127.0.0.1:9999/mcp"));
+        assert!(args.contains(
+            &"mcp_servers.dyson-workspace.url=http://127.0.0.1:9999/mcp".to_string()
+        ));
+    }
+
+    #[test]
+    fn build_args_prompt_is_last() {
+        let client = CodexClient::new(Some("codex"), None, false);
+        let args = client.build_args("o3", "sys", "my prompt", None);
+        assert_eq!(args.last().unwrap(), "my prompt");
     }
 }
