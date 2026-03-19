@@ -129,15 +129,19 @@ pub trait Controller: Send {
 /// prompt and applying any controller-specific prompt fragments.
 ///
 /// Every controller should use this instead of building agents manually.
-/// This ensures the workspace (SOUL.md, MEMORY.md, etc.) is always loaded.
+/// This ensures the workspace (SOUL.md, MEMORY.md, etc.) is always loaded
+/// and that the workspace is available to tools via `ToolContext.workspace`.
+///
+/// The workspace backend is determined by `settings.workspace.backend`
+/// (default: "openclaw") and loaded from `settings.workspace.connection_string`
+/// (default: "~/.dyson/").  The workspace is wrapped in `Arc<RwLock>` so
+/// tools can read and write workspace files concurrently.
 pub async fn build_agent(
     settings: &Settings,
     controller_prompt: Option<&str>,
 ) -> crate::Result<crate::agent::Agent> {
-    // Load the persistent workspace.
-    let workspace = crate::persistence::Workspace::load_default(
-        settings.workspace_path.as_deref(),
-    )?;
+    // Load the persistent workspace via the configured backend.
+    let workspace = crate::workspace::create_workspace(&settings.workspace)?;
 
     // Compose the system prompt: base + workspace + controller.
     let mut agent_settings = settings.agent.clone();
@@ -153,6 +157,10 @@ pub async fn build_agent(
         agent_settings.system_prompt.push_str(prompt);
     }
 
+    // Wrap workspace in Arc<RwLock> for shared tool access.
+    let workspace: std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>> =
+        std::sync::Arc::new(tokio::sync::RwLock::new(workspace));
+
     let client = crate::llm::create_client(&agent_settings);
     let sandbox = crate::sandbox::create_sandbox(
         &settings.sandbox,
@@ -160,7 +168,7 @@ pub async fn build_agent(
     );
     let skills = crate::skill::create_skills(settings).await;
 
-    crate::agent::Agent::new(client, sandbox, skills, &agent_settings)
+    crate::agent::Agent::new(client, sandbox, skills, &agent_settings, Some(workspace))
 }
 
 // ---------------------------------------------------------------------------

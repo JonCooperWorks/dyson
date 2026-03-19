@@ -86,7 +86,7 @@ pub fn run(
 
     // Create default workspace files (only creates files that don't exist,
     // so imported files are preserved).
-    let _ = dyson::persistence::Workspace::load(&workspace_dir)?;
+    let _ = dyson::workspace::OpenClawWorkspace::load(&workspace_dir)?;
     eprintln!("  workspace ready at {}", workspace_dir.display());
 
     // Install binary to PATH.

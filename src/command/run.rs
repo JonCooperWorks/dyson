@@ -38,9 +38,7 @@ pub async fn run(
     let mut settings = dyson::config::loader::load_settings(config_path.as_deref())?;
     super::apply_overrides(&mut settings, dangerous_no_sandbox, provider, base_url, workspace)?;
 
-    let workspace = dyson::persistence::Workspace::load_default(
-        settings.workspace_path.as_deref(),
-    )?;
+    let workspace = dyson::workspace::create_workspace(&settings.workspace)?;
     let mut agent_settings = settings.agent.clone();
     let ws_prompt = workspace.system_prompt();
     if !ws_prompt.is_empty() {
@@ -48,13 +46,17 @@ pub async fn run(
         agent_settings.system_prompt.push_str(&ws_prompt);
     }
 
+    // Wrap workspace in Arc<RwLock> for shared tool access.
+    let workspace: std::sync::Arc<tokio::sync::RwLock<Box<dyn dyson::workspace::Workspace>>> =
+        std::sync::Arc::new(tokio::sync::RwLock::new(workspace));
+
     let client = dyson::llm::create_client(&agent_settings);
     let sandbox = dyson::sandbox::create_sandbox(
         &settings.sandbox,
         settings.dangerous_no_sandbox,
     );
     let skills = dyson::skill::create_skills(&settings).await;
-    let mut agent = dyson::agent::Agent::new(client, sandbox, skills, &agent_settings)?;
+    let mut agent = dyson::agent::Agent::new(client, sandbox, skills, &agent_settings, Some(workspace))?;
     let mut output = dyson::controller::terminal::TerminalOutput::new();
     agent.run(&prompt, &mut output).await?;
     println!();

@@ -70,9 +70,11 @@ pub struct Settings {
     /// Sandbox configuration.
     pub sandbox: SandboxConfig,
 
-    /// Workspace directory for persistent state (SOUL.md, MEMORY.md, etc.).
-    /// Default: ~/.dyson/
-    pub workspace_path: Option<String>,
+    /// Workspace configuration (backend + connection string).
+    pub workspace: WorkspaceConfig,
+
+    /// Chat history configuration (backend + connection string).
+    pub chat_history: ChatHistoryConfig,
 
     /// Whether `--dangerous-no-sandbox` was passed on the CLI.
     ///
@@ -272,6 +274,75 @@ pub struct BuiltinSkillConfig {
 }
 
 // ---------------------------------------------------------------------------
+// WorkspaceConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for the workspace backend.
+///
+/// ```json
+/// {
+///   "workspace": {
+///     "backend": "openclaw",
+///     "connection_string": "~/.dyson"
+///   }
+/// }
+/// ```
+///
+/// The `connection_string` supports the secret resolver scheme:
+/// ```json
+/// { "connection_string": { "resolver": "insecure_env", "name": "WORKSPACE_DIR" } }
+/// ```
+#[derive(Debug, Clone)]
+pub struct WorkspaceConfig {
+    /// Backend type.  Currently supported: "openclaw".
+    pub backend: String,
+
+    /// Connection string (path for openclaw).  Resolved via secret system.
+    pub connection_string: String,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            backend: "openclaw".into(),
+            connection_string: "~/.dyson".into(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ChatHistoryConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for the chat history backend.
+///
+/// ```json
+/// {
+///   "chat_history": {
+///     "backend": "disk",
+///     "connection_string": "~/.dyson/chats"
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ChatHistoryConfig {
+    /// Backend type.  Currently supported: "disk".
+    pub backend: String,
+
+    /// Connection string (directory path for disk).  Resolved via secret system.
+    pub connection_string: String,
+}
+
+impl Default for ChatHistoryConfig {
+    fn default() -> Self {
+        Self {
+            backend: "disk".into(),
+            connection_string: "~/.dyson/chats".into(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
 
@@ -300,8 +371,9 @@ impl Default for Settings {
             })],
             controllers: vec![],
             sandbox: SandboxConfig::default(),
+            workspace: WorkspaceConfig::default(),
+            chat_history: ChatHistoryConfig::default(),
             dangerous_no_sandbox: false,
-            workspace_path: None,
         }
     }
 }

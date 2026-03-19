@@ -11,15 +11,18 @@
 // Crate structure:
 //
 //   dyson (library crate)
-//     ├── error       — DysonError enum, Result type alias
-//     ├── message     — Message, Role, ContentBlock
-//     ├── config      — Settings, loaders (dyson.toml, Claude, Cursor)
-//     ├── tool        — Tool trait, ToolContext, ToolOutput, built-in tools
-//     ├── skill       — Skill trait, BuiltinSkill
-//     ├── sandbox     — Sandbox trait, DangerousNoSandbox
-//     ├── llm         — LlmClient trait, Anthropic streaming client
-//     ├── agent       — Agent loop, stream handler
-//     └── ui          — Output trait, terminal renderer
+//     ├── error         — DysonError enum, Result type alias
+//     ├── message       — Message, Role, ContentBlock
+//     ├── config        — Settings, loaders (dyson.json)
+//     ├── tool          — Tool trait, ToolContext, ToolOutput, built-in tools
+//     ├── skill         — Skill trait, BuiltinSkill
+//     ├── sandbox       — Sandbox trait, DangerousNoSandbox
+//     ├── llm           — LlmClient trait, Anthropic/OpenAI/Claude Code clients
+//     ├── agent         — Agent loop, stream handler
+//     ├── workspace     — Workspace trait + OpenClawWorkspace (agent identity/memory)
+//     ├── chat_history  — ChatHistory trait + DiskChatHistory (per-chat messages)
+//     ├── controller    — Controller trait, terminal REPL, Telegram bot
+//     └── secret        — Secret resolution (env vars, vault, etc.)
 //
 // The binary crate (main.rs) wires everything together: parse CLI args,
 // load config, create the agent, and run the interactive loop.
@@ -30,19 +33,22 @@
 //   - Settings are portable: parse any config format into one struct
 //   - Sandbox gates everything: every tool call goes through a Sandbox trait
 //   - Extensible by default: new providers, skills, tools — all traits
+//   - Storage is pluggable: workspace and chat history are traits with
+//     configurable backends (OpenClaw filesystem, disk JSON, future: cloud)
 // ===========================================================================
 
 pub mod agent;
+pub mod chat_history;
 pub mod config;
 pub mod controller;
 pub mod error;
 pub mod llm;
 pub mod message;
-pub mod persistence;
 pub mod sandbox;
 pub mod secret;
 pub mod skill;
 pub mod tool;
+pub mod workspace;
 
 // ---------------------------------------------------------------------------
 // Re-exports for convenience

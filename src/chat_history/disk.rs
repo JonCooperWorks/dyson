@@ -1,89 +1,51 @@
 // ===========================================================================
-// ChatStore — trait for persisting per-chat conversation history.
+// DiskChatHistory — JSON files on disk, one per chat.
 //
-// The trait is intentionally simple: save and load a list of messages
-// keyed by a chat ID string.  This lets you swap in any backend:
+// Active conversations use `{chat_id}.json`.  When rotated, the file
+// is renamed to `{chat_id}.{timestamp}.json` and a fresh file is
+// created on the next save.
 //
-// - JsonChatStore (default) — one JSON file per chat in a directory
-// - A database (Postgres, SQLite, Redis, etc.)
-// - A RAG pipeline that indexes and retrieves relevant past messages
-// - An in-memory store for testing
-//
-// The agent doesn't know or care which backend is in use.
-//
-// Chat rotation:
-//   When the user clears context, the current chat file is rotated
-//   (renamed with a timestamp) rather than deleted.  This preserves
-//   history for review or RAG indexing.  The agent always picks up
-//   the newest (unrotated) file.
+// ```text
+// ~/.dyson/chats/
+//   2102424765.json                      ← current conversation
+//   2102424765.2026-03-19T14-30-00.json  ← rotated (old) conversation
+//   2102424765.2026-03-18T09-15-22.json  ← even older
+// ```
 // ===========================================================================
 
+use std::path::PathBuf;
+
+use crate::chat_history::ChatHistory;
 use crate::error::Result;
 use crate::message::Message;
+use crate::workspace::openclaw::resolve_tilde;
 
 // ---------------------------------------------------------------------------
-// ChatStore trait
-// ---------------------------------------------------------------------------
-
-/// Persistent storage for per-chat conversation history.
-///
-/// Implementors decide where and how messages are stored.  The Telegram
-/// controller (or any controller) calls `save()` after each agent turn
-/// and `load()` when creating an agent for a chat.
-pub trait ChatStore: Send + Sync {
-    /// Save the conversation history for a chat.
-    ///
-    /// Called after each agent turn.  Replaces any previously saved
-    /// history for this chat_id.
-    fn save(&self, chat_id: &str, messages: &[Message]) -> Result<()>;
-
-    /// Load the conversation history for a chat.
-    ///
-    /// Returns the newest (current) conversation.  Returns an empty Vec
-    /// if no history exists for this chat_id.
-    fn load(&self, chat_id: &str) -> Result<Vec<Message>>;
-
-    /// Rotate the conversation history for a chat.
-    ///
-    /// Called on /clear.  The current history is archived (not deleted)
-    /// and a fresh conversation starts.  Old history files are preserved
-    /// for review or RAG indexing.
-    fn rotate(&self, chat_id: &str) -> Result<()>;
-}
-
-// ---------------------------------------------------------------------------
-// JsonChatStore — one JSON file per chat, with rotation
+// DiskChatHistory
 // ---------------------------------------------------------------------------
 
 /// File-based chat store: one JSON file per chat in a directory.
-///
-/// Active conversations use `{chat_id}.json`.  When rotated, the file
-/// is renamed to `{chat_id}.{timestamp}.json` and a fresh file is
-/// created on the next save.
-///
-/// ```text
-/// ~/.dyson/chats/
-///   2102424765.json                  ← current conversation
-///   2102424765.2026-03-19T14-30-00.json  ← rotated (old) conversation
-///   2102424765.2026-03-18T09-15-22.json  ← even older
-/// ```
-///
-/// Simple, zero-dependency, easy to inspect and back up.
-pub struct JsonChatStore {
+pub struct DiskChatHistory {
     /// Directory where chat JSON files are stored.
-    dir: std::path::PathBuf,
+    dir: PathBuf,
 }
 
-impl JsonChatStore {
-    /// Create a new JSON chat store in the given directory.
+impl DiskChatHistory {
+    /// Create a new disk chat history in the given directory.
     ///
     /// Creates the directory if it doesn't exist.
-    pub fn new(dir: std::path::PathBuf) -> Result<Self> {
+    pub fn new(dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&dir)?;
         Ok(Self { dir })
     }
 
-    fn chat_path(&self, chat_id: &str) -> std::path::PathBuf {
+    /// Create from a connection string (path with ~ expansion).
+    pub fn new_from_connection_string(connection_string: &str) -> Result<Self> {
+        let path = resolve_tilde(connection_string);
+        Self::new(path)
+    }
+
+    fn chat_path(&self, chat_id: &str) -> PathBuf {
         self.dir.join(format!("{chat_id}.json"))
     }
 
@@ -94,7 +56,7 @@ impl JsonChatStore {
             .unwrap()
             .as_secs();
 
-        // Convert to readable timestamp using the same algorithm as chrono_today.
+        // Convert to readable timestamp using the same algorithm as workspace dates.
         let z = (now / 86400) as i64 + 719468;
         let era = if z >= 0 { z } else { z - 146096 } / 146097;
         let doe = (z - era * 146097) as u64;
@@ -115,7 +77,7 @@ impl JsonChatStore {
     }
 }
 
-impl ChatStore for JsonChatStore {
+impl ChatHistory for DiskChatHistory {
     fn save(&self, chat_id: &str, messages: &[Message]) -> Result<()> {
         let path = self.chat_path(chat_id);
         let json = serde_json::to_string_pretty(messages)?;
@@ -166,11 +128,11 @@ mod tests {
     use super::*;
     use crate::message::Message;
 
-    fn temp_store(name: &str) -> (std::path::PathBuf, JsonChatStore) {
+    fn temp_store(name: &str) -> (PathBuf, DiskChatHistory) {
         let dir = std::env::temp_dir()
             .join(format!("dyson_chat_test_{}_{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let store = JsonChatStore::new(dir.clone()).unwrap();
+        let store = DiskChatHistory::new(dir.clone()).unwrap();
         (dir, store)
     }
 
@@ -206,11 +168,9 @@ mod tests {
     fn rotate_preserves_old_and_clears_current() {
         let (dir, store) = temp_store("rotate");
 
-        // Save a conversation.
         store.save("chat_1", &[Message::user("old message")]).unwrap();
         assert!(!store.load("chat_1").unwrap().is_empty());
 
-        // Rotate — current file should be gone, but a timestamped copy exists.
         store.rotate("chat_1").unwrap();
 
         // Current chat should be empty (file renamed).
@@ -247,12 +207,10 @@ mod tests {
     fn new_save_after_rotate() {
         let (dir, store) = temp_store("save_after_rotate");
 
-        // Save, rotate, save again.
         store.save("chat_1", &[Message::user("first")]).unwrap();
         store.rotate("chat_1").unwrap();
         store.save("chat_1", &[Message::user("second")]).unwrap();
 
-        // Load should return the new conversation.
         let loaded = store.load("chat_1").unwrap();
         assert_eq!(loaded.len(), 1);
         match &loaded[0].content[0] {

@@ -10,16 +10,21 @@
 //   this one trait.
 //
 // Module layout:
-//   mod.rs  — Tool trait, ToolContext, ToolOutput (this file)
-//   bash.rs — Shell execution tool
+//   mod.rs              — Tool trait, ToolContext, ToolOutput (this file)
+//   bash.rs             — Shell execution tool
+//   workspace_view.rs   — View/list workspace files
+//   workspace_search.rs — Search across workspace files
+//   workspace_update.rs — Update workspace files (set/append)
 //
 // How tools fit into the architecture:
 //
 //   Skill (owns tools)
 //     │
 //     ├── Arc<dyn Tool>  ─── BashTool
-//     ├── Arc<dyn Tool>  ─── ReadFileTool      (future)
-//     └── Arc<dyn Tool>  ─── McpRemoteTool     (future)
+//     ├── Arc<dyn Tool>  ─── WorkspaceViewTool
+//     ├── Arc<dyn Tool>  ─── WorkspaceSearchTool
+//     ├── Arc<dyn Tool>  ─── WorkspaceUpdateTool
+//     └── Arc<dyn Tool>  ─── McpRemoteTool     (MCP servers)
 //           │
 //           ▼
 //   Agent (flat lookup: HashMap<name, Arc<dyn Tool>>)
@@ -48,11 +53,16 @@
 // ===========================================================================
 
 pub mod bash;
+pub mod workspace_search;
+pub mod workspace_update;
+pub mod workspace_view;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
@@ -156,6 +166,16 @@ pub struct ToolContext {
     /// token and abort promptly when it fires.  Triggered by Ctrl-C
     /// in the terminal.
     pub cancellation: CancellationToken,
+
+    /// Workspace for agent identity/memory operations.
+    ///
+    /// Shared via `Arc<RwLock>` because multiple tools need concurrent
+    /// access — reads (view, search) can proceed in parallel, writes
+    /// (update, journal) get exclusive access.
+    ///
+    /// `None` when workspace is not configured (e.g., tests without
+    /// workspace setup, or when the provider handles tools internally).
+    pub workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
 }
 
 impl ToolContext {
@@ -168,6 +188,7 @@ impl ToolContext {
             working_dir: std::env::current_dir()?,
             env: HashMap::new(),
             cancellation: CancellationToken::new(),
+            workspace: None,
         })
     }
 }

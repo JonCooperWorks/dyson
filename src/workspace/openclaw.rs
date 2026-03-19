@@ -1,5 +1,5 @@
 // ===========================================================================
-// Workspace — OpenClaw-compatible agent memory and identity.
+// OpenClawWorkspace — OpenClaw-compatible agent memory and identity.
 //
 // LEARNING OVERVIEW
 //
@@ -25,50 +25,23 @@
 //   These files are the same format as OpenClaw/TARS.  If you have an
 //   existing OpenClaw workspace, point Dyson at it and it reads the same
 //   files.  If you don't, Dyson creates sensible defaults.
-//
-// How it integrates with the agent:
-//
-//   On startup:
-//     1. Workspace::load() reads all .md files from the workspace dir
-//     2. The system prompt is composed from:
-//        SOUL.md + IDENTITY.md + AGENTS.md + MEMORY.md + today's journal
-//     3. This becomes part of the agent's system prompt
-//
-//   During a session:
-//     4. The agent can write to memory files via tool calls or hooks
-//     5. Daily journal entries are appended automatically
-//
-//   On shutdown:
-//     6. Workspace::save() writes any dirty files back to disk
-//
-// Why markdown files instead of a database?
-//   - Human-readable and editable
-//   - Git-friendly (diff, history, branches)
-//   - Compatible with OpenClaw ecosystem
-//   - No dependencies (no SQLite, no Redis)
-//   - The agent can read and write them with standard file tools
-//
-// Directory configuration:
-//   Default: ~/.dyson/
-//   Override in dyson.json:
-//     { "workspace": { "path": "/path/to/workspace" } }
-//   Or via CLI: --workspace /path/to/workspace
 // ===========================================================================
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{DysonError, Result};
+use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
-// Workspace — the persistent state directory.
+// OpenClawWorkspace — the persistent state directory.
 // ---------------------------------------------------------------------------
 
 /// The agent's persistent workspace — identity, memory, and journals.
 ///
 /// Reads/writes markdown files in the OpenClaw format.  The workspace
 /// directory defaults to `~/.dyson/` but can be configured.
-pub struct Workspace {
+pub struct OpenClawWorkspace {
     /// Root directory of the workspace.
     path: PathBuf,
 
@@ -76,7 +49,7 @@ pub struct Workspace {
     files: HashMap<String, String>,
 }
 
-impl Workspace {
+impl OpenClawWorkspace {
     /// Load a workspace from a directory.
     ///
     /// Creates the directory and default files if they don't exist.
@@ -152,41 +125,19 @@ impl Workspace {
 
     /// Load from the default path (~/.dyson/) or a configured path.
     pub fn load_default(config_path: Option<&str>) -> Result<Self> {
-        let home = std::env::var("HOME").unwrap_or_default();
-
-        let path = match config_path {
-            Some(p) => {
-                // Expand ~ to $HOME.
-                if p.starts_with("~/") {
-                    PathBuf::from(&home).join(&p[2..])
-                } else if p == "~" {
-                    PathBuf::from(&home)
-                } else {
-                    PathBuf::from(p)
-                }
-            }
-            None => PathBuf::from(&home).join(".dyson"),
-        };
+        let path = resolve_tilde(config_path.unwrap_or("~/.dyson"));
         Self::load(&path)
     }
 
-    /// Get a file's content by name.
-    pub fn get(&self, name: &str) -> Option<&str> {
-        self.files.get(name).map(|s| s.as_str())
+    /// Load from a connection string (path with ~ expansion).
+    pub fn load_from_connection_string(connection_string: &str) -> Result<Self> {
+        let path = resolve_tilde(connection_string);
+        Self::load(&path)
     }
 
-    /// Set a file's content (in memory — call save() to persist).
-    pub fn set(&mut self, name: &str, content: &str) {
-        self.files.insert(name.to_string(), content.to_string());
-    }
-
-    /// Append to a file (creates it if it doesn't exist).
-    pub fn append(&mut self, name: &str, content: &str) {
-        let entry = self.files.entry(name.to_string()).or_default();
-        if !entry.is_empty() && !entry.ends_with('\n') {
-            entry.push('\n');
-        }
-        entry.push_str(content);
+    /// The workspace directory path.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Get today's date as YYYY-MM-DD.
@@ -204,87 +155,6 @@ impl Workspace {
     pub fn yesterday_journal() -> String {
         let yesterday = chrono_yesterday();
         format!("memory/{yesterday}.md")
-    }
-
-    /// Append to today's journal.
-    pub fn journal(&mut self, entry: &str) {
-        let name = Self::today_journal();
-        self.append(&name, entry);
-    }
-
-    /// Save all files back to disk.
-    pub fn save(&self) -> Result<()> {
-        for (name, content) in &self.files {
-            let file_path = self.path.join(name);
-
-            // Ensure parent directory exists (for memory/ files).
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-
-            std::fs::write(&file_path, content)?;
-        }
-
-        tracing::debug!(
-            files = self.files.len(),
-            "workspace saved"
-        );
-
-        Ok(())
-    }
-
-    /// Build the system prompt fragment from workspace files.
-    ///
-    /// Composes the agent's context from:
-    /// 1. SOUL.md — personality (always loaded)
-    /// 2. IDENTITY.md — who the agent is (always loaded)
-    /// 3. MEMORY.md — curated long-term memory (always loaded)
-    /// 4. Today's + yesterday's journal — recent context
-    ///
-    /// AGENTS.md is NOT included in the prompt — it's instructions for
-    /// the file-loading process itself, not content for the LLM.
-    ///
-    /// Old journal files (before yesterday) are NOT included.  They're
-    /// on disk for reference but would blow the context window on small
-    /// models.  The agent should distill important info into MEMORY.md.
-    pub fn system_prompt(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-
-        // Core identity files — always loaded.
-        for (label, file) in [
-            ("PERSONALITY", "SOUL.md"),
-            ("IDENTITY", "IDENTITY.md"),
-            ("LONG-TERM MEMORY", "MEMORY.md"),
-        ] {
-            if let Some(content) = self.get(file) {
-                if !content.trim().is_empty() {
-                    parts.push(format!("## {label}\n\n{content}"));
-                }
-            }
-        }
-
-        // Yesterday's journal (for continuity across sessions).
-        let yesterday = Self::yesterday_journal();
-        if let Some(content) = self.get(&yesterday) {
-            if !content.trim().is_empty() {
-                parts.push(format!("## YESTERDAY'S JOURNAL\n\n{content}"));
-            }
-        }
-
-        // Today's journal.
-        let today = Self::today_journal();
-        if let Some(content) = self.get(&today) {
-            if !content.trim().is_empty() {
-                parts.push(format!("## TODAY'S JOURNAL\n\n{content}"));
-            }
-        }
-
-        parts.join("\n\n---\n\n")
-    }
-
-    /// The workspace directory path.
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     // -----------------------------------------------------------------------
@@ -371,32 +241,141 @@ Capture what matters. Decisions, context, things to remember.
 }
 
 // ---------------------------------------------------------------------------
+// Workspace trait implementation
+// ---------------------------------------------------------------------------
+
+impl Workspace for OpenClawWorkspace {
+    fn get(&self, name: &str) -> Option<String> {
+        self.files.get(name).cloned()
+    }
+
+    fn set(&mut self, name: &str, content: &str) {
+        self.files.insert(name.to_string(), content.to_string());
+    }
+
+    fn append(&mut self, name: &str, content: &str) {
+        let entry = self.files.entry(name.to_string()).or_default();
+        if !entry.is_empty() && !entry.ends_with('\n') {
+            entry.push('\n');
+        }
+        entry.push_str(content);
+    }
+
+    fn save(&self) -> Result<()> {
+        for (name, content) in &self.files {
+            let file_path = self.path.join(name);
+
+            // Ensure parent directory exists (for memory/ files).
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            std::fs::write(&file_path, content)?;
+        }
+
+        tracing::debug!(
+            files = self.files.len(),
+            "workspace saved"
+        );
+
+        Ok(())
+    }
+
+    fn list_files(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.files.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    fn search(&self, pattern: &str) -> Vec<(String, Vec<String>)> {
+        let pattern_lower = pattern.to_lowercase();
+        let mut results = Vec::new();
+
+        for (name, content) in &self.files {
+            let matching_lines: Vec<String> = content
+                .lines()
+                .filter(|line| line.to_lowercase().contains(&pattern_lower))
+                .map(|line| line.to_string())
+                .collect();
+
+            if !matching_lines.is_empty() {
+                results.push((name.clone(), matching_lines));
+            }
+        }
+
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        results
+    }
+
+    fn system_prompt(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+
+        // Core identity files — always loaded.
+        for (label, file) in [
+            ("PERSONALITY", "SOUL.md"),
+            ("IDENTITY", "IDENTITY.md"),
+            ("LONG-TERM MEMORY", "MEMORY.md"),
+        ] {
+            if let Some(content) = self.files.get(file) {
+                if !content.trim().is_empty() {
+                    parts.push(format!("## {label}\n\n{content}"));
+                }
+            }
+        }
+
+        // Yesterday's journal (for continuity across sessions).
+        let yesterday = Self::yesterday_journal();
+        if let Some(content) = self.files.get(&yesterday) {
+            if !content.trim().is_empty() {
+                parts.push(format!("## YESTERDAY'S JOURNAL\n\n{content}"));
+            }
+        }
+
+        // Today's journal.
+        let today = Self::today_journal();
+        if let Some(content) = self.files.get(&today) {
+            if !content.trim().is_empty() {
+                parts.push(format!("## TODAY'S JOURNAL\n\n{content}"));
+            }
+        }
+
+        parts.join("\n\n---\n\n")
+    }
+
+    fn journal(&mut self, entry: &str) {
+        let name = Self::today_journal();
+        self.append(&name, entry);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path helpers
+// ---------------------------------------------------------------------------
+
+/// Resolve ~ to $HOME in a path string.
+pub(crate) fn resolve_tilde(path: &str) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if path.starts_with("~/") {
+        PathBuf::from(&home).join(&path[2..])
+    } else if path == "~" {
+        PathBuf::from(&home)
+    } else {
+        PathBuf::from(path)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Date helpers
 // ---------------------------------------------------------------------------
 
 /// Get today's date as YYYY-MM-DD string.
 pub(crate) fn chrono_today() -> String {
-    // We avoid pulling in the chrono crate by using a simple system time
-    // approach.  This works on all platforms.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
 
-    // Convert Unix timestamp to date components.
-    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
-    let z = (now / 86400) as i64 + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-
-    format!("{y:04}-{m:02}-{d:02}")
+    unix_to_date(now)
 }
 
 /// Get yesterday's date as YYYY-MM-DD string.
@@ -406,10 +385,12 @@ fn chrono_yesterday() -> String {
         .unwrap()
         .as_secs();
 
-    // Subtract one day (86400 seconds).
-    let yesterday = now.saturating_sub(86400);
+    unix_to_date(now.saturating_sub(86400))
+}
 
-    let z = (yesterday / 86400) as i64 + 719468;
+/// Convert Unix timestamp to YYYY-MM-DD string.
+fn unix_to_date(secs: u64) -> String {
+    let z = (secs / 86400) as i64 + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
@@ -432,7 +413,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn temp_workspace() -> (PathBuf, Workspace) {
+    fn temp_workspace() -> (PathBuf, OpenClawWorkspace) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -441,7 +422,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        let ws = Workspace::load(&dir).unwrap();
+        let ws = OpenClawWorkspace::load(&dir).unwrap();
         (dir, ws)
     }
 
@@ -465,7 +446,7 @@ mod tests {
         std::fs::write(dir.join("SOUL.md"), "I am custom").unwrap();
 
         // Reload — should keep the custom content.
-        let ws = Workspace::load(&dir).unwrap();
+        let ws = OpenClawWorkspace::load(&dir).unwrap();
         assert_eq!(ws.get("SOUL.md").unwrap(), "I am custom");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -476,7 +457,7 @@ mod tests {
         ws.journal("## Session started");
         ws.journal("Did some work");
 
-        let today = Workspace::today_journal();
+        let today = OpenClawWorkspace::today_journal();
         let content = ws.get(&today).unwrap();
         assert!(content.contains("Session started"));
         assert!(content.contains("Did some work"));
@@ -501,17 +482,39 @@ mod tests {
         assert!(prompt.contains("PERSONALITY"));
         assert!(prompt.contains("IDENTITY"));
         assert!(prompt.contains("LONG-TERM MEMORY"));
-        // AGENTS.md is NOT included — it's meta-instructions for
-        // the loading process, not content for the LLM.
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn today_date_format() {
         let today = chrono_today();
-        // Should be YYYY-MM-DD format.
         assert_eq!(today.len(), 10);
         assert_eq!(&today[4..5], "-");
         assert_eq!(&today[7..8], "-");
+    }
+
+    #[test]
+    fn list_files_returns_sorted() {
+        let (dir, ws) = temp_workspace();
+        let files = ws.list_files();
+        assert!(files.contains(&"SOUL.md".to_string()));
+        assert!(files.contains(&"MEMORY.md".to_string()));
+        // Verify sorted.
+        let mut sorted = files.clone();
+        sorted.sort();
+        assert_eq!(files, sorted);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_finds_matches() {
+        let (dir, mut ws) = temp_workspace();
+        ws.set("MEMORY.md", "# Memory\n\nI learned about Rust.\nRust is great.");
+        let results = ws.search("rust");
+        assert!(!results.is_empty());
+        let (name, lines) = &results.iter().find(|(n, _)| n == "MEMORY.md").unwrap();
+        assert_eq!(name, "MEMORY.md");
+        assert_eq!(lines.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
