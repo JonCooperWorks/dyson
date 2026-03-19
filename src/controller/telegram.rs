@@ -25,7 +25,6 @@
 //     │     ├── create Agent + TelegramOutput for this message
 //     │     └── agent.run(text, &mut output)
 //     │           ├── output.text_delta("Hello") → edit message
-//     │           ├── output.tool_use_start(...)  → send "🔧 bash"
 //     │           └── output.flush()             → final edit
 //     └── runs until shutdown
 //
