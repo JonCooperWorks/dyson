@@ -38,7 +38,7 @@
 //   │  │    '{"mcpServers":  │     │   ├─ initialize          │   │
 //   │  │     {"dyson-        │     │   ├─ notifications/      │   │
 //   │  │      workspace":    │     │   │  initialized         │   │
-//   │  │      {"type":"url", │     │   ├─ tools/list          │   │
+//   │  │      {"type":"sse", │     │   ├─ tools/list          │   │
 //   │  │       "url":        │     │   │  → workspace_view    │   │
 //   │  │       "http://...   │     │   │  → workspace_search  │   │
 //   │  │       /mcp"}}}'     │     │   │  → workspace_update  │   │
