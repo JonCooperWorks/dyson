@@ -10,11 +10,13 @@
 //   Anthropic, OpenAI, or a local model.
 //
 // Module layout:
-//   mod.rs       — LlmClient trait, CompletionConfig, ToolDefinition (this file)
-//   stream.rs    — StreamEvent and StopReason enums
-//   anthropic.rs — Anthropic Messages API implementation
-//   openai.rs    — OpenAI Chat Completions API (also Codex, Ollama, etc.)
+//   mod.rs         — LlmClient trait, CompletionConfig, ToolDefinition,
+//                    shared utilities (format_prompt, resolve_binary_path)
+//   stream.rs      — StreamEvent and StopReason enums
+//   anthropic.rs   — Anthropic Messages API implementation
+//   openai.rs      — OpenAI Chat Completions API (GPT, Ollama, etc.)
 //   claude_code.rs — Claude Code CLI subprocess (no API key needed)
+//   codex.rs       — Codex CLI subprocess (no API key needed)
 //
 // Why a trait?
 //   Dyson is designed to support multiple LLM providers.  The trait boundary
@@ -43,7 +45,7 @@ use futures::Stream;
 
 use crate::error::Result;
 use crate::llm::stream::StreamEvent;
-use crate::message::Message;
+use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
 // CompletionConfig
@@ -222,5 +224,208 @@ pub fn create_client(
                 dangerous_no_sandbox,
             ),
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared utilities for CLI-subprocess-based clients
+// ---------------------------------------------------------------------------
+
+/// Resolve the absolute path to a CLI binary by name.
+///
+/// Uses `which <name>` to find it on the current PATH.  This is important
+/// for service environments (systemd, launchd) where PATH is minimal and
+/// won't include npm global bin directories.  By resolving at startup
+/// (which happens before daemonizing or during the first run), we capture
+/// the full path while the user's PATH is still available.
+///
+/// Falls back to the bare binary name if `which` fails (lets the OS search
+/// PATH at spawn time).
+pub(crate) fn resolve_binary_path(name: &str) -> String {
+    std::process::Command::new("which")
+        .arg(name)
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    tracing::info!(binary = name, path = path, "resolved binary path");
+                    return Some(path);
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| {
+            tracing::warn!(binary = name, "could not resolve path — falling back to bare name");
+            name.to_string()
+        })
+}
+
+/// Format a conversation history and tool definitions into a single text
+/// prompt for CLI-subprocess-based clients.
+///
+/// CLI agents like `claude -p` and `codex exec` take a single text prompt
+/// rather than structured message arrays.  This function converts the
+/// conversation history into a readable text format.
+///
+/// For single-turn conversations (the common case), the prompt is just
+/// the user's latest message.  For multi-turn conversations with tool
+/// results, the full history is included so the model has context.
+///
+/// ## Format
+///
+/// ```text
+/// [Previous conversation:]
+///
+/// User: What files are here?
+///
+/// Assistant: Let me check.
+/// [Used tool: bash with input: {"command":"ls"}]
+///
+/// Tool result (bash): Cargo.toml
+/// src/
+///
+/// Assistant: There are 2 items.
+///
+/// [Current message:]
+///
+/// Tell me more about Cargo.toml
+/// ```
+pub(crate) fn format_prompt(messages: &[Message], tools: &[ToolDefinition]) -> String {
+    // Single user message with no history and no tools — just return the text.
+    if messages.len() == 1 && tools.is_empty() {
+        if let Some(ContentBlock::Text { text }) = messages[0].content.first() {
+            return text.clone();
+        }
+    }
+
+    let mut prompt = String::new();
+
+    // Multi-turn: format the history.
+    if messages.len() > 1 {
+        prompt.push_str("[Previous conversation:]\n\n");
+
+        for (i, msg) in messages.iter().enumerate() {
+            // Skip the last message — we'll add it separately below.
+            if i == messages.len() - 1 {
+                break;
+            }
+
+            let role_label = match msg.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+            };
+
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text { text } => {
+                        prompt.push_str(&format!("{role_label}: {text}\n\n"));
+                    }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        prompt.push_str(&format!(
+                            "[Used tool: {name} with input: {input}]\n\n"
+                        ));
+                    }
+                    ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } => {
+                        let label = if *is_error { "Tool error" } else { "Tool result" };
+                        prompt.push_str(&format!("{label}: {content}\n\n"));
+                    }
+                }
+            }
+        }
+
+        prompt.push_str("[Current message:]\n\n");
+    }
+
+    // Add the last (current) message.
+    if let Some(msg) = messages.last() {
+        for block in &msg.content {
+            if let ContentBlock::Text { text } = block {
+                prompt.push_str(text);
+            }
+        }
+    }
+
+    // Append tool definitions if any.
+    if !tools.is_empty() {
+        prompt.push_str("\n\n[Available tools:]\n");
+        for tool in tools {
+            prompt.push_str(&format!(
+                "\n- **{}**: {}\n  Input schema: {}\n",
+                tool.name, tool.description, tool.input_schema
+            ));
+        }
+    }
+
+    prompt
+}
+
+// ===========================================================================
+// Tests for shared utilities
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // format_prompt tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn single_message_is_just_text() {
+        let messages = vec![Message::user("hello")];
+        let prompt = format_prompt(&messages, &[]);
+        assert_eq!(prompt, "hello");
+    }
+
+    #[test]
+    fn multi_turn_includes_history() {
+        let messages = vec![
+            Message::user("what files?"),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "Let me check.".into(),
+            }]),
+            Message::user("thanks"),
+        ];
+        let prompt = format_prompt(&messages, &[]);
+        assert!(prompt.contains("[Previous conversation:]"));
+        assert!(prompt.contains("User: what files?"));
+        assert!(prompt.contains("Assistant: Let me check."));
+        assert!(prompt.contains("[Current message:]"));
+        assert!(prompt.contains("thanks"));
+    }
+
+    #[test]
+    fn tool_results_in_history() {
+        let messages = vec![
+            Message::user("list files"),
+            Message::assistant(vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            }]),
+            Message::tool_result("call_1", "Cargo.toml\nsrc/", false),
+            Message::user("nice"),
+        ];
+        let prompt = format_prompt(&messages, &[]);
+        assert!(prompt.contains("[Used tool: bash"));
+        assert!(prompt.contains("Tool result: Cargo.toml"));
+    }
+
+    #[test]
+    fn tools_appended_to_prompt() {
+        let messages = vec![Message::user("help")];
+        let tools = vec![ToolDefinition {
+            name: "bash".into(),
+            description: "Run commands".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+        let prompt = format_prompt(&messages, &tools);
+        assert!(prompt.contains("[Available tools:]"));
+        assert!(prompt.contains("**bash**"));
     }
 }

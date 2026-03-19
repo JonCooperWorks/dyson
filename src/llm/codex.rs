@@ -75,7 +75,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Stream;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::RwLock;
 
 use crate::error::{DysonError, Result};
@@ -139,7 +139,7 @@ impl CodexClient {
     ) -> Self {
         let resolved = match codex_path {
             Some(p) => p.to_string(),
-            None => resolve_codex_path(),
+            None => super::resolve_binary_path("codex"),
         };
 
         Self {
@@ -148,28 +148,6 @@ impl CodexClient {
             dangerous_no_sandbox,
         }
     }
-}
-
-/// Resolve the absolute path to the `codex` binary.
-fn resolve_codex_path() -> String {
-    std::process::Command::new("which")
-        .arg("codex")
-        .output()
-        .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    tracing::info!(path = path, "resolved codex binary path");
-                    return Some(path);
-                }
-            }
-            None
-        })
-        .unwrap_or_else(|| {
-            tracing::warn!("could not resolve codex path — falling back to 'codex'");
-            "codex".to_string()
-        })
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +170,7 @@ impl LlmClient for CodexClient {
         config: &CompletionConfig,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
         // Format conversation history into a single prompt string.
-        let prompt = super::claude_code::format_prompt(messages, tools);
+        let prompt = super::format_prompt(messages, tools);
 
         tracing::debug!(
             model = config.model,
@@ -233,10 +211,19 @@ impl LlmClient for CodexClient {
         let mut cmd = tokio::process::Command::new(&self.codex_path);
         cmd.arg("exec")
             .arg("--json")
-            .arg("--dangerously-bypass-approvals-and-sandbox")
             .arg("--ephemeral")
-            .arg("--skip-git-repo-check")
-            .arg("--model")
+            .arg("--skip-git-repo-check");
+
+        // Only bypass all approvals and sandboxing when explicitly requested
+        // via --dangerous-no-sandbox.  Otherwise use --full-auto which keeps
+        // Codex's workspace sandbox active but skips most approval prompts.
+        if self.dangerous_no_sandbox {
+            cmd.arg("--dangerously-bypass-approvals-and-sandbox");
+        } else {
+            cmd.arg("--full-auto");
+        }
+
+        cmd.arg("--model")
             .arg(&config.model);
 
         // Inject system prompt via developer_instructions config override.

@@ -145,7 +145,7 @@ use tokio::sync::RwLock;
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
-use crate::message::{ContentBlock, Message, Role};
+use crate::message::Message;
 use crate::skill::mcp::serve::McpHttpServer;
 use crate::workspace::Workspace;
 
@@ -244,7 +244,7 @@ impl ClaudeCodeClient {
     ) -> Self {
         let resolved = match claude_path {
             Some(p) => p.to_string(),
-            None => resolve_claude_path(),
+            None => super::resolve_binary_path("claude"),
         };
 
         Self {
@@ -254,34 +254,6 @@ impl ClaudeCodeClient {
             dangerous_no_sandbox,
         }
     }
-}
-
-/// Resolve the absolute path to the `claude` binary.
-///
-/// Uses `which claude` to find it on the current PATH.  This is important
-/// for service environments (systemd, launchd) where PATH is minimal and
-/// won't include npm global bin directories.  By resolving at startup
-/// (which happens before daemonizing or during the first run), we capture
-/// the full path while the user's PATH is still available.
-fn resolve_claude_path() -> String {
-    std::process::Command::new("which")
-        .arg("claude")
-        .output()
-        .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    tracing::info!(path = path, "resolved claude binary path");
-                    return Some(path);
-                }
-            }
-            None
-        })
-        .unwrap_or_else(|| {
-            tracing::warn!("could not resolve claude path — falling back to 'claude'");
-            "claude".to_string()
-        })
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +310,7 @@ impl LlmClient for ClaudeCodeClient {
         //
         // For single-turn conversations (most common), this is just the
         // user's message.  For multi-turn, we include the full history.
-        let prompt = format_prompt(messages, tools);
+        let prompt = super::format_prompt(messages, tools);
 
         tracing::debug!(
             model = config.model,
@@ -928,124 +900,6 @@ impl StreamParserState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Prompt formatting — convert structured messages into a text prompt.
-// ---------------------------------------------------------------------------
-
-/// Format the conversation history and tool definitions into a single
-/// text prompt for the `claude -p` command.
-///
-/// ## Why text formatting instead of structured messages?
-///
-/// The `claude -p` command takes a single text prompt via stdin.  It
-/// doesn't accept structured message arrays like the API does.  So we
-/// format the conversation history into a readable text format.
-///
-/// For single-turn conversations (the common case), the prompt is just
-/// the user's latest message.  For multi-turn conversations with tool
-/// results, we include the full history so the model has context.
-///
-/// ## Tool definitions
-///
-/// When tools are available, we append their definitions to the prompt
-/// so the model knows what tools exist.  However, since the underlying
-/// API call doesn't include a `tools` parameter, the model cannot emit
-/// structured `tool_use` blocks.  This is a known limitation of the
-/// Claude Code backend.
-///
-/// ## Format
-///
-/// ```text
-/// [Previous conversation:]
-///
-/// User: What files are here?
-///
-/// Assistant: Let me check.
-/// [Used tool: bash with input: {"command":"ls"}]
-///
-/// Tool result (bash): Cargo.toml
-/// src/
-///
-/// Assistant: There are 2 items.
-///
-/// [Current message:]
-///
-/// Tell me more about Cargo.toml
-/// ```
-pub(crate) fn format_prompt(messages: &[Message], tools: &[ToolDefinition]) -> String {
-    // Single user message with no history and no tools — just return the text.
-    if messages.len() == 1 && tools.is_empty() {
-        if let Some(ContentBlock::Text { text }) = messages[0].content.first() {
-            return text.clone();
-        }
-    }
-
-    let mut prompt = String::new();
-
-    // Multi-turn: format the history.
-    if messages.len() > 1 {
-        prompt.push_str("[Previous conversation:]\n\n");
-
-        for (i, msg) in messages.iter().enumerate() {
-            // Skip the last message — we'll add it separately below.
-            if i == messages.len() - 1 {
-                break;
-            }
-
-            let role_label = match msg.role {
-                Role::User => "User",
-                Role::Assistant => "Assistant",
-            };
-
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text } => {
-                        prompt.push_str(&format!("{role_label}: {text}\n\n"));
-                    }
-                    ContentBlock::ToolUse { name, input, .. } => {
-                        prompt.push_str(&format!(
-                            "[Used tool: {name} with input: {input}]\n\n"
-                        ));
-                    }
-                    ContentBlock::ToolResult {
-                        content, is_error, ..
-                    } => {
-                        let label = if *is_error { "Tool error" } else { "Tool result" };
-                        prompt.push_str(&format!("{label}: {content}\n\n"));
-                    }
-                }
-            }
-        }
-
-        prompt.push_str("[Current message:]\n\n");
-    }
-
-    // Add the last (current) message.
-    if let Some(msg) = messages.last() {
-        for block in &msg.content {
-            if let ContentBlock::Text { text } = block {
-                prompt.push_str(text);
-            }
-        }
-    }
-
-    // Append tool definitions if any.
-    //
-    // This is a best-effort approach — the model will see the tools
-    // described in text but can't emit structured tool_use blocks.
-    if !tools.is_empty() {
-        prompt.push_str("\n\n[Available tools:]\n");
-        for tool in tools {
-            prompt.push_str(&format!(
-                "\n- **{}**: {}\n  Input schema: {}\n",
-                tool.name, tool.description, tool.input_schema
-            ));
-        }
-    }
-
-    prompt
-}
-
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -1053,65 +907,6 @@ pub(crate) fn format_prompt(messages: &[Message], tools: &[ToolDefinition]) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-
-    // -----------------------------------------------------------------------
-    // Prompt formatting tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn single_message_is_just_text() {
-        let messages = vec![Message::user("hello")];
-        let prompt = format_prompt(&messages, &[]);
-        assert_eq!(prompt, "hello");
-    }
-
-    #[test]
-    fn multi_turn_includes_history() {
-        let messages = vec![
-            Message::user("what files?"),
-            Message::assistant(vec![ContentBlock::Text {
-                text: "Let me check.".into(),
-            }]),
-            Message::user("thanks"),
-        ];
-        let prompt = format_prompt(&messages, &[]);
-        assert!(prompt.contains("[Previous conversation:]"));
-        assert!(prompt.contains("User: what files?"));
-        assert!(prompt.contains("Assistant: Let me check."));
-        assert!(prompt.contains("[Current message:]"));
-        assert!(prompt.contains("thanks"));
-    }
-
-    #[test]
-    fn tool_results_in_history() {
-        let messages = vec![
-            Message::user("list files"),
-            Message::assistant(vec![ContentBlock::ToolUse {
-                id: "call_1".into(),
-                name: "bash".into(),
-                input: serde_json::json!({"command": "ls"}),
-            }]),
-            Message::tool_result("call_1", "Cargo.toml\nsrc/", false),
-            Message::user("nice"),
-        ];
-        let prompt = format_prompt(&messages, &[]);
-        assert!(prompt.contains("[Used tool: bash"));
-        assert!(prompt.contains("Tool result: Cargo.toml"));
-    }
-
-    #[test]
-    fn tools_appended_to_prompt() {
-        let messages = vec![Message::user("help")];
-        let tools = vec![ToolDefinition {
-            name: "bash".into(),
-            description: "Run commands".into(),
-            input_schema: serde_json::json!({"type": "object"}),
-        }];
-        let prompt = format_prompt(&messages, &tools);
-        assert!(prompt.contains("[Available tools:]"));
-        assert!(prompt.contains("**bash**"));
-    }
 
     // -----------------------------------------------------------------------
     // JSON event parsing tests
