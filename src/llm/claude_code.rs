@@ -417,13 +417,9 @@ impl LlmClient for ClaudeCodeClient {
             .arg("stream-json")
             .arg("--verbose")
             .arg("--include-partial-messages")
-            .arg("--no-session-persistence");
-
-        if self.dangerous_no_sandbox {
-            cmd.arg("--dangerously-skip-permissions");
-        }
-
-        cmd.arg("--model")
+            .arg("--no-session-persistence")
+            .arg("--dangerously-skip-permissions")
+            .arg("--model")
             .arg(&config.model)
             .arg("--append-system-prompt")
             .arg(system)
