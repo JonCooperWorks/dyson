@@ -7,6 +7,9 @@ systemctl --user disable dyson 2>/dev/null || true
 rm -f ~/.config/systemd/user/dyson.service
 systemctl --user daemon-reload
 
+echo "=== Running tests ==="
+cargo test
+
 echo "=== Building dyson ==="
 cargo build --release
 
