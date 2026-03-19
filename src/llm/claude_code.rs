@@ -648,20 +648,27 @@ impl LlmClient for ClaudeCodeClient {
                     "result" => {
                         if !completed {
                             completed = true;
-                            let stop_reason = match json["stop_reason"].as_str() {
-                                Some("end_turn") => StopReason::EndTurn,
-                                Some("tool_use") => StopReason::ToolUse,
-                                Some("max_tokens") => StopReason::MaxTokens,
-                                _ => StopReason::EndTurn,
-                            };
-                            if let Some(cost) = json["total_cost_usd"].as_f64() {
-                                tracing::info!(
-                                    cost_usd = cost,
-                                    duration_ms = json["duration_ms"].as_u64().unwrap_or(0),
-                                    "claude CLI turn complete"
-                                );
+                            // Check if this is an error result from Claude Code.
+                            if json["is_error"].as_bool() == Some(true) {
+                                let error_msg = json["result"].as_str().unwrap_or("unknown error");
+                                tracing::error!(error = error_msg, "claude CLI returned error result");
+                                yield Err(DysonError::Llm(format!("Claude Code error: {error_msg}")));
+                            } else {
+                                let stop_reason = match json["stop_reason"].as_str() {
+                                    Some("end_turn") => StopReason::EndTurn,
+                                    Some("tool_use") => StopReason::ToolUse,
+                                    Some("max_tokens") => StopReason::MaxTokens,
+                                    _ => StopReason::EndTurn,
+                                };
+                                if let Some(cost) = json["total_cost_usd"].as_f64() {
+                                    tracing::info!(
+                                        cost_usd = cost,
+                                        duration_ms = json["duration_ms"].as_u64().unwrap_or(0),
+                                        "claude CLI turn complete"
+                                    );
+                                }
+                                yield Ok(StreamEvent::MessageComplete { stop_reason });
                             }
-                            yield Ok(StreamEvent::MessageComplete { stop_reason });
                         }
                     }
 
@@ -717,9 +724,10 @@ impl LlmClient for ClaudeCodeClient {
                                 }
                             }
                         }
-                        // Reset for the next turn (Claude Code may do
-                        // multiple turns with tool calls).
+                        // Clear per-turn state for the next turn.
                         got_stream_deltas = false;
+                        thinking_blocks.clear();
+                        tool_buffers.clear();
                     }
 
                     // user — tool results from Claude Code's internal loop.
@@ -732,11 +740,12 @@ impl LlmClient for ClaudeCodeClient {
             }
 
             // If we never got a result event (process killed, crash),
-            // emit a MessageComplete so the stream handler doesn't hang.
+            // emit an error so the caller knows something went wrong.
             if !completed {
-                yield Ok(StreamEvent::MessageComplete {
-                    stop_reason: StopReason::EndTurn,
-                });
+                tracing::error!("claude CLI exited without result event");
+                yield Err(DysonError::Llm(
+                    "Claude Code process exited without producing a result".to_string()
+                ));
             }
         };
 
@@ -754,6 +763,169 @@ struct ToolUseBuffer {
     id: String,
     name: String,
     json: String,
+}
+
+// ---------------------------------------------------------------------------
+// StreamParserState — testable line-parsing logic (mirrors the inline stream).
+// ---------------------------------------------------------------------------
+
+/// Mutable state for parsing Claude Code's stream-json output line by line.
+///
+/// This duplicates the parsing logic from `stream()` into a standalone struct
+/// so we can unit test it without spawning a subprocess.
+#[cfg(test)]
+struct StreamParserState {
+    completed: bool,
+    got_stream_deltas: bool,
+    tool_buffers: HashMap<usize, ToolUseBuffer>,
+    thinking_blocks: std::collections::HashSet<usize>,
+}
+
+#[cfg(test)]
+impl StreamParserState {
+    fn new() -> Self {
+        Self {
+            completed: false,
+            got_stream_deltas: false,
+            tool_buffers: HashMap::new(),
+            thinking_blocks: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Parse one JSON line. Returns events to yield (may be empty).
+    fn parse_line(&mut self, line: &str) -> Vec<Result<StreamEvent>> {
+        let mut events = Vec::new();
+
+        let json: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => return events,
+        };
+
+        let event_type = json["type"].as_str().unwrap_or("");
+
+        match event_type {
+            "stream_event" => {
+                let inner = &json["event"];
+                let inner_type = inner["type"].as_str().unwrap_or("");
+
+                match inner_type {
+                    "content_block_delta" => {
+                        let delta = &inner["delta"];
+                        match delta["type"].as_str().unwrap_or("") {
+                            "thinking_delta" => {
+                                if let Some(text) = delta["thinking"].as_str() {
+                                    events.push(Ok(StreamEvent::ThinkingDelta(text.to_string())));
+                                }
+                            }
+                            "text_delta" => {
+                                if let Some(text) = delta["text"].as_str() {
+                                    let idx = inner["index"].as_u64().unwrap_or(0) as usize;
+                                    if self.thinking_blocks.contains(&idx) {
+                                        events.push(Ok(StreamEvent::ThinkingDelta(text.to_string())));
+                                    } else {
+                                        self.got_stream_deltas = true;
+                                        events.push(Ok(StreamEvent::TextDelta(text.to_string())));
+                                    }
+                                }
+                            }
+                            "input_json_delta" => {
+                                if let Some(partial) = delta["partial_json"].as_str() {
+                                    let idx = inner["index"].as_u64().unwrap_or(0) as usize;
+                                    if let Some(buf) = self.tool_buffers.get_mut(&idx) {
+                                        buf.json.push_str(partial);
+                                    }
+                                    events.push(Ok(StreamEvent::ToolUseInputDelta(partial.to_string())));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    "content_block_start" => {
+                        let block = &inner["content_block"];
+                        let block_type = block["type"].as_str().unwrap_or("");
+                        let idx = inner["index"].as_u64().unwrap_or(0) as usize;
+
+                        if block_type == "tool_use" {
+                            let id = block["id"].as_str().unwrap_or("").to_string();
+                            let name = block["name"].as_str().unwrap_or("").to_string();
+                            self.tool_buffers.insert(idx, ToolUseBuffer {
+                                id: id.clone(), name: name.clone(), json: String::new(),
+                            });
+                            events.push(Ok(StreamEvent::ToolUseStart { id, name }));
+                        } else if block_type == "thinking" {
+                            self.thinking_blocks.insert(idx);
+                        }
+                    }
+
+                    "content_block_stop" => {
+                        let idx = inner["index"].as_u64().unwrap_or(0) as usize;
+                        if let Some(buf) = self.tool_buffers.remove(&idx) {
+                            let input = serde_json::from_str(&buf.json)
+                                .unwrap_or(serde_json::json!({}));
+                            events.push(Ok(StreamEvent::ToolUseComplete {
+                                id: buf.id, name: buf.name, input,
+                            }));
+                        }
+                    }
+
+                    _ => {}
+                }
+            }
+
+            "result" => {
+                if !self.completed {
+                    self.completed = true;
+                    if json["is_error"].as_bool() == Some(true) {
+                        let error_msg = json["result"].as_str().unwrap_or("unknown error");
+                        events.push(Err(DysonError::Llm(format!("Claude Code error: {error_msg}"))));
+                    } else {
+                        let stop_reason = match json["stop_reason"].as_str() {
+                            Some("end_turn") => StopReason::EndTurn,
+                            Some("tool_use") => StopReason::ToolUse,
+                            Some("max_tokens") => StopReason::MaxTokens,
+                            _ => StopReason::EndTurn,
+                        };
+                        events.push(Ok(StreamEvent::MessageComplete { stop_reason }));
+                    }
+                }
+            }
+
+            "assistant" => {
+                if !self.got_stream_deltas {
+                    if let Some(content) = json["message"]["content"].as_array() {
+                        for block in content {
+                            if block["type"].as_str() == Some("text") {
+                                if let Some(text) = block["text"].as_str() {
+                                    if !text.is_empty() {
+                                        events.push(Ok(StreamEvent::TextDelta(text.to_string())));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                self.got_stream_deltas = false;
+                self.thinking_blocks.clear();
+                self.tool_buffers.clear();
+            }
+
+            _ => {}
+        }
+
+        events
+    }
+
+    /// Called after EOF.
+    fn finalize(&mut self) -> Vec<Result<StreamEvent>> {
+        let mut events = Vec::new();
+        if !self.completed {
+            events.push(Err(DysonError::Llm(
+                "Claude Code process exited without producing a result".to_string(),
+            )));
+        }
+        events
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -983,5 +1155,104 @@ mod tests {
 
         assert_eq!(json["type"].as_str().unwrap(), "system");
         assert_eq!(json["model"].as_str().unwrap(), "claude-sonnet-4-6");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bug reproduction tests (StreamParserState)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn error_result_yields_error() {
+        let mut state = StreamParserState::new();
+        let events = state.parse_line(
+            r#"{"type":"result","subtype":"error","is_error":true,"result":"Rate limit exceeded","duration_ms":100,"total_cost_usd":0.0}"#
+        );
+        assert_eq!(events.len(), 1);
+        assert!(events[0].is_err(), "error result should yield Err, not Ok(MessageComplete)");
+        let err_msg = format!("{}", events[0].as_ref().unwrap_err());
+        assert!(err_msg.contains("Rate limit exceeded"));
+    }
+
+    #[test]
+    fn success_result_yields_message_complete() {
+        let mut state = StreamParserState::new();
+        let events = state.parse_line(
+            r#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","total_cost_usd":0.01,"duration_ms":1234}"#
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Ok(StreamEvent::MessageComplete { stop_reason }) => {
+                assert_eq!(*stop_reason, StopReason::EndTurn);
+            }
+            other => panic!("expected Ok(MessageComplete), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_result_event_yields_error_on_finalize() {
+        let mut state = StreamParserState::new();
+        state.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}}"#
+        );
+        let final_events = state.finalize();
+        assert_eq!(final_events.len(), 1);
+        assert!(final_events[0].is_err(), "finalize without result should yield Err");
+    }
+
+    #[test]
+    fn finalize_after_result_produces_nothing() {
+        let mut state = StreamParserState::new();
+        state.parse_line(
+            r#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","total_cost_usd":0.0,"duration_ms":0}"#
+        );
+        let final_events = state.finalize();
+        assert!(final_events.is_empty());
+    }
+
+    #[test]
+    fn thinking_blocks_cleared_between_turns() {
+        let mut state = StreamParserState::new();
+
+        // Turn 1: index 0 is a thinking block.
+        state.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}}"#
+        );
+        let events = state.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"reasoning..."}}}"#
+        );
+        match &events[0] {
+            Ok(StreamEvent::ThinkingDelta(t)) => assert_eq!(t, "reasoning..."),
+            other => panic!("turn 1: expected ThinkingDelta, got: {other:?}"),
+        }
+
+        // Turn boundary.
+        state.parse_line(r#"{"type":"assistant","message":{"content":[]}}"#);
+
+        // Turn 2: index 0 is now a regular text block.
+        state.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}"#
+        );
+        let events = state.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"visible answer"}}}"#
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Ok(StreamEvent::TextDelta(t)) => assert_eq!(t, "visible answer"),
+            other => panic!("turn 2: expected TextDelta, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_buffers_cleared_between_turns() {
+        let mut state = StreamParserState::new();
+
+        state.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_1","name":"bash"}}}"#
+        );
+        assert!(state.tool_buffers.contains_key(&1));
+
+        state.parse_line(r#"{"type":"assistant","message":{"content":[]}}"#);
+
+        assert!(state.tool_buffers.is_empty(), "tool_buffers should be cleared on turn boundary");
     }
 }
