@@ -189,6 +189,11 @@ impl Workspace {
         entry.push_str(content);
     }
 
+    /// Get today's date as YYYY-MM-DD.
+    pub fn today_date() -> String {
+        chrono_today()
+    }
+
     /// Get today's journal file name.
     pub fn today_journal() -> String {
         let now = chrono_today();

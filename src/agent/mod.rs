@@ -203,6 +203,11 @@ impl Agent {
         })
     }
 
+    /// Clear conversation history, starting fresh.
+    pub fn clear(&mut self) {
+        self.messages.clear();
+    }
+
     /// Run the agent loop for a single user message.
     ///
     /// Appends the user message to the conversation history, then loops:

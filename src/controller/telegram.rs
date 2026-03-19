@@ -38,10 +38,13 @@
 //   teloxide call there.  This is the correct bridge pattern.
 // ===========================================================================
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use teloxide::prelude::*;
 use teloxide::types::{ChatId, MessageId};
+use tokio::sync::Mutex;
 
 use serde::Deserialize;
 
@@ -212,6 +215,12 @@ impl super::Controller for TelegramController {
             workspace_path.as_deref(),
         );
 
+        // Per-chat agents — persistent conversation context.
+        // Each chat gets its own agent that remembers previous messages.
+        // /clear resets a chat's agent.
+        let agents: Arc<Mutex<HashMap<i64, crate::agent::Agent>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
         // Manual polling loop instead of teloxide::repl.
         // teloxide::repl swallows SIGINT and can't be Ctrl-C'd.
         let mut offset: i64 = 0;
@@ -224,7 +233,9 @@ impl super::Controller for TelegramController {
                         current_settings = s;
                         current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
                     }
-                    tracing::info!("config/workspace reloaded");
+                    // Clear all agents so they pick up new config.
+                    agents.lock().await.clear();
+                    tracing::info!("config/workspace reloaded — agents reset");
                 }
             }
             // Poll for updates with a timeout, racing against Ctrl-C.
@@ -273,6 +284,41 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
+                // /clear — reset conversation context for this chat.
+                if text == "/clear" {
+                    agents.lock().await.remove(&chat_id.0);
+                    let _ = bot.send_message(chat_id, "Context cleared.").await;
+                    tracing::info!(chat_id = chat_id.0, "conversation cleared");
+                    continue;
+                }
+
+                // /memory — save a note to the workspace memory.
+                if let Some(note) = text.strip_prefix("/memory ") {
+                    let note = note.trim();
+                    if note.is_empty() {
+                        let _ = bot.send_message(chat_id, "Usage: /memory <note>").await;
+                        continue;
+                    }
+                    match save_memory_note(
+                        &current_settings,
+                        note,
+                    ) {
+                        Ok(()) => {
+                            let _ = bot.send_message(chat_id, "Saved to memory.").await;
+                            tracing::info!(chat_id = chat_id.0, "memory note saved");
+                        }
+                        Err(e) => {
+                            let _ = bot.send_message(chat_id, format!("Error: {e}")).await;
+                            tracing::error!(error = %e, "failed to save memory note");
+                        }
+                    }
+                    continue;
+                }
+                if text == "/memory" {
+                    let _ = bot.send_message(chat_id, "Usage: /memory <note>").await;
+                    continue;
+                }
+
                 tracing::info!(chat_id = chat_id.0, "telegram message received");
 
                 // Spawn the agent run in a background task so the polling
@@ -282,17 +328,26 @@ impl super::Controller for TelegramController {
                 let bot_clone = bot.clone();
                 let settings_clone = current_settings.clone();
                 let prompt_clone = controller_prompt.clone();
+                let agents_clone = agents.clone();
                 tokio::spawn(async move {
-                    let mut agent = match crate::controller::build_agent(
-                        &settings_clone,
-                        prompt_clone.as_deref(),
-                    ).await {
-                        Ok(a) => a,
-                        Err(e) => {
-                            tracing::error!(error = %e, "failed to create agent");
-                            return;
+                    // Get or create the per-chat agent.
+                    let mut agents_map = agents_clone.lock().await;
+                    if !agents_map.contains_key(&chat_id.0) {
+                        match crate::controller::build_agent(
+                            &settings_clone,
+                            prompt_clone.as_deref(),
+                        ).await {
+                            Ok(agent) => {
+                                agents_map.insert(chat_id.0, agent);
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "failed to create agent");
+                                let _ = bot_clone.send_message(chat_id, format!("Error: {e}")).await;
+                                return;
+                            }
                         }
-                    };
+                    }
+                    let agent = agents_map.get_mut(&chat_id.0).unwrap();
 
                     let mut output = TelegramOutput::new(bot_clone.clone(), chat_id);
 
@@ -300,12 +355,33 @@ impl super::Controller for TelegramController {
                         tracing::error!(error = %e, "agent run failed");
                         let _ = bot_clone.send_message(chat_id, format!("Error: {e}")).await;
                     }
+
+                    // Drop the lock before the task ends.
+                    drop(agents_map);
                 });
             }
         }
 
         Ok(())
     }
+}
+
+/// Save a note to the workspace MEMORY.md file.
+fn save_memory_note(
+    settings: &Settings,
+    note: &str,
+) -> crate::Result<()> {
+    let mut workspace = crate::persistence::Workspace::load_default(
+        settings.workspace_path.as_deref(),
+    )?;
+
+    let today = crate::persistence::Workspace::today_date();
+    let entry = format!("\n- [{today}] {note}");
+
+    workspace.append("MEMORY.md", &entry);
+    workspace.save()?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
