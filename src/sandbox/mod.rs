@@ -48,6 +48,7 @@
 // the sandbox quietly sends it to S3.  The LLM doesn't know or care.
 // ===========================================================================
 
+pub mod composite;
 pub mod docker;
 pub mod no_sandbox;
 
