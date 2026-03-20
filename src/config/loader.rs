@@ -213,7 +213,9 @@ pub fn load_settings(path: Option<&Path>) -> Result<Settings> {
         Some(p) => {
             let content = read_config_file(p)?;
             let mut raw: serde_json::Value = serde_json::from_str(&content)?;
-            crate::config::migrate::migrate(&mut raw)?;
+            if crate::config::migrate::migrate(&mut raw)? {
+                write_back_config(p, &raw);
+            }
             Some(serde_json::from_value::<JsonRoot>(raw)?)
         }
         None => try_discover_config()?,
@@ -254,24 +256,52 @@ fn try_discover_config() -> Result<Option<JsonRoot>> {
     // 1. Current directory.
     let cwd_path = Path::new("dyson.json");
     if cwd_path.exists() {
-        let content = read_config_file(cwd_path)?;
-        let mut raw: serde_json::Value = serde_json::from_str(&content)?;
-        crate::config::migrate::migrate(&mut raw)?;
-        return Ok(Some(serde_json::from_value::<JsonRoot>(raw)?));
+        return load_and_migrate(cwd_path);
     }
 
     // 2. ~/.config/dyson/dyson.json
     if let Some(home) = std::env::var_os("HOME") {
         let global_path = Path::new(&home).join(".config/dyson/dyson.json");
         if global_path.exists() {
-            let content = read_config_file(&global_path)?;
-            let mut raw: serde_json::Value = serde_json::from_str(&content)?;
-            crate::config::migrate::migrate(&mut raw)?;
-            return Ok(Some(serde_json::from_value::<JsonRoot>(raw)?));
+            return load_and_migrate(&global_path);
         }
     }
 
     Ok(None)
+}
+
+/// Read a config file, migrate it, write back if changed, and parse.
+fn load_and_migrate(path: &Path) -> Result<Option<JsonRoot>> {
+    let content = read_config_file(path)?;
+    let mut raw: serde_json::Value = serde_json::from_str(&content)?;
+    if crate::config::migrate::migrate(&mut raw)? {
+        write_back_config(path, &raw);
+    }
+    Ok(Some(serde_json::from_value::<JsonRoot>(raw)?))
+}
+
+/// Best-effort write migrated config back to disk.
+///
+/// Logs a warning on failure but does not propagate errors — the in-memory
+/// migration already succeeded, so the runtime can proceed.  The file will
+/// be migrated again on next load if write-back fails.
+fn write_back_config(path: &Path, value: &serde_json::Value) {
+    match serde_json::to_string_pretty(value) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(path, format!("{json}\n")) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to write migrated config back to disk"
+                );
+            } else {
+                tracing::info!(path = %path.display(), "wrote migrated config to disk");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to serialize migrated config");
+        }
+    }
 }
 
 /// Convert JSON into runtime Settings.
