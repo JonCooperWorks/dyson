@@ -147,7 +147,7 @@ use tokio::sync::RwLock;
 
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
+use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call};
 use crate::message::Message;
 use crate::skill::mcp::serve::McpHttpServer;
 use crate::workspace::Workspace;
@@ -517,7 +517,7 @@ impl LlmClient for ClaudeCodeClient {
 
             // Parser state for accumulating tool_use blocks from
             // stream_event content_block deltas (same as Anthropic SSE).
-            let mut tool_buffers: HashMap<usize, ToolUseBuffer> = HashMap::new();
+            let mut tool_buffers: HashMap<usize, ToolCallBuffer> = HashMap::new();
 
             // Track thinking block indices so their text_delta events
             // are emitted as ThinkingDelta instead of TextDelta.
@@ -613,7 +613,7 @@ impl LlmClient for ClaudeCodeClient {
                                 if block_type == "tool_use" {
                                     let id = block["id"].as_str().unwrap_or("").to_string();
                                     let name = block["name"].as_str().unwrap_or("").to_string();
-                                    tool_buffers.insert(idx, ToolUseBuffer {
+                                    tool_buffers.insert(idx, ToolCallBuffer {
                                         id: id.clone(), name: name.clone(), json: String::new(),
                                     });
                                     yield Ok(StreamEvent::ToolUseStart { id, name });
@@ -625,11 +625,7 @@ impl LlmClient for ClaudeCodeClient {
                             "content_block_stop" => {
                                 let idx = inner["index"].as_u64().unwrap_or(0) as usize;
                                 if let Some(buf) = tool_buffers.remove(&idx) {
-                                    let input = serde_json::from_str(&buf.json)
-                                        .unwrap_or(serde_json::json!({}));
-                                    yield Ok(StreamEvent::ToolUseComplete {
-                                        id: buf.id, name: buf.name, input,
-                                    });
+                                    yield finalize_tool_call(buf);
                                 }
                             }
 
@@ -750,16 +746,6 @@ impl LlmClient for ClaudeCodeClient {
 }
 
 // ---------------------------------------------------------------------------
-// ToolUseBuffer — accumulates partial tool_use JSON from stream events.
-// ---------------------------------------------------------------------------
-
-/// Same concept as in the Anthropic client — accumulates
-/// `input_json_delta` fragments for a tool_use content block.
-struct ToolUseBuffer {
-    id: String,
-    name: String,
-    json: String,
-}
 
 // ---------------------------------------------------------------------------
 // StreamParserState — testable line-parsing logic (mirrors the inline stream).
@@ -773,7 +759,7 @@ struct ToolUseBuffer {
 struct StreamParserState {
     completed: bool,
     got_stream_deltas: bool,
-    tool_buffers: HashMap<usize, ToolUseBuffer>,
+    tool_buffers: HashMap<usize, ToolCallBuffer>,
     thinking_blocks: std::collections::HashSet<usize>,
 }
 
@@ -845,7 +831,7 @@ impl StreamParserState {
                         if block_type == "tool_use" {
                             let id = block["id"].as_str().unwrap_or("").to_string();
                             let name = block["name"].as_str().unwrap_or("").to_string();
-                            self.tool_buffers.insert(idx, ToolUseBuffer {
+                            self.tool_buffers.insert(idx, ToolCallBuffer {
                                 id: id.clone(), name: name.clone(), json: String::new(),
                             });
                             events.push(Ok(StreamEvent::ToolUseStart { id, name }));
@@ -857,11 +843,7 @@ impl StreamParserState {
                     "content_block_stop" => {
                         let idx = inner["index"].as_u64().unwrap_or(0) as usize;
                         if let Some(buf) = self.tool_buffers.remove(&idx) {
-                            let input = serde_json::from_str(&buf.json)
-                                .unwrap_or(serde_json::json!({}));
-                            events.push(Ok(StreamEvent::ToolUseComplete {
-                                id: buf.id, name: buf.name, input,
-                            }));
+                            events.push(finalize_tool_call(buf));
                         }
                     }
 

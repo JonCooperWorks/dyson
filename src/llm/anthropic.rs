@@ -56,7 +56,7 @@
 //   The Anthropic API streams tool input as partial JSON strings.  We need
 //   to concatenate all the `input_json_delta` fragments for a given content
 //   block index, then parse the final JSON when `content_block_stop` arrives.
-//   We use a HashMap<usize, ToolUseBuffer> to track active tool calls by
+//   We use a HashMap<usize, ToolCallBuffer> to track active tool calls by
 //   their content block index.
 // ===========================================================================
 
@@ -71,8 +71,66 @@ use zeroize::Zeroize;
 
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
-use crate::message::Message;
+use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call};
+use crate::message::{ContentBlock, Message, Role};
+
+// ---------------------------------------------------------------------------
+// Anthropic message serialization
+// ---------------------------------------------------------------------------
+
+/// Serialize a `Message` to the JSON shape expected by the Anthropic Messages API.
+///
+/// Each LLM provider is responsible for converting from the internal `Message`
+/// type to its own wire format.  This is the Anthropic version — see
+/// `message_to_openai()` in `openai.rs` for the OpenAI equivalent.
+///
+/// Rather than annotating everything with serde renames and custom serializers,
+/// we build the JSON value directly.  This is explicit, easy to debug, and
+/// trivial to adapt when adding new providers.
+fn message_to_anthropic(msg: &Message) -> serde_json::Value {
+    let role_str = match msg.role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+    };
+
+    let content: Vec<serde_json::Value> = msg
+        .content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => {
+                serde_json::json!({
+                    "type": "text",
+                    "text": text,
+                })
+            }
+            ContentBlock::ToolUse { id, name, input } => {
+                serde_json::json!({
+                    "type": "tool_use",
+                    "id": id,
+                    "name": name,
+                    "input": input,
+                })
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                    "is_error": is_error,
+                })
+            }
+        })
+        .collect();
+
+    serde_json::json!({
+        "role": role_str,
+        "content": content,
+    })
+}
 
 // ---------------------------------------------------------------------------
 // AnthropicClient
@@ -146,7 +204,7 @@ impl LlmClient for AnthropicClient {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
         // -- Build the request body --
         let messages_json: Vec<serde_json::Value> =
-            messages.iter().map(|m| m.to_anthropic_value()).collect();
+            messages.iter().map(message_to_anthropic).collect();
 
         let tools_json: Vec<serde_json::Value> = tools
             .iter()
@@ -271,7 +329,7 @@ struct SseParser {
     /// When `content_block_start` arrives with type "tool_use", we insert
     /// an entry.  Each `input_json_delta` appends to the JSON string.
     /// On `content_block_stop`, we parse the JSON and emit ToolUseComplete.
-    tool_buffers: HashMap<usize, ToolUseBuffer>,
+    tool_buffers: HashMap<usize, ToolCallBuffer>,
 
     /// Content block indices that are "thinking" blocks.
     ///
@@ -280,14 +338,6 @@ struct SseParser {
     /// which blocks are thinking so we can emit ThinkingDelta instead of
     /// TextDelta for their content.
     thinking_blocks: std::collections::HashSet<usize>,
-}
-
-/// State for a single in-progress tool_use content block.
-struct ToolUseBuffer {
-    id: String,
-    name: String,
-    /// Accumulated partial JSON fragments from input_json_delta events.
-    json: String,
 }
 
 impl SseParser {
@@ -394,7 +444,7 @@ impl SseParser {
                     // Start accumulating JSON for this tool call.
                     self.tool_buffers.insert(
                         index,
-                        ToolUseBuffer {
+                        ToolCallBuffer {
                             id: id.clone(),
                             name: name.clone(),
                             json: String::new(),
@@ -458,28 +508,13 @@ impl SseParser {
                 let index = json["index"].as_u64()? as usize;
 
                 if let Some(buf) = self.tool_buffers.remove(&index) {
-                    // Parse the accumulated JSON fragments into a Value.
-                    let input = match serde_json::from_str(&buf.json) {
-                        Ok(v) => v,
+                    return match finalize_tool_call(buf) {
+                        Ok(event) => Some(event),
                         Err(e) => {
-                            tracing::error!(
-                                tool = buf.name,
-                                json = buf.json,
-                                error = %e,
-                                "failed to parse accumulated tool_use JSON"
-                            );
-                            // Return an empty object so the tool can still
-                            // be called (it will likely fail with a missing
-                            // field error, which is better than crashing).
-                            serde_json::json!({})
+                            tracing::error!(error = %e, "tool call finalization failed");
+                            None
                         }
                     };
-
-                    return Some(StreamEvent::ToolUseComplete {
-                        id: buf.id,
-                        name: buf.name,
-                        input,
-                    });
                 }
 
                 None
@@ -692,5 +727,44 @@ mod tests {
              data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"role\":\"assistant\"}}\n\n"
         );
         assert!(events.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // message_to_anthropic tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn anthropic_serialization_user() {
+        let msg = Message::user("hi");
+        let val = message_to_anthropic(&msg);
+        assert_eq!(val["role"], "user");
+        assert_eq!(val["content"][0]["type"], "text");
+        assert_eq!(val["content"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn anthropic_serialization_tool_use() {
+        let msg = Message::assistant(vec![ContentBlock::ToolUse {
+            id: "id_1".into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "echo test"}),
+        }]);
+        let val = message_to_anthropic(&msg);
+        assert_eq!(val["role"], "assistant");
+        assert_eq!(val["content"][0]["type"], "tool_use");
+        assert_eq!(val["content"][0]["id"], "id_1");
+        assert_eq!(val["content"][0]["name"], "bash");
+        assert_eq!(val["content"][0]["input"]["command"], "echo test");
+    }
+
+    #[test]
+    fn anthropic_serialization_tool_result() {
+        let msg = Message::tool_result("id_1", "output here", true);
+        let val = message_to_anthropic(&msg);
+        assert_eq!(val["role"], "user");
+        assert_eq!(val["content"][0]["type"], "tool_result");
+        assert_eq!(val["content"][0]["tool_use_id"], "id_1");
+        assert_eq!(val["content"][0]["content"], "output here");
+        assert_eq!(val["content"][0]["is_error"], true);
     }
 }
