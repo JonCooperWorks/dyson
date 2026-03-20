@@ -117,6 +117,12 @@ pub struct Agent {
 
     /// Shared tool context (working dir, env, cancellation).
     tool_context: ToolContext,
+
+    /// Number of user turns processed (for nudge timing).
+    turn_count: usize,
+
+    /// Inject a memory maintenance nudge every N turns.  0 = disabled.
+    nudge_interval: usize,
 }
 
 impl Agent {
@@ -135,6 +141,7 @@ impl Agent {
         skills: Vec<Box<dyn Skill>>,
         settings: &AgentSettings,
         workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+        nudge_interval: usize,
     ) -> Result<Self> {
         // -- Flatten tools from all skills --
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
@@ -202,6 +209,8 @@ impl Agent {
             max_iterations: settings.max_iterations,
             messages: Vec::new(),
             tool_context,
+            turn_count: 0,
+            nudge_interval,
         })
     }
 
@@ -251,6 +260,17 @@ impl Agent {
     pub async fn run(&mut self, user_input: &str, output: &mut dyn Output) -> Result<String> {
         // Append the user's message to history.
         self.messages.push(Message::user(user_input));
+        self.turn_count += 1;
+
+        // Inject a memory maintenance nudge every N turns.
+        if self.nudge_interval > 0 && self.turn_count % self.nudge_interval == 0 {
+            if let Some(ref ws) = self.tool_context.workspace {
+                let ws = ws.read().await;
+                let nudge = Self::build_nudge_message(&**ws);
+                drop(ws);
+                self.messages.push(Message::user(&nudge));
+            }
+        }
 
         let mut final_text = String::new();
 
@@ -355,6 +375,24 @@ impl Agent {
 
         output.flush()?;
         Ok(final_text)
+    }
+
+    /// Build the memory maintenance nudge message.
+    fn build_nudge_message(ws: &dyn crate::workspace::Workspace) -> String {
+        let memory_usage = ws.get("MEMORY.md")
+            .map(|c| c.chars().count())
+            .unwrap_or(0);
+        let memory_limit = ws.char_limit("MEMORY.md").unwrap_or(0);
+        let user_usage = ws.get("USER.md")
+            .map(|c| c.chars().count())
+            .unwrap_or(0);
+        let user_limit = ws.char_limit("USER.md").unwrap_or(0);
+
+        format!(
+            "[System: Memory Maintenance] Consider saving important details from this conversation.\n\
+             MEMORY.md: {memory_usage}/{memory_limit} chars. USER.md: {user_usage}/{user_limit} chars.\n\
+             Use workspace_view/workspace_update. Move overflow to memory/notes/ (searchable via memory_search)."
+        )
     }
 
     /// Execute a single tool call, routing through the sandbox.
@@ -548,7 +586,7 @@ mod tests {
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new())];
         let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
-        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None).unwrap();
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
         let result = agent.run("hi", &mut output).await.unwrap();
@@ -592,7 +630,7 @@ mod tests {
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new())];
         let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
-        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None).unwrap();
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
         let result = agent.run("run echo test_output", &mut output).await.unwrap();
@@ -631,7 +669,7 @@ mod tests {
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new())];
         let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
-        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None).unwrap();
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
         let result = agent.run("list files", &mut output).await.unwrap();
@@ -640,5 +678,22 @@ mod tests {
         assert_eq!(result, "Here are the files.");
         // Only 2 messages: user + assistant (no tool_result messages).
         assert_eq!(agent.messages.len(), 2);
+    }
+
+    #[test]
+    fn nudge_message_contains_usage_info() {
+        let ws = crate::workspace::InMemoryWorkspace::new()
+            .with_file("MEMORY.md", "some memories here")
+            .with_limit("MEMORY.md", 2200)
+            .with_file("USER.md", "user info")
+            .with_limit("USER.md", 1375);
+
+        let nudge = Agent::build_nudge_message(&ws);
+        assert!(nudge.contains("[System: Memory Maintenance]"));
+        assert!(nudge.contains("MEMORY.md:"));
+        assert!(nudge.contains("/2200 chars"));
+        assert!(nudge.contains("USER.md:"));
+        assert!(nudge.contains("/1375 chars"));
+        assert!(nudge.contains("memory_search"));
     }
 }

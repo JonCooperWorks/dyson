@@ -161,6 +161,12 @@ pub async fn build_agent(
     let workspace: std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>> =
         std::sync::Arc::new(tokio::sync::RwLock::new(workspace));
 
+    // Read nudge interval from workspace config.
+    let nudge_interval = {
+        let ws = workspace.read().await;
+        ws.nudge_interval()
+    };
+
     let client = crate::llm::create_client(
         &agent_settings,
         Some(std::sync::Arc::clone(&workspace)),
@@ -172,7 +178,7 @@ pub async fn build_agent(
     );
     let skills = crate::skill::create_skills(settings).await;
 
-    crate::agent::Agent::new(client, sandbox, skills, &agent_settings, Some(workspace))
+    crate::agent::Agent::new(client, sandbox, skills, &agent_settings, Some(workspace), nudge_interval)
 }
 
 // ---------------------------------------------------------------------------

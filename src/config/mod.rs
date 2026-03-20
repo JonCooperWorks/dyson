@@ -358,6 +358,9 @@ pub struct WorkspaceConfig {
 
     /// Connection string (path for openclaw).  Resolved via secret system.
     pub connection_string: String,
+
+    /// Memory tier configuration: character limits and nudge interval.
+    pub memory: MemoryConfig,
 }
 
 impl Default for WorkspaceConfig {
@@ -365,6 +368,48 @@ impl Default for WorkspaceConfig {
         Self {
             backend: "openclaw".into(),
             connection_string: "~/.dyson".into(),
+            memory: MemoryConfig::default(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MemoryConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for the tiered memory system.
+///
+/// Controls character limits on Tier 1 files (always in context) and the
+/// nudge interval for periodic memory maintenance reminders.
+///
+/// ```json
+/// {
+///   "workspace": {
+///     "memory": {
+///       "limits": { "MEMORY.md": 2200, "USER.md": 1375 },
+///       "nudge_interval": 5
+///     }
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct MemoryConfig {
+    /// Per-file character limits.  Keys are file names (e.g. "MEMORY.md").
+    /// Files not listed here have no limit.
+    pub limits: std::collections::HashMap<String, usize>,
+
+    /// Inject a memory maintenance nudge every N turns.  0 = disabled.
+    pub nudge_interval: usize,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        let mut limits = std::collections::HashMap::new();
+        limits.insert("MEMORY.md".into(), 2200);
+        limits.insert("USER.md".into(), 1375);
+        Self {
+            limits,
+            nudge_interval: 5,
         }
     }
 }

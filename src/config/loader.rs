@@ -174,6 +174,21 @@ struct JsonWorkspace {
     connection_string: Option<SecretValue>,
     /// Legacy: plain path.  Falls back to this if connection_string is absent.
     path: Option<String>,
+    /// Memory tier configuration.
+    memory: Option<JsonMemory>,
+}
+
+/// The `"memory"` object inside `"workspace"`.
+///
+/// ```json
+/// { "memory": { "limits": { "MEMORY.md": 2200 }, "nudge_interval": 5 } }
+/// ```
+#[derive(Debug, Deserialize)]
+struct JsonMemory {
+    /// Per-file character limits.
+    limits: Option<std::collections::HashMap<String, usize>>,
+    /// Nudge interval in turns (0 = disabled).
+    nudge_interval: Option<usize>,
 }
 
 /// The `"chat_history"` object.
@@ -537,6 +552,17 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
             }
         } else if let Some(path) = ws.path {
             settings.workspace.connection_string = path;
+        }
+        // Memory config: merge user overrides on top of defaults.
+        if let Some(mem) = ws.memory {
+            if let Some(limits) = mem.limits {
+                for (file, limit) in limits {
+                    settings.workspace.memory.limits.insert(file, limit);
+                }
+            }
+            if let Some(interval) = mem.nudge_interval {
+                settings.workspace.memory.nudge_interval = interval;
+            }
         }
     }
 

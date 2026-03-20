@@ -60,7 +60,11 @@ pub async fn run(
         settings.dangerous_no_sandbox,
     );
     let skills = dyson::skill::create_skills(&settings).await;
-    let mut agent = dyson::agent::Agent::new(client, sandbox, skills, &agent_settings, Some(workspace))?;
+    let nudge_interval = {
+        let ws = workspace.read().await;
+        ws.nudge_interval()
+    };
+    let mut agent = dyson::agent::Agent::new(client, sandbox, skills, &agent_settings, Some(workspace), nudge_interval)?;
     let mut output = dyson::controller::terminal::TerminalOutput::new();
     agent.run(&prompt, &mut output).await?;
     println!();
