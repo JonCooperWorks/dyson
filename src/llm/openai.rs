@@ -61,7 +61,7 @@ use zeroize::Zeroize;
 
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
+use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -340,12 +340,6 @@ struct OpenAiSseParser {
     tool_buffers: HashMap<usize, ToolCallBuffer>,
 }
 
-struct ToolCallBuffer {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
 impl OpenAiSseParser {
     fn new() -> Self {
         Self {
@@ -458,7 +452,7 @@ impl OpenAiSseParser {
                             ToolCallBuffer {
                                 id: id.to_string(),
                                 name: name.clone(),
-                                arguments: String::new(),
+                                json: String::new(),
                             },
                         );
 
@@ -471,7 +465,7 @@ impl OpenAiSseParser {
                     // Subsequent chunks have function.arguments fragments.
                     if let Some(args) = tc["function"]["arguments"].as_str() {
                         if let Some(buf) = self.tool_buffers.get_mut(&index) {
-                            buf.arguments.push_str(args);
+                            buf.json.push_str(args);
                         }
                         events.push(Ok(StreamEvent::ToolUseInputDelta(args.to_string())));
                     }
@@ -515,28 +509,6 @@ impl OpenAiSseParser {
         events
     }
 
-}
-
-/// Parse accumulated arguments and emit ToolUseComplete.
-fn finalize_tool_call(buf: ToolCallBuffer) -> Result<StreamEvent> {
-    let input = match serde_json::from_str(&buf.arguments) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(
-                tool = buf.name,
-                arguments = buf.arguments,
-                error = %e,
-                "failed to parse accumulated OpenAI tool arguments"
-            );
-            serde_json::json!({})
-        }
-    };
-
-    Ok(StreamEvent::ToolUseComplete {
-        id: buf.id,
-        name: buf.name,
-        input,
-    })
 }
 
 // ===========================================================================

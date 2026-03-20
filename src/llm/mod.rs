@@ -228,6 +228,51 @@ pub fn create_client(
 }
 
 // ---------------------------------------------------------------------------
+// Shared tool call buffer
+// ---------------------------------------------------------------------------
+
+/// Accumulation buffer for a single in-progress tool call during streaming.
+///
+/// All LLM providers stream tool call arguments as partial JSON fragments.
+/// This struct collects those fragments until the tool call is complete,
+/// at which point [`finalize_tool_call`] parses the accumulated JSON.
+pub(crate) struct ToolCallBuffer {
+    /// Unique identifier for this tool call.
+    pub id: String,
+    /// Name of the tool being called.
+    pub name: String,
+    /// Accumulated partial JSON fragments.
+    pub json: String,
+}
+
+/// Parse the accumulated JSON in a [`ToolCallBuffer`] and produce a
+/// `ToolUseComplete` event.
+///
+/// Logs an error and falls back to an empty object if JSON parsing fails,
+/// so the tool will still be called (and likely fail with a useful error
+/// message about missing fields).
+pub(crate) fn finalize_tool_call(buf: ToolCallBuffer) -> Result<StreamEvent> {
+    let input = match serde_json::from_str(&buf.json) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                tool = buf.name,
+                json = buf.json,
+                error = %e,
+                "failed to parse accumulated tool call JSON"
+            );
+            serde_json::json!({})
+        }
+    };
+
+    Ok(StreamEvent::ToolUseComplete {
+        id: buf.id,
+        name: buf.name,
+        input,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Shared utilities for CLI-subprocess-based clients
 // ---------------------------------------------------------------------------
 

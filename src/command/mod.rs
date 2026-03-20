@@ -39,6 +39,10 @@ pub fn dirs_config_path() -> PathBuf {
 }
 
 /// Apply CLI overrides to loaded settings.
+///
+/// `--provider` selects a named provider from `settings.providers`.
+/// If the name isn't found, it's treated as a provider type string
+/// (e.g. "anthropic") for convenience.
 pub fn apply_overrides(
     settings: &mut Settings,
     dangerous_no_sandbox: bool,
@@ -47,15 +51,23 @@ pub fn apply_overrides(
     workspace: Option<String>,
 ) -> anyhow::Result<()> {
     if let Some(provider_str) = provider {
-        settings.agent.provider = match provider_str.to_lowercase().as_str() {
-            "anthropic" => LlmProvider::Anthropic,
-            "openai" | "gpt" => LlmProvider::OpenAi,
-            "claude-code" | "claude_code" | "cc" => LlmProvider::ClaudeCode,
-            "codex" | "codex-cli" => LlmProvider::Codex,
-            other => anyhow::bail!(
-                "unknown provider '{other}'.  Use 'anthropic', 'openai', 'claude-code', or 'codex'."
-            ),
-        };
+        if let Some(pc) = settings.providers.get(&provider_str) {
+            // Named provider from config.
+            settings.agent.provider = pc.provider_type.clone();
+            settings.agent.model = pc.model.clone();
+            settings.agent.api_key = pc.api_key.clone();
+            settings.agent.base_url = pc.base_url.clone();
+        } else if let Some(provider_type) = LlmProvider::from_str_loose(&provider_str) {
+            // Bare provider type string (e.g. "anthropic").
+            settings.agent.provider = provider_type;
+        } else {
+            let available: Vec<&str> = settings.providers.keys().map(|s| s.as_str()).collect();
+            anyhow::bail!(
+                "unknown provider '{provider_str}'.  \
+                 Available: {available:?}.  \
+                 Or use a type: 'anthropic', 'openai', 'claude-code', 'codex'."
+            );
+        }
     }
     if let Some(url) = base_url {
         settings.agent.base_url = Some(url);

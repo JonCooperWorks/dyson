@@ -42,6 +42,7 @@
 
 pub mod hot_reload;
 pub mod loader;
+pub mod migrate;
 
 // ---------------------------------------------------------------------------
 // Settings — the top-level config struct.
@@ -56,6 +57,14 @@ pub mod loader;
 pub struct Settings {
     /// Core agent behavior: model, limits, system prompt, API key.
     pub agent: AgentSettings,
+
+    /// Named provider configurations from the `"providers"` JSON map.
+    ///
+    /// Each entry is a fully-resolved provider (API key resolved, type
+    /// parsed).  The active provider's fields are flattened into `agent`
+    /// at load time, but the full map is available for runtime switching
+    /// (e.g. `/model <name>` commands).
+    pub providers: std::collections::HashMap<String, ProviderConfig>,
 
     /// Which skills (tool bundles) to load.
     pub skills: Vec<SkillConfig>,
@@ -230,6 +239,54 @@ pub enum LlmProvider {
     Codex,
 }
 
+impl LlmProvider {
+    /// Parse a provider type string loosely (case-insensitive, with aliases).
+    ///
+    /// Returns `None` for unrecognized strings.
+    pub fn from_str_loose(s: &str) -> Option<LlmProvider> {
+        match s.to_lowercase().as_str() {
+            "anthropic" => Some(LlmProvider::Anthropic),
+            "openai" | "gpt" => Some(LlmProvider::OpenAi),
+            "claude-code" | "claude_code" | "cc" => Some(LlmProvider::ClaudeCode),
+            "codex" | "codex-cli" => Some(LlmProvider::Codex),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ProviderConfig — a named provider entry from the "providers" map.
+// ---------------------------------------------------------------------------
+
+/// A named, fully-resolved provider configuration.
+///
+/// Defined in the `"providers"` map in dyson.json.  At load time, the
+/// active provider's fields are copied into `AgentSettings`.  The full
+/// map is kept on `Settings` for runtime switching (e.g. `/model`).
+///
+/// ```json
+/// {
+///   "providers": {
+///     "claude": {
+///       "type": "anthropic",
+///       "model": "claude-sonnet-4-20250514",
+///       "api_key": "sk-..."
+///     }
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct ProviderConfig {
+    /// Provider backend type (anthropic, openai, claude-code, codex).
+    pub provider_type: LlmProvider,
+    /// Model identifier (e.g. "claude-sonnet-4-20250514", "gpt-4o").
+    pub model: String,
+    /// Resolved API key (empty string for CLI-based providers).
+    pub api_key: String,
+    /// Optional base URL override for the provider API.
+    pub base_url: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // SkillConfig
 // ---------------------------------------------------------------------------
@@ -368,6 +425,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             agent: AgentSettings::default(),
+            providers: std::collections::HashMap::new(),
             skills: vec![SkillConfig::Builtin(BuiltinSkillConfig {
                 tools: vec![],
             })],

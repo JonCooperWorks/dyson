@@ -13,7 +13,8 @@
 //   Dyson is provider-agnostic.  The `LlmClient` trait can be backed by
 //   Anthropic, OpenAI, or a local model.  These internal types are the
 //   common denominator.  Each LLM client is responsible for converting
-//   to/from its provider's wire format (see `to_anthropic_value()`).
+//   to/from its provider's wire format (see `message_to_anthropic()` in
+//   `llm/anthropic.rs` and `message_to_openai()` in `llm/openai.rs`).
 //
 // Why manual serialization instead of serde on Message?
 //   The Anthropic API has quirks that make serde cumbersome:
@@ -22,14 +23,15 @@
 //   - The system prompt is a separate field, not a message
 //   Rather than fighting serde with custom serializers and `#[serde(rename)]`
 //   gymnastics, we keep `ContentBlock` serde-friendly (useful for logging
-//   and debugging) but serialize `Message` to API format explicitly.
+//   and debugging) but each provider module serializes `Message` to its
+//   API format explicitly.
 //
 // Data flow:
 //
 //   User types text
 //     → Message::user("hello")
 //     → agent sends to LLM client
-//     → LLM client calls msg.to_anthropic_value()  ← provider-specific
+//     → LLM client converts to provider format  (e.g. message_to_anthropic)
 //     → HTTP request
 //
 //   LLM streams back
@@ -79,7 +81,7 @@ pub enum Role {
 /// { "type": "tool_use", "id": "...", "name": "bash", "input": {...} }
 /// ```
 /// This is handy for debug logging.  For actual API serialization, see
-/// [`Message::to_anthropic_value()`].
+/// `message_to_anthropic()` in `llm/anthropic.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -179,69 +181,6 @@ impl Message {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Anthropic API serialization
-    // -----------------------------------------------------------------------
-
-    /// Serialize this message to the JSON shape expected by the Anthropic
-    /// Messages API.
-    ///
-    /// ## Why manual serialization?
-    ///
-    /// The Anthropic API has specific requirements:
-    /// - `role` is either `"user"` or `"assistant"` (no "tool" or "system")
-    /// - Tool results go in `role: "user"` messages with content blocks
-    ///   of `type: "tool_result"`
-    /// - Tool use blocks have `type: "tool_use"` with `id`, `name`, `input`
-    /// - Text blocks have `type: "text"` with `text`
-    ///
-    /// Rather than annotating everything with serde renames and custom
-    /// serializers, we build the JSON value directly.  This is explicit,
-    /// easy to debug, and trivial to adapt when adding new providers.
-    pub fn to_anthropic_value(&self) -> serde_json::Value {
-        let role_str = match self.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-        };
-
-        let content: Vec<serde_json::Value> = self
-            .content
-            .iter()
-            .map(|block| match block {
-                ContentBlock::Text { text } => {
-                    serde_json::json!({
-                        "type": "text",
-                        "text": text,
-                    })
-                }
-                ContentBlock::ToolUse { id, name, input } => {
-                    serde_json::json!({
-                        "type": "tool_use",
-                        "id": id,
-                        "name": name,
-                        "input": input,
-                    })
-                }
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                } => {
-                    serde_json::json!({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": content,
-                        "is_error": is_error,
-                    })
-                }
-            })
-            .collect();
-
-        serde_json::json!({
-            "role": role_str,
-            "content": content,
-        })
-    }
 }
 
 // ===========================================================================
@@ -300,38 +239,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn anthropic_serialization_user() {
-        let msg = Message::user("hi");
-        let val = msg.to_anthropic_value();
-        assert_eq!(val["role"], "user");
-        assert_eq!(val["content"][0]["type"], "text");
-        assert_eq!(val["content"][0]["text"], "hi");
-    }
-
-    #[test]
-    fn anthropic_serialization_tool_use() {
-        let msg = Message::assistant(vec![ContentBlock::ToolUse {
-            id: "id_1".into(),
-            name: "bash".into(),
-            input: serde_json::json!({"command": "echo test"}),
-        }]);
-        let val = msg.to_anthropic_value();
-        assert_eq!(val["role"], "assistant");
-        assert_eq!(val["content"][0]["type"], "tool_use");
-        assert_eq!(val["content"][0]["id"], "id_1");
-        assert_eq!(val["content"][0]["name"], "bash");
-        assert_eq!(val["content"][0]["input"]["command"], "echo test");
-    }
-
-    #[test]
-    fn anthropic_serialization_tool_result() {
-        let msg = Message::tool_result("id_1", "output here", true);
-        let val = msg.to_anthropic_value();
-        assert_eq!(val["role"], "user");
-        assert_eq!(val["content"][0]["type"], "tool_result");
-        assert_eq!(val["content"][0]["tool_use_id"], "id_1");
-        assert_eq!(val["content"][0]["content"], "output here");
-        assert_eq!(val["content"][0]["is_error"], true);
-    }
 }

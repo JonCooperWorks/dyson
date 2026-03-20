@@ -117,6 +117,47 @@ impl super::Controller for TerminalController {
                 break;
             }
 
+            if input == "/models" {
+                let providers = super::list_providers(&current_settings);
+                if providers.is_empty() {
+                    eprintln!("No providers configured.");
+                } else {
+                    eprintln!("Available providers:");
+                    for (name, pc) in &providers {
+                        eprintln!("  {name} — {:?} ({})", pc.provider_type, pc.model);
+                    }
+                }
+                continue;
+            }
+
+            if let Some(name) = input.strip_prefix("/model ").map(str::trim) {
+                if name.is_empty() {
+                    eprintln!("Usage: /model <provider-name>");
+                    continue;
+                }
+                let messages = agent.messages().to_vec();
+                match super::build_agent_with_provider(
+                    &current_settings,
+                    name,
+                    None,
+                    messages,
+                )
+                .await
+                {
+                    Ok(new_agent) => {
+                        agent = new_agent;
+                        eprintln!(
+                            "[switched to '{}' — {:?} ({})]",
+                            name,
+                            current_settings.providers[name].provider_type,
+                            current_settings.providers[name].model,
+                        );
+                    }
+                    Err(e) => eprintln!("[switch error: {e}]"),
+                }
+                continue;
+            }
+
             match agent.run(input, &mut output).await {
                 Ok(_) => println!(),
                 Err(e) => eprintln!("\n[Error]: {e}"),

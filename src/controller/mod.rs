@@ -176,6 +176,48 @@ pub async fn build_agent(
 }
 
 // ---------------------------------------------------------------------------
+// Provider switching helpers
+// ---------------------------------------------------------------------------
+
+/// Build a new agent using a named provider, preserving conversation history.
+///
+/// Looks up `provider_name` in `settings.providers`, builds a new agent
+/// with that provider's config, and restores the given messages.  Returns
+/// an error if the provider name is unknown.
+pub async fn build_agent_with_provider(
+    settings: &Settings,
+    provider_name: &str,
+    controller_prompt: Option<&str>,
+    existing_messages: Vec<crate::message::Message>,
+) -> crate::Result<crate::agent::Agent> {
+    let pc = settings.providers.get(provider_name).ok_or_else(|| {
+        crate::error::DysonError::Config(format!("unknown provider '{provider_name}'"))
+    })?;
+
+    // Build a modified settings with the new provider's fields.
+    let mut switched = settings.clone();
+    switched.agent.provider = pc.provider_type.clone();
+    switched.agent.model = pc.model.clone();
+    switched.agent.api_key = pc.api_key.clone();
+    switched.agent.base_url = pc.base_url.clone();
+
+    let mut agent = build_agent(&switched, controller_prompt).await?;
+    agent.set_messages(existing_messages);
+    Ok(agent)
+}
+
+/// List all configured providers, sorted by name.
+pub fn list_providers(settings: &Settings) -> Vec<(&str, &crate::config::ProviderConfig)> {
+    let mut providers: Vec<_> = settings
+        .providers
+        .iter()
+        .map(|(name, config)| (name.as_str(), config))
+        .collect();
+    providers.sort_by_key(|(name, _)| *name);
+    providers
+}
+
+// ---------------------------------------------------------------------------
 // Output trait
 // ---------------------------------------------------------------------------
 
