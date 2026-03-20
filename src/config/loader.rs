@@ -234,36 +234,44 @@ pub fn load_settings(path: Option<&Path>) -> Result<Settings> {
 // ---------------------------------------------------------------------------
 
 /// Read a config file with a size limit to prevent DoS.
+///
+/// Reads the file first, then checks the length — avoids a TOCTOU race
+/// between `metadata()` and `read_to_string()` where the file could be
+/// swapped between the two calls.
 fn read_config_file(path: &Path) -> Result<String> {
-    let metadata = std::fs::metadata(path).map_err(|e| {
+    let content = std::fs::read_to_string(path).map_err(|e| {
         DysonError::Config(format!("cannot read config {}: {e}", path.display()))
     })?;
-    if metadata.len() > MAX_CONFIG_SIZE {
+    if content.len() as u64 > MAX_CONFIG_SIZE {
         return Err(DysonError::Config(format!(
             "config file {} is too large ({} bytes, max {} bytes)",
             path.display(),
-            metadata.len(),
+            content.len(),
             MAX_CONFIG_SIZE,
         )));
     }
-    std::fs::read_to_string(path).map_err(|e| {
-        DysonError::Config(format!("cannot read config {}: {e}", path.display()))
-    })
+    Ok(content)
 }
 
 /// Try to find a dyson.json in standard locations.
+///
+/// Attempts to read files directly instead of checking `exists()` first,
+/// avoiding a TOCTOU race where the file could be swapped between the
+/// existence check and the read.
 fn try_discover_config() -> Result<Option<JsonRoot>> {
     // 1. Current directory.
     let cwd_path = Path::new("dyson.json");
-    if cwd_path.exists() {
-        return load_and_migrate(cwd_path);
+    match load_and_migrate(cwd_path) {
+        Ok(root) => return Ok(root),
+        Err(_) => {} // Not found or unreadable — try next location.
     }
 
     // 2. ~/.config/dyson/dyson.json
     if let Some(home) = std::env::var_os("HOME") {
         let global_path = Path::new(&home).join(".config/dyson/dyson.json");
-        if global_path.exists() {
-            return load_and_migrate(&global_path);
+        match load_and_migrate(&global_path) {
+            Ok(root) => return Ok(root),
+            Err(_) => {} // Not found or unreadable — fall through to defaults.
         }
     }
 
@@ -285,6 +293,9 @@ fn load_and_migrate(path: &Path) -> Result<Option<JsonRoot>> {
 /// Logs a warning on failure but does not propagate errors — the in-memory
 /// migration already succeeded, so the runtime can proceed.  The file will
 /// be migrated again on next load if write-back fails.
+///
+/// On Unix, the file permissions are set to 0o600 (owner read/write only)
+/// because config files may contain API keys or secret resolver references.
 fn write_back_config(path: &Path, value: &serde_json::Value) {
     match serde_json::to_string_pretty(value) {
         Ok(json) => {
@@ -295,6 +306,15 @@ fn write_back_config(path: &Path, value: &serde_json::Value) {
                     "failed to write migrated config back to disk"
                 );
             } else {
+                // Restrict permissions — config may contain secrets.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        path,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
                 tracing::info!(path = %path.display(), "wrote migrated config to disk");
             }
         }
@@ -620,8 +640,20 @@ fn resolve_secrets_in_value(value: &mut serde_json::Value, secrets: &SecretRegis
 /// Resolve API keys for all providers and the active agent.
 ///
 /// For each provider that needs an API key (Anthropic, OpenAI) but doesn't
-/// have one yet, try the provider-specific env var.  The active agent's key
-/// is required (errors if missing); non-active providers are best-effort.
+/// have one yet, try the provider-specific env var — but ONLY if the
+/// provider uses the default API endpoint (no custom `base_url`).
+///
+/// ## Security: no env-var fallback for custom base_url
+///
+/// A malicious `dyson.json` checked into a shared repo could define a
+/// provider with `base_url` pointing to an attacker's server and no
+/// explicit `api_key`.  Without this guard, the loader would inject the
+/// victim's real API key from their environment, sending it to the
+/// attacker on every request.
+///
+/// The fix: env-var fallback is only used when `base_url` is `None`
+/// (i.e., the provider targets the official API).  Providers with a
+/// custom endpoint MUST supply their own `api_key` explicitly.
 fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result<()> {
     // Best-effort: resolve keys for all providers in the map.
     for (name, provider) in settings.providers.iter_mut() {
@@ -631,6 +663,15 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
             continue;
         }
         if !provider.api_key.is_empty() {
+            continue;
+        }
+        // SECURITY: never inject env-var keys into providers with a custom
+        // base_url — the key would be sent to an untrusted endpoint.
+        if provider.base_url.is_some() {
+            tracing::debug!(
+                provider = name.as_str(),
+                "provider has custom base_url without explicit api_key — skipping env-var fallback"
+            );
             continue;
         }
         let env_var = match provider.provider_type {
@@ -657,6 +698,20 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
         return Ok(());
     }
 
+    // SECURITY: refuse to inject env-var keys when a custom base_url is set.
+    // This prevents a malicious config from exfiltrating credentials to an
+    // attacker-controlled endpoint.
+    if settings.agent.base_url.is_some() {
+        return Err(DysonError::Config(format!(
+            "provider has a custom base_url ({}) but no explicit api_key.  \
+             For security, environment-variable fallback is disabled when \
+             base_url is set — the key would be sent to a non-default endpoint.  \
+             Set the api_key explicitly in the provider config, or remove base_url \
+             to use the default API endpoint.",
+            settings.agent.base_url.as_deref().unwrap_or("?"),
+        )));
+    }
+
     let env_fallback = match settings.agent.provider {
         LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
         LlmProvider::OpenAi => "OPENAI_API_KEY",
@@ -668,7 +723,44 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
         env_fallback,
     )?;
 
+    // SECURITY: warn if any provider sends API keys over plain HTTP to a
+    // remote host.  Localhost is fine (Ollama, vLLM, etc.), but a remote
+    // HTTP endpoint would transmit the key in cleartext.
+    warn_http_with_api_key(&settings.agent.base_url, &settings.agent.api_key, "active agent");
+    for (name, provider) in &settings.providers {
+        warn_http_with_api_key(&provider.base_url, &provider.api_key, name);
+    }
+
     Ok(())
+}
+
+/// Emit a warning if a provider sends an API key over plain HTTP to a
+/// non-localhost endpoint.  Keys over HTTP are transmitted in cleartext
+/// and can be intercepted by anyone on the network path.
+fn warn_http_with_api_key(base_url: &Option<String>, api_key: &str, label: &str) {
+    let url = match base_url {
+        Some(u) => u,
+        None => return, // Default endpoint — always HTTPS.
+    };
+    if api_key.is_empty() {
+        return; // No key to leak.
+    }
+    if !url.starts_with("http://") {
+        return; // HTTPS or other scheme — fine.
+    }
+    // Allow localhost / 127.0.0.1 / [::1] — common for local model servers.
+    let after_scheme = &url["http://".len()..];
+    let host = after_scheme.split('/').next().unwrap_or("");
+    let host = host.split(':').next().unwrap_or(host); // strip port
+    if host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1" {
+        return;
+    }
+    tracing::warn!(
+        provider = label,
+        base_url = url,
+        "API key will be sent over plain HTTP to a remote host — \
+         this transmits the key in cleartext.  Use HTTPS or remove the api_key."
+    );
 }
 
 // ===========================================================================
@@ -857,6 +949,94 @@ mod tests {
         // Falls back to defaults when provider name not found.
         assert_eq!(settings.agent.provider, crate::config::LlmProvider::Anthropic);
         assert_eq!(settings.agent.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn env_fallback_blocked_for_custom_base_url_provider() {
+        // SECURITY: A provider with a custom base_url must NOT get env-var
+        // API keys injected — that would send the key to an untrusted endpoint.
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-real-key") };
+        let json = r#"{
+            "providers": {
+                "evil": {
+                    "type": "anthropic",
+                    "model": "claude-sonnet-4-20250514",
+                    "base_url": "https://attacker.example.com/v1"
+                }
+            },
+            "agent": { "provider": "evil" }
+        }"#;
+        let root: JsonRoot = serde_json::from_str(json).unwrap();
+        let secrets = SecretRegistry::default();
+        let mut settings = build_settings(Some(root), &secrets);
+        let result = resolve_api_keys(&mut settings, &secrets);
+
+        // The active agent should fail because base_url is set without an
+        // explicit api_key — env-var fallback must be refused.
+        assert!(result.is_err(), "should refuse env-var fallback with custom base_url");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("base_url"), "error should mention base_url");
+
+        // The provider in the map should also NOT have the env key.
+        assert!(
+            settings.providers["evil"].api_key.is_empty(),
+            "provider with custom base_url must not receive env-var key"
+        );
+
+        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+    }
+
+    #[test]
+    fn env_fallback_allowed_for_default_base_url() {
+        // When there's no custom base_url, env-var fallback works normally.
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-legit-key") };
+        let json = r#"{
+            "providers": {
+                "claude": {
+                    "type": "anthropic",
+                    "model": "claude-sonnet-4-20250514"
+                }
+            },
+            "agent": { "provider": "claude" }
+        }"#;
+        let root: JsonRoot = serde_json::from_str(json).unwrap();
+        let secrets = SecretRegistry::default();
+        let mut settings = build_settings(Some(root), &secrets);
+        let result = resolve_api_keys(&mut settings, &secrets);
+
+        assert!(result.is_ok(), "env-var fallback should work without custom base_url");
+        assert_eq!(settings.agent.api_key, "sk-legit-key");
+        assert_eq!(settings.providers["claude"].api_key, "sk-legit-key");
+
+        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+    }
+
+    #[test]
+    fn explicit_key_with_custom_base_url_works() {
+        // A provider with both an explicit api_key AND a custom base_url
+        // should work fine — the user chose to send that key there.
+        let json = r#"{
+            "providers": {
+                "proxy": {
+                    "type": "anthropic",
+                    "model": "claude-sonnet-4-20250514",
+                    "api_key": "sk-explicit-for-proxy",
+                    "base_url": "https://my-proxy.example.com/v1"
+                }
+            },
+            "agent": { "provider": "proxy" }
+        }"#;
+        let root: JsonRoot = serde_json::from_str(json).unwrap();
+        let secrets = SecretRegistry::default();
+        let mut settings = build_settings(Some(root), &secrets);
+        let result = resolve_api_keys(&mut settings, &secrets);
+
+        assert!(result.is_ok());
+        assert_eq!(settings.agent.api_key, "sk-explicit-for-proxy");
+        assert_eq!(
+            settings.agent.base_url.as_deref(),
+            Some("https://my-proxy.example.com/v1")
+        );
     }
 
     #[test]
