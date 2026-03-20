@@ -53,9 +53,15 @@ pub fn run(
     let config_path = base.join("dyson.json");
     if !config_path.exists() {
         let default_config = serde_json::json!({
+            "config_version": dyson::config::migrate::CURRENT_VERSION,
+            "providers": {
+                "default": {
+                    "type": "claude-code",
+                    "model": "sonnet"
+                }
+            },
             "agent": {
-                "provider": "claude-code",
-                "model": "sonnet",
+                "provider": "default",
                 "max_iterations": 20,
                 "max_tokens": 8192
             },

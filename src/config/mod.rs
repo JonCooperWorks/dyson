@@ -42,6 +42,7 @@
 
 pub mod hot_reload;
 pub mod loader;
+pub mod migrate;
 
 // ---------------------------------------------------------------------------
 // Settings — the top-level config struct.

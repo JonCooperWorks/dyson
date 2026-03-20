@@ -204,11 +204,17 @@ const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
 /// 2. Try `./dyson.json` in the current directory.
 /// 3. Try `~/.config/dyson/dyson.json`.
 /// 4. No file found → use built-in defaults.
+///
+/// Config files are automatically migrated in-memory before parsing.
+/// Old formats (e.g. inline `agent.provider`/`api_key`) are upgraded
+/// to the current schema via the migration chain in `config::migrate`.
 pub fn load_settings(path: Option<&Path>) -> Result<Settings> {
     let json_root = match path {
         Some(p) => {
             let content = read_config_file(p)?;
-            Some(serde_json::from_str::<JsonRoot>(&content)?)
+            let mut raw: serde_json::Value = serde_json::from_str(&content)?;
+            crate::config::migrate::migrate(&mut raw)?;
+            Some(serde_json::from_value::<JsonRoot>(raw)?)
         }
         None => try_discover_config()?,
     };
@@ -249,7 +255,9 @@ fn try_discover_config() -> Result<Option<JsonRoot>> {
     let cwd_path = Path::new("dyson.json");
     if cwd_path.exists() {
         let content = read_config_file(cwd_path)?;
-        return Ok(Some(serde_json::from_str::<JsonRoot>(&content)?));
+        let mut raw: serde_json::Value = serde_json::from_str(&content)?;
+        crate::config::migrate::migrate(&mut raw)?;
+        return Ok(Some(serde_json::from_value::<JsonRoot>(raw)?));
     }
 
     // 2. ~/.config/dyson/dyson.json
@@ -257,7 +265,9 @@ fn try_discover_config() -> Result<Option<JsonRoot>> {
         let global_path = Path::new(&home).join(".config/dyson/dyson.json");
         if global_path.exists() {
             let content = read_config_file(&global_path)?;
-            return Ok(Some(serde_json::from_str::<JsonRoot>(&content)?));
+            let mut raw: serde_json::Value = serde_json::from_str(&content)?;
+            crate::config::migrate::migrate(&mut raw)?;
+            return Ok(Some(serde_json::from_value::<JsonRoot>(raw)?));
         }
     }
 
