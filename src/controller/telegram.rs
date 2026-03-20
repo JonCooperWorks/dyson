@@ -357,6 +357,69 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
+                // /models — list available providers.
+                if text == "/models" {
+                    let providers = super::list_providers(&current_settings);
+                    if providers.is_empty() {
+                        let _ = bot.send_message(chat_id, "No providers configured.").await;
+                    } else {
+                        let mut reply = String::from("Available providers:\n");
+                        for (name, pc) in &providers {
+                            reply.push_str(&format!(
+                                "  {} — {:?} ({})\n",
+                                name, pc.provider_type, pc.model,
+                            ));
+                        }
+                        let _ = bot.send_message(chat_id, reply).await;
+                    }
+                    continue;
+                }
+
+                // /model <name> — switch to a named provider.
+                if let Some(name) = text.strip_prefix("/model ").map(str::trim) {
+                    if name.is_empty() {
+                        let _ = bot.send_message(chat_id, "Usage: /model <provider-name>").await;
+                        continue;
+                    }
+                    let existing_messages = {
+                        let agents_map = agents.lock().await;
+                        agents_map
+                            .get(&chat_id.0)
+                            .map(|a| a.messages().to_vec())
+                            .unwrap_or_default()
+                    };
+                    match super::build_agent_with_provider(
+                        &current_settings,
+                        name,
+                        controller_prompt.as_deref(),
+                        existing_messages,
+                    )
+                    .await
+                    {
+                        Ok(new_agent) => {
+                            let pc = &current_settings.providers[name];
+                            let reply = format!(
+                                "Switched to '{}' — {:?} ({})",
+                                name, pc.provider_type, pc.model,
+                            );
+                            agents.lock().await.insert(chat_id.0, new_agent);
+                            let _ = bot.send_message(chat_id, reply).await;
+                        }
+                        Err(e) => {
+                            let _ = bot
+                                .send_message(chat_id, format!("Switch error: {e}"))
+                                .await;
+                        }
+                    }
+                    continue;
+                }
+                if text == "/model" {
+                    let _ = bot
+                        .send_message(chat_id, "Usage: /model <provider-name>")
+                        .await;
+                    continue;
+                }
+
                 tracing::info!(chat_id = chat_id.0, "telegram message received");
 
                 // Spawn the agent run in a background task so the polling

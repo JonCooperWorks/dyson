@@ -55,8 +55,8 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::config::{
-    BuiltinSkillConfig, ControllerConfig, DockerSandboxConfig, McpConfig,
-    McpTransportConfig, SandboxConfig, Settings, SkillConfig,
+    BuiltinSkillConfig, ControllerConfig, DockerSandboxConfig, LlmProvider, McpConfig,
+    McpTransportConfig, ProviderConfig, SandboxConfig, Settings, SkillConfig,
 };
 use crate::error::{DysonError, Result};
 use crate::secret::{SecretRegistry, SecretValue};
@@ -68,6 +68,15 @@ use crate::secret::{SecretRegistry, SecretValue};
 /// Root of the dyson.json file.
 #[derive(Debug, Deserialize)]
 struct JsonRoot {
+    /// Named provider configurations.
+    ///
+    /// ```json
+    /// "providers": {
+    ///   "claude": { "type": "anthropic", "model": "claude-sonnet-4-20250514", "api_key": "..." },
+    ///   "gpt":    { "type": "openai",    "model": "gpt-4o" }
+    /// }
+    /// ```
+    providers: Option<std::collections::HashMap<String, JsonProviderConfig>>,
     agent: Option<JsonAgent>,
     skills: Option<JsonSkills>,
     controllers: Option<Vec<serde_json::Value>>,
@@ -85,16 +94,34 @@ struct JsonRoot {
     mcp_servers: Option<serde_json::Value>,
 }
 
+/// A single provider entry in the `"providers"` map.
+#[derive(Debug, Deserialize)]
+struct JsonProviderConfig {
+    /// Provider type: "anthropic", "openai", "claude-code", "codex".
+    #[serde(rename = "type")]
+    provider_type: String,
+    /// Model identifier (optional, defaults per provider type).
+    model: Option<String>,
+    /// API key — literal string or secret resolver reference.
+    api_key: Option<SecretValue>,
+    /// Base URL override.
+    base_url: Option<String>,
+}
+
 /// The `"agent"` object.
+///
+/// Provider-specific fields (api_key, base_url) live in the `"providers"`
+/// map.  The agent references a provider by name.  `model` can optionally
+/// override the provider's model.
 #[derive(Debug, Deserialize)]
 struct JsonAgent {
+    /// Optional model override — takes precedence over the provider's model.
     model: Option<String>,
     max_iterations: Option<usize>,
     max_tokens: Option<u32>,
     system_prompt: Option<String>,
-    api_key: Option<SecretValue>,
+    /// Name of the provider from the `"providers"` map.
     provider: Option<String>,
-    base_url: Option<String>,
 }
 
 /// The `"skills"` object.
@@ -189,7 +216,7 @@ pub fn load_settings(path: Option<&Path>) -> Result<Settings> {
     let secrets = SecretRegistry::default();
     let mut settings = build_settings(json_root, &secrets);
 
-    resolve_api_key(&mut settings, &secrets)?;
+    resolve_api_keys(&mut settings, &secrets)?;
 
     Ok(settings)
 }
@@ -246,8 +273,69 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
         None => return settings,
     };
 
+    // -- Providers --
+    //
+    // Parse all named providers first so the agent section can reference them.
+    if let Some(providers) = root.providers {
+        for (name, jp) in providers {
+            let provider_type = match LlmProvider::from_str_loose(&jp.provider_type) {
+                Some(p) => p,
+                None => {
+                    tracing::warn!(
+                        provider = name.as_str(),
+                        r#type = jp.provider_type.as_str(),
+                        "unknown provider type — skipping"
+                    );
+                    continue;
+                }
+            };
+
+            let api_key = jp
+                .api_key
+                .as_ref()
+                .and_then(|k| secrets.resolve(k).ok())
+                .unwrap_or_default();
+
+            let model = jp.model.unwrap_or_else(|| {
+                match provider_type {
+                    LlmProvider::Anthropic => "claude-sonnet-4-20250514",
+                    LlmProvider::OpenAi => "gpt-4o",
+                    LlmProvider::ClaudeCode => "claude-sonnet-4-20250514",
+                    LlmProvider::Codex => "codex",
+                }
+                .into()
+            });
+
+            settings.providers.insert(
+                name,
+                ProviderConfig {
+                    provider_type,
+                    model,
+                    api_key,
+                    base_url: jp.base_url,
+                },
+            );
+        }
+    }
+
     // -- Agent settings --
     if let Some(agent) = root.agent {
+        // Apply the named provider's fields to agent settings.
+        if let Some(ref provider_name) = agent.provider {
+            if let Some(pc) = settings.providers.get(provider_name) {
+                settings.agent.provider = pc.provider_type.clone();
+                settings.agent.model = pc.model.clone();
+                settings.agent.api_key = pc.api_key.clone();
+                settings.agent.base_url = pc.base_url.clone();
+            } else {
+                tracing::warn!(
+                    provider = provider_name.as_str(),
+                    "agent references unknown provider name"
+                );
+            }
+        }
+
+        // Agent-level overrides (model can override the provider's model).
         if let Some(model) = agent.model {
             settings.agent.model = model;
         }
@@ -259,26 +347,6 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
         }
         if let Some(prompt) = agent.system_prompt {
             settings.agent.system_prompt = prompt;
-        }
-        if let Some(ref key) = agent.api_key {
-            if let Ok(resolved) = secrets.resolve(key) {
-                settings.agent.api_key = resolved;
-            }
-        }
-        if let Some(provider) = agent.provider {
-            settings.agent.provider = match provider.to_lowercase().as_str() {
-                "anthropic" => crate::config::LlmProvider::Anthropic,
-                "openai" | "gpt" => crate::config::LlmProvider::OpenAi,
-                "claude-code" | "claude_code" | "cc" => crate::config::LlmProvider::ClaudeCode,
-                "codex" | "codex-cli" => crate::config::LlmProvider::Codex,
-                other => {
-                    tracing::warn!(provider = other, "unknown provider, defaulting to anthropic");
-                    crate::config::LlmProvider::Anthropic
-                }
-            };
-        }
-        if let Some(base_url) = agent.base_url {
-            settings.agent.base_url = Some(base_url);
         }
     }
 
@@ -509,10 +577,38 @@ fn resolve_secrets_in_value(value: &mut serde_json::Value, secrets: &SecretRegis
     }
 }
 
-/// Ensure we have an API key (unless using Claude Code or Codex).
-fn resolve_api_key(settings: &mut Settings, secrets: &SecretRegistry) -> Result<()> {
-    if settings.agent.provider == crate::config::LlmProvider::ClaudeCode
-        || settings.agent.provider == crate::config::LlmProvider::Codex
+/// Resolve API keys for all providers and the active agent.
+///
+/// For each provider that needs an API key (Anthropic, OpenAI) but doesn't
+/// have one yet, try the provider-specific env var.  The active agent's key
+/// is required (errors if missing); non-active providers are best-effort.
+fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result<()> {
+    // Best-effort: resolve keys for all providers in the map.
+    for (name, provider) in settings.providers.iter_mut() {
+        if provider.provider_type == LlmProvider::ClaudeCode
+            || provider.provider_type == LlmProvider::Codex
+        {
+            continue;
+        }
+        if !provider.api_key.is_empty() {
+            continue;
+        }
+        let env_var = match provider.provider_type {
+            LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
+            LlmProvider::OpenAi => "OPENAI_API_KEY",
+            LlmProvider::ClaudeCode | LlmProvider::Codex => continue,
+        };
+        match secrets.resolve_or_env_fallback(&SecretValue::Literal(String::new()), env_var) {
+            Ok(key) => provider.api_key = key,
+            Err(_) => {
+                tracing::debug!(provider = name.as_str(), "no API key for provider (not active, skipping)");
+            }
+        }
+    }
+
+    // Required: resolve the active agent's key.
+    if settings.agent.provider == LlmProvider::ClaudeCode
+        || settings.agent.provider == LlmProvider::Codex
     {
         return Ok(());
     }
@@ -521,11 +617,10 @@ fn resolve_api_key(settings: &mut Settings, secrets: &SecretRegistry) -> Result<
         return Ok(());
     }
 
-    // Fall back to provider-specific env var.
     let env_fallback = match settings.agent.provider {
-        crate::config::LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
-        crate::config::LlmProvider::OpenAi => "OPENAI_API_KEY",
-        crate::config::LlmProvider::ClaudeCode | crate::config::LlmProvider::Codex => unreachable!(),
+        LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
+        LlmProvider::OpenAi => "OPENAI_API_KEY",
+        LlmProvider::ClaudeCode | LlmProvider::Codex => unreachable!(),
     };
 
     settings.agent.api_key = secrets.resolve_or_env_fallback(
@@ -554,12 +649,17 @@ mod tests {
     #[test]
     fn parse_full_json() {
         let json = r#"{
+            "providers": {
+                "claude": {
+                    "type": "anthropic",
+                    "model": "claude-sonnet-4-20250514",
+                    "api_key": "sk-test"
+                }
+            },
             "agent": {
-                "model": "claude-sonnet-4-20250514",
+                "provider": "claude",
                 "max_iterations": 50,
-                "max_tokens": 16384,
-                "api_key": "sk-test",
-                "provider": "anthropic"
+                "max_tokens": 16384
             },
             "skills": {
                 "builtin": { "tools": ["bash"] }
@@ -576,6 +676,12 @@ mod tests {
         assert_eq!(settings.agent.model, "claude-sonnet-4-20250514");
         assert_eq!(settings.agent.max_iterations, 50);
         assert_eq!(settings.agent.api_key, "sk-test");
+        assert_eq!(
+            settings.agent.provider,
+            crate::config::LlmProvider::Anthropic
+        );
+        assert_eq!(settings.providers.len(), 1);
+        assert!(settings.providers.contains_key("claude"));
         assert_eq!(settings.controllers.len(), 2);
         assert_eq!(settings.controllers[0].controller_type, "terminal");
         assert_eq!(settings.controllers[1].controller_type, "telegram");
@@ -616,15 +722,101 @@ mod tests {
     fn literal_and_reference_both_work() {
         unsafe { std::env::set_var("DYSON_JSON_TEST_2", "from_env") };
         let json = r#"{
+            "providers": {
+                "test": {
+                    "type": "anthropic",
+                    "api_key": { "resolver": "insecure_env", "name": "DYSON_JSON_TEST_2" }
+                }
+            },
             "agent": {
-                "api_key": { "resolver": "insecure_env", "name": "DYSON_JSON_TEST_2" }
+                "provider": "test"
             }
         }"#;
         let root: JsonRoot = serde_json::from_str(json).unwrap();
         let secrets = SecretRegistry::default();
         let settings = build_settings(Some(root), &secrets);
         assert_eq!(settings.agent.api_key, "from_env");
+        assert_eq!(settings.providers["test"].api_key, "from_env");
         unsafe { std::env::remove_var("DYSON_JSON_TEST_2") };
+    }
+
+    #[test]
+    fn multiple_providers_parsed() {
+        let json = r#"{
+            "providers": {
+                "claude": {
+                    "type": "anthropic",
+                    "model": "claude-opus-4-20250514",
+                    "api_key": "sk-ant"
+                },
+                "gpt": {
+                    "type": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "sk-oai"
+                },
+                "local": {
+                    "type": "openai",
+                    "model": "llama3",
+                    "base_url": "http://localhost:11434"
+                }
+            },
+            "agent": { "provider": "claude" }
+        }"#;
+        let root: JsonRoot = serde_json::from_str(json).unwrap();
+        let secrets = SecretRegistry::default();
+        let settings = build_settings(Some(root), &secrets);
+
+        // Active provider applied to agent.
+        assert_eq!(settings.agent.provider, crate::config::LlmProvider::Anthropic);
+        assert_eq!(settings.agent.model, "claude-opus-4-20250514");
+        assert_eq!(settings.agent.api_key, "sk-ant");
+
+        // All providers in the map.
+        assert_eq!(settings.providers.len(), 3);
+        assert_eq!(settings.providers["gpt"].model, "gpt-4o");
+        assert_eq!(settings.providers["local"].base_url.as_deref(), Some("http://localhost:11434"));
+    }
+
+    #[test]
+    fn agent_model_overrides_provider() {
+        let json = r#"{
+            "providers": {
+                "claude": {
+                    "type": "anthropic",
+                    "model": "claude-sonnet-4-20250514",
+                    "api_key": "sk-test"
+                }
+            },
+            "agent": {
+                "provider": "claude",
+                "model": "claude-opus-4-20250514"
+            }
+        }"#;
+        let root: JsonRoot = serde_json::from_str(json).unwrap();
+        let secrets = SecretRegistry::default();
+        let settings = build_settings(Some(root), &secrets);
+
+        // Agent-level model overrides provider's model.
+        assert_eq!(settings.agent.model, "claude-opus-4-20250514");
+        // Provider's model is unchanged in the map.
+        assert_eq!(settings.providers["claude"].model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn unknown_provider_name_warns() {
+        let json = r#"{
+            "providers": {
+                "claude": { "type": "anthropic", "api_key": "sk-test" }
+            },
+            "agent": { "provider": "nonexistent" }
+        }"#;
+        let root: JsonRoot = serde_json::from_str(json).unwrap();
+        let secrets = SecretRegistry::default();
+        let settings = build_settings(Some(root), &secrets);
+
+        // Falls back to defaults when provider name not found.
+        assert_eq!(settings.agent.provider, crate::config::LlmProvider::Anthropic);
+        assert_eq!(settings.agent.model, "claude-sonnet-4-20250514");
     }
 
     #[test]
