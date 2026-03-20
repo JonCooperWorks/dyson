@@ -19,6 +19,14 @@
 //   5. If migration was applied, the loader writes the result back
 //      to disk so the file stays current.
 //
+// Version detection:
+//   Configs without a `"config_version"` field are treated as version 0.
+//   This means existing configs written before versioning was introduced
+//   enter the chain at v0 and get migrated forward automatically — no
+//   manual intervention required.  After migration, `"config_version"`
+//   is stamped into the file so subsequent loads skip already-applied
+//   migrations.
+//
 // Adding a new migration:
 //   1. Bump `CURRENT_VERSION`.
 //   2. Add a `Migration` to the `migrations()` vec with the new steps.
