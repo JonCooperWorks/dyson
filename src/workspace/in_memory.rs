@@ -16,18 +16,28 @@ use crate::workspace::openclaw::chrono_today;
 /// In-memory workspace — no filesystem, no persistence.
 pub struct InMemoryWorkspace {
     files: HashMap<String, String>,
+    limits: HashMap<String, usize>,
+    nudge_interval: usize,
 }
 
 impl InMemoryWorkspace {
     pub fn new() -> Self {
         Self {
             files: HashMap::new(),
+            limits: HashMap::new(),
+            nudge_interval: 5,
         }
     }
 
     /// Builder: add a file to the workspace.
     pub fn with_file(mut self, name: &str, content: &str) -> Self {
         self.files.insert(name.to_string(), content.to_string());
+        self
+    }
+
+    /// Builder: set a character limit for a file.
+    pub fn with_limit(mut self, file: &str, max_chars: usize) -> Self {
+        self.limits.insert(file.to_string(), max_chars);
         self
     }
 }
@@ -98,6 +108,7 @@ impl Workspace for InMemoryWorkspace {
             ("PERSONALITY", "SOUL.md"),
             ("IDENTITY", "IDENTITY.md"),
             ("LONG-TERM MEMORY", "MEMORY.md"),
+            ("USER PROFILE", "USER.md"),
         ] {
             if let Some(content) = self.files.get(file) {
                 if !content.trim().is_empty() {
@@ -113,6 +124,14 @@ impl Workspace for InMemoryWorkspace {
         let today = chrono_today();
         let name = format!("memory/{today}.md");
         self.append(&name, entry);
+    }
+
+    fn char_limit(&self, file: &str) -> Option<usize> {
+        self.limits.get(file).copied()
+    }
+
+    fn nudge_interval(&self) -> usize {
+        self.nudge_interval
     }
 }
 
@@ -180,5 +199,26 @@ mod tests {
     fn save_is_noop() {
         let ws = InMemoryWorkspace::new();
         assert!(ws.save().is_ok());
+    }
+
+    #[test]
+    fn with_limit_sets_char_limit() {
+        let ws = InMemoryWorkspace::new()
+            .with_limit("MEMORY.md", 100)
+            .with_limit("USER.md", 50);
+
+        assert_eq!(ws.char_limit("MEMORY.md"), Some(100));
+        assert_eq!(ws.char_limit("USER.md"), Some(50));
+        assert_eq!(ws.char_limit("SOUL.md"), None);
+    }
+
+    #[test]
+    fn system_prompt_includes_user_profile() {
+        let ws = InMemoryWorkspace::new()
+            .with_file("USER.md", "User likes Rust.");
+
+        let prompt = ws.system_prompt();
+        assert!(prompt.contains("USER PROFILE"));
+        assert!(prompt.contains("User likes Rust"));
     }
 }

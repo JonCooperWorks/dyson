@@ -39,6 +39,7 @@
 // ===========================================================================
 
 pub mod in_memory;
+pub mod memory_store;
 pub mod openclaw;
 
 pub use in_memory::InMemoryWorkspace;
@@ -91,6 +92,24 @@ pub trait Workspace: Send + Sync {
 
     /// Append to today's journal.
     fn journal(&mut self, entry: &str);
+
+    /// Character limit for a given file, or None if unlimited.
+    fn char_limit(&self, _file: &str) -> Option<usize> {
+        None
+    }
+
+    /// How often (in turns) to inject a memory maintenance nudge.  0 = disabled.
+    fn nudge_interval(&self) -> usize {
+        5
+    }
+
+    /// Full-text search over memory files (Tier 2).
+    ///
+    /// Returns `(file_key, snippet)` pairs.  Default implementation
+    /// returns empty — backends with FTS5 override this.
+    fn memory_search(&self, _query: &str) -> Vec<(String, String)> {
+        vec![]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +197,10 @@ pub fn migrate_workspace(
 pub fn create_workspace(config: &WorkspaceConfig) -> Result<Box<dyn Workspace>> {
     match config.backend.as_str() {
         "openclaw" => {
-            let ws = OpenClawWorkspace::load_from_connection_string(&config.connection_string)?;
+            let ws = OpenClawWorkspace::load_from_connection_string(
+                &config.connection_string,
+                config.memory.clone(),
+            )?;
             Ok(Box::new(ws))
         }
         other => Err(DysonError::Config(format!(
@@ -223,7 +245,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let mut source = OpenClawWorkspace::load(&dir).unwrap();
+        let mut source = OpenClawWorkspace::load(&dir, crate::config::MemoryConfig::default()).unwrap();
         source.set("SOUL.md", "Custom soul.");
         source.set("MEMORY.md", "Important memory.");
         source.save().unwrap();
@@ -250,7 +272,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let mut target = OpenClawWorkspace::load(&dir).unwrap();
+        let mut target = OpenClawWorkspace::load(&dir, crate::config::MemoryConfig::default()).unwrap();
         let result = migrate_workspace(&source, &mut target).unwrap();
 
         assert_eq!(result.files_migrated, 2);

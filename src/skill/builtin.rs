@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use crate::skill::Skill;
 use crate::tool::Tool;
 use crate::tool::bash::BashTool;
+use crate::tool::memory_search::MemorySearchTool;
 use crate::tool::workspace_view::WorkspaceViewTool;
 use crate::tool::workspace_search::WorkspaceSearchTool;
 use crate::tool::workspace_update::WorkspaceUpdateTool;
@@ -64,6 +65,7 @@ impl BuiltinSkill {
     pub fn new() -> Self {
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(BashTool::default()),
+            Arc::new(MemorySearchTool),
             Arc::new(WorkspaceViewTool),
             Arc::new(WorkspaceSearchTool),
             Arc::new(WorkspaceUpdateTool),
@@ -127,11 +129,12 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new();
         let tools = skill.tools();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
         assert_eq!(tools[0].name(), "bash");
-        assert_eq!(tools[1].name(), "workspace_view");
-        assert_eq!(tools[2].name(), "workspace_search");
-        assert_eq!(tools[3].name(), "workspace_update");
+        assert_eq!(tools[1].name(), "memory_search");
+        assert_eq!(tools[2].name(), "workspace_view");
+        assert_eq!(tools[3].name(), "workspace_search");
+        assert_eq!(tools[4].name(), "workspace_update");
     }
 
     #[test]
