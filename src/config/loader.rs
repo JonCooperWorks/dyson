@@ -771,6 +771,9 @@ fn warn_http_with_api_key(base_url: &Option<String>, api_key: &str, label: &str)
 mod tests {
     use super::*;
 
+    /// Mutex to serialize tests that mutate `ANTHROPIC_API_KEY`.
+    static ANTHROPIC_KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn parse_minimal_json() {
         let json = r#"{ "agent": { "model": "claude-opus-4-20250514" } }"#;
@@ -953,6 +956,7 @@ mod tests {
 
     #[test]
     fn env_fallback_blocked_for_custom_base_url_provider() {
+        let _guard = ANTHROPIC_KEY_LOCK.lock().unwrap();
         // SECURITY: A provider with a custom base_url must NOT get env-var
         // API keys injected — that would send the key to an untrusted endpoint.
         unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-real-key") };
@@ -988,6 +992,7 @@ mod tests {
 
     #[test]
     fn env_fallback_allowed_for_default_base_url() {
+        let _guard = ANTHROPIC_KEY_LOCK.lock().unwrap();
         // When there's no custom base_url, env-var fallback works normally.
         unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-legit-key") };
         let json = r#"{
