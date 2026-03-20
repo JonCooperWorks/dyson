@@ -94,6 +94,81 @@ pub trait Workspace: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// WorkspaceMigrate — trait for migrating between workspace backends.
+// ---------------------------------------------------------------------------
+
+/// Result of a workspace migration.
+pub struct MigrationResult {
+    /// Number of files migrated.
+    pub files_migrated: usize,
+
+    /// Names of files that were migrated.
+    pub file_names: Vec<String>,
+}
+
+/// Trait for migrating workspace contents between backends.
+///
+/// The default implementation uses `Workspace` primitives (list_files, get,
+/// set) so it works for any backend pair.  Backends can override
+/// `export_files` or `import_files` for optimized bulk operations (e.g.,
+/// a database backend might use COPY instead of row-by-row inserts).
+pub trait WorkspaceMigrate: Workspace {
+    /// Export all files as (name, content) pairs.
+    ///
+    /// Default: iterates `list_files()` and `get()`.
+    fn export_files(&self) -> Vec<(String, String)> {
+        self.list_files()
+            .into_iter()
+            .filter_map(|name| {
+                let content = self.get(&name)?;
+                Some((name, content))
+            })
+            .collect()
+    }
+
+    /// Import files from (name, content) pairs, replacing any existing content.
+    ///
+    /// Default: iterates and calls `set()` for each file.
+    fn import_files(&mut self, files: &[(String, String)]) {
+        for (name, content) in files {
+            self.set(name, content);
+        }
+    }
+}
+
+// Blanket impl: every Workspace automatically gets WorkspaceMigrate.
+impl<T: Workspace + ?Sized> WorkspaceMigrate for T {}
+
+/// Migrate all files from one workspace to another.
+///
+/// Reads every file from `source`, writes each into `target`, then persists
+/// `target`.  Returns a summary of what was migrated.
+///
+/// This works across any backend combination — OpenClaw to InMemory, future
+/// database backends, etc. — because it operates through the trait interface.
+pub fn migrate_workspace(
+    source: &dyn Workspace,
+    target: &mut dyn Workspace,
+) -> Result<MigrationResult> {
+    let files = source.export_files();
+    let file_names: Vec<String> = files.iter().map(|(n, _)| n.clone()).collect();
+    let count = files.len();
+
+    target.import_files(&files);
+    target.save()?;
+
+    tracing::info!(
+        files = count,
+        "workspace migration complete"
+    );
+
+    Ok(MigrationResult {
+        files_migrated: count,
+        file_names,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
@@ -109,5 +184,136 @@ pub fn create_workspace(config: &WorkspaceConfig) -> Result<Box<dyn Workspace>> 
         other => Err(DysonError::Config(format!(
             "unknown workspace backend: '{other}'.  Supported: 'openclaw'."
         ))),
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_between_in_memory_workspaces() {
+        let source = InMemoryWorkspace::new()
+            .with_file("SOUL.md", "Be bold.")
+            .with_file("MEMORY.md", "Learned Rust.")
+            .with_file("memory/2026-03-19.md", "Built a feature.");
+
+        let mut target = InMemoryWorkspace::new();
+
+        let result = migrate_workspace(&source, &mut target).unwrap();
+
+        assert_eq!(result.files_migrated, 3);
+        assert_eq!(target.get("SOUL.md").unwrap(), "Be bold.");
+        assert_eq!(target.get("MEMORY.md").unwrap(), "Learned Rust.");
+        assert_eq!(
+            target.get("memory/2026-03-19.md").unwrap(),
+            "Built a feature."
+        );
+    }
+
+    #[test]
+    fn migrate_openclaw_to_in_memory() {
+        let dir = std::env::temp_dir().join(format!(
+            "dyson-migrate-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut source = OpenClawWorkspace::load(&dir).unwrap();
+        source.set("SOUL.md", "Custom soul.");
+        source.set("MEMORY.md", "Important memory.");
+        source.save().unwrap();
+
+        let mut target = InMemoryWorkspace::new();
+        let result = migrate_workspace(&source, &mut target).unwrap();
+
+        assert!(result.files_migrated >= 2);
+        assert_eq!(target.get("SOUL.md").unwrap(), "Custom soul.");
+        assert_eq!(target.get("MEMORY.md").unwrap(), "Important memory.");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_in_memory_to_openclaw() {
+        let source = InMemoryWorkspace::new()
+            .with_file("SOUL.md", "Migrated soul.")
+            .with_file("memory/2026-03-20.md", "Journal entry.");
+
+        let dir = std::env::temp_dir().join(format!(
+            "dyson-migrate-target-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut target = OpenClawWorkspace::load(&dir).unwrap();
+        let result = migrate_workspace(&source, &mut target).unwrap();
+
+        assert_eq!(result.files_migrated, 2);
+
+        // Verify persisted to disk.
+        let on_disk = std::fs::read_to_string(dir.join("SOUL.md")).unwrap();
+        assert_eq!(on_disk, "Migrated soul.");
+        let journal = std::fs::read_to_string(dir.join("memory/2026-03-20.md")).unwrap();
+        assert_eq!(journal, "Journal entry.");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_empty_workspace() {
+        let source = InMemoryWorkspace::new();
+        let mut target = InMemoryWorkspace::new();
+
+        let result = migrate_workspace(&source, &mut target).unwrap();
+
+        assert_eq!(result.files_migrated, 0);
+        assert!(result.file_names.is_empty());
+        assert!(target.list_files().is_empty());
+    }
+
+    #[test]
+    fn migrate_overwrites_existing_target_files() {
+        let source = InMemoryWorkspace::new()
+            .with_file("SOUL.md", "New soul.");
+
+        let mut target = InMemoryWorkspace::new()
+            .with_file("SOUL.md", "Old soul.");
+
+        migrate_workspace(&source, &mut target).unwrap();
+
+        assert_eq!(target.get("SOUL.md").unwrap(), "New soul.");
+    }
+
+    #[test]
+    fn export_files_returns_all_files() {
+        let ws = InMemoryWorkspace::new()
+            .with_file("A.md", "aaa")
+            .with_file("B.md", "bbb");
+
+        let files = ws.export_files();
+        assert_eq!(files.len(), 2);
+
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"A.md"));
+        assert!(names.contains(&"B.md"));
+    }
+
+    #[test]
+    fn import_files_sets_content() {
+        let mut ws = InMemoryWorkspace::new();
+        let files = vec![
+            ("X.md".to_string(), "xxx".to_string()),
+            ("Y.md".to_string(), "yyy".to_string()),
+        ];
+
+        ws.import_files(&files);
+
+        assert_eq!(ws.get("X.md").unwrap(), "xxx");
+        assert_eq!(ws.get("Y.md").unwrap(), "yyy");
     }
 }
