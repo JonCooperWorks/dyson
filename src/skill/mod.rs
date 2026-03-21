@@ -44,6 +44,7 @@
 // ===========================================================================
 
 pub mod builtin;
+pub mod local;
 pub mod mcp;
 
 use std::sync::Arc;
@@ -133,15 +134,22 @@ pub trait Skill: Send + Sync {
 // Skill factory — build skills from config.
 // ---------------------------------------------------------------------------
 
-/// Create skills from the settings.
+/// Create skills from settings and (optionally) workspace discovery.
 ///
 /// Iterates `settings.skills`, constructs the appropriate Skill impl for
 /// each, and calls `on_load()` to initialize them.  MCP skills connect
 /// to their servers and discover tools during on_load().
 ///
+/// When a workspace is provided, also auto-discovers skill files from
+/// the workspace's `skills/` directory (Hermes-style).  Workspace skills
+/// are loaded after config-defined skills.
+///
 /// Skills that fail to load are logged and skipped — the agent continues
 /// without them.
-pub async fn create_skills(settings: &crate::config::Settings) -> Vec<Box<dyn Skill>> {
+pub async fn create_skills(
+    settings: &crate::config::Settings,
+    workspace: Option<&dyn crate::workspace::Workspace>,
+) -> Vec<Box<dyn Skill>> {
     let mut skills: Vec<Box<dyn Skill>> = Vec::new();
 
     for config in &settings.skills {
@@ -171,8 +179,50 @@ pub async fn create_skills(settings: &crate::config::Settings) -> Vec<Box<dyn Sk
                     }
                 }
             }
-            crate::config::SkillConfig::Local(_) => {
-                tracing::warn!("local skills not yet implemented — skipping");
+            crate::config::SkillConfig::Local(cfg) => {
+                let path = std::path::Path::new(&cfg.path);
+                match local::LocalSkill::from_file(path) {
+                    Ok(skill) => {
+                        tracing::info!(
+                            name = skill.name(),
+                            path = cfg.path.as_str(),
+                            "local skill loaded"
+                        );
+                        skills.push(Box::new(skill));
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            name = cfg.name.as_str(),
+                            error = %e,
+                            "local skill failed to load — skipping"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Auto-discover skills from the workspace's skills/ directory.
+    // This follows the Hermes pattern: skills are workspace-managed content
+    // that the agent can create and edit, not just external config references.
+    if let Some(ws) = workspace {
+        for path in ws.skill_files() {
+            match local::LocalSkill::from_file(&path) {
+                Ok(skill) => {
+                    tracing::info!(
+                        name = skill.name(),
+                        path = %path.display(),
+                        "workspace skill loaded"
+                    );
+                    skills.push(Box::new(skill));
+                }
+                Err(e) => {
+                    tracing::error!(
+                        path = %path.display(),
+                        error = %e,
+                        "workspace skill failed to load — skipping"
+                    );
+                }
             }
         }
     }

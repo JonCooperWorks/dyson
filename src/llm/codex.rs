@@ -244,11 +244,12 @@ impl LlmClient for CodexClient {
                 self.dangerous_no_sandbox,
             ));
 
-            let (port, handle) = server.start().await.map_err(|e| {
+            let (port, handle, _token) = server.start().await.map_err(|e| {
                 DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
             })?;
 
             tracing::info!(port = port, "MCP server started for Codex");
+            // TODO: pass bearer token to Codex when it supports MCP auth headers
             mcp_url = Some(format!("http://127.0.0.1:{port}/mcp"));
             _mcp_server_handle = Some(handle);
         }

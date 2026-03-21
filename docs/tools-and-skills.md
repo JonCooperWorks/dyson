@@ -7,8 +7,9 @@ extensibility layer that lets you plug arbitrary capabilities into the agent.
 **Key files:**
 - `src/tool/mod.rs` — `Tool` trait, `ToolContext`, `ToolOutput`
 - `src/tool/bash.rs` — `BashTool` (shell execution with timeout)
-- `src/skill/mod.rs` — `Skill` trait
+- `src/skill/mod.rs` — `Skill` trait, `create_skills()` factory
 - `src/skill/builtin.rs` — `BuiltinSkill` (wraps built-in tools)
+- `src/skill/local.rs` — `LocalSkill` (SKILL.md parser, workspace discovery)
 
 ---
 
@@ -253,18 +254,133 @@ the agent loop needed.
 
 ---
 
-## Skill Taxonomy (Current and Future)
+## Skill Taxonomy
 
 | Skill | Status | Tools | Source |
 |-------|--------|-------|--------|
 | `BuiltinSkill` | Implemented | bash (+ future read/write/edit) | Compiled into Dyson |
-| `McpSkill` | Planned | Discovered via `tools/list` | MCP server (stdio/SSE) |
-| `LocalSkill` | Planned | Defined in SKILL.md files | Local filesystem |
+| `McpSkill` | Implemented | Discovered via `tools/list` | MCP server (stdio/HTTP) |
+| `LocalSkill` | Implemented | None (prompt-only) | SKILL.md files |
 
-All three will implement the same `Skill` trait.  The agent loop treats them
+All three implement the same `Skill` trait.  The agent loop treats them
 identically.
 
 ---
 
+## LocalSkill — Workspace-Managed Skills
+
+Local skills follow the **Hermes pattern**: they live inside the workspace
+directory as agent-curated content, auto-discovered at startup.  No explicit
+config entries needed — just drop a `.md` file in the `skills/` directory.
+
+**Key files:**
+- `src/skill/local.rs` — `LocalSkill` struct and SKILL.md parser
+- `src/skill/mod.rs` — Workspace discovery in `create_skills()`
+
+### SKILL.md Format
+
+```markdown
+---
+name: code-review
+description: Reviews code for quality and security issues
+---
+
+You are a code review expert. When asked to review code:
+1. Search the workspace for the relevant files
+2. Analyze code quality, security, and patterns
+3. Provide actionable feedback
+```
+
+The file has two parts:
+
+| Part | Description |
+|------|-------------|
+| **Frontmatter** | YAML-like key-value pairs between `---` delimiters |
+| **Body** | The system prompt fragment injected into the agent's context |
+
+#### Frontmatter fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Unique skill identifier (used for logging) |
+| `description` | No | One-line summary (for future skill selection) |
+
+### Discovery
+
+Skills are discovered from two sources, loaded in this order:
+
+1. **Config-defined** (`dyson.json` → `skills.local`):
+   ```json
+   {
+     "skills": {
+       "local": [
+         { "name": "code-review", "path": "./skills/code-review.md" }
+       ]
+     }
+   }
+   ```
+   Paths can be absolute or relative to the working directory.
+
+2. **Workspace-discovered** (Hermes-style auto-scan):
+   ```
+   ~/.dyson/
+     skills/
+       code-review.md    ← auto-discovered
+       writing-style.md  ← auto-discovered
+   ```
+   Every `.md` file in the workspace's `skills/` directory is loaded
+   automatically.  The directory is created when the workspace initializes.
+
+Config-defined skills load first, then workspace skills.  Both use the
+same `LocalSkill::from_file()` parser and `SKILL.md` format.
+
+### What local skills do
+
+Local skills contribute a **system prompt fragment** but **no tools**.
+They guide the agent's behaviour through instructions — for example,
+coding conventions, review checklists, or domain expertise.
+
+```rust
+impl Skill for LocalSkill {
+    fn name(&self) -> &str { &self.name }
+    fn tools(&self) -> &[Arc<dyn Tool>] { &[] }          // no tools
+    fn system_prompt(&self) -> Option<&str> { Some(&self.system_prompt) }
+}
+```
+
+### Error handling
+
+| Error | Behaviour |
+|-------|-----------|
+| Missing file | Logged, skill skipped |
+| No frontmatter (`---` delimiters) | `DysonError::Config` |
+| Missing `name` field | `DysonError::Config` |
+| Empty body | `DysonError::Config` |
+
+Failed skills never stop the agent — they're logged and skipped.
+
+### Example: adding a workspace skill
+
+```bash
+cat > ~/.dyson/skills/rust-conventions.md << 'EOF'
+---
+name: rust-conventions
+description: Enforces project Rust coding standards
+---
+
+When writing or reviewing Rust code:
+- Use `thiserror` for error types, not `anyhow` in library code
+- Prefer `Arc<dyn Trait>` for shared polymorphic state
+- All public functions need doc comments
+- Use `tracing` for logging, never `println!` or `eprintln!`
+EOF
+```
+
+Next time the agent starts, it will automatically include these conventions
+in its system prompt.
+
+---
+
 See also: [Architecture Overview](architecture-overview.md) ·
-[Agent Loop](agent-loop.md) · [Sandbox](sandbox.md)
+[Agent Loop](agent-loop.md) · [Sandbox](sandbox.md) ·
+[Tool Forwarding over MCP](tool-forwarding-over-mcp.md)

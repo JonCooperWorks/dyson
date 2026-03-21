@@ -215,6 +215,8 @@ Three types of skills can be configured:
 
 ### Local
 
+Local skills can be configured explicitly in `dyson.json`:
+
 ```json
 {
   "skills": {
@@ -225,6 +227,12 @@ Three types of skills can be configured:
   }
 }
 ```
+
+They can also be auto-discovered from the workspace's `skills/` directory
+(Hermes-style).  Any `.md` file in `~/.dyson/skills/` with valid SKILL.md
+frontmatter is loaded automatically — no config needed.  See
+[Tools & Skills](tools-and-skills.md#localskill--workspace-managed-skills)
+for the SKILL.md format.
 
 ---
 

@@ -55,6 +55,8 @@ included in the system prompt for session continuity.
 │   ├── 2026-03-19.md    yesterday's journal       (Tier 3)
 │   └── notes/           overflow storage           (Tier 2)
 │       └── *.md
+├── skills/              local skill files (auto-discovered)
+│   └── *.md             SKILL.md format with frontmatter
 └── memory.db            SQLite FTS5 index
 ```
 

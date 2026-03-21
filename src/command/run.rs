@@ -59,7 +59,10 @@ pub async fn run(
         &settings.sandbox,
         settings.dangerous_no_sandbox,
     );
-    let skills = dyson::skill::create_skills(&settings).await;
+    let skills = {
+        let ws = workspace.read().await;
+        dyson::skill::create_skills(&settings, Some(&**ws)).await
+    };
     let nudge_interval = {
         let ws = workspace.read().await;
         ws.nudge_interval()

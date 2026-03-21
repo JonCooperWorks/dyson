@@ -55,8 +55,8 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::config::{
-    BuiltinSkillConfig, ControllerConfig, DockerSandboxConfig, LlmProvider, McpConfig,
-    McpTransportConfig, ProviderConfig, SandboxConfig, Settings, SkillConfig,
+    BuiltinSkillConfig, ControllerConfig, DockerSandboxConfig, LlmProvider, LocalSkillConfig,
+    McpConfig, McpTransportConfig, ProviderConfig, SandboxConfig, Settings, SkillConfig,
 };
 use crate::error::{DysonError, Result};
 use crate::secret::{SecretRegistry, SecretValue};
@@ -128,6 +128,13 @@ struct JsonAgent {
 #[derive(Debug, Deserialize)]
 struct JsonSkills {
     builtin: Option<JsonBuiltinSkill>,
+    local: Option<Vec<JsonLocalSkill>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonLocalSkill {
+    name: String,
+    path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -462,6 +469,16 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
             skill_configs.push(SkillConfig::Builtin(BuiltinSkillConfig {
                 tools: vec![],
             }));
+        }
+
+        // -- Local skills --
+        if let Some(locals) = skills.local {
+            for local in locals {
+                skill_configs.push(SkillConfig::Local(LocalSkillConfig {
+                    name: local.name,
+                    path: local.path,
+                }));
+            }
         }
 
         settings.skills = skill_configs;

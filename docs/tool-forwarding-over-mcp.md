@@ -87,25 +87,27 @@ and has a workspace, the MCP server starts automatically.  No extra config neede
 Each time `ClaudeCodeClient::stream()` is called (once per LLM turn):
 
 1. **Start MCP server**: `McpHttpServer::start()` binds to `127.0.0.1:0`
-   (loopback-only, OS-assigned port) and spawns a tokio task for the accept loop.
+   (loopback-only, OS-assigned port), generates a bearer token, and spawns a
+   tokio task for the accept loop.  Returns `(port, handle, token)`.
 
 2. **Build config JSON**: Construct the MCP server config that tells Claude Code
-   where to connect:
+   where to connect and how to authenticate:
    ```json
    {
      "mcpServers": {
        "dyson-workspace": {
          "type": "url",
-         "url": "http://127.0.0.1:54321/mcp"
+         "url": "http://127.0.0.1:54321/mcp",
+         "headers": {
+           "Authorization": "Bearer <token>"
+         }
        }
      }
    }
    ```
 
-3. **Pass to Claude Code**: The config is passed as a CLI argument:
-   ```
-   claude -p --mcp-config '{"mcpServers":{"dyson-workspace":{"type":"url","url":"http://127.0.0.1:54321/mcp"}}}'
-   ```
+3. **Pass to Claude Code**: The config (including the bearer token) is passed as
+   a CLI argument via `--mcp-config`.
 
 4. **Claude Code connects**: During startup, Claude Code reads the MCP config,
    connects to our HTTP server, and runs the MCP handshake.
@@ -179,13 +181,34 @@ no shutdown coordination, no stale connections, no port leaks.
 - **Loopback-only**: The server binds to `127.0.0.1`, not `0.0.0.0`.  Only
   local processes can reach it.  No network exposure.
 
-- **No authentication**: The server has no auth.  This is acceptable because:
-  - Only the co-located `claude -p` subprocess connects
-  - Binding is loopback-only (no remote access)
-  - The port is ephemeral and short-lived (one LLM turn)
+- **Bearer token authentication**: Every request must include an
+  `Authorization: Bearer <token>` header.  The token is a 64-character hex
+  string generated from two UUID v4 values at server startup.  Requests
+  without a valid token receive HTTP 401.  This prevents other local
+  processes from accessing the workspace even if they discover the port.
 
-- **No secrets in URL**: The MCP config passed via CLI args contains only
-  a loopback URL.  No API keys, tokens, or credentials.
+- **Token lifecycle**: A new token is generated per LLM turn (each call to
+  `stream()`).  The token is passed to Claude Code via `--mcp-config`:
+  ```json
+  {
+    "mcpServers": {
+      "dyson-workspace": {
+        "type": "url",
+        "url": "http://127.0.0.1:54321/mcp",
+        "headers": {
+          "Authorization": "Bearer <token>"
+        }
+      }
+    }
+  }
+  ```
+  The token is visible in `ps` output (part of the CLI args), but it's
+  ephemeral and only usable on loopback.  The token is zeroized in memory
+  when the server is dropped.
+
+- **Defense in depth**: Loopback binding + bearer auth + ephemeral port
+  together ensure that only the intended `claude -p` subprocess can access
+  the workspace.
 
 ---
 
@@ -260,6 +283,7 @@ MCP's `isError` field for tool-level errors:
 
 | Scenario | Response |
 |----------|----------|
+| Missing or invalid bearer token | HTTP 401, `{"error": "unauthorized"}` |
 | Invalid JSON body | HTTP 400, JSON-RPC error -32700 (Parse error) |
 | Unknown method | HTTP 200, JSON-RPC error -32601 (Method not found) |
 | Missing params | HTTP 200, JSON-RPC error -32602 (Invalid params) |
@@ -282,10 +306,16 @@ The MCP server has both unit and integration tests:
 - **Integration test** starts the real HTTP server, sends a request via
   `reqwest`, and validates the full stack from TCP accept to JSON response.
 
+- **Auth tests** (`tests/security_regression.rs`) verify that:
+  - Requests without an `Authorization` header are rejected with 401
+  - Requests with a wrong bearer token are rejected with 401
+  - Requests with the correct bearer token succeed
+
 - **MockWorkspace** provides a minimal in-memory workspace implementation
   with one file for verifying tool execution end-to-end.
 
 Run with:
 ```bash
-cargo test skill::mcp::serve
+cargo test skill::mcp::serve           # unit tests
+cargo test mcp_server                   # security regression tests
 ```

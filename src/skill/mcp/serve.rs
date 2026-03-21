@@ -143,6 +143,8 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use zeroize::Zeroize;
+
 use crate::error::Result;
 use crate::tool::workspace_search::WorkspaceSearchTool;
 use crate::tool::workspace_update::WorkspaceUpdateTool;
@@ -213,6 +215,19 @@ pub struct McpHttpServer {
     ///    CLI → Settings → create_client() → ClaudeCodeClient → McpHttpServer
     #[allow(dead_code)]
     dangerous_no_sandbox: bool,
+
+    /// Bearer token for authenticating incoming requests.
+    ///
+    /// Generated once in `new()` from two concatenated UUID v4 values (64 hex
+    /// chars).  Every request must include `Authorization: Bearer <token>`.
+    /// The token is zeroized on drop to avoid lingering in memory.
+    bearer_token: String,
+}
+
+impl Drop for McpHttpServer {
+    fn drop(&mut self) {
+        self.bearer_token.zeroize();
+    }
 }
 
 impl McpHttpServer {
@@ -234,7 +249,7 @@ impl McpHttpServer {
     /// ```ignore
     /// let ws: Arc<RwLock<Box<dyn Workspace>>> = /* ... */;
     /// let server = Arc::new(McpHttpServer::new(ws, true));
-    /// let (port, handle) = server.start().await?;
+    /// let (port, handle, token) = server.start().await?;
     /// ```
     pub fn new(
         workspace: Arc<RwLock<Box<dyn Workspace>>>,
@@ -252,11 +267,23 @@ impl McpHttpServer {
         tools.insert(search.name().to_string(), search);
         tools.insert(update.name().to_string(), update);
 
+        let bearer_token = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+
         Self {
             workspace,
             tools,
             dangerous_no_sandbox,
+            bearer_token,
         }
+    }
+
+    /// Returns the bearer token required to authenticate requests.
+    pub fn bearer_token(&self) -> &str {
+        &self.bearer_token
     }
 
     /// Start the HTTP server on a random loopback port.
@@ -267,21 +294,23 @@ impl McpHttpServer {
     ///
     /// ## Returns
     ///
-    /// `(port, task_handle)` where:
+    /// `(port, task_handle, bearer_token)` where:
     /// - `port`: The OS-assigned port number.  Used to construct the MCP
     ///   config JSON passed to Claude Code via `--mcp-config`.
     /// - `task_handle`: A `JoinHandle<()>` that owns the accept loop.
     ///   Dropping or aborting this handle stops the server and frees the
     ///   port.  The caller (ClaudeCodeClient) moves this into the stream
     ///   closure so the server lives exactly as long as the LLM turn.
+    /// - `bearer_token`: The token that must be included in the
+    ///   `Authorization: Bearer <token>` header of every request.
     ///
     /// ## Why loopback-only?
     ///
-    /// Security.  The MCP server has no authentication — any process that
-    /// can reach it can read/write the workspace.  Binding to 127.0.0.1
-    /// ensures only local processes can connect.  This is sufficient
-    /// because the only intended client is the `claude -p` subprocess
-    /// running on the same machine.
+    /// Security.  The MCP server requires a per-session bearer token and
+    /// binds to 127.0.0.1 so only local processes can connect.  The token
+    /// is generated at startup and passed to Claude Code via `--mcp-config`.
+    /// Together, loopback binding + bearer auth ensure that only the
+    /// intended `claude -p` subprocess can access the workspace.
     ///
     /// ## Why port 0?
     ///
@@ -295,7 +324,7 @@ impl McpHttpServer {
     /// connection uses `service_fn` to dispatch requests to
     /// `handle_request()`.  Claude Code typically sends one request per
     /// connection (MCP over HTTP uses request/response, not streaming).
-    pub async fn start(self: Arc<Self>) -> Result<(u16, JoinHandle<()>)> {
+    pub async fn start(self: Arc<Self>) -> Result<(u16, JoinHandle<()>, String)> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         assert!(
@@ -337,7 +366,8 @@ impl McpHttpServer {
             }
         });
 
-        Ok((port, handle))
+        let token = self.bearer_token.clone();
+        Ok((port, handle, token))
     }
 
     /// Route an incoming HTTP request to the JSON-RPC dispatcher.
@@ -373,6 +403,22 @@ impl McpHttpServer {
         if req.method() != hyper::Method::POST || req.uri().path() != "/mcp" {
             return json_response(StatusCode::NOT_FOUND, &serde_json::json!({
                 "error": "not found"
+            }));
+        }
+
+        // Authenticate the request via Bearer token.
+        let authorized = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|t| t == self.bearer_token)
+            .unwrap_or(false);
+
+        if !authorized {
+            tracing::warn!("MCP server: rejected unauthorized request");
+            return json_response(StatusCode::UNAUTHORIZED, &serde_json::json!({
+                "error": "unauthorized"
             }));
         }
 
@@ -954,13 +1000,14 @@ mod tests {
     #[tokio::test]
     async fn server_binds_and_accepts() {
         let server = make_server();
-        let (port, handle) = server.start().await.unwrap();
+        let (port, handle, token) = server.start().await.unwrap();
         assert!(port > 0);
 
         // Send a real HTTP request to the server.
         let client = reqwest::Client::new();
         let resp = client
             .post(format!("http://127.0.0.1:{port}/mcp"))
+            .header("Authorization", format!("Bearer {token}"))
             .json(&serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 1,

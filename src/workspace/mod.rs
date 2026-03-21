@@ -111,6 +111,18 @@ pub trait Workspace: Send + Sync {
     fn memory_search(&self, _query: &str) -> Vec<(String, String)> {
         vec![]
     }
+
+    /// Discover skill files in the workspace's `skills/` directory.
+    ///
+    /// Returns absolute paths to `.md` files in the `skills/` subdirectory.
+    /// Following the Hermes pattern, skills are workspace-managed content
+    /// that the agent can create, edit, and discover — not just external
+    /// files referenced by config.
+    ///
+    /// Default implementation returns empty (InMemoryWorkspace, etc.).
+    fn skill_files(&self) -> Vec<std::path::PathBuf> {
+        vec![]
+    }
 }
 
 // ---------------------------------------------------------------------------

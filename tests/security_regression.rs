@@ -446,7 +446,7 @@ async fn mcp_server_binds_to_loopback_only() {
         Arc::new(RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())));
 
     let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, true));
-    let (port, handle) = server.start().await.unwrap();
+    let (port, handle, token) = server.start().await.unwrap();
 
     // Verify the port is non-zero (OS assigned).
     assert!(port > 0, "port should be a valid non-zero port");
@@ -466,6 +466,7 @@ async fn mcp_server_binds_to_loopback_only() {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://127.0.0.1:{port}/mcp"))
+        .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -488,4 +489,126 @@ async fn mcp_server_binds_to_loopback_only() {
     );
 
     handle.abort();
+}
+
+// =========================================================================
+// 9. MCP server bearer token authentication
+// =========================================================================
+
+#[tokio::test]
+async fn mcp_server_rejects_unauthorized_request() {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let ws: Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> =
+        Arc::new(RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())));
+
+    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, true));
+    let (port, handle, _token) = server.start().await.unwrap();
+
+    // Send a request with no Authorization header.
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/mcp"))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.0.1" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        401,
+        "request without Authorization header must be rejected"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn mcp_server_rejects_wrong_bearer_token() {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let ws: Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> =
+        Arc::new(RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())));
+
+    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, true));
+    let (port, handle, _token) = server.start().await.unwrap();
+
+    // Send a request with a wrong bearer token.
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/mcp"))
+        .header("Authorization", "Bearer wrong-token-value")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test", "version": "0.0.1" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        401,
+        "request with wrong bearer token must be rejected"
+    );
+
+    handle.abort();
+}
+
+#[test]
+fn mcp_server_bearer_token_is_64_hex_chars() {
+    use tokio::sync::RwLock;
+
+    let ws: std::sync::Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> =
+        std::sync::Arc::new(RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())));
+
+    let server = dyson::skill::mcp::serve::McpHttpServer::new(ws, true);
+    let token = server.bearer_token();
+
+    assert_eq!(
+        token.len(),
+        64,
+        "bearer token should be 64 hex chars, got {} chars",
+        token.len()
+    );
+    assert!(
+        token.chars().all(|c| c.is_ascii_hexdigit()),
+        "bearer token should be hex only, got: {token}"
+    );
+}
+
+#[test]
+fn mcp_server_generates_unique_tokens() {
+    use tokio::sync::RwLock;
+
+    let ws1: std::sync::Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> =
+        std::sync::Arc::new(RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())));
+    let ws2: std::sync::Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> =
+        std::sync::Arc::new(RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())));
+
+    let server1 = dyson::skill::mcp::serve::McpHttpServer::new(ws1, true);
+    let server2 = dyson::skill::mcp::serve::McpHttpServer::new(ws2, true);
+
+    assert_ne!(
+        server1.bearer_token(),
+        server2.bearer_token(),
+        "different server instances should have different tokens"
+    );
 }

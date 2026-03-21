@@ -20,6 +20,9 @@
 //       2026-03-19.md  — daily journal (one per day, created automatically)
 //       2026-03-18.md
 //       ...
+//     skills/
+//       code-review.md — local skill files (auto-discovered, Hermes-style)
+//       ...
 //
 // OpenClaw compatibility:
 //   These files are the same format as OpenClaw/TARS.  If you have an
@@ -74,6 +77,9 @@ impl OpenClawWorkspace {
         })?;
         std::fs::create_dir_all(path.join("memory")).map_err(|e| {
             DysonError::Config(format!("cannot create memory dir: {e}"))
+        })?;
+        std::fs::create_dir_all(path.join("skills")).map_err(|e| {
+            DysonError::Config(format!("cannot create skills dir: {e}"))
         })?;
 
         // Run workspace migrations before reading files.
@@ -414,6 +420,25 @@ impl Workspace for OpenClawWorkspace {
             results.into_iter().map(|r| (r.key, r.snippet)).collect()
         }
     }
+
+    fn skill_files(&self) -> Vec<std::path::PathBuf> {
+        let skills_dir = self.path.join("skills");
+        if !skills_dir.is_dir() {
+            return vec![];
+        }
+
+        let mut paths = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&skills_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "md") && path.is_file() {
+                    paths.push(path);
+                }
+            }
+        }
+        paths.sort();
+        paths
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +682,80 @@ mod tests {
         // FTS5 should find it by word match
         let results = ws.memory_search("XYZ123");
         assert!(!results.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skill_files_returns_empty_when_no_skills() {
+        let (dir, ws) = temp_workspace();
+        // skills/ directory exists but is empty
+        assert!(dir.join("skills").is_dir());
+        assert!(ws.skill_files().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skill_files_discovers_md_files() {
+        let (dir, ws) = temp_workspace();
+        let skills_dir = dir.join("skills");
+
+        // Create skill files
+        std::fs::write(
+            skills_dir.join("code-review.md"),
+            "---\nname: code-review\n---\n\nReview code.",
+        )
+        .unwrap();
+        std::fs::write(
+            skills_dir.join("writing.md"),
+            "---\nname: writing\n---\n\nWrite well.",
+        )
+        .unwrap();
+        // Non-.md files should be ignored
+        std::fs::write(skills_dir.join("notes.txt"), "not a skill").unwrap();
+
+        let paths = ws.skill_files();
+        assert_eq!(paths.len(), 2, "should find exactly 2 .md files");
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"code-review.md".to_string()));
+        assert!(names.contains(&"writing.md".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skill_files_ignores_subdirectories() {
+        let (dir, ws) = temp_workspace();
+        let skills_dir = dir.join("skills");
+
+        // Create a subdirectory with an .md file — should not be discovered
+        let subdir = skills_dir.join("nested");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("deep.md"), "---\nname: deep\n---\n\nDeep.").unwrap();
+
+        // Create a top-level skill
+        std::fs::write(
+            skills_dir.join("top.md"),
+            "---\nname: top\n---\n\nTop level.",
+        )
+        .unwrap();
+
+        let paths = ws.skill_files();
+        assert_eq!(paths.len(), 1, "should only find top-level .md files");
+        assert!(paths[0].file_name().unwrap() == "top.md");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn creates_skills_directory() {
+        let (dir, _ws) = temp_workspace();
+        assert!(
+            dir.join("skills").is_dir(),
+            "workspace load should create skills/ directory"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -222,4 +222,13 @@ mod tests {
         assert!(prompt.contains("USER PROFILE"));
         assert!(prompt.contains("User likes Rust"));
     }
+
+    #[test]
+    fn skill_files_returns_empty() {
+        let ws = InMemoryWorkspace::new();
+        assert!(
+            ws.skill_files().is_empty(),
+            "InMemoryWorkspace should return no skill files"
+        );
+    }
 }

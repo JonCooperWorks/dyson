@@ -388,8 +388,9 @@ impl LlmClient for ClaudeCodeClient {
         //
         // Why pass config as CLI arg (not temp file)?
         //   Simpler.  No file I/O, no cleanup, no race conditions.  The
-        //   JSON is small (~100 bytes).  The tradeoff is it's visible in
-        //   `ps` output, but it's just a loopback URL — no secrets.
+        //   JSON is small.  The tradeoff is the bearer token is visible
+        //   in `ps` output, but it's ephemeral (new token per LLM turn)
+        //   and only usable on loopback.
         let mut _mcp_server_handle: Option<tokio::task::JoinHandle<()>> = None;
         let mut mcp_config_json: Option<String> = None;
 
@@ -399,7 +400,7 @@ impl LlmClient for ClaudeCodeClient {
                 self.dangerous_no_sandbox,
             ));
 
-            let (port, handle) = server.start().await.map_err(|e| {
+            let (port, handle, token) = server.start().await.map_err(|e| {
                 DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
             })?;
 
@@ -414,7 +415,10 @@ impl LlmClient for ClaudeCodeClient {
                 "mcpServers": {
                     "dyson-workspace": {
                         "type": "sse",
-                        "url": format!("http://127.0.0.1:{port}/mcp")
+                        "url": format!("http://127.0.0.1:{port}/mcp"),
+                        "headers": {
+                            "Authorization": format!("Bearer {token}")
+                        }
                     }
                 }
             });

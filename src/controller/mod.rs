@@ -176,7 +176,10 @@ pub async fn build_agent(
         &settings.sandbox,
         settings.dangerous_no_sandbox,
     );
-    let skills = crate::skill::create_skills(settings).await;
+    let skills = {
+        let ws = workspace.read().await;
+        crate::skill::create_skills(settings, Some(&**ws)).await
+    };
 
     crate::agent::Agent::new(client, sandbox, skills, &agent_settings, Some(workspace), nudge_interval)
 }
