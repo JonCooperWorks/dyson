@@ -67,8 +67,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use tokio_stream::StreamExt;
 
-use zeroize::Zeroize;
-
+use crate::auth::Auth;
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call, MAX_LINE_BUFFER, MAX_TOOL_JSON, MAX_ACTIVE_TOOL_BUFFERS};
@@ -149,9 +148,9 @@ pub struct AnthropicClient {
     /// Reusable HTTP client (connection pooling, TLS setup, etc.).
     client: reqwest::Client,
 
-    /// Anthropic API key (sent as `x-api-key` header).
-    /// Zeroized on drop to avoid leaving secrets in memory.
-    api_key: String,
+    /// Authentication handler (applies `x-api-key` header).
+    /// Zeroize is handled by the Auth implementation.
+    auth: Box<dyn Auth>,
 
     /// Base URL for the API (default: "https://api.anthropic.com").
     ///
@@ -159,20 +158,32 @@ pub struct AnthropicClient {
     base_url: String,
 }
 
-impl Drop for AnthropicClient {
-    fn drop(&mut self) {
-        self.api_key.zeroize();
-    }
-}
-
 impl AnthropicClient {
-    /// Create a new Anthropic client.
+    /// Create a new Anthropic client with an API key string.
     ///
+    /// Convenience constructor — wraps the key in `ApiKeyAuth::anthropic()`.
     /// `base_url` is optional — pass `None` for the default Anthropic endpoint.
     pub fn new(api_key: &str, base_url: Option<&str>) -> Self {
+        Self::with_auth(
+            Box::new(crate::auth::ApiKeyAuth::anthropic(api_key.to_string())),
+            base_url,
+        )
+    }
+
+    /// Create a new Anthropic client with a custom `Auth` implementation.
+    ///
+    /// Use this for composable auth (e.g., adding audit logging):
+    /// ```ignore
+    /// let auth = TracingAuth::new(
+    ///     Box::new(ApiKeyAuth::anthropic(key)),
+    ///     "anthropic",
+    /// );
+    /// let client = AnthropicClient::with_auth(Box::new(auth), None);
+    /// ```
+    pub fn with_auth(auth: Box<dyn Auth>, base_url: Option<&str>) -> Self {
         Self {
             client: reqwest::Client::new(),
-            api_key: api_key.to_string(),
+            auth,
             base_url: base_url
                 .unwrap_or("https://api.anthropic.com")
                 .to_string(),
@@ -250,15 +261,14 @@ impl LlmClient for AnthropicClient {
             "sending Anthropic streaming request"
         );
 
-        let response = self
+        let req = self
             .client
             .post(&url)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+            .json(&body);
+
+        let response = self.auth.apply_to_request(req).await?.send().await?;
 
         // -- Check for HTTP errors --
         //

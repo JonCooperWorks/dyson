@@ -293,143 +293,78 @@ fn telegram_accepts_config_with_chat_ids() {
 }
 
 // =========================================================================
-// 7. Zeroize on drop (API key memory is zeroed)
+// 7. Zeroize on drop (Credential zeroes secret memory)
 // =========================================================================
 //
-// Strategy: We allocate a large buffer, place the client inside it using
-// placement-style construction (Box), then after drop_in_place we can
-// read the Box's memory (which we still own) to verify that the String
-// struct's length field is zeroed -- zeroize on String sets len to 0
-// and writes zeros to the buffer before the String's own drop frees it.
+// The Credential type wraps secret strings and zeroes them on drop.
+// All auth types (BearerTokenAuth, ApiKeyAuth) use Credential internally,
+// so testing Credential covers the full chain.
 //
-// We verify two things:
-// 1. The client can be constructed and dropped without panicking.
-// 2. After drop_in_place, the client's memory region no longer contains
-//    the API key bytes (scanning the struct's inline memory, not the heap).
+// Strategy: Box the Credential, use into_raw / drop_in_place to trigger
+// the destructor without freeing memory, then verify the String's length
+// field has been zeroed.
 
 #[test]
-fn anthropic_client_zeroizes_api_key_on_drop() {
-    use dyson::llm::anthropic::AnthropicClient;
+fn credential_zeroizes_on_drop() {
+    use dyson::auth::Credential;
 
-    let secret = "sk-ant-secret-key-12345678-zeroize-test";
+    let secret = "sk-secret-key-for-zeroize-regression-test-12345678";
 
-    // Box the client so we can use into_raw / drop_in_place pattern.
-    let client = Box::new(AnthropicClient::new(secret, None));
-    let raw = Box::into_raw(client);
+    let cred = Box::new(Credential::new(secret.to_string()));
+    let raw = Box::into_raw(cred);
 
-    // Before drop: read the struct's memory and verify the key length
-    // is stored somewhere (the String's len field should be non-zero).
-    let struct_size = std::mem::size_of::<AnthropicClient>();
+    let struct_size = std::mem::size_of::<Credential>();
+    let secret_len_bytes = (secret.len() as usize).to_ne_bytes();
+
+    // Before drop: the String's length field should be present.
     let pre_drop_bytes: Vec<u8> = unsafe {
         std::slice::from_raw_parts(raw as *const u8, struct_size).to_vec()
     };
-
-    // The secret length should appear somewhere in the struct memory
-    // as the String's len field.
-    let secret_len_bytes = (secret.len() as usize).to_ne_bytes();
+    let pre_match_count = pre_drop_bytes
+        .windows(secret_len_bytes.len())
+        .filter(|w| *w == secret_len_bytes)
+        .count();
     assert!(
-        pre_drop_bytes
-            .windows(secret_len_bytes.len())
-            .any(|w| w == secret_len_bytes),
+        pre_match_count > 0,
         "before drop, the String's length field should be present in struct memory"
     );
 
-    // Run destructor (zeroize + field drops), but keep the allocation alive.
+    // Run destructor (zeroize), but keep the allocation alive.
     unsafe {
         std::ptr::drop_in_place(raw);
     }
 
-    // After drop: the String's len should have been set to 0 by zeroize.
-    // Read the struct memory again.
+    // After drop: the String's length should have been zeroed.
     let post_drop_bytes: Vec<u8> = unsafe {
         std::slice::from_raw_parts(raw as *const u8, struct_size).to_vec()
     };
-
-    // The secret length should no longer appear (zeroize sets len to 0).
-    // Note: there could be a false positive if some other field happens
-    // to have the same value, but with a unique key length this is unlikely.
-    let len_still_present = post_drop_bytes
-        .windows(secret_len_bytes.len())
-        .enumerate()
-        .filter(|(i, w)| {
-            // Only check at the same offsets where we found it before.
-            *w == secret_len_bytes
-                && pre_drop_bytes[*i..*i + secret_len_bytes.len()] == secret_len_bytes[..]
-        })
-        .count();
-
-    // If zeroize worked, the len field that matched before should now be 0.
-    // We check that at least one of the previous matches is now gone.
-    let pre_match_count = pre_drop_bytes
+    let post_match_count = post_drop_bytes
         .windows(secret_len_bytes.len())
         .filter(|w| *w == secret_len_bytes)
         .count();
 
     assert!(
-        len_still_present < pre_match_count,
-        "after drop, the API key's length field should have been zeroed by zeroize"
+        post_match_count < pre_match_count,
+        "after drop, the secret's length field should have been zeroed by Credential"
     );
 
-    // Deallocate the Box memory.
     unsafe {
-        let layout = std::alloc::Layout::new::<AnthropicClient>();
+        let layout = std::alloc::Layout::new::<Credential>();
         std::alloc::dealloc(raw as *mut u8, layout);
     }
 }
 
 #[test]
-fn openai_client_zeroizes_api_key_on_drop() {
-    use dyson::llm::openai::OpenAiClient;
+fn credential_debug_redacts_secret() {
+    use dyson::auth::Credential;
 
-    let secret = "sk-openai-secret-key-87654321-zeroize-test";
-
-    let client = Box::new(OpenAiClient::new(secret, None));
-    let raw = Box::into_raw(client);
-
-    let struct_size = std::mem::size_of::<OpenAiClient>();
-    let pre_drop_bytes: Vec<u8> = unsafe {
-        std::slice::from_raw_parts(raw as *const u8, struct_size).to_vec()
-    };
-
-    let secret_len_bytes = (secret.len() as usize).to_ne_bytes();
+    let cred = Credential::new("sk-ant-super-secret".to_string());
+    let debug = format!("{:?}", cred);
     assert!(
-        pre_drop_bytes
-            .windows(secret_len_bytes.len())
-            .any(|w| w == secret_len_bytes),
-        "before drop, the String's length field should be present in struct memory"
+        !debug.contains("sk-ant-super-secret"),
+        "Debug output must not contain the secret value"
     );
-
-    unsafe {
-        std::ptr::drop_in_place(raw);
-    }
-
-    let post_drop_bytes: Vec<u8> = unsafe {
-        std::slice::from_raw_parts(raw as *const u8, struct_size).to_vec()
-    };
-
-    let len_still_present = post_drop_bytes
-        .windows(secret_len_bytes.len())
-        .enumerate()
-        .filter(|(i, w)| {
-            *w == secret_len_bytes
-                && pre_drop_bytes[*i..*i + secret_len_bytes.len()] == secret_len_bytes[..]
-        })
-        .count();
-
-    let pre_match_count = pre_drop_bytes
-        .windows(secret_len_bytes.len())
-        .filter(|w| *w == secret_len_bytes)
-        .count();
-
-    assert!(
-        len_still_present < pre_match_count,
-        "after drop, the API key's length field should have been zeroed by zeroize"
-    );
-
-    unsafe {
-        let layout = std::alloc::Layout::new::<OpenAiClient>();
-        std::alloc::dealloc(raw as *mut u8, layout);
-    }
+    assert!(debug.contains("***"), "Debug output should show redacted marker");
 }
 
 // =========================================================================

@@ -78,7 +78,7 @@ pub fn apply_overrides(
     }
     settings.dangerous_no_sandbox = dangerous_no_sandbox;
     if let Some(ws) = workspace {
-        settings.workspace.connection_string = ws;
+        settings.workspace.connection_string = dyson::auth::Credential::new(ws);
     }
     Ok(())
 }

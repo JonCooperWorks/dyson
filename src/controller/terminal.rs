@@ -68,7 +68,7 @@ impl super::Controller for TerminalController {
             });
 
         let workspace_path = crate::workspace::OpenClawWorkspace::resolve_path(
-            Some(settings.workspace.connection_string.as_str()),
+            Some(settings.workspace.connection_string.expose()),
         );
 
         let mut reloader = crate::config::hot_reload::HotReloader::new(

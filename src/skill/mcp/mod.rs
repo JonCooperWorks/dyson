@@ -150,7 +150,8 @@ impl Skill for McpSkill {
                 Arc::new(StdioTransport::spawn(command, args, env).await?)
             }
             crate::config::McpTransportConfig::Http { url, headers } => {
-                Arc::new(HttpTransport::new(url, headers.clone()))
+                let auth = Box::new(crate::auth::StaticHeadersAuth::new(headers.clone()));
+                Arc::new(HttpTransport::new(url, auth))
             }
         };
 

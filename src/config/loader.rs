@@ -372,7 +372,7 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                 }
             };
 
-            let api_key = match jp.api_key.as_ref() {
+            let api_key: crate::auth::Credential = match jp.api_key.as_ref() {
                 Some(k) => match secrets.resolve(k) {
                     Ok(resolved) => resolved,
                     Err(e) => {
@@ -384,7 +384,7 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                         continue;
                     }
                 },
-                None => String::new(),
+                None => crate::auth::Credential::new(String::new()),
             };
 
             let model = jp.model.unwrap_or_else(|| {
@@ -577,7 +577,7 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                 settings.workspace.connection_string = resolved;
             }
         } else if let Some(path) = ws.path {
-            settings.workspace.connection_string = path;
+            settings.workspace.connection_string = crate::auth::Credential::new(path);
         }
         // Memory config: merge user overrides on top of defaults.
         if let Some(mem) = ws.memory {
@@ -661,7 +661,7 @@ fn resolve_secrets_in_value(value: &mut serde_json::Value, secrets: &SecretRegis
                 };
                 match secrets.resolve(&secret_val) {
                     Ok(resolved) => {
-                        *value = serde_json::Value::String(resolved);
+                        *value = serde_json::Value::String(resolved.expose().to_string());
                         return;
                     }
                     Err(e) => {
@@ -778,9 +778,9 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
     // SECURITY: warn if any provider sends API keys over plain HTTP to a
     // remote host.  Localhost is fine (Ollama, vLLM, etc.), but a remote
     // HTTP endpoint would transmit the key in cleartext.
-    warn_http_with_api_key(&settings.agent.base_url, &settings.agent.api_key, "active agent");
+    warn_http_with_api_key(&settings.agent.base_url, settings.agent.api_key.expose(), "active agent");
     for (name, provider) in &settings.providers {
-        warn_http_with_api_key(&provider.base_url, &provider.api_key, name);
+        warn_http_with_api_key(&provider.base_url, provider.api_key.expose(), name);
     }
 
     Ok(())

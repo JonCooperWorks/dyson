@@ -57,8 +57,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use tokio_stream::StreamExt;
 
-use zeroize::Zeroize;
-
+use crate::auth::Auth;
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call, MAX_LINE_BUFFER, MAX_TOOL_JSON, MAX_ACTIVE_TOOL_BUFFERS};
@@ -78,22 +77,28 @@ use crate::message::{ContentBlock, Message, Role};
 /// - vLLM: `http://localhost:8000`
 pub struct OpenAiClient {
     client: reqwest::Client,
-    /// Zeroized on drop to avoid leaving secrets in memory.
-    api_key: String,
+    /// Authentication handler (applies `Authorization: Bearer` header).
+    /// Zeroize is handled by the Auth implementation.
+    auth: Box<dyn Auth>,
     base_url: String,
 }
 
-impl Drop for OpenAiClient {
-    fn drop(&mut self) {
-        self.api_key.zeroize();
-    }
-}
-
 impl OpenAiClient {
+    /// Create a new OpenAI client with an API key string.
+    ///
+    /// Convenience constructor — wraps the key in `BearerTokenAuth`.
     pub fn new(api_key: &str, base_url: Option<&str>) -> Self {
+        Self::with_auth(
+            Box::new(crate::auth::BearerTokenAuth::new(api_key.to_string())),
+            base_url,
+        )
+    }
+
+    /// Create a new OpenAI client with a custom `Auth` implementation.
+    pub fn with_auth(auth: Box<dyn Auth>, base_url: Option<&str>) -> Self {
         Self {
             client: reqwest::Client::new(),
-            api_key: api_key.to_string(),
+            auth,
             base_url: base_url
                 .unwrap_or("https://api.openai.com")
                 .trim_end_matches('/')
@@ -176,14 +181,13 @@ impl LlmClient for OpenAiClient {
             "sending OpenAI streaming request"
         );
 
-        let response = self
+        let req = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+            .json(&body);
+
+        let response = self.auth.apply_to_request(req).await?.send().await?;
 
         if !response.status().is_success() {
             let status = response.status();

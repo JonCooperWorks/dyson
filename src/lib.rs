@@ -11,6 +11,7 @@
 // Crate structure:
 //
 //   dyson (library crate)
+//     ├── auth          — Auth trait, Credential, BearerToken/ApiKey/Composite/Tracing auth
 //     ├── error         — DysonError enum, Result type alias
 //     ├── message       — Message, Role, ContentBlock
 //     ├── config        — Settings, loaders (dyson.json)
@@ -38,6 +39,7 @@
 // ===========================================================================
 
 pub mod agent;
+pub mod auth;
 pub mod chat_history;
 pub mod config;
 pub mod controller;

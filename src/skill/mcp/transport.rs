@@ -276,8 +276,9 @@ pub struct HttpTransport {
     /// The MCP server URL to POST to.
     url: String,
 
-    /// Headers sent with every request (API keys, auth tokens, etc.).
-    headers: HashMap<String, String>,
+    /// Authentication handler for outgoing requests.
+    /// Applies headers (API keys, auth tokens, etc.) via the Auth trait.
+    auth: Box<dyn crate::auth::Auth>,
 
     /// Request ID counter.
     next_id: AtomicU64,
@@ -292,31 +293,28 @@ impl HttpTransport {
     /// Create a new HTTP transport.
     ///
     /// `url` is the MCP server endpoint.
-    /// `headers` are extra HTTP headers (API keys, etc.).
-    pub fn new(url: &str, headers: HashMap<String, String>) -> Self {
+    /// `auth` applies authentication headers to every request.
+    pub fn new(url: &str, auth: Box<dyn crate::auth::Auth>) -> Self {
         Self {
             client: reqwest::Client::new(),
             url: url.to_string(),
-            headers,
+            auth,
             next_id: AtomicU64::new(1),
             session_id: Mutex::new(None),
         }
     }
 
     /// Build a request with common headers.
-    fn build_request(&self, body: &str) -> reqwest::RequestBuilder {
-        let mut req = self
+    async fn build_request(&self, body: &str) -> crate::error::Result<reqwest::RequestBuilder> {
+        let req = self
             .client
             .post(&self.url)
             .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream");
+            .header("Accept", "application/json, text/event-stream")
+            .body(body.to_string());
 
-        // Add custom headers (API keys, etc.).
-        for (key, value) in &self.headers {
-            req = req.header(key.as_str(), value.as_str());
-        }
-
-        req.body(body.to_string())
+        // Apply auth headers (API keys, bearer tokens, etc.).
+        self.auth.apply_to_request(req).await
     }
 }
 
@@ -331,7 +329,7 @@ impl McpTransport for HttpTransport {
         let request = JsonRpcRequest::new(id, method, params);
         let json = serde_json::to_string(&request)?;
 
-        let mut req = self.build_request(&json);
+        let mut req = self.build_request(&json).await?;
 
         // Include session ID if we have one.
         {
@@ -398,7 +396,7 @@ impl McpTransport for HttpTransport {
         let notification = JsonRpcNotification::new(method, params);
         let json = serde_json::to_string(&notification)?;
 
-        let mut req = self.build_request(&json);
+        let mut req = self.build_request(&json).await?;
 
         {
             let session = self.session_id.lock().await;

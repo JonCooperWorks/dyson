@@ -213,7 +213,8 @@ pub struct AgentSettings {
     pub system_prompt: String,
 
     /// API key for the LLM provider (resolved at load time).
-    pub api_key: String,
+    /// Uses `Credential` to zeroize the key from memory on drop.
+    pub api_key: crate::auth::Credential,
 
     /// Which LLM provider to use.
     pub provider: LlmProvider,
@@ -282,7 +283,8 @@ pub struct ProviderConfig {
     /// Model identifier (e.g. "claude-sonnet-4-20250514", "gpt-4o").
     pub model: String,
     /// Resolved API key (empty string for CLI-based providers).
-    pub api_key: String,
+    /// Uses `Credential` to zeroize the key from memory on drop.
+    pub api_key: crate::auth::Credential,
     /// Optional base URL override for the provider API.
     pub base_url: Option<String>,
 }
@@ -357,7 +359,9 @@ pub struct WorkspaceConfig {
     pub backend: String,
 
     /// Connection string (path for openclaw).  Resolved via secret system.
-    pub connection_string: String,
+    /// Uses `Credential` because connection strings can contain passwords
+    /// (e.g., database URLs with embedded credentials).
+    pub connection_string: crate::auth::Credential,
 
     /// Memory tier configuration: character limits and nudge interval.
     pub memory: MemoryConfig,
@@ -367,7 +371,7 @@ impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
             backend: "openclaw".into(),
-            connection_string: "~/.dyson".into(),
+            connection_string: crate::auth::Credential::new("~/.dyson".into()),
             memory: MemoryConfig::default(),
         }
     }
@@ -434,14 +438,15 @@ pub struct ChatHistoryConfig {
     pub backend: String,
 
     /// Connection string (directory path for disk).  Resolved via secret system.
-    pub connection_string: String,
+    /// Uses `Credential` because connection strings can contain passwords.
+    pub connection_string: crate::auth::Credential,
 }
 
 impl Default for ChatHistoryConfig {
     fn default() -> Self {
         Self {
             backend: "disk".into(),
-            connection_string: "~/.dyson/chats".into(),
+            connection_string: crate::auth::Credential::new("~/.dyson/chats".into()),
         }
     }
 }
@@ -459,7 +464,7 @@ impl Default for AgentSettings {
             system_prompt: "You are Dyson, a capable AI assistant. You can use tools to help \
                             answer questions and complete tasks."
                 .into(),
-            api_key: String::new(),
+            api_key: crate::auth::Credential::new(String::new()),
             provider: LlmProvider::Anthropic,
             base_url: None,
         }

@@ -143,8 +143,6 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use zeroize::Zeroize;
-
 use crate::error::Result;
 use crate::tool::workspace_search::WorkspaceSearchTool;
 use crate::tool::workspace_update::WorkspaceUpdateTool;
@@ -216,18 +214,18 @@ pub struct McpHttpServer {
     #[allow(dead_code)]
     dangerous_no_sandbox: bool,
 
-    /// Bearer token for authenticating incoming requests.
+    /// Authentication handler for validating incoming requests.
     ///
-    /// Generated once in `new()` from two concatenated UUID v4 values (64 hex
-    /// chars).  Every request must include `Authorization: Bearer <token>`.
-    /// The token is zeroized on drop to avoid lingering in memory.
-    bearer_token: String,
-}
+    /// Uses `BearerTokenAuth` by default — generates a 64 hex-char token
+    /// from two UUID v4 values.  Every request must include
+    /// `Authorization: Bearer <token>`.  Zeroize is handled by the Auth
+    /// implementation.
+    auth: Arc<dyn crate::auth::Auth>,
 
-impl Drop for McpHttpServer {
-    fn drop(&mut self) {
-        self.bearer_token.zeroize();
-    }
+    /// The bearer token string, stored separately for passing to Claude Code
+    /// via `--mcp-config`.  The `Auth` trait doesn't expose the raw token
+    /// (by design — not all auth schemes have one), so we keep it here.
+    bearer_token: String,
 }
 
 impl McpHttpServer {
@@ -267,16 +265,14 @@ impl McpHttpServer {
         tools.insert(search.name().to_string(), search);
         tools.insert(update.name().to_string(), update);
 
-        let bearer_token = format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
+        let bearer_auth = crate::auth::BearerTokenAuth::generate();
+        let bearer_token = bearer_auth.token().to_string();
 
         Self {
             workspace,
             tools,
             dangerous_no_sandbox,
+            auth: Arc::new(bearer_auth),
             bearer_token,
         }
     }
@@ -406,16 +402,8 @@ impl McpHttpServer {
             }));
         }
 
-        // Authenticate the request via Bearer token.
-        let authorized = req
-            .headers()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|t| t == self.bearer_token)
-            .unwrap_or(false);
-
-        if !authorized {
+        // Authenticate the request via the Auth trait.
+        if self.auth.validate_request(req.headers()).await.is_err() {
             tracing::warn!("MCP server: rejected unauthorized request");
             return json_response(StatusCode::UNAUTHORIZED, &serde_json::json!({
                 "error": "unauthorized"

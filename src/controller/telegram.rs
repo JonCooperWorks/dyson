@@ -46,7 +46,6 @@ use teloxide::types::{ChatId, MessageId};
 use tokio::sync::Mutex;
 
 use serde::Deserialize;
-use zeroize::Zeroize;
 
 use crate::config::{ControllerConfig, Settings};
 use crate::controller::Output;
@@ -141,15 +140,9 @@ where
 
 /// Telegram bot controller.
 pub struct TelegramController {
-    /// Zeroized on drop to avoid leaving secrets in memory.
-    bot_token: String,
+    /// Bot API token.  Uses `Credential` for zeroize-on-drop.
+    bot_token: crate::auth::Credential,
     allowed_chat_ids: Vec<i64>,
-}
-
-impl Drop for TelegramController {
-    fn drop(&mut self) {
-        self.bot_token.zeroize();
-    }
 }
 
 impl TelegramController {
@@ -190,7 +183,7 @@ impl TelegramController {
         }
 
         Some(Self {
-            bot_token: tg_config.bot_token,
+            bot_token: crate::auth::Credential::new(tg_config.bot_token),
             allowed_chat_ids: tg_config.allowed_chat_ids,
         })
     }
@@ -219,7 +212,7 @@ impl super::Controller for TelegramController {
             env!("CARGO_PKG_VERSION")
         );
 
-        let bot = teloxide::Bot::new(&self.bot_token);
+        let bot = teloxide::Bot::new(self.bot_token.expose());
         let allowed_ids = self.allowed_chat_ids.clone();
         let mut current_settings = settings.clone();
         let controller_prompt = self.system_prompt().map(|s| s.to_string());
@@ -234,7 +227,7 @@ impl super::Controller for TelegramController {
                 if p.exists() { Some(p) } else { None }
             });
         let workspace_path = crate::workspace::OpenClawWorkspace::resolve_path(
-            Some(settings.workspace.connection_string.as_str()),
+            Some(settings.workspace.connection_string.expose()),
         );
         let mut reloader = crate::config::hot_reload::HotReloader::new(
             config_path.as_deref(),

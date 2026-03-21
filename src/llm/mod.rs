@@ -199,13 +199,13 @@ pub fn create_client(
     match settings.provider {
         crate::config::LlmProvider::Anthropic => Box::new(
             anthropic::AnthropicClient::new(
-                &settings.api_key,
+                settings.api_key.expose(),
                 settings.base_url.as_deref(),
             ),
         ),
         crate::config::LlmProvider::OpenAi => Box::new(
             openai::OpenAiClient::new(
-                &settings.api_key,
+                settings.api_key.expose(),
                 settings.base_url.as_deref(),
             ),
         ),

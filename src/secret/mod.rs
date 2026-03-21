@@ -205,14 +205,16 @@ impl SecretRegistry {
         self.resolvers.insert(name.to_string(), resolver);
     }
 
-    /// Resolve a SecretValue to its actual string value.
+    /// Resolve a SecretValue to a `Credential`.
     ///
-    /// - `Literal(s)` → returns `s` directly
+    /// - `Literal(s)` → wraps `s` in a `Credential`
     /// - `Reference { resolver, name }` → looks up the resolver, calls
-    ///   `resolver.resolve(name)`
-    pub fn resolve(&self, value: &SecretValue) -> Result<String> {
-        match value {
-            SecretValue::Literal(s) => Ok(s.clone()),
+    ///   `resolver.resolve(name)`, wraps the result in a `Credential`
+    ///
+    /// The returned `Credential` zeroizes the secret from memory on drop.
+    pub fn resolve(&self, value: &SecretValue) -> Result<crate::auth::Credential> {
+        let raw = match value {
+            SecretValue::Literal(s) => s.clone(),
             SecretValue::Reference { resolver, name } => {
                 let r = self.resolvers.get(resolver.as_str()).ok_or_else(|| {
                     let available: Vec<&str> =
@@ -230,21 +232,22 @@ impl SecretRegistry {
                     "resolving secret"
                 );
 
-                r.resolve(name)
+                r.resolve(name)?
             }
-        }
+        };
+        Ok(crate::auth::Credential::new(raw))
     }
 
     /// Resolve a SecretValue, falling back to an env var if the value is
     /// an empty literal.
     ///
     /// Used for API keys where we want `ANTHROPIC_API_KEY` as a default
-    /// when no explicit config is provided.
+    /// when no explicit config is provided.  Returns a `Credential`.
     pub fn resolve_or_env_fallback(
         &self,
         value: &SecretValue,
         env_fallback: &str,
-    ) -> Result<String> {
+    ) -> Result<crate::auth::Credential> {
         if !value.is_empty() {
             return self.resolve(value);
         }
@@ -252,7 +255,7 @@ impl SecretRegistry {
         // Try the env fallback via the insecure_env resolver.
         if let Some(env_resolver) = self.resolvers.get("insecure_env") {
             if let Ok(val) = env_resolver.resolve(env_fallback) {
-                return Ok(val);
+                return Ok(crate::auth::Credential::new(val));
             }
         }
 

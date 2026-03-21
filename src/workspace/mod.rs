@@ -211,7 +211,7 @@ pub fn create_workspace(config: &WorkspaceConfig) -> Result<Box<dyn Workspace>> 
     match config.backend.as_str() {
         "openclaw" => {
             let ws = OpenClawWorkspace::load_from_connection_string(
-                &config.connection_string,
+                config.connection_string.expose(),
                 config.memory.clone(),
             )?;
             Ok(Box::new(ws))
