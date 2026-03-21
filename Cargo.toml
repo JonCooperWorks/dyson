@@ -19,7 +19,6 @@ tokio-stream = { version = "0.1", features = ["io-util"] }
 tokio-util = "0.7"
 futures = "0.3"
 pin-project-lite = "0.2"
-uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
 teloxide = { version = "0.13", default-features = false, features = ["macros", "rustls"] }
 hyper = { version = "1", features = ["server", "http1"] }

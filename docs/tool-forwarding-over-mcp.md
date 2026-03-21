@@ -183,7 +183,7 @@ no shutdown coordination, no stale connections, no port leaks.
 
 - **Bearer token authentication**: Every request must include an
   `Authorization: Bearer <token>` header.  The token is a 64-character hex
-  string generated from two UUID v4 values at server startup.  Requests
+  string generated from 32 bytes of CSPRNG output at server startup.  Requests
   without a valid token receive HTTP 401.  This prevents other local
   processes from accessing the workspace even if they discover the port.
 

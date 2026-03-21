@@ -73,7 +73,7 @@ use crate::tool::{Tool, ToolOutput};
 ///   → skill.system_prompt()     # agent composes the full system prompt
 ///
 /// Each LLM turn:
-///   → skill.before_turn()       # inject ephemeral context (future)
+///   → skill.before_turn()       # inject ephemeral context
 ///   → LLM streams response
 ///   → for each tool call from this skill:
 ///       → tool.run(...)
@@ -119,6 +119,16 @@ pub trait Skill: Send + Sync {
     /// (the sandbox handles mutation); this is for observation only.
     async fn after_tool(&self, _tool_name: &str, _result: &ToolOutput) -> Result<()> {
         Ok(())
+    }
+
+    /// Called before each LLM turn.
+    ///
+    /// Use this to inject ephemeral context that changes between turns:
+    /// refreshing auth tokens, updating time-sensitive data, or syncing
+    /// external state.  Returns an optional string that the agent appends
+    /// to the system prompt for that turn only.
+    async fn before_turn(&self) -> Result<Option<String>> {
+        Ok(None)
     }
 
     /// Called on agent shutdown.

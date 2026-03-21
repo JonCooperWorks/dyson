@@ -217,7 +217,7 @@ pub struct McpHttpServer {
     /// Authentication handler for validating incoming requests.
     ///
     /// Uses `BearerTokenAuth` by default — generates a 64 hex-char token
-    /// from two UUID v4 values.  Every request must include
+    /// from 32 bytes of CSPRNG output.  Every request must include
     /// `Authorization: Bearer <token>`.  Zeroize is handled by the Auth
     /// implementation.
     auth: Arc<dyn crate::auth::Auth>,

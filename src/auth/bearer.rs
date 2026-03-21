@@ -7,14 +7,16 @@
 //   - MCP config (token passed to Claude Code via --mcp-config headers)
 //
 // Token generation:
-//   `generate()` creates a 64 hex-char token from two concatenated UUID v4
-//   values.  This is used by the MCP server to create a per-session token.
+//   `generate()` creates a 64 hex-char token from 32 bytes of CSPRNG output
+//   (rand::rngs::OsRng via thread_rng).  Used by the MCP server to create a
+//   per-session token.
 //
 // Memory safety:
 //   Uses `Credential` internally — the token is zeroized on drop.
 // ===========================================================================
 
 use async_trait::async_trait;
+use rand::Rng;
 
 use crate::auth::{Auth, AuthInfo, Credential};
 use crate::error::{DysonError, Result};
@@ -35,16 +37,14 @@ impl BearerTokenAuth {
         }
     }
 
-    /// Generate a random bearer token (64 hex chars from two UUID v4 values).
+    /// Generate a random bearer token (64 hex chars from 32 bytes of CSPRNG).
     ///
     /// Used by the MCP server to create a per-session token that Claude Code
     /// includes in its requests.
     pub fn generate() -> Self {
-        let token = format!(
-            "{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple(),
-        );
+        let mut bytes = [0u8; 32];
+        rand::rng().fill(&mut bytes);
+        let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         Self {
             token: Credential::new(token),
         }

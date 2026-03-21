@@ -159,8 +159,7 @@ pub struct Agent {
     /// Sandbox that gates all tool execution.
     sandbox: Box<dyn Sandbox>,
 
-    /// Loaded skills (retained for lifecycle: on_unload on shutdown).
-    #[allow(dead_code)]
+    /// Loaded skills (retained for lifecycle: before_turn, after_tool, on_unload).
     skills: Vec<Box<dyn Skill>>,
 
     /// Flat tool lookup map: tool_name → Arc<dyn Tool>.
@@ -168,6 +167,11 @@ pub struct Agent {
     /// Built at construction by flattening all skills' tools.  Shared
     /// ownership (Arc) with the skills — no cloning of tool implementations.
     tools: HashMap<String, Arc<dyn Tool>>,
+
+    /// Reverse index: tool_name → skill index in `self.skills`.
+    ///
+    /// Used to dispatch `after_tool()` to the owning skill.
+    tool_to_skill: HashMap<String, usize>,
 
     /// Tool definitions sent to the LLM so it knows what tools are available.
     tool_definitions: Vec<ToolDefinition>,
@@ -220,9 +224,10 @@ impl Agent {
     ) -> Result<Self> {
         // -- Flatten tools from all skills --
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        let mut tool_to_skill: HashMap<String, usize> = HashMap::new();
         let mut tool_definitions: Vec<ToolDefinition> = Vec::new();
 
-        for skill in &skills {
+        for (skill_idx, skill) in skills.iter().enumerate() {
             for tool in skill.tools() {
                 let name = tool.name().to_string();
 
@@ -240,7 +245,8 @@ impl Agent {
                     input_schema: tool.input_schema(),
                 });
 
-                tools.insert(name, Arc::clone(tool));
+                tools.insert(name.clone(), Arc::clone(tool));
+                tool_to_skill.insert(name, skill_idx);
             }
         }
 
@@ -278,6 +284,7 @@ impl Agent {
             sandbox,
             skills,
             tools,
+            tool_to_skill,
             tool_definitions,
             system_prompt,
             config,
@@ -349,6 +356,29 @@ impl Agent {
 
         let mut final_text = String::new();
 
+        // -- Collect ephemeral context from skills --
+        //
+        // Each skill can inject per-turn context (refreshed tokens, timestamps,
+        // etc.) via before_turn().  These fragments are appended to the system
+        // prompt for this run() call only — they don't persist.
+        let mut turn_system_prompt = self.system_prompt.clone();
+        for skill in &self.skills {
+            match skill.before_turn().await {
+                Ok(Some(fragment)) => {
+                    turn_system_prompt.push_str("\n\n");
+                    turn_system_prompt.push_str(&fragment);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        skill = skill.name(),
+                        error = %e,
+                        "skill before_turn failed — continuing without its context"
+                    );
+                }
+            }
+        }
+
         for iteration in 0..self.max_iterations {
             tracing::info!(
                 iteration = iteration,
@@ -375,7 +405,7 @@ impl Agent {
                         .client
                         .stream(
                             &self.messages,
-                            &self.system_prompt,
+                            &turn_system_prompt,
                             tools_for_llm,
                             &self.config,
                         )
@@ -547,6 +577,23 @@ impl Agent {
         result
     }
 
+    /// Notify the owning skill that one of its tools was executed.
+    ///
+    /// Errors are logged but don't interrupt the agent loop — after_tool
+    /// is observational, not control flow.
+    async fn notify_after_tool(&self, tool_name: &str, output: &ToolOutput) {
+        if let Some(&skill_idx) = self.tool_to_skill.get(tool_name) {
+            if let Err(e) = self.skills[skill_idx].after_tool(tool_name, output).await {
+                tracing::warn!(
+                    skill = self.skills[skill_idx].name(),
+                    tool = tool_name,
+                    error = %e,
+                    "skill after_tool hook failed"
+                );
+            }
+        }
+    }
+
     /// Execute a single tool call, routing through the sandbox.
     ///
     /// ## Flow
@@ -583,6 +630,9 @@ impl Agent {
                     .after(&call.name, &input, &mut tool_output)
                     .await?;
 
+                // Notify the owning skill.
+                self.notify_after_tool(&call.name, &tool_output).await;
+
                 Ok(tool_output)
             }
 
@@ -617,6 +667,9 @@ impl Agent {
                 self.sandbox
                     .after(&tool_name, &input, &mut tool_output)
                     .await?;
+
+                // Notify the owning skill (using the redirected tool name).
+                self.notify_after_tool(&tool_name, &tool_output).await;
 
                 Ok(tool_output)
             }
