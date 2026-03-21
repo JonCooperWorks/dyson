@@ -365,11 +365,20 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                 }
             };
 
-            let api_key = jp
-                .api_key
-                .as_ref()
-                .and_then(|k| secrets.resolve(k).ok())
-                .unwrap_or_default();
+            let api_key = match jp.api_key.as_ref() {
+                Some(k) => match secrets.resolve(k) {
+                    Ok(resolved) => resolved,
+                    Err(e) => {
+                        tracing::error!(
+                            provider = name.as_str(),
+                            error = %e,
+                            "failed to resolve API key — skipping provider"
+                        );
+                        continue;
+                    }
+                },
+                None => String::new(),
+            };
 
             let model = jp.model.unwrap_or_else(|| {
                 match provider_type {
@@ -1091,5 +1100,29 @@ mod tests {
         assert_eq!(settings.controllers[0].controller_type, "discord");
         assert_eq!(settings.controllers[0].config["guild_id"], "123456");
         assert_eq!(settings.controllers[0].config["channel"], "general");
+    }
+
+    #[test]
+    fn unresolvable_secret_skips_provider() {
+        // A provider with a secret reference that can't be resolved should
+        // be skipped entirely — not silently defaulted to an empty key.
+        let json = r#"{
+            "providers": {
+                "bad": {
+                    "type": "anthropic",
+                    "api_key": { "resolver": "insecure_env", "name": "DYSON_NONEXISTENT_VAR_12345" }
+                }
+            },
+            "agent": { "provider": "bad" }
+        }"#;
+        let root: JsonRoot = serde_json::from_str(json).unwrap();
+        let secrets = SecretRegistry::default();
+        let settings = build_settings(Some(root), &secrets);
+
+        // The provider should have been skipped — not inserted with empty key.
+        assert!(
+            !settings.providers.contains_key("bad"),
+            "provider with unresolvable secret should be skipped"
+        );
     }
 }

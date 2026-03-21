@@ -576,6 +576,7 @@ mod tests {
             StreamEvent::TextDelta("Hello!".into()),
             StreamEvent::MessageComplete {
                 stop_reason: StopReason::EndTurn,
+                output_tokens: None,
             },
         ]]);
 
@@ -612,6 +613,7 @@ mod tests {
                 },
                 StreamEvent::MessageComplete {
                     stop_reason: StopReason::ToolUse,
+                    output_tokens: None,
                 },
             ],
             // Turn 2: LLM responds with text.
@@ -619,6 +621,7 @@ mod tests {
                 StreamEvent::TextDelta("Done.".into()),
                 StreamEvent::MessageComplete {
                     stop_reason: StopReason::EndTurn,
+                    output_tokens: None,
                 },
             ],
         ]);
@@ -659,6 +662,7 @@ mod tests {
             StreamEvent::TextDelta("Here are the files.".into()),
             StreamEvent::MessageComplete {
                 stop_reason: StopReason::EndTurn,
+                output_tokens: None,
             },
         ]]);
 

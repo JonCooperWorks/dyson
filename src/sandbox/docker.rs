@@ -86,6 +86,7 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::sandbox::{Sandbox, SandboxDecision};
 use crate::tool::{ToolContext, ToolOutput};
+use crate::util::escape_single_quotes;
 
 // ---------------------------------------------------------------------------
 // DockerSandbox
@@ -163,24 +164,16 @@ impl Sandbox for DockerSandbox {
     ) -> Result<SandboxDecision> {
         match tool_name {
             "bash" => {
-                let command = input["command"].as_str().unwrap_or("");
+                let command = match input["command"].as_str() {
+                    Some(cmd) if !cmd.is_empty() => cmd,
+                    _ => {
+                        return Ok(SandboxDecision::Deny {
+                            reason: "missing or empty 'command' field".into(),
+                        });
+                    }
+                };
 
-                if command.is_empty() {
-                    return Ok(SandboxDecision::Allow {
-                        input: input.clone(),
-                    });
-                }
-
-                // Escape single quotes for safe embedding in bash -c '...'.
-                //
-                // The trick: replace every ' with '\'' which:
-                //   1. Ends the current single-quoted string
-                //   2. Adds a literal ' via \'
-                //   3. Starts a new single-quoted string
-                //
-                // Example: "it's here" → "it'\''s here"
-                // In shell: bash -c 'it'\''s here'
-                let escaped = command.replace('\'', "'\\''");
+                let escaped = escape_single_quotes(command);
 
                 let docker_cmd = format!(
                     "docker exec {} bash -c '{}'",
@@ -287,16 +280,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_command_passes_through() {
+    async fn empty_command_is_denied() {
         let sandbox = DockerSandbox::new("test-box").unwrap();
         let ctx = ToolContext::from_cwd().unwrap();
         let input = serde_json::json!({"command": ""});
 
         let decision = sandbox.check("bash", &input, &ctx).await.unwrap();
         match decision {
-            SandboxDecision::Allow { input: allowed } => {
-                // Empty command should pass through, not be wrapped in docker exec.
-                assert_eq!(allowed["command"], "");
+            SandboxDecision::Deny { reason } => {
+                assert!(reason.contains("empty"), "reason: {reason}");
+            }
+            other => panic!("expected Deny, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_command_is_denied() {
+        let sandbox = DockerSandbox::new("test-box").unwrap();
+        let ctx = ToolContext::from_cwd().unwrap();
+        let input = serde_json::json!({});
+
+        let decision = sandbox.check("bash", &input, &ctx).await.unwrap();
+        match decision {
+            SandboxDecision::Deny { reason } => {
+                assert!(reason.contains("missing"), "reason: {reason}");
+            }
+            other => panic!("expected Deny, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn command_with_newlines_is_escaped() {
+        let sandbox = DockerSandbox::new("test-box").unwrap();
+        let ctx = ToolContext::from_cwd().unwrap();
+        // Use a real newline in the command string.
+        let input = serde_json::json!({"command": "echo line1\necho line2"});
+
+        let decision = sandbox.check("bash", &input, &ctx).await.unwrap();
+        match decision {
+            SandboxDecision::Allow { input } => {
+                let cmd = input["command"].as_str().unwrap();
+                assert!(cmd.starts_with("docker exec test-box bash -c"));
+                // The newline should be preserved inside the single-quoted string
+                // — it's safe because single quotes don't interpret anything.
+                assert!(cmd.contains('\n'), "newline should be preserved in command: {cmd}");
             }
             other => panic!("expected Allow, got: {other:?}"),
         }

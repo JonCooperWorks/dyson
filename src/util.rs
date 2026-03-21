@@ -21,6 +21,18 @@ pub(crate) fn unix_to_ymd(secs: u64) -> (i64, u64, u64) {
     (y, m, d)
 }
 
+/// Escape a string for safe embedding inside single-quoted shell arguments.
+///
+/// Replaces every `'` with `'\''` which:
+///   1. Ends the current single-quoted string
+///   2. Adds a literal `'` via `\'`
+///   3. Starts a new single-quoted string
+///
+/// Example: `it's here` → `it'\''s here`
+pub(crate) fn escape_single_quotes(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================

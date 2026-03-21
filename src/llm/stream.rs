@@ -131,8 +131,12 @@ pub enum StreamEvent {
     /// The LLM has finished generating this message.
     ///
     /// `stop_reason` tells the agent loop whether to execute tools and
-    /// continue, or to end the turn.
-    MessageComplete { stop_reason: StopReason },
+    /// continue, or to end the turn.  `output_tokens` is the API-reported
+    /// token count (if the provider includes it in the response).
+    MessageComplete {
+        stop_reason: StopReason,
+        output_tokens: Option<usize>,
+    },
 
     /// An error occurred during streaming.
     ///

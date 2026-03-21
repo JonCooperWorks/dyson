@@ -248,6 +248,7 @@ fn tool_call_events(id: &str, name: &str, input: serde_json::Value) -> Vec<Strea
         },
         StreamEvent::MessageComplete {
             stop_reason: StopReason::ToolUse,
+            output_tokens: None,
         },
     ]
 }
@@ -257,6 +258,7 @@ fn text_response_events(text: &str) -> Vec<StreamEvent> {
         StreamEvent::TextDelta(text.into()),
         StreamEvent::MessageComplete {
             stop_reason: StopReason::EndTurn,
+            output_tokens: None,
         },
     ]
 }
@@ -414,6 +416,7 @@ async fn multiple_tool_calls_in_one_turn() {
             },
             StreamEvent::MessageComplete {
                 stop_reason: StopReason::ToolUse,
+                output_tokens: None,
             },
         ],
         // Turn 2: text response.
@@ -719,6 +722,7 @@ async fn streaming_text_accumulates_correctly() {
         StreamEvent::TextDelta("!".into()),
         StreamEvent::MessageComplete {
             stop_reason: StopReason::EndTurn,
+            output_tokens: None,
         },
     ]]);
 

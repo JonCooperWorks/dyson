@@ -376,11 +376,42 @@ impl McpHttpServer {
             }));
         }
 
-        // Read the full request body.  MCP requests are small (tool
-        // arguments are typically a few KB at most) so buffering the
-        // entire body is fine.
+        // Read the full request body with a size limit.
+        //
+        // MCP requests are small (tool arguments are typically a few KB at
+        // most) so buffering the entire body is fine.  The size check
+        // prevents a misbehaving client from sending gigabytes and causing
+        // OOM.
+        const MAX_REQUEST_BODY: usize = 10 * 1024 * 1024; // 10 MB
+
+        if let Some(content_length) = req.headers().get("content-length") {
+            if let Ok(len) = content_length.to_str().unwrap_or("0").parse::<usize>() {
+                if len > MAX_REQUEST_BODY {
+                    tracing::warn!(
+                        content_length = len,
+                        "MCP server: rejecting oversized request"
+                    );
+                    return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({
+                        "error": "request body too large"
+                    }));
+                }
+            }
+        }
+
         let body = match req.collect().await {
-            Ok(collected) => collected.to_bytes(),
+            Ok(collected) => {
+                let bytes = collected.to_bytes();
+                if bytes.len() > MAX_REQUEST_BODY {
+                    tracing::warn!(
+                        body_len = bytes.len(),
+                        "MCP server: rejecting oversized request body"
+                    );
+                    return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({
+                        "error": "request body too large"
+                    }));
+                }
+                bytes
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "MCP server: failed to read request body");
                 return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({

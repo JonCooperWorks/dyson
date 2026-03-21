@@ -659,7 +659,7 @@ impl LlmClient for ClaudeCodeClient {
                                         "claude CLI turn complete"
                                     );
                                 }
-                                yield Ok(StreamEvent::MessageComplete { stop_reason });
+                                yield Ok(StreamEvent::MessageComplete { stop_reason, output_tokens: None });
                             }
                         }
                     }
@@ -864,7 +864,7 @@ impl StreamParserState {
                             Some("max_tokens") => StopReason::MaxTokens,
                             _ => StopReason::EndTurn,
                         };
-                        events.push(Ok(StreamEvent::MessageComplete { stop_reason }));
+                        events.push(Ok(StreamEvent::MessageComplete { stop_reason, output_tokens: None }));
                     }
                 }
             }
@@ -982,7 +982,7 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         match &events[0] {
-            Ok(StreamEvent::MessageComplete { stop_reason }) => {
+            Ok(StreamEvent::MessageComplete { stop_reason, .. }) => {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
             }
             other => panic!("expected Ok(MessageComplete), got: {other:?}"),

@@ -78,6 +78,7 @@ impl Workspace for InMemoryWorkspace {
     fn search(&self, pattern: &str) -> Vec<(String, Vec<String>)> {
         let re = RegexBuilder::new(pattern)
             .case_insensitive(true)
+            .size_limit(10 * 1024 * 1024) // 10 MB compiled size limit (prevents ReDoS)
             .build();
 
         let mut results = Vec::new();

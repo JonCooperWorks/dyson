@@ -151,11 +151,14 @@ pub async fn process_stream(
                 output.tool_use_complete()?;
             }
 
-            StreamEvent::MessageComplete { .. } => {
+            StreamEvent::MessageComplete { output_tokens, .. } => {
                 let elapsed = stream_start.elapsed();
                 let elapsed_ms = elapsed.as_millis();
+                // Prefer the API-reported token count; fall back to the
+                // rough whitespace estimate.
+                let final_tokens = output_tokens.unwrap_or(token_count);
                 let tok_per_sec = if elapsed.as_secs_f64() > 0.0 {
-                    token_count as f64 / elapsed.as_secs_f64()
+                    final_tokens as f64 / elapsed.as_secs_f64()
                 } else {
                     0.0
                 };
@@ -165,7 +168,7 @@ pub async fn process_stream(
                 tracing::info!(
                     duration_ms = elapsed_ms,
                     ttft_ms = ttft_ms,
-                    tokens = token_count,
+                    tokens = final_tokens,
                     tok_per_sec = format!("{tok_per_sec:.1}"),
                     tool_calls = tool_calls.len(),
                     "stream complete"
@@ -273,6 +276,7 @@ mod tests {
             StreamEvent::TextDelta(" world".into()),
             StreamEvent::MessageComplete {
                 stop_reason: StopReason::EndTurn,
+                output_tokens: None,
             },
         ]);
 
@@ -303,6 +307,7 @@ mod tests {
             },
             StreamEvent::MessageComplete {
                 stop_reason: StopReason::ToolUse,
+                output_tokens: None,
             },
         ]);
 
@@ -340,6 +345,7 @@ mod tests {
             StreamEvent::TextDelta("The answer is 42.".into()),
             StreamEvent::MessageComplete {
                 stop_reason: StopReason::EndTurn,
+                output_tokens: None,
             },
         ]);
 

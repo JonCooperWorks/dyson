@@ -101,6 +101,7 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::sandbox::{Sandbox, SandboxDecision};
 use crate::tool::ToolContext;
+use crate::util::escape_single_quotes;
 
 // ---------------------------------------------------------------------------
 // Seatbelt profiles (macOS)
@@ -204,12 +205,14 @@ impl Sandbox for OsSandbox {
             });
         }
 
-        let command = input["command"].as_str().unwrap_or("");
-        if command.is_empty() {
-            return Ok(SandboxDecision::Allow {
-                input: input.clone(),
-            });
-        }
+        let command = match input["command"].as_str() {
+            Some(cmd) if !cmd.is_empty() => cmd,
+            _ => {
+                return Ok(SandboxDecision::Deny {
+                    reason: "missing or empty 'command' field".into(),
+                });
+            }
+        };
 
         #[cfg(target_os = "macos")]
         {
@@ -261,12 +264,11 @@ impl Sandbox for OsSandbox {
 /// Not gated by #[cfg] so it can be tested on any platform.
 /// Only *executed* on macOS.
 pub fn build_seatbelt_command(command: &str, profile: &str, working_dir: &str) -> String {
-    let escaped = command.replace('\'', "'\\''");
     format!(
         "sandbox-exec -p '{}' -D WORKING_DIR='{}' bash -c '{}'",
-        profile.replace('\'', "'\\''"),
-        working_dir.replace('\'', "'\\''"),
-        escaped,
+        escape_single_quotes(profile),
+        escape_single_quotes(working_dir),
+        escape_single_quotes(command),
     )
 }
 
@@ -280,8 +282,8 @@ pub fn build_seatbelt_command(command: &str, profile: &str, working_dir: &str) -
 /// - `"strict"` — read-only root, writable cwd only, no network, no PID
 /// - `"permissive"` — writable root, no namespace isolation
 pub fn build_bwrap_command(command: &str, profile: &str, working_dir: &str) -> String {
-    let escaped = command.replace('\'', "'\\''");
-    let working_dir = working_dir.replace('\'', "'\\''");
+    let escaped = escape_single_quotes(command);
+    let working_dir = escape_single_quotes(working_dir);
 
     match profile {
         "strict" => format!(
@@ -444,17 +446,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_command_passes_through() {
+    async fn empty_command_is_denied() {
         let sandbox = OsSandbox::default_profile("/workspace");
         let ctx = ToolContext::from_cwd().unwrap();
         let input = serde_json::json!({"command": ""});
 
         let decision = sandbox.check("bash", &input, &ctx).await.unwrap();
         match decision {
-            SandboxDecision::Allow { input } => {
-                assert_eq!(input["command"], "");
+            SandboxDecision::Deny { reason } => {
+                assert!(reason.contains("empty"), "reason: {reason}");
             }
-            other => panic!("expected Allow, got: {other:?}"),
+            other => panic!("expected Deny, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_command_is_denied() {
+        let sandbox = OsSandbox::default_profile("/workspace");
+        let ctx = ToolContext::from_cwd().unwrap();
+        let input = serde_json::json!({});
+
+        let decision = sandbox.check("bash", &input, &ctx).await.unwrap();
+        match decision {
+            SandboxDecision::Deny { reason } => {
+                assert!(reason.contains("missing"), "reason: {reason}");
+            }
+            other => panic!("expected Deny, got: {other:?}"),
         }
     }
 

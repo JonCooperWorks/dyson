@@ -61,7 +61,7 @@ use zeroize::Zeroize;
 
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call};
+use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call, MAX_LINE_BUFFER, MAX_TOOL_JSON, MAX_ACTIVE_TOOL_BUFFERS};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -350,7 +350,17 @@ impl OpenAiSseParser {
 
     fn feed(&mut self, bytes: &[u8]) -> Vec<Result<StreamEvent>> {
         let mut events = Vec::new();
-        self.line_buffer.push_str(&String::from_utf8_lossy(bytes));
+
+        // Guard against unbounded growth from a malformed stream that never
+        // sends newlines.
+        let incoming = String::from_utf8_lossy(bytes);
+        if self.line_buffer.len() + incoming.len() > MAX_LINE_BUFFER {
+            events.push(Err(DysonError::Llm(
+                "SSE line buffer exceeded 10 MB — aborting stream".into(),
+            )));
+            return events;
+        }
+        self.line_buffer.push_str(&incoming);
 
         while let Some(newline_pos) = self.line_buffer.find('\n') {
             let line: String = self.line_buffer.drain(..=newline_pos).collect();
@@ -442,6 +452,16 @@ impl OpenAiSseParser {
 
                     // First chunk for this tool call has id and function.name.
                     if let Some(id) = tc["id"].as_str() {
+                        // Guard against unbounded tool buffer growth.
+                        if self.tool_buffers.len() >= MAX_ACTIVE_TOOL_BUFFERS {
+                            events.push(Err(DysonError::Llm(
+                                format!(
+                                    "too many concurrent tool calls ({MAX_ACTIVE_TOOL_BUFFERS}) — aborting stream"
+                                ),
+                            )));
+                            return events;
+                        }
+
                         let name = tc["function"]["name"]
                             .as_str()
                             .unwrap_or("")
@@ -465,7 +485,13 @@ impl OpenAiSseParser {
                     // Subsequent chunks have function.arguments fragments.
                     if let Some(args) = tc["function"]["arguments"].as_str() {
                         if let Some(buf) = self.tool_buffers.get_mut(&index) {
-                            buf.json.push_str(args);
+                            if buf.json.len() + args.len() > MAX_TOOL_JSON {
+                                events.push(Ok(StreamEvent::TextDelta(
+                                    "[error: tool input exceeded 10 MB limit]".into(),
+                                )));
+                            } else {
+                                buf.json.push_str(args);
+                            }
                         }
                         events.push(Ok(StreamEvent::ToolUseInputDelta(args.to_string())));
                     }
@@ -474,10 +500,17 @@ impl OpenAiSseParser {
 
             // -- Finish reason --
             if let Some(reason) = choice["finish_reason"].as_str() {
+                // OpenAI reports usage in a top-level "usage" object on the
+                // final chunk (when stream_options.include_usage is set).
+                let output_tokens = json["usage"]["completion_tokens"]
+                    .as_u64()
+                    .map(|n| n as usize);
+
                 match reason {
                     "stop" => {
                         events.push(Ok(StreamEvent::MessageComplete {
                             stop_reason: StopReason::EndTurn,
+                            output_tokens,
                         }));
                     }
                     "tool_calls" => {
@@ -489,17 +522,20 @@ impl OpenAiSseParser {
                         }
                         events.push(Ok(StreamEvent::MessageComplete {
                             stop_reason: StopReason::ToolUse,
+                            output_tokens,
                         }));
                     }
                     "length" => {
                         events.push(Ok(StreamEvent::MessageComplete {
                             stop_reason: StopReason::MaxTokens,
+                            output_tokens,
                         }));
                     }
                     _ => {
                         tracing::warn!(finish_reason = reason, "unknown OpenAI finish_reason");
                         events.push(Ok(StreamEvent::MessageComplete {
                             stop_reason: StopReason::EndTurn,
+                            output_tokens,
                         }));
                     }
                 }
@@ -576,7 +612,7 @@ mod tests {
             "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
         );
         match events.last().unwrap().as_ref().unwrap() {
-            StreamEvent::MessageComplete { stop_reason } => {
+            StreamEvent::MessageComplete { stop_reason, .. } => {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
             }
             other => panic!("expected MessageComplete, got: {other:?}"),
@@ -645,5 +681,56 @@ mod tests {
         assert_eq!(json["role"], "assistant");
         assert_eq!(json["tool_calls"][0]["id"], "call_1");
         assert_eq!(json["tool_calls"][0]["function"]["name"], "bash");
+    }
+
+    #[test]
+    fn line_buffer_rejects_oversized_input() {
+        let mut parser = OpenAiSseParser::new();
+        let chunk = vec![b'x'; 10 * 1024 * 1024 + 1];
+        let events = parser.feed(&chunk);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].is_err());
+        let err_msg = format!("{}", events[0].as_ref().unwrap_err());
+        assert!(err_msg.contains("10 MB"), "error should mention size limit, got: {err_msg}");
+    }
+
+    #[test]
+    fn too_many_tool_buffers_emits_error() {
+        let mut parser = OpenAiSseParser::new();
+        // Insert MAX_ACTIVE_TOOL_BUFFERS + 1 tool calls.
+        for i in 0..=MAX_ACTIVE_TOOL_BUFFERS {
+            let sse = format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":{i},\"id\":\"call_{i}\",\"type\":\"function\",\"function\":{{\"name\":\"bash\",\"arguments\":\"\"}}}}]}},\"finish_reason\":null}}]}}\n\n"
+            );
+            let events = parser.feed(sse.as_bytes());
+            if i == MAX_ACTIVE_TOOL_BUFFERS {
+                let has_error = events.iter().any(|e| e.is_err());
+                assert!(has_error, "expected error on tool buffer #{i}");
+            }
+        }
+    }
+
+    #[test]
+    fn tool_json_buffer_rejects_oversized_input() {
+        let mut parser = OpenAiSseParser::new();
+
+        // Start a tool call.
+        let start = "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n";
+        parser.feed(start.as_bytes());
+
+        // Feed chunks that exceed 10 MB.
+        let big_chunk = "x".repeat(1024 * 1024);
+        for i in 0..11 {
+            let delta = format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"arguments\":\"{big_chunk}\"}}}}]}},\"finish_reason\":null}}]}}\n\n"
+            );
+            let events = parser.feed(delta.as_bytes());
+            if i >= 10 {
+                let has_overflow = events.iter().any(|e| {
+                    matches!(e, Ok(StreamEvent::TextDelta(t)) if t.contains("10 MB"))
+                });
+                assert!(has_overflow, "expected tool buffer overflow on chunk {i}");
+            }
+        }
     }
 }

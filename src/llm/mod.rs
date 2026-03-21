@@ -228,6 +228,27 @@ pub fn create_client(
 }
 
 // ---------------------------------------------------------------------------
+// Shared SSE parser limits
+// ---------------------------------------------------------------------------
+
+/// Maximum SSE line buffer size before aborting the stream.
+///
+/// Protects against malformed streams that never send newlines.  Shared
+/// across all SSE-based LLM clients (Anthropic, OpenAI).
+pub(crate) const MAX_LINE_BUFFER: usize = 10 * 1024 * 1024; // 10 MB
+
+/// Maximum accumulated JSON for a single tool call's input.
+///
+/// Prevents a runaway stream from consuming unbounded memory during
+/// tool argument accumulation.
+pub(crate) const MAX_TOOL_JSON: usize = 10 * 1024 * 1024; // 10 MB
+
+/// Maximum number of concurrent tool call buffers the SSE parser will
+/// track.  A well-behaved stream will have at most a handful; this cap
+/// protects against malformed streams that never close content blocks.
+pub(crate) const MAX_ACTIVE_TOOL_BUFFERS: usize = 100;
+
+// ---------------------------------------------------------------------------
 // Shared tool call buffer
 // ---------------------------------------------------------------------------
 

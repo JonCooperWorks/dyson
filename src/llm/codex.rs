@@ -358,6 +358,7 @@ impl LlmClient for CodexClient {
                             completed = true;
                             yield Ok(StreamEvent::MessageComplete {
                                 stop_reason: StopReason::EndTurn,
+                                output_tokens: None,
                             });
                         }
                     }
@@ -608,6 +609,7 @@ impl StreamParserState {
                     self.completed = true;
                     events.push(Ok(StreamEvent::MessageComplete {
                         stop_reason: StopReason::EndTurn,
+                        output_tokens: None,
                     }));
                 }
             }
@@ -783,7 +785,7 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         match &events[0] {
-            Ok(StreamEvent::MessageComplete { stop_reason }) => {
+            Ok(StreamEvent::MessageComplete { stop_reason, .. }) => {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
             }
             other => panic!("expected Ok(MessageComplete), got: {other:?}"),

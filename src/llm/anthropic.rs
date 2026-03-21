@@ -71,7 +71,7 @@ use zeroize::Zeroize;
 
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call};
+use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call, MAX_LINE_BUFFER, MAX_TOOL_JSON, MAX_ACTIVE_TOOL_BUFFERS};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -131,6 +131,11 @@ fn message_to_anthropic(msg: &Message) -> serde_json::Value {
         "content": content,
     })
 }
+
+/// Anthropic API version header.  Pinned to a specific version to avoid
+/// unexpected behaviour if the API evolves.  Bump this when adopting new
+/// API features.
+const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 
 // ---------------------------------------------------------------------------
 // AnthropicClient
@@ -249,7 +254,7 @@ impl LlmClient for AnthropicClient {
             .client
             .post(&url)
             .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -375,7 +380,6 @@ impl SseParser {
         //
         // Guard against unbounded growth from a malformed stream that never
         // sends newlines.
-        const MAX_LINE_BUFFER: usize = 10 * 1024 * 1024; // 10 MB
         let incoming = String::from_utf8_lossy(bytes);
         if self.line_buffer.len() + incoming.len() > MAX_LINE_BUFFER {
             events.push(Err(DysonError::Llm(
@@ -463,6 +467,17 @@ impl SseParser {
                     let id = block["id"].as_str()?.to_string();
                     let name = block["name"].as_str()?.to_string();
 
+                    // Guard against unbounded growth from a malformed stream
+                    // that sends many content_block_start events without
+                    // matching content_block_stop events.
+                    if self.tool_buffers.len() >= MAX_ACTIVE_TOOL_BUFFERS {
+                        return Some(StreamEvent::Error(DysonError::Llm(
+                            format!(
+                                "too many concurrent tool calls ({MAX_ACTIVE_TOOL_BUFFERS}) — aborting stream"
+                            ),
+                        )));
+                    }
+
                     // Start accumulating JSON for this tool call.
                     self.tool_buffers.insert(
                         index,
@@ -513,7 +528,6 @@ impl SseParser {
 
                         // Append to the accumulation buffer, guarding against
                         // unbounded growth from a runaway stream.
-                        const MAX_TOOL_JSON: usize = 10 * 1024 * 1024; // 10 MB
                         if let Some(buf) = self.tool_buffers.get_mut(&index) {
                             if buf.json.len() + partial.len() > MAX_TOOL_JSON {
                                 return Some(StreamEvent::TextDelta(
@@ -551,7 +565,7 @@ impl SseParser {
 
             // -- message_delta --
             //
-            // The message-level delta carries the stop_reason.
+            // The message-level delta carries the stop_reason and usage.
             "message_delta" => {
                 let stop_str = json["delta"]["stop_reason"].as_str()?;
                 let stop_reason = match stop_str {
@@ -564,7 +578,9 @@ impl SseParser {
                     }
                 };
 
-                Some(StreamEvent::MessageComplete { stop_reason })
+                let output_tokens = json["usage"]["output_tokens"].as_u64().map(|n| n as usize);
+
+                Some(StreamEvent::MessageComplete { stop_reason, output_tokens })
             }
 
             // -- error --
@@ -658,7 +674,7 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         match events[0].as_ref().unwrap() {
-            StreamEvent::MessageComplete { stop_reason } => {
+            StreamEvent::MessageComplete { stop_reason, .. } => {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
             }
             other => panic!("expected MessageComplete, got: {other:?}"),
@@ -671,7 +687,7 @@ mod tests {
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n"
         );
         match events[0].as_ref().unwrap() {
-            StreamEvent::MessageComplete { stop_reason } => {
+            StreamEvent::MessageComplete { stop_reason, .. } => {
                 assert_eq!(*stop_reason, StopReason::ToolUse);
             }
             other => panic!("expected MessageComplete, got: {other:?}"),
@@ -832,6 +848,57 @@ mod tests {
         // Should parse successfully — one TextDelta event.
         assert_eq!(events.len(), 1);
         assert!(events[0].is_ok());
+    }
+
+    #[test]
+    fn too_many_tool_buffers_emits_error() {
+        let mut parser = SseParser::new();
+
+        // Start MAX_ACTIVE_TOOL_BUFFERS + 1 tool_use blocks without closing any.
+        for i in 0..=MAX_ACTIVE_TOOL_BUFFERS {
+            let start = format!(
+                "event: content_block_start\n\
+                 data: {{\"type\":\"content_block_start\",\"index\":{i},\"content_block\":{{\"type\":\"tool_use\",\"id\":\"call_{i}\",\"name\":\"bash\"}}}}\n\n"
+            );
+            let events = parser.feed(start.as_bytes());
+
+            if i == MAX_ACTIVE_TOOL_BUFFERS {
+                // The 101st tool should trigger an error.
+                let has_error = events.iter().any(|e| {
+                    matches!(e, Ok(StreamEvent::Error(DysonError::Llm(msg))) if msg.contains("too many"))
+                });
+                assert!(has_error, "expected 'too many' error on tool buffer #{i}");
+            }
+        }
+    }
+
+    #[test]
+    fn message_delta_includes_output_tokens() {
+        let events = parse_sse(
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n"
+        );
+        assert_eq!(events.len(), 1);
+        match events[0].as_ref().unwrap() {
+            StreamEvent::MessageComplete { stop_reason, output_tokens } => {
+                assert_eq!(*stop_reason, StopReason::EndTurn);
+                assert_eq!(*output_tokens, Some(42));
+            }
+            other => panic!("expected MessageComplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_delta_without_usage_has_none_tokens() {
+        let events = parse_sse(
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
+        );
+        assert_eq!(events.len(), 1);
+        match events[0].as_ref().unwrap() {
+            StreamEvent::MessageComplete { output_tokens, .. } => {
+                assert_eq!(*output_tokens, None);
+            }
+            other => panic!("expected MessageComplete, got: {other:?}"),
+        }
     }
 
     #[test]
