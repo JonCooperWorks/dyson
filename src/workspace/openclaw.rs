@@ -76,6 +76,12 @@ impl OpenClawWorkspace {
             DysonError::Config(format!("cannot create memory dir: {e}"))
         })?;
 
+        // Run workspace migrations before reading files.
+        let migrated = crate::workspace::migrate::migrate(path)?;
+        if migrated {
+            tracing::info!(path = %path.display(), "workspace migrated");
+        }
+
         let mut files = HashMap::new();
 
         // Read top-level .md files.

@@ -88,10 +88,12 @@ pub fn run(
     // Import OpenClaw workspace if requested.
     if let Some(ref source) = import_openclaw {
         import_openclaw_workspace(source, &workspace_dir)?;
+    } else if is_openclaw_workspace(&workspace_dir) {
+        eprintln!("  detected existing OpenClaw workspace — migrating in place");
     }
 
-    // Create default workspace files (only creates files that don't exist,
-    // so imported files are preserved).
+    // Load workspace — runs migrations (v0 → current), then creates
+    // default files for anything missing (USER.md, HEARTBEAT.md, etc.).
     let _ = dyson::workspace::OpenClawWorkspace::load(&workspace_dir, dyson::config::MemoryConfig::default())?;
     eprintln!("  workspace ready at {}", workspace_dir.display());
 
@@ -113,8 +115,16 @@ pub fn run(
 }
 
 // ---------------------------------------------------------------------------
-// OpenClaw import
+// OpenClaw detection and import
 // ---------------------------------------------------------------------------
+
+/// Check if a directory looks like an existing OpenClaw workspace.
+///
+/// Returns `true` if it contains at least SOUL.md and IDENTITY.md.
+/// These are the two files every OpenClaw/TARS workspace has.
+fn is_openclaw_workspace(path: &PathBuf) -> bool {
+    path.join("SOUL.md").exists() && path.join("IDENTITY.md").exists()
+}
 
 /// Copy an OpenClaw workspace directory into the Dyson workspace.
 ///

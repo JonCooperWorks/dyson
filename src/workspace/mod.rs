@@ -40,6 +40,7 @@
 
 pub mod in_memory;
 pub mod memory_store;
+pub mod migrate;
 pub mod openclaw;
 
 pub use in_memory::InMemoryWorkspace;
