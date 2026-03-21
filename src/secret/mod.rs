@@ -5,26 +5,20 @@
 //
 // What this file does:
 //   Defines the `SecretResolver` trait, a `SecretRegistry` of resolvers,
-//   and a `SecretValue` type that deserializes from TOML as either a
-//   literal string or an explicit { resolver, name } table.
+//   and a `SecretValue` type that deserializes from JSON as either a
+//   literal string or an explicit { resolver, name } object.
 //
 // Design principle: no magic, no parsing.
-//   A secret in dyson.toml is one of two things:
+//   A secret in dyson.json is one of two things:
 //
 //   1. A literal string:
-//      ```toml
-//      api_key = "sk-ant-literal-value"
+//      ```json
+//      "api_key": "sk-ant-literal-value"
 //      ```
 //
-//   2. A table naming the resolver and key:
-//      ```toml
-//      api_key = { resolver = "insecure_env", name = "ANTHROPIC_API_KEY" }
-//      ```
-//      Or equivalently as a sub-table:
-//      ```toml
-//      [agent.api_key]
-//      resolver = "insecure_env"
-//      name = "ANTHROPIC_API_KEY"
+//   2. An object naming the resolver and key:
+//      ```json
+//      "api_key": { "resolver": "insecure_env", "name": "ANTHROPIC_API_KEY" }
 //      ```
 //
 //   There is no prefix parsing, no $-shorthand, no scheme:key URI syntax.
@@ -34,16 +28,18 @@
 // Per-secret routing:
 //   Each secret can use a different backend:
 //
-//   ```toml
-//   [agent.api_key]
-//   resolver = "insecure_env"
-//   name = "ANTHROPIC_API_KEY"
-//
-//   [[controller]]
-//   type = "telegram"
-//   [controller.bot_token]
-//   resolver = "insecure_env"
-//   name = "TELEGRAM_API_KEY"
+//   ```json
+//   {
+//     "agent": {
+//       "api_key": { "resolver": "insecure_env", "name": "ANTHROPIC_API_KEY" }
+//     },
+//     "controllers": [
+//       {
+//         "type": "telegram",
+//         "bot_token": { "resolver": "insecure_env", "name": "TELEGRAM_API_KEY" }
+//       }
+//     ]
+//   }
 //   ```
 //
 //   Future resolvers (vault, ssm, op) plug in the same way — just a
@@ -101,8 +97,8 @@ use crate::error::{DysonError, Result};
 /// ```
 ///
 /// Register it and use in config:
-/// ```toml
-/// api_key = { resolver = "vault", name = "secret/data/anthropic-key" }
+/// ```json
+/// "api_key": { "resolver": "vault", "name": "secret/data/anthropic-key" }
 /// ```
 pub trait SecretResolver: Send + Sync {
     /// Resolve a secret by its key.
@@ -123,19 +119,14 @@ pub trait SecretResolver: Send + Sync {
 /// A config value that is either a literal string or a reference to a
 /// secret in an external backend.
 ///
-/// TOML deserialization handles both forms transparently:
+/// JSON deserialization handles both forms transparently:
 ///
-/// ```toml
-/// # Literal — the value IS the secret:
-/// api_key = "sk-ant-literal-value"
+/// ```json
+/// // Literal — the value IS the secret:
+/// "api_key": "sk-ant-literal-value"
 ///
-/// # Reference — fetch from a backend:
-/// api_key = { resolver = "insecure_env", name = "ANTHROPIC_API_KEY" }
-///
-/// # Reference as sub-table (equivalent):
-/// [agent.api_key]
-/// resolver = "insecure_env"
-/// name = "ANTHROPIC_API_KEY"
+/// // Reference — fetch from a backend:
+/// "api_key": { "resolver": "insecure_env", "name": "ANTHROPIC_API_KEY" }
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
@@ -262,7 +253,7 @@ impl SecretRegistry {
         Err(DysonError::Config(format!(
             "no value configured and {env_fallback} not set in environment.  \
              Set it with: export {env_fallback}=<value>  \
-             Or in dyson.toml: api_key = {{ resolver = \"insecure_env\", name = \"{env_fallback}\" }}"
+             Or in dyson.json: \"api_key\": {{ \"resolver\": \"insecure_env\", \"name\": \"{env_fallback}\" }}"
         )))
     }
 }

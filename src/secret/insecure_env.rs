@@ -42,7 +42,7 @@
 //   this resolver just does the lookup.
 //
 //   The flow:
-//     dyson.toml:  api_key = { resolver = "insecure_env", name = "ANTHROPIC_API_KEY" }
+//     dyson.json:  "api_key": { "resolver": "insecure_env", "name": "ANTHROPIC_API_KEY" }
 //       → serde deserializes as SecretValue::Reference
 //       → SecretRegistry.resolve() finds "insecure_env" → this resolver
 //       → calls resolve("ANTHROPIC_API_KEY")
@@ -51,17 +51,22 @@
 //
 //   Config examples:
 //
-//   ```toml
-//   # Inline table form:
-//   api_key = { resolver = "insecure_env", name = "ANTHROPIC_API_KEY" }
+//   ```json
+//   {
+//     "agent": {
+//       // Resolver form:
+//       "api_key": { "resolver": "insecure_env", "name": "ANTHROPIC_API_KEY" }
+//     }
+//   }
+//   ```
 //
-//   # Sub-table form (equivalent):
-//   [agent.api_key]
-//   resolver = "insecure_env"
-//   name = "ANTHROPIC_API_KEY"
-//
-//   # Literal form (no resolver, value used as-is):
-//   api_key = "sk-ant-literal-value"
+//   ```json
+//   {
+//     "agent": {
+//       // Literal form (no resolver, value used as-is):
+//       "api_key": "sk-ant-literal-value"
+//     }
+//   }
 //   ```
 // ===========================================================================
 

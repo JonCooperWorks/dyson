@@ -15,6 +15,7 @@ knows where a value came from.
 ```rust
 pub struct Settings {
     pub agent: AgentSettings,
+    pub providers: HashMap<String, ProviderConfig>,
     pub skills: Vec<SkillConfig>,
     pub controllers: Vec<ControllerConfig>,
     pub sandbox: SandboxConfig,
@@ -105,7 +106,7 @@ Dyson's native config format.  Example:
 When no `--config` flag is provided, Dyson searches:
 
 1. `./dyson.json` in the current working directory
-2. `~/.dyson/dyson.json` (global config)
+2. `~/.config/dyson/dyson.json` (global config)
 3. No file found → use built-in defaults
 
 With `--config path/to/custom.json`, only that file is loaded (error if
@@ -159,7 +160,48 @@ config file.
 
 ---
 
-## Provider Selection
+## Providers
+
+Named provider configurations live in the `"providers"` map.  The `"agent"`
+section references a provider by name.  This lets you define multiple providers
+and switch between them at runtime (e.g. via `/model`).
+
+```json
+{
+  "providers": {
+    "claude": {
+      "type": "anthropic",
+      "model": "claude-sonnet-4-20250514",
+      "api_key": { "resolver": "insecure_env", "name": "ANTHROPIC_API_KEY" }
+    },
+    "gpt": {
+      "type": "openai",
+      "model": "gpt-4o",
+      "api_key": { "resolver": "insecure_env", "name": "OPENAI_API_KEY" },
+      "base_url": "https://api.openai.com"
+    },
+    "local": {
+      "type": "openai",
+      "model": "llama-3.2-3b-instruct",
+      "base_url": "http://localhost:9000"
+    }
+  },
+  "agent": {
+    "provider": "claude"
+  }
+}
+```
+
+Each provider entry has:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `type` | Yes | Provider backend: `"anthropic"`, `"openai"`, `"claude-code"`, `"codex"` |
+| `model` | No | Model identifier (defaults per provider type) |
+| `api_key` | No | API key — literal string or secret resolver reference |
+| `base_url` | No | Override the default API endpoint |
+
+### Provider Selection
 
 The `provider` field determines which `LlmClient` implementation is used:
 

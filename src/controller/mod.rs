@@ -27,7 +27,7 @@
 //
 // How controllers fit in the architecture:
 //
-//   dyson.toml [[controller]] entries
+//   dyson.json "controllers" array
 //     │
 //     ▼
 //   main.rs reads config, creates Controller instances
@@ -44,14 +44,17 @@
 //   Dyson supports running multiple controllers simultaneously.  For
 //   example, you could run both a terminal REPL and a Telegram bot:
 //
-//   ```toml
-//   [[controller]]
-//   type = "terminal"
-//
-//   [[controller]]
-//   type = "telegram"
-//   bot_token = "$TELEGRAM_API_KEY"
-//   allowed_chat_ids = [123456789]
+//   ```json
+//   {
+//     "controllers": [
+//       { "type": "terminal" },
+//       {
+//         "type": "telegram",
+//         "bot_token": "$TELEGRAM_API_KEY",
+//         "allowed_chat_ids": [123456789]
+//       }
+//     ]
+//   }
 //   ```
 //
 //   Each controller runs as a concurrent tokio task.  They share the
