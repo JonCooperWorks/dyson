@@ -796,4 +796,72 @@ mod tests {
         assert_eq!(val["content"][0]["content"], "output here");
         assert_eq!(val["content"][0]["is_error"], true);
     }
+
+    // -----------------------------------------------------------------------
+    // Buffer overflow protection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn line_buffer_rejects_oversized_input() {
+        let mut parser = SseParser::new();
+
+        // Feed just over 10 MB without any newlines — should trigger the cap.
+        let chunk = vec![b'x'; 10 * 1024 * 1024 + 1];
+        let events = parser.feed(&chunk);
+
+        assert_eq!(events.len(), 1);
+        assert!(events[0].is_err());
+        let err_msg = format!("{}", events[0].as_ref().unwrap_err());
+        assert!(
+            err_msg.contains("10 MB"),
+            "error should mention the size limit, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn line_buffer_accepts_large_but_valid_input() {
+        let mut parser = SseParser::new();
+
+        // Feed a large but valid SSE line (under the cap) with a newline.
+        let text = "x".repeat(1024);
+        let line = format!(
+            "data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"{text}\"}}}}\n\n"
+        );
+        let events = parser.feed(line.as_bytes());
+
+        // Should parse successfully — one TextDelta event.
+        assert_eq!(events.len(), 1);
+        assert!(events[0].is_ok());
+    }
+
+    #[test]
+    fn tool_json_buffer_rejects_oversized_input() {
+        let mut parser = SseParser::new();
+
+        // Start a tool_use block.
+        let start = "event: content_block_start\n\
+                     data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"bash\"}}\n\n";
+        parser.feed(start.as_bytes());
+
+        // Feed many input_json_delta chunks to exceed 10 MB.
+        let big_chunk = "x".repeat(1024 * 1024); // 1 MB per chunk
+        for i in 0..11 {
+            let delta = format!(
+                "event: content_block_delta\n\
+                 data: {{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":\"{big_chunk}\"}}}}\n\n"
+            );
+            let events = parser.feed(delta.as_bytes());
+
+            if i >= 10 {
+                // After 10+ MB, should get an error event.
+                let has_error = events.iter().any(|e| {
+                    matches!(e, Ok(StreamEvent::TextDelta(t)) if t.contains("10 MB"))
+                });
+                assert!(
+                    has_error,
+                    "expected tool buffer overflow error on chunk {i}"
+                );
+            }
+        }
+    }
 }
