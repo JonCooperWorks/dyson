@@ -61,16 +61,14 @@
 // ===========================================================================
 
 use std::collections::HashMap;
-use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::Stream;
 use tokio_stream::StreamExt;
 
 use crate::auth::Auth;
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call, MAX_LINE_BUFFER, MAX_TOOL_JSON, MAX_ACTIVE_TOOL_BUFFERS};
+use crate::llm::{CompletionConfig, LlmClient, SseLineBuffer, ToolCallBuffer, ToolDefinition, finalize_tool_call, MAX_TOOL_JSON, MAX_ACTIVE_TOOL_BUFFERS};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -217,7 +215,7 @@ impl LlmClient for AnthropicClient {
         system: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+    ) -> Result<crate::llm::StreamResponse> {
         // -- Build the request body --
         let messages_json: Vec<serde_json::Value> =
             messages.iter().map(message_to_anthropic).collect();
@@ -327,7 +325,11 @@ impl LlmClient for AnthropicClient {
             }
         };
 
-        Ok(Box::pin(event_stream))
+        Ok(crate::llm::StreamResponse {
+            stream: Box::pin(event_stream),
+            tool_mode: crate::llm::ToolMode::Execute,
+            input_tokens: None,
+        })
     }
 }
 
@@ -344,8 +346,8 @@ impl LlmClient for AnthropicClient {
 /// 3. **Tool use accumulation**: tracks partial JSON for each tool_use content
 ///    block and emits `ToolUseComplete` when the block stops.
 struct SseParser {
-    /// Buffer for incomplete lines (bytes received but no newline yet).
-    line_buffer: String,
+    /// Shared line buffer that handles SSE framing.
+    line_buffer: SseLineBuffer,
 
     /// Active tool_use blocks being accumulated.
     ///
@@ -369,7 +371,7 @@ struct SseParser {
 impl SseParser {
     fn new() -> Self {
         Self {
-            line_buffer: String::new(),
+            line_buffer: SseLineBuffer::new(),
             tool_buffers: HashMap::new(),
             thinking_blocks: std::collections::HashSet::new(),
         }
@@ -383,61 +385,31 @@ impl SseParser {
     fn feed(&mut self, bytes: &[u8]) -> Vec<Result<StreamEvent>> {
         let mut events = Vec::new();
 
-        // Append raw bytes to the line buffer.
-        //
-        // Note: SSE is always UTF-8.  If we get invalid UTF-8, we replace
-        // it with the replacement character rather than crashing.
-        //
-        // Guard against unbounded growth from a malformed stream that never
-        // sends newlines.
-        let incoming = String::from_utf8_lossy(bytes);
-        if self.line_buffer.len() + incoming.len() > MAX_LINE_BUFFER {
-            events.push(Err(DysonError::Llm(
-                "SSE line buffer exceeded 10 MB — aborting stream".into(),
-            )));
-            return events;
-        }
-        self.line_buffer.push_str(&incoming);
+        // Use the shared line buffer for SSE framing.
+        let payloads = match self.line_buffer.feed(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                events.push(Err(e));
+                return events;
+            }
+        };
 
-        // Process all complete lines.
-        while let Some(newline_pos) = self.line_buffer.find('\n') {
-            // Split off the complete line (including the newline).
-            let line: String = self.line_buffer.drain(..=newline_pos).collect();
-            let line = line.trim();
-
-            // Skip empty lines (SSE event delimiters) and comments.
-            if line.is_empty() || line.starts_with(':') {
+        for data in payloads {
+            // "[DONE]" is an OpenAI convention; Anthropic uses
+            // "message_stop" events instead.  Handle both for safety.
+            if data == "[DONE]" {
                 continue;
             }
 
-            // Skip "event:" lines — we determine the event type from the
-            // JSON "type" field in the data line instead.
-            if line.starts_with("event:") {
-                continue;
-            }
-
-            // Parse "data:" lines.
-            if let Some(data) = line.strip_prefix("data:") {
-                let data = data.trim();
-
-                // "[DONE]" is an OpenAI convention; Anthropic uses
-                // "message_stop" events instead.  Handle both for safety.
-                if data == "[DONE]" {
-                    continue;
+            // Parse the JSON payload and convert to StreamEvent(s).
+            match serde_json::from_str::<serde_json::Value>(&data) {
+                Ok(json) => {
+                    if let Some(event) = self.parse_sse_json(&json) {
+                        events.push(Ok(event));
+                    }
                 }
-
-                // Parse the JSON payload and convert to StreamEvent(s).
-                match serde_json::from_str::<serde_json::Value>(data) {
-                    Ok(json) => {
-                        if let Some(event) = self.parse_sse_json(&json) {
-                            events.push(Ok(event));
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(data = data, error = %e, "failed to parse SSE JSON");
-                        // Don't emit an error event for parse failures — they're
-                        // usually harmless (ping events, etc.).
-                    }
+                Err(e) => {
+                    tracing::warn!(data = data, error = %e, "failed to parse SSE JSON");
                 }
             }
         }

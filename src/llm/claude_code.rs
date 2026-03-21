@@ -136,12 +136,10 @@
 // ===========================================================================
 
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::Stream;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::RwLock;
 
@@ -328,23 +326,13 @@ impl LlmClient for ClaudeCodeClient {
     /// | `--no-session-persistence` | Don't save this to Claude Code's history |
     /// | `--model <model>` | Model selection |
     /// | `--append-system-prompt <prompt>` | System prompt (on top of built-in) |
-    /// Claude Code runs its own agent loop with built-in tools (Bash, Read,
-    /// Write, etc.).  Dyson should NOT re-execute those tool calls — they
-    /// already ran inside the `claude -p` subprocess.  ToolUse stream events
-    /// are still emitted for display purposes (so the user sees what Claude
-    /// Code is doing), but the agent loop skips execution and breaks after
-    /// a single iteration.
-    fn handles_tools_internally(&self) -> bool {
-        true
-    }
-
     async fn stream(
         &self,
         messages: &[Message],
         system: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+    ) -> Result<crate::llm::StreamResponse> {
         // -- Format conversation history into a prompt string --
         //
         // The claude CLI in -p mode takes a single prompt.  We format the
@@ -707,16 +695,15 @@ impl LlmClient for ClaudeCodeClient {
                     "assistant" => {
                         // Only use assistant messages as fallback when we
                         // haven't received stream_event deltas for this turn.
-                        if !got_stream_deltas {
-                            if let Some(content) = json["message"]["content"].as_array() {
-                                for block in content {
-                                    if block["type"].as_str() == Some("text") {
-                                        if let Some(text) = block["text"].as_str() {
-                                            if !text.is_empty() {
-                                                yield Ok(StreamEvent::TextDelta(text.to_string()));
-                                            }
-                                        }
-                                    }
+                        if !got_stream_deltas
+                            && let Some(content) = json["message"]["content"].as_array()
+                        {
+                            for block in content {
+                                if block["type"].as_str() == Some("text")
+                                    && let Some(text) = block["text"].as_str()
+                                    && !text.is_empty()
+                                {
+                                    yield Ok(StreamEvent::TextDelta(text.to_string()));
                                 }
                             }
                         }
@@ -745,7 +732,11 @@ impl LlmClient for ClaudeCodeClient {
             }
         };
 
-        Ok(Box::pin(event_stream))
+        Ok(crate::llm::StreamResponse {
+            stream: Box::pin(event_stream),
+            tool_mode: crate::llm::ToolMode::Observe,
+            input_tokens: None,
+        })
     }
 }
 
@@ -874,16 +865,15 @@ impl StreamParserState {
             }
 
             "assistant" => {
-                if !self.got_stream_deltas {
-                    if let Some(content) = json["message"]["content"].as_array() {
-                        for block in content {
-                            if block["type"].as_str() == Some("text") {
-                                if let Some(text) = block["text"].as_str() {
-                                    if !text.is_empty() {
-                                        events.push(Ok(StreamEvent::TextDelta(text.to_string())));
-                                    }
-                                }
-                            }
+                if !self.got_stream_deltas
+                    && let Some(content) = json["message"]["content"].as_array()
+                {
+                    for block in content {
+                        if block["type"].as_str() == Some("text")
+                            && let Some(text) = block["text"].as_str()
+                            && !text.is_empty()
+                        {
+                            events.push(Ok(StreamEvent::TextDelta(text.to_string())));
                         }
                     }
                 }

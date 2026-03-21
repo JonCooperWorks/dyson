@@ -74,12 +74,10 @@
 //   in `llm/mod.rs`.
 // ===========================================================================
 
-use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::Stream;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::RwLock;
 
@@ -206,19 +204,13 @@ impl CodexClient {
 
 #[async_trait]
 impl LlmClient for CodexClient {
-    /// Codex runs its own agent loop with built-in tools (shell, file ops,
-    /// MCP, web search).  Dyson should NOT re-execute those tool calls.
-    fn handles_tools_internally(&self) -> bool {
-        true
-    }
-
     async fn stream(
         &self,
         messages: &[Message],
         system: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+    ) -> Result<crate::llm::StreamResponse> {
         // Format conversation history into a single prompt string.
         let prompt = super::format_prompt(messages, tools);
 
@@ -453,21 +445,21 @@ impl LlmClient for CodexClient {
 
                         match item_type {
                             "agent_message" => {
-                                if let Some(text) = item["text"].as_str() {
-                                    if !text.is_empty() {
-                                        yield Ok(StreamEvent::TextDelta(
-                                            text.to_string()
-                                        ));
-                                    }
+                                if let Some(text) = item["text"].as_str()
+                                    && !text.is_empty()
+                                {
+                                    yield Ok(StreamEvent::TextDelta(
+                                        text.to_string()
+                                    ));
                                 }
                             }
                             "reasoning" => {
-                                if let Some(text) = item["text"].as_str() {
-                                    if !text.is_empty() {
-                                        yield Ok(StreamEvent::ThinkingDelta(
-                                            text.to_string()
-                                        ));
-                                    }
+                                if let Some(text) = item["text"].as_str()
+                                    && !text.is_empty()
+                                {
+                                    yield Ok(StreamEvent::ThinkingDelta(
+                                        text.to_string()
+                                    ));
                                 }
                             }
                             "command_execution" => {
@@ -570,7 +562,11 @@ impl LlmClient for CodexClient {
             }
         };
 
-        Ok(Box::pin(event_stream))
+        Ok(crate::llm::StreamResponse {
+            stream: Box::pin(event_stream),
+            tool_mode: crate::llm::ToolMode::Observe,
+            input_tokens: None,
+        })
     }
 }
 
@@ -680,17 +676,17 @@ impl StreamParserState {
 
                 match item_type {
                     "agent_message" => {
-                        if let Some(text) = item["text"].as_str() {
-                            if !text.is_empty() {
-                                events.push(Ok(StreamEvent::TextDelta(text.to_string())));
-                            }
+                        if let Some(text) = item["text"].as_str()
+                            && !text.is_empty()
+                        {
+                            events.push(Ok(StreamEvent::TextDelta(text.to_string())));
                         }
                     }
                     "reasoning" => {
-                        if let Some(text) = item["text"].as_str() {
-                            if !text.is_empty() {
-                                events.push(Ok(StreamEvent::ThinkingDelta(text.to_string())));
-                            }
+                        if let Some(text) = item["text"].as_str()
+                            && !text.is_empty()
+                        {
+                            events.push(Ok(StreamEvent::ThinkingDelta(text.to_string())));
                         }
                     }
                     "command_execution" => {

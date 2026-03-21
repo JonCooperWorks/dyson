@@ -41,6 +41,40 @@ fn path_traversal_allows_valid_paths() {
     assert!(dyson::tool::validate_workspace_path("sub/dir/file.txt").is_ok());
 }
 
+#[test]
+fn path_traversal_rejects_symlinks() {
+    // Create a temp directory with a symlink.
+    let dir = std::env::temp_dir().join(format!(
+        "dyson-symlink-test-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let target = dir.join("real_file.txt");
+    std::fs::write(&target, "secret").unwrap();
+
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    // validate_workspace_path checks relative paths from CWD.
+    // We need the symlink to exist at the relative path.
+    let saved_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&dir).unwrap();
+
+    let result = dyson::tool::validate_workspace_path("link");
+    assert!(result.is_err(), "symlinks must be rejected");
+    assert!(
+        result.unwrap_err().contains("symlink"),
+        "error message should mention 'symlink'"
+    );
+
+    // Non-symlink file should still work.
+    assert!(dyson::tool::validate_workspace_path("real_file.txt").is_ok());
+
+    std::env::set_current_dir(&saved_cwd).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // =========================================================================
 // 2. Docker container name validation
 // =========================================================================
@@ -314,7 +348,7 @@ fn credential_zeroizes_on_drop() {
     let raw = Box::into_raw(cred);
 
     let struct_size = std::mem::size_of::<Credential>();
-    let secret_len_bytes = (secret.len() as usize).to_ne_bytes();
+    let secret_len_bytes = secret.len().to_ne_bytes();
 
     // Before drop: the String's length field should be present.
     let pre_drop_bytes: Vec<u8> = unsafe {

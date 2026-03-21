@@ -51,16 +51,14 @@
 // ===========================================================================
 
 use std::collections::HashMap;
-use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::Stream;
 use tokio_stream::StreamExt;
 
 use crate::auth::Auth;
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call, MAX_LINE_BUFFER, MAX_TOOL_JSON, MAX_ACTIVE_TOOL_BUFFERS};
+use crate::llm::{CompletionConfig, LlmClient, SseLineBuffer, ToolCallBuffer, ToolDefinition, finalize_tool_call, MAX_TOOL_JSON, MAX_ACTIVE_TOOL_BUFFERS};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -119,7 +117,7 @@ impl LlmClient for OpenAiClient {
         system: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+    ) -> Result<crate::llm::StreamResponse> {
         // -- Build messages array --
         //
         // OpenAI puts the system prompt as the first message with role "system".
@@ -223,7 +221,11 @@ impl LlmClient for OpenAiClient {
             }
         };
 
-        Ok(Box::pin(event_stream))
+        Ok(crate::llm::StreamResponse {
+            stream: Box::pin(event_stream),
+            tool_mode: crate::llm::ToolMode::Execute,
+            input_tokens: None,
+        })
     }
 }
 
@@ -251,15 +253,13 @@ fn message_to_openai(msg: &Message) -> serde_json::Value {
         content,
         ..
     }) = msg.content.first()
+        && matches!(msg.role, Role::User)
     {
-        if matches!(msg.role, Role::User) && matches!(msg.content[0], ContentBlock::ToolResult { .. })
-        {
-            return serde_json::json!({
-                "role": "tool",
-                "tool_call_id": tool_use_id,
-                "content": content,
-            });
-        }
+        return serde_json::json!({
+            "role": "tool",
+            "tool_call_id": tool_use_id,
+            "content": content,
+        });
     }
 
     // Check if this is an assistant message with tool calls.
@@ -334,9 +334,13 @@ fn message_to_openai(msg: &Message) -> serde_json::Value {
 ///
 /// Similar structure to the Anthropic parser but handles OpenAI's different
 /// JSON format: choices[0].delta instead of content_block events.
+///
+/// Uses the shared `SseLineBuffer` for SSE framing (line buffering, overflow
+/// protection), and only implements the OpenAI-specific JSON → StreamEvent
+/// mapping.
 struct OpenAiSseParser {
-    /// Buffer for incomplete SSE lines.
-    line_buffer: String,
+    /// Shared line buffer that handles SSE framing.
+    line_buffer: SseLineBuffer,
 
     /// Active tool call accumulation.
     /// Key: tool_calls array index.
@@ -347,7 +351,7 @@ struct OpenAiSseParser {
 impl OpenAiSseParser {
     fn new() -> Self {
         Self {
-            line_buffer: String::new(),
+            line_buffer: SseLineBuffer::new(),
             tool_buffers: HashMap::new(),
         }
     }
@@ -355,49 +359,34 @@ impl OpenAiSseParser {
     fn feed(&mut self, bytes: &[u8]) -> Vec<Result<StreamEvent>> {
         let mut events = Vec::new();
 
-        // Guard against unbounded growth from a malformed stream that never
-        // sends newlines.
-        let incoming = String::from_utf8_lossy(bytes);
-        if self.line_buffer.len() + incoming.len() > MAX_LINE_BUFFER {
-            events.push(Err(DysonError::Llm(
-                "SSE line buffer exceeded 10 MB — aborting stream".into(),
-            )));
-            return events;
-        }
-        self.line_buffer.push_str(&incoming);
+        let payloads = match self.line_buffer.feed(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                events.push(Err(e));
+                return events;
+            }
+        };
 
-        while let Some(newline_pos) = self.line_buffer.find('\n') {
-            let line: String = self.line_buffer.drain(..=newline_pos).collect();
-            let line = line.trim();
-
-            if line.is_empty() || line.starts_with(':') {
+        for data in payloads {
+            if data == "[DONE]" {
+                // Flush any remaining tool buffers.
+                // OpenAI emits finish_reason before [DONE], so tool
+                // buffers should already be flushed.  But just in case:
+                let remaining: Vec<ToolCallBuffer> =
+                    self.tool_buffers.drain().map(|(_, buf)| buf).collect();
+                for buf in remaining {
+                    events.push(finalize_tool_call(buf));
+                }
                 continue;
             }
 
-            if let Some(data) = line.strip_prefix("data:") {
-                let data = data.trim();
-
-                // [DONE] signals end of stream.
-                if data == "[DONE]" {
-                    // Flush any remaining tool buffers.
-                    // OpenAI emits finish_reason before [DONE], so tool
-                    // buffers should already be flushed.  But just in case:
-                    let remaining: Vec<ToolCallBuffer> =
-                        self.tool_buffers.drain().map(|(_, buf)| buf).collect();
-                    for buf in remaining {
-                        events.push(finalize_tool_call(buf));
-                    }
-                    continue;
+            match serde_json::from_str::<serde_json::Value>(&data) {
+                Ok(json) => {
+                    let new_events = self.parse_chunk(&json);
+                    events.extend(new_events);
                 }
-
-                match serde_json::from_str::<serde_json::Value>(data) {
-                    Ok(json) => {
-                        let new_events = self.parse_chunk(&json);
-                        events.extend(new_events);
-                    }
-                    Err(e) => {
-                        tracing::warn!(data = data, error = %e, "failed to parse OpenAI SSE JSON");
-                    }
+                Err(e) => {
+                    tracing::warn!(data = data, error = %e, "failed to parse OpenAI SSE JSON");
                 }
             }
         }
@@ -436,17 +425,17 @@ impl OpenAiSseParser {
             // in a separate "reasoning_content" field before the visible
             // response.  We capture these as ThinkingDelta events so they
             // can be logged without being shown to the user.
-            if let Some(thinking) = delta["reasoning_content"].as_str() {
-                if !thinking.is_empty() {
-                    events.push(Ok(StreamEvent::ThinkingDelta(thinking.to_string())));
-                }
+            if let Some(thinking) = delta["reasoning_content"].as_str()
+                && !thinking.is_empty()
+            {
+                events.push(Ok(StreamEvent::ThinkingDelta(thinking.to_string())));
             }
 
             // -- Text content --
-            if let Some(text) = delta["content"].as_str() {
-                if !text.is_empty() {
-                    events.push(Ok(StreamEvent::TextDelta(text.to_string())));
-                }
+            if let Some(text) = delta["content"].as_str()
+                && !text.is_empty()
+            {
+                events.push(Ok(StreamEvent::TextDelta(text.to_string())));
             }
 
             // -- Tool calls --

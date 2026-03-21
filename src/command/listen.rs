@@ -33,7 +33,7 @@ pub async fn run(
     provider: Option<String>,
     base_url: Option<String>,
     workspace: Option<String>,
-) -> anyhow::Result<()> {
+) -> dyson::error::Result<()> {
     // Resolve config path: explicit > ~/.dyson/dyson.json > ./dyson.json
     let config_path = config.or_else(|| {
         let home_config = super::dirs_config_path();
@@ -59,10 +59,10 @@ pub async fn run(
     let mut controllers: Vec<Box<dyn Controller>> = Vec::new();
 
     if settings.controllers.is_empty() {
-        anyhow::bail!(
+        return Err(dyson::error::DysonError::Config(
             "no controllers configured.  Add a controller to the \"controllers\" array in dyson.json.\n\
-             Use 'dyson run \"prompt\"' for single-shot mode."
-        );
+             Use 'dyson run \"prompt\"' for single-shot mode.".into()
+        ));
     } else {
         for config in &settings.controllers {
             match config.controller_type.as_str() {

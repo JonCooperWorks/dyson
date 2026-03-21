@@ -283,17 +283,15 @@ fn read_config_file(path: &Path) -> Result<String> {
 fn try_discover_config() -> Result<Option<JsonRoot>> {
     // 1. Current directory.
     let cwd_path = Path::new("dyson.json");
-    match load_and_migrate(cwd_path) {
-        Ok(root) => return Ok(root),
-        Err(_) => {} // Not found or unreadable — try next location.
+    if let Ok(root) = load_and_migrate(cwd_path) {
+        return Ok(root);
     }
 
     // 2. ~/.config/dyson/dyson.json
     if let Some(home) = std::env::var_os("HOME") {
         let global_path = Path::new(&home).join(".config/dyson/dyson.json");
-        match load_and_migrate(&global_path) {
-            Ok(root) => return Ok(root),
-            Err(_) => {} // Not found or unreadable — fall through to defaults.
+        if let Ok(root) = load_and_migrate(&global_path) {
+            return Ok(root);
         }
     }
 
@@ -597,10 +595,10 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
         if let Some(backend) = ch.backend {
             settings.chat_history.backend = backend;
         }
-        if let Some(ref cs) = ch.connection_string {
-            if let Ok(resolved) = secrets.resolve(cs) {
-                settings.chat_history.connection_string = resolved;
-            }
+        if let Some(ref cs) = ch.connection_string
+            && let Ok(resolved) = secrets.resolve(cs)
+        {
+            settings.chat_history.connection_string = resolved;
         }
     }
 

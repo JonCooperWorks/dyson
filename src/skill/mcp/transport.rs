@@ -345,11 +345,11 @@ impl McpTransport for HttpTransport {
         })?;
 
         // Capture session ID from response headers.
-        if let Some(sid) = response.headers().get("mcp-session-id") {
-            if let Ok(sid_str) = sid.to_str() {
-                let mut session = self.session_id.lock().await;
-                *session = Some(sid_str.to_string());
-            }
+        if let Some(sid) = response.headers().get("mcp-session-id")
+            && let Ok(sid_str) = sid.to_str()
+        {
+            let mut session = self.session_id.lock().await;
+            *session = Some(sid_str.to_string());
         }
 
         if !response.status().is_success() {

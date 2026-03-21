@@ -111,10 +111,10 @@ impl Workspace for InMemoryWorkspace {
             ("LONG-TERM MEMORY", "MEMORY.md"),
             ("USER PROFILE", "USER.md"),
         ] {
-            if let Some(content) = self.files.get(file) {
-                if !content.trim().is_empty() {
-                    parts.push(format!("## {label}\n\n{content}"));
-                }
+            if let Some(content) = self.files.get(file)
+                && !content.trim().is_empty()
+            {
+                parts.push(format!("## {label}\n\n{content}"));
             }
         }
 

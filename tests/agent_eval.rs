@@ -15,11 +15,9 @@
 // 9. Tool execution errors — tool failures are reported back to the LLM
 // ===========================================================================
 
-use std::pin::Pin;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use futures::Stream;
 
 use dyson::agent::Agent;
 use dyson::config::AgentSettings;
@@ -61,9 +59,13 @@ impl LlmClient for MockLlm {
         _system: &str,
         _tools: &[ToolDefinition],
         _config: &CompletionConfig,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+    ) -> Result<dyson::llm::StreamResponse> {
         let events = self.responses.lock().unwrap().remove(0);
-        Ok(Box::pin(tokio_stream::iter(events.into_iter().map(Ok))))
+        Ok(dyson::llm::StreamResponse {
+            stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
+            tool_mode: dyson::llm::ToolMode::Execute,
+            input_tokens: None,
+        })
     }
 }
 
@@ -735,4 +737,122 @@ async fn streaming_text_accumulates_correctly() {
     let result = agent.run("say hello world", &mut output).await.unwrap();
     assert_eq!(result, "Hello, world!");
     assert_eq!(output.text, "Hello, world!");
+}
+
+// ===========================================================================
+// 15. Concurrent tool execution
+// ===========================================================================
+
+#[tokio::test]
+async fn concurrent_tool_calls_produce_all_results() {
+    // The LLM emits 3 tool calls. All should execute and produce results,
+    // verifying that concurrent dispatch works correctly.
+    let llm = MockLlm::new(vec![
+        vec![
+            StreamEvent::ToolUseStart {
+                id: "call_a".into(),
+                name: "bash".into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "call_a".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "echo alpha"}),
+            },
+            StreamEvent::ToolUseStart {
+                id: "call_b".into(),
+                name: "bash".into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "call_b".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "echo bravo"}),
+            },
+            StreamEvent::ToolUseStart {
+                id: "call_c".into(),
+                name: "bash".into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "call_c".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "echo charlie"}),
+            },
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::ToolUse,
+                output_tokens: None,
+            },
+        ],
+        text_response_events("All three done."),
+    ]);
+
+    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let mut agent =
+        Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
+            .unwrap();
+    let mut output = MockOutput::new();
+
+    let result = agent.run("run three", &mut output).await.unwrap();
+    assert_eq!(result, "All three done.");
+
+    // All 3 tool calls should have produced results.
+    assert_eq!(output.tool_results.len(), 3, "all 3 concurrent tools should produce results");
+
+    // Conversation: user, assistant(3 tools), tool_result x3, assistant(text) = 6 messages.
+    assert_eq!(agent.messages().len(), 6);
+}
+
+// ===========================================================================
+// 16. Token budget enforcement via integration test
+// ===========================================================================
+
+#[tokio::test]
+async fn token_budget_halts_agent_after_limit() {
+    // Budget: 50 tokens. LLM reports 40 per turn.
+    // Turn 1: tool call (40 tokens, total 40, under budget → continue).
+    // Turn 2: response (40 tokens, total 80, over budget → stop).
+    let llm = MockLlm::new(vec![
+        vec![
+            StreamEvent::ToolUseStart {
+                id: "call_1".into(),
+                name: "bash".into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "call_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "echo hi"}),
+            },
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::ToolUse,
+                output_tokens: Some(40),
+            },
+        ],
+        vec![
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: Some(40),
+            },
+        ],
+    ]);
+
+    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let mut agent =
+        Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
+            .unwrap();
+    agent.token_budget.max_output_tokens = Some(50);
+    let mut output = MockOutput::new();
+
+    // Should complete (budget exceeded mid-loop triggers break, not hard error).
+    let _result = agent.run("test budget", &mut output).await.unwrap();
+
+    // Token budget should reflect usage.
+    assert_eq!(agent.token_budget.output_tokens_used, 80);
+    assert_eq!(agent.token_budget.llm_calls, 2);
+    assert!(!agent.token_budget.has_budget());
+
+    // An error about exceeding budget should have been surfaced.
+    assert!(
+        output.errors.iter().any(|e| e.contains("token budget")),
+        "should surface token budget error, got: {:?}",
+        output.errors
+    );
 }

@@ -227,7 +227,8 @@ pub struct ToolOutput {
 
 /// Validate a workspace file path to prevent path traversal.
 ///
-/// Rejects absolute paths and parent-directory components (`..`).
+/// Rejects absolute paths, parent-directory components (`..`), and
+/// paths containing symlink components that could escape the workspace.
 pub fn validate_workspace_path(path: &str) -> std::result::Result<(), String> {
     let p = std::path::Path::new(path);
     if p.is_absolute() {
@@ -235,6 +236,17 @@ pub fn validate_workspace_path(path: &str) -> std::result::Result<(), String> {
     }
     if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
         return Err(format!("path traversal is not allowed: '{path}'"));
+    }
+    // Check each prefix for symlinks that could escape the workspace.
+    let mut accumulated = std::path::PathBuf::new();
+    for component in p.components() {
+        accumulated.push(component);
+        if accumulated.is_symlink() {
+            return Err(format!(
+                "symlinks are not allowed in workspace paths: '{}' is a symlink",
+                accumulated.display()
+            ));
+        }
     }
     Ok(())
 }

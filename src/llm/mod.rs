@@ -93,13 +93,60 @@ pub struct ToolDefinition {
 }
 
 // ---------------------------------------------------------------------------
+// ToolMode — how the agent loop should handle tool calls from this stream.
+// ---------------------------------------------------------------------------
+
+/// Controls whether the agent loop executes tool calls from the stream.
+///
+/// This replaces the old `handles_tools_internally()` boolean.  Instead of
+/// a flag on the trait, the mode travels with the `StreamResponse` — the
+/// information is co-located with the data it describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolMode {
+    /// Dyson executes tool calls itself (standard behavior).
+    ///
+    /// The agent loop dispatches tool calls through the sandbox, runs them
+    /// concurrently, and feeds results back to the LLM.
+    Execute,
+
+    /// The provider already executed tool calls internally.
+    ///
+    /// ToolUse stream events are informational only (displayed to the user
+    /// but not re-executed).  The agent loop breaks after one iteration.
+    /// Used by Claude Code and Codex, which run their own agent loops.
+    Observe,
+}
+
+// ---------------------------------------------------------------------------
+// StreamResponse — what stream() returns.
+// ---------------------------------------------------------------------------
+
+/// The result of starting a streaming LLM completion.
+///
+/// Bundles the event stream with its [`ToolMode`] so the agent loop knows
+/// how to handle tool calls without querying the client separately.
+pub struct StreamResponse {
+    /// The event stream to consume.
+    pub stream: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>,
+
+    /// How the agent loop should handle tool calls in this stream.
+    pub tool_mode: ToolMode,
+
+    /// Input token count for this request (if known at request time).
+    ///
+    /// Some providers report input tokens in the response headers or
+    /// initial event.  `None` if not available until the stream completes.
+    pub input_tokens: Option<usize>,
+}
+
+// ---------------------------------------------------------------------------
 // LlmClient trait
 // ---------------------------------------------------------------------------
 
 /// Provider-agnostic interface for streaming LLM completions.
 ///
 /// Each provider (Anthropic, OpenAI, local) implements this trait.  The
-/// agent loop calls `stream()` and consumes the resulting event stream
+/// agent loop calls `stream()` and consumes the resulting `StreamResponse`
 /// without knowing anything about the underlying API.
 ///
 /// ## Why async?
@@ -107,13 +154,6 @@ pub struct ToolDefinition {
 /// LLM calls are network I/O — building the HTTP request, streaming the
 /// response.  Async lets the tokio runtime do other work (handle Ctrl-C,
 /// run the UI) while waiting for the first token.
-///
-/// ## Why Pin<Box<dyn Stream>>?
-///
-/// Streams in Rust are typically `!Unpin` (they contain internal state
-/// that can't be moved).  `Pin<Box<...>>` is the standard way to return
-/// a dynamically-dispatched, heap-allocated stream.  The `Send` bound
-/// ensures the stream can be consumed from the tokio runtime.
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     /// Start a streaming completion.
@@ -128,29 +168,15 @@ pub trait LlmClient: Send + Sync {
     ///
     /// ## Returns
     ///
-    /// A stream of `StreamEvent`s that the stream handler consumes.
-    /// The stream ends with `StreamEvent::MessageComplete`.  Errors
-    /// during streaming are emitted as `StreamEvent::Error` or as
-    /// `Err(...)` items in the stream.
+    /// A [`StreamResponse`] containing the event stream and its
+    /// [`ToolMode`].  The stream ends with `StreamEvent::MessageComplete`.
     async fn stream(
         &self,
         messages: &[Message],
         system: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>>;
-
-    /// Whether this provider runs its own internal tool-use loop.
-    ///
-    /// When `true`, the agent loop will NOT attempt to execute tool calls
-    /// from the stream.  The provider (e.g., Claude Code) already executed
-    /// them internally — the ToolUse stream events are informational only
-    /// (displayed to the user but not re-executed by Dyson).
-    ///
-    /// Default is `false` (standard behavior: Dyson executes tool calls).
-    fn handles_tools_internally(&self) -> bool {
-        false
-    }
+    ) -> Result<StreamResponse>;
 }
 
 // ---------------------------------------------------------------------------
@@ -269,9 +295,9 @@ pub(crate) struct ToolCallBuffer {
 /// Parse the accumulated JSON in a [`ToolCallBuffer`] and produce a
 /// `ToolUseComplete` event.
 ///
-/// Logs an error and falls back to an empty object if JSON parsing fails,
-/// so the tool will still be called (and likely fail with a useful error
-/// message about missing fields).
+/// If JSON parsing fails, emits a `ToolUseComplete` with an `_parse_error`
+/// field so the tool call is still dispatched (preserving the agent loop's
+/// tool_result contract with the LLM) but the error is visible.
 pub(crate) fn finalize_tool_call(buf: ToolCallBuffer) -> Result<StreamEvent> {
     let input = match serde_json::from_str(&buf.json) {
         Ok(v) => v,
@@ -280,9 +306,15 @@ pub(crate) fn finalize_tool_call(buf: ToolCallBuffer) -> Result<StreamEvent> {
                 tool = buf.name,
                 json = buf.json,
                 error = %e,
-                "failed to parse accumulated tool call JSON"
+                "failed to parse accumulated tool call JSON — tool will receive error input"
             );
-            serde_json::json!({})
+            // Include the parse error so the tool (or agent loop) can
+            // surface a clear error message instead of a cryptic
+            // "missing required field" from an empty object.
+            serde_json::json!({
+                "_parse_error": format!("malformed tool input JSON: {e}"),
+                "_raw_json": buf.json,
+            })
         }
     };
 
@@ -291,6 +323,70 @@ pub(crate) fn finalize_tool_call(buf: ToolCallBuffer) -> Result<StreamEvent> {
         name: buf.name,
         input,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Shared SSE line buffer — deduplicates parsing logic across providers.
+// ---------------------------------------------------------------------------
+
+/// Shared line-buffering state for SSE parsers.
+///
+/// Both Anthropic and OpenAI SSE parsers need identical logic for:
+/// - Buffering incomplete lines from chunked byte streams
+/// - Splitting on newlines to yield complete data payloads
+/// - Guarding against unbounded buffer growth
+///
+/// This struct extracts that shared concern so each provider's parser
+/// only implements the provider-specific JSON → StreamEvent mapping.
+pub(crate) struct SseLineBuffer {
+    /// Buffer for incomplete lines (bytes received but no newline yet).
+    buffer: String,
+}
+
+impl SseLineBuffer {
+    pub fn new() -> Self {
+        Self {
+            buffer: String::new(),
+        }
+    }
+
+    /// Feed raw bytes and return complete `data:` payloads.
+    ///
+    /// Handles line buffering, SSE protocol (skips comments, event: lines),
+    /// and the `[DONE]` sentinel.  Returns `Err` if the buffer exceeds
+    /// `MAX_LINE_BUFFER`.
+    pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<String>> {
+        let incoming = String::from_utf8_lossy(bytes);
+        if self.buffer.len() + incoming.len() > MAX_LINE_BUFFER {
+            return Err(crate::error::DysonError::Llm(
+                "SSE line buffer exceeded 10 MB — aborting stream".into(),
+            ));
+        }
+        self.buffer.push_str(&incoming);
+
+        let mut payloads = Vec::new();
+
+        while let Some(newline_pos) = self.buffer.find('\n') {
+            let line: String = self.buffer.drain(..=newline_pos).collect();
+            let line = line.trim();
+
+            // Skip empty lines, comments, and event: lines.
+            if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
+                continue;
+            }
+
+            if let Some(data) = line.strip_prefix("data:") {
+                let data = data.trim();
+                if data == "[DONE]" {
+                    payloads.push("[DONE]".to_string());
+                } else {
+                    payloads.push(data.to_string());
+                }
+            }
+        }
+
+        Ok(payloads)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -360,10 +456,11 @@ pub(crate) fn resolve_binary_path(name: &str) -> String {
 /// ```
 pub(crate) fn format_prompt(messages: &[Message], tools: &[ToolDefinition]) -> String {
     // Single user message with no history and no tools — just return the text.
-    if messages.len() == 1 && tools.is_empty() {
-        if let Some(ContentBlock::Text { text }) = messages[0].content.first() {
-            return text.clone();
-        }
+    if messages.len() == 1
+        && tools.is_empty()
+        && let Some(ContentBlock::Text { text }) = messages[0].content.first()
+    {
+        return text.clone();
     }
 
     let mut prompt = String::new();
@@ -493,5 +590,117 @@ mod tests {
         let prompt = format_prompt(&messages, &tools);
         assert!(prompt.contains("[Available tools:]"));
         assert!(prompt.contains("**bash**"));
+    }
+
+    // -----------------------------------------------------------------------
+    // SseLineBuffer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sse_line_buffer_extracts_data_payloads() {
+        let mut buf = SseLineBuffer::new();
+        let payloads = buf
+            .feed(b"data: {\"type\":\"text\"}\n\n")
+            .unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0], "{\"type\":\"text\"}");
+    }
+
+    #[test]
+    fn sse_line_buffer_skips_comments_and_events() {
+        let mut buf = SseLineBuffer::new();
+        let payloads = buf
+            .feed(b": this is a comment\nevent: message_start\ndata: {\"ok\":true}\n\n")
+            .unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0], "{\"ok\":true}");
+    }
+
+    #[test]
+    fn sse_line_buffer_handles_partial_lines() {
+        let mut buf = SseLineBuffer::new();
+
+        // First chunk: incomplete line.
+        let p1 = buf.feed(b"data: {\"part").unwrap();
+        assert!(p1.is_empty());
+
+        // Second chunk: completes the line.
+        let p2 = buf.feed(b"ial\":true}\n\n").unwrap();
+        assert_eq!(p2.len(), 1);
+        assert_eq!(p2[0], "{\"partial\":true}");
+    }
+
+    #[test]
+    fn sse_line_buffer_returns_done_sentinel() {
+        let mut buf = SseLineBuffer::new();
+        let payloads = buf.feed(b"data: [DONE]\n\n").unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0], "[DONE]");
+    }
+
+    #[test]
+    fn sse_line_buffer_rejects_oversized_input() {
+        let mut buf = SseLineBuffer::new();
+        let chunk = vec![b'x'; 10 * 1024 * 1024 + 1];
+        let result = buf.feed(&chunk);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("10 MB"));
+    }
+
+    // -----------------------------------------------------------------------
+    // finalize_tool_call tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn finalize_valid_json() {
+        let buf = ToolCallBuffer {
+            id: "call_1".into(),
+            name: "bash".into(),
+            json: r#"{"command":"ls"}"#.into(),
+        };
+        let event = finalize_tool_call(buf).unwrap();
+        match event {
+            stream::StreamEvent::ToolUseComplete { id, name, input } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "bash");
+                assert_eq!(input["command"], "ls");
+            }
+            other => panic!("expected ToolUseComplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_malformed_json_includes_parse_error() {
+        let buf = ToolCallBuffer {
+            id: "call_2".into(),
+            name: "bash".into(),
+            json: "{broken json".into(),
+        };
+        let event = finalize_tool_call(buf).unwrap();
+        match event {
+            stream::StreamEvent::ToolUseComplete { input, .. } => {
+                // Should contain the parse error info, not an empty object.
+                assert!(input["_parse_error"].as_str().unwrap().contains("malformed"));
+                assert_eq!(input["_raw_json"], "{broken json");
+            }
+            other => panic!("expected ToolUseComplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_empty_json_includes_parse_error() {
+        let buf = ToolCallBuffer {
+            id: "call_3".into(),
+            name: "bash".into(),
+            json: String::new(),
+        };
+        let event = finalize_tool_call(buf).unwrap();
+        match event {
+            stream::StreamEvent::ToolUseComplete { input, .. } => {
+                assert!(input.get("_parse_error").is_some());
+            }
+            other => panic!("expected ToolUseComplete, got: {other:?}"),
+        }
     }
 }

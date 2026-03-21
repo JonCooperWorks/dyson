@@ -94,7 +94,7 @@ impl OpenClawWorkspace {
         for entry in std::fs::read_dir(path).map_err(|e| {
             DysonError::Config(format!("cannot read workspace dir: {e}"))
         })? {
-            let entry = entry.map_err(|e| DysonError::Io(e))?;
+            let entry = entry.map_err(DysonError::Io)?;
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".md") && entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                 let content = std::fs::read_to_string(entry.path())?;
@@ -368,27 +368,27 @@ impl Workspace for OpenClawWorkspace {
             ("LONG-TERM MEMORY", "MEMORY.md"),
             ("USER PROFILE", "USER.md"),
         ] {
-            if let Some(content) = self.files.get(file) {
-                if !content.trim().is_empty() {
-                    parts.push(format!("## {label}\n\n{content}"));
-                }
+            if let Some(content) = self.files.get(file)
+                && !content.trim().is_empty()
+            {
+                parts.push(format!("## {label}\n\n{content}"));
             }
         }
 
         // Yesterday's journal (for continuity across sessions).
         let yesterday = Self::yesterday_journal();
-        if let Some(content) = self.files.get(&yesterday) {
-            if !content.trim().is_empty() {
-                parts.push(format!("## YESTERDAY'S JOURNAL\n\n{content}"));
-            }
+        if let Some(content) = self.files.get(&yesterday)
+            && !content.trim().is_empty()
+        {
+            parts.push(format!("## YESTERDAY'S JOURNAL\n\n{content}"));
         }
 
         // Today's journal.
         let today = Self::today_journal();
-        if let Some(content) = self.files.get(&today) {
-            if !content.trim().is_empty() {
-                parts.push(format!("## TODAY'S JOURNAL\n\n{content}"));
-            }
+        if let Some(content) = self.files.get(&today)
+            && !content.trim().is_empty()
+        {
+            parts.push(format!("## TODAY'S JOURNAL\n\n{content}"));
         }
 
         parts.join("\n\n---\n\n")
@@ -448,8 +448,8 @@ impl Workspace for OpenClawWorkspace {
 /// Resolve ~ to $HOME in a path string.
 pub(crate) fn resolve_tilde(path: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    if path.starts_with("~/") {
-        PathBuf::from(&home).join(&path[2..])
+    if let Some(rest) = path.strip_prefix("~/") {
+        PathBuf::from(&home).join(rest)
     } else if path == "~" {
         PathBuf::from(&home)
     } else {

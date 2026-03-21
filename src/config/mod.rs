@@ -114,7 +114,7 @@ pub struct Settings {
 ///   }
 /// }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SandboxConfig {
     /// Sandbox names to disable.  Everything not in this list is active.
     ///
@@ -142,15 +142,6 @@ pub struct DockerSandboxConfig {
     pub container: String,
 }
 
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            disabled: vec![],
-            os_profile: None, // uses "default"
-            docker: None,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // ControllerConfig — type + opaque config blob.

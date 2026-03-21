@@ -345,7 +345,6 @@ dependencies = [
 name = "dyson"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-stream",
  "async-trait",
  "clap",
@@ -354,6 +353,7 @@ dependencies = [
  "hyper 1.8.1",
  "hyper-util",
  "pin-project-lite",
+ "rand",
  "regex",
  "reqwest 0.12.28",
  "rusqlite",

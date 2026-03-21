@@ -75,6 +75,75 @@ use crate::controller::Output;
 use self::stream_handler::ToolCall;
 
 // ---------------------------------------------------------------------------
+// TokenBudget — tracks and limits token usage across the agent session.
+// ---------------------------------------------------------------------------
+
+/// Token usage tracking and optional budget enforcement.
+///
+/// Hooks into the agent loop via `process_stream`'s reported `output_tokens`.
+/// When a `max_output_tokens` budget is set, the agent loop stops with an
+/// error once the cumulative output tokens exceed the limit.
+///
+/// ## Usage
+///
+/// ```ignore
+/// let mut budget = TokenBudget::default();
+/// budget.max_output_tokens = Some(100_000); // cap at 100k output tokens
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct TokenBudget {
+    /// Maximum cumulative output tokens before the agent refuses to continue.
+    /// `None` = unlimited (default).
+    pub max_output_tokens: Option<usize>,
+
+    /// Cumulative output tokens used across all turns in this session.
+    pub output_tokens_used: usize,
+
+    /// Cumulative input tokens used across all turns in this session.
+    pub input_tokens_used: usize,
+
+    /// Number of LLM calls made in this session (across all `run()` calls).
+    pub llm_calls: usize,
+}
+
+impl TokenBudget {
+    /// Record tokens from a completed LLM turn.
+    ///
+    /// Returns `Err` if the budget is exceeded after recording.
+    pub fn record(&mut self, output_tokens: usize) -> Result<()> {
+        self.output_tokens_used += output_tokens;
+        self.llm_calls += 1;
+        if let Some(max) = self.max_output_tokens && self.output_tokens_used > max {
+            return Err(DysonError::Llm(format!(
+                "token budget exceeded: {}/{max} output tokens used",
+                self.output_tokens_used,
+            )));
+        }
+        Ok(())
+    }
+
+    /// Check if there's budget remaining (without recording).
+    pub fn has_budget(&self) -> bool {
+        match self.max_output_tokens {
+            Some(max) => self.output_tokens_used < max,
+            None => true,
+        }
+    }
+
+    /// Record input tokens from a completed LLM turn (informational only).
+    pub fn record_input(&mut self, input_tokens: usize) {
+        self.input_tokens_used += input_tokens;
+    }
+
+    /// Reset the budget counters (e.g., on `clear()`).
+    pub fn reset(&mut self) {
+        self.output_tokens_used = 0;
+        self.input_tokens_used = 0;
+        self.llm_calls = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Agent
 // ---------------------------------------------------------------------------
 
@@ -112,6 +181,9 @@ pub struct Agent {
     /// Maximum LLM turns per `run()` call.
     max_iterations: usize,
 
+    /// Maximum retries on transient LLM errors (HTTP 429, 529, network).
+    max_retries: usize,
+
     /// Conversation history.  Persists across `run()` calls.
     messages: Vec<Message>,
 
@@ -123,6 +195,9 @@ pub struct Agent {
 
     /// Inject a memory maintenance nudge every N turns.  0 = disabled.
     nudge_interval: usize,
+
+    /// Token usage tracking and optional budget enforcement.
+    pub token_budget: TokenBudget,
 }
 
 impl Agent {
@@ -207,10 +282,12 @@ impl Agent {
             system_prompt,
             config,
             max_iterations: settings.max_iterations,
+            max_retries: 3,
             messages: Vec::new(),
             tool_context,
             turn_count: 0,
             nudge_interval,
+            token_budget: TokenBudget::default(),
         })
     }
 
@@ -263,13 +340,11 @@ impl Agent {
         self.turn_count += 1;
 
         // Inject a memory maintenance nudge every N turns.
-        if self.nudge_interval > 0 && self.turn_count % self.nudge_interval == 0 {
-            if let Some(ref ws) = self.tool_context.workspace {
-                let ws = ws.read().await;
-                let nudge = Self::build_nudge_message(&**ws);
-                drop(ws);
-                self.messages.push(Message::user(&nudge));
-            }
+        if self.nudge_interval > 0 && self.turn_count.is_multiple_of(self.nudge_interval) && let Some(ref ws) = self.tool_context.workspace {
+            let ws = ws.read().await;
+            let nudge = Self::build_nudge_message(&**ws);
+            drop(ws);
+            self.messages.push(Message::user(&nudge));
         }
 
         let mut final_text = String::new();
@@ -282,33 +357,76 @@ impl Agent {
                 "starting LLM call"
             );
 
-            // -- Stream LLM response --
+            // -- Stream LLM response (with retry/backoff) --
             //
             // When the provider handles tools internally (e.g., Claude Code),
             // don't send Dyson's tool definitions — the provider has its own.
-            let tools_for_llm = if self.client.handles_tools_internally() {
-                &[]
-            } else {
-                self.tool_definitions.as_slice()
+            // We discover this from `StreamResponse.tool_mode` after the call.
+            let response = {
+                let mut last_err = None;
+                let mut response_opt = None;
+                for attempt in 0..=self.max_retries {
+                    // Determine tools_for_llm inside the loop so retries
+                    // behave identically.  On the first successful response
+                    // we learn the tool_mode.
+                    let tools_for_llm = self.tool_definitions.as_slice();
+
+                    match self
+                        .client
+                        .stream(
+                            &self.messages,
+                            &self.system_prompt,
+                            tools_for_llm,
+                            &self.config,
+                        )
+                        .await
+                    {
+                        Ok(s) => {
+                            response_opt = Some(s);
+                            break;
+                        }
+                        Err(e) if attempt < self.max_retries && Self::is_retryable(&e) => {
+                            let base_ms = 1000 * 2u64.pow(attempt as u32);
+                            let jitter_ms = rand::random::<u64>() % (base_ms / 2 + 1);
+                            let delay_ms = base_ms + jitter_ms;
+                            tracing::warn!(
+                                attempt = attempt + 1,
+                                max = self.max_retries,
+                                delay_ms = delay_ms,
+                                error = %e,
+                                "LLM call failed, retrying"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            last_err = Some(e);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                response_opt.ok_or_else(|| last_err.unwrap())?
             };
 
-            let stream = self
-                .client
-                .stream(
-                    &self.messages,
-                    &self.system_prompt,
-                    tools_for_llm,
-                    &self.config,
-                )
-                .await?;
+            let tool_mode = response.tool_mode;
+            if let Some(input_tokens) = response.input_tokens {
+                self.token_budget.record_input(input_tokens);
+            }
 
             tracing::info!("streaming response");
 
             // -- Process the stream into a message + tool calls --
-            let (assistant_msg, tool_calls) =
-                stream_handler::process_stream(stream, output).await?;
+            let (assistant_msg, tool_calls, output_tokens) =
+                stream_handler::process_stream(response.stream, output).await?;
 
             self.messages.push(assistant_msg.clone());
+
+            // -- Record token usage and check budget --
+            if let Err(e) = self.token_budget.record(output_tokens) {
+                tracing::warn!(
+                    used = self.token_budget.output_tokens_used,
+                    "token budget exceeded — stopping agent loop"
+                );
+                output.error(&e)?;
+                break;
+            }
 
             // -- If no tool calls, the LLM is done --
             //
@@ -317,7 +435,7 @@ impl Agent {
             // informational — the provider already executed them.  Without
             // this check, Dyson would try to re-execute every tool call and
             // loop until max_iterations, spawning a new subprocess each time.
-            if tool_calls.is_empty() || self.client.handles_tools_internally() {
+            if tool_calls.is_empty() || tool_mode == crate::llm::ToolMode::Observe {
                 // Extract the final text from the assistant message.
                 for block in &assistant_msg.content {
                     if let crate::message::ContentBlock::Text { text } = block {
@@ -328,30 +446,21 @@ impl Agent {
                 break;
             }
 
-            // -- Execute tool calls through the sandbox --
-            for call in &tool_calls {
-                tracing::info!(tool = call.name, id = call.id, "executing tool call");
-                let tool_start = std::time::Instant::now();
-                let result = self.execute_tool_call(call, output).await;
-                let tool_ms = tool_start.elapsed().as_millis();
-                match &result {
-                    Ok(out) => tracing::info!(
-                        tool = call.name,
-                        duration_ms = tool_ms,
-                        is_error = out.is_error,
-                        "tool call finished"
-                    ),
-                    Err(e) => tracing::error!(
-                        tool = call.name,
-                        duration_ms = tool_ms,
-                        error = %e,
-                        "tool call failed"
-                    ),
-                }
+            // -- Execute tool calls concurrently --
+            //
+            // Independent tool calls are dispatched in parallel via join_all.
+            // Results are collected in order and appended to the conversation
+            // so the LLM sees them in the same order it requested them.
+            let futures: Vec<_> = tool_calls
+                .iter()
+                .map(|call| self.execute_tool_call_timed(call))
+                .collect();
+            let results = futures::future::join_all(futures).await;
 
-                // Build the tool_result message.
+            for (call, result) in tool_calls.iter().zip(results) {
                 let tool_result_msg = match result {
                     Ok(ref tool_output) => {
+                        output.tool_result(tool_output)?;
                         Message::tool_result(&call.id, &tool_output.content, tool_output.is_error)
                     }
                     Err(ref e) => Message::tool_result(&call.id, &e.to_string(), true),
@@ -395,6 +504,49 @@ impl Agent {
         )
     }
 
+    /// Check if an LLM error is retryable (rate limit, overloaded, network).
+    fn is_retryable(err: &DysonError) -> bool {
+        match err {
+            DysonError::Llm(msg) => {
+                msg.contains("rate limit")
+                    || msg.contains("429")
+                    || msg.contains("overloaded")
+                    || msg.contains("529")
+                    || msg.contains("502")
+                    || msg.contains("503")
+            }
+            DysonError::Http(_) => true, // network errors are always retryable
+            _ => false,
+        }
+    }
+
+    /// Execute a single tool call with timing and structured logging.
+    ///
+    /// This is the concurrent-safe entry point — it doesn't touch `output`
+    /// (which is `&mut` and can't be shared across futures).  The caller
+    /// handles output rendering after all futures resolve.
+    async fn execute_tool_call_timed(&self, call: &ToolCall) -> Result<ToolOutput> {
+        tracing::info!(tool = call.name, id = call.id, "executing tool call");
+        let tool_start = std::time::Instant::now();
+        let result = self.execute_tool_call(call).await;
+        let tool_ms = tool_start.elapsed().as_millis();
+        match &result {
+            Ok(out) => tracing::info!(
+                tool = call.name,
+                duration_ms = tool_ms,
+                is_error = out.is_error,
+                "tool call finished"
+            ),
+            Err(e) => tracing::error!(
+                tool = call.name,
+                duration_ms = tool_ms,
+                error = %e,
+                "tool call failed"
+            ),
+        }
+        result
+    }
+
     /// Execute a single tool call, routing through the sandbox.
     ///
     /// ## Flow
@@ -406,7 +558,6 @@ impl Agent {
     async fn execute_tool_call(
         &self,
         call: &ToolCall,
-        output: &mut dyn Output,
     ) -> Result<ToolOutput> {
         // -- Ask the sandbox --
         let decision = self
@@ -432,16 +583,12 @@ impl Agent {
                     .after(&call.name, &input, &mut tool_output)
                     .await?;
 
-                // Display the result.
-                output.tool_result(&tool_output)?;
-
                 Ok(tool_output)
             }
 
             SandboxDecision::Deny { reason } => {
                 tracing::info!(tool = call.name, reason = reason, "tool call denied by sandbox");
                 let tool_output = ToolOutput::error(format!("Denied by sandbox: {reason}"));
-                output.tool_result(&tool_output)?;
                 Ok(tool_output)
             }
 
@@ -471,7 +618,6 @@ impl Agent {
                     .after(&tool_name, &input, &mut tool_output)
                     .await?;
 
-                output.tool_result(&tool_output)?;
                 Ok(tool_output)
             }
         }
@@ -488,7 +634,7 @@ mod tests {
     use crate::llm::stream::{StopReason, StreamEvent};
     use crate::sandbox::no_sandbox::DangerousNoSandbox;
     use crate::skill::builtin::BuiltinSkill;
-    use std::pin::Pin;
+
 
     // -----------------------------------------------------------------------
     // Mock LLM client that returns a fixed response.
@@ -499,21 +645,21 @@ mod tests {
         /// the first entry.
         responses: std::sync::Mutex<Vec<Vec<StreamEvent>>>,
         /// Simulate a provider that handles tools internally (like Claude Code).
-        internal_tools: bool,
+        tool_mode: crate::llm::ToolMode,
     }
 
     impl MockLlm {
         fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
             Self {
                 responses: std::sync::Mutex::new(responses),
-                internal_tools: false,
+                tool_mode: crate::llm::ToolMode::Execute,
             }
         }
 
         fn with_internal_tools(responses: Vec<Vec<StreamEvent>>) -> Self {
             Self {
                 responses: std::sync::Mutex::new(responses),
-                internal_tools: true,
+                tool_mode: crate::llm::ToolMode::Observe,
             }
         }
     }
@@ -526,17 +672,17 @@ mod tests {
             _system: &str,
             _tools: &[ToolDefinition],
             _config: &CompletionConfig,
-        ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
+        ) -> Result<crate::llm::StreamResponse> {
             let events = self
                 .responses
                 .lock()
                 .unwrap()
                 .remove(0);
-            Ok(Box::pin(tokio_stream::iter(events.into_iter().map(Ok))))
-        }
-
-        fn handles_tools_internally(&self) -> bool {
-            self.internal_tools
+            Ok(crate::llm::StreamResponse {
+                stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
+                tool_mode: self.tool_mode,
+                input_tokens: None,
+            })
         }
     }
 
@@ -699,5 +845,180 @@ mod tests {
         assert!(nudge.contains("USER.md:"));
         assert!(nudge.contains("/1375 chars"));
         assert!(nudge.contains("memory_search"));
+    }
+
+    // -----------------------------------------------------------------------
+    // TokenBudget tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn token_budget_unlimited_by_default() {
+        let budget = TokenBudget::default();
+        assert!(budget.has_budget());
+        assert_eq!(budget.output_tokens_used, 0);
+        assert_eq!(budget.llm_calls, 0);
+    }
+
+    #[test]
+    fn token_budget_records_and_enforces() {
+        let mut budget = TokenBudget {
+            max_output_tokens: Some(100),
+            ..TokenBudget::default()
+        };
+
+        // Under budget — should succeed.
+        assert!(budget.record(50).is_ok());
+        assert_eq!(budget.output_tokens_used, 50);
+        assert_eq!(budget.llm_calls, 1);
+        assert!(budget.has_budget());
+
+        // Still under — should succeed.
+        assert!(budget.record(49).is_ok());
+        assert_eq!(budget.output_tokens_used, 99);
+        assert!(budget.has_budget());
+
+        // Over budget — should fail.
+        assert!(budget.record(10).is_err());
+        assert_eq!(budget.output_tokens_used, 109);
+        assert!(!budget.has_budget());
+    }
+
+    #[test]
+    fn token_budget_reset() {
+        let mut budget = TokenBudget {
+            max_output_tokens: Some(100),
+            ..TokenBudget::default()
+        };
+        budget.record(80).unwrap();
+        assert_eq!(budget.llm_calls, 1);
+
+        budget.reset();
+        assert_eq!(budget.output_tokens_used, 0);
+        assert_eq!(budget.llm_calls, 0);
+        assert!(budget.has_budget());
+    }
+
+    #[test]
+    fn token_budget_unlimited_never_fails() {
+        let mut budget = TokenBudget::default();
+        // No max set — should always succeed.
+        for _ in 0..100 {
+            assert!(budget.record(1_000_000).is_ok());
+        }
+        assert!(budget.has_budget());
+    }
+
+    // -----------------------------------------------------------------------
+    // Retry logic tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn retryable_error_detection() {
+        assert!(Agent::is_retryable(&DysonError::Llm("rate limited".into())));
+        assert!(Agent::is_retryable(&DysonError::Llm("HTTP 429".into())));
+        assert!(Agent::is_retryable(&DysonError::Llm("overloaded".into())));
+        assert!(Agent::is_retryable(&DysonError::Llm("HTTP 529".into())));
+        assert!(Agent::is_retryable(&DysonError::Llm("HTTP 503".into())));
+
+        // Non-retryable errors.
+        assert!(!Agent::is_retryable(&DysonError::Llm("authentication failed".into())));
+        assert!(!Agent::is_retryable(&DysonError::Config("bad config".into())));
+        assert!(!Agent::is_retryable(&DysonError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn token_budget_stops_agent_loop() {
+        // LLM reports 100 tokens per turn. Budget is 150, so it should
+        // stop after the second turn (100 + 100 = 200 > 150).
+        let llm = MockLlm::new(vec![
+            // Turn 1: tool call (100 tokens).
+            vec![
+                StreamEvent::ToolUseStart {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                },
+                StreamEvent::ToolUseComplete {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "echo hi"}),
+                },
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::ToolUse,
+                    output_tokens: Some(100),
+                },
+            ],
+            // Turn 2: tool call (100 more tokens → over budget).
+            vec![
+                StreamEvent::ToolUseStart {
+                    id: "call_2".into(),
+                    name: "bash".into(),
+                },
+                StreamEvent::ToolUseComplete {
+                    id: "call_2".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "echo bye"}),
+                },
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::ToolUse,
+                    output_tokens: Some(100),
+                },
+            ],
+        ]);
+
+        let settings = AgentSettings {
+            api_key: "test".into(),
+            ..Default::default()
+        };
+
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new())];
+        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
+        agent.token_budget.max_output_tokens = Some(150);
+        let mut output = MockOutput::new();
+
+        // Agent should stop due to budget, not error out.
+        let _result = agent.run("run both", &mut output).await.unwrap();
+        assert!(agent.token_budget.output_tokens_used >= 200);
+        assert!(!agent.token_budget.has_budget());
+    }
+
+    // -------------------------------------------------------------------
+    // Input token tracking
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn token_budget_tracks_input_tokens() {
+        let mut budget = TokenBudget::default();
+        assert_eq!(budget.input_tokens_used, 0);
+
+        budget.record_input(500);
+        assert_eq!(budget.input_tokens_used, 500);
+
+        budget.record_input(300);
+        assert_eq!(budget.input_tokens_used, 800);
+    }
+
+    #[test]
+    fn token_budget_reset_clears_input_tokens() {
+        let mut budget = TokenBudget::default();
+        budget.record_input(1000);
+        budget.record(200).unwrap();
+        budget.reset();
+        assert_eq!(budget.input_tokens_used, 0);
+        assert_eq!(budget.output_tokens_used, 0);
+        assert_eq!(budget.llm_calls, 0);
+    }
+
+    // -------------------------------------------------------------------
+    // ToolMode enum
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn tool_mode_execute_vs_observe() {
+        assert_ne!(crate::llm::ToolMode::Execute, crate::llm::ToolMode::Observe);
+        // Copy semantics work.
+        let mode = crate::llm::ToolMode::Observe;
+        let copied = mode;
+        assert_eq!(mode, copied);
     }
 }

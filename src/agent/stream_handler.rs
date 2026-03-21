@@ -88,6 +88,7 @@ pub struct ToolCall {
 /// - `Message`: The assistant's message with all content blocks (text + tool_use).
 /// - `Vec<ToolCall>`: Tool calls that need to be executed (empty if the LLM
 ///   just sent text and no tool calls).
+/// - `usize`: Output token count (API-reported if available, otherwise estimated).
 ///
 /// ## Error handling
 ///
@@ -97,7 +98,7 @@ pub struct ToolCall {
 pub async fn process_stream(
     stream: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>,
     output: &mut dyn Output,
-) -> Result<(Message, Vec<ToolCall>)> {
+) -> Result<(Message, Vec<ToolCall>, usize)> {
     let mut content_blocks: Vec<ContentBlock> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
@@ -108,6 +109,7 @@ pub async fn process_stream(
     let stream_start = std::time::Instant::now();
     let mut first_token_time: Option<std::time::Instant> = None;
     let mut token_count: usize = 0;
+    let mut api_output_tokens: Option<usize> = None;
 
     tokio::pin!(stream);
 
@@ -152,6 +154,7 @@ pub async fn process_stream(
             }
 
             StreamEvent::MessageComplete { output_tokens, .. } => {
+                api_output_tokens = output_tokens;
                 let elapsed = stream_start.elapsed();
                 let elapsed_ms = elapsed.as_millis();
                 // Prefer the API-reported token count; fall back to the
@@ -185,7 +188,8 @@ pub async fn process_stream(
     flush_text(&mut current_text, &mut content_blocks);
 
     let message = Message::assistant(content_blocks);
-    Ok((message, tool_calls))
+    let final_token_count = api_output_tokens.unwrap_or(token_count);
+    Ok((message, tool_calls, final_token_count))
 }
 
 // ---------------------------------------------------------------------------
@@ -281,7 +285,7 @@ mod tests {
         ]);
 
         let mut output = MockOutput::new();
-        let (message, tool_calls) = process_stream(stream, &mut output).await.unwrap();
+        let (message, tool_calls, _tokens) = process_stream(stream, &mut output).await.unwrap();
 
         assert_eq!(output.text, "Hello world");
         assert!(tool_calls.is_empty());
@@ -312,7 +316,7 @@ mod tests {
         ]);
 
         let mut output = MockOutput::new();
-        let (message, tool_calls) = process_stream(stream, &mut output).await.unwrap();
+        let (message, tool_calls, _tokens) = process_stream(stream, &mut output).await.unwrap();
 
         assert_eq!(output.text, "Checking.");
         assert_eq!(tool_calls.len(), 1);
@@ -350,7 +354,7 @@ mod tests {
         ]);
 
         let mut output = MockOutput::new();
-        let (message, tool_calls) = process_stream(stream, &mut output).await.unwrap();
+        let (message, tool_calls, _tokens) = process_stream(stream, &mut output).await.unwrap();
 
         // Only the TextDelta should appear in output — thinking is suppressed.
         assert_eq!(output.text, "The answer is 42.");

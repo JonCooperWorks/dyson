@@ -83,15 +83,11 @@ impl HotReloader {
         }
 
         // If the config file specifically changed, reload settings.
-        if changed {
-            if let Some(ref config_path) = self.config_path {
-                if config_path.exists() {
-                    match crate::config::loader::load_settings(Some(config_path)) {
-                        Ok(s) => new_settings = Some(s),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "config reload failed — keeping old");
-                        }
-                    }
+        if changed && let Some(ref config_path) = self.config_path && config_path.exists() {
+            match crate::config::loader::load_settings(Some(config_path)) {
+                Ok(s) => new_settings = Some(s),
+                Err(e) => {
+                    tracing::warn!(error = %e, "config reload failed — keeping old");
                 }
             }
         }

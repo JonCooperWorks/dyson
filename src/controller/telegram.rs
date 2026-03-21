@@ -255,16 +255,14 @@ impl super::Controller for TelegramController {
 
         loop {
             // Check for config/workspace changes each poll cycle.
-            if let Ok((changed, new_settings)) = reloader.check() {
-                if changed {
-                    if let Some(s) = new_settings {
-                        current_settings = s;
-                        current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
-                    }
-                    // Clear all agents so they pick up new config.
-                    agents.lock().await.clear();
-                    tracing::info!("config/workspace reloaded — agents reset");
+            if let Ok((true, new_settings)) = reloader.check() {
+                if let Some(s) = new_settings {
+                    current_settings = s;
+                    current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
                 }
+                // Clear all agents so they pick up new config.
+                agents.lock().await.clear();
+                tracing::info!("config/workspace reloaded — agents reset");
             }
             // Poll for updates with a timeout, racing against Ctrl-C.
             let updates = tokio::select! {
@@ -429,24 +427,22 @@ impl super::Controller for TelegramController {
 
                     // Get or create the per-chat agent.
                     let mut agents_map = agents_clone.lock().await;
-                    if !agents_map.contains_key(&chat_id.0) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = agents_map.entry(chat_id.0) {
                         match crate::controller::build_agent(
                             &settings_clone,
                             prompt_clone.as_deref(),
                         ).await {
                             Ok(mut agent) => {
                                 // Restore conversation history from disk.
-                                if let Ok(messages) = store_clone.load(&chat_key) {
-                                    if !messages.is_empty() {
-                                        tracing::info!(
-                                            chat_id = chat_id.0,
-                                            messages = messages.len(),
-                                            "restored chat history"
-                                        );
-                                        agent.set_messages(messages);
-                                    }
+                                if let Ok(messages) = store_clone.load(&chat_key) && !messages.is_empty() {
+                                    tracing::info!(
+                                        chat_id = chat_id.0,
+                                        messages = messages.len(),
+                                        "restored chat history"
+                                    );
+                                    agent.set_messages(messages);
                                 }
-                                agents_map.insert(chat_id.0, agent);
+                                entry.insert(agent);
                             }
                             Err(e) => {
                                 tracing::error!(error = %e, "failed to create agent");

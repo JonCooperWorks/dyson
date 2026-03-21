@@ -23,7 +23,7 @@
 //         2026-03-19.md    — daily journal
 // ===========================================================================
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Run `dyson init`.
 pub fn run(
@@ -31,15 +31,16 @@ pub fn run(
     daemonize: bool,
     import_openclaw: Option<PathBuf>,
     path: Option<PathBuf>,
-) -> anyhow::Result<()> {
-    let home = std::env::var("HOME")?;
+) -> dyson::error::Result<()> {
+    let home = std::env::var("HOME")
+        .map_err(|_| dyson::error::DysonError::Config("HOME environment variable not set".into()))?;
     let base = path.unwrap_or_else(|| PathBuf::from(&home).join(".dyson"));
 
     if !noinput {
-        anyhow::bail!(
+        return Err(dyson::error::DysonError::Config(
             "interactive init not yet implemented.  Use --noinput for defaults.\n\
-             Usage: dyson init --noinput"
-        );
+             Usage: dyson init --noinput".into()
+        ));
     }
 
     eprintln!("initializing {}...", base.display());
@@ -122,7 +123,7 @@ pub fn run(
 ///
 /// Returns `true` if it contains at least SOUL.md and IDENTITY.md.
 /// These are the two files every OpenClaw/TARS workspace has.
-fn is_openclaw_workspace(path: &PathBuf) -> bool {
+fn is_openclaw_workspace(path: &Path) -> bool {
     path.join("SOUL.md").exists() && path.join("IDENTITY.md").exists()
 }
 
@@ -130,9 +131,11 @@ fn is_openclaw_workspace(path: &PathBuf) -> bool {
 ///
 /// Copies all .md files from the source root and the memory/ subdirectory.
 /// Existing files in the destination are overwritten.
-fn import_openclaw_workspace(source: &PathBuf, dest: &PathBuf) -> anyhow::Result<()> {
+fn import_openclaw_workspace(source: &Path, dest: &Path) -> dyson::error::Result<()> {
     if !source.exists() {
-        anyhow::bail!("OpenClaw workspace not found: {}", source.display());
+        return Err(dyson::error::DysonError::Config(format!(
+            "OpenClaw workspace not found: {}", source.display()
+        )));
     }
 
     eprintln!("  importing OpenClaw workspace from {}...", source.display());
@@ -183,7 +186,7 @@ fn import_openclaw_workspace(source: &PathBuf, dest: &PathBuf) -> anyhow::Result
 /// systemd's user environment) and on macOS if the user has it configured.
 /// If ~/.local/bin/ doesn't exist, we create it — the user may need to
 /// add it to PATH manually (we print instructions).
-fn install_to_path(base: &PathBuf) -> anyhow::Result<()> {
+fn install_to_path(base: &Path) -> dyson::error::Result<()> {
     let current_exe = std::env::current_exe()?;
 
     // Copy binary into ~/.dyson/bin/.
@@ -222,7 +225,7 @@ fn install_to_path(base: &PathBuf) -> anyhow::Result<()> {
 
     // Check if ~/.local/bin is actually on PATH.
     let path_var = std::env::var("PATH").unwrap_or_default();
-    if !path_var.split(':').any(|p| PathBuf::from(p) == local_bin) {
+    if !path_var.split(':').any(|p| Path::new(p) == local_bin) {
         eprintln!();
         eprintln!("  note: {} is not on your PATH.", local_bin.display());
         eprintln!("  add this to your shell config (~/.bashrc or ~/.zshrc):");
@@ -242,12 +245,12 @@ fn install_to_path(base: &PathBuf) -> anyhow::Result<()> {
 /// Falls back to /etc/systemd/system/dyson.service with sudo if
 /// user services aren't available.
 #[allow(unused_variables)]
-fn install_systemd_service(base: &PathBuf, config_path: &PathBuf) -> anyhow::Result<()> {
+fn install_systemd_service(base: &Path, config_path: &Path) -> dyson::error::Result<()> {
     #[cfg(not(target_os = "linux"))]
     {
         eprintln!("--daemonize is only supported on Linux (systemd).");
         eprintln!("on macOS, use launchd instead (not yet implemented).");
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]

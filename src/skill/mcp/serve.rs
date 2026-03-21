@@ -418,18 +418,17 @@ impl McpHttpServer {
         // OOM.
         const MAX_REQUEST_BODY: usize = 10 * 1024 * 1024; // 10 MB
 
-        if let Some(content_length) = req.headers().get("content-length") {
-            if let Ok(len) = content_length.to_str().unwrap_or("0").parse::<usize>() {
-                if len > MAX_REQUEST_BODY {
-                    tracing::warn!(
-                        content_length = len,
-                        "MCP server: rejecting oversized request"
-                    );
-                    return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({
-                        "error": "request body too large"
-                    }));
-                }
-            }
+        if let Some(content_length) = req.headers().get("content-length")
+            && let Ok(len) = content_length.to_str().unwrap_or("0").parse::<usize>()
+            && len > MAX_REQUEST_BODY
+        {
+            tracing::warn!(
+                content_length = len,
+                "MCP server: rejecting oversized request"
+            );
+            return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({
+                "error": "request body too large"
+            }));
         }
 
         let body = match req.collect().await {

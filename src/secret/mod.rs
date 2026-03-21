@@ -253,10 +253,10 @@ impl SecretRegistry {
         }
 
         // Try the env fallback via the insecure_env resolver.
-        if let Some(env_resolver) = self.resolvers.get("insecure_env") {
-            if let Ok(val) = env_resolver.resolve(env_fallback) {
-                return Ok(crate::auth::Credential::new(val));
-            }
+        if let Some(env_resolver) = self.resolvers.get("insecure_env")
+            && let Ok(val) = env_resolver.resolve(env_fallback)
+        {
+            return Ok(crate::auth::Credential::new(val));
         }
 
         Err(DysonError::Config(format!(

@@ -97,18 +97,15 @@ impl MemoryStore {
             Err(_) => return vec![],
         };
 
-        let results = stmt
-            .query_map(rusqlite::params![safe_query], |row| {
-                Ok(SearchResult {
-                    key: row.get(0)?,
-                    snippet: row.get(1)?,
-                })
+        stmt.query_map(rusqlite::params![safe_query], |row| {
+            Ok(SearchResult {
+                key: row.get(0)?,
+                snippet: row.get(1)?,
             })
-            .ok()
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default();
-
-        results
+        })
+        .ok()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
     }
 
     /// Remove a file from the FTS5 index.

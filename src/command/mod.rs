@@ -53,7 +53,7 @@ pub fn apply_overrides(
     provider: Option<String>,
     base_url: Option<String>,
     workspace: Option<String>,
-) -> anyhow::Result<()> {
+) -> dyson::error::Result<()> {
     if let Some(provider_str) = provider {
         if let Some(pc) = settings.providers.get(&provider_str) {
             // Named provider from config.
@@ -66,11 +66,11 @@ pub fn apply_overrides(
             settings.agent.provider = provider_type;
         } else {
             let available: Vec<&str> = settings.providers.keys().map(|s| s.as_str()).collect();
-            anyhow::bail!(
+            return Err(dyson::error::DysonError::Config(format!(
                 "unknown provider '{provider_str}'.  \
                  Available: {available:?}.  \
                  Or use a type: 'anthropic', 'openai', 'claude-code', 'codex'."
-            );
+            )));
         }
     }
     if let Some(url) = base_url {

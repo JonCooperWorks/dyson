@@ -24,7 +24,7 @@ pub async fn run(
     provider: Option<String>,
     base_url: Option<String>,
     workspace: Option<String>,
-) -> anyhow::Result<()> {
+) -> dyson::error::Result<()> {
     let config_path = config.or_else(|| {
         let home_config = super::dirs_config_path();
         if home_config.exists() {
