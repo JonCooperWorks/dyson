@@ -207,9 +207,12 @@ fn install_to_path(base: &PathBuf) -> anyhow::Result<()> {
 
     let symlink_path = local_bin.join("dyson");
 
-    // Remove existing symlink/file if present.
-    if symlink_path.exists() || symlink_path.is_symlink() {
-        std::fs::remove_file(&symlink_path)?;
+    // Remove existing symlink/file if present.  We skip the existence check
+    // to avoid a TOCTOU race — just attempt removal and ignore NotFound.
+    match std::fs::remove_file(&symlink_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
 
     #[cfg(unix)]
@@ -297,18 +300,31 @@ fn install_systemd_service(base: &PathBuf, config_path: &PathBuf) -> anyhow::Res
             std::fs::write(&user_service_path, &unit)?;
             eprintln!("  created {}", user_service_path.display());
 
-            // Enable and start.
-            let _ = std::process::Command::new("systemctl")
-                .args(["--user", "daemon-reload"])
-                .status();
-            let _ = std::process::Command::new("systemctl")
-                .args(["--user", "enable", "dyson"])
-                .status();
-            let _ = std::process::Command::new("systemctl")
-                .args(["--user", "start", "dyson"])
-                .status();
+            // Enable and start — warn on failure rather than silently ignoring.
+            let mut systemd_ok = true;
+            for args in [
+                &["--user", "daemon-reload"][..],
+                &["--user", "enable", "dyson"],
+                &["--user", "start", "dyson"],
+            ] {
+                match std::process::Command::new("systemctl").args(args).status() {
+                    Ok(s) if s.success() => {}
+                    Ok(s) => {
+                        eprintln!("  warning: systemctl {} exited with {s}", args.join(" "));
+                        systemd_ok = false;
+                    }
+                    Err(e) => {
+                        eprintln!("  warning: failed to run systemctl {}: {e}", args.join(" "));
+                        systemd_ok = false;
+                    }
+                }
+            }
 
-            eprintln!("  enabled and started (user service)");
+            if systemd_ok {
+                eprintln!("  enabled and started (user service)");
+            } else {
+                eprintln!("  service created but systemctl commands had errors (see above)");
+            }
             eprintln!();
             eprintln!("manage with:");
             eprintln!("  systemctl --user status dyson");
@@ -358,17 +374,30 @@ fn install_systemd_service(base: &PathBuf, config_path: &PathBuf) -> anyhow::Res
 
             eprintln!("  created {}", system_path.display());
 
-            let _ = std::process::Command::new("sudo")
-                .args(["systemctl", "daemon-reload"])
-                .status();
-            let _ = std::process::Command::new("sudo")
-                .args(["systemctl", "enable", "dyson"])
-                .status();
-            let _ = std::process::Command::new("sudo")
-                .args(["systemctl", "start", "dyson"])
-                .status();
+            let mut systemd_ok = true;
+            for args in [
+                &["systemctl", "daemon-reload"][..],
+                &["systemctl", "enable", "dyson"],
+                &["systemctl", "start", "dyson"],
+            ] {
+                match std::process::Command::new("sudo").args(args).status() {
+                    Ok(s) if s.success() => {}
+                    Ok(s) => {
+                        eprintln!("  warning: sudo {} exited with {s}", args.join(" "));
+                        systemd_ok = false;
+                    }
+                    Err(e) => {
+                        eprintln!("  warning: failed to run sudo {}: {e}", args.join(" "));
+                        systemd_ok = false;
+                    }
+                }
+            }
 
-            eprintln!("  enabled and started (system service)");
+            if systemd_ok {
+                eprintln!("  enabled and started (system service)");
+            } else {
+                eprintln!("  service created but systemctl commands had errors (see above)");
+            }
             eprintln!();
             eprintln!("manage with:");
             eprintln!("  sudo systemctl status dyson");

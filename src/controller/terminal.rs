@@ -84,8 +84,8 @@ impl super::Controller for TerminalController {
 
         loop {
             // Check for config/workspace changes before each turn.
-            if let Ok((changed, new_settings)) = reloader.check() {
-                if changed {
+            match reloader.check() {
+                Ok((true, new_settings)) => {
                     if let Some(s) = new_settings {
                         current_settings = s;
                         current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
@@ -96,6 +96,8 @@ impl super::Controller for TerminalController {
                         Err(e) => eprintln!("[reload error: {e}]"),
                     }
                 }
+                Ok((false, _)) => {}
+                Err(e) => eprintln!("[config reload check failed: {e}]"),
             }
 
             eprint!("> ");

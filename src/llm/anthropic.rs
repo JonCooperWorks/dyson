@@ -266,8 +266,19 @@ impl LlmClient for AnthropicClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "failed to read error body".into());
+
+            // Log the full body for debugging, but only surface a summary
+            // to the agent to avoid leaking internal API details.
+            tracing::error!(status = %status, body = %body, "Anthropic API error");
+
+            let summary = match status.as_u16() {
+                401 => "authentication failed (check API key)".to_string(),
+                429 => "rate limited — try again shortly".to_string(),
+                529 => "Anthropic API overloaded — try again shortly".to_string(),
+                _ => format!("HTTP {status}"),
+            };
             return Err(DysonError::Llm(format!(
-                "Anthropic API returned {status}: {body}"
+                "Anthropic API error: {summary}"
             )));
         }
 
@@ -361,7 +372,18 @@ impl SseParser {
         //
         // Note: SSE is always UTF-8.  If we get invalid UTF-8, we replace
         // it with the replacement character rather than crashing.
-        self.line_buffer.push_str(&String::from_utf8_lossy(bytes));
+        //
+        // Guard against unbounded growth from a malformed stream that never
+        // sends newlines.
+        const MAX_LINE_BUFFER: usize = 10 * 1024 * 1024; // 10 MB
+        let incoming = String::from_utf8_lossy(bytes);
+        if self.line_buffer.len() + incoming.len() > MAX_LINE_BUFFER {
+            events.push(Err(DysonError::Llm(
+                "SSE line buffer exceeded 10 MB — aborting stream".into(),
+            )));
+            return events;
+        }
+        self.line_buffer.push_str(&incoming);
 
         // Process all complete lines.
         while let Some(newline_pos) = self.line_buffer.find('\n') {
@@ -489,8 +511,15 @@ impl SseParser {
                     "input_json_delta" => {
                         let partial = delta["partial_json"].as_str()?;
 
-                        // Append to the accumulation buffer.
+                        // Append to the accumulation buffer, guarding against
+                        // unbounded growth from a runaway stream.
+                        const MAX_TOOL_JSON: usize = 10 * 1024 * 1024; // 10 MB
                         if let Some(buf) = self.tool_buffers.get_mut(&index) {
+                            if buf.json.len() + partial.len() > MAX_TOOL_JSON {
+                                return Some(StreamEvent::TextDelta(
+                                    "[error: tool input exceeded 10 MB limit]".into(),
+                                ));
+                            }
                             buf.json.push_str(partial);
                         }
 
