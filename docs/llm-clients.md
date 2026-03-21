@@ -230,6 +230,17 @@ Without this, Dyson would see the internal tool calls, try to execute them
 (failing because they're not in Dyson's tool registry), and loop up to
 `max_iterations` times — spawning a new `claude -p` process each iteration.
 
+### Workspace via MCP
+
+When a workspace is configured, Dyson starts an in-process HTTP MCP server
+(`McpHttpServer` in `src/skill/mcp/serve.rs`) and passes the connection URL
+to Claude Code via `--mcp-config`.  The server requires bearer token
+authentication — a 64-char hex token is generated per LLM turn and included
+in the MCP config's `headers`.  This gives Claude Code access to
+`workspace_view`, `workspace_search`, and `workspace_update` as native MCP
+tools.  See [Tool Forwarding over MCP](tool-forwarding-over-mcp.md) for
+details.
+
 ### Conversation history
 
 The `claude -p` command is stateless — each invocation is a fresh session.

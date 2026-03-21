@@ -8,12 +8,13 @@ overview, then dive into the component that interests you.
 | [Architecture Overview](architecture-overview.md) | The streaming loop, component wiring, data flow end-to-end |
 | [Agent Loop](agent-loop.md) | The core loop: stream → detect tool calls → execute → repeat. Internal-tools providers (Claude Code) |
 | [LLM Clients](llm-clients.md) | Anthropic, OpenAI, and Claude Code streaming. SSE parsing, thinking tokens, provider abstraction |
-| [Tools & Skills](tools-and-skills.md) | Tool trait, Skill trait, BuiltinSkill, adding new tools |
+| [Tools & Skills](tools-and-skills.md) | Tool trait, Skill trait, BuiltinSkill, LocalSkill, adding new tools |
 | [Sandbox](sandbox.md) | OS sandbox (Seatbelt/bubblewrap), Docker sandbox, Allow/Deny/Redirect, composition |
 | [Memory](memory.md) | Tiered memory (always-in-context, FTS5 search, journals), nudges, character limits |
-| [Chat Persistence](chat-persistence.md) | ChatStore trait, per-chat agents, `/clear` and `/memory` commands |
-| [Configuration](configuration.md) | dyson.json format, provider selection, env var resolution |
-| [Secrets](secrets.md) | Per-secret scheme routing, InsecureEnvironmentVariable, adding resolvers |
+| [Chat Persistence](chat-persistence.md) | ChatHistory trait, per-chat agents, `/clear` and `/memory` commands |
+| [Configuration](configuration.md) | dyson.json format, provider selection, skill config, env var resolution |
+| [Secrets](secrets.md) | Per-secret scheme routing, InsecureEnvironmentVariable, zeroize, adding resolvers |
+| [Tool Forwarding over MCP](tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth, bidirectional MCP |
 
 **Key source files:**
 
@@ -24,16 +25,25 @@ src/
   error.rs                DysonError (unified error type)
   message.rs              Message, Role, ContentBlock
   config/
-    mod.rs                Settings, AgentSettings, LlmProvider
+    mod.rs                Settings, AgentSettings, LlmProvider, SkillConfig
     loader.rs             JSON config loader (dyson.json)
     hot_reload.rs         Config/workspace file watching
   tool/
     mod.rs                Tool trait, ToolContext, ToolOutput
     bash.rs               Shell execution with timeout
+    workspace_view.rs     Read workspace files
+    workspace_search.rs   Search workspace files by pattern
+    workspace_update.rs   Write/append workspace files
+    memory_search.rs      FTS5 memory search
   skill/
-    mod.rs                Skill trait (lifecycle hooks)
+    mod.rs                Skill trait, create_skills() factory
     builtin.rs            BuiltinSkill (wraps built-in tools)
-    mcp.rs                MCP server integration (stdio + HTTP)
+    local.rs              LocalSkill (SKILL.md parser, workspace discovery)
+    mcp/
+      mod.rs              McpSkill (client — connects to external MCP servers)
+      serve.rs            McpHttpServer (server — exposes workspace tools with bearer auth)
+      protocol.rs         Shared JSON-RPC types
+      transport.rs        Stdio/HTTP MCP transports
   sandbox/
     mod.rs                Sandbox trait, SandboxDecision, create_sandbox()
     os.rs                 OsSandbox (macOS Seatbelt / Linux bubblewrap)
@@ -48,14 +58,23 @@ src/
     stream.rs             StreamEvent (TextDelta, ThinkingDelta, ToolUse*), StopReason
     anthropic.rs          Anthropic Messages API (extended thinking support)
     openai.rs             OpenAI Chat Completions API (reasoning_content support)
-    claude_code.rs        Claude Code CLI subprocess (no API key needed)
+    claude_code.rs        Claude Code CLI subprocess (MCP server + bearer token)
+    codex.rs              Codex CLI subprocess
   agent/
     mod.rs                Agent struct, the streaming loop
     stream_handler.rs     Consumes StreamEvents → Messages + ToolCalls (filters thinking)
+  workspace/
+    mod.rs                Workspace trait, skill_files() discovery
+    openclaw.rs           OpenClawWorkspace (filesystem, skills/ auto-discovery)
+    in_memory.rs          InMemoryWorkspace (for testing)
+    memory_store.rs       SQLite FTS5 index for Tier 2 memory
+    migrate.rs            Workspace versioning and migrations
   controller/
     mod.rs                Controller trait, Output trait, build_agent()
     terminal.rs           Terminal REPL controller
     telegram.rs           Telegram bot controller
-  persistence/
-    mod.rs                Workspace (SOUL.md, MEMORY.md, journals)
+  chat_history/
+    mod.rs                ChatHistory trait
+    disk.rs               Disk-backed JSON chat persistence
+    in_memory.rs          In-memory chat store (for testing)
 ```

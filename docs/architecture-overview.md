@@ -65,9 +65,11 @@ Agent
   ├── client: Box<dyn LlmClient>          ← Anthropic, OpenAI, Claude Code, or Codex
   ├── sandbox: Box<dyn Sandbox>            ← gates every tool call
   ├── skills: Vec<Box<dyn Skill>>          ← own tools + lifecycle
-  │     └── BuiltinSkill
-  │           └── tools: Vec<Arc<dyn Tool>>
-  │                 └── BashTool
+  │     ├── BuiltinSkill
+  │     │     └── tools: Vec<Arc<dyn Tool>>
+  │     │           └── BashTool
+  │     ├── McpSkill                       ← tools discovered from MCP servers
+  │     └── LocalSkill                     ← prompt-only, from workspace skills/
   ├── tools: HashMap<name, Arc<dyn Tool>>  ← flat lookup (shared Arcs)
   ├── tool_definitions: Vec<ToolDefinition> ← sent to the LLM
   ├── system_prompt: String                ← base + skill fragments
@@ -204,8 +206,10 @@ retry.  `DysonError` propagates up and may abort the turn.
   tokens go to the user immediately.  Tool calls are assembled from deltas
   and dispatched when complete.  No buffering.
 
-- **MCP is not special.** MCP will be implemented as `McpSkill` — just
-  another `Skill` impl.  The agent loop has zero awareness of MCP.
+- **MCP is not special.** MCP is implemented as `McpSkill` — just another
+  `Skill` impl.  The agent loop has zero awareness of MCP.  Dyson also
+  acts as an MCP *server* to expose workspace tools to Claude Code (with
+  bearer token auth).
 
 - **Skills own tools.** Every tool is registered through a skill.  The agent
   has a flat `HashMap<String, Arc<dyn Tool>>` for O(1) dispatch, but skills
@@ -228,4 +232,5 @@ retry.  `DysonError` propagates up and may abort the turn.
 ---
 
 See also: [Agent Loop](agent-loop.md) · [LLM Clients](llm-clients.md) ·
-[Tools & Skills](tools-and-skills.md) · [Sandbox](sandbox.md)
+[Tools & Skills](tools-and-skills.md) · [Sandbox](sandbox.md) ·
+[Tool Forwarding over MCP](tool-forwarding-over-mcp.md)

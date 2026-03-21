@@ -29,7 +29,7 @@ pub struct Agent {
 
 | Field | Purpose |
 |-------|---------|
-| `client` | Streams completions from Anthropic or OpenAI |
+| `client` | Streams completions from any LLM provider (Anthropic, OpenAI, Claude Code, Codex) |
 | `sandbox` | Gates every tool call (Allow/Deny/Redirect) |
 | `skills` | Retained for lifecycle management (`on_unload` on shutdown) |
 | `tools` | Flat lookup by tool name — `Arc` shared with skills |

@@ -13,21 +13,33 @@ file.
 
 ## Secret Reference Syntax
 
-Every secret value in `dyson.toml` uses a `scheme:key` URI format:
+Every secret value in `dyson.json` can be a literal string or a resolver
+reference.  The JSON config uses `serde(untagged)` deserialization, so both
+forms work:
 
-```toml
-[agent]
-api_key = "insecure_env:ANTHROPIC_API_KEY"   # explicit: env var
-api_key = "env:ANTHROPIC_API_KEY"            # shorthand alias
-api_key = "$ANTHROPIC_API_KEY"               # $ shorthand → env:ANTHROPIC_API_KEY
-api_key = "sk-ant-literal-value"             # literal (no scheme = no resolution)
-
-[telegram]
-bot_token = "insecure_env:TELEGRAM_BOT_TOKEN"   # from env
-bot_token = "ssm:/dyson/telegram-token"          # from AWS SSM (future)
-bot_token = "vault:secret/data/telegram"         # from Vault (future)
-bot_token = "op:op://Personal/dyson/token"       # from 1Password (future)
+```json
+{
+  "providers": {
+    "claude": {
+      "type": "anthropic",
+      "api_key": "sk-ant-literal-value"
+    },
+    "gpt": {
+      "type": "openai",
+      "api_key": { "resolver": "insecure_env", "name": "OPENAI_API_KEY" }
+    }
+  },
+  "controllers": [
+    {
+      "type": "telegram",
+      "bot_token": { "resolver": "insecure_env", "name": "TELEGRAM_BOT_TOKEN" }
+    }
+  ]
+}
 ```
+
+Environment variables are also resolved automatically for API-based providers
+when no explicit key is set (falls back to `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`).
 
 ### Parsing rules
 
@@ -159,9 +171,15 @@ impl SecretResolver for AwsSsmResolver {
 ```
 
 Then in config:
-```toml
-api_key = "ssm:/production/anthropic-api-key"
-bot_token = "ssm:/production/telegram-bot-token"
+```json
+{
+  "providers": {
+    "claude": {
+      "type": "anthropic",
+      "api_key": "ssm:/production/anthropic-api-key"
+    }
+  }
+}
 ```
 
 ---
@@ -169,7 +187,7 @@ bot_token = "ssm:/production/telegram-bot-token"
 ## How Secrets Flow Through Config Loading
 
 ```
-dyson.toml loaded
+dyson.json loaded
   │
   ▼
 SecretRegistry::default()
@@ -177,22 +195,19 @@ SecretRegistry::default()
   │  registers: "env" → InsecureEnvironmentVariable (alias)
   │
   ▼
-build_settings(toml, &registry)
+build_settings(json_root, &secrets)
   │
-  ├── agent.api_key = "env:ANTHROPIC_API_KEY"
-  │     → registry.resolve_value("env:ANTHROPIC_API_KEY")
+  ├── provider api_key = { "resolver": "insecure_env", "name": "ANTHROPIC_API_KEY" }
+  │     → secrets.resolve(SecretValue::Reference { ... })
   │     → InsecureEnvironmentVariable.resolve("ANTHROPIC_API_KEY")
   │     → "sk-ant-..."
   │
-  ├── telegram.bot_token = "$TELEGRAM_BOT_TOKEN"
-  │     → registry.resolve_value("$TELEGRAM_BOT_TOKEN")
-  │     → parse: scheme="env", key="TELEGRAM_BOT_TOKEN"
-  │     → InsecureEnvironmentVariable.resolve("TELEGRAM_BOT_TOKEN")
-  │     → "123456:ABC-DEF..."
+  ├── controller config has secret references
+  │     → resolve_secrets_in_value() walks the JSON tree
+  │     → resolves each { "resolver": ..., "name": ... } object in place
   │
-  └── agent.api_key = "" (not set in config)
+  └── provider api_key absent
         → resolve_with_env_fallback("", "ANTHROPIC_API_KEY")
-        → try: resolvers["env"].resolve("ANTHROPIC_API_KEY")
         → std::env::var("ANTHROPIC_API_KEY")
 ```
 
@@ -209,6 +224,22 @@ build_settings(toml, &registry)
 
 The scheme name `insecure_env` is deliberately uncomfortable.  When you see
 it in your config, it's a reminder to migrate.
+
+### Zeroize on drop
+
+API key strings in `AnthropicClient` and `OpenAiClient` are zeroized when
+the client is dropped (via the `zeroize` crate).  The MCP server's
+per-session bearer token is also zeroized on drop.  This prevents secrets
+from lingering in freed memory.
+
+### MCP bearer token
+
+The in-process MCP server generates a per-session bearer token (64 hex chars)
+that is passed to Claude Code via CLI args.  The token is **not** in shell
+history (subprocess is spawned programmatically) but **is** visible in `ps`
+output while the process runs.  It's ephemeral (new token per LLM turn) and
+only usable on loopback.  See [Tool Forwarding over MCP](tool-forwarding-over-mcp.md)
+for details.
 
 ---
 

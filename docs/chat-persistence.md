@@ -5,19 +5,21 @@ The Telegram controller maintains one agent per chat with full message
 history. History is saved to disk after each turn and restored on startup.
 
 **Key files:**
-- `src/persistence/chat_store.rs` — `ChatStore` trait + `JsonChatStore` implementation
+- `src/chat_history/mod.rs` — `ChatHistory` trait
+- `src/chat_history/disk.rs` — `DiskChatHistory` (JSON-file-per-chat persistence)
+- `src/chat_history/in_memory.rs` — `InMemoryChatHistory` (for testing)
 - `src/controller/telegram.rs` — per-chat agent management, `/clear` and `/memory` commands
 - `src/agent/mod.rs` — `Agent::messages()`, `Agent::set_messages()`, `Agent::clear()`
 
 ---
 
-## ChatStore Trait
+## ChatHistory Trait
 
 ```rust
-pub trait ChatStore: Send + Sync {
+pub trait ChatHistory: Send + Sync {
     fn save(&self, chat_id: &str, messages: &[Message]) -> Result<()>;
     fn load(&self, chat_id: &str) -> Result<Vec<Message>>;
-    fn delete(&self, chat_id: &str) -> Result<()>;
+    fn rotate(&self, chat_id: &str) -> Result<()>;
 }
 ```
 
@@ -25,17 +27,18 @@ The trait is intentionally minimal so you can swap backends:
 
 | Backend | Use case |
 |---------|----------|
-| `JsonChatStore` (default) | One JSON file per chat in `~/.dyson/chats/` |
+| `DiskChatHistory` (default) | One JSON file per chat in `~/.dyson/chats/` |
 | Database (Postgres, SQLite) | Multi-server deployments, query history |
 | RAG pipeline | Index and retrieve relevant past context |
-| In-memory | Testing, ephemeral sessions |
+| `InMemoryChatHistory` | Testing, ephemeral sessions |
 
-To implement a custom backend, implement the `ChatStore` trait and wire it
-into the Telegram controller where `JsonChatStore` is currently created.
+`rotate()` archives the current conversation (preserves the file with a
+timestamp suffix) and starts fresh — used by `/clear`.  Old history files
+are preserved for review or future RAG indexing.
 
 ---
 
-## JsonChatStore
+## DiskChatHistory
 
 The default implementation stores one JSON file per chat:
 
