@@ -202,8 +202,12 @@ no shutdown coordination, no stale connections, no port leaks.
     }
   }
   ```
-  The token is visible in `ps` output (part of the CLI args), but it's
-  ephemeral and only usable on loopback.  The token is zeroized in memory
+  The token is **not** in shell history — Dyson spawns `claude -p`
+  programmatically via `tokio::process::Command`, not through a shell.
+  It **is** visible in `ps` output while the process is running (the
+  `--mcp-config` JSON is a CLI argument), but the token is ephemeral
+  (regenerated every LLM turn), only usable on loopback, and gone from
+  `ps` as soon as the process exits.  The token is zeroized in memory
   when the server is dropped.
 
 - **Defense in depth**: Loopback binding + bearer auth + ephemeral port
