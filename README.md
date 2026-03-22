@@ -32,10 +32,10 @@ LLM says: tool_use("bash", {"command": "rm -rf /"})
     → inspect/redact/audit the output
 ```
 
-Two sandbox implementations:
+Sandbox implementations:
 
-- **DangerousNoSandbox** — passthrough, no restrictions (development)
-- **DockerSandbox** — rewrites bash commands to `docker exec`, running them inside a container instead of on the host
+- **OsSandbox** — wraps bash commands in the OS's native sandbox (macOS Seatbelt / Linux bubblewrap). Also truncates oversized tool outputs (including MCP results)
+- **DangerousNoSandbox** — passthrough, no restrictions (development only)
 
 ## Architecture
 
@@ -169,7 +169,7 @@ src/
   config/              Settings, JSON loader
   tool/                Tool trait + bash implementation
   skill/               Skill trait, BuiltinSkill, MCP skill
-  sandbox/             Sandbox trait, DangerousNoSandbox, DockerSandbox
+  sandbox/             Sandbox trait, OsSandbox, DangerousNoSandbox
   secret/              SecretResolver trait, InsecureEnvironmentVariable
   llm/                 LlmClient trait + Anthropic, OpenAI, Claude Code
   agent/               The loop + stream handler
@@ -188,7 +188,7 @@ Every file has extensive annotations in the style of [rLLM](https://github.com/j
 | [Agent Loop](docs/agent-loop.md) | The streaming loop, tool execution, error recovery |
 | [LLM Clients](docs/llm-clients.md) | Anthropic vs OpenAI vs Claude Code, SSE parsing |
 | [Tools & Skills](docs/tools-and-skills.md) | Tool trait, Skill trait, MCP skill, adding new tools |
-| [Sandbox](docs/sandbox.md) | Allow/Deny/Redirect, DockerSandbox, future designs |
+| [Sandbox](docs/sandbox.md) | Allow/Deny/Redirect, OsSandbox, future designs |
 | [Secrets](docs/secrets.md) | Per-secret resolver routing, InsecureEnvironmentVariable |
 | [Configuration](docs/configuration.md) | dyson.json format, provider selection |
 

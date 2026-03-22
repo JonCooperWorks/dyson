@@ -76,75 +76,7 @@ fn path_traversal_rejects_symlinks() {
 }
 
 // =========================================================================
-// 2. Docker container name validation
-// =========================================================================
-
-#[test]
-fn docker_rejects_empty_container_name() {
-    assert!(
-        dyson::sandbox::docker::DockerSandbox::new("").is_err(),
-        "empty container name must be rejected"
-    );
-}
-
-#[test]
-fn docker_rejects_semicolon_injection() {
-    assert!(
-        dyson::sandbox::docker::DockerSandbox::new("foo;rm -rf /").is_err(),
-        "semicolons in container name must be rejected"
-    );
-}
-
-#[test]
-fn docker_rejects_spaces() {
-    assert!(
-        dyson::sandbox::docker::DockerSandbox::new("foo bar").is_err(),
-        "spaces in container name must be rejected"
-    );
-}
-
-#[test]
-fn docker_rejects_dollar_paren_injection() {
-    assert!(
-        dyson::sandbox::docker::DockerSandbox::new("$(evil)").is_err(),
-        "command substitution in container name must be rejected"
-    );
-}
-
-#[test]
-fn docker_rejects_backtick_injection() {
-    assert!(
-        dyson::sandbox::docker::DockerSandbox::new("`evil`").is_err(),
-        "backtick injection in container name must be rejected"
-    );
-}
-
-#[test]
-fn docker_rejects_pipe() {
-    assert!(
-        dyson::sandbox::docker::DockerSandbox::new("foo|bar").is_err(),
-        "pipe in container name must be rejected"
-    );
-}
-
-#[test]
-fn docker_allows_valid_names() {
-    assert!(
-        dyson::sandbox::docker::DockerSandbox::new("my-container").is_ok(),
-        "valid container name with hyphens should be accepted"
-    );
-    assert!(
-        dyson::sandbox::docker::DockerSandbox::new("test_box.1").is_ok(),
-        "valid container name with underscores and dots should be accepted"
-    );
-    assert!(
-        dyson::sandbox::docker::DockerSandbox::new("abc123").is_ok(),
-        "valid alphanumeric container name should be accepted"
-    );
-}
-
-// =========================================================================
-// 3. Bash timeout kills process
+// 2. Bash timeout kills process
 // =========================================================================
 
 #[tokio::test]
@@ -186,7 +118,7 @@ async fn bash_timeout_kills_process() {
 }
 
 // =========================================================================
-// 4. Regex size limit (ReDoS prevention)
+// 3. Regex size limit (ReDoS prevention)
 // =========================================================================
 
 #[test]
@@ -215,7 +147,7 @@ fn workspace_search_does_not_hang_on_pathological_regex() {
 }
 
 // =========================================================================
-// 5. Config size limit
+// 4. Config size limit
 // =========================================================================
 
 #[test]
@@ -256,7 +188,7 @@ fn config_rejects_file_larger_than_1mb() {
 }
 
 // =========================================================================
-// 6. Telegram config requires allow_all_chats
+// 5. Telegram config requires allow_all_chats
 // =========================================================================
 
 #[test]
@@ -327,7 +259,7 @@ fn telegram_accepts_config_with_chat_ids() {
 }
 
 // =========================================================================
-// 7. Zeroize on drop (Credential zeroes secret memory)
+// 6. Zeroize on drop (Credential zeroes secret memory)
 // =========================================================================
 //
 // The Credential type wraps secret strings and zeroes them on drop.
@@ -402,7 +334,7 @@ fn credential_debug_redacts_secret() {
 }
 
 // =========================================================================
-// 8. MCP server binds to loopback
+// 7. MCP server binds to loopback
 // =========================================================================
 
 #[tokio::test]
@@ -461,7 +393,7 @@ async fn mcp_server_binds_to_loopback_only() {
 }
 
 // =========================================================================
-// 9. MCP server bearer token authentication
+// 8. MCP server bearer token authentication
 // =========================================================================
 
 #[tokio::test]

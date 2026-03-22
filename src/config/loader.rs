@@ -55,7 +55,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::config::{
-    BuiltinSkillConfig, ControllerConfig, DockerSandboxConfig, LlmProvider, LocalSkillConfig,
+    BuiltinSkillConfig, ControllerConfig, LlmProvider, LocalSkillConfig,
     McpConfig, McpTransportConfig, ProviderConfig, SandboxConfig, Settings, SkillConfig,
 };
 use crate::error::{DysonError, Result};
@@ -146,8 +146,8 @@ struct JsonBuiltinSkill {
 ///
 /// ```json
 /// "sandbox": {
-///   "disabled": ["docker"],
-///   "docker": { "container": "dyson-sandbox" }
+///   "disabled": ["os"],
+///   "os_profile": "strict"
 /// }
 /// ```
 #[derive(Debug, Deserialize)]
@@ -157,13 +157,6 @@ struct JsonSandbox {
     disabled: Vec<String>,
     /// OS sandbox profile: "default", "strict", "permissive".
     os_profile: Option<String>,
-    /// Docker sandbox config.
-    docker: Option<JsonDockerSandbox>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JsonDockerSandbox {
-    container: String,
 }
 
 /// The `"workspace"` object.
@@ -558,9 +551,6 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
         settings.sandbox = SandboxConfig {
             disabled: sb.disabled,
             os_profile: sb.os_profile,
-            docker: sb.docker.map(|d| DockerSandboxConfig {
-                container: d.container,
-            }),
         };
     }
 

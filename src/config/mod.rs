@@ -107,10 +107,8 @@ pub struct Settings {
 /// ```json
 /// {
 ///   "sandbox": {
-///     "disabled": ["docker"],
-///     "docker": {
-///       "container": "dyson-sandbox"
-///     }
+///     "disabled": ["os"],
+///     "os_profile": "strict"
 ///   }
 /// }
 /// ```
@@ -118,7 +116,7 @@ pub struct Settings {
 pub struct SandboxConfig {
     /// Sandbox names to disable.  Everything not in this list is active.
     ///
-    /// Known sandboxes: "os", "docker"
+    /// Known sandboxes: "os"
     /// Future: "file", "network", "audit", "ratelimit"
     pub disabled: Vec<String>,
 
@@ -130,16 +128,6 @@ pub struct SandboxConfig {
     /// - "strict" — deny network, deny all writes outside cwd
     /// - "permissive" — allow everything (just wraps in sandbox-exec)
     pub os_profile: Option<String>,
-
-    /// Docker sandbox settings (optional, only if configured).
-    pub docker: Option<DockerSandboxConfig>,
-}
-
-/// Docker sandbox configuration.
-#[derive(Debug, Clone)]
-pub struct DockerSandboxConfig {
-    /// Container name or ID to exec into.
-    pub container: String,
 }
 
 

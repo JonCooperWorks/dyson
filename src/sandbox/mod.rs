@@ -12,6 +12,8 @@
 // Module layout:
 //   mod.rs         — Sandbox trait, SandboxDecision (this file)
 //   no_sandbox.rs  — DangerousNoSandbox (passthrough, no restrictions)
+//   os.rs          — OsSandbox (macOS Seatbelt / Linux bubblewrap)
+//   composite.rs   — CompositeSandbox (chain multiple sandboxes)
 //
 // Why a trait and not middleware?
 //   The sandbox needs to make *semantic* decisions about tool calls.  It's
@@ -33,8 +35,6 @@
 //
 // Future sandbox implementations:
 //
-//   ContainerSandbox   — routes bash/python through a Docker container,
-//                         rewrites file paths to container mounts
 //   BlacklistSandbox   — denies specific tools or command patterns
 //   S3Sandbox          — redirects file read/write to S3 paths instead
 //                         of the host filesystem
@@ -49,7 +49,6 @@
 // ===========================================================================
 
 pub mod composite;
-pub mod docker;
 pub mod no_sandbox;
 pub mod os;
 
@@ -205,24 +204,6 @@ pub fn create_sandbox(
         )));
     } else {
         tracing::info!("OS sandbox disabled via config");
-    }
-
-    // Docker sandbox (optional — only if configured).
-    if !disabled.iter().any(|s| s == "docker") {
-        if let Some(ref docker_config) = config.docker {
-            tracing::info!(
-                container = docker_config.container,
-                "docker sandbox enabled"
-            );
-            match docker::DockerSandbox::new(&docker_config.container) {
-                Ok(sandbox) => sandboxes.push(Box::new(sandbox)),
-                Err(e) => {
-                    tracing::error!(error = %e, "invalid docker sandbox config — skipping");
-                }
-            }
-        }
-    } else {
-        tracing::info!("docker sandbox disabled via config");
     }
 
     // Future sandboxes go here:

@@ -13,7 +13,7 @@
 //   A single sandbox that handles bash, files, network, and audit is a
 //   mess.  Each concern is different:
 //
-//   - DockerSandbox knows about bash commands and containers
+//   - OsSandbox knows about bash commands and OS-level restrictions
 //   - FileSandbox knows about path restrictions
 //   - NetworkSandbox knows about URL whitelists
 //   - AuditSandbox knows about logging
@@ -23,7 +23,7 @@
 //
 // How the pipeline works:
 //
-//   CompositeSandbox([AuditSandbox, FileSandbox, DockerSandbox])
+//   CompositeSandbox([AuditSandbox, FileSandbox, OsSandbox])
 //
 //   Tool call: bash {"command": "cat /etc/shadow"}
 //     │
@@ -36,12 +36,12 @@
 //     → Deny { reason: "/etc/shadow is restricted" }
 //     │
 //     ▼
-//   STOP — first Deny wins.  DockerSandbox never runs.
+//   STOP — first Deny wins.  OsSandbox never runs.
 //   Agent receives: ToolOutput::error("Denied: /etc/shadow is restricted")
 //
 // Another example — rewrite chaining:
 //
-//   CompositeSandbox([AuditSandbox, DockerSandbox])
+//   CompositeSandbox([AuditSandbox, OsSandbox])
 //
 //   Tool call: bash {"command": "ls"}
 //     │
@@ -50,17 +50,17 @@
 //     → Allow { input unchanged }
 //     │
 //     ▼
-//   DockerSandbox.check("bash", {"command": "ls"})
-//     → Allow { input: {"command": "docker exec sandbox bash -c 'ls'"} }
+//   OsSandbox.check("bash", {"command": "ls"})
+//     → Allow { input: {"command": "sandbox-exec ... bash -c 'ls'"} }
 //     │
 //     ▼
 //   Final decision: Allow with rewritten input.
-//   BashTool runs: docker exec sandbox bash -c 'ls'
+//   BashTool runs: sandbox-exec ... bash -c 'ls'
 //
 // The `after()` pipeline:
 //   After the tool executes, each sandbox's `after()` runs in the SAME
 //   order.  Each can inspect and mutate the output.  This lets AuditSandbox
-//   log the final output after DockerSandbox has had a chance to clean it.
+//   log the final output after OsSandbox has had a chance to clean it.
 //
 // Order matters:
 //   Put sandboxes that DENY first (fail fast).
@@ -91,7 +91,7 @@ use crate::tool::{ToolContext, ToolOutput};
 /// let sandbox = CompositeSandbox::new(vec![
 ///     Box::new(AuditSandbox::new("audit.log")),
 ///     Box::new(FileSandbox::new(vec!["/etc", "/root"])),
-///     Box::new(DockerSandbox::new("dyson-sandbox")),
+///     Box::new(OsSandbox::default_profile("/workspace")),
 /// ]);
 /// ```
 pub struct CompositeSandbox {

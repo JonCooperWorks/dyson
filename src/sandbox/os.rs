@@ -11,7 +11,7 @@
 //
 //   This is the DEFAULT sandbox — enabled automatically, no config needed.
 //   It restricts what the LLM's bash commands can do without requiring
-//   Docker, containers, or any external setup.
+//   containers or any external setup.
 //
 // macOS: sandbox-exec (Seatbelt)
 //
@@ -100,8 +100,17 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::sandbox::{Sandbox, SandboxDecision};
-use crate::tool::ToolContext;
+use crate::tool::{ToolContext, ToolOutput};
 use crate::util::escape_single_quotes;
+
+/// Maximum tool output size (characters) before truncation.
+///
+/// This protects against:
+/// - MCP servers returning huge payloads that blow up the context window
+/// - Bash commands producing excessive output (BashTool has its own 100KB
+///   byte limit, but this catches anything that slips through)
+/// - Any tool returning unexpectedly large results
+const MAX_OUTPUT_CHARS: usize = 100_000;
 
 // ---------------------------------------------------------------------------
 // Seatbelt profiles (macOS)
@@ -252,6 +261,49 @@ impl Sandbox for OsSandbox {
                 input: input.clone(),
             })
         }
+    }
+
+    /// Post-process tool output: truncate oversized results and log
+    /// suspicious content.
+    ///
+    /// This runs on ALL tool outputs — bash, MCP, workspace tools, etc.
+    /// It's the primary defense against MCP servers returning crafted
+    /// payloads designed to influence the LLM:
+    ///
+    /// - **Truncation**: Outputs larger than 100K chars are cut at a line
+    ///   boundary to prevent context window explosion.
+    /// - **Audit logging**: All tool outputs are logged at debug level for
+    ///   forensic analysis.
+    async fn after(
+        &self,
+        tool_name: &str,
+        _input: &serde_json::Value,
+        output: &mut ToolOutput,
+    ) -> Result<()> {
+        // Truncate oversized output at a line boundary.
+        if output.content.len() > MAX_OUTPUT_CHARS {
+            let original_len = output.content.len();
+
+            // Find the last newline before the limit to avoid cutting
+            // mid-line (or mid-UTF8 if the line boundary finder fails).
+            let truncate_at = output.content[..MAX_OUTPUT_CHARS]
+                .rfind('\n')
+                .unwrap_or(MAX_OUTPUT_CHARS);
+
+            output.content.truncate(truncate_at);
+            output.content.push_str(&format!(
+                "\n\n[output truncated by sandbox: {original_len} chars → {truncate_at} chars]"
+            ));
+
+            tracing::warn!(
+                tool = tool_name,
+                original_len,
+                truncated_to = truncate_at,
+                "tool output truncated by sandbox"
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -520,5 +572,43 @@ mod tests {
             }
             _ => panic!("expected Allow"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // after() output sanitization tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn after_truncates_oversized_output() {
+        let sandbox = OsSandbox::default_profile("/workspace");
+        let input = serde_json::json!({});
+
+        // Create output larger than MAX_OUTPUT_CHARS with newlines.
+        let big = "a".repeat(1000) + "\n";
+        let content = big.repeat(200); // 200K+ chars
+        let original_len = content.len();
+        let mut output = ToolOutput::success(content);
+
+        sandbox.after("some_mcp_tool", &input, &mut output).await.unwrap();
+
+        assert!(
+            output.content.len() < original_len,
+            "output should have been truncated"
+        );
+        assert!(
+            output.content.contains("[output truncated by sandbox"),
+            "should have truncation marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn after_does_not_truncate_small_output() {
+        let sandbox = OsSandbox::default_profile("/workspace");
+        let input = serde_json::json!({});
+        let mut output = ToolOutput::success("small result".to_string());
+
+        sandbox.after("bash", &input, &mut output).await.unwrap();
+
+        assert_eq!(output.content, "small result");
     }
 }

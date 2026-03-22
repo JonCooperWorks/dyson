@@ -9,7 +9,7 @@ overview, then dive into the component that interests you.
 | [Agent Loop](agent-loop.md) | The core loop: stream → detect tool calls → execute → repeat. Internal-tools providers (Claude Code) |
 | [LLM Clients](llm-clients.md) | Anthropic, OpenAI, and Claude Code streaming. SSE parsing, thinking tokens, provider abstraction |
 | [Tools & Skills](tools-and-skills.md) | Tool trait, Skill trait, BuiltinSkill, LocalSkill, adding new tools |
-| [Sandbox](sandbox.md) | OS sandbox (Seatbelt/bubblewrap), Docker sandbox, Allow/Deny/Redirect, composition |
+| [Sandbox](sandbox.md) | OS sandbox (Seatbelt/bubblewrap), Allow/Deny/Redirect, composition, MCP result sandboxing |
 | [Memory](memory.md) | Tiered memory (always-in-context, FTS5 search, journals), nudges, character limits |
 | [Chat Persistence](chat-persistence.md) | ChatHistory trait, per-chat agents, `/clear` and `/memory` commands |
 | [Configuration](configuration.md) | dyson.json format, provider selection, skill config, env var resolution |
@@ -46,8 +46,7 @@ src/
       transport.rs        Stdio/HTTP MCP transports
   sandbox/
     mod.rs                Sandbox trait, SandboxDecision, create_sandbox()
-    os.rs                 OsSandbox (macOS Seatbelt / Linux bubblewrap)
-    docker.rs             DockerSandbox (route bash to container)
+    os.rs                 OsSandbox (macOS Seatbelt / Linux bubblewrap, output sanitization)
     composite.rs          CompositeSandbox (chain multiple sandboxes)
     no_sandbox.rs         DangerousNoSandbox (CLI-only bypass)
   secret/
