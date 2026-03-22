@@ -10,13 +10,13 @@ systemctl --user disable dyson 2>/dev/null || true
 rm -f ~/.config/systemd/user/dyson.service
 systemctl --user daemon-reload
 
-
-
 echo "=== Building dyson ==="
 cargo build --release
 
 echo "=== Installing ==="
-./target/release/dyson init --noinput --daemonize
+# Pass any extra args (e.g. --env KEY=VALUE) to dyson init.
+# Usage: ./scripts/update.sh --env OPENROUTER_API_KEY=sk-... --env RUST_LOG=debug
+./target/release/dyson init --noinput --daemonize "$@"
 
 echo "=== Done ==="
 systemctl --user status dyson
