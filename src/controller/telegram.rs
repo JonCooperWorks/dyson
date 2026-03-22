@@ -858,53 +858,61 @@ fn convert_links(s: &str) -> String {
 fn convert_pattern(s: &str, marker: &str, open: &str, close: &str) -> String {
     let mlen = marker.len();
     let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
     let mut pos = 0;
 
     while pos < s.len() {
+        let rest = &s[pos..];
+
         // Skip content inside <code>, <pre>, <a> tags — don't convert
         // markdown inside already-converted spans.
-        if s[pos..].starts_with("<code>") {
-            if let Some(end) = s[pos..].find("</code>") {
-                out.push_str(&s[pos..pos + end + 7]);
+        if rest.starts_with("<code>") {
+            if let Some(end) = rest.find("</code>") {
+                out.push_str(&rest[..end + 7]);
                 pos += end + 7;
                 continue;
             }
         }
-        if s[pos..].starts_with("<pre>") {
-            if let Some(end) = s[pos..].find("</pre>") {
-                out.push_str(&s[pos..pos + end + 6]);
+        if rest.starts_with("<pre>") {
+            if let Some(end) = rest.find("</pre>") {
+                out.push_str(&rest[..end + 6]);
                 pos += end + 6;
                 continue;
             }
         }
-        if s[pos..].starts_with("<a ") {
-            if let Some(end) = s[pos..].find("</a>") {
-                out.push_str(&s[pos..pos + end + 4]);
+        if rest.starts_with("<a ") {
+            if let Some(end) = rest.find("</a>") {
+                out.push_str(&rest[..end + 4]);
                 pos += end + 4;
                 continue;
             }
         }
 
-        if pos + mlen <= s.len() && &s[pos..pos + mlen] == marker {
+        if rest.starts_with(marker) {
             // For single-char markers, don't match if preceded by alphanumeric
             // (avoids converting mid-word underscores).
-            if mlen == 1 && pos > 0 && bytes[pos - 1].is_ascii_alphanumeric() {
-                out.push_str(marker);
-                pos += mlen;
-                continue;
-            }
-
-            // Look for closing marker.
-            if let Some(end_offset) = s[pos + mlen..].find(marker) {
-                let inner = &s[pos + mlen..pos + mlen + end_offset];
-                // For single-char markers, skip if closing marker is
-                // followed by alphanumeric (mid-word).
-                let after = pos + mlen + end_offset + mlen;
-                if mlen == 1 && after < s.len() && bytes[after].is_ascii_alphanumeric() {
+            if mlen == 1 {
+                let prev_char = s[..pos].chars().next_back();
+                if prev_char.map_or(false, |c| c.is_ascii_alphanumeric()) {
                     out.push_str(marker);
                     pos += mlen;
                     continue;
+                }
+            }
+
+            // Look for closing marker.
+            let after_open = &s[pos + mlen..];
+            if let Some(end_offset) = after_open.find(marker) {
+                let inner = &after_open[..end_offset];
+                let after = pos + mlen + end_offset + mlen;
+                // For single-char markers, skip if closing marker is
+                // followed by alphanumeric (mid-word).
+                if mlen == 1 {
+                    let next_char = s[after..].chars().next();
+                    if next_char.map_or(false, |c| c.is_ascii_alphanumeric()) {
+                        out.push_str(marker);
+                        pos += mlen;
+                        continue;
+                    }
                 }
                 if !inner.is_empty() {
                     out.push_str(open);
@@ -916,8 +924,10 @@ fn convert_pattern(s: &str, marker: &str, open: &str, close: &str) -> String {
             }
         }
 
-        out.push(bytes[pos] as char);
-        pos += 1;
+        // Advance by one UTF-8 character.
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        pos += ch.len_utf8();
     }
 
     out
@@ -1091,6 +1101,23 @@ mod tests {
         assert_eq!(
             markdown_to_telegram_html("[search](https://example.com?a=1&b=2)"),
             "<a href=\"https://example.com?a=1&b=2\">search</a>"
+        );
+    }
+
+    #[test]
+    fn multibyte_utf8_with_formatting() {
+        // The exact crash case: en-dash (–) is 3 bytes, bold markers around it.
+        assert_eq!(
+            markdown_to_telegram_html("**pts/0** – your current shell"),
+            "<b>pts/0</b> – your current shell"
+        );
+    }
+
+    #[test]
+    fn multibyte_utf8_emoji() {
+        assert_eq!(
+            markdown_to_telegram_html("hello **world** 🌍"),
+            "hello <b>world</b> 🌍"
         );
     }
 }
