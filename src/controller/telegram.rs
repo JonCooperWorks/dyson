@@ -580,12 +580,17 @@ impl TelegramOutput {
             return Ok(());
         }
 
-        let text = truncate_for_telegram(&markdown_to_telegram_html(&self.text_buffer));
+        let html = markdown_to_telegram_html(&self.text_buffer);
+        let parts = split_for_telegram(&html);
+
+        // While streaming, only edit/send the first chunk (the current message).
+        // Full multi-message send happens in force_flush_text on completion.
+        let text = &parts[0];
 
         match self.current_message_id {
-            Some(msg_id) => self.edit_message(msg_id, &text)?,
+            Some(msg_id) => self.edit_message(msg_id, text)?,
             None => {
-                let msg_id = self.send_message(&text)?;
+                let msg_id = self.send_message(text)?;
                 self.current_message_id = Some(msg_id);
             }
         }
@@ -599,13 +604,22 @@ impl TelegramOutput {
             return Ok(());
         }
 
-        let text = truncate_for_telegram(&markdown_to_telegram_html(&self.text_buffer));
+        let html = markdown_to_telegram_html(&self.text_buffer);
+        let parts = split_for_telegram(&html);
 
-        match self.current_message_id {
-            Some(msg_id) => self.edit_message(msg_id, &text)?,
-            None => {
-                let msg_id = self.send_message(&text)?;
-                self.current_message_id = Some(msg_id);
+        for (i, part) in parts.iter().enumerate() {
+            if i == 0 {
+                // First chunk: edit the existing message or send a new one.
+                match self.current_message_id {
+                    Some(msg_id) => self.edit_message(msg_id, part)?,
+                    None => {
+                        let msg_id = self.send_message(part)?;
+                        self.current_message_id = Some(msg_id);
+                    }
+                }
+            } else {
+                // Subsequent chunks: send as new messages.
+                self.send_message(part)?;
             }
         }
 
@@ -654,15 +668,37 @@ impl Output for TelegramOutput {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn truncate_for_telegram(text: &str) -> String {
+fn split_for_telegram(text: &str) -> Vec<String> {
     if text.len() <= MAX_MESSAGE_LEN {
-        return text.to_string();
+        return vec![text.to_string()];
     }
-    let mut end = MAX_MESSAGE_LEN;
-    while !text.is_char_boundary(end) && end > 0 {
-        end -= 1;
+
+    let mut parts = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= MAX_MESSAGE_LEN {
+            parts.push(remaining.to_string());
+            break;
+        }
+
+        // Find a split point at MAX_MESSAGE_LEN, respecting UTF-8 boundaries.
+        let mut end = MAX_MESSAGE_LEN;
+        while !remaining.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+
+        // Try to split at the last newline within the chunk for cleaner breaks.
+        if let Some(nl) = remaining[..end].rfind('\n') {
+            parts.push(remaining[..nl].to_string());
+            remaining = &remaining[nl + 1..];
+        } else {
+            parts.push(remaining[..end].to_string());
+            remaining = &remaining[end..];
+        }
     }
-    format!("{}… (truncated)", &text[..end])
+
+    parts
 }
 
 /// Convert standard markdown to Telegram-compatible HTML.
