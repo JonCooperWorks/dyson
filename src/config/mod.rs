@@ -213,6 +213,8 @@ pub enum LlmProvider {
     Anthropic,
     /// OpenAI Chat Completions API (GPT, Ollama, vLLM, Together, etc.).
     OpenAi,
+    /// OpenRouter unified API (200+ models via OpenAI-compatible endpoint).
+    OpenRouter,
     /// Locally installed `claude` CLI (no API key needed).
     ClaudeCode,
     /// Locally installed `codex` CLI (OpenAI Codex, no API key needed).
@@ -222,15 +224,10 @@ pub enum LlmProvider {
 impl LlmProvider {
     /// Parse a provider type string loosely (case-insensitive, with aliases).
     ///
-    /// Returns `None` for unrecognized strings.
+    /// Returns `None` for unrecognized strings.  Delegates to the
+    /// provider registry so aliases are defined in one place.
     pub fn from_str_loose(s: &str) -> Option<LlmProvider> {
-        match s.to_lowercase().as_str() {
-            "anthropic" => Some(LlmProvider::Anthropic),
-            "openai" | "gpt" => Some(LlmProvider::OpenAi),
-            "claude-code" | "claude_code" | "cc" => Some(LlmProvider::ClaudeCode),
-            "codex" | "codex-cli" => Some(LlmProvider::Codex),
-            _ => None,
-        }
+        crate::llm::registry::from_str_loose(s)
     }
 }
 

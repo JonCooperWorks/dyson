@@ -54,7 +54,7 @@ Six core traits:
 
 | Trait | What it does |
 |-------|-------------|
-| `LlmClient` | Stream completions from any provider (Anthropic, OpenAI, Claude Code CLI) |
+| `LlmClient` | Stream completions from any provider (Anthropic, OpenAI, OpenRouter, Claude Code, Codex) |
 | `Tool` | A single callable capability (bash, MCP remote tool) |
 | `Skill` | A bundle of tools with lifecycle hooks and prompt fragments |
 | `Sandbox` | Gate every tool call — allow, deny, redirect, audit |
@@ -63,13 +63,17 @@ Six core traits:
 
 ## Providers
 
-Three LLM backends, selectable via `--provider` or config:
+Five LLM backends, selectable via `--provider` or config:
 
 | Provider | Config value | API key | Notes |
 |----------|-------------|---------|-------|
 | Anthropic | `"anthropic"` | `ANTHROPIC_API_KEY` | Default. Full streaming + structured tool calling |
 | OpenAI | `"openai"` | `OPENAI_API_KEY` | Also works with Ollama, vLLM, Together, rLLM, etc. via `base_url` |
+| OpenRouter | `"openrouter"` | `OPENROUTER_API_KEY` | 200+ models via OpenAI-compatible API |
 | Claude Code | `"claude-code"` | None (uses stored creds) | Spawns the `claude` CLI. Zero config. Claude Code handles tools |
+| Codex | `"codex"` | None (uses stored creds) | Spawns the `codex` CLI. OpenAI Codex agent loop |
+
+Adding a new provider is a 3-step process — see [Adding a Provider](docs/adding-a-provider.md).
 
 ## Quick start
 
@@ -171,7 +175,7 @@ src/
   skill/               Skill trait, BuiltinSkill, MCP skill
   sandbox/             Sandbox trait, OsSandbox, DangerousNoSandbox
   secret/              SecretResolver trait, InsecureEnvironmentVariable
-  llm/                 LlmClient trait + Anthropic, OpenAI, Claude Code
+  llm/                 LlmClient trait + provider registry + Anthropic, OpenAI, OpenRouter, Claude Code, Codex
   agent/               The loop + stream handler
   controller/          Controller trait + terminal, Telegram
 examples/              Example dyson.json configs
@@ -191,6 +195,10 @@ Every file has extensive annotations in the style of [rLLM](https://github.com/j
 | [Sandbox](docs/sandbox.md) | Allow/Deny/Redirect, OsSandbox, future designs |
 | [Secrets](docs/secrets.md) | Per-secret resolver routing, InsecureEnvironmentVariable |
 | [Configuration](docs/configuration.md) | dyson.json format, provider selection |
+| [Adding a Provider](docs/adding-a-provider.md) | 3-step process to add a new LLM provider |
+| [Memory](docs/memory.md) | Tiered memory system, FTS5 search, journals |
+| [Chat Persistence](docs/chat-persistence.md) | ChatHistory trait, per-chat agents |
+| [Tool Forwarding over MCP](docs/tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth |
 
 ## Tests
 
@@ -198,7 +206,7 @@ Every file has extensive annotations in the style of [rLLM](https://github.com/j
 cargo test
 ```
 
-68 tests covering SSE parsing, message serialization, config loading, bash execution, stream handling, sandbox decisions, secret resolution, and the agent loop with mock LLM clients.
+330 tests covering SSE parsing, message serialization, config loading, bash execution, stream handling, sandbox decisions, secret resolution, provider registry, workspace persistence, and the agent loop with mock LLM clients.
 
 ## Future
 

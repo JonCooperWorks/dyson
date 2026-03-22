@@ -69,7 +69,8 @@ pub fn apply_overrides(
             return Err(dyson::error::DysonError::Config(format!(
                 "unknown provider '{provider_str}'.  \
                  Available: {available:?}.  \
-                 Or use a type: 'anthropic', 'openai', 'claude-code', 'codex'."
+                 Or use a type: '{}'.",
+                dyson::llm::registry::all_canonical_names().join("', '"),
             )));
         }
     }

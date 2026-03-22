@@ -36,6 +36,8 @@ pub mod anthropic;
 pub mod claude_code;
 pub mod codex;
 pub mod openai;
+pub mod openrouter;
+pub mod registry;
 pub mod stream;
 
 use std::pin::Pin;
@@ -207,6 +209,7 @@ pub trait LlmClient: Send + Sync {
 /// |----------------|-----------------|-------------------|-------|
 /// | `Anthropic`    | No              | No                | Dyson's tool system |
 /// | `OpenAi`       | No              | No                | Dyson's tool system |
+/// | `OpenRouter`   | No              | No                | Dyson's tool system |
 /// | `ClaudeCode`   | Yes (MCP server)| Yes (forwarded)   | Claude Code built-in + workspace via MCP |
 /// | `Codex`        | Yes (MCP server)| Yes (forwarded)   | Codex built-in + workspace via MCP |
 ///
@@ -222,35 +225,14 @@ pub fn create_client(
     workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
     dangerous_no_sandbox: bool,
 ) -> Box<dyn LlmClient> {
-    match settings.provider {
-        crate::config::LlmProvider::Anthropic => Box::new(
-            anthropic::AnthropicClient::new(
-                settings.api_key.expose(),
-                settings.base_url.as_deref(),
-            ),
-        ),
-        crate::config::LlmProvider::OpenAi => Box::new(
-            openai::OpenAiClient::new(
-                settings.api_key.expose(),
-                settings.base_url.as_deref(),
-            ),
-        ),
-        crate::config::LlmProvider::ClaudeCode => Box::new(
-            claude_code::ClaudeCodeClient::new(
-                settings.base_url.as_deref(),
-                vec![], // MCP servers go through the skill system, not CLI args
-                workspace,
-                dangerous_no_sandbox,
-            ),
-        ),
-        crate::config::LlmProvider::Codex => Box::new(
-            codex::CodexClient::new(
-                settings.base_url.as_deref(),
-                workspace,
-                dangerous_no_sandbox,
-            ),
-        ),
-    }
+    let entry = registry::lookup(&settings.provider);
+    let config = registry::ClientConfig {
+        api_key: settings.api_key.expose(),
+        base_url: settings.base_url.as_deref(),
+        workspace,
+        dangerous_no_sandbox,
+    };
+    (entry.create_client)(&config)
 }
 
 // ---------------------------------------------------------------------------

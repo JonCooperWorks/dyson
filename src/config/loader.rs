@@ -379,13 +379,9 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
             };
 
             let model = jp.model.unwrap_or_else(|| {
-                match provider_type {
-                    LlmProvider::Anthropic => "claude-sonnet-4-20250514",
-                    LlmProvider::OpenAi => "gpt-4o",
-                    LlmProvider::ClaudeCode => "claude-sonnet-4-20250514",
-                    LlmProvider::Codex => "codex",
-                }
-                .into()
+                crate::llm::registry::lookup(&provider_type)
+                    .default_model
+                    .into()
             });
 
             settings.providers.insert(
@@ -697,9 +693,8 @@ fn resolve_secrets_in_value(value: &mut serde_json::Value, secrets: &SecretRegis
 fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result<()> {
     // Best-effort: resolve keys for all providers in the map.
     for (name, provider) in settings.providers.iter_mut() {
-        if provider.provider_type == LlmProvider::ClaudeCode
-            || provider.provider_type == LlmProvider::Codex
-        {
+        let entry = crate::llm::registry::lookup(&provider.provider_type);
+        if !entry.requires_api_key {
             continue;
         }
         if !provider.api_key.is_empty() {
@@ -714,10 +709,9 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
             );
             continue;
         }
-        let env_var = match provider.provider_type {
-            LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
-            LlmProvider::OpenAi => "OPENAI_API_KEY",
-            LlmProvider::ClaudeCode | LlmProvider::Codex => continue,
+        let env_var = match entry.env_var {
+            Some(v) => v,
+            None => continue,
         };
         match secrets.resolve_or_env_fallback(&SecretValue::Literal(String::new()), env_var) {
             Ok(key) => provider.api_key = key,
@@ -728,9 +722,8 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
     }
 
     // Required: resolve the active agent's key.
-    if settings.agent.provider == LlmProvider::ClaudeCode
-        || settings.agent.provider == LlmProvider::Codex
-    {
+    let active_entry = crate::llm::registry::lookup(&settings.agent.provider);
+    if !active_entry.requires_api_key {
         return Ok(());
     }
 
@@ -752,11 +745,9 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
         )));
     }
 
-    let env_fallback = match settings.agent.provider {
-        LlmProvider::Anthropic => "ANTHROPIC_API_KEY",
-        LlmProvider::OpenAi => "OPENAI_API_KEY",
-        LlmProvider::ClaudeCode | LlmProvider::Codex => unreachable!(),
-    };
+    let env_fallback = active_entry
+        .env_var
+        .expect("API-based provider must have env_var in registry");
 
     settings.agent.api_key = secrets.resolve_or_env_fallback(
         &SecretValue::Literal(String::new()),

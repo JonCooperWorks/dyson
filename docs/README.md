@@ -15,6 +15,7 @@ overview, then dive into the component that interests you.
 | [Configuration](configuration.md) | dyson.json format, provider selection, skill config, env var resolution |
 | [Secrets](secrets.md) | Per-secret scheme routing, InsecureEnvironmentVariable, zeroize, adding resolvers |
 | [Tool Forwarding over MCP](tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth, bidirectional MCP |
+| [Adding a Provider](adding-a-provider.md) | How to add a new LLM provider (3-step process via the registry) |
 
 **Key source files:**
 
@@ -53,10 +54,12 @@ src/
     mod.rs                SecretResolver trait, SecretRegistry
     insecure_env.rs       InsecureEnvironmentVariable
   llm/
-    mod.rs                LlmClient trait, CompletionConfig, handles_tools_internally()
+    mod.rs                LlmClient trait, CompletionConfig, create_client() factory
+    registry.rs           Provider registry (aliases, defaults, env vars, factories)
     stream.rs             StreamEvent (TextDelta, ThinkingDelta, ToolUse*), StopReason
     anthropic.rs          Anthropic Messages API (extended thinking support)
     openai.rs             OpenAI Chat Completions API (reasoning_content support)
+    openrouter.rs         OpenRouter (OpenAI-compatible wrapper with custom headers)
     claude_code.rs        Claude Code CLI subprocess (MCP server + bearer token)
     codex.rs              Codex CLI subprocess
   agent/
