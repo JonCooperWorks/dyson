@@ -55,7 +55,7 @@ Six core traits:
 | Trait | What it does |
 |-------|-------------|
 | `LlmClient` | Stream completions from any provider (Anthropic, OpenAI, OpenRouter, Claude Code, Codex) |
-| `Tool` | A single callable capability (bash, MCP remote tool) |
+| `Tool` | A single callable capability (bash, web search, MCP remote tool) |
 | `Skill` | A bundle of tools with lifecycle hooks and prompt fragments |
 | `Sandbox` | Gate every tool call — allow, deny, redirect, audit |
 | `Controller` | Own the input/output lifecycle (terminal REPL, Telegram bot) |
@@ -117,13 +117,45 @@ Dyson uses JSON config files (`dyson.json`). See the `examples/` folder for read
 }
 ```
 
-### Full config with MCP, Telegram, and secrets
+### Web search
+
+Give models access to web search by adding a `web_search` section. Supports
+Brave Search (API key required) and SearXNG (free public instances, no key):
+
+```json
+{
+  "web_search": {
+    "provider": "searxng",
+    "base_url": "https://searx.be"
+  }
+}
+```
+
+Or with Brave Search:
+
+```json
+{
+  "web_search": {
+    "provider": "brave",
+    "api_key": { "resolver": "insecure_env", "name": "BRAVE_API_KEY" }
+  }
+}
+```
+
+The `web_search` tool only appears when configured — otherwise models don't see it.
+The search backend is a trait (`SearchProvider`), so adding new providers is straightforward.
+
+### Full config with MCP, Telegram, web search, and secrets
 
 ```json
 {
   "agent": {
     "provider": "claude-code",
     "model": "sonnet"
+  },
+  "web_search": {
+    "provider": "searxng",
+    "base_url": "https://searx.be"
   },
   "mcp_servers": {
     "context7": {
@@ -171,7 +203,7 @@ src/
   error.rs             DysonError — unified error type
   message.rs           Message, Role, ContentBlock
   config/              Settings, JSON loader
-  tool/                Tool trait + bash implementation
+  tool/                Tool trait + bash, web search, workspace tools
   skill/               Skill trait, BuiltinSkill, MCP skill
   sandbox/             Sandbox trait, OsSandbox, DangerousNoSandbox
   secret/              SecretResolver trait, InsecureEnvironmentVariable
@@ -206,11 +238,12 @@ Every file has extensive annotations in the style of [rLLM](https://github.com/j
 cargo test
 ```
 
-330 tests covering SSE parsing, message serialization, config loading, bash execution, stream handling, sandbox decisions, secret resolution, provider registry, workspace persistence, and the agent loop with mock LLM clients.
+339 tests covering SSE parsing, message serialization, config loading, bash execution, stream handling, sandbox decisions, secret resolution, provider registry, workspace persistence, web search, and the agent loop with mock LLM clients.
 
 ## Future
 
-- **More tools** — read_file, write_file, edit_file, web_search
+- **More tools** — read_file, write_file, edit_file
+- **More search providers** — Tavily, Google Custom Search
 - **More sandboxes** — blacklist, S3 redirect, audit, composite
 - **More controllers** — Slack, Discord, HTTP API
 - **More secret resolvers** — Vault, AWS SSM, 1Password, GCP
