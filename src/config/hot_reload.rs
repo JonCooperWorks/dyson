@@ -102,12 +102,40 @@ impl HotReloader {
         }
     }
 
-    /// Check if any watched file changed (with debounce).
+    /// Check if any watched file changed, waiting for the debounce to settle.
+    ///
+    /// Unlike `check_nonblocking()`, this method sleeps until the debounce
+    /// period elapses when a change is detected.  This ensures a single call
+    /// is sufficient to pick up changes — important for interactive loops
+    /// where there's only one check per turn.
+    ///
+    /// Returns `Ok((true, Some(settings)))` if the config file changed.
+    /// Returns `Ok((true, None))` if only workspace files changed.
+    /// Returns `Ok((false, None))` if nothing changed.
+    pub fn check(&mut self) -> Result<(bool, Option<Settings>)> {
+        let result = self.check_nonblocking()?;
+        if result.0 {
+            return Ok(result);
+        }
+
+        // If we have a pending change, wait for the debounce to settle.
+        if let Some(ref pending) = self.pending_change {
+            let elapsed = pending.detected_at.elapsed();
+            if elapsed < DEBOUNCE_DURATION {
+                std::thread::sleep(DEBOUNCE_DURATION - elapsed);
+            }
+            return self.check_nonblocking();
+        }
+
+        Ok(result)
+    }
+
+    /// Check if any watched file changed (non-blocking, with debounce).
     ///
     /// Returns `Ok((true, Some(settings)))` if the config file changed.
     /// Returns `Ok((true, None))` if only workspace files changed.
     /// Returns `Ok((false, None))` if nothing changed or debounce pending.
-    pub fn check(&mut self) -> Result<(bool, Option<Settings>)> {
+    fn check_nonblocking(&mut self) -> Result<(bool, Option<Settings>)> {
         // Snapshot current mtimes.
         let current_mtimes: HashMap<PathBuf, Option<SystemTime>> = self
             .watched
@@ -300,16 +328,36 @@ mod tests {
             write!(f, r#"{{"agent":{{"model":"test"}}}}"#).unwrap();
         }
 
-        // First check after change — should NOT reload yet (debounce).
-        let (changed, _) = reloader.check().unwrap();
+        // Non-blocking check — should NOT reload yet (debounce).
+        let (changed, _) = reloader.check_nonblocking().unwrap();
         assert!(!changed, "change should be debounced, not immediate");
 
         // Wait for debounce to settle.
         std::thread::sleep(DEBOUNCE_DURATION + Duration::from_millis(50));
 
         // Now it should report the change.
-        let (changed, _) = reloader.check().unwrap();
+        let (changed, _) = reloader.check_nonblocking().unwrap();
         assert!(changed, "change should be reported after debounce");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blocking_check_waits_for_debounce() {
+        let dir = temp_dir("blocking");
+        let config = dir.join("dyson.json");
+        std::fs::write(&config, r#"{"agent":{}}"#).unwrap();
+
+        let mut reloader = HotReloader::new(Some(&config), None);
+
+        // Modify the file.
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&config, r#"{"agent":{"model":"test"}}"#).unwrap();
+
+        // Blocking check should wait for debounce and report the change
+        // in a single call.
+        let (changed, _) = reloader.check().unwrap();
+        assert!(changed, "blocking check should wait for debounce and report change");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -325,18 +373,18 @@ mod tests {
         // First write.
         std::thread::sleep(Duration::from_millis(50));
         std::fs::write(&config, r#"{"agent":{"model":"v1"}}"#).unwrap();
-        let (changed, _) = reloader.check().unwrap();
+        let (changed, _) = reloader.check_nonblocking().unwrap();
         assert!(!changed);
 
         // Second write before debounce expires — should reset timer.
         std::thread::sleep(Duration::from_millis(200));
         std::fs::write(&config, r#"{"agent":{"model":"v2"}}"#).unwrap();
-        let (changed, _) = reloader.check().unwrap();
+        let (changed, _) = reloader.check_nonblocking().unwrap();
         assert!(!changed, "debounce should have reset");
 
         // Wait for debounce after final write.
         std::thread::sleep(DEBOUNCE_DURATION + Duration::from_millis(50));
-        let (changed, _) = reloader.check().unwrap();
+        let (changed, _) = reloader.check_nonblocking().unwrap();
         assert!(changed, "should report after debounce settled");
 
         let _ = std::fs::remove_dir_all(&dir);
