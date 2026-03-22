@@ -14,9 +14,21 @@ echo "=== Building dyson ==="
 cargo build --release
 
 echo "=== Installing ==="
-# Pass any extra args (e.g. --env KEY=VALUE) to dyson init.
+# Extract --env KEY=VALUE pairs and pass them to dyson init.
 # Usage: ./scripts/update.sh --env OPENROUTER_API_KEY=sk-... --env RUST_LOG=debug
-./target/release/dyson init --noinput --daemonize "$@"
+env_args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --env)
+            env_args+=("--env" "$2")
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+./target/release/dyson init --noinput --daemonize "${env_args[@]+"${env_args[@]}"}"
 
 echo "=== Done ==="
 systemctl --user status dyson
