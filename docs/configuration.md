@@ -21,6 +21,7 @@ pub struct Settings {
     pub sandbox: SandboxConfig,
     pub workspace: WorkspaceConfig,
     pub chat_history: ChatHistoryConfig,
+    pub web_search: Option<WebSearchConfig>,
     pub dangerous_no_sandbox: bool,
 }
 
@@ -214,6 +215,45 @@ The `provider` field determines which `LlmClient` implementation is used:
 
 Use `base_url` to point to alternative endpoints (Ollama, vLLM, Together,
 etc.) when using the OpenAI provider.
+
+---
+
+## Web Search
+
+The `web_search` section enables the `web_search` built-in tool.  When
+absent, the tool doesn't exist — models never see it.
+
+### Brave Search (requires API key)
+
+```json
+{
+  "web_search": {
+    "provider": "brave",
+    "api_key": { "resolver": "insecure_env", "name": "BRAVE_API_KEY" }
+  }
+}
+```
+
+Free tier: 2000 queries/month.  Get a key at https://brave.com/search/api/.
+
+### SearXNG (no API key needed)
+
+```json
+{
+  "web_search": {
+    "provider": "searxng",
+    "base_url": "https://searx.be"
+  }
+}
+```
+
+Use any public instance from https://searx.space/ or a self-hosted one.
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `provider` | No | `"brave"` | Search backend: `"brave"` or `"searxng"` |
+| `api_key` | For Brave | — | API key (literal or secret resolver reference) |
+| `base_url` | For SearXNG | — | Instance URL (e.g. `"https://searx.be"`) |
 
 ---
 

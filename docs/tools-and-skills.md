@@ -7,6 +7,7 @@ extensibility layer that lets you plug arbitrary capabilities into the agent.
 **Key files:**
 - `src/tool/mod.rs` — `Tool` trait, `ToolContext`, `ToolOutput`
 - `src/tool/bash.rs` — `BashTool` (shell execution with timeout)
+- `src/tool/web_search.rs` — `WebSearchTool`, `SearchProvider` trait, Brave/SearXNG providers
 - `src/skill/mod.rs` — `Skill` trait, `create_skills()` factory
 - `src/skill/builtin.rs` — `BuiltinSkill` (wraps built-in tools)
 - `src/skill/local.rs` — `LocalSkill` (SKILL.md parser, workspace discovery)
@@ -205,14 +206,93 @@ pub struct BuiltinSkill {
 }
 ```
 
-Phase 1 includes only `BashTool`.  Future phases will add:
-- `ReadFileTool` — read files with line ranges and binary detection
-- `WriteFileTool` — create or overwrite files
-- `EditFileTool` — surgical string-replace edits
-- `WebSearchTool` — web search via pluggable provider
+Currently provides:
+- `BashTool` — shell command execution with timeout
+- `MemorySearchTool` — full-text search over memory files
+- `WorkspaceViewTool` — view/list workspace files
+- `WorkspaceSearchTool` — search across workspace files
+- `WorkspaceUpdateTool` — update workspace files (set/append)
+- `WebSearchTool` — web search via pluggable provider (conditional — see below)
 
 The system prompt is generated dynamically from the loaded tools — each
 tool's name and description are listed so the LLM knows what's available.
+
+---
+
+## WebSearchTool
+
+Gives the agent access to web search via a pluggable `SearchProvider` trait.
+Conditionally registered — only appears when `web_search` is configured in
+`dyson.json`.
+
+**Key files:**
+- `src/tool/web_search.rs` — `SearchProvider` trait, providers, `WebSearchTool`
+
+### SearchProvider trait
+
+```rust
+#[async_trait]
+pub trait SearchProvider: Send + Sync {
+    async fn search(&self, query: &str, num_results: usize) -> Result<Vec<SearchResult>>;
+}
+
+pub struct SearchResult {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+```
+
+### Supported providers
+
+| Provider | Config value | Requires | Description |
+|----------|-------------|----------|-------------|
+| Brave Search | `"brave"` | `api_key` | Brave Web Search API (free tier: 2000 queries/month) |
+| SearXNG | `"searxng"` | `base_url` | Any public or self-hosted SearXNG instance (no API key) |
+
+### Configuration
+
+```json
+{
+  "web_search": {
+    "provider": "brave",
+    "api_key": { "resolver": "insecure_env", "name": "BRAVE_API_KEY" }
+  }
+}
+```
+
+Or with a public SearXNG instance (find one at https://searx.space/):
+
+```json
+{
+  "web_search": {
+    "provider": "searxng",
+    "base_url": "https://searx.be"
+  }
+}
+```
+
+Without a `web_search` section, the tool is simply absent — the LLM never
+sees it.  When configured, it appears alongside the other built-in tools.
+
+### Input schema
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "query": { "type": "string", "description": "The search query" },
+    "num_results": { "type": "integer", "minimum": 1, "maximum": 10, "default": 5 }
+  },
+  "required": ["query"]
+}
+```
+
+### Adding a new search provider
+
+1. Implement the `SearchProvider` trait in `src/tool/web_search.rs`
+2. Add a match arm in `create_provider()` for the new provider name
+3. Document the config fields
 
 ---
 
@@ -258,7 +338,7 @@ the agent loop needed.
 
 | Skill | Status | Tools | Source |
 |-------|--------|-------|--------|
-| `BuiltinSkill` | Implemented | bash (+ future read/write/edit) | Compiled into Dyson |
+| `BuiltinSkill` | Implemented | bash, workspace_*, memory_search, web_search | Compiled into Dyson |
 | `McpSkill` | Implemented | Discovered via `tools/list` | MCP server (stdio/HTTP) |
 | `LocalSkill` | Implemented | None (prompt-only) | SKILL.md files |
 
