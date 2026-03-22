@@ -618,10 +618,13 @@ impl Output for TelegramOutput {
         Ok(())
     }
 
-    fn tool_use_start(&mut self, _id: &str, name: &str) -> Result<(), DysonError> {
-        // Show tool activity so the user knows the agent is working.
-        self.force_flush_text()?;
-        self.text_buffer.push_str(&format!("[{name}] "));
+    fn tool_use_start(&mut self, _id: &str, _name: &str) -> Result<(), DysonError> {
+        // Send "typing..." indicator so the user knows the agent is working.
+        let bot = self.bot.clone();
+        let chat_id = self.chat_id;
+        let _ = self.block_on(async {
+            bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await
+        });
         Ok(())
     }
 
