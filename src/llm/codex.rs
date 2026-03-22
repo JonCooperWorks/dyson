@@ -85,7 +85,6 @@ use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use crate::message::Message;
-use crate::skill::mcp::serve::McpHttpServer;
 use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
@@ -223,27 +222,15 @@ impl LlmClient for CodexClient {
         );
 
         // -- Start MCP server if workspace is available --
-        //
-        // Codex supports MCP natively.  We start an in-process HTTP MCP server
-        // and register it via `-c mcp_servers.dyson-workspace.url=<url>` config
-        // override (similar to how Claude Code gets workspace via --mcp-config).
         let mut _mcp_server_handle: Option<tokio::task::JoinHandle<()>> = None;
         let mut mcp_url: Option<String> = None;
 
         if let Some(ref workspace) = self.workspace {
-            let server = Arc::new(McpHttpServer::new(
-                Arc::clone(workspace),
-                self.dangerous_no_sandbox,
-            ));
-
-            let (port, handle, _token) = server.start().await.map_err(|e| {
-                DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
-            })?;
-
-            tracing::info!(port = port, "MCP server started for Codex");
+            let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox).await?;
+            tracing::info!(port = info.port, "MCP server started for Codex");
             // TODO: pass bearer token to Codex when it supports MCP auth headers
-            mcp_url = Some(format!("http://127.0.0.1:{port}/mcp"));
-            _mcp_server_handle = Some(handle);
+            mcp_url = Some(info.url);
+            _mcp_server_handle = Some(info.handle);
         }
 
         // -- Build the command --
@@ -283,7 +270,7 @@ impl LlmClient for CodexClient {
             let _mcp_handle = _mcp_server_handle;
 
             let mut reader = reader;
-            let mut completed = false;
+            let mut parser = StreamParserState::new();
 
             loop {
                 let mut line = String::new();
@@ -297,268 +284,18 @@ impl LlmClient for CodexClient {
                 if bytes_read == 0 {
                     break; // EOF
                 }
-                let line = line.trim_end().to_string();
+                let line = line.trim_end();
                 if line.is_empty() {
                     continue;
                 }
 
-                let json: serde_json::Value = match serde_json::from_str(&line) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(
-                            line = line,
-                            error = %e,
-                            "failed to parse codex CLI JSON line"
-                        );
-                        continue;
-                    }
-                };
-
-                let event_type = json["type"].as_str().unwrap_or("");
-
-                match event_type {
-                    // -------------------------------------------------
-                    // thread.started — session initialized
-                    // -------------------------------------------------
-                    "thread.started" => {
-                        if let Some(thread_id) = json["thread_id"].as_str() {
-                            tracing::debug!(
-                                thread_id = thread_id,
-                                "codex CLI session started"
-                            );
-                        }
-                    }
-
-                    // -------------------------------------------------
-                    // turn.started — new LLM turn begins
-                    // -------------------------------------------------
-                    "turn.started" => {
-                        tracing::trace!("codex turn started");
-                    }
-
-                    // -------------------------------------------------
-                    // turn.completed — turn finished successfully
-                    // -------------------------------------------------
-                    "turn.completed" => {
-                        if let Some(usage) = json.get("usage") {
-                            tracing::info!(
-                                input_tokens = usage["input_tokens"].as_u64().unwrap_or(0),
-                                output_tokens = usage["output_tokens"].as_u64().unwrap_or(0),
-                                "codex turn completed"
-                            );
-                        }
-                        if !completed {
-                            completed = true;
-                            yield Ok(StreamEvent::MessageComplete {
-                                stop_reason: StopReason::EndTurn,
-                                output_tokens: None,
-                            });
-                        }
-                    }
-
-                    // -------------------------------------------------
-                    // turn.failed — turn ended with error
-                    // -------------------------------------------------
-                    "turn.failed" => {
-                        completed = true;
-                        let error_msg = json["error"]["message"]
-                            .as_str()
-                            .unwrap_or("unknown error");
-                        tracing::error!(error = error_msg, "codex turn failed");
-                        yield Err(DysonError::Llm(
-                            format!("Codex CLI error: {error_msg}")
-                        ));
-                    }
-
-                    // -------------------------------------------------
-                    // error — stream-level error
-                    // -------------------------------------------------
-                    "error" => {
-                        let error_msg = json["message"]
-                            .as_str()
-                            .unwrap_or("unknown error");
-                        tracing::error!(error = error_msg, "codex stream error");
-                        yield Err(DysonError::Llm(
-                            format!("Codex CLI error: {error_msg}")
-                        ));
-                    }
-
-                    // -------------------------------------------------
-                    // item.started — tool execution began
-                    // -------------------------------------------------
-                    "item.started" => {
-                        let item = &json["item"];
-                        let item_type = item["type"].as_str().unwrap_or("");
-
-                        match item_type {
-                            "command_execution" => {
-                                let command = item["command"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                let id = item["id"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                yield Ok(StreamEvent::ToolUseStart {
-                                    id,
-                                    name: "bash".to_string(),
-                                });
-                                yield Ok(StreamEvent::ToolUseInputDelta(
-                                    serde_json::json!({"command": command}).to_string()
-                                ));
-                            }
-                            "mcp_tool_call" => {
-                                let tool = item["tool"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                let id = item["id"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                yield Ok(StreamEvent::ToolUseStart {
-                                    id,
-                                    name: tool,
-                                });
-                            }
-                            "web_search" => {
-                                let id = item["id"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                yield Ok(StreamEvent::ToolUseStart {
-                                    id,
-                                    name: "web_search".to_string(),
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // -------------------------------------------------
-                    // item.completed — tool finished or agent message
-                    // -------------------------------------------------
-                    "item.completed" => {
-                        let item = &json["item"];
-                        let item_type = item["type"].as_str().unwrap_or("");
-
-                        match item_type {
-                            "agent_message" => {
-                                if let Some(text) = item["text"].as_str()
-                                    && !text.is_empty()
-                                {
-                                    yield Ok(StreamEvent::TextDelta(
-                                        text.to_string()
-                                    ));
-                                }
-                            }
-                            "reasoning" => {
-                                if let Some(text) = item["text"].as_str()
-                                    && !text.is_empty()
-                                {
-                                    yield Ok(StreamEvent::ThinkingDelta(
-                                        text.to_string()
-                                    ));
-                                }
-                            }
-                            "command_execution" => {
-                                let id = item["id"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                let command = item["command"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                let output = item["aggregated_output"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                let exit_code = item["exit_code"].as_i64();
-
-                                // Emit as a completed tool use so the UI
-                                // shows what command was run and its output.
-                                let input = serde_json::json!({
-                                    "command": command,
-                                    "output": output,
-                                    "exit_code": exit_code,
-                                });
-                                yield Ok(StreamEvent::ToolUseComplete {
-                                    id,
-                                    name: "bash".to_string(),
-                                    input,
-                                });
-                            }
-                            "file_change" => {
-                                let id = item["id"]
-                                    .as_str()
-                                    .unwrap_or("file_change")
-                                    .to_string();
-                                let changes = item["changes"].clone();
-                                yield Ok(StreamEvent::ToolUseStart {
-                                    id: id.clone(),
-                                    name: "file_change".to_string(),
-                                });
-                                yield Ok(StreamEvent::ToolUseComplete {
-                                    id,
-                                    name: "file_change".to_string(),
-                                    input: changes,
-                                });
-                            }
-                            "mcp_tool_call" => {
-                                let id = item["id"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                let tool = item["tool"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                let input = item["arguments"].clone();
-                                yield Ok(StreamEvent::ToolUseComplete {
-                                    id,
-                                    name: tool,
-                                    input,
-                                });
-                            }
-                            "web_search" => {
-                                let id = item["id"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                let query = item["query"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_string();
-                                yield Ok(StreamEvent::ToolUseComplete {
-                                    id,
-                                    name: "web_search".to_string(),
-                                    input: serde_json::json!({"query": query}),
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // item.updated — todo list updates, ignored
-                    "item.updated" => {}
-
-                    other => {
-                        tracing::trace!(
-                            event_type = other,
-                            "unknown codex CLI event type"
-                        );
-                    }
+                for event in parser.parse_line(line) {
+                    yield event;
                 }
             }
 
-            // If we never got a turn.completed event, emit an error.
-            if !completed {
-                tracing::error!("codex CLI exited without turn.completed event");
-                yield Err(DysonError::Llm(
-                    "Codex CLI process exited without producing a result".to_string()
-                ));
+            for event in parser.finalize() {
+                yield event;
             }
         };
 
@@ -576,14 +313,12 @@ impl LlmClient for CodexClient {
 
 /// Mutable state for parsing Codex's JSONL output line by line.
 ///
-/// Extracted from the `stream()` closure so we can unit test parsing
-/// without spawning a subprocess.
-#[cfg(test)]
+/// This is the single source of truth for Codex event parsing.  Used by
+/// both the `stream()` async closure (production) and unit tests.
 struct StreamParserState {
     completed: bool,
 }
 
-#[cfg(test)]
 impl StreamParserState {
     fn new() -> Self {
         Self { completed: false }
@@ -666,6 +401,16 @@ impl StreamParserState {
                             name: tool,
                         }));
                     }
+                    "web_search" => {
+                        let id = item["id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        events.push(Ok(StreamEvent::ToolUseStart {
+                            id,
+                            name: "web_search".to_string(),
+                        }));
+                    }
                     _ => {}
                 }
             }
@@ -714,6 +459,22 @@ impl StreamParserState {
                             input,
                         }));
                     }
+                    "file_change" => {
+                        let id = item["id"]
+                            .as_str()
+                            .unwrap_or("file_change")
+                            .to_string();
+                        let changes = item["changes"].clone();
+                        events.push(Ok(StreamEvent::ToolUseStart {
+                            id: id.clone(),
+                            name: "file_change".to_string(),
+                        }));
+                        events.push(Ok(StreamEvent::ToolUseComplete {
+                            id,
+                            name: "file_change".to_string(),
+                            input: changes,
+                        }));
+                    }
                     "mcp_tool_call" => {
                         let id = item["id"]
                             .as_str()
@@ -728,6 +489,21 @@ impl StreamParserState {
                             id,
                             name: tool,
                             input,
+                        }));
+                    }
+                    "web_search" => {
+                        let id = item["id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        let query = item["query"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        events.push(Ok(StreamEvent::ToolUseComplete {
+                            id,
+                            name: "web_search".to_string(),
+                            input: serde_json::json!({"query": query}),
                         }));
                     }
                     _ => {}

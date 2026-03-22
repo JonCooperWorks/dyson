@@ -147,7 +147,6 @@ use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call};
 use crate::message::Message;
-use crate::skill::mcp::serve::McpHttpServer;
 use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
@@ -353,68 +352,31 @@ impl LlmClient for ClaudeCodeClient {
 
         // -- Start MCP server if workspace is available --
         //
-        // When the user has a workspace configured, we spin up an in-process
-        // HTTP MCP server that exposes workspace tools to Claude Code.
-        //
-        // How this works:
-        //   1. Create McpHttpServer with shared workspace Arc
-        //   2. Start it on 127.0.0.1:0 (OS picks a free port)
-        //   3. Build MCP config JSON with the server's URL
-        //   4. Later, pass it via `--mcp-config '<json>'` to claude CLI
-        //
-        // The server runs as a tokio task (JoinHandle).  We move the handle
-        // into the async_stream closure so it stays alive for exactly the
-        // duration of the LLM turn.  When the stream is dropped (turn ends
-        // or is cancelled), the handle is dropped, which aborts the task,
-        // which stops the server and frees the port.
-        //
-        // Why a new server per turn?
-        //   Each `stream()` call spawns a fresh `claude -p` process.
-        //   Binding a TCP socket takes ~0.1ms, negligible vs a multi-second
-        //   LLM turn.  A per-turn server simplifies lifecycle management:
-        //   no shutdown coordination, no stale connections, no port leaks.
-        //
-        // Why pass config as CLI arg (not temp file)?
-        //   Simpler.  No file I/O, no cleanup, no race conditions.  The
-        //   JSON is small.  The tradeoff is the bearer token is visible
-        //   in `ps` output, but it's ephemeral (new token per LLM turn)
-        //   and only usable on loopback.
+        // The server lives as a tokio task for the duration of the LLM turn.
+        // When the stream is dropped, the handle is dropped, stopping the server.
         let mut _mcp_server_handle: Option<tokio::task::JoinHandle<()>> = None;
         let mut mcp_config_json: Option<String> = None;
 
         if let Some(ref workspace) = self.workspace {
-            let server = Arc::new(McpHttpServer::new(
-                Arc::clone(workspace),
-                self.dangerous_no_sandbox,
-            ));
+            let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox).await?;
 
-            let (port, handle, token) = server.start().await.map_err(|e| {
-                DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
-            })?;
-
-            // Build the MCP config JSON that tells Claude Code how to
-            // connect to our server.  The format matches Claude Code's
-            // `--mcp-config` flag:
-            //   {"mcpServers":{"<name>":{"type":"sse","url":"<url>"}}}
-            //
-            // "type": "sse" tells Claude Code this is an HTTP MCP server
-            // (as opposed to "stdio" which would spawn a subprocess).
+            // Build MCP config JSON for Claude Code's --mcp-config flag.
             let config = serde_json::json!({
                 "mcpServers": {
                     "dyson-workspace": {
                         "type": "sse",
-                        "url": format!("http://127.0.0.1:{port}/mcp"),
+                        "url": info.url,
                         "headers": {
-                            "Authorization": format!("Bearer {token}")
+                            "Authorization": format!("Bearer {}", info.token)
                         }
                     }
                 }
             });
 
-            tracing::info!(port = port, "MCP server started for Claude Code");
+            tracing::info!(port = info.port, "MCP server started for Claude Code");
 
             mcp_config_json = Some(config.to_string());
-            _mcp_server_handle = Some(handle);
+            _mcp_server_handle = Some(info.handle);
         }
 
         // -- Build the command --
@@ -471,54 +433,13 @@ impl LlmClient for ClaudeCodeClient {
         // StreamEvent types.  The async_stream macro handles the
         // async iteration naturally.
         let event_stream = async_stream::stream! {
-            // We need to keep the child process alive for the duration
-            // of the stream.  Moving it into the stream closure ensures
-            // it's not dropped (and killed) prematurely.
+            // Keep child process and MCP server alive for the stream's lifetime.
             let _child = child;
-
-            // Keep the MCP server task alive for the duration of the
-            // stream.  The underscore prefix prevents "unused" warnings
-            // while still binding the value (so it's not dropped early).
-            //
-            // Lifecycle:
-            //   - Stream created → JoinHandle moved here → server running
-            //   - Stream consumed (turn complete) → closure dropped
-            //   - JoinHandle dropped → tokio aborts the task → server stops
-            //   - TCP port freed, connections closed
-            //
-            // This ensures the MCP server lives exactly as long as the
-            // `claude -p` subprocess needs it.
             let _mcp_handle = _mcp_server_handle;
 
-            // Use the BufReader directly with next_line() instead of
-            // LinesStream, which avoids type inference issues inside
-            // the async_stream macro.
             let mut reader = reader;
+            let mut parser = StreamParserState::new();
 
-            // Track whether we've emitted a MessageComplete event.
-            // Claude Code sends a "result" event at the end, which
-            // is our signal to emit MessageComplete.
-            let mut completed = false;
-
-            // Track whether we received any stream_event text deltas.
-            // If we did, we skip "assistant" message text to avoid
-            // duplicates.  If we didn't (some Claude Code versions/modes
-            // don't emit deltas for every turn), we use assistant messages
-            // as fallback.
-            let mut got_stream_deltas = false;
-
-            // Parser state for accumulating tool_use blocks from
-            // stream_event content_block deltas (same as Anthropic SSE).
-            let mut tool_buffers: HashMap<usize, ToolCallBuffer> = HashMap::new();
-
-            // Track thinking block indices so their text_delta events
-            // are emitted as ThinkingDelta instead of TextDelta.
-            let mut thinking_blocks: std::collections::HashSet<usize> = std::collections::HashSet::new();
-
-            // Read lines from the subprocess stdout.
-            //
-            // `read_line()` appends to a buffer and returns the number
-            // of bytes read.  0 bytes means EOF (process exited).
             loop {
                 let mut line = String::new();
                 let bytes_read = match reader.read_line(&mut line).await {
@@ -531,204 +452,18 @@ impl LlmClient for ClaudeCodeClient {
                 if bytes_read == 0 {
                     break; // EOF — process exited
                 }
-                let line = line.trim_end().to_string();
-
+                let line = line.trim_end();
                 if line.is_empty() {
                     continue;
                 }
 
-                // Parse the JSON line.
-                let json: serde_json::Value = match serde_json::from_str(&line) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(
-                            line = line,
-                            error = %e,
-                            "failed to parse claude CLI JSON line"
-                        );
-                        continue;
-                    }
-                };
-
-                // Dispatch based on the top-level "type" field.
-                let event_type = json["type"].as_str().unwrap_or("");
-
-                match event_type {
-                    // ---------------------------------------------------
-                    // stream_event — raw Anthropic streaming events
-                    // wrapped in {"type":"stream_event","event":{...}}.
-                    // Same events our Anthropic SSE parser handles.
-                    // ---------------------------------------------------
-                    "stream_event" => {
-                        let inner = &json["event"];
-                        let inner_type = inner["type"].as_str().unwrap_or("");
-
-                        match inner_type {
-                            "content_block_delta" => {
-                                let delta = &inner["delta"];
-                                match delta["type"].as_str().unwrap_or("") {
-                                    "thinking_delta" => {
-                                        if let Some(text) = delta["thinking"].as_str() {
-                                            yield Ok(StreamEvent::ThinkingDelta(text.to_string()));
-                                        }
-                                    }
-                                    "text_delta" => {
-                                        if let Some(text) = delta["text"].as_str() {
-                                            // Route text from thinking blocks as ThinkingDelta.
-                                            let idx = inner["index"].as_u64().unwrap_or(0) as usize;
-                                            if thinking_blocks.contains(&idx) {
-                                                yield Ok(StreamEvent::ThinkingDelta(text.to_string()));
-                                            } else {
-                                                got_stream_deltas = true;
-                                                yield Ok(StreamEvent::TextDelta(text.to_string()));
-                                            }
-                                        }
-                                    }
-                                    "input_json_delta" => {
-                                        if let Some(partial) = delta["partial_json"].as_str() {
-                                            let idx = inner["index"].as_u64().unwrap_or(0) as usize;
-                                            if let Some(buf) = tool_buffers.get_mut(&idx) {
-                                                buf.json.push_str(partial);
-                                            }
-                                            yield Ok(StreamEvent::ToolUseInputDelta(partial.to_string()));
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-
-                            "content_block_start" => {
-                                let block = &inner["content_block"];
-                                let block_type = block["type"].as_str().unwrap_or("");
-                                let idx = inner["index"].as_u64().unwrap_or(0) as usize;
-
-                                if block_type == "tool_use" {
-                                    let id = block["id"].as_str().unwrap_or("").to_string();
-                                    let name = block["name"].as_str().unwrap_or("").to_string();
-                                    tool_buffers.insert(idx, ToolCallBuffer {
-                                        id: id.clone(), name: name.clone(), json: String::new(),
-                                    });
-                                    yield Ok(StreamEvent::ToolUseStart { id, name });
-                                } else if block_type == "thinking" {
-                                    thinking_blocks.insert(idx);
-                                }
-                            }
-
-                            "content_block_stop" => {
-                                let idx = inner["index"].as_u64().unwrap_or(0) as usize;
-                                if let Some(buf) = tool_buffers.remove(&idx) {
-                                    yield finalize_tool_call(buf);
-                                }
-                            }
-
-                            // message_delta stop reason handled via "result" event.
-                            _ => {}
-                        }
-                    }
-
-                    // ---------------------------------------------------
-                    // result — final result with stop_reason and cost.
-                    // ---------------------------------------------------
-                    "result" => {
-                        if !completed {
-                            completed = true;
-                            // Check if this is an error result from Claude Code.
-                            if json["is_error"].as_bool() == Some(true) {
-                                let error_msg = json["result"].as_str().unwrap_or("unknown error");
-                                tracing::error!(error = error_msg, "claude CLI returned error result");
-                                yield Err(DysonError::Llm(format!("Claude Code error: {error_msg}")));
-                            } else {
-                                let stop_reason = match json["stop_reason"].as_str() {
-                                    Some("end_turn") => StopReason::EndTurn,
-                                    Some("tool_use") => StopReason::ToolUse,
-                                    Some("max_tokens") => StopReason::MaxTokens,
-                                    _ => StopReason::EndTurn,
-                                };
-                                if let Some(cost) = json["total_cost_usd"].as_f64() {
-                                    tracing::info!(
-                                        cost_usd = cost,
-                                        duration_ms = json["duration_ms"].as_u64().unwrap_or(0),
-                                        "claude CLI turn complete"
-                                    );
-                                }
-                                yield Ok(StreamEvent::MessageComplete { stop_reason, output_tokens: None });
-                            }
-                        }
-                    }
-
-                    // ---------------------------------------------------
-                    // system — session init metadata (model, version).
-                    // ---------------------------------------------------
-                    "system" => {
-                        if let Some(model) = json["model"].as_str() {
-                            tracing::debug!(
-                                model = model,
-                                version = json["claude_code_version"].as_str().unwrap_or(""),
-                                "claude CLI session initialized"
-                            );
-                        }
-                    }
-
-                    // ---------------------------------------------------
-                    // rate_limit_event — log if throttled.
-                    // ---------------------------------------------------
-                    "rate_limit_event" => {
-                        if json["rate_limit_info"]["status"].as_str() != Some("allowed") {
-                            tracing::warn!("claude CLI rate limited");
-                        }
-                    }
-
-                    // ---------------------------------------------------
-                    // assistant — complete assistant message.
-                    //
-                    // When --include-partial-messages is active, text usually
-                    // arrives via stream_event deltas first.  But for multi-
-                    // turn tool use, Claude Code may emit assistant messages
-                    // without prior deltas (especially for intermediate turns
-                    // and the final response after tool calls).
-                    //
-                    // We extract text from these as a fallback to ensure
-                    // nothing is lost.  If stream_event deltas already
-                    // delivered the text, we'll get duplicates — but that's
-                    // better than empty responses.
-                    // ---------------------------------------------------
-                    "assistant" => {
-                        // Only use assistant messages as fallback when we
-                        // haven't received stream_event deltas for this turn.
-                        if !got_stream_deltas
-                            && let Some(content) = json["message"]["content"].as_array()
-                        {
-                            for block in content {
-                                if block["type"].as_str() == Some("text")
-                                    && let Some(text) = block["text"].as_str()
-                                    && !text.is_empty()
-                                {
-                                    yield Ok(StreamEvent::TextDelta(text.to_string()));
-                                }
-                            }
-                        }
-                        // Clear per-turn state for the next turn.
-                        got_stream_deltas = false;
-                        thinking_blocks.clear();
-                        tool_buffers.clear();
-                    }
-
-                    // user — tool results from Claude Code's internal loop.
-                    "user" => {}
-
-                    other => {
-                        tracing::trace!(event_type = other, "unknown claude CLI event type");
-                    }
+                for event in parser.parse_line(line) {
+                    yield event;
                 }
             }
 
-            // If we never got a result event (process killed, crash),
-            // emit an error so the caller knows something went wrong.
-            if !completed {
-                tracing::error!("claude CLI exited without result event");
-                yield Err(DysonError::Llm(
-                    "Claude Code process exited without producing a result".to_string()
-                ));
+            for event in parser.finalize() {
+                yield event;
             }
         };
 
@@ -741,16 +476,13 @@ impl LlmClient for ClaudeCodeClient {
 }
 
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// StreamParserState — testable line-parsing logic (mirrors the inline stream).
+// StreamParserState — the single source of truth for event parsing.
 // ---------------------------------------------------------------------------
 
 /// Mutable state for parsing Claude Code's stream-json output line by line.
 ///
-/// This duplicates the parsing logic from `stream()` into a standalone struct
-/// so we can unit test it without spawning a subprocess.
-#[cfg(test)]
+/// This is the single source of truth for Claude Code event parsing.  Used by
+/// both the `stream()` async closure (production) and unit tests.
 struct StreamParserState {
     completed: bool,
     got_stream_deltas: bool,
@@ -758,7 +490,6 @@ struct StreamParserState {
     thinking_blocks: std::collections::HashSet<usize>,
 }
 
-#[cfg(test)]
 impl StreamParserState {
     fn new() -> Self {
         Self {

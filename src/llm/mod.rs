@@ -375,6 +375,49 @@ impl SseLineBuffer {
 // Shared utilities for CLI-subprocess-based clients
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Shared MCP server startup for CLI-subprocess clients
+// ---------------------------------------------------------------------------
+
+/// Info about a running MCP HTTP server started for a CLI subprocess.
+pub(crate) struct McpServerInfo {
+    /// The port the server is listening on (127.0.0.1).
+    pub port: u16,
+    /// The server task handle — drop to stop the server.
+    pub handle: tokio::task::JoinHandle<()>,
+    /// Bearer token for authenticating requests.
+    pub token: String,
+    /// The base URL for the MCP endpoint (e.g., "http://127.0.0.1:{port}/mcp").
+    pub url: String,
+}
+
+/// Start an in-process MCP HTTP server exposing workspace tools.
+///
+/// Used by both `ClaudeCodeClient` and `CodexClient` to give CLI
+/// subprocesses access to workspace tools via MCP.  Each `stream()` call
+/// starts a fresh server on a random port; the returned `JoinHandle`
+/// keeps it alive for the duration of the LLM turn.
+pub(crate) async fn start_mcp_server(
+    workspace: &std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
+    dangerous_no_sandbox: bool,
+) -> Result<McpServerInfo> {
+    use std::sync::Arc;
+    use crate::skill::mcp::serve::McpHttpServer;
+
+    let server = Arc::new(McpHttpServer::new(
+        Arc::clone(workspace),
+        dangerous_no_sandbox,
+    ));
+
+    let (port, handle, token) = server.start().await.map_err(|e| {
+        crate::error::DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))
+    })?;
+
+    let url = format!("http://127.0.0.1:{port}/mcp");
+
+    Ok(McpServerInfo { port, handle, token, url })
+}
+
 /// Resolve the absolute path to a CLI binary by name.
 ///
 /// Uses `which <name>` to find it on the current PATH.  This is important
