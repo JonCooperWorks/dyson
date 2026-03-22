@@ -358,7 +358,7 @@ impl super::Controller for TelegramController {
                         for (name, pc) in &providers {
                             reply.push_str(&format!(
                                 "  {} — {:?} ({})\n",
-                                name, pc.provider_type, pc.model,
+                                name, pc.provider_type, pc.models.join(", "),
                             ));
                         }
                         let _ = bot.send_message(chat_id, reply).await;
@@ -391,7 +391,7 @@ impl super::Controller for TelegramController {
                             let pc = &current_settings.providers[name];
                             let reply = format!(
                                 "Switched to '{}' — {:?} ({})",
-                                name, pc.provider_type, pc.model,
+                                name, pc.provider_type, pc.models.join(", "),
                             );
                             agents.lock().await.insert(chat_id.0, new_agent);
                             let _ = bot.send_message(chat_id, reply).await;

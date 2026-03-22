@@ -72,8 +72,8 @@ struct JsonRoot {
     ///
     /// ```json
     /// "providers": {
-    ///   "claude": { "type": "anthropic", "model": "claude-sonnet-4-20250514", "api_key": "..." },
-    ///   "gpt":    { "type": "openai",    "model": "gpt-4o" }
+    ///   "claude": { "type": "anthropic", "models": ["claude-sonnet-4-20250514"], "api_key": "..." },
+    ///   "gpt":    { "type": "openai",    "models": ["gpt-4o"] }
     /// }
     /// ```
     providers: Option<std::collections::HashMap<String, JsonProviderConfig>>,
@@ -120,8 +120,9 @@ struct JsonProviderConfig {
     /// Provider type: "anthropic", "openai", "claude-code", "codex".
     #[serde(rename = "type")]
     provider_type: String,
-    /// Model identifier (optional, defaults per provider type).
-    model: Option<String>,
+    /// Available models for this provider.
+    #[serde(default)]
+    models: Vec<String>,
     /// API key — literal string or secret resolver reference.
     api_key: Option<SecretValue>,
     /// Base URL override.
@@ -398,17 +399,19 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                 None => crate::auth::Credential::new(String::new()),
             };
 
-            let model = jp.model.unwrap_or_else(|| {
-                crate::llm::registry::lookup(&provider_type)
+            let models = if jp.models.is_empty() {
+                vec![crate::llm::registry::lookup(&provider_type)
                     .default_model
-                    .into()
-            });
+                    .into()]
+            } else {
+                jp.models
+            };
 
             settings.providers.insert(
                 name,
                 ProviderConfig {
                     provider_type,
-                    model,
+                    models,
                     api_key,
                     base_url: jp.base_url,
                 },
@@ -422,7 +425,7 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
         if let Some(ref provider_name) = agent.provider {
             if let Some(pc) = settings.providers.get(provider_name) {
                 settings.agent.provider = pc.provider_type.clone();
-                settings.agent.model = pc.model.clone();
+                settings.agent.model = pc.default_model().to_string();
                 settings.agent.api_key = pc.api_key.clone();
                 settings.agent.base_url = pc.base_url.clone();
             } else {
@@ -821,7 +824,7 @@ mod tests {
             "providers": {
                 "claude": {
                     "type": "anthropic",
-                    "model": "claude-sonnet-4-20250514",
+                    "models": ["claude-sonnet-4-20250514"],
                     "api_key": "sk-test"
                 }
             },
@@ -915,17 +918,17 @@ mod tests {
             "providers": {
                 "claude": {
                     "type": "anthropic",
-                    "model": "claude-opus-4-20250514",
+                    "models": ["claude-opus-4-20250514"],
                     "api_key": "sk-ant"
                 },
                 "gpt": {
                     "type": "openai",
-                    "model": "gpt-4o",
+                    "models": ["gpt-4o"],
                     "api_key": "sk-oai"
                 },
                 "local": {
                     "type": "openai",
-                    "model": "llama3",
+                    "models": ["llama3"],
                     "base_url": "http://localhost:11434"
                 }
             },
@@ -942,7 +945,7 @@ mod tests {
 
         // All providers in the map.
         assert_eq!(settings.providers.len(), 3);
-        assert_eq!(settings.providers["gpt"].model, "gpt-4o");
+        assert_eq!(settings.providers["gpt"].default_model(), "gpt-4o");
         assert_eq!(settings.providers["local"].base_url.as_deref(), Some("http://localhost:11434"));
     }
 
@@ -952,7 +955,7 @@ mod tests {
             "providers": {
                 "claude": {
                     "type": "anthropic",
-                    "model": "claude-sonnet-4-20250514",
+                    "models": ["claude-sonnet-4-20250514"],
                     "api_key": "sk-test"
                 }
             },
@@ -965,10 +968,10 @@ mod tests {
         let secrets = SecretRegistry::default();
         let settings = build_settings(Some(root), &secrets);
 
-        // Agent-level model overrides provider's model.
+        // Agent-level model overrides provider's default model.
         assert_eq!(settings.agent.model, "claude-opus-4-20250514");
-        // Provider's model is unchanged in the map.
-        assert_eq!(settings.providers["claude"].model, "claude-sonnet-4-20250514");
+        // Provider's models list is unchanged.
+        assert_eq!(settings.providers["claude"].default_model(), "claude-sonnet-4-20250514");
     }
 
     #[test]
@@ -998,7 +1001,7 @@ mod tests {
             "providers": {
                 "evil": {
                     "type": "anthropic",
-                    "model": "claude-sonnet-4-20250514",
+                    "models": ["claude-sonnet-4-20250514"],
                     "base_url": "https://attacker.example.com/v1"
                 }
             },
@@ -1033,7 +1036,7 @@ mod tests {
             "providers": {
                 "claude": {
                     "type": "anthropic",
-                    "model": "claude-sonnet-4-20250514"
+                    "models": ["claude-sonnet-4-20250514"]
                 }
             },
             "agent": { "provider": "claude" }
@@ -1058,7 +1061,7 @@ mod tests {
             "providers": {
                 "proxy": {
                     "type": "anthropic",
-                    "model": "claude-sonnet-4-20250514",
+                    "models": ["claude-sonnet-4-20250514"],
                     "api_key": "sk-explicit-for-proxy",
                     "base_url": "https://my-proxy.example.com/v1"
                 }

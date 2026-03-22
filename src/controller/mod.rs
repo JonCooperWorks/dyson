@@ -209,7 +209,7 @@ pub async fn build_agent_with_provider(
     // Build a modified settings with the new provider's fields.
     let mut switched = settings.clone();
     switched.agent.provider = pc.provider_type.clone();
-    switched.agent.model = pc.model.clone();
+    switched.agent.model = pc.default_model().to_string();
     switched.agent.api_key = pc.api_key.clone();
     switched.agent.base_url = pc.base_url.clone();
 

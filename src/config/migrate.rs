@@ -50,7 +50,7 @@ use serde_json::Value;
 use crate::error::{DysonError, Result};
 
 /// Current config version.  Bump this when adding a new migration.
-pub const CURRENT_VERSION: u64 = 1;
+pub const CURRENT_VERSION: u64 = 2;
 
 // ---------------------------------------------------------------------------
 // Step — a single atomic operation in a migration.
@@ -86,6 +86,16 @@ enum Step {
     /// resolved automatically.
     #[allow(dead_code)]
     BailIf(&'static str, &'static str),
+
+    /// For each child object under `parent_path`, remove `old_key` and
+    /// insert `new_key` with the value wrapped in a JSON array.
+    /// If the value is already an array, it's moved as-is.
+    /// No-op for children that don't have `old_key`.
+    ///
+    /// Example: RenameWrapArray("providers", "model", "models")
+    ///   { "providers": { "a": { "model": "x" } } }
+    ///   → { "providers": { "a": { "models": ["x"] } } }
+    RenameWrapArray(&'static str, &'static str, &'static str),
 }
 
 /// A versioned migration: a description + a list of steps.
@@ -126,6 +136,21 @@ fn migrations() -> &'static [Migration] {
                 Step::Move("agent.base_url", "providers.default.base_url"),
                 // Point agent.provider at the new named entry.
                 Step::SetString("agent.provider", "default"),
+            ],
+        },
+        // v1 → v2: Rename providers.*.model (string) to providers.*.models (array).
+        //
+        // Before: { "providers": { "claude": { "type": "anthropic", "model": "claude-sonnet-4" } } }
+        // After:  { "providers": { "claude": { "type": "anthropic", "models": ["claude-sonnet-4"] } } }
+        //
+        // Also removes agent.model since the model is now selected from the
+        // provider's models list, and agent.model was just a copy of it.
+        Migration {
+            from_version: 1,
+            description: "Rename providers.*.model to providers.*.models (array)",
+            steps: &[
+                Step::RenameWrapArray("providers", "model", "models"),
+                Step::Remove("agent.model"),
             ],
         },
     ]
@@ -219,6 +244,24 @@ fn apply_steps(root: &mut Value, steps: &[Step]) -> Result<()> {
                     return Err(DysonError::Config((*message).into()));
                 }
             }
+            Step::RenameWrapArray(parent_path, old_key, new_key) => {
+                if let Some(parent) = get_path_mut(root, parent_path) {
+                    if let Some(map) = parent.as_object_mut() {
+                        for (_name, child) in map.iter_mut() {
+                            if let Some(obj) = child.as_object_mut() {
+                                if let Some(val) = obj.remove(*old_key) {
+                                    let wrapped = if val.is_array() {
+                                        val
+                                    } else {
+                                        Value::Array(vec![val])
+                                    };
+                                    obj.insert((*new_key).into(), wrapped);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -237,6 +280,19 @@ fn get_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
         current = current.get(key)?;
     }
     // Don't return JSON null — treat it as missing.
+    if current.is_null() {
+        None
+    } else {
+        Some(current)
+    }
+}
+
+/// Get a mutable reference to a value at a dot-separated path.
+fn get_path_mut<'a>(root: &'a mut Value, path: &str) -> Option<&'a mut Value> {
+    let mut current = root;
+    for key in path.split('.') {
+        current = current.get_mut(key)?;
+    }
     if current.is_null() {
         None
     } else {
@@ -348,7 +404,7 @@ mod tests {
         let applied = migrate(&mut root).unwrap();
         assert!(applied);
 
-        // Provider map created.
+        // Provider map created (v1 creates it, v2 converts model → models).
         assert!(root["providers"]["default"].is_object());
         assert_eq!(root["providers"]["default"]["type"], "anthropic");
         assert_eq!(root["providers"]["default"]["api_key"], "sk-test");
@@ -356,17 +412,19 @@ mod tests {
             root["providers"]["default"]["base_url"],
             "https://api.example.com"
         );
+        // v2 migration wraps model in array and renames to models.
         assert_eq!(
-            root["providers"]["default"]["model"],
-            "claude-sonnet-4-20250514"
+            root["providers"]["default"]["models"],
+            json!(["claude-sonnet-4-20250514"])
         );
+        assert!(root["providers"]["default"].get("model").is_none());
 
         // Agent cleaned up — api_key and base_url moved (not copied).
         assert_eq!(root["agent"]["provider"], "default");
         assert!(root["agent"].get("api_key").is_none());
         assert!(root["agent"].get("base_url").is_none());
-        // model stays as agent override (Copy, not Move).
-        assert_eq!(root["agent"]["model"], "claude-sonnet-4-20250514");
+        // v2 migration removes agent.model.
+        assert!(root["agent"].get("model").is_none());
         // Non-provider fields preserved.
         assert_eq!(root["agent"]["max_iterations"], 50);
 
@@ -378,16 +436,18 @@ mod tests {
     fn v0_to_v1_skips_when_providers_exist() {
         let mut root = json!({
             "providers": {
-                "claude": { "type": "anthropic", "api_key": "sk-test" }
+                "claude": { "type": "anthropic", "model": "claude-sonnet-4", "api_key": "sk-test" }
             },
             "agent": { "provider": "claude" }
         });
 
         let applied = migrate(&mut root).unwrap();
-        assert!(applied); // Version was still bumped (0 → 1).
-        // But providers map is unchanged — SkipIf stopped the steps.
+        assert!(applied); // Version was still bumped (0 → 2).
+        // v1 SkipIf stopped the provider-move steps.
         assert!(root["providers"]["claude"].is_object());
         assert!(root["providers"].get("default").is_none());
+        // But v2 still ran — model → models.
+        assert_eq!(root["providers"]["claude"]["models"], json!(["claude-sonnet-4"]));
     }
 
     #[test]
@@ -480,5 +540,333 @@ mod tests {
         apply_steps(&mut root, steps).unwrap();
         assert_eq!(root["a"], "hello");
         assert_eq!(root["b"], "hello");
+    }
+
+    // -- v1 → v2 migration tests --
+
+    #[test]
+    fn v1_to_v2_wraps_model_in_array() {
+        let mut root = json!({
+            "config_version": 1,
+            "providers": {
+                "claude": { "type": "anthropic", "model": "claude-sonnet-4" },
+                "gpt": { "type": "openai", "model": "gpt-4o" }
+            },
+            "agent": { "provider": "claude", "model": "claude-sonnet-4" }
+        });
+
+        let applied = migrate(&mut root).unwrap();
+        assert!(applied);
+
+        // Both providers have models arrays.
+        assert_eq!(root["providers"]["claude"]["models"], json!(["claude-sonnet-4"]));
+        assert_eq!(root["providers"]["gpt"]["models"], json!(["gpt-4o"]));
+
+        // Old model field removed.
+        assert!(root["providers"]["claude"].get("model").is_none());
+        assert!(root["providers"]["gpt"].get("model").is_none());
+
+        // agent.model removed.
+        assert!(root["agent"].get("model").is_none());
+
+        assert_eq!(root["config_version"], CURRENT_VERSION);
+    }
+
+    #[test]
+    fn v1_to_v2_no_model_field_is_fine() {
+        let mut root = json!({
+            "config_version": 1,
+            "providers": {
+                "cc": { "type": "claude-code" }
+            }
+        });
+
+        migrate(&mut root).unwrap();
+
+        // No model → no models field added (it's a no-op).
+        assert!(root["providers"]["cc"].get("models").is_none());
+        assert_eq!(root["config_version"], CURRENT_VERSION);
+    }
+
+    #[test]
+    fn v1_to_v2_already_array_preserved() {
+        let mut root = json!({
+            "config_version": 1,
+            "providers": {
+                "claude": {
+                    "type": "anthropic",
+                    "model": ["claude-sonnet-4", "claude-opus-4"]
+                }
+            }
+        });
+
+        migrate(&mut root).unwrap();
+
+        // Array value moved as-is, not double-wrapped.
+        assert_eq!(
+            root["providers"]["claude"]["models"],
+            json!(["claude-sonnet-4", "claude-opus-4"])
+        );
+    }
+
+    // -- v0 → current (full chain) tests --
+
+    #[test]
+    fn v0_to_current_full_chain() {
+        // Simulates a real v0 config with inline provider fields.
+        // Should pass through v0→v1 (extract providers) then v1→v2 (model→models).
+        let mut root = json!({
+            "agent": {
+                "provider": "anthropic",
+                "model": "claude-sonnet-4-20250514",
+                "api_key": "sk-ant-test",
+                "base_url": "https://api.anthropic.com",
+                "max_iterations": 30,
+                "system_prompt": "You are helpful."
+            }
+        });
+
+        let applied = migrate(&mut root).unwrap();
+        assert!(applied);
+        assert_eq!(root["config_version"], CURRENT_VERSION);
+
+        // v1 created the providers map.
+        assert!(root["providers"]["default"].is_object());
+        assert_eq!(root["providers"]["default"]["type"], "anthropic");
+        assert_eq!(root["providers"]["default"]["api_key"], "sk-ant-test");
+        assert_eq!(root["providers"]["default"]["base_url"], "https://api.anthropic.com");
+
+        // v2 wrapped model into models array.
+        assert_eq!(
+            root["providers"]["default"]["models"],
+            json!(["claude-sonnet-4-20250514"])
+        );
+        assert!(root["providers"]["default"].get("model").is_none());
+
+        // agent.provider points to "default", agent.model removed by v2.
+        assert_eq!(root["agent"]["provider"], "default");
+        assert!(root["agent"].get("model").is_none());
+        assert!(root["agent"].get("api_key").is_none());
+        assert!(root["agent"].get("base_url").is_none());
+
+        // Non-provider agent fields preserved.
+        assert_eq!(root["agent"]["max_iterations"], 30);
+        assert_eq!(root["agent"]["system_prompt"], "You are helpful.");
+    }
+
+    #[test]
+    fn v0_to_current_realistic_multi_provider() {
+        // A v0 config that already has a providers map (manually written).
+        // v0→v1 SkipIf fires, then v1→v2 migrates model→models.
+        let mut root = json!({
+            "providers": {
+                "claude": {
+                    "type": "anthropic",
+                    "model": "claude-sonnet-4-20250514",
+                    "api_key": "sk-ant"
+                },
+                "gpt": {
+                    "type": "openai",
+                    "model": "gpt-4o",
+                    "api_key": { "resolver": "insecure_env", "name": "OPENAI_API_KEY" }
+                },
+                "local": {
+                    "type": "claude-code"
+                }
+            },
+            "agent": {
+                "provider": "claude",
+                "model": "claude-opus-4-20250514"
+            },
+            "controllers": [{ "type": "terminal" }]
+        });
+
+        let applied = migrate(&mut root).unwrap();
+        assert!(applied);
+        assert_eq!(root["config_version"], CURRENT_VERSION);
+
+        // v1 skipped (providers already exists), but v2 ran.
+        assert_eq!(root["providers"]["claude"]["models"], json!(["claude-sonnet-4-20250514"]));
+        assert_eq!(root["providers"]["gpt"]["models"], json!(["gpt-4o"]));
+        // local had no model → no models field.
+        assert!(root["providers"]["local"].get("models").is_none());
+
+        // Secret references preserved through migration.
+        assert_eq!(root["providers"]["gpt"]["api_key"]["resolver"], "insecure_env");
+
+        // agent.model removed by v2.
+        assert!(root["agent"].get("model").is_none());
+        // agent.provider preserved.
+        assert_eq!(root["agent"]["provider"], "claude");
+
+        // Non-provider config preserved.
+        assert_eq!(root["controllers"][0]["type"], "terminal");
+    }
+
+    #[test]
+    fn v1_to_v2_realistic_config() {
+        // A complete v1 config — the format users would have after v0→v1 migration.
+        let mut root = json!({
+            "config_version": 1,
+            "providers": {
+                "default": {
+                    "type": "anthropic",
+                    "model": "claude-sonnet-4-20250514",
+                    "api_key": "sk-ant-test"
+                }
+            },
+            "agent": {
+                "provider": "default",
+                "model": "claude-sonnet-4-20250514",
+                "max_iterations": 20,
+                "max_tokens": 8192,
+                "system_prompt": "You are Dyson."
+            },
+            "skills": { "builtin": { "tools": ["bash"] } },
+            "controllers": [{ "type": "terminal" }],
+            "sandbox": { "disabled": [] },
+            "workspace": { "backend": "openclaw", "connection_string": "~/.dyson" }
+        });
+
+        let applied = migrate(&mut root).unwrap();
+        assert!(applied);
+        assert_eq!(root["config_version"], CURRENT_VERSION);
+
+        // Provider model wrapped.
+        assert_eq!(
+            root["providers"]["default"]["models"],
+            json!(["claude-sonnet-4-20250514"])
+        );
+        assert!(root["providers"]["default"].get("model").is_none());
+
+        // agent.model removed, everything else preserved.
+        assert!(root["agent"].get("model").is_none());
+        assert_eq!(root["agent"]["provider"], "default");
+        assert_eq!(root["agent"]["max_iterations"], 20);
+        assert_eq!(root["agent"]["max_tokens"], 8192);
+        assert_eq!(root["agent"]["system_prompt"], "You are Dyson.");
+
+        // All other top-level sections untouched.
+        assert_eq!(root["skills"]["builtin"]["tools"][0], "bash");
+        assert_eq!(root["controllers"][0]["type"], "terminal");
+        assert_eq!(root["workspace"]["backend"], "openclaw");
+    }
+
+    #[test]
+    fn v0_to_current_dyson_json() {
+        // The actual dyson.json from the project directory.
+        let mut root = json!({
+            "agent": {
+                "provider": "claude-code",
+                "model": "opus",
+                "max_iterations": 20,
+                "max_tokens": 8192
+            },
+            "workspace": {
+                "path": "~/.dyson"
+            },
+            "controllers": [
+                {
+                    "type": "telegram",
+                    "bot_token": "fake-token",
+                    "allowed_chat_ids": ["2102424765"]
+                }
+            ],
+            "skills": {
+                "builtin": { "tools": [] }
+            }
+        });
+
+        let applied = migrate(&mut root).unwrap();
+        assert!(applied);
+        assert_eq!(root["config_version"], CURRENT_VERSION);
+
+        // v1: inline provider extracted into providers.default.
+        assert_eq!(root["providers"]["default"]["type"], "claude-code");
+        assert_eq!(root["agent"]["provider"], "default");
+        assert!(root["agent"].get("api_key").is_none());
+        assert!(root["agent"].get("base_url").is_none());
+
+        // v2: model wrapped into models array, agent.model removed.
+        assert_eq!(root["providers"]["default"]["models"], json!(["opus"]));
+        assert!(root["providers"]["default"].get("model").is_none());
+        assert!(root["agent"].get("model").is_none());
+
+        // Non-provider agent fields preserved.
+        assert_eq!(root["agent"]["max_iterations"], 20);
+        assert_eq!(root["agent"]["max_tokens"], 8192);
+
+        // Other sections untouched.
+        assert_eq!(root["workspace"]["path"], "~/.dyson");
+        assert_eq!(root["controllers"][0]["type"], "telegram");
+        assert_eq!(root["skills"]["builtin"]["tools"], json!([]));
+    }
+
+    #[test]
+    fn v0_to_current_dyson_local_json() {
+        // The actual dyson-local.json from the project directory.
+        let mut root = json!({
+            "agent": {
+                "provider": "openai",
+                "model": "phi-4",
+                "base_url": "http://localhost:8080",
+                "api_key": "not-needed",
+                "max_iterations": 20,
+                "max_tokens": 8192
+            },
+            "workspace": {
+                "path": "~/.dyson"
+            },
+            "controllers": [
+                {
+                    "type": "telegram",
+                    "bot_token": "fake-token",
+                    "allowed_chat_ids": ["2102424765"]
+                }
+            ],
+            "skills": {
+                "builtin": { "tools": [] }
+            }
+        });
+
+        let applied = migrate(&mut root).unwrap();
+        assert!(applied);
+        assert_eq!(root["config_version"], CURRENT_VERSION);
+
+        // v1: inline provider extracted into providers.default.
+        assert_eq!(root["providers"]["default"]["type"], "openai");
+        assert_eq!(root["providers"]["default"]["api_key"], "not-needed");
+        assert_eq!(root["providers"]["default"]["base_url"], "http://localhost:8080");
+
+        // v2: model wrapped into models array, agent.model removed.
+        assert_eq!(root["providers"]["default"]["models"], json!(["phi-4"]));
+        assert!(root["providers"]["default"].get("model").is_none());
+        assert!(root["agent"].get("model").is_none());
+
+        // agent points to "default", inline fields removed.
+        assert_eq!(root["agent"]["provider"], "default");
+        assert!(root["agent"].get("api_key").is_none());
+        assert!(root["agent"].get("base_url").is_none());
+        assert_eq!(root["agent"]["max_iterations"], 20);
+        assert_eq!(root["agent"]["max_tokens"], 8192);
+    }
+
+    #[test]
+    fn step_rename_wrap_array() {
+        let mut root = json!({
+            "items": {
+                "a": { "val": "x" },
+                "b": { "val": "y" },
+                "c": { "other": 1 }
+            }
+        });
+        let steps = &[Step::RenameWrapArray("items", "val", "vals")];
+        apply_steps(&mut root, steps).unwrap();
+
+        assert_eq!(root["items"]["a"]["vals"], json!(["x"]));
+        assert_eq!(root["items"]["b"]["vals"], json!(["y"]));
+        // c had no "val" field — unchanged.
+        assert!(root["items"]["c"].get("vals").is_none());
+        assert_eq!(root["items"]["c"]["other"], 1);
     }
 }

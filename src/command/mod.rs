@@ -58,7 +58,7 @@ pub fn apply_overrides(
         if let Some(pc) = settings.providers.get(&provider_str) {
             // Named provider from config.
             settings.agent.provider = pc.provider_type.clone();
-            settings.agent.model = pc.model.clone();
+            settings.agent.model = pc.default_model().to_string();
             settings.agent.api_key = pc.api_key.clone();
             settings.agent.base_url = pc.base_url.clone();
         } else if let Some(provider_type) = dyson::llm::registry::from_str_loose(&provider_str) {

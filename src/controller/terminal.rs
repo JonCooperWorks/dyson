@@ -126,7 +126,7 @@ impl super::Controller for TerminalController {
                 } else {
                     eprintln!("Available providers:");
                     for (name, pc) in &providers {
-                        eprintln!("  {name} — {:?} ({})", pc.provider_type, pc.model);
+                        eprintln!("  {name} — {:?} ({})", pc.provider_type, pc.models.join(", "));
                     }
                 }
                 continue;
@@ -152,7 +152,7 @@ impl super::Controller for TerminalController {
                             "[switched to '{}' — {:?} ({})]",
                             name,
                             current_settings.providers[name].provider_type,
-                            current_settings.providers[name].model,
+                            current_settings.providers[name].default_model(),
                         );
                     }
                     Err(e) => eprintln!("[switch error: {e}]"),

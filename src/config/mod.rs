@@ -242,7 +242,7 @@ pub enum LlmProvider {
 ///   "providers": {
 ///     "claude": {
 ///       "type": "anthropic",
-///       "model": "claude-sonnet-4-20250514",
+///       "models": ["claude-sonnet-4-20250514", "claude-opus-4-20250514"],
 ///       "api_key": "sk-..."
 ///     }
 ///   }
@@ -252,13 +252,23 @@ pub enum LlmProvider {
 pub struct ProviderConfig {
     /// Provider backend type (anthropic, openai, claude-code, codex).
     pub provider_type: LlmProvider,
-    /// Model identifier (e.g. "claude-sonnet-4-20250514", "gpt-4o").
-    pub model: String,
+    /// Available model identifiers.  The first entry is the default.
+    pub models: Vec<String>,
     /// Resolved API key (empty string for CLI-based providers).
     /// Uses `Credential` to zeroize the key from memory on drop.
     pub api_key: crate::auth::Credential,
     /// Optional base URL override for the provider API.
     pub base_url: Option<String>,
+}
+
+impl ProviderConfig {
+    /// The default model — first entry in the `models` list.
+    ///
+    /// Panics if `models` is empty (should never happen — the loader
+    /// always populates at least one model from registry defaults).
+    pub fn default_model(&self) -> &str {
+        &self.models[0]
+    }
 }
 
 // ---------------------------------------------------------------------------
