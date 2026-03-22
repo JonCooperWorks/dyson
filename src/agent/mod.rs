@@ -262,6 +262,15 @@ impl Agent {
         // Skills contribute context like "You have access to bash..." or
         // "The following MCP tools are available...".
         let mut system_prompt = settings.system_prompt.clone();
+
+        // Inject model/provider info so the model can answer "what model
+        // are you running?" accurately instead of guessing from its
+        // training data or workspace identity files.
+        system_prompt.push_str(&format!(
+            "\n\nYou are running on model '{}' via the {:?} provider.",
+            settings.model, settings.provider,
+        ));
+
         for skill in &skills {
             if let Some(fragment) = skill.system_prompt() {
                 system_prompt.push_str("\n\n");
