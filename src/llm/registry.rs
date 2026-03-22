@@ -26,8 +26,11 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+use crate::auth::Credential;
 use crate::config::LlmProvider;
+use crate::error::{DysonError, Result};
 use crate::llm::LlmClient;
+use crate::secret::{SecretRegistry, SecretValue};
 use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
@@ -71,6 +74,68 @@ pub struct ProviderEntry {
     /// clients use `api_key` and `base_url`; CLI-subprocess clients
     /// use `workspace` and `dangerous_no_sandbox`.
     pub create_client: fn(&ClientConfig) -> Box<dyn LlmClient>,
+}
+
+impl ProviderEntry {
+    /// Resolve an API key for this provider, falling back to its env var.
+    ///
+    /// Encapsulates all provider-aware API key logic so the config loader
+    /// doesn't need to know about individual providers:
+    ///
+    /// 1. If the provider doesn't need an API key → returns `Ok(None)`.
+    /// 2. If `existing_key` is already populated → returns `Ok(None)` (no change).
+    /// 3. If a custom `base_url` is set → blocks env-var fallback (security).
+    /// 4. Otherwise → tries the provider's env var via `SecretRegistry`.
+    ///
+    /// Returns `Ok(Some(credential))` when a key was resolved, `Ok(None)`
+    /// when no action is needed, or `Err` when a key is required but missing.
+    pub fn resolve_api_key(
+        &self,
+        existing_key: &Credential,
+        base_url: &Option<String>,
+        secrets: &SecretRegistry,
+        required: bool,
+    ) -> Result<Option<Credential>> {
+        if !self.requires_api_key {
+            return Ok(None);
+        }
+
+        if !existing_key.is_empty() {
+            return Ok(None);
+        }
+
+        // SECURITY: refuse to inject env-var keys when a custom base_url
+        // is set — the key would be sent to an untrusted endpoint.
+        if base_url.is_some() {
+            if required {
+                return Err(DysonError::Config(format!(
+                    "provider has a custom base_url ({}) but no explicit api_key.  \
+                     For security, environment-variable fallback is disabled when \
+                     base_url is set — the key would be sent to a non-default endpoint.  \
+                     Set the api_key explicitly in the provider config, or remove base_url \
+                     to use the default API endpoint.",
+                    base_url.as_deref().unwrap_or("?"),
+                )));
+            }
+            return Ok(None);
+        }
+
+        let env_var = match self.env_var {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        match secrets.resolve_or_env_fallback(&SecretValue::Literal(String::new()), env_var) {
+            Ok(key) => Ok(Some(key)),
+            Err(e) => {
+                if required {
+                    Err(e)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -55,7 +55,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::config::{
-    BuiltinSkillConfig, ControllerConfig, LlmProvider, LocalSkillConfig,
+    BuiltinSkillConfig, ControllerConfig, LocalSkillConfig,
     McpConfig, McpTransportConfig, ProviderConfig, SandboxConfig, Settings, SkillConfig,
 };
 use crate::error::{DysonError, Result};
@@ -351,7 +351,7 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
     // Parse all named providers first so the agent section can reference them.
     if let Some(providers) = root.providers {
         for (name, jp) in providers {
-            let provider_type = match LlmProvider::from_str_loose(&jp.provider_type) {
+            let provider_type = match crate::llm::registry::from_str_loose(&jp.provider_type) {
                 Some(p) => p,
                 None => {
                     tracing::warn!(
@@ -694,27 +694,9 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
     // Best-effort: resolve keys for all providers in the map.
     for (name, provider) in settings.providers.iter_mut() {
         let entry = crate::llm::registry::lookup(&provider.provider_type);
-        if !entry.requires_api_key {
-            continue;
-        }
-        if !provider.api_key.is_empty() {
-            continue;
-        }
-        // SECURITY: never inject env-var keys into providers with a custom
-        // base_url — the key would be sent to an untrusted endpoint.
-        if provider.base_url.is_some() {
-            tracing::debug!(
-                provider = name.as_str(),
-                "provider has custom base_url without explicit api_key — skipping env-var fallback"
-            );
-            continue;
-        }
-        let env_var = match entry.env_var {
-            Some(v) => v,
-            None => continue,
-        };
-        match secrets.resolve_or_env_fallback(&SecretValue::Literal(String::new()), env_var) {
-            Ok(key) => provider.api_key = key,
+        match entry.resolve_api_key(&provider.api_key, &provider.base_url, secrets, false) {
+            Ok(Some(key)) => provider.api_key = key,
+            Ok(None) => {}
             Err(_) => {
                 tracing::debug!(provider = name.as_str(), "no API key for provider (not active, skipping)");
             }
@@ -723,36 +705,14 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
 
     // Required: resolve the active agent's key.
     let active_entry = crate::llm::registry::lookup(&settings.agent.provider);
-    if !active_entry.requires_api_key {
-        return Ok(());
+    if let Some(key) = active_entry.resolve_api_key(
+        &settings.agent.api_key,
+        &settings.agent.base_url,
+        secrets,
+        true, // required — error if missing
+    )? {
+        settings.agent.api_key = key;
     }
-
-    if !settings.agent.api_key.is_empty() {
-        return Ok(());
-    }
-
-    // SECURITY: refuse to inject env-var keys when a custom base_url is set.
-    // This prevents a malicious config from exfiltrating credentials to an
-    // attacker-controlled endpoint.
-    if settings.agent.base_url.is_some() {
-        return Err(DysonError::Config(format!(
-            "provider has a custom base_url ({}) but no explicit api_key.  \
-             For security, environment-variable fallback is disabled when \
-             base_url is set — the key would be sent to a non-default endpoint.  \
-             Set the api_key explicitly in the provider config, or remove base_url \
-             to use the default API endpoint.",
-            settings.agent.base_url.as_deref().unwrap_or("?"),
-        )));
-    }
-
-    let env_fallback = active_entry
-        .env_var
-        .expect("API-based provider must have env_var in registry");
-
-    settings.agent.api_key = secrets.resolve_or_env_fallback(
-        &SecretValue::Literal(String::new()),
-        env_fallback,
-    )?;
 
     // SECURITY: warn if any provider sends API keys over plain HTTP to a
     // remote host.  Localhost is fine (Ollama, vLLM, etc.), but a remote

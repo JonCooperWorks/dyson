@@ -26,7 +26,7 @@ pub mod run;
 
 use std::path::PathBuf;
 
-use dyson::config::{LlmProvider, Settings};
+use dyson::config::Settings;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -61,7 +61,7 @@ pub fn apply_overrides(
             settings.agent.model = pc.model.clone();
             settings.agent.api_key = pc.api_key.clone();
             settings.agent.base_url = pc.base_url.clone();
-        } else if let Some(provider_type) = LlmProvider::from_str_loose(&provider_str) {
+        } else if let Some(provider_type) = dyson::llm::registry::from_str_loose(&provider_str) {
             // Bare provider type string (e.g. "anthropic").
             settings.agent.provider = provider_type;
         } else {

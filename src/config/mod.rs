@@ -221,16 +221,6 @@ pub enum LlmProvider {
     Codex,
 }
 
-impl LlmProvider {
-    /// Parse a provider type string loosely (case-insensitive, with aliases).
-    ///
-    /// Returns `None` for unrecognized strings.  Delegates to the
-    /// provider registry so aliases are defined in one place.
-    pub fn from_str_loose(s: &str) -> Option<LlmProvider> {
-        crate::llm::registry::from_str_loose(s)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // ProviderConfig — a named provider entry from the "providers" map.
 // ---------------------------------------------------------------------------

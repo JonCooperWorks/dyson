@@ -1,8 +1,7 @@
 # Adding an LLM Provider
 
-How to add a new LLM provider to Dyson.  The provider registry
-(`src/llm/registry.rs`) centralizes all per-provider metadata, so adding
-a new provider is three steps.
+How to add a new LLM provider to Dyson.  All provider knowledge lives in
+`src/llm/` — the config loader doesn't know about individual providers.
 
 ## Steps
 
@@ -20,9 +19,6 @@ pub enum LlmProvider {
     YourProvider,  // ← add here
 }
 ```
-
-The compiler will immediately flag any exhaustive matches you've missed,
-but the registry handles all of them — so this is the only enum change needed.
 
 ### 2. Implement `LlmClient`
 
@@ -45,13 +41,6 @@ impl LlmClient for YourProviderClient {
 
 Add `pub mod your_provider;` to `src/llm/mod.rs`.
 
-**Two implementation patterns exist:**
-
-| Pattern | Examples | Constructor signature |
-|---------|----------|----------------------|
-| **API-based** | Anthropic, OpenAI, OpenRouter | `new(api_key: &str, base_url: Option<&str>)` |
-| **CLI subprocess** | ClaudeCode, Codex | `new(base_url: Option<&str>, workspace: Option<Arc<...>>, dangerous_no_sandbox: bool)` |
-
 If your provider uses an OpenAI-compatible API, wrap `OpenAiClient` like
 `OpenRouterClient` does — override the base URL and add any custom headers.
 
@@ -73,31 +62,30 @@ ProviderEntry {
 },
 ```
 
-That's it.  The registry drives:
+That's it.  Nothing outside `src/llm/` needs to change.
 
-- **String parsing** — `from_str_loose()` matches your aliases
-- **Client creation** — `create_client()` calls your factory
-- **Default model** — used when the user doesn't specify one
-- **API key resolution** — env var fallback in the config loader
-- **Error messages** — `--provider` help text lists all canonical names
+## What the registry handles
 
-## What the registry handles for you
+The `ProviderEntry` is the single source of truth.  The config loader and
+CLI interrogate it generically — they never match on `LlmProvider` variants.
 
-| Concern | Before registry | After registry |
-|---------|----------------|----------------|
-| String aliases | `from_str_loose` match arm | `aliases` field |
-| Default model | `loader.rs` match arm | `default_model` field |
-| Env var name | Two `loader.rs` match arms | `env_var` field |
-| Factory dispatch | `create_client` match arm | `create_client` field |
-| Error message | Hardcoded string | `all_canonical_names()` |
+| Field | What it drives |
+|-------|---------------|
+| `aliases` | Loose string parsing (`--provider openai`, `"type": "gpt"`) |
+| `default_model` | Fallback when user doesn't specify a model |
+| `env_var` | Environment variable for API key fallback |
+| `requires_api_key` | Whether to attempt key resolution at all |
+| `create_client` | Factory function called by the agent loop |
+| `canonical_name` | Display in `--provider` error messages |
+
+The `resolve_api_key()` method on `ProviderEntry` encapsulates the full
+API key resolution flow (env var fallback, custom base_url security check),
+so the config loader calls one method without knowing provider details.
 
 ## Testing
 
 The `registry_covers_all_variants` test ensures every `LlmProvider` variant
-has a corresponding registry entry.  If you add a variant but forget the
-entry, this test fails.
-
-Run the full test suite to verify:
+has a corresponding registry entry.  Run the full suite:
 
 ```bash
 cargo test
@@ -119,15 +107,11 @@ Once registered, your provider works everywhere:
 }
 ```
 
-Or via CLI:
-
 ```bash
+# Via CLI flag
 cargo run -- --provider your-provider --model your-model
-```
 
-Or via env var (if `env_var` is set):
-
-```bash
+# Via env var (if env_var is set in the registry entry)
 export YOUR_PROVIDER_API_KEY="sk-..."
 cargo run -- --provider your-provider
 ```
