@@ -98,6 +98,12 @@ enum Commands {
         /// Directory to initialize.  Default: ~/.dyson
         #[arg(long)]
         path: Option<PathBuf>,
+
+        /// Extra environment variables for the systemd service (KEY=VALUE).
+        /// Repeatable: --env FOO=bar --env BAZ=qux
+        /// Only used with --daemonize.
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env_vars: Vec<String>,
     },
 
     /// Run a single prompt and exit.
@@ -144,8 +150,8 @@ async fn main() -> dyson::error::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { noinput, daemonize, import_openclaw, path } => {
-            command::init::run(noinput, daemonize, import_openclaw, path)
+        Commands::Init { noinput, daemonize, import_openclaw, path, env_vars } => {
+            command::init::run(noinput, daemonize, import_openclaw, path, env_vars)
         }
         Commands::Listen {
             config,
