@@ -618,10 +618,10 @@ impl Output for TelegramOutput {
         Ok(())
     }
 
-    fn tool_use_start(&mut self, _id: &str, _name: &str) -> Result<(), DysonError> {
-        // Don't send tool call notifications to Telegram — they're noisy,
-        // especially with providers like Claude Code that run many internal
-        // tool calls.  The user only needs the final text response.
+    fn tool_use_start(&mut self, _id: &str, name: &str) -> Result<(), DysonError> {
+        // Show tool activity so the user knows the agent is working.
+        self.force_flush_text()?;
+        self.text_buffer.push_str(&format!("[{name}] "));
         Ok(())
     }
 
