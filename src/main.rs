@@ -104,6 +104,11 @@ enum Commands {
         /// Only used with --daemonize.
         #[arg(long = "env", value_name = "KEY=VALUE")]
         env_vars: Vec<String>,
+
+        /// Pass --dangerous-no-sandbox to the systemd service's ExecStart.
+        /// Only used with --daemonize.
+        #[arg(long)]
+        dangerous_no_sandbox: bool,
     },
 
     /// Run a single prompt and exit.
@@ -150,8 +155,8 @@ async fn main() -> dyson::error::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { noinput, daemonize, import_openclaw, path, env_vars } => {
-            command::init::run(noinput, daemonize, import_openclaw, path, env_vars)
+        Commands::Init { noinput, daemonize, import_openclaw, path, env_vars, dangerous_no_sandbox } => {
+            command::init::run(noinput, daemonize, import_openclaw, path, env_vars, dangerous_no_sandbox)
         }
         Commands::Listen {
             config,

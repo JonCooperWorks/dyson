@@ -32,6 +32,7 @@ pub fn run(
     import_openclaw: Option<PathBuf>,
     path: Option<PathBuf>,
     env_vars: Vec<String>,
+    dangerous_no_sandbox: bool,
 ) -> dyson::error::Result<()> {
     let home = std::env::var("HOME")
         .map_err(|_| dyson::error::DysonError::Config("HOME environment variable not set".into()))?;
@@ -103,7 +104,7 @@ pub fn run(
     install_to_path(&base)?;
 
     if daemonize {
-        install_systemd_service(&base, &config_path, &env_vars)?;
+        install_systemd_service(&base, &config_path, &env_vars, dangerous_no_sandbox)?;
     } else {
         eprintln!();
         eprintln!("done. to start:");
@@ -246,7 +247,7 @@ fn install_to_path(base: &Path) -> dyson::error::Result<()> {
 /// Falls back to /etc/systemd/system/dyson.service with sudo if
 /// user services aren't available.
 #[allow(unused_variables)]
-fn install_systemd_service(base: &Path, config_path: &Path, env_vars: &[String]) -> dyson::error::Result<()> {
+fn install_systemd_service(base: &Path, config_path: &Path, env_vars: &[String], dangerous_no_sandbox: bool) -> dyson::error::Result<()> {
     #[cfg(not(target_os = "linux"))]
     {
         eprintln!("--daemonize is only supported on Linux (systemd).");
@@ -264,6 +265,13 @@ fn install_systemd_service(base: &Path, config_path: &Path, env_vars: &[String])
         let user = std::env::var("USER").unwrap_or_else(|_| "root".into());
         let home = std::env::var("HOME").unwrap_or_default();
         let path = std::env::var("PATH").unwrap_or_default();
+
+        // Build extra CLI flags for ExecStart.
+        let extra_listen_args = if dangerous_no_sandbox {
+            " --dangerous-no-sandbox"
+        } else {
+            ""
+        };
 
         // Build extra Environment= lines from --env flags.
         let extra_env: String = env_vars
@@ -284,7 +292,7 @@ fn install_systemd_service(base: &Path, config_path: &Path, env_vars: &[String])
              \n\
              [Service]\n\
              Type=simple\n\
-             ExecStart={dyson_bin} listen --config {config_path}\n\
+             ExecStart={dyson_bin} listen --config {config_path}{extra_listen_args}\n\
              Restart=on-failure\n\
              RestartSec=5\n\
              WorkingDirectory={home}\n\
@@ -355,7 +363,7 @@ fn install_systemd_service(base: &Path, config_path: &Path, env_vars: &[String])
                  [Service]\n\
                  Type=simple\n\
                  User={user}\n\
-                 ExecStart={dyson_bin} listen --config {config_path}\n\
+                 ExecStart={dyson_bin} listen --config {config_path}{extra_listen_args}\n\
                  Restart=on-failure\n\
                  RestartSec=5\n\
                  WorkingDirectory={home}\n\
