@@ -3,6 +3,8 @@ set -euo pipefail
 git pull origin master
 echo "=== Running tests ==="
 cargo test
+echo "=== Building dyson ==="
+cargo build --release
 
 echo "=== Stopping dyson service ==="
 systemctl --user stop dyson 2>/dev/null || true
@@ -10,8 +12,7 @@ systemctl --user disable dyson 2>/dev/null || true
 rm -f ~/.config/systemd/user/dyson.service
 systemctl --user daemon-reload
 
-echo "=== Building dyson ==="
-cargo build --release
+
 
 echo "=== Installing ==="
 # Forward supported flags to dyson init.
