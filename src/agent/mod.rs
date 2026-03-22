@@ -63,6 +63,8 @@ pub mod stream_handler;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::config::AgentSettings;
 use crate::error::{DysonError, Result};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
@@ -286,7 +288,24 @@ impl Agent {
             temperature: None, // use provider default
         };
 
-        let mut tool_context = ToolContext::from_cwd()?;
+        // Use the workspace's programs directory as the working directory
+        // for coding tools.  This gives the agent a dedicated place to create
+        // and manage projects (e.g. ~/.dyson/programs/).  Falls back to the
+        // process CWD when no workspace is configured.
+        let working_dir = workspace
+            .as_ref()
+            .and_then(|ws| {
+                let guard = ws.try_read().ok()?;
+                guard.programs_dir()
+            })
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+        let mut tool_context = ToolContext {
+            working_dir,
+            env: HashMap::new(),
+            cancellation: CancellationToken::new(),
+            workspace: None,
+        };
         tool_context.workspace = workspace;
 
         Ok(Self {

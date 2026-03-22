@@ -123,6 +123,18 @@ pub trait Workspace: Send + Sync {
     fn skill_files(&self) -> Vec<std::path::PathBuf> {
         vec![]
     }
+
+    /// Directory where coding projects are stored.
+    ///
+    /// Coding tools (read_file, write_file, edit_file, etc.) use this as
+    /// their working directory.  The agent can create and manage projects
+    /// within this directory.
+    ///
+    /// Default implementation returns `None` (coding tools fall back to
+    /// the process's current working directory).
+    fn programs_dir(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

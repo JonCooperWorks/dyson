@@ -439,6 +439,15 @@ impl Workspace for OpenClawWorkspace {
         paths.sort();
         paths
     }
+
+    fn programs_dir(&self) -> Option<std::path::PathBuf> {
+        let dir = self.path.join("programs");
+        // Create it if it doesn't exist yet.
+        if !dir.exists() {
+            let _ = std::fs::create_dir_all(&dir);
+        }
+        Some(dir)
+    }
 }
 
 // ---------------------------------------------------------------------------
