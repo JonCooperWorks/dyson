@@ -346,6 +346,11 @@ struct OpenAiSseParser {
     /// Key: tool_calls array index.
     /// Value: (call_id, function_name, accumulated_arguments_string).
     tool_buffers: HashMap<usize, ToolCallBuffer>,
+
+    /// Whether we've already emitted a MessageComplete event.
+    /// Guards against duplicate finish_reason chunks from providers
+    /// like OpenRouter that may send usage data in a separate chunk.
+    completed: bool,
 }
 
 impl OpenAiSseParser {
@@ -353,6 +358,7 @@ impl OpenAiSseParser {
         Self {
             line_buffer: SseLineBuffer::new(),
             tool_buffers: HashMap::new(),
+            completed: false,
         }
     }
 
@@ -492,7 +498,11 @@ impl OpenAiSseParser {
             }
 
             // -- Finish reason --
-            if let Some(reason) = choice["finish_reason"].as_str() {
+            if let Some(reason) = choice["finish_reason"].as_str()
+                && !self.completed
+            {
+                self.completed = true;
+
                 // OpenAI reports usage in a top-level "usage" object on the
                 // final chunk (when stream_options.include_usage is set).
                 let output_tokens = json["usage"]["completion_tokens"]
@@ -674,6 +684,34 @@ mod tests {
         assert_eq!(json["role"], "assistant");
         assert_eq!(json["tool_calls"][0]["id"], "call_1");
         assert_eq!(json["tool_calls"][0]["function"]["name"], "bash");
+    }
+
+    #[test]
+    fn duplicate_finish_reason_emits_single_message_complete() {
+        // OpenRouter and some providers send finish_reason in one chunk,
+        // then a usage-only chunk that also includes finish_reason.
+        // We must only emit one MessageComplete.
+        let mut parser = OpenAiSseParser::new();
+
+        // First chunk: text + finish.
+        let events1 = parser.feed(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n\
+              data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        );
+        let complete_count = events1.iter().filter(|e| {
+            matches!(e, Ok(StreamEvent::MessageComplete { .. }))
+        }).count();
+        assert_eq!(complete_count, 1, "first batch should have exactly one MessageComplete");
+
+        // Second chunk: usage data with finish_reason again.
+        let events2 = parser.feed(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":5}}\n\n\
+              data: [DONE]\n\n"
+        );
+        let complete_count2 = events2.iter().filter(|e| {
+            matches!(e, Ok(StreamEvent::MessageComplete { .. }))
+        }).count();
+        assert_eq!(complete_count2, 0, "duplicate finish_reason should not emit another MessageComplete");
     }
 
     #[test]
