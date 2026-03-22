@@ -92,6 +92,11 @@ pub struct ToolDefinition {
 
     /// JSON Schema for the tool's input parameters.
     pub input_schema: serde_json::Value,
+
+    /// When `true`, this tool is only sent to providers that execute tools
+    /// directly (ToolMode::Execute).  Providers with their own agent loop
+    /// (Claude Code, Codex) will not see this tool.
+    pub agent_only: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -611,6 +616,7 @@ mod tests {
             name: "bash".into(),
             description: "Run commands".into(),
             input_schema: serde_json::json!({"type": "object"}),
+            agent_only: false,
         }];
         let prompt = format_prompt(&messages, &tools);
         assert!(prompt.contains("[Available tools:]"));

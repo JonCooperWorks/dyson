@@ -53,11 +53,16 @@
 // ===========================================================================
 
 pub mod bash;
+pub mod edit_file;
+pub mod list_files;
 pub mod memory_search;
+pub mod read_file;
+pub mod search_files;
 pub mod web_search;
 pub mod workspace_search;
 pub mod workspace_update;
 pub mod workspace_view;
+pub mod write_file;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -126,6 +131,18 @@ pub trait Tool: Send + Sync {
     /// Sent to the LLM as part of the tool definition so it knows what
     /// arguments to provide.  Must be a valid JSON Schema object.
     fn input_schema(&self) -> serde_json::Value;
+
+    /// Whether this tool should only be available when Dyson executes
+    /// tools directly (ToolMode::Execute).
+    ///
+    /// When `true`, the tool is excluded from the prompt sent to providers
+    /// that handle tools internally (Claude Code, Codex) since they already
+    /// have equivalent built-in capabilities.
+    ///
+    /// Defaults to `false` (tool is available to all providers).
+    fn agent_only(&self) -> bool {
+        false
+    }
 
     /// Execute the tool with the given input and context.
     ///
@@ -250,6 +267,61 @@ pub fn validate_workspace_path(path: &str) -> std::result::Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Resolve a user-provided path relative to the working directory and
+/// verify it does not escape the working directory boundary.
+///
+/// Accepts both relative and absolute paths.  For existing files, the path
+/// is canonicalized (resolving symlinks).  For new files (e.g., write_file),
+/// the nearest existing ancestor is canonicalized.
+///
+/// Returns the resolved absolute path on success, or a human-readable
+/// error string on failure.
+pub fn resolve_and_validate_path(
+    working_dir: &std::path::Path,
+    user_path: &str,
+) -> std::result::Result<PathBuf, String> {
+    let candidate = if std::path::Path::new(user_path).is_absolute() {
+        PathBuf::from(user_path)
+    } else {
+        working_dir.join(user_path)
+    };
+
+    let resolved = if candidate.exists() {
+        candidate
+            .canonicalize()
+            .map_err(|e| format!("cannot resolve path '{}': {e}", candidate.display()))?
+    } else {
+        // File does not exist yet — canonicalize the nearest existing ancestor.
+        let mut ancestor = candidate.clone();
+        loop {
+            if !ancestor.pop() {
+                // Reached filesystem root without finding an existing dir.
+                return Err(format!("no existing ancestor for '{user_path}'"));
+            }
+            if ancestor.exists() {
+                let canon = ancestor.canonicalize().map_err(|e| {
+                    format!("cannot resolve ancestor '{}': {e}", ancestor.display())
+                })?;
+                // Re-append the remaining components.
+                let suffix = candidate
+                    .strip_prefix(&ancestor)
+                    .map_err(|e| format!("path error: {e}"))?;
+                break canon.join(suffix);
+            }
+        }
+    };
+
+    let canon_wd = working_dir
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve working directory: {e}"))?;
+
+    if !resolved.starts_with(&canon_wd) {
+        return Err(format!("path escapes working directory: '{user_path}'"));
+    }
+
+    Ok(resolved)
 }
 
 impl ToolOutput {

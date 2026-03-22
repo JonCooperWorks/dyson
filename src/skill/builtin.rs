@@ -27,11 +27,16 @@ use async_trait::async_trait;
 use crate::skill::Skill;
 use crate::tool::Tool;
 use crate::tool::bash::BashTool;
+use crate::tool::edit_file::EditFileTool;
+use crate::tool::list_files::ListFilesTool;
 use crate::tool::memory_search::MemorySearchTool;
+use crate::tool::read_file::ReadFileTool;
+use crate::tool::search_files::SearchFilesTool;
 use crate::tool::web_search;
 use crate::tool::workspace_view::WorkspaceViewTool;
 use crate::tool::workspace_search::WorkspaceSearchTool;
 use crate::tool::workspace_update::WorkspaceUpdateTool;
+use crate::tool::write_file::WriteFileTool;
 
 // ---------------------------------------------------------------------------
 // BuiltinSkill
@@ -70,6 +75,11 @@ impl BuiltinSkill {
     pub fn new(web_search_config: Option<&crate::config::WebSearchConfig>) -> Self {
         let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(BashTool::default()),
+            Arc::new(ReadFileTool),
+            Arc::new(WriteFileTool),
+            Arc::new(EditFileTool),
+            Arc::new(ListFilesTool),
+            Arc::new(SearchFilesTool),
             Arc::new(MemorySearchTool),
             Arc::new(WorkspaceViewTool),
             Arc::new(WorkspaceSearchTool),
@@ -148,12 +158,17 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new(None);
         let tools = skill.tools();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 10);
         assert_eq!(tools[0].name(), "bash");
-        assert_eq!(tools[1].name(), "memory_search");
-        assert_eq!(tools[2].name(), "workspace_view");
-        assert_eq!(tools[3].name(), "workspace_search");
-        assert_eq!(tools[4].name(), "workspace_update");
+        assert_eq!(tools[1].name(), "read_file");
+        assert_eq!(tools[2].name(), "write_file");
+        assert_eq!(tools[3].name(), "edit_file");
+        assert_eq!(tools[4].name(), "list_files");
+        assert_eq!(tools[5].name(), "search_files");
+        assert_eq!(tools[6].name(), "memory_search");
+        assert_eq!(tools[7].name(), "workspace_view");
+        assert_eq!(tools[8].name(), "workspace_search");
+        assert_eq!(tools[9].name(), "workspace_update");
     }
 
     #[test]

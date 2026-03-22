@@ -243,6 +243,7 @@ impl Agent {
                     name: name.clone(),
                     description: tool.description().to_string(),
                     input_schema: tool.input_schema(),
+                    agent_only: tool.agent_only(),
                 });
 
                 tools.insert(name.clone(), Arc::clone(tool));

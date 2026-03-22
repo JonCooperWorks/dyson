@@ -211,7 +211,10 @@ impl LlmClient for CodexClient {
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
         // Format conversation history into a single prompt string.
-        let prompt = super::format_prompt(messages, tools);
+        // Filter out agent-only tools — Codex has its own built-in
+        // equivalents for file operations and search.
+        let filtered_tools: Vec<_> = tools.iter().filter(|t| !t.agent_only).cloned().collect();
+        let prompt = super::format_prompt(messages, &filtered_tools);
 
         tracing::debug!(
             model = config.model,

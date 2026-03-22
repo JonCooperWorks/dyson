@@ -340,7 +340,10 @@ impl LlmClient for ClaudeCodeClient {
         //
         // For single-turn conversations (most common), this is just the
         // user's message.  For multi-turn, we include the full history.
-        let prompt = super::format_prompt(messages, tools);
+        // Filter out agent-only tools — Claude Code has its own built-in
+        // equivalents (Read, Write, Edit, Grep, Glob, etc.).
+        let filtered_tools: Vec<_> = tools.iter().filter(|t| !t.agent_only).cloned().collect();
+        let prompt = super::format_prompt(messages, &filtered_tools);
 
         tracing::debug!(
             model = config.model,
