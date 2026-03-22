@@ -85,6 +85,12 @@ pub struct Settings {
     /// Chat history configuration (backend + connection string).
     pub chat_history: ChatHistoryConfig,
 
+    /// Web search configuration (provider + API key).
+    ///
+    /// When present, the `web_search` built-in tool is registered.
+    /// When `None`, the tool is simply absent.
+    pub web_search: Option<WebSearchConfig>,
+
     /// Whether `--dangerous-no-sandbox` was passed on the CLI.
     ///
     /// This is the ONLY way to disable all sandboxes.  It cannot be set
@@ -418,6 +424,35 @@ impl Default for ChatHistoryConfig {
 }
 
 // ---------------------------------------------------------------------------
+// WebSearchConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for the web search tool.
+///
+/// When present in settings, the `web_search` built-in tool is registered
+/// with the configured search provider.  When absent, the tool doesn't exist.
+///
+/// ```json
+/// {
+///   "web_search": {
+///     "provider": "brave",
+///     "api_key": { "resolver": "insecure_env", "name": "BRAVE_API_KEY" }
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct WebSearchConfig {
+    /// Search provider: "brave" (default).  Future: "tavily", "searxng".
+    pub provider: String,
+
+    /// API key for the search provider.  Resolved via secret system.
+    pub api_key: crate::auth::Credential,
+
+    /// Optional base URL override (e.g. for self-hosted SearXNG).
+    pub base_url: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
 
@@ -449,6 +484,7 @@ impl Default for Settings {
             sandbox: SandboxConfig::default(),
             workspace: WorkspaceConfig::default(),
             chat_history: ChatHistoryConfig::default(),
+            web_search: None,
             dangerous_no_sandbox: false,
         }
     }

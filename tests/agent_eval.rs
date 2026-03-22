@@ -234,7 +234,7 @@ fn default_settings() -> AgentSettings {
 }
 
 fn builtin_skills() -> Vec<Box<dyn Skill>> {
-    vec![Box::new(BuiltinSkill::new())]
+    vec![Box::new(BuiltinSkill::new(None))]
 }
 
 fn tool_call_events(id: &str, name: &str, input: serde_json::Value) -> Vec<StreamEvent> {

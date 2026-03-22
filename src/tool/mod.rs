@@ -54,6 +54,7 @@
 
 pub mod bash;
 pub mod memory_search;
+pub mod web_search;
 pub mod workspace_search;
 pub mod workspace_update;
 pub mod workspace_view;

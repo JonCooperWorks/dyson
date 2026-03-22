@@ -165,12 +165,11 @@ impl HotReloader {
             }
 
             // Check if a pending change has settled.
-            if let Some(ref pending) = self.pending_change {
-                if pending.detected_at.elapsed() >= DEBOUNCE_DURATION {
+            if let Some(ref pending) = self.pending_change
+                && pending.detected_at.elapsed() >= DEBOUNCE_DURATION {
                     // Debounce complete — commit the change.
                     return self.commit_reload(&current_mtimes);
                 }
-            }
 
             return Ok((false, None));
         }
@@ -233,8 +232,8 @@ impl HotReloader {
 
         // If the config file specifically changed, reload settings.
         let mut new_settings = None;
-        if let Some(ref config_path) = self.config_path {
-            if config_path.exists() {
+        if let Some(ref config_path) = self.config_path
+            && config_path.exists() {
                 match crate::config::loader::load_settings(Some(config_path)) {
                     Ok(s) => new_settings = Some(s),
                     Err(e) => {
@@ -242,7 +241,6 @@ impl HotReloader {
                     }
                 }
             }
-        }
 
         Ok((true, new_settings))
     }

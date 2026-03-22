@@ -591,8 +591,8 @@ impl Agent {
     /// Errors are logged but don't interrupt the agent loop — after_tool
     /// is observational, not control flow.
     async fn notify_after_tool(&self, tool_name: &str, output: &ToolOutput) {
-        if let Some(&skill_idx) = self.tool_to_skill.get(tool_name) {
-            if let Err(e) = self.skills[skill_idx].after_tool(tool_name, output).await {
+        if let Some(&skill_idx) = self.tool_to_skill.get(tool_name)
+            && let Err(e) = self.skills[skill_idx].after_tool(tool_name, output).await {
                 tracing::warn!(
                     skill = self.skills[skill_idx].name(),
                     tool = tool_name,
@@ -600,7 +600,6 @@ impl Agent {
                     "skill after_tool hook failed"
                 );
             }
-        }
     }
 
     /// Execute a single tool call, routing through the sandbox.
@@ -793,7 +792,7 @@ mod tests {
             ..Default::default()
         };
 
-        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new())];
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
@@ -839,7 +838,7 @@ mod tests {
             ..Default::default()
         };
 
-        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new())];
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
@@ -879,7 +878,7 @@ mod tests {
             ..Default::default()
         };
 
-        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new())];
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
@@ -1032,7 +1031,7 @@ mod tests {
             ..Default::default()
         };
 
-        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new())];
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         agent.token_budget.max_output_tokens = Some(150);

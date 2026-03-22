@@ -92,6 +92,26 @@ struct JsonRoot {
     /// }
     /// ```
     mcp_servers: Option<serde_json::Value>,
+    /// Web search provider configuration.
+    web_search: Option<JsonWebSearch>,
+}
+
+/// The `"web_search"` object.
+///
+/// ```json
+/// "web_search": {
+///   "provider": "brave",
+///   "api_key": { "resolver": "insecure_env", "name": "BRAVE_API_KEY" }
+/// }
+/// ```
+#[derive(Debug, Deserialize)]
+struct JsonWebSearch {
+    /// Search provider: "brave" (default).
+    provider: Option<String>,
+    /// API key for the search provider.  Supports secret resolution.
+    api_key: Option<SecretValue>,
+    /// Optional base URL override (e.g. for self-hosted SearXNG).
+    base_url: Option<String>,
 }
 
 /// A single provider entry in the `"providers"` map.
@@ -585,6 +605,29 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
             && let Ok(resolved) = secrets.resolve(cs)
         {
             settings.chat_history.connection_string = resolved;
+        }
+    }
+
+    // -- Web search --
+    if let Some(ws) = root.web_search {
+        // Only create the config if there's something useful (api_key or base_url).
+        let api_key = match ws.api_key {
+            Some(ref sv) => match secrets.resolve(sv) {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to resolve web_search api_key — skipping");
+                    crate::auth::Credential::new(String::new())
+                }
+            },
+            None => crate::auth::Credential::new(String::new()),
+        };
+
+        if !api_key.is_empty() || ws.base_url.is_some() {
+            settings.web_search = Some(crate::config::WebSearchConfig {
+                provider: ws.provider.unwrap_or_else(|| "brave".into()),
+                api_key,
+                base_url: ws.base_url,
+            });
         }
     }
 

@@ -28,6 +28,7 @@ use crate::skill::Skill;
 use crate::tool::Tool;
 use crate::tool::bash::BashTool;
 use crate::tool::memory_search::MemorySearchTool;
+use crate::tool::web_search;
 use crate::tool::workspace_view::WorkspaceViewTool;
 use crate::tool::workspace_search::WorkspaceSearchTool;
 use crate::tool::workspace_update::WorkspaceUpdateTool;
@@ -62,14 +63,32 @@ pub struct BuiltinSkill {
 
 impl BuiltinSkill {
     /// Create a new BuiltinSkill with all default tools.
-    pub fn new() -> Self {
-        let tools: Vec<Arc<dyn Tool>> = vec![
+    ///
+    /// When `web_search_config` is `Some`, the `web_search` tool is
+    /// registered with the configured search provider.  When `None`,
+    /// the tool is simply absent.
+    pub fn new(web_search_config: Option<&crate::config::WebSearchConfig>) -> Self {
+        let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(BashTool::default()),
             Arc::new(MemorySearchTool),
             Arc::new(WorkspaceViewTool),
             Arc::new(WorkspaceSearchTool),
             Arc::new(WorkspaceUpdateTool),
         ];
+
+        if let Some(ws_cfg) = web_search_config {
+            match web_search::create_provider(ws_cfg) {
+                Ok(provider) => {
+                    tools.push(Arc::new(web_search::WebSearchTool::new(provider)));
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "failed to create search provider — skipping web_search tool"
+                    );
+                }
+            }
+        }
 
         // Build the system prompt dynamically from the loaded tools.
         let tool_list: Vec<String> = tools
@@ -94,7 +113,7 @@ impl BuiltinSkill {
 
 impl Default for BuiltinSkill {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
@@ -127,7 +146,7 @@ mod tests {
 
     #[test]
     fn has_builtin_tools() {
-        let skill = BuiltinSkill::new();
+        let skill = BuiltinSkill::new(None);
         let tools = skill.tools();
         assert_eq!(tools.len(), 5);
         assert_eq!(tools[0].name(), "bash");
@@ -139,7 +158,7 @@ mod tests {
 
     #[test]
     fn has_system_prompt() {
-        let skill = BuiltinSkill::new();
+        let skill = BuiltinSkill::new(None);
         let prompt = skill.system_prompt().unwrap();
         assert!(prompt.contains("bash"));
         assert!(!prompt.is_empty());
@@ -147,7 +166,7 @@ mod tests {
 
     #[test]
     fn skill_name() {
-        let skill = BuiltinSkill::new();
+        let skill = BuiltinSkill::new(None);
         assert_eq!(skill.name(), "builtin");
     }
 }
