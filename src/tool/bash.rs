@@ -213,6 +213,7 @@ impl Tool for BashTool {
                         "stdout_bytes": output.stdout.len(),
                         "stderr_bytes": output.stderr.len(),
                     })),
+                    files: Vec::new(),
                 })
             }
 

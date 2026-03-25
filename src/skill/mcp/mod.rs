@@ -337,6 +337,7 @@ impl Tool for McpRemoteTool {
             content,
             is_error: tool_result.is_error,
             metadata: None,
+            files: Vec::new(),
         })
     }
 }

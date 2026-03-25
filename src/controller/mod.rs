@@ -70,6 +70,8 @@
 pub mod telegram;
 pub mod terminal;
 
+use std::path::Path;
+
 use crate::config::Settings;
 use crate::error::DysonError;
 use crate::tool::ToolOutput;
@@ -271,6 +273,17 @@ pub trait Output: Send {
 
     /// A tool has finished executing.
     fn tool_result(&mut self, output: &ToolOutput) -> std::result::Result<(), DysonError>;
+
+    /// Send a file to the user.
+    ///
+    /// Called by the agent loop when a tool attaches files to its output.
+    /// The file is delivered as a side-channel to the user — it does not
+    /// appear in the LLM's conversation history.
+    ///
+    /// Controllers implement this differently:
+    /// - Terminal: prints the file path
+    /// - Telegram: sends the file as a document via `sendDocument`
+    fn send_file(&mut self, path: &Path) -> std::result::Result<(), DysonError>;
 
     /// An error occurred.
     fn error(&mut self, error: &DysonError) -> std::result::Result<(), DysonError>;
