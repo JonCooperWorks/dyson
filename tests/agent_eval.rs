@@ -212,6 +212,10 @@ impl Output for MockOutput {
         Ok(())
     }
 
+    fn send_file(&mut self, _: &std::path::Path) -> Result<()> {
+        Ok(())
+    }
+
     fn error(&mut self, e: &DysonError) -> Result<()> {
         self.errors.push(e.to_string());
         Ok(())

@@ -38,11 +38,12 @@
 // ===========================================================================
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, MessageId, ParseMode};
+use teloxide::types::{ChatId, InputFile, MessageId, ParseMode};
 use tokio::sync::Mutex;
 
 use serde::Deserialize;
@@ -200,7 +201,9 @@ impl super::Controller for TelegramController {
             "You are responding via Telegram. Keep these rules:\n\
              - Keep responses concise. Telegram messages have a 4096 character limit.\n\
              - Use line breaks for readability.\n\
-             - Markdown formatting is fine — it will be converted automatically."
+             - Markdown formatting is fine — it will be converted automatically.\n\
+             - You can send files to the user. When a tool produces a file, it will \
+             be delivered as a Telegram document automatically."
         )
     }
 
@@ -650,6 +653,24 @@ impl Output for TelegramOutput {
 
     fn tool_result(&mut self, _output: &ToolOutput) -> Result<(), DysonError> {
         Ok(())
+    }
+
+    fn send_file(&mut self, path: &Path) -> Result<(), DysonError> {
+        let bot = self.bot.clone();
+        let chat_id = self.chat_id;
+        let input_file = InputFile::file(path);
+
+        let result = self.block_on(async {
+            bot.send_document(chat_id, input_file).await
+        });
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::error!(error = %e, path = %path.display(), "failed to send file via Telegram");
+                Err(DysonError::Llm(format!("Telegram send_document failed: {e}")))
+            }
+        }
     }
 
     fn error(&mut self, error: &DysonError) -> Result<(), DysonError> {

@@ -30,6 +30,7 @@
 // ===========================================================================
 
 use std::io::Write;
+use std::path::Path;
 
 use crate::config::Settings;
 use crate::controller::Output;
@@ -218,6 +219,12 @@ impl Output for TerminalOutput {
         }
         writeln!(self.stdout, "{}", output.content)?;
         writeln!(self.stdout, "---")?;
+        self.stdout.flush()?;
+        Ok(())
+    }
+
+    fn send_file(&mut self, path: &Path) -> Result<(), DysonError> {
+        writeln!(self.stdout, "[File: {}]", path.display())?;
         self.stdout.flush()?;
         Ok(())
     }

@@ -251,6 +251,9 @@ mod tests {
         fn tool_result(&mut self, _: &crate::tool::ToolOutput) -> Result<()> {
             Ok(())
         }
+        fn send_file(&mut self, _: &std::path::Path) -> Result<()> {
+            Ok(())
+        }
         fn error(&mut self, _: &DysonError) -> Result<()> {
             Ok(())
         }

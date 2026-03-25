@@ -241,6 +241,15 @@ pub struct ToolOutput {
     /// Used for internal tracking: timing info, exit codes, byte counts,
     /// etc.  Skills can inspect this in their `after_tool()` hook.
     pub metadata: Option<serde_json::Value>,
+
+    /// Files to send to the user via the controller.
+    ///
+    /// Tools can attach file paths here and the controller's `Output`
+    /// implementation will deliver them (e.g., Telegram sends them as
+    /// documents, the terminal prints the path).  The files are sent
+    /// *after* the text content — they are not included in the LLM's
+    /// conversation history.
+    pub files: Vec<PathBuf>,
 }
 
 /// Validate a workspace file path to prevent path traversal.
@@ -331,6 +340,7 @@ impl ToolOutput {
             content: content.into(),
             is_error: false,
             metadata: None,
+            files: Vec::new(),
         }
     }
 
@@ -340,6 +350,82 @@ impl ToolOutput {
             content: content.into(),
             is_error: true,
             metadata: None,
+            files: Vec::new(),
         }
+    }
+
+    /// Attach a file to be sent to the user via the controller.
+    ///
+    /// The file is delivered after the text content.  It does not appear
+    /// in the LLM's conversation history — it is a side-channel to the
+    /// user only.
+    pub fn with_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.files.push(path.into());
+        self
+    }
+
+    /// Attach multiple files to be sent to the user.
+    pub fn with_files(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
+        self.files.extend(paths.into_iter().map(Into::into));
+        self
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn success_has_no_files() {
+        let output = ToolOutput::success("hello");
+        assert_eq!(output.content, "hello");
+        assert!(!output.is_error);
+        assert!(output.files.is_empty());
+    }
+
+    #[test]
+    fn error_has_no_files() {
+        let output = ToolOutput::error("oops");
+        assert_eq!(output.content, "oops");
+        assert!(output.is_error);
+        assert!(output.files.is_empty());
+    }
+
+    #[test]
+    fn with_file_attaches_single_file() {
+        let output = ToolOutput::success("done")
+            .with_file("/tmp/report.pdf");
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0], PathBuf::from("/tmp/report.pdf"));
+    }
+
+    #[test]
+    fn with_file_chains() {
+        let output = ToolOutput::success("done")
+            .with_file("/tmp/a.txt")
+            .with_file("/tmp/b.txt");
+        assert_eq!(output.files.len(), 2);
+        assert_eq!(output.files[0], PathBuf::from("/tmp/a.txt"));
+        assert_eq!(output.files[1], PathBuf::from("/tmp/b.txt"));
+    }
+
+    #[test]
+    fn with_files_attaches_multiple() {
+        let paths = vec!["/tmp/a.txt", "/tmp/b.txt", "/tmp/c.txt"];
+        let output = ToolOutput::success("done").with_files(paths);
+        assert_eq!(output.files.len(), 3);
+        assert_eq!(output.files[2], PathBuf::from("/tmp/c.txt"));
+    }
+
+    #[test]
+    fn with_file_on_error_output() {
+        let output = ToolOutput::error("failed but here's a log")
+            .with_file("/tmp/debug.log");
+        assert!(output.is_error);
+        assert_eq!(output.files.len(), 1);
     }
 }

@@ -520,6 +520,18 @@ impl Agent {
                 let tool_result_msg = match result {
                     Ok(ref tool_output) => {
                         output.tool_result(tool_output)?;
+
+                        // Send any attached files to the user via the controller.
+                        for file_path in &tool_output.files {
+                            if let Err(e) = output.send_file(file_path) {
+                                tracing::warn!(
+                                    path = %file_path.display(),
+                                    error = %e,
+                                    "failed to send file"
+                                );
+                            }
+                        }
+
                         Message::tool_result(&call.id, &tool_output.content, tool_output.is_error)
                     }
                     Err(ref e) => Message::tool_result(&call.id, &e.to_string(), true),
@@ -773,11 +785,15 @@ mod tests {
 
     struct MockOutput {
         text: String,
+        sent_files: Vec<std::path::PathBuf>,
     }
 
     impl MockOutput {
         fn new() -> Self {
-            Self { text: String::new() }
+            Self {
+                text: String::new(),
+                sent_files: Vec::new(),
+            }
         }
     }
 
@@ -789,6 +805,10 @@ mod tests {
         fn tool_use_start(&mut self, _: &str, _: &str) -> Result<()> { Ok(()) }
         fn tool_use_complete(&mut self) -> Result<()> { Ok(()) }
         fn tool_result(&mut self, _: &ToolOutput) -> Result<()> { Ok(()) }
+        fn send_file(&mut self, path: &std::path::Path) -> Result<()> {
+            self.sent_files.push(path.to_path_buf());
+            Ok(())
+        }
         fn error(&mut self, _: &DysonError) -> Result<()> { Ok(()) }
         fn flush(&mut self) -> Result<()> { Ok(()) }
     }
@@ -1093,6 +1113,146 @@ mod tests {
     // -------------------------------------------------------------------
     // ToolMode enum
     // -------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // File sending tests
+    // -----------------------------------------------------------------------
+
+    /// A mock tool that returns a ToolOutput with attached files.
+    struct MockFileTool;
+
+    #[async_trait::async_trait]
+    impl crate::tool::Tool for MockFileTool {
+        fn name(&self) -> &str { "send_test_file" }
+        fn description(&self) -> &str { "Returns a file" }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+            })
+        }
+        async fn run(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &crate::tool::ToolContext,
+        ) -> Result<ToolOutput> {
+            Ok(ToolOutput::success("Here is your file.")
+                .with_file("/tmp/test_report.pdf")
+                .with_file("/tmp/data.csv"))
+        }
+    }
+
+    /// A skill that provides only the MockFileTool.
+    struct MockFileSkill {
+        tools: Vec<Arc<dyn crate::tool::Tool>>,
+    }
+
+    impl MockFileSkill {
+        fn new() -> Self {
+            Self {
+                tools: vec![Arc::new(MockFileTool)],
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Skill for MockFileSkill {
+        fn name(&self) -> &str { "mock_file_skill" }
+        fn tools(&self) -> &[Arc<dyn crate::tool::Tool>] {
+            &self.tools
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_output_files_dispatched_via_send_file() {
+        // LLM calls send_test_file, then responds with text.
+        let llm = MockLlm::new(vec![
+            vec![
+                StreamEvent::ToolUseStart {
+                    id: "call_f1".into(),
+                    name: "send_test_file".into(),
+                },
+                StreamEvent::ToolUseComplete {
+                    id: "call_f1".into(),
+                    name: "send_test_file".into(),
+                    input: serde_json::json!({}),
+                },
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::ToolUse,
+                    output_tokens: None,
+                },
+            ],
+            vec![
+                StreamEvent::TextDelta("Files sent.".into()),
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: None,
+                },
+            ],
+        ]);
+
+        let settings = AgentSettings {
+            api_key: "test".into(),
+            ..Default::default()
+        };
+
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(MockFileSkill::new())];
+        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
+        let mut output = MockOutput::new();
+
+        let result = agent.run("send me a file", &mut output).await.unwrap();
+        assert_eq!(result, "Files sent.");
+
+        // Verify that send_file was called for both attached files.
+        assert_eq!(output.sent_files.len(), 2);
+        assert_eq!(output.sent_files[0], std::path::PathBuf::from("/tmp/test_report.pdf"));
+        assert_eq!(output.sent_files[1], std::path::PathBuf::from("/tmp/data.csv"));
+    }
+
+    #[tokio::test]
+    async fn tool_output_no_files_means_no_send_file() {
+        // Normal tool call without files — send_file should not be called.
+        let llm = MockLlm::new(vec![
+            vec![
+                StreamEvent::ToolUseStart {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                },
+                StreamEvent::ToolUseComplete {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "echo hello"}),
+                },
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::ToolUse,
+                    output_tokens: None,
+                },
+            ],
+            vec![
+                StreamEvent::TextDelta("Done.".into()),
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: None,
+                },
+            ],
+        ]);
+
+        let settings = AgentSettings {
+            api_key: "test".into(),
+            ..Default::default()
+        };
+
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
+        let mut output = MockOutput::new();
+
+        agent.run("echo hello", &mut output).await.unwrap();
+
+        // No files should have been sent.
+        assert!(output.sent_files.is_empty());
+    }
 
     #[test]
     fn tool_mode_execute_vs_observe() {
