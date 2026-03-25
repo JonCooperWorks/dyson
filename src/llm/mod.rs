@@ -326,14 +326,18 @@ pub(crate) fn finalize_tool_call(buf: ToolCallBuffer) -> Result<StreamEvent> {
 /// This struct extracts that shared concern so each provider's parser
 /// only implements the provider-specific JSON → StreamEvent mapping.
 pub(crate) struct SseLineBuffer {
-    /// Buffer for incomplete lines (bytes received but no newline yet).
-    buffer: String,
+    /// Buffer for incomplete lines (raw bytes received but no newline yet).
+    ///
+    /// We store raw bytes instead of `String` so that multi-byte UTF-8
+    /// characters split across chunk boundaries are preserved correctly.
+    /// Decoding to UTF-8 happens only when a complete line is extracted.
+    buffer: Vec<u8>,
 }
 
 impl SseLineBuffer {
     pub fn new() -> Self {
         Self {
-            buffer: String::new(),
+            buffer: Vec::new(),
         }
     }
 
@@ -343,18 +347,19 @@ impl SseLineBuffer {
     /// and the `[DONE]` sentinel.  Returns `Err` if the buffer exceeds
     /// `MAX_LINE_BUFFER`.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<String>> {
-        let incoming = String::from_utf8_lossy(bytes);
-        if self.buffer.len() + incoming.len() > MAX_LINE_BUFFER {
+        if self.buffer.len() + bytes.len() > MAX_LINE_BUFFER {
             return Err(crate::error::DysonError::Llm(
                 "SSE line buffer exceeded 10 MB — aborting stream".into(),
             ));
         }
-        self.buffer.push_str(&incoming);
+        self.buffer.extend_from_slice(bytes);
 
         let mut payloads = Vec::new();
 
-        while let Some(newline_pos) = self.buffer.find('\n') {
-            let line: String = self.buffer.drain(..=newline_pos).collect();
+        while let Some(newline_pos) = self.buffer.iter().position(|&b| b == b'\n') {
+            // Drain the line including the newline byte.
+            let line_bytes: Vec<u8> = self.buffer.drain(..=newline_pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes);
             let line = line.trim();
 
             // Skip empty lines, comments, and event: lines.
@@ -667,6 +672,33 @@ mod tests {
         let payloads = buf.feed(b"data: [DONE]\n\n").unwrap();
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0], "[DONE]");
+    }
+
+    #[test]
+    fn sse_line_buffer_preserves_multibyte_utf8_across_chunks() {
+        let mut buf = SseLineBuffer::new();
+
+        // "├──" is three box-drawing characters, each 3 bytes in UTF-8.
+        // U+251C (├) = E2 94 9C, U+2500 (─) = E2 94 80
+        // Split the data line so the chunk boundary falls mid-character.
+        let full = "data: {\"text\":\"├──\"}\n";
+        let bytes = full.as_bytes();
+
+        // Split at byte 17: bytes 15-17 are E2 94 9C (├).
+        // split_at(17) puts [..17] (ending with 0x94) in chunk1, and
+        // [17..] (starting with 0x9C) in chunk2, splitting mid-character.
+        let (chunk1, chunk2) = bytes.split_at(17);
+        assert!(
+            chunk1.last().copied() == Some(0x94),
+            "sanity: split should land mid-character"
+        );
+
+        let p1 = buf.feed(chunk1).unwrap();
+        assert!(p1.is_empty(), "first chunk has no complete line");
+
+        let p2 = buf.feed(chunk2).unwrap();
+        assert_eq!(p2.len(), 1);
+        assert_eq!(p2[0], "{\"text\":\"├──\"}");
     }
 
     #[test]
