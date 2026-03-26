@@ -335,7 +335,8 @@ async fn sandbox_redirect_routes_to_different_tool() {
 #[tokio::test]
 async fn agent_stops_at_max_iterations() {
     // Create an LLM that always calls tools (never stops on its own).
-    // With max_iterations=3, the agent should make exactly 3 LLM calls.
+    // With max_iterations=3, the agent should make exactly 3 LLM calls,
+    // then a 4th summary call (no tools) to wrap up gracefully.
     let mut responses = Vec::new();
     for i in 0..3 {
         responses.push(tool_call_events(
@@ -344,6 +345,8 @@ async fn agent_stops_at_max_iterations() {
             serde_json::json!({"command": "echo loop"}),
         ));
     }
+    // The summary call that fires after max iterations is reached.
+    responses.push(text_response_events("Here is a summary of progress."));
 
     let llm = MockLlm::new(responses);
     let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
@@ -354,12 +357,12 @@ async fn agent_stops_at_max_iterations() {
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &settings, None, 0).unwrap();
     let mut output = MockOutput::new();
 
-    let _result = agent.run("loop forever", &mut output).await.unwrap();
+    let result = agent.run("loop forever", &mut output).await.unwrap();
 
-    // Should have hit the max iterations warning.
+    // The summary text should be returned as the final result.
     assert!(
-        output.errors.iter().any(|e| e.contains("maximum iterations")),
-        "agent should warn about hitting max iterations"
+        result.contains("summary of progress"),
+        "agent should return a summary after hitting max iterations, got: {result}"
     );
 }
 
