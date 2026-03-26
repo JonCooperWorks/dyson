@@ -120,6 +120,21 @@ impl super::Controller for TerminalController {
                 break;
             }
 
+            if input == "/clear" {
+                agent.clear();
+                eprintln!("[context cleared]");
+                continue;
+            }
+
+            if input == "/compact" {
+                eprintln!("[compacting context...]");
+                match agent.compact(&mut output).await {
+                    Ok(()) => eprintln!("[context compacted]"),
+                    Err(e) => eprintln!("[compaction failed: {e}]"),
+                }
+                continue;
+            }
+
             if input == "/models" {
                 let providers = super::list_providers(&current_settings);
                 if providers.is_empty() {

@@ -204,6 +204,11 @@ pub struct Agent {
 
     /// Token usage tracking and optional budget enforcement.
     pub token_budget: TokenBudget,
+
+    /// Input token threshold for automatic context compaction.
+    /// When `input_tokens_used` exceeds this after an LLM call,
+    /// the agent compacts the conversation before the next call.
+    compaction_threshold: Option<usize>,
 }
 
 impl Agent {
@@ -324,6 +329,7 @@ impl Agent {
             turn_count: 0,
             nudge_interval,
             token_budget: TokenBudget::default(),
+            compaction_threshold: settings.compaction_threshold,
         })
     }
 
@@ -345,6 +351,104 @@ impl Agent {
     ///    history.
     pub fn clear(&mut self) {
         self.messages.clear();
+    }
+
+    /// Compact the conversation by summarising it and replacing the history.
+    ///
+    /// This is the core context-compaction primitive:
+    ///
+    /// 1. Send the full message history to the LLM with a summarisation
+    ///    prompt (no tools, so the model can only respond with text).
+    /// 2. Replace the entire message history with a single user message
+    ///    containing the summary, prefixed with `[Context Summary]`.
+    /// 3. The next LLM call sees only the compact summary instead of the
+    ///    full history, dramatically reducing input tokens.
+    ///
+    /// ## When to use
+    ///
+    /// - Automatically: the agent loop triggers compaction when
+    ///   `input_tokens_used` exceeds `compaction_threshold` (if set).
+    /// - Manually: a controller can call `agent.compact()` directly
+    ///   (e.g. in response to a `/compact` command).
+    ///
+    /// ## Design notes
+    ///
+    /// The summary is injected as a `User` message so it plays well with
+    /// every provider's message format (the first message must be a user
+    /// message for Anthropic).  The `[Context Summary]` prefix tells the
+    /// model that this is condensed history, not a literal user utterance.
+    pub async fn compact(&mut self, output: &mut dyn Output) -> Result<()> {
+        if self.messages.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            messages = self.messages.len(),
+            input_tokens = self.token_budget.input_tokens_used,
+            "compacting conversation context"
+        );
+
+        // Build a one-shot summarisation request: the full history with a
+        // system prompt that instructs the model to produce a concise summary.
+        let compaction_system = format!(
+            "{}\n\n\
+             You are being asked to summarise the conversation so far.  \
+             Produce a concise but thorough summary that preserves:\n\
+             - Key facts, decisions, and conclusions reached\n\
+             - Important tool results and their outcomes\n\
+             - The user's original goals and current progress\n\
+             - Any pending tasks or unresolved questions\n\n\
+             Write the summary as a single block of text.  Do NOT call any tools.  \
+             Do NOT ask questions.  Just summarise.",
+            self.system_prompt,
+        );
+
+        let empty_tools: &[ToolDefinition] = &[];
+        let response = self
+            .client
+            .stream(&self.messages, &compaction_system, empty_tools, &self.config)
+            .await?;
+
+        let (assistant_msg, _tool_calls, _output_tokens) =
+            stream_handler::process_stream(response.stream, output).await?;
+
+        // Extract the summary text from the assistant's response.
+        let summary = assistant_msg
+            .content
+            .iter()
+            .filter_map(|block| {
+                if let crate::message::ContentBlock::Text { text } = block {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if summary.is_empty() {
+            tracing::warn!("compaction produced empty summary — keeping original history");
+            return Ok(());
+        }
+
+        let old_count = self.messages.len();
+
+        // Rotate: replace the entire history with the summary.
+        self.messages.clear();
+        self.messages.push(Message::user(&format!(
+            "[Context Summary]\n\n{summary}"
+        )));
+
+        // Reset token counters since we've effectively started a new context.
+        self.token_budget.reset();
+
+        tracing::info!(
+            old_messages = old_count,
+            summary_chars = summary.len(),
+            "context compacted successfully"
+        );
+
+        Ok(())
     }
 
     /// Get the current conversation messages (for persistence).
@@ -410,6 +514,30 @@ impl Agent {
         }
 
         for iteration in 0..self.max_iterations {
+            // -- Auto-compact if input tokens exceed threshold --
+            //
+            // After the first LLM call, we know how many input tokens were
+            // used.  If a compaction_threshold is set and we've exceeded it,
+            // summarise the conversation to reduce context size before the
+            // next LLM call.  We only compact when there are at least 3
+            // messages (a real multi-turn conversation worth summarising).
+            if let Some(threshold) = self.compaction_threshold
+                && self.token_budget.input_tokens_used > threshold
+                && self.messages.len() >= 3
+            {
+                tracing::info!(
+                    input_tokens = self.token_budget.input_tokens_used,
+                    threshold = threshold,
+                    "input tokens exceed compaction threshold — compacting"
+                );
+                if let Err(e) = self.compact(output).await {
+                    tracing::warn!(
+                        error = %e,
+                        "auto-compaction failed — continuing with full history"
+                    );
+                }
+            }
+
             tracing::info!(
                 iteration = iteration,
                 model = self.config.model,
@@ -1302,5 +1430,203 @@ mod tests {
         let mode = crate::llm::ToolMode::Observe;
         let copied = mode;
         assert_eq!(mode, copied);
+    }
+
+    // -----------------------------------------------------------------------
+    // Context compaction tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn compact_replaces_history_with_summary() {
+        // Set up an agent with some conversation history, then compact it.
+        // The MockLlm needs:
+        //   1. Response for the initial run() call
+        //   2. Response for the compact() summarisation call
+        let llm = MockLlm::new(vec![
+            // Turn 1: normal response.
+            vec![
+                StreamEvent::TextDelta("Hello! I can help you.".into()),
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: None,
+                },
+            ],
+            // Compaction: summarisation response.
+            vec![
+                StreamEvent::TextDelta("The user greeted the assistant and received a helpful response.".into()),
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: None,
+                },
+            ],
+        ]);
+
+        let settings = AgentSettings {
+            api_key: "test".into(),
+            ..Default::default()
+        };
+
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
+        let mut output = MockOutput::new();
+
+        // Run a turn to build up history.
+        agent.run("hi there", &mut output).await.unwrap();
+        assert_eq!(agent.messages.len(), 2); // user + assistant
+
+        // Compact.
+        agent.compact(&mut output).await.unwrap();
+
+        // After compaction: exactly 1 message (the summary).
+        assert_eq!(agent.messages.len(), 1);
+        assert_eq!(agent.messages[0].role, crate::message::Role::User);
+        match &agent.messages[0].content[0] {
+            crate::message::ContentBlock::Text { text } => {
+                assert!(text.starts_with("[Context Summary]"));
+                assert!(text.contains("greeted the assistant"));
+            }
+            other => panic!("expected Text, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_on_empty_history_is_noop() {
+        // Compacting with no messages should succeed without making an LLM call.
+        let llm = MockLlm::new(vec![]); // No responses queued — would panic if called.
+
+        let settings = AgentSettings {
+            api_key: "test".into(),
+            ..Default::default()
+        };
+
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
+        let mut output = MockOutput::new();
+
+        agent.compact(&mut output).await.unwrap();
+        assert!(agent.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compact_resets_token_budget() {
+        let llm = MockLlm::new(vec![
+            // Turn 1.
+            vec![
+                StreamEvent::TextDelta("OK.".into()),
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: Some(50),
+                },
+            ],
+            // Compaction summary.
+            vec![
+                StreamEvent::TextDelta("Summary of the conversation.".into()),
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: Some(10),
+                },
+            ],
+        ]);
+
+        let settings = AgentSettings {
+            api_key: "test".into(),
+            ..Default::default()
+        };
+
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
+        let mut output = MockOutput::new();
+
+        agent.run("hello", &mut output).await.unwrap();
+        assert_eq!(agent.token_budget.output_tokens_used, 50);
+        assert_eq!(agent.token_budget.llm_calls, 1);
+
+        agent.compact(&mut output).await.unwrap();
+
+        // Token budget should be reset after compaction.
+        assert_eq!(agent.token_budget.output_tokens_used, 0);
+        assert_eq!(agent.token_budget.input_tokens_used, 0);
+        assert_eq!(agent.token_budget.llm_calls, 0);
+    }
+
+    #[tokio::test]
+    async fn auto_compaction_triggers_on_threshold() {
+        // Set up a low compaction threshold. The MockLlm needs:
+        //   1. First run() response (reports high input tokens)
+        //   2. Compaction summary (triggered automatically on second run)
+        //   3. Second run() response
+        let llm = MockLlm::new(vec![
+            // Turn 1: normal response with high token count.
+            vec![
+                StreamEvent::TextDelta("First response.".into()),
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: Some(20),
+                },
+            ],
+            // Auto-compaction summary (triggered at start of turn 2 loop).
+            vec![
+                StreamEvent::TextDelta("Summary of turn 1.".into()),
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: Some(5),
+                },
+            ],
+            // Turn 2: normal response after compaction.
+            vec![
+                StreamEvent::TextDelta("Second response.".into()),
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: Some(20),
+                },
+            ],
+        ]);
+
+        let settings = AgentSettings {
+            api_key: "test".into(),
+            compaction_threshold: Some(100), // low threshold
+            ..Default::default()
+        };
+
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
+        let mut output = MockOutput::new();
+
+        // First turn — build up history.
+        agent.run("first message", &mut output).await.unwrap();
+        assert_eq!(agent.messages.len(), 2); // user + assistant
+
+        // Simulate high input tokens (as if the provider reported them).
+        agent.token_budget.input_tokens_used = 200; // over threshold of 100
+
+        // Second turn — should auto-compact before the LLM call.
+        let result = agent.run("second message", &mut output).await.unwrap();
+        assert_eq!(result, "Second response.");
+
+        // After compaction + new turn, we should have:
+        // [Context Summary] (from compaction) + "second message" (new user) + assistant
+        // But compaction resets, then run() adds new user msg + assistant.
+        // The summary message + new user message + assistant = 3
+        // Actually: compact produces 1 msg, then run() adds user msg on top,
+        // but compact happens inside run() after the user msg is already added.
+        // Let me trace: run("second message") → push user → loop iteration →
+        // auto-compact (now messages=[summary]) → LLM call → push assistant
+        // Wait, the user message was already pushed before the loop, so compact
+        // will include it in the summary. After compact: [summary].
+        // Then the LLM call happens with just [summary], assistant responds.
+        // Result: [summary, assistant] = 2 messages.
+        // But we also need the user's new message in context...
+        // Actually looking at the code more carefully: run() pushes the user
+        // message first, then enters the loop. At the top of the loop,
+        // auto-compact fires. compact() summarises ALL current messages
+        // (including the just-added user message) and replaces with summary.
+        // Then the LLM call proceeds with just [summary].
+        //
+        // This is correct behavior — the summary includes the new user message.
+        assert_eq!(agent.messages.len(), 2); // summary + assistant
     }
 }

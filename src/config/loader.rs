@@ -143,6 +143,8 @@ struct JsonAgent {
     system_prompt: Option<String>,
     /// Name of the provider from the `"providers"` map.
     provider: Option<String>,
+    /// Input token threshold for automatic context compaction.
+    compaction_threshold: Option<usize>,
 }
 
 /// The `"skills"` object.
@@ -448,6 +450,9 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
         }
         if let Some(prompt) = agent.system_prompt {
             settings.agent.system_prompt = prompt;
+        }
+        if let Some(threshold) = agent.compaction_threshold {
+            settings.agent.compaction_threshold = Some(threshold);
         }
     }
 
