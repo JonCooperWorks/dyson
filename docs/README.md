@@ -16,6 +16,7 @@ overview, then dive into the component that interests you.
 | [Secrets](secrets.md) | Per-secret scheme routing, InsecureEnvironmentVariable, zeroize, adding resolvers |
 | [Tool Forwarding over MCP](tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth, bidirectional MCP |
 | [Adding a Provider](adding-a-provider.md) | How to add a new LLM provider (3-step process via the registry) |
+| [Production Considerations](turboquant-production.md) | Economics of self-hosted models: TurboQuant, sizing, context vs. concurrency |
 
 **Key source files:**
 
