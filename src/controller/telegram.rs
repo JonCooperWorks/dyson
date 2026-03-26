@@ -322,6 +322,31 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
+                // /compact — summarise the conversation and replace the
+                // history with the summary.  Keeps the agent alive (unlike
+                // /clear) so the model retains a condensed version of context.
+                if text == "/compact" {
+                    let mut agents_map = agents.lock().await;
+                    if let Some(agent) = agents_map.get_mut(&chat_id.0) {
+                        let mut output = TelegramOutput::new(bot.clone(), chat_id);
+                        match agent.compact(&mut output).await {
+                            Ok(()) => {
+                                let chat_key = chat_id.0.to_string();
+                                let _ = chat_store.save(&chat_key, agent.messages());
+                                let _ = bot.send_message(chat_id, "Context compacted.").await;
+                                tracing::info!(chat_id = chat_id.0, "conversation compacted");
+                            }
+                            Err(e) => {
+                                let _ = bot.send_message(chat_id, format!("Compaction failed: {e}")).await;
+                                tracing::error!(error = %e, "compaction failed");
+                            }
+                        }
+                    } else {
+                        let _ = bot.send_message(chat_id, "No active conversation to compact.").await;
+                    }
+                    continue;
+                }
+
                 // /memory — save a note to the workspace memory.
                 if let Some(note) = text.strip_prefix("/memory ") {
                     let note = note.trim();

@@ -206,6 +206,14 @@ pub struct AgentSettings {
 
     /// Optional base URL override for the LLM API.
     pub base_url: Option<String>,
+
+    /// Input token threshold that triggers automatic context compaction.
+    ///
+    /// When the cumulative input tokens (`token_budget.input_tokens_used`)
+    /// exceed this value, the agent loop will summarise the conversation
+    /// and replace the history with the summary before the next LLM call.
+    /// `None` = automatic compaction disabled (default).
+    pub compaction_threshold: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +486,7 @@ impl Default for AgentSettings {
             api_key: crate::auth::Credential::new(String::new()),
             provider: LlmProvider::Anthropic,
             base_url: None,
+            compaction_threshold: None,
         }
     }
 }
