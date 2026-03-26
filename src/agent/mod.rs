@@ -384,6 +384,7 @@ impl Agent {
         }
 
         let mut final_text = String::new();
+        let mut hit_max_iterations = false;
 
         // -- Collect ephemeral context from skills --
         //
@@ -544,12 +545,52 @@ impl Agent {
             if iteration == self.max_iterations - 1 {
                 tracing::warn!(
                     max = self.max_iterations,
-                    "agent hit maximum iterations — stopping"
+                    "agent hit maximum iterations — requesting summary"
                 );
-                output.error(&DysonError::Llm(format!(
-                    "Reached maximum iterations ({}) — stopping",
-                    self.max_iterations
-                )))?;
+                hit_max_iterations = true;
+            }
+        }
+
+        // When the agent exhausts max_iterations, make one final LLM call
+        // (with no tools) so the model can summarise progress gracefully.
+        if hit_max_iterations {
+            self.messages.push(Message::user(
+                "You have reached the maximum number of iterations and must stop now. \
+                 Please provide a brief summary of:\n\
+                 1. What you have accomplished so far\n\
+                 2. What still needs to be done\n\
+                 3. Any relevant partial results\n\n\
+                 Do NOT call any tools. Just summarize.",
+            ));
+
+            let empty_tools: &[crate::llm::ToolDefinition] = &[];
+            match self
+                .client
+                .stream(
+                    &self.messages,
+                    &turn_system_prompt,
+                    empty_tools,
+                    &self.config,
+                )
+                .await
+            {
+                Ok(response) => {
+                    let (assistant_msg, _tool_calls, _output_tokens) =
+                        stream_handler::process_stream(response.stream, output).await?;
+                    for block in &assistant_msg.content {
+                        if let crate::message::ContentBlock::Text { text } = block {
+                            final_text = text.clone();
+                        }
+                    }
+                    self.messages.push(assistant_msg);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "summary LLM call failed — falling back to error");
+                    output.error(&DysonError::Llm(format!(
+                        "Reached maximum iterations ({}) — stopping",
+                        self.max_iterations
+                    )))?;
+                }
             }
         }
 
