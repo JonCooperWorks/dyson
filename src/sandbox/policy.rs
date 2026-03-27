@@ -150,7 +150,7 @@ pub fn default_policy(tool_name: &str, working_dir: &Path) -> SandboxPolicy {
 
     match tool_name {
         "bash" => SandboxPolicy {
-            network: Access::Deny,
+            network: Access::Allow,
             file_read: PathAccess::RestrictTo(vec![cwd.clone()]),
             file_write: PathAccess::RestrictTo(vec![cwd, tmp]),
             process_exec: Access::Allow,
@@ -462,9 +462,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn bash_default_denies_network() {
+    fn bash_default_allows_network() {
         let p = default_policy("bash", &wd());
-        assert_eq!(p.network, Access::Deny);
+        assert_eq!(p.network, Access::Allow);
     }
 
     #[test]

@@ -64,7 +64,7 @@ sensible default policy:
 
 | Tool | Network | File Read | File Write | Process Exec |
 |------|---------|-----------|------------|--------------|
-| `bash` | Deny | RestrictTo(cwd) | RestrictTo(cwd, /tmp) | Allow |
+| `bash` | Allow | RestrictTo(cwd) | RestrictTo(cwd, /tmp) | Allow |
 | `web_search` | Allow | Deny | Deny | Deny |
 | `read_file` | Deny | RestrictTo(cwd) | Deny | Deny |
 | `write_file` | Deny | Deny | RestrictTo(cwd) | Deny |
