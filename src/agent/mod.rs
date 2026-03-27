@@ -159,7 +159,11 @@ pub struct Agent {
     client: Box<dyn LlmClient>,
 
     /// Sandbox that gates all tool execution.
-    sandbox: Box<dyn Sandbox>,
+    ///
+    /// Wrapped in `Arc` (not `Box`) so subagents can share the parent's
+    /// sandbox without cloning.  This ensures child agents inherit the
+    /// same security policy — subagents cannot bypass the sandbox.
+    sandbox: Arc<dyn Sandbox>,
 
     /// Loaded skills (retained for lifecycle: before_turn, after_tool, on_unload).
     skills: Vec<Box<dyn Skill>>,
@@ -223,7 +227,7 @@ impl Agent {
     /// (later skills override earlier ones), with a warning logged.
     pub fn new(
         client: Box<dyn LlmClient>,
-        sandbox: Box<dyn Sandbox>,
+        sandbox: Arc<dyn Sandbox>,
         skills: Vec<Box<dyn Skill>>,
         settings: &AgentSettings,
         workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
@@ -310,6 +314,7 @@ impl Agent {
             env: HashMap::new(),
             cancellation: CancellationToken::new(),
             workspace: None,
+            depth: 0,
         };
         tool_context.workspace = workspace;
 
@@ -331,6 +336,22 @@ impl Agent {
             token_budget: TokenBudget::default(),
             compaction_threshold: settings.compaction_threshold,
         })
+    }
+
+    /// Get a shared reference to the sandbox for subagent reuse.
+    ///
+    /// Subagents share the parent's sandbox to ensure consistent security
+    /// policy across the agent hierarchy.
+    pub fn sandbox(&self) -> &Arc<dyn Sandbox> {
+        &self.sandbox
+    }
+
+    /// Set the subagent nesting depth on this agent's tool context.
+    ///
+    /// Called by `SubagentTool` after construction to propagate the depth
+    /// counter.  The child runs at `parent_depth + 1`.
+    pub fn set_depth(&mut self, depth: u8) {
+        self.tool_context.depth = depth;
     }
 
     /// Clear conversation history, starting fresh.
@@ -1002,7 +1023,7 @@ mod tests {
         };
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
-        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
@@ -1048,7 +1069,7 @@ mod tests {
         };
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
-        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
@@ -1088,7 +1109,7 @@ mod tests {
         };
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
-        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
@@ -1241,7 +1262,7 @@ mod tests {
         };
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
-        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         agent.token_budget.max_output_tokens = Some(150);
         let mut output = MockOutput::new();
@@ -1366,7 +1387,7 @@ mod tests {
         };
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(MockFileSkill::new())];
-        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
@@ -1413,7 +1434,7 @@ mod tests {
         };
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
-        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
@@ -1467,7 +1488,7 @@ mod tests {
         };
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
-        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
@@ -1501,7 +1522,7 @@ mod tests {
         };
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
-        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
@@ -1536,7 +1557,7 @@ mod tests {
         };
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
-        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
@@ -1592,7 +1613,7 @@ mod tests {
         };
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
-        let sandbox: Box<dyn Sandbox> = Box::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 

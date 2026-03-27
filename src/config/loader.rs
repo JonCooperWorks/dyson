@@ -57,6 +57,7 @@ use serde::Deserialize;
 use crate::config::{
     BuiltinSkillConfig, ControllerConfig, LocalSkillConfig,
     McpConfig, McpTransportConfig, ProviderConfig, SandboxConfig, Settings, SkillConfig,
+    SubagentAgentConfig, SubagentSkillConfig,
 };
 use crate::error::{DysonError, Result};
 use crate::secret::{SecretRegistry, SecretValue};
@@ -152,6 +153,21 @@ struct JsonAgent {
 struct JsonSkills {
     builtin: Option<JsonBuiltinSkill>,
     local: Option<Vec<JsonLocalSkill>>,
+    /// Subagent definitions — child agents spawnable as tools.
+    ///
+    /// ```json
+    /// "subagents": [
+    ///   {
+    ///     "name": "research_agent",
+    ///     "description": "Research specialist",
+    ///     "system_prompt": "You are a research specialist.",
+    ///     "provider": "gpt",
+    ///     "max_iterations": 15,
+    ///     "tools": ["bash", "web_search"]
+    ///   }
+    /// ]
+    /// ```
+    subagents: Option<Vec<JsonSubagent>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,6 +178,27 @@ struct JsonLocalSkill {
 
 #[derive(Debug, Deserialize)]
 struct JsonBuiltinSkill {
+    tools: Option<Vec<String>>,
+}
+
+/// A single subagent definition in the `"subagents"` array.
+#[derive(Debug, Deserialize)]
+struct JsonSubagent {
+    /// Tool name (e.g., "research_agent").
+    name: String,
+    /// Description shown to the parent LLM.
+    description: String,
+    /// System prompt for the subagent.
+    system_prompt: String,
+    /// Provider name from the `"providers"` map.
+    provider: String,
+    /// Optional model override.
+    model: Option<String>,
+    /// Max LLM turns per invocation (default: 10).
+    max_iterations: Option<usize>,
+    /// Max tokens per response (default: 4096).
+    max_tokens: Option<u32>,
+    /// Optional tool name filter (None = inherit all parent tools).
     tools: Option<Vec<String>>,
 }
 
@@ -493,6 +530,27 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                     name: local.name,
                     path: local.path,
                 }));
+            }
+        }
+
+        // -- Subagents --
+        if let Some(subagents) = skills.subagents {
+            let agents: Vec<SubagentAgentConfig> = subagents
+                .into_iter()
+                .map(|sa| SubagentAgentConfig {
+                    name: sa.name,
+                    description: sa.description,
+                    system_prompt: sa.system_prompt,
+                    provider: sa.provider,
+                    model: sa.model,
+                    max_iterations: sa.max_iterations,
+                    max_tokens: sa.max_tokens,
+                    tools: sa.tools,
+                })
+                .collect();
+
+            if !agents.is_empty() {
+                skill_configs.push(SkillConfig::Subagent(SubagentSkillConfig { agents }));
             }
         }
 
@@ -1131,5 +1189,106 @@ mod tests {
             !settings.providers.contains_key("bad"),
             "provider with unresolvable secret should be skipped"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Subagent config parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_subagent_config() {
+        let json = r#"{
+            "providers": {
+                "gpt": {
+                    "type": "openai",
+                    "models": ["gpt-4o"],
+                    "api_key": "sk-test"
+                }
+            },
+            "skills": {
+                "builtin": {},
+                "subagents": [
+                    {
+                        "name": "research_agent",
+                        "description": "Research specialist",
+                        "system_prompt": "You are a researcher.",
+                        "provider": "gpt",
+                        "max_iterations": 15,
+                        "max_tokens": 4096,
+                        "tools": ["bash", "web_search"]
+                    },
+                    {
+                        "name": "code_agent",
+                        "description": "Code reviewer",
+                        "system_prompt": "You review code.",
+                        "provider": "gpt"
+                    }
+                ]
+            }
+        }"#;
+        let root: JsonRoot = serde_json::from_str(json).unwrap();
+        let secrets = SecretRegistry::default();
+        let settings = build_settings(Some(root), &secrets);
+
+        // Should have builtin + subagent skill configs.
+        let subagent_configs: Vec<_> = settings
+            .skills
+            .iter()
+            .filter_map(|s| match s {
+                SkillConfig::Subagent(cfg) => Some(cfg),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(subagent_configs.len(), 1);
+
+        let agents = &subagent_configs[0].agents;
+        assert_eq!(agents.len(), 2);
+
+        assert_eq!(agents[0].name, "research_agent");
+        assert_eq!(agents[0].description, "Research specialist");
+        assert_eq!(agents[0].provider, "gpt");
+        assert_eq!(agents[0].max_iterations, Some(15));
+        assert_eq!(agents[0].max_tokens, Some(4096));
+        assert_eq!(
+            agents[0].tools,
+            Some(vec!["bash".to_string(), "web_search".to_string()])
+        );
+
+        assert_eq!(agents[1].name, "code_agent");
+        assert_eq!(agents[1].model, None);
+        assert_eq!(agents[1].max_iterations, None);
+        assert_eq!(agents[1].tools, None);
+    }
+
+    #[test]
+    fn parse_subagent_minimal() {
+        // All required fields, no optional ones.
+        let json = r#"{
+            "skills": {
+                "subagents": [
+                    {
+                        "name": "helper",
+                        "description": "A helpful agent",
+                        "system_prompt": "Help the user.",
+                        "provider": "claude"
+                    }
+                ]
+            }
+        }"#;
+        let root: JsonRoot = serde_json::from_str(json).unwrap();
+        let secrets = SecretRegistry::default();
+        let settings = build_settings(Some(root), &secrets);
+
+        let subagent_configs: Vec<_> = settings
+            .skills
+            .iter()
+            .filter_map(|s| match s {
+                SkillConfig::Subagent(cfg) => Some(cfg),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(subagent_configs.len(), 1);
+        assert_eq!(subagent_configs[0].agents[0].name, "helper");
+        assert_eq!(subagent_configs[0].agents[0].model, None);
     }
 }

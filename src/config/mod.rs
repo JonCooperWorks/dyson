@@ -289,6 +289,13 @@ pub enum SkillConfig {
     Mcp(McpConfig),
     Local(LocalSkillConfig),
     Builtin(BuiltinSkillConfig),
+    /// Subagent skill — spawns child agents as tools.
+    ///
+    /// Each subagent is a Tool that creates a fresh Agent with its own
+    /// LlmClient (potentially a different model/provider), runs it to
+    /// completion, and returns the result.  Subagents share the parent's
+    /// sandbox for security and workspace for memory.
+    Subagent(SubagentSkillConfig),
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +329,95 @@ pub struct LocalSkillConfig {
 #[derive(Debug, Clone)]
 pub struct BuiltinSkillConfig {
     pub tools: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// SubagentSkillConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for the subagent skill — bundles one or more subagent
+/// definitions into a single skill.
+///
+/// Each entry in `agents` becomes a separate `SubagentTool` that the
+/// parent LLM can invoke.  Subagents can use different providers and
+/// models from the parent agent.
+///
+/// ```json
+/// {
+///   "skills": {
+///     "subagents": [
+///       {
+///         "name": "research_agent",
+///         "description": "Research specialist for web research tasks.",
+///         "system_prompt": "You are a research specialist.",
+///         "provider": "gpt",
+///         "max_iterations": 15
+///       }
+///     ]
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct SubagentSkillConfig {
+    /// Individual subagent definitions.
+    pub agents: Vec<SubagentAgentConfig>,
+}
+
+/// Configuration for a single subagent.
+///
+/// Maps to one `SubagentTool` in the parent agent.  The `provider` field
+/// references a named entry in the top-level `"providers"` map, allowing
+/// each subagent to use a different LLM backend and model.
+///
+/// ## Tool filtering
+///
+/// By default, subagents inherit **all** the parent's tools (builtins +
+/// MCP + local skills) except other subagent tools (which prevents
+/// recursive spawning).  The optional `tools` field filters this to a
+/// specific subset by tool name.
+#[derive(Debug, Clone)]
+pub struct SubagentAgentConfig {
+    /// Tool name exposed to the parent LLM (e.g., "research_agent").
+    ///
+    /// Must be a valid identifier (lowercase, underscores) — it appears
+    /// in tool_use blocks and log output.
+    pub name: String,
+
+    /// Human-readable description shown to the parent LLM.
+    ///
+    /// The parent LLM uses this to decide *when* to delegate to this
+    /// subagent.  Be specific about its specialty.
+    pub description: String,
+
+    /// System prompt for the subagent.
+    ///
+    /// Defines the subagent's personality, expertise, and behavioral
+    /// guidelines.  This is separate from the parent's system prompt.
+    pub system_prompt: String,
+
+    /// Provider name from the `"providers"` map in dyson.json.
+    ///
+    /// Looked up at skill construction time to resolve the provider type,
+    /// API key, and base URL.
+    pub provider: String,
+
+    /// Optional model override (defaults to the provider's default model).
+    pub model: Option<String>,
+
+    /// Maximum LLM turns per subagent invocation (default: 10).
+    pub max_iterations: Option<usize>,
+
+    /// Maximum tokens per LLM response (default: 4096).
+    pub max_tokens: Option<u32>,
+
+    /// Optional tool name filter.
+    ///
+    /// When `Some`, only tools whose names are in this list are available
+    /// to the subagent.  When `None`, all parent tools are inherited
+    /// (minus subagent tools).
+    ///
+    /// Tool names that don't match any parent tool are silently ignored.
+    pub tools: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------

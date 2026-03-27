@@ -145,6 +145,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             cancellation: tokio_util::sync::CancellationToken::new(),
             workspace: Some(Arc::new(RwLock::new(workspace))),
+            depth: 0,
         }
     }
 

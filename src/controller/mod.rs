@@ -183,7 +183,12 @@ pub async fn build_agent(
     );
     let skills = {
         let ws = workspace.read().await;
-        crate::skill::create_skills(settings, Some(&**ws)).await
+        crate::skill::create_skills(
+            settings,
+            Some(&**ws),
+            std::sync::Arc::clone(&sandbox),
+            Some(std::sync::Arc::clone(&workspace)),
+        ).await
     };
 
     crate::agent::Agent::new(client, sandbox, skills, &agent_settings, Some(workspace), nudge_interval)

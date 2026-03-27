@@ -162,6 +162,13 @@ pub trait Tool: Send + Sync {
 // ToolContext — ambient state available to every tool call.
 // ---------------------------------------------------------------------------
 
+/// Maximum nesting depth for subagent spawning.
+///
+/// Prevents infinite recursion when subagents spawn subagents.  A top-level
+/// agent runs at depth 0; each subagent increments by 1.  When depth reaches
+/// this limit, the subagent tool returns an error instead of spawning.
+pub const MAX_SUBAGENT_DEPTH: u8 = 3;
+
 /// Runtime context passed to every tool invocation.
 ///
 /// Tools should use this instead of querying the environment directly.
@@ -196,6 +203,16 @@ pub struct ToolContext {
     /// `None` when workspace is not configured (e.g., tests without
     /// workspace setup, or when the provider handles tools internally).
     pub workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
+
+    /// Subagent nesting depth.  0 = top-level agent.
+    ///
+    /// Used to prevent infinite recursion when subagents spawn subagents.
+    /// The subagent tool checks this before spawning a child agent and
+    /// returns an error if `depth >= MAX_SUBAGENT_DEPTH`.
+    ///
+    /// Flows through `ToolContext` (not `AgentSettings`) because depth is
+    /// runtime state, not configuration — you don't set it in dyson.json.
+    pub depth: u8,
 }
 
 impl ToolContext {
@@ -209,6 +226,7 @@ impl ToolContext {
             env: HashMap::new(),
             cancellation: CancellationToken::new(),
             workspace: None,
+            depth: 0,
         })
     }
 }
