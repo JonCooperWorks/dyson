@@ -51,6 +51,8 @@
 pub mod composite;
 pub mod no_sandbox;
 pub mod os;
+pub mod policy;
+pub mod policy_sandbox;
 
 use async_trait::async_trait;
 
@@ -187,34 +189,33 @@ pub fn create_sandbox(
     let disabled = &config.disabled;
     let mut sandboxes: Vec<Box<dyn Sandbox>> = Vec::new();
 
-    // OS sandbox (default — always on unless explicitly disabled).
+    // Policy sandbox — per-tool capability enforcement.
     //
-    // Uses the operating system's native sandboxing:
-    // - macOS: sandbox-exec (Seatbelt) — denies network, restricts writes
-    // - Linux: falls back to unsandboxed (with warning) until bwrap support
+    // This subsumes OsSandbox: it handles both application-level checks
+    // (for Rust-native tools like read_file, web_search) AND OS-level
+    // sandboxing (for bash via bwrap/seatbelt).
+    //
+    // Each tool gets a SandboxPolicy expressing what it can do (network,
+    // file_read, file_write, process_exec).  The enforcement translates
+    // intent into platform-specific mechanisms.
     if !disabled.iter().any(|s| s == "os") {
         let working_dir = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/tmp".to_string());
+            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
 
-        let profile = config
-            .os_profile
-            .as_deref()
-            .unwrap_or("default");
-
-        tracing::info!(profile = profile, "OS sandbox enabled");
-        sandboxes.push(Box::new(os::OsSandbox::named_profile(
-            profile,
-            &working_dir,
-        )));
+        tracing::info!(
+            tool_policies = config.tool_policies.len(),
+            "policy sandbox enabled"
+        );
+        sandboxes.push(Box::new(
+            policy_sandbox::PolicySandbox::new(&config.tool_policies, &working_dir),
+        ));
     } else {
         tracing::info!("OS sandbox disabled via config");
     }
 
     // Future sandboxes go here:
-    // if !disabled.contains("file") { ... }
-    // if !disabled.contains("network") { ... }
     // if !disabled.contains("audit") { ... }
+    // if !disabled.contains("ratelimit") { ... }
 
     tracing::info!(count = sandboxes.len(), "sandbox pipeline built");
 
