@@ -59,6 +59,13 @@ use async_trait::async_trait;
 use crate::error::Result;
 use crate::tool::{ToolContext, ToolOutput};
 
+/// Maximum tool output size (characters) before truncation.
+///
+/// Protects against MCP servers returning huge payloads, bash commands
+/// producing excessive output, or any tool returning unexpectedly large
+/// results that would blow up the context window.
+pub(crate) const MAX_OUTPUT_CHARS: usize = 100_000;
+
 // ---------------------------------------------------------------------------
 // SandboxDecision
 // ---------------------------------------------------------------------------

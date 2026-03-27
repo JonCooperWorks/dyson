@@ -47,8 +47,7 @@ use crate::sandbox::policy::{Access, PathAccess, PolicyTable, SandboxPolicy, Too
 use crate::sandbox::{Sandbox, SandboxDecision};
 use crate::tool::{ToolContext, ToolOutput};
 
-/// Maximum tool output size (characters) before truncation.
-const MAX_OUTPUT_CHARS: usize = 100_000;
+use super::MAX_OUTPUT_CHARS;
 
 // ---------------------------------------------------------------------------
 // PolicySandbox
@@ -224,16 +223,22 @@ fn check_file_read(
         _ => "file_path",
     };
 
-    if let Some(file_path) = input[path_key].as_str() {
-        if !check_path_access(&policy.file_read, file_path, working_dir) {
+    match input[path_key].as_str() {
+        Some(file_path) => {
+            if !check_path_access(&policy.file_read, file_path, working_dir) {
+                return Ok(SandboxDecision::Deny {
+                    reason: format!(
+                        "sandbox policy denies file read for '{file_path}' by tool '{tool_name}'"
+                    ),
+                });
+            }
+        }
+        None => {
             return Ok(SandboxDecision::Deny {
-                reason: format!(
-                    "sandbox policy denies file read for '{file_path}' by tool '{tool_name}'"
-                ),
+                reason: format!("missing '{path_key}' field in {tool_name} input"),
             });
         }
     }
-    // If no path in input, let the tool itself handle the error.
 
     Ok(SandboxDecision::Allow {
         input: input.clone(),
@@ -247,12 +252,19 @@ fn check_file_write(
     policy: &SandboxPolicy,
     working_dir: &Path,
 ) -> Result<SandboxDecision> {
-    if let Some(file_path) = input["file_path"].as_str() {
-        if !check_path_access(&policy.file_write, file_path, working_dir) {
+    match input["file_path"].as_str() {
+        Some(file_path) => {
+            if !check_path_access(&policy.file_write, file_path, working_dir) {
+                return Ok(SandboxDecision::Deny {
+                    reason: format!(
+                        "sandbox policy denies file write for '{file_path}' by tool '{tool_name}'"
+                    ),
+                });
+            }
+        }
+        None => {
             return Ok(SandboxDecision::Deny {
-                reason: format!(
-                    "sandbox policy denies file write for '{file_path}' by tool '{tool_name}'"
-                ),
+                reason: format!("missing 'file_path' field in {tool_name} input"),
             });
         }
     }
@@ -269,19 +281,26 @@ fn check_file_read_write(
     policy: &SandboxPolicy,
     working_dir: &Path,
 ) -> Result<SandboxDecision> {
-    if let Some(file_path) = input["file_path"].as_str() {
-        if !check_path_access(&policy.file_read, file_path, working_dir) {
-            return Ok(SandboxDecision::Deny {
-                reason: format!(
-                    "sandbox policy denies file read for '{file_path}' by tool '{tool_name}'"
-                ),
-            });
+    match input["file_path"].as_str() {
+        Some(file_path) => {
+            if !check_path_access(&policy.file_read, file_path, working_dir) {
+                return Ok(SandboxDecision::Deny {
+                    reason: format!(
+                        "sandbox policy denies file read for '{file_path}' by tool '{tool_name}'"
+                    ),
+                });
+            }
+            if !check_path_access(&policy.file_write, file_path, working_dir) {
+                return Ok(SandboxDecision::Deny {
+                    reason: format!(
+                        "sandbox policy denies file write for '{file_path}' by tool '{tool_name}'"
+                    ),
+                });
+            }
         }
-        if !check_path_access(&policy.file_write, file_path, working_dir) {
+        None => {
             return Ok(SandboxDecision::Deny {
-                reason: format!(
-                    "sandbox policy denies file write for '{file_path}' by tool '{tool_name}'"
-                ),
+                reason: format!("missing 'file_path' field in {tool_name} input"),
             });
         }
     }
@@ -340,7 +359,9 @@ fn check_unknown(
 
 /// Check if a file path (from tool input) is allowed by a PathAccess policy.
 ///
-/// Resolves the path relative to working_dir and checks against the policy.
+/// Resolves the path relative to working_dir, canonicalizes to resolve
+/// symlinks, and checks against the policy.  Falls back to lexical
+/// normalization for paths that don't exist yet.
 fn check_path_access(access: &PathAccess, file_path: &str, working_dir: &Path) -> bool {
     match access {
         PathAccess::Allow => true,
@@ -353,10 +374,53 @@ fn check_path_access(access: &PathAccess, file_path: &str, working_dir: &Path) -
                 working_dir.join(file_path)
             };
 
-            // Normalize (without requiring the path to exist).
-            let normalized = normalize_path(&resolved);
+            // Canonicalize to resolve symlinks.  For paths that don't exist
+            // yet, canonicalize the nearest existing ancestor and re-append
+            // remaining components (same pattern as tool/mod.rs).
+            let canonical = resolve_canonical(&resolved);
 
-            allowed.iter().any(|prefix| normalized.starts_with(prefix))
+            allowed.iter().any(|prefix| {
+                // Canonicalize the allowed prefix too so comparisons are
+                // consistent (e.g. if cwd itself is behind a symlink).
+                let canon_prefix = std::fs::canonicalize(prefix)
+                    .unwrap_or_else(|_| prefix.clone());
+                canonical.starts_with(&canon_prefix)
+            })
+        }
+    }
+}
+
+/// Resolve a path to its canonical form, following symlinks.
+///
+/// Strategy:
+/// 1. Normalize lexically first (resolve `.` and `..` without filesystem access).
+/// 2. Try `canonicalize()` on the normalized path (resolves symlinks).
+/// 3. If the path doesn't exist: walk up to the nearest existing ancestor,
+///    canonicalize that, then re-append the remaining components.
+/// 4. If no ancestor exists: return the lexically normalized path.
+fn resolve_canonical(path: &Path) -> PathBuf {
+    // Always normalize first to resolve .. and . components.
+    let normalized = normalize_path(path);
+
+    // Fast path: the normalized path exists — canonicalize resolves symlinks.
+    if let Ok(canon) = std::fs::canonicalize(&normalized) {
+        return canon;
+    }
+
+    // Slow path: walk up to find an existing ancestor.
+    let mut ancestor = normalized.clone();
+    loop {
+        if !ancestor.pop() {
+            // Reached filesystem root without finding an existing dir.
+            return normalized;
+        }
+        if ancestor.exists() {
+            if let Ok(canon) = std::fs::canonicalize(&ancestor) {
+                if let Ok(suffix) = normalized.strip_prefix(&ancestor) {
+                    return canon.join(suffix);
+                }
+            }
+            return normalized;
         }
     }
 }
@@ -472,6 +536,34 @@ mod tests {
         assert!(check_path_access(&access, "file.txt", &wd()));
         assert!(check_path_access(&access, "/tmp/scratch", &wd()));
         assert!(!check_path_access(&access, "/etc/passwd", &wd()));
+    }
+
+    #[test]
+    fn path_access_restrict_catches_symlink() {
+        // Create a symlink inside a temp dir that points outside the allowed area.
+        let tmp = std::env::temp_dir().join("dyson_sandbox_symlink_test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let target = std::env::temp_dir().join("dyson_sandbox_symlink_target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("secret.txt"), "secret").unwrap();
+
+        // Create symlink: tmp/link → target (which is outside tmp)
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, tmp.join("link")).unwrap();
+
+        let access = PathAccess::RestrictTo(vec![tmp.clone()]);
+        // The symlink resolves outside the allowed directory.
+        let symlink_path = tmp.join("link").join("secret.txt");
+        assert!(
+            !check_path_access(&access, symlink_path.to_str().unwrap(), &tmp),
+            "symlink escaping allowed directory should be denied"
+        );
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&target);
     }
 
     // -----------------------------------------------------------------------
@@ -620,6 +712,37 @@ mod tests {
         let s = sandbox_default();
         let ctx = ctx();
         let input = serde_json::json!({"file_path": "/root/.bashrc", "content": "evil"});
+        let decision = s.check("edit_file", &input, &ctx).await.unwrap();
+        assert!(matches!(decision, SandboxDecision::Deny { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Missing path field checks
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_file_denied_when_path_missing() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        let input = serde_json::json!({"content": "no path here"});
+        let decision = s.check("read_file", &input, &ctx).await.unwrap();
+        assert!(matches!(decision, SandboxDecision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn write_file_denied_when_path_missing() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        let input = serde_json::json!({"content": "no path here"});
+        let decision = s.check("write_file", &input, &ctx).await.unwrap();
+        assert!(matches!(decision, SandboxDecision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn edit_file_denied_when_path_missing() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        let input = serde_json::json!({"content": "no path here"});
         let decision = s.check("edit_file", &input, &ctx).await.unwrap();
         assert!(matches!(decision, SandboxDecision::Deny { .. }));
     }
