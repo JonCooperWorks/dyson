@@ -114,7 +114,11 @@ pub struct Settings {
 /// {
 ///   "sandbox": {
 ///     "disabled": ["os"],
-///     "os_profile": "strict"
+///     "os_profile": "strict",
+///     "tool_policies": {
+///       "web_search": { "network": "allow", "file_read": "deny" },
+///       "mcp__*": { "network": "allow", "file_write": "deny" }
+///     }
 ///   }
 /// }
 /// ```
@@ -123,17 +127,21 @@ pub struct SandboxConfig {
     /// Sandbox names to disable.  Everything not in this list is active.
     ///
     /// Known sandboxes: "os"
-    /// Future: "file", "network", "audit", "ratelimit"
+    /// Future: "audit", "ratelimit"
     pub disabled: Vec<String>,
 
     /// OS sandbox profile: "default", "strict", or "permissive".
     ///
-    /// The OS sandbox is enabled by default.  The profile controls how
-    /// restrictive it is:
-    /// - "default" — deny network, allow writes to cwd + /tmp
-    /// - "strict" — deny network, deny all writes outside cwd
-    /// - "permissive" — allow everything (just wraps in sandbox-exec)
+    /// Only used as a backward-compatibility fallback when `tool_policies`
+    /// is empty.  When `tool_policies` is set, policies control everything.
     pub os_profile: Option<String>,
+
+    /// Per-tool sandbox policies.
+    ///
+    /// Keys are tool names or glob patterns (e.g., "mcp__*").
+    /// Values override the default policy for that tool.
+    /// Unspecified tools get sensible defaults (see `sandbox::policy`).
+    pub tool_policies: std::collections::HashMap<String, crate::sandbox::policy::ToolPolicyConfig>,
 }
 
 

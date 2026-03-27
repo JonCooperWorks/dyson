@@ -217,6 +217,26 @@ struct JsonSandbox {
     disabled: Vec<String>,
     /// OS sandbox profile: "default", "strict", "permissive".
     os_profile: Option<String>,
+    /// Per-tool sandbox policies (tool name or glob → policy overrides).
+    #[serde(default)]
+    tool_policies: std::collections::HashMap<String, JsonToolPolicy>,
+}
+
+/// Per-tool policy overrides in dyson.json.
+///
+/// ```json
+/// "web_search": {
+///   "network": "allow",
+///   "file_read": "deny",
+///   "file_write": { "restrict_to": ["/tmp/workdir"] }
+/// }
+/// ```
+#[derive(Debug, Deserialize)]
+struct JsonToolPolicy {
+    network: Option<String>,
+    file_read: Option<serde_json::Value>,
+    file_write: Option<serde_json::Value>,
+    process_exec: Option<String>,
 }
 
 /// The `"workspace"` object.
@@ -630,9 +650,19 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
 
     // -- Sandbox --
     if let Some(sb) = root.sandbox {
+        let tool_policies = sb
+            .tool_policies
+            .into_iter()
+            .map(|(name, jp)| {
+                let config = parse_tool_policy(jp);
+                (name, config)
+            })
+            .collect();
+
         settings.sandbox = SandboxConfig {
             disabled: sb.disabled,
             os_profile: sb.os_profile,
+            tool_policies,
         };
     }
 
@@ -733,6 +763,39 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
 /// value.  This lets controllers receive fully-resolved config without
 /// knowing about the secret system.
 ///
+/// Parse a `JsonToolPolicy` into a `ToolPolicyConfig`.
+///
+/// File access fields can be either a simple string ("allow"/"deny")
+/// or an object `{ "restrict_to": ["/path1", "/path2"] }`.
+fn parse_tool_policy(jp: JsonToolPolicy) -> crate::sandbox::policy::ToolPolicyConfig {
+    use crate::sandbox::policy::{ToolPolicyConfig, ToolPolicyPathConfig};
+
+    fn parse_path_field(val: serde_json::Value) -> Option<ToolPolicyPathConfig> {
+        match val {
+            serde_json::Value::String(s) => Some(ToolPolicyPathConfig::Simple(s)),
+            serde_json::Value::Object(obj) => {
+                if let Some(serde_json::Value::Array(arr)) = obj.get("restrict_to") {
+                    let paths: Vec<String> = arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
+                    Some(ToolPolicyPathConfig::RestrictTo(paths))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    ToolPolicyConfig {
+        network: jp.network,
+        file_read: jp.file_read.and_then(parse_path_field),
+        file_write: jp.file_write.and_then(parse_path_field),
+        process_exec: jp.process_exec,
+    }
+}
+
 /// ```json
 /// // Before:
 /// { "bot_token": { "resolver": "insecure_env", "name": "MY_TOKEN" } }
