@@ -117,7 +117,12 @@ pub struct SandboxPolicy {
     /// Same enforcement strategy as `file_read`.
     pub file_write: PathAccess,
 
-    /// Can the tool spawn child processes?
+    /// PID namespace isolation for child processes.
+    ///
+    /// When `Deny`, the OS sandbox hides host processes via `--unshare-pid`
+    /// (bwrap).  NOTE: This does NOT prevent `fork()`/`execve()` — the
+    /// sandboxed process can still spawn children.  True exec prevention
+    /// requires seccomp filters (future work).
     ///
     /// Only meaningful for `bash`.  Other tools don't spawn processes
     /// through the sandbox gate.
@@ -150,7 +155,7 @@ pub fn default_policy(tool_name: &str, working_dir: &Path) -> SandboxPolicy {
 
     match tool_name {
         "bash" => SandboxPolicy {
-            network: Access::Allow,
+            network: Access::Deny,
             file_read: PathAccess::RestrictTo(vec![cwd.clone()]),
             file_write: PathAccess::RestrictTo(vec![cwd, tmp]),
             process_exec: Access::Allow,
@@ -462,9 +467,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn bash_default_allows_network() {
+    fn bash_default_denies_network() {
         let p = default_policy("bash", &wd());
-        assert_eq!(p.network, Access::Allow);
+        assert_eq!(p.network, Access::Deny);
     }
 
     #[test]

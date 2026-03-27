@@ -103,14 +103,7 @@ use crate::sandbox::{Sandbox, SandboxDecision};
 use crate::tool::{ToolContext, ToolOutput};
 use crate::util::escape_single_quotes;
 
-/// Maximum tool output size (characters) before truncation.
-///
-/// This protects against:
-/// - MCP servers returning huge payloads that blow up the context window
-/// - Bash commands producing excessive output (BashTool has its own 100KB
-///   byte limit, but this catches anything that slips through)
-/// - Any tool returning unexpectedly large results
-const MAX_OUTPUT_CHARS: usize = 100_000;
+use super::MAX_OUTPUT_CHARS;
 
 // ---------------------------------------------------------------------------
 // Seatbelt profiles (macOS)
@@ -369,14 +362,23 @@ pub fn build_bwrap_command(command: &str, profile: &str, working_dir: &str) -> S
 
 use crate::sandbox::policy::{Access, PathAccess, SandboxPolicy};
 
+/// Essential system directories needed for bash to function.
+///
+/// These are always mounted read-only when file_read is restricted,
+/// so that shell builtins, coreutils, and shared libraries are available.
+const ESSENTIAL_SYSTEM_DIRS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
+
 /// Build a Linux bwrap command from a `SandboxPolicy`.
 ///
 /// Translates intent into bwrap flags:
+/// - `file_read: Allow` + `file_write: Allow` → `--bind / /`
+/// - `file_read: Allow` + `file_write: Deny/RestrictTo` → `--ro-bind / /` + writable binds
+/// - `file_read: RestrictTo/Deny` → selective read-only binds for allowed paths + system dirs
 /// - `network: Deny` → `--unshare-net`
-/// - `file_write: RestrictTo(paths)` → `--ro-bind / /` + `--bind <p> <p>` per path
-/// - `file_write: Deny` → `--ro-bind / /` only
-/// - `file_write: Allow` → `--bind / /`
-/// - `process_exec: Deny` → `--unshare-pid`
+/// - `process_exec: Deny` → `--unshare-pid` (PID visibility only; does NOT prevent exec)
+///
+/// When `/tmp` appears in writable paths, `--tmpfs /tmp` is used instead of
+/// `--bind /tmp /tmp` to provide an isolated temporary directory.
 ///
 /// Not gated by #[cfg] so it can be tested on any platform.
 pub fn build_bwrap_command_from_policy(
@@ -389,24 +391,44 @@ pub fn build_bwrap_command_from_policy(
 
     parts.push("bwrap".to_string());
 
-    // Filesystem access.
-    match &policy.file_write {
-        PathAccess::Allow => {
-            // Full write access — bind root writable.
-            parts.push("--bind / /".to_string());
+    // --- Filesystem mounts ---
+    //
+    // Strategy depends on the combination of file_read and file_write:
+    //   read=Allow, write=Allow  → --bind / / (full access)
+    //   read=Allow, write=other  → --ro-bind / / + selective writable binds
+    //   read=Restrict/Deny       → no root bind; selective ro-binds + system dirs
+    let full_read = matches!(policy.file_read, PathAccess::Allow);
+    let full_write = matches!(policy.file_write, PathAccess::Allow);
+
+    if full_read && full_write {
+        parts.push("--bind / /".to_string());
+    } else if full_read {
+        // Read everything, write selectively.
+        parts.push("--ro-bind / /".to_string());
+        add_writable_mounts(&mut parts, &policy.file_write);
+    } else {
+        // Restricted or denied reads — no root bind.
+        // Mount essential system directories read-only so bash works.
+        for dir in ESSENTIAL_SYSTEM_DIRS {
+            parts.push(format!("--ro-bind {dir} {dir}"));
         }
-        PathAccess::Deny => {
-            // Read-only root, no writable mounts.
-            parts.push("--ro-bind / /".to_string());
-        }
-        PathAccess::RestrictTo(paths) => {
-            // Read-only root + writable binds for specific paths.
-            parts.push("--ro-bind / /".to_string());
-            for path in paths {
+
+        // Mount allowed read paths.
+        if let PathAccess::RestrictTo(read_paths) = &policy.file_read {
+            for path in read_paths {
                 let p = escape_single_quotes(&path.to_string_lossy());
-                parts.push(format!("--bind '{p}' '{p}'"));
+                // Don't duplicate system dirs already mounted above.
+                let already_covered = ESSENTIAL_SYSTEM_DIRS
+                    .iter()
+                    .any(|sys| path.starts_with(sys) || sys == &p.as_str());
+                if !already_covered {
+                    parts.push(format!("--ro-bind '{p}' '{p}'"));
+                }
             }
         }
+
+        // Layer writable paths on top (--bind overrides --ro-bind for same path).
+        add_writable_mounts(&mut parts, &policy.file_write);
     }
 
     // Always need /dev and /proc.
@@ -418,7 +440,9 @@ pub fn build_bwrap_command_from_policy(
         parts.push("--unshare-net".to_string());
     }
 
-    // PID isolation (when process_exec is denied).
+    // PID namespace isolation: hides host processes from the sandbox.
+    // NOTE: This does NOT prevent process execution (fork/execve).
+    // True exec prevention requires seccomp filters (future work).
     if policy.process_exec == Access::Deny {
         parts.push("--unshare-pid".to_string());
     }
@@ -432,6 +456,45 @@ pub fn build_bwrap_command_from_policy(
     parts.join(" ")
 }
 
+/// Add writable mount flags for a `PathAccess` policy.
+///
+/// Special case: `/tmp` uses `--tmpfs /tmp` for isolation instead of
+/// `--bind /tmp /tmp` (which would expose the host's /tmp).
+fn add_writable_mounts(parts: &mut Vec<String>, file_write: &PathAccess) {
+    if let PathAccess::RestrictTo(paths) = file_write {
+        for path in paths {
+            let path_str = path.to_string_lossy();
+            if path_str == "/tmp" || path_str == "/private/tmp" {
+                // Isolated writable /tmp — not shared with the host.
+                parts.push("--tmpfs /tmp".to_string());
+            } else {
+                let p = escape_single_quotes(&path_str);
+                parts.push(format!("--bind '{p}' '{p}'"));
+            }
+        }
+    } else if matches!(file_write, PathAccess::Allow) {
+        // file_write: Allow is handled at the caller level with --bind / /.
+        // This branch shouldn't be reached but is here for completeness.
+    }
+    // file_write: Deny → no writable mounts.
+}
+
+/// Sanitize a path for embedding in a Seatbelt S-expression.
+///
+/// Rejects paths containing characters that could break S-expression syntax.
+/// Returns `None` (and logs a warning) for unsafe paths.
+fn sanitize_seatbelt_path(path: &str) -> Option<String> {
+    if path.contains('"') || path.contains('\\') {
+        tracing::warn!(
+            path = path,
+            "rejecting path with special characters for Seatbelt profile"
+        );
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
 /// Build a macOS sandbox-exec command from a `SandboxPolicy`.
 ///
 /// Translates intent into Seatbelt S-expressions:
@@ -439,6 +502,8 @@ pub fn build_bwrap_command_from_policy(
 /// - `file_write: RestrictTo(paths)` → `(deny file-write* (require-not (require-any ...)))`
 /// - `file_write: Deny` → `(deny file-write*)`
 /// - `file_write: Allow` → (no deny rule)
+///
+/// Paths containing `"` or `\` are rejected to prevent S-expression injection.
 ///
 /// Not gated by #[cfg] so it can be tested on any platform.
 pub fn build_seatbelt_command_from_policy(
@@ -461,13 +526,13 @@ pub fn build_seatbelt_command_from_policy(
             profile_parts.push("(deny file-write*)".to_string());
         }
         PathAccess::RestrictTo(paths) => {
-            let mut exceptions = Vec::new();
-            for path in paths {
-                exceptions.push(format!(
-                    "(subpath \"{}\")",
-                    path.to_string_lossy()
-                ));
-            }
+            let exceptions: Vec<String> = paths
+                .iter()
+                .filter_map(|path| {
+                    sanitize_seatbelt_path(&path.to_string_lossy())
+                        .map(|p| format!("(subpath \"{p}\")"))
+                })
+                .collect();
             if exceptions.is_empty() {
                 profile_parts.push("(deny file-write*)".to_string());
             } else {
@@ -488,13 +553,13 @@ pub fn build_seatbelt_command_from_policy(
             profile_parts.push("(deny file-read*)".to_string());
         }
         PathAccess::RestrictTo(paths) => {
-            let mut exceptions = Vec::new();
-            for path in paths {
-                exceptions.push(format!(
-                    "(subpath \"{}\")",
-                    path.to_string_lossy()
-                ));
-            }
+            let mut exceptions: Vec<String> = paths
+                .iter()
+                .filter_map(|path| {
+                    sanitize_seatbelt_path(&path.to_string_lossy())
+                        .map(|p| format!("(subpath \"{p}\")"))
+                })
+                .collect();
             // Always allow reading system libraries and executables.
             exceptions.push("(subpath \"/usr\")".to_string());
             exceptions.push("(subpath \"/bin\")".to_string());
@@ -835,7 +900,9 @@ mod tests {
         };
         let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
         assert!(cmd.contains("--bind '/workspace' '/workspace'"));
-        assert!(cmd.contains("--bind '/tmp' '/tmp'"));
+        // /tmp should use --tmpfs for isolation, not --bind.
+        assert!(cmd.contains("--tmpfs /tmp"), "should use isolated /tmp: {cmd}");
+        assert!(!cmd.contains("--bind '/tmp'"), "should NOT bind host /tmp: {cmd}");
     }
 
     #[test]
@@ -860,6 +927,44 @@ mod tests {
         };
         let cmd = build_bwrap_command_from_policy("echo 'hello'", &policy, "/workspace");
         assert!(cmd.contains("'\\''"));
+    }
+
+    #[test]
+    fn bwrap_policy_restrict_file_read() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::RestrictTo(vec![PathBuf::from("/workspace")]),
+            file_write: PathAccess::RestrictTo(vec![PathBuf::from("/workspace")]),
+            process_exec: Access::Allow,
+        };
+        let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
+        // Should NOT have --ro-bind / / (restricted reads).
+        assert!(!cmd.contains("--ro-bind / /"), "should not bind entire root: {cmd}");
+        // Should have essential system dirs.
+        assert!(cmd.contains("--ro-bind /usr /usr"), "should bind /usr: {cmd}");
+        assert!(cmd.contains("--ro-bind /bin /bin"), "should bind /bin: {cmd}");
+        assert!(cmd.contains("--ro-bind /etc /etc"), "should bind /etc: {cmd}");
+        // Should have read-only bind for allowed read path.
+        assert!(cmd.contains("--ro-bind '/workspace' '/workspace'"), "should ro-bind workspace: {cmd}");
+        // Should have writable bind for allowed write path.
+        assert!(cmd.contains("--bind '/workspace' '/workspace'"), "should bind workspace writable: {cmd}");
+    }
+
+    #[test]
+    fn bwrap_policy_deny_file_read() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Deny,
+            file_write: PathAccess::Deny,
+            process_exec: Access::Deny,
+        };
+        let cmd = build_bwrap_command_from_policy("echo ok", &policy, "/workspace");
+        // Should NOT have --ro-bind / /.
+        assert!(!cmd.contains("--ro-bind / /"), "should not bind entire root: {cmd}");
+        // Should still have essential system dirs for bash to work.
+        assert!(cmd.contains("--ro-bind /usr /usr"), "should bind /usr: {cmd}");
+        // Should have no writable binds.
+        assert!(!cmd.contains("--bind '/"), "should have no writable binds: {cmd}");
     }
 
     // -----------------------------------------------------------------------
@@ -948,6 +1053,24 @@ mod tests {
         assert!(cmd.contains("subpath \"/workspace\""));
         // Should include system paths.
         assert!(cmd.contains("subpath \"/usr\""));
+    }
+
+    #[test]
+    fn seatbelt_policy_rejects_path_with_quotes() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::RestrictTo(vec![
+                PathBuf::from("/workspace"),
+                PathBuf::from("/path/with\"quote"),
+            ]),
+            process_exec: Access::Allow,
+        };
+        let cmd = build_seatbelt_command_from_policy("ls", &policy, "/workspace");
+        // Safe path should be present.
+        assert!(cmd.contains("subpath \"/workspace\""));
+        // Unsafe path should be rejected (not present in output).
+        assert!(!cmd.contains("with\"quote"), "path with quote should be sanitized out: {cmd}");
     }
 
     // -----------------------------------------------------------------------
