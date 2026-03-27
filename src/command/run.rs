@@ -61,7 +61,12 @@ pub async fn run(
     );
     let skills = {
         let ws = workspace.read().await;
-        dyson::skill::create_skills(&settings, Some(&**ws)).await
+        dyson::skill::create_skills(
+            &settings,
+            Some(&**ws),
+            std::sync::Arc::clone(&sandbox),
+            Some(std::sync::Arc::clone(&workspace)),
+        ).await
     };
     let nudge_interval = {
         let ws = workspace.read().await;

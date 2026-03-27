@@ -15,7 +15,7 @@
 // 9. Tool execution errors — tool failures are reported back to the LLM
 // ===========================================================================
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -285,7 +285,7 @@ async fn sandbox_deny_returns_error_to_llm() {
 
     let sandbox = DenySandbox::new("dangerous command blocked");
     let mut agent =
-        Agent::new(Box::new(llm), Box::new(sandbox), builtin_skills(), &default_settings(), None, 0)
+        Agent::new(Box::new(llm), Arc::new(sandbox), builtin_skills(), &default_settings(), None, 0)
             .unwrap();
     let mut output = MockOutput::new();
 
@@ -317,7 +317,7 @@ async fn sandbox_redirect_routes_to_different_tool() {
 
     let sandbox = RedirectSandbox::new("workspace_view");
     let mut agent =
-        Agent::new(Box::new(llm), Box::new(sandbox), builtin_skills(), &default_settings(), None, 0)
+        Agent::new(Box::new(llm), Arc::new(sandbox), builtin_skills(), &default_settings(), None, 0)
             .unwrap();
     let mut output = MockOutput::new();
 
@@ -349,7 +349,7 @@ async fn agent_stops_at_max_iterations() {
     responses.push(text_response_events("Here is a summary of progress."));
 
     let llm = MockLlm::new(responses);
-    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut settings = default_settings();
     settings.max_iterations = 3;
 
@@ -379,7 +379,7 @@ async fn conversation_persists_across_runs() {
         text_response_events("Second response."),
     ]);
 
-    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
             .unwrap();
@@ -432,7 +432,7 @@ async fn multiple_tool_calls_in_one_turn() {
         text_response_events("Both commands ran."),
     ]);
 
-    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
             .unwrap();
@@ -465,7 +465,7 @@ async fn unknown_tool_returns_error() {
         text_response_events("Tool not found, sorry."),
     ]);
 
-    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
             .unwrap();
@@ -509,7 +509,7 @@ async fn multi_turn_builds_correct_history() {
         text_response_events("Here are the files."),
     ]);
 
-    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
             .unwrap();
@@ -537,7 +537,7 @@ async fn clear_resets_conversation_history() {
         text_response_events("After clear."),
     ]);
 
-    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
             .unwrap();
@@ -574,7 +574,7 @@ async fn tool_error_is_reported_back() {
         text_response_events("Command failed."),
     ]);
 
-    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
             .unwrap();
@@ -607,7 +607,7 @@ async fn selective_sandbox_denies_specific_tools() {
 
     let sandbox = SelectiveDenySandbox::new(&["bash"]);
     let mut agent =
-        Agent::new(Box::new(llm), Box::new(sandbox), builtin_skills(), &default_settings(), None, 0)
+        Agent::new(Box::new(llm), Arc::new(sandbox), builtin_skills(), &default_settings(), None, 0)
             .unwrap();
     let mut output = MockOutput::new();
 
@@ -632,7 +632,7 @@ async fn selective_sandbox_denies_specific_tools() {
 async fn simple_text_response_no_tools() {
     let llm = MockLlm::new(vec![text_response_events("Hello, world!")]);
 
-    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
             .unwrap();
@@ -654,7 +654,7 @@ async fn simple_text_response_no_tools() {
 async fn set_messages_restores_conversation() {
     let llm = MockLlm::new(vec![text_response_events("Continuing.")]);
 
-    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
             .unwrap();
@@ -690,7 +690,7 @@ async fn redirect_to_unknown_tool_is_handled_gracefully() {
     // Redirect all calls to a tool that doesn't exist.
     let sandbox = RedirectSandbox::new("tool_that_does_not_exist");
     let mut agent =
-        Agent::new(Box::new(llm), Box::new(sandbox), builtin_skills(), &default_settings(), None, 0)
+        Agent::new(Box::new(llm), Arc::new(sandbox), builtin_skills(), &default_settings(), None, 0)
             .unwrap();
     let mut output = MockOutput::new();
 
@@ -735,7 +735,7 @@ async fn streaming_text_accumulates_correctly() {
         },
     ]]);
 
-    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
             .unwrap();
@@ -791,7 +791,7 @@ async fn concurrent_tool_calls_produce_all_results() {
         text_response_events("All three done."),
     ]);
 
-    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
             .unwrap();
@@ -841,7 +841,7 @@ async fn token_budget_halts_agent_after_limit() {
         ],
     ]);
 
-    let sandbox: Box<dyn Sandbox> = Box::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &default_settings(), None, 0)
             .unwrap();

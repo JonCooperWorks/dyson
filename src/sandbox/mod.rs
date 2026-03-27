@@ -170,13 +170,18 @@ pub trait Sandbox: Send + Sync {
 /// Otherwise, builds a `CompositeSandbox` with all non-disabled sandboxes.
 /// If the composite has no sandboxes (all disabled via config), it still
 /// functions — it just allows everything (like an empty pipeline).
+/// Build the sandbox from config, returning an `Arc` for shared ownership.
+///
+/// The `Arc` wrapper enables subagents to share the parent's sandbox without
+/// cloning the entire sandbox tree.  This ensures child agents inherit the
+/// same security policy as their parent.
 pub fn create_sandbox(
     config: &crate::config::SandboxConfig,
     dangerous_no_sandbox: bool,
-) -> Box<dyn Sandbox> {
+) -> std::sync::Arc<dyn Sandbox> {
     if dangerous_no_sandbox {
         tracing::warn!("all sandboxes disabled via --dangerous-no-sandbox");
-        return Box::new(no_sandbox::DangerousNoSandbox);
+        return std::sync::Arc::new(no_sandbox::DangerousNoSandbox);
     }
 
     let disabled = &config.disabled;
@@ -213,5 +218,5 @@ pub fn create_sandbox(
 
     tracing::info!(count = sandboxes.len(), "sandbox pipeline built");
 
-    Box::new(composite::CompositeSandbox::new(sandboxes))
+    std::sync::Arc::new(composite::CompositeSandbox::new(sandboxes))
 }

@@ -179,6 +179,7 @@ mod tests {
             env: std::collections::HashMap::new(),
             cancellation: tokio_util::sync::CancellationToken::new(),
             workspace: None,
+            depth: 0,
         }
     }
 

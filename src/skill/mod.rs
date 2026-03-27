@@ -46,6 +46,7 @@
 pub mod builtin;
 pub mod local;
 pub mod mcp;
+pub mod subagent;
 
 use std::sync::Arc;
 
@@ -156,11 +157,31 @@ pub trait Skill: Send + Sync {
 ///
 /// Skills that fail to load are logged and skipped — the agent continues
 /// without them.
+/// Create skills from settings and (optionally) workspace discovery.
+///
+/// Uses **two-phase construction** for subagent support:
+///
+/// 1. **Phase A**: Load all non-subagent skills (builtin, MCP, local).
+///    These are the regular skills that provide tools.
+///
+/// 2. **Phase B**: Flatten the loaded tools from Phase A into a single
+///    list, then construct SubagentSkill with those tools.  Each subagent
+///    gets `Arc<dyn Tool>` clones of the parent's tools — no duplication,
+///    no reconnecting to MCP servers.
+///
+/// This ordering avoids the chicken-and-egg problem: subagent tools need
+/// the parent's tools to exist first, but they're also part of the skill
+/// list that feeds the parent.
 pub async fn create_skills(
     settings: &crate::config::Settings,
     workspace: Option<&dyn crate::workspace::Workspace>,
+    sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox>,
+    workspace_arc: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
 ) -> Vec<Box<dyn Skill>> {
     let mut skills: Vec<Box<dyn Skill>> = Vec::new();
+    let mut subagent_configs: Vec<crate::config::SubagentAgentConfig> = Vec::new();
+
+    // -- Phase A: Load non-subagent skills --
 
     for config in &settings.skills {
         match config {
@@ -211,12 +232,14 @@ pub async fn create_skills(
                     }
                 }
             }
+            crate::config::SkillConfig::Subagent(cfg) => {
+                // Defer subagent construction to Phase B.
+                subagent_configs.extend(cfg.agents.clone());
+            }
         }
     }
 
     // Auto-discover skills from the workspace's skills/ directory.
-    // This follows the Hermes pattern: skills are workspace-managed content
-    // that the agent can create and edit, not just external config references.
     if let Some(ws) = workspace {
         for path in ws.skill_files() {
             match local::LocalSkill::from_file(&path) {
@@ -236,6 +259,44 @@ pub async fn create_skills(
                     );
                 }
             }
+        }
+    }
+
+    // -- Phase B: Construct subagent skill from loaded tools --
+    //
+    // Now that all non-subagent skills are loaded, flatten their tools
+    // into a single list.  SubagentSkill will distribute these to each
+    // subagent based on its `tools` filter config.
+    //
+    // Built-in subagents (planner, researcher) are always included.
+    // User-defined subagents from dyson.json are appended after them,
+    // so user configs can override built-ins by using the same name.
+    let mut all_subagent_configs = subagent::builtin_subagent_configs();
+    all_subagent_configs.extend(subagent_configs);
+
+    {
+        let parent_tools: Vec<std::sync::Arc<dyn crate::tool::Tool>> = skills
+            .iter()
+            .flat_map(|s| s.tools().iter().cloned())
+            .collect();
+
+        tracing::info!(
+            builtin_subagents = subagent::builtin_subagent_configs().len(),
+            user_subagents = all_subagent_configs.len() - subagent::builtin_subagent_configs().len(),
+            parent_tools = parent_tools.len(),
+            "constructing subagent skill"
+        );
+
+        let subagent_skill = subagent::SubagentSkill::new(
+            &all_subagent_configs,
+            settings,
+            sandbox,
+            workspace_arc,
+            &parent_tools,
+        );
+
+        if !subagent_skill.tools().is_empty() {
+            skills.push(Box::new(subagent_skill));
         }
     }
 
