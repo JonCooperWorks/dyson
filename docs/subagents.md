@@ -14,6 +14,24 @@ runs to completion and returns its final text as a tool result.
 
 ---
 
+## Built-in Subagents
+
+Dyson ships with two built-in subagents that are always available.  They use
+the `"default"` provider (the parent agent's own model), so they work out of
+the box with zero extra configuration.
+
+| Name | Description | Tools | Max Iterations |
+|------|-------------|-------|----------------|
+| `planner` | Breaks down complex tasks into concrete, ordered implementation steps.  Reads the codebase to understand structure before planning. | `read_file`, `search_files`, `list_files` | 15 |
+| `researcher` | Does deep research and summarizes findings.  Can read code, run commands, and search the web. | `bash`, `read_file`, `search_files`, `list_files`, `web_search` | 20 |
+
+The planner is deliberately read-only — it plans but doesn't execute.
+The researcher has broader access for thorough investigation.
+
+User-defined subagents in `dyson.json` are appended after built-ins.
+
+---
+
 ## Why Subagents?
 
 Different tasks benefit from different models.  A Claude parent might delegate
@@ -101,7 +119,7 @@ Add subagents to your `dyson.json`:
 | `name` | yes | — | Tool name the parent uses to invoke this subagent |
 | `description` | yes | — | Shown to the parent LLM so it knows when to delegate |
 | `system_prompt` | yes | — | System prompt for the child agent |
-| `provider` | yes | — | Key into `providers` map (e.g., `"claude"`, `"gpt"`) |
+| `provider` | yes | — | Key into `providers` map (e.g., `"claude"`, `"gpt"`), or `"default"` to use the parent's provider |
 | `model` | no | provider default | Override the model within the provider |
 | `max_iterations` | no | 10 | Maximum agent loop iterations for the child |
 | `max_tokens` | no | 4096 | Max tokens per LLM response |

@@ -445,20 +445,32 @@ impl SubagentSkill {
         let mut prompt_lines: Vec<String> = Vec::new();
 
         for cfg in configs {
-            // Resolve the provider from the providers map.
-            let (provider, api_key, base_url) = match settings.providers.get(&cfg.provider) {
-                Some(pc) => (
-                    pc.provider_type.clone(),
-                    pc.api_key.clone(),
-                    pc.base_url.clone(),
-                ),
-                None => {
-                    tracing::error!(
-                        subagent = cfg.name,
-                        provider = cfg.provider,
-                        "unknown provider for subagent — skipping"
-                    );
-                    continue;
+            // Resolve the provider.
+            //
+            // The special name "default" uses the parent agent's own provider,
+            // API key, and base URL.  This lets built-in subagents work out of
+            // the box without requiring extra provider config.
+            let (provider, api_key, base_url) = if cfg.provider == "default" {
+                (
+                    settings.agent.provider.clone(),
+                    settings.agent.api_key.clone(),
+                    settings.agent.base_url.clone(),
+                )
+            } else {
+                match settings.providers.get(&cfg.provider) {
+                    Some(pc) => (
+                        pc.provider_type.clone(),
+                        pc.api_key.clone(),
+                        pc.base_url.clone(),
+                    ),
+                    None => {
+                        tracing::error!(
+                            subagent = cfg.name,
+                            provider = cfg.provider,
+                            "unknown provider for subagent — skipping"
+                        );
+                        continue;
+                    }
                 }
             };
 
@@ -531,6 +543,86 @@ impl Skill for SubagentSkill {
             Some(&self.system_prompt)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Built-in subagent configurations.
+// ---------------------------------------------------------------------------
+
+/// Returns the default built-in subagent configurations.
+///
+/// These ship with every Dyson instance and use the `"default"` provider
+/// (the parent agent's own provider).  Users can override or extend these
+/// by adding their own subagent configs in dyson.json.
+///
+/// Built-in subagents:
+///
+/// - **planner**: Breaks down complex tasks into concrete, ordered steps.
+///   Given read-only tools so it can inspect the codebase before planning.
+///   Use it before tackling multi-step work.
+///
+/// - **researcher**: Does deep research and summarizes findings.  Has
+///   broader tool access including bash and web_search for thorough
+///   investigation.  Use it for questions that need exploration.
+pub fn builtin_subagent_configs() -> Vec<SubagentAgentConfig> {
+    vec![
+        SubagentAgentConfig {
+            name: "planner".into(),
+            description: "Breaks down complex tasks into concrete, ordered implementation \
+                steps.  Reads the codebase to understand structure before planning.  \
+                Returns a numbered plan with file paths and specific changes needed."
+                .into(),
+            system_prompt: "You are a planning specialist.  Your job is to analyze a task \
+                and break it into concrete, ordered implementation steps.\n\n\
+                Rules:\n\
+                1. Read relevant files to understand the codebase structure before planning.\n\
+                2. Each step must be specific — include file paths, function names, and what \
+                   to change.\n\
+                3. Order steps by dependency — what must happen first.\n\
+                4. Identify risks or decisions that need human input.\n\
+                5. Keep the plan concise — no filler, just actionable steps.\n\
+                6. Do NOT implement anything.  Only plan."
+                .into(),
+            provider: "default".into(),
+            model: None,
+            max_iterations: Some(15),
+            max_tokens: Some(4096),
+            tools: Some(vec![
+                "read_file".into(),
+                "search_files".into(),
+                "list_files".into(),
+            ]),
+        },
+        SubagentAgentConfig {
+            name: "researcher".into(),
+            description: "Does deep research and summarizes findings.  Can read code, \
+                run commands, and search the web.  Returns a concise summary of what \
+                it found.  Use for questions that need investigation."
+                .into(),
+            system_prompt: "You are a research specialist.  Your job is to thoroughly \
+                investigate a question and return a clear, concise summary.\n\n\
+                Rules:\n\
+                1. Use your tools to gather information — read files, run commands, \
+                   search the web.\n\
+                2. Be thorough — check multiple sources when possible.\n\
+                3. Cite specifics — file paths, line numbers, URLs.\n\
+                4. Summarize findings clearly — lead with the answer, then supporting \
+                   evidence.\n\
+                5. Flag uncertainty — if you're not sure, say so."
+                .into(),
+            provider: "default".into(),
+            model: None,
+            max_iterations: Some(20),
+            max_tokens: Some(4096),
+            tools: Some(vec![
+                "bash".into(),
+                "read_file".into(),
+                "search_files".into(),
+                "list_files".into(),
+                "web_search".into(),
+            ]),
+        },
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,5 +1098,65 @@ mod tests {
         ];
         let filtered = filter_tools(&tools, &Some(vec![]));
         assert_eq!(filtered.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Built-in subagent tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn builtin_subagent_configs_returns_planner_and_researcher() {
+        let configs = builtin_subagent_configs();
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].name, "planner");
+        assert_eq!(configs[1].name, "researcher");
+        // Both use the "default" provider.
+        assert!(configs.iter().all(|c| c.provider == "default"));
+    }
+
+    #[test]
+    fn builtin_subagents_have_tool_filters() {
+        let configs = builtin_subagent_configs();
+        // Planner has read-only tools.
+        let planner_tools = configs[0].tools.as_ref().unwrap();
+        assert!(planner_tools.contains(&"read_file".to_string()));
+        assert!(!planner_tools.contains(&"bash".to_string()));
+        // Researcher has broader access.
+        let researcher_tools = configs[1].tools.as_ref().unwrap();
+        assert!(researcher_tools.contains(&"bash".to_string()));
+        assert!(researcher_tools.contains(&"web_search".to_string()));
+    }
+
+    #[test]
+    fn default_provider_resolves_to_agent_settings() {
+        // Create settings with no named providers but a configured agent.
+        let settings = crate::config::Settings {
+            agent: AgentSettings {
+                provider: LlmProvider::Anthropic,
+                api_key: crate::auth::Credential::new("test-key".into()),
+                base_url: Some("https://custom.api".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let configs = vec![SubagentAgentConfig {
+            name: "test_default".into(),
+            description: "Uses default provider".into(),
+            system_prompt: "Test".into(),
+            provider: "default".into(),
+            model: None,
+            max_iterations: None,
+            max_tokens: None,
+            tools: None,
+        }];
+
+        let sandbox: Arc<dyn Sandbox> =
+            Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+        let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[]);
+
+        // Should have resolved successfully (1 tool, not skipped).
+        assert_eq!(skill.tools().len(), 1);
+        assert_eq!(skill.tools()[0].name(), "test_default");
     }
 }

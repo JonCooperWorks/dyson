@@ -267,20 +267,28 @@ pub async fn create_skills(
     // Now that all non-subagent skills are loaded, flatten their tools
     // into a single list.  SubagentSkill will distribute these to each
     // subagent based on its `tools` filter config.
-    if !subagent_configs.is_empty() {
+    //
+    // Built-in subagents (planner, researcher) are always included.
+    // User-defined subagents from dyson.json are appended after them,
+    // so user configs can override built-ins by using the same name.
+    let mut all_subagent_configs = subagent::builtin_subagent_configs();
+    all_subagent_configs.extend(subagent_configs);
+
+    {
         let parent_tools: Vec<std::sync::Arc<dyn crate::tool::Tool>> = skills
             .iter()
             .flat_map(|s| s.tools().iter().cloned())
             .collect();
 
         tracing::info!(
-            subagent_count = subagent_configs.len(),
+            builtin_subagents = subagent::builtin_subagent_configs().len(),
+            user_subagents = all_subagent_configs.len() - subagent::builtin_subagent_configs().len(),
             parent_tools = parent_tools.len(),
             "constructing subagent skill"
         );
 
         let subagent_skill = subagent::SubagentSkill::new(
-            &subagent_configs,
+            &all_subagent_configs,
             settings,
             sandbox,
             workspace_arc,
