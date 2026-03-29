@@ -215,11 +215,12 @@ pub struct AgentSettings {
     /// Optional base URL override for the LLM API.
     pub base_url: Option<String>,
 
-    /// Input token threshold that triggers automatic context compaction.
+    /// Estimated token threshold for automatic context compaction.
     ///
-    /// When the cumulative input tokens (`token_budget.input_tokens_used`)
-    /// exceed this value, the agent loop will summarise the conversation
-    /// and replace the history with the summary before the next LLM call.
+    /// Before each LLM call, the agent estimates the current context size
+    /// (messages + system prompt + tool definitions) offline.  When the
+    /// estimate exceeds this value, the conversation is summarised and
+    /// replaced before the next call.
     /// `None` = automatic compaction disabled (default).
     pub compaction_threshold: Option<usize>,
 }
