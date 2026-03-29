@@ -209,9 +209,9 @@ pub struct Agent {
     /// Token usage tracking and optional budget enforcement.
     pub token_budget: TokenBudget,
 
-    /// Input token threshold for automatic context compaction.
-    /// When `input_tokens_used` exceeds this after an LLM call,
-    /// the agent compacts the conversation before the next call.
+    /// Estimated token threshold for automatic context compaction.
+    /// Before each LLM call, the agent estimates the current context size
+    /// offline; if it exceeds this value, the conversation is compacted first.
     compaction_threshold: Option<usize>,
 }
 
@@ -387,8 +387,8 @@ impl Agent {
     ///
     /// ## When to use
     ///
-    /// - Automatically: the agent loop triggers compaction when
-    ///   `input_tokens_used` exceeds `compaction_threshold` (if set).
+    /// - Automatically: the agent loop triggers compaction when the
+    ///   offline-estimated context size exceeds `compaction_threshold`.
     /// - Manually: a controller can call `agent.compact()` directly
     ///   (e.g. in response to a `/compact` command).
     ///
@@ -405,7 +405,7 @@ impl Agent {
 
         tracing::info!(
             messages = self.messages.len(),
-            input_tokens = self.token_budget.input_tokens_used,
+            estimated_tokens = self.estimate_context_tokens(&self.system_prompt),
             "compacting conversation context"
         );
 
@@ -472,6 +472,30 @@ impl Agent {
         Ok(())
     }
 
+    /// Estimate the total token count of the current context that would be
+    /// sent to the LLM (messages + system prompt + tool definitions).
+    ///
+    /// This is a local/offline estimate using whitespace splitting — no API
+    /// call needed.  Used to decide whether to compact before the next call.
+    fn estimate_context_tokens(&self, system_prompt: &str) -> usize {
+        let system_tokens = system_prompt.split_whitespace().count();
+
+        let message_tokens: usize = self.messages.iter().map(|m| m.estimate_tokens()).sum();
+
+        let tool_tokens: usize = self
+            .tool_definitions
+            .iter()
+            .map(|t| {
+                t.name.split_whitespace().count()
+                    + t.description.split_whitespace().count()
+                    + t.input_schema.to_string().split_whitespace().count()
+                    + 10 // per-tool JSON framing overhead
+            })
+            .sum();
+
+        system_tokens + message_tokens + tool_tokens
+    }
+
     /// Get the current conversation messages (for persistence).
     pub fn messages(&self) -> &[Message] {
         &self.messages
@@ -535,27 +559,29 @@ impl Agent {
         }
 
         for iteration in 0..self.max_iterations {
-            // -- Auto-compact if input tokens exceed threshold --
+            // -- Auto-compact if estimated context tokens exceed threshold --
             //
-            // After the first LLM call, we know how many input tokens were
-            // used.  If a compaction_threshold is set and we've exceeded it,
-            // summarise the conversation to reduce context size before the
-            // next LLM call.  We only compact when there are at least 3
-            // messages (a real multi-turn conversation worth summarising).
+            // Before each LLM call, estimate the token count of the full
+            // context (messages + system prompt + tool definitions) locally.
+            // If it exceeds the threshold, compact first so we never send
+            // an oversized context to the API.
             if let Some(threshold) = self.compaction_threshold
-                && self.token_budget.input_tokens_used > threshold
                 && self.messages.len() >= 3
             {
-                tracing::info!(
-                    input_tokens = self.token_budget.input_tokens_used,
-                    threshold = threshold,
-                    "input tokens exceed compaction threshold — compacting"
-                );
-                if let Err(e) = self.compact(output).await {
-                    tracing::warn!(
-                        error = %e,
-                        "auto-compaction failed — continuing with full history"
+                let estimated_tokens = self.estimate_context_tokens(&turn_system_prompt);
+                if estimated_tokens > threshold {
+                    tracing::info!(
+                        estimated_tokens = estimated_tokens,
+                        threshold = threshold,
+                        messages = self.messages.len(),
+                        "estimated context tokens exceed compaction threshold — compacting"
                     );
+                    if let Err(e) = self.compact(output).await {
+                        tracing::warn!(
+                            error = %e,
+                            "auto-compaction failed — continuing with full history"
+                        );
+                    }
                 }
             }
 
@@ -1575,12 +1601,14 @@ mod tests {
 
     #[tokio::test]
     async fn auto_compaction_triggers_on_threshold() {
-        // Set up a low compaction threshold. The MockLlm needs:
-        //   1. First run() response (reports high input tokens)
+        // Set up a very low compaction threshold so that after turn 1 builds
+        // up history, the offline token estimate exceeds it on turn 2.
+        // The MockLlm needs:
+        //   1. First run() response
         //   2. Compaction summary (triggered automatically on second run)
         //   3. Second run() response
         let llm = MockLlm::new(vec![
-            // Turn 1: normal response with high token count.
+            // Turn 1: normal response.
             vec![
                 StreamEvent::TextDelta("First response.".into()),
                 StreamEvent::MessageComplete {
@@ -1588,7 +1616,8 @@ mod tests {
                     output_tokens: Some(20),
                 },
             ],
-            // Auto-compaction summary (triggered at start of turn 2 loop).
+            // Auto-compaction summary (triggered at start of turn 2 loop
+            // because estimated context tokens exceed the low threshold).
             vec![
                 StreamEvent::TextDelta("Summary of turn 1.".into()),
                 StreamEvent::MessageComplete {
@@ -1608,7 +1637,7 @@ mod tests {
 
         let settings = AgentSettings {
             api_key: "test".into(),
-            compaction_threshold: Some(100), // low threshold
+            compaction_threshold: Some(10), // very low — system prompt + tool defs alone exceed this
             ..Default::default()
         };
 
@@ -1617,37 +1646,18 @@ mod tests {
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
-        // First turn — build up history.
+        // First turn — build up history (2 messages: user + assistant).
         agent.run("first message", &mut output).await.unwrap();
-        assert_eq!(agent.messages.len(), 2); // user + assistant
+        assert_eq!(agent.messages.len(), 2);
 
-        // Simulate high input tokens (as if the provider reported them).
-        agent.token_budget.input_tokens_used = 200; // over threshold of 100
-
-        // Second turn — should auto-compact before the LLM call.
+        // Second turn — pushes "second message" (3 msgs total), offline
+        // estimate exceeds threshold of 10, so auto-compact fires.
         let result = agent.run("second message", &mut output).await.unwrap();
         assert_eq!(result, "Second response.");
 
-        // After compaction + new turn, we should have:
-        // [Context Summary] (from compaction) + "second message" (new user) + assistant
-        // But compaction resets, then run() adds new user msg + assistant.
-        // The summary message + new user message + assistant = 3
-        // Actually: compact produces 1 msg, then run() adds user msg on top,
-        // but compact happens inside run() after the user msg is already added.
-        // Let me trace: run("second message") → push user → loop iteration →
-        // auto-compact (now messages=[summary]) → LLM call → push assistant
-        // Wait, the user message was already pushed before the loop, so compact
-        // will include it in the summary. After compact: [summary].
-        // Then the LLM call happens with just [summary], assistant responds.
+        // Trace: run("second message") → push user (3 msgs) → loop →
+        // estimate > 10, compact → messages=[summary] → LLM → push assistant
         // Result: [summary, assistant] = 2 messages.
-        // But we also need the user's new message in context...
-        // Actually looking at the code more carefully: run() pushes the user
-        // message first, then enters the loop. At the top of the loop,
-        // auto-compact fires. compact() summarises ALL current messages
-        // (including the just-added user message) and replaces with summary.
-        // Then the LLM call proceeds with just [summary].
-        //
-        // This is correct behavior — the summary includes the new user message.
         assert_eq!(agent.messages.len(), 2); // summary + assistant
     }
 }

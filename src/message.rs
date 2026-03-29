@@ -137,7 +137,42 @@ pub struct Message {
 // Constructors — ergonomic builders for common message shapes.
 // ---------------------------------------------------------------------------
 
+impl ContentBlock {
+    /// Rough offline token estimate for this content block.
+    ///
+    /// Uses whitespace splitting (consistent with `stream_handler.rs`) to
+    /// approximate token count without calling a tokenizer.  Good enough
+    /// for deciding when to compact — not meant for billing accuracy.
+    pub fn estimate_tokens(&self) -> usize {
+        match self {
+            ContentBlock::Text { text } => text.split_whitespace().count().max(1),
+            ContentBlock::ToolUse { id, name, input } => {
+                let input_str = input.to_string();
+                name.split_whitespace().count()
+                    + id.split_whitespace().count()
+                    + input_str.split_whitespace().count()
+                    + 10 // JSON structure overhead
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                tool_use_id.split_whitespace().count()
+                    + content.split_whitespace().count()
+                    + 5 // JSON structure overhead
+            }
+        }
+    }
+}
+
 impl Message {
+    /// Rough offline token estimate for this entire message.
+    pub fn estimate_tokens(&self) -> usize {
+        let content_tokens: usize = self.content.iter().map(|b| b.estimate_tokens()).sum();
+        content_tokens + 4 // role + message framing overhead
+    }
+
     /// Create a user message from plain text.
     ///
     /// ```ignore
@@ -237,6 +272,59 @@ mod tests {
             }
             other => panic!("expected ToolResult, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn estimate_tokens_text_block() {
+        let block = ContentBlock::Text {
+            text: "hello world foo bar baz".into(),
+        };
+        assert_eq!(block.estimate_tokens(), 5);
+    }
+
+    #[test]
+    fn estimate_tokens_empty_text_returns_at_least_one() {
+        let block = ContentBlock::Text {
+            text: String::new(),
+        };
+        assert_eq!(block.estimate_tokens(), 1);
+    }
+
+    #[test]
+    fn estimate_tokens_tool_use_block() {
+        let block = ContentBlock::ToolUse {
+            id: "call_1".into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "ls -la"}),
+        };
+        let tokens = block.estimate_tokens();
+        // Should include name, id, JSON input, plus overhead.
+        assert!(tokens >= 10, "expected at least 10, got {tokens}");
+    }
+
+    #[test]
+    fn estimate_tokens_tool_result_block() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "call_1".into(),
+            content: "file.txt\nREADME.md\n".into(),
+            is_error: false,
+        };
+        let tokens = block.estimate_tokens();
+        assert!(tokens >= 5, "expected at least 5, got {tokens}");
+    }
+
+    #[test]
+    fn estimate_tokens_message_sums_blocks() {
+        let msg = Message::assistant(vec![
+            ContentBlock::Text {
+                text: "one two three".into(),
+            },
+            ContentBlock::Text {
+                text: "four five".into(),
+            },
+        ]);
+        // 3 + 2 words + 4 overhead = 9
+        assert_eq!(msg.estimate_tokens(), 9);
     }
 
 }
