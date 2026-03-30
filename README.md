@@ -2,13 +2,29 @@
 
 A streaming AI agent loop in Rust, built to understand how these things actually work — and how to secure them.
 
+> **This is an educational project.** I'm an AppSec engineer who got tired of treating AI agents as black boxes. Dyson exists so I can take agents apart, understand every moving piece, and figure out how to secure and deploy them responsibly. **If you need a production agent, you should use a real one** — see [the projects that inspired this](#standing-on-the-shoulders-of-lobsters-and-gods) below. If you want to understand what's happening inside the loop, read on.
+
 ## Why
 
-AI agents are black boxes that run tools in a loop. They read your files, execute commands, make network requests. If you're going to trust one with access to your system, you should understand exactly what's happening inside that loop.
+AI agents run tools in a loop. They read your files, execute commands, make network requests. If you're going to trust one with access to your system, you should understand exactly what's happening inside that loop.
 
-Dyson is a from-scratch implementation of the core agent pattern: **LLM streams a response → detects tool calls → executes them → feeds results back → repeats**. Every component is a trait, every decision point is a hook, and every file is heavily annotated explaining *why* it works the way it does.
+As someone who works in application security, I found myself reviewing agent deployments without a clear mental model of what was actually going on under the hood. The best way to understand something is to build it from scratch — so that's what Dyson is. A from-scratch implementation of the core agent pattern: **LLM streams a response → detects tool calls → executes them → feeds results back → repeats**. Every component is a trait, every decision point is a hook, and every file is heavily annotated explaining *why* it works the way it does.
 
-The goal isn't to replace Claude Code or Cursor — it's to build the mental model for how agent loops work, where the security boundaries are, and what controls are possible.
+The goal isn't to replace Claude Code or Cursor — it's to demystify how agent loops work, where the security boundaries are, and what controls are possible.
+
+## Standing on the shoulders of lobsters and gods
+
+Dyson wouldn't exist without two outstanding open-source projects:
+
+### [OpenClaw](https://github.com/openclaw/openclaw)
+
+OpenClaw is the real deal — a fully-featured personal AI assistant that runs on your own hardware across every platform and channel you can think of (Telegram, Slack, Discord, WhatsApp, Signal, iMessage, and many more). It has browser control, a skill registry, voice support, and a thriving ecosystem of community-built agents and tooling. If you want an agent you can actually *use* day-to-day, OpenClaw is where you should start. Dyson's multi-controller architecture and workspace file format are directly inspired by how OpenClaw handles channels and agent identity.
+
+### [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+
+Hermes Agent from [Nous Research](https://nousresearch.com/) is a beautifully designed agent framework with one of the most thoughtful approaches to agent memory I've seen. Its tiered memory system — agent-curated journals, persistent identity files, periodic nudges, and full-text search for overflow — is the kind of design that makes you rethink what agents are capable of when given the right scaffolding. Dyson's entire memory architecture is modeled after Hermes, and the workspace format is compatible with the OpenClaw/TARS format that Hermes uses.
+
+**Seriously — go check both of them out.** They are production-quality projects built by talented teams. Dyson is just me in a room trying to figure out how it all works so I can help others secure it.
 
 ## What you learn by reading this codebase
 
