@@ -380,10 +380,11 @@ fn check_path_access(access: &PathAccess, file_path: &str, working_dir: &Path) -
             let canonical = resolve_canonical(&resolved);
 
             allowed.iter().any(|prefix| {
-                // Canonicalize the allowed prefix too so comparisons are
-                // consistent (e.g. if cwd itself is behind a symlink).
-                let canon_prefix = std::fs::canonicalize(prefix)
-                    .unwrap_or_else(|_| prefix.clone());
+                // Use the same resolve_canonical helper for the allowed prefix
+                // so both sides get consistent symlink resolution — e.g. on
+                // macOS where /tmp → /private/tmp, a non-existent prefix like
+                // /tmp/output resolves to /private/tmp/output.
+                let canon_prefix = resolve_canonical(prefix);
                 canonical.starts_with(&canon_prefix)
             })
         }
