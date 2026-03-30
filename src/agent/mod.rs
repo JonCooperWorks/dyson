@@ -864,18 +864,29 @@ impl Agent {
         // Build a condensed view of the conversation for the reflection.
         let reflection_system = Self::build_reflection_system_prompt(&self.tool_context).await;
 
-        // Only expose self-improvement tools.
-        let reflection_tools: Vec<ToolDefinition> = self
-            .tool_definitions
-            .iter()
-            .filter(|t| t.name == "skill_create" || t.name == "export_conversation")
-            .cloned()
-            .collect();
+        // Self-improvement tools are NOT part of the agent's normal tool set.
+        // They live only here — the LLM can't call them during regular
+        // conversation.  We instantiate them directly and build tool
+        // definitions inline.
+        let skill_create_tool: Arc<dyn Tool> =
+            Arc::new(crate::tool::skill_create::SkillCreateTool);
+        let export_tool: Arc<dyn Tool> =
+            Arc::new(crate::tool::export_conversation::ExportConversationTool);
 
-        if reflection_tools.is_empty() {
-            tracing::warn!("self-improvement tools not loaded — skipping reflection");
-            return Ok(());
-        }
+        let reflection_tool_map: HashMap<String, Arc<dyn Tool>> = HashMap::from([
+            (skill_create_tool.name().to_string(), Arc::clone(&skill_create_tool)),
+            (export_tool.name().to_string(), Arc::clone(&export_tool)),
+        ]);
+
+        let reflection_tools: Vec<ToolDefinition> = [&skill_create_tool, &export_tool]
+            .iter()
+            .map(|t| ToolDefinition {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                input_schema: t.input_schema(),
+                agent_only: false,
+            })
+            .collect();
 
         // Build the reflection messages: a condensed summary of what happened.
         let summary = Self::summarize_for_reflection(&self.messages);
@@ -937,14 +948,37 @@ impl Agent {
                 break;
             }
 
-            // Execute the tool calls (through the sandbox like everything else).
+            // Execute the tool calls directly against the reflection-only
+            // tools.  These bypass the agent's normal tool map and sandbox
+            // — they are internal-only tools that don't exist in the main
+            // conversation.  The sandbox still gates any child operations
+            // (e.g., bash calls inside export_conversation).
             for call in &tool_calls {
                 tracing::info!(
                     tool = call.name.as_str(),
                     "self-improvement executing tool"
                 );
 
-                let result = self.execute_tool_call_timed(call).await;
+                let tool = match reflection_tool_map.get(&call.name) {
+                    Some(t) => Arc::clone(t),
+                    None => {
+                        tracing::warn!(
+                            tool = call.name.as_str(),
+                            "self-improvement: LLM called unknown tool"
+                        );
+                        messages.push(Message::tool_result(
+                            &call.id,
+                            &format!("unknown tool '{}'", call.name),
+                            true,
+                        ));
+                        continue;
+                    }
+                };
+
+                let tool_start = std::time::Instant::now();
+                let result = tool.run(call.input.clone(), &self.tool_context).await;
+                let tool_ms = tool_start.elapsed().as_millis();
+
                 let tool_result_msg = match result {
                     Ok(ref tool_output) => {
                         actions_taken += 1;
@@ -957,6 +991,7 @@ impl Agent {
 
                         tracing::info!(
                             tool = call.name.as_str(),
+                            duration_ms = tool_ms,
                             is_error = tool_output.is_error,
                             result = tool_output.content.as_str(),
                             "self-improvement tool result"
@@ -967,6 +1002,7 @@ impl Agent {
                     Err(ref e) => {
                         tracing::warn!(
                             tool = call.name.as_str(),
+                            duration_ms = tool_ms,
                             error = %e,
                             "self-improvement tool call failed"
                         );
