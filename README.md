@@ -18,7 +18,7 @@ Dyson is heavily inspired by two projects that are worth checking out if you wan
 
 - **[OpenClaw](https://github.com/openclaw/openclaw)** — A personal AI assistant that runs on your own hardware with support for dozens of channels (Telegram, Slack, Discord, WhatsApp, Signal, etc.), browser control, a skill registry, and voice. Dyson's multi-controller architecture and workspace file format come directly from how OpenClaw handles channels and agent identity.
 
-- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — An agent framework from [Nous Research](https://nousresearch.com/) with a well-thought-out memory system: agent-curated journals, persistent identity files, periodic nudges, and full-text search. Dyson's memory architecture is modeled after Hermes, and the workspace format is compatible with the OpenClaw/TARS format that Hermes uses.
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — An agent framework from [Nous Research](https://nousresearch.com/) with a well-thought-out memory system: agent-curated journals, persistent identity files, periodic nudges, and full-text search. Dyson's memory architecture is modeled after Hermes, and the workspace format is compatible with the OpenClaw format that Hermes uses.
 
 If you want a production-ready agent, start with one of those. If you want to understand what's happening inside the loop and how to secure it, that's what Dyson is for.
 
