@@ -250,4 +250,4 @@ Every file has extensive annotations in the style of [rLLM](https://github.com/j
 cargo test
 ```
 
-339 tests covering SSE parsing, message serialization, config loading, bash execution, stream handling, sandbox decisions, secret resolution, provider registry, workspace persistence, web search, and the agent loop with mock LLM clients.
+500+ tests covering SSE parsing, message serialization, config loading, bash execution, stream handling, sandbox decisions, secret resolution, provider registry, workspace persistence, web search, and the agent loop with mock LLM clients.
