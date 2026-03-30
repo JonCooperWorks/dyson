@@ -2,7 +2,7 @@
 
 A streaming AI agent loop in Rust, built to understand how these things actually work — and how to secure them.
 
-> **This is an educational project.** I'm an AppSec engineer who got tired of treating AI agents as black boxes. Dyson exists so I can take agents apart, understand every moving piece, and figure out how to secure and deploy them responsibly. **If you need a production agent, you should use a real one** — see [the projects that inspired this](#standing-on-the-shoulders-of-lobsters-and-gods) below. If you want to understand what's happening inside the loop, read on.
+> **This is an educational project.** I'm an AppSec engineer who got tired of treating AI agents as black boxes. Dyson exists so I can take agents apart, understand every moving piece, and figure out how to secure and deploy them responsibly. **If you need a production agent, you should use a real one** — see [the projects that inspired this](#inspired-by) below. If you want to understand what's happening inside the loop, read on.
 
 ## Why
 
@@ -12,19 +12,15 @@ As someone who works in application security, I found myself reviewing agent dep
 
 The goal isn't to replace Claude Code or Cursor — it's to demystify how agent loops work, where the security boundaries are, and what controls are possible.
 
-## Standing on the shoulders of lobsters and gods
+## Inspired by
 
-Dyson wouldn't exist without two outstanding open-source projects:
+Dyson is heavily inspired by two projects that are worth checking out if you want something production-ready:
 
-### [OpenClaw](https://github.com/openclaw/openclaw)
+- **[OpenClaw](https://github.com/openclaw/openclaw)** — A personal AI assistant that runs on your own hardware with support for dozens of channels (Telegram, Slack, Discord, WhatsApp, Signal, etc.), browser control, a skill registry, and voice. Dyson's multi-controller architecture and workspace file format come directly from how OpenClaw handles channels and agent identity.
 
-OpenClaw is the real deal — a fully-featured personal AI assistant that runs on your own hardware across every platform and channel you can think of (Telegram, Slack, Discord, WhatsApp, Signal, iMessage, and many more). It has browser control, a skill registry, voice support, and a thriving ecosystem of community-built agents and tooling. If you want an agent you can actually *use* day-to-day, OpenClaw is where you should start. Dyson's multi-controller architecture and workspace file format are directly inspired by how OpenClaw handles channels and agent identity.
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — An agent framework from [Nous Research](https://nousresearch.com/) with a well-thought-out memory system: agent-curated journals, persistent identity files, periodic nudges, and full-text search. Dyson's memory architecture is modeled after Hermes, and the workspace format is compatible with the OpenClaw/TARS format that Hermes uses.
 
-### [Hermes Agent](https://github.com/NousResearch/hermes-agent)
-
-Hermes Agent from [Nous Research](https://nousresearch.com/) is a beautifully designed agent framework with one of the most thoughtful approaches to agent memory I've seen. Its tiered memory system — agent-curated journals, persistent identity files, periodic nudges, and full-text search for overflow — is the kind of design that makes you rethink what agents are capable of when given the right scaffolding. Dyson's entire memory architecture is modeled after Hermes, and the workspace format is compatible with the OpenClaw/TARS format that Hermes uses.
-
-**Seriously — go check both of them out.** They are production-quality projects built by talented teams. Dyson is just me in a room trying to figure out how it all works so I can help others secure it.
+Both are further along than Dyson and solve real problems. This project exists to take the ideas apart and understand how to secure them.
 
 ## What you learn by reading this codebase
 
