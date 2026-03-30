@@ -325,9 +325,13 @@ pub fn build_seatbelt_command(command: &str, profile: &str, working_dir: &str) -
 /// Only *executed* on Linux.
 ///
 /// Profile controls which flags are used:
-/// - `"default"` — read-only root, writable cwd + /tmp, no network
-/// - `"strict"` — read-only root, writable cwd only, no network, no PID
+/// - `"default"` — read-only root, writable cwd + /tmp, shared network
+/// - `"strict"` — read-only root, writable cwd + /tmp, shared network, PID isolated
 /// - `"permissive"` — writable root, no namespace isolation
+///
+/// Network is always shared (`--share-net`) to support skill execution
+/// (pip installs, API calls, etc.) and avoid kernel compatibility issues
+/// with `--unshare-net` on ARM servers.
 pub fn build_bwrap_command(command: &str, profile: &str, working_dir: &str) -> String {
     let escaped = escape_single_quotes(command);
     let working_dir = escape_single_quotes(working_dir);
@@ -335,8 +339,9 @@ pub fn build_bwrap_command(command: &str, profile: &str, working_dir: &str) -> S
     match profile {
         "strict" => format!(
             "bwrap --ro-bind / / --dev /dev --proc /proc \
+             --tmpfs /tmp \
              --bind '{working_dir}' '{working_dir}' \
-             --unshare-net --unshare-pid \
+             --share-net --unshare-pid \
              --die-with-parent \
              bash -c '{escaped}'"
         ),
@@ -349,7 +354,7 @@ pub fn build_bwrap_command(command: &str, profile: &str, working_dir: &str) -> S
             "bwrap --ro-bind / / --dev /dev --proc /proc \
              --tmpfs /tmp \
              --bind '{working_dir}' '{working_dir}' \
-             --unshare-net --unshare-pid \
+             --share-net --unshare-pid \
              --die-with-parent \
              bash -c '{escaped}'"
         ),
@@ -374,7 +379,8 @@ const ESSENTIAL_SYSTEM_DIRS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib6
 /// - `file_read: Allow` + `file_write: Allow` → `--bind / /`
 /// - `file_read: Allow` + `file_write: Deny/RestrictTo` → `--ro-bind / /` + writable binds
 /// - `file_read: RestrictTo/Deny` → selective read-only binds for allowed paths + system dirs
-/// - `network: Deny` → `--unshare-net`
+/// - `network`: always shared (`--share-net` omitted; no `--unshare-net`) to support
+///   skill execution (pip, API calls) and ARM kernel compatibility.
 /// - `process_exec: Deny` → `--unshare-pid` (PID visibility only; does NOT prevent exec)
 ///
 /// When `/tmp` appears in writable paths, `--tmpfs /tmp` is used instead of
@@ -435,10 +441,8 @@ pub fn build_bwrap_command_from_policy(
     parts.push("--dev /dev".to_string());
     parts.push("--proc /proc".to_string());
 
-    // Network isolation.
-    if policy.network == Access::Deny {
-        parts.push("--unshare-net".to_string());
-    }
+    // Network: always shared to support skill execution (pip, APIs) and
+    // avoid RTM_NEWADDR errors on ARM kernels. No --unshare-net.
 
     // PID namespace isolation: hides host processes from the sandbox.
     // NOTE: This does NOT prevent process execution (fork/execve).
@@ -644,7 +648,8 @@ mod tests {
         assert!(cmd.contains("--proc /proc"));
         assert!(cmd.contains("--tmpfs /tmp"));
         assert!(cmd.contains("--bind '/workspace' '/workspace'"));
-        assert!(cmd.contains("--unshare-net"));
+        assert!(cmd.contains("--share-net"));
+        assert!(!cmd.contains("--unshare-net"));
         assert!(cmd.contains("--unshare-pid"));
         assert!(cmd.contains("--die-with-parent"));
         assert!(cmd.contains("bash -c 'ls -la'"));
@@ -655,10 +660,11 @@ mod tests {
         let cmd = build_bwrap_command("pwd", "strict", "/home/user");
         assert!(cmd.contains("--ro-bind / /"));
         assert!(cmd.contains("--bind '/home/user' '/home/user'"));
-        assert!(cmd.contains("--unshare-net"));
+        assert!(cmd.contains("--share-net"));
+        assert!(!cmd.contains("--unshare-net"));
         assert!(cmd.contains("--unshare-pid"));
-        // Strict: no --tmpfs /tmp (no writable /tmp)
-        assert!(!cmd.contains("--tmpfs /tmp"));
+        // Strict now includes --tmpfs /tmp for skill temp files.
+        assert!(cmd.contains("--tmpfs /tmp"));
     }
 
     #[test]
@@ -852,7 +858,8 @@ mod tests {
             process_exec: Access::Allow,
         };
         let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
-        assert!(cmd.contains("--unshare-net"), "should deny network");
+        // Network is always shared now — --unshare-net should NOT be present.
+        assert!(!cmd.contains("--unshare-net"), "should not unshare network");
         assert!(cmd.contains("--ro-bind / /"), "should have read-only root");
         assert!(cmd.contains("--bind '/workspace' '/workspace'"), "should bind working dir");
         assert!(cmd.contains("--die-with-parent"));
