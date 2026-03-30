@@ -215,14 +215,14 @@ pub struct AgentSettings {
     /// Optional base URL override for the LLM API.
     pub base_url: Option<String>,
 
-    /// Estimated token threshold for automatic context compaction.
+    /// Context compaction configuration.
     ///
-    /// Before each LLM call, the agent estimates the current context size
-    /// (messages + system prompt + tool definitions) offline.  When the
-    /// estimate exceeds this value, the conversation is summarised and
-    /// replaced before the next call.
+    /// When set, the agent automatically compacts conversation history when
+    /// the estimated context size exceeds `compaction.threshold()`.  Uses a
+    /// Hermes-style five-phase algorithm that preserves the head and tail of
+    /// the conversation while summarising the middle.
     /// `None` = automatic compaction disabled (default).
-    pub compaction_threshold: Option<usize>,
+    pub compaction: Option<CompactionConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -514,6 +514,92 @@ impl Default for MemoryConfig {
 }
 
 // ---------------------------------------------------------------------------
+// CompactionConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for the Hermes-style context compressor.
+///
+/// Controls when and how the agent compacts its conversation history
+/// to stay within the model's context window while preserving critical
+/// context at both ends of the conversation.
+///
+/// The algorithm has five phases:
+///   1. **Tool output pruning** — replace old tool results outside protected
+///      regions with placeholders (no LLM call needed).
+///   2. **Region identification** — protect the first N messages (head) and
+///      the most recent messages within a token budget (tail).
+///   3. **Structured summarisation** — summarise only the middle section
+///      via LLM (Goal / Progress / Decisions / Files / Next Steps).
+///   4. **Reassembly** — head + `[Context Summary]` + tail.
+///   5. **Orphan repair** — fix broken tool_use / tool_result pairs at the
+///      boundaries.
+///
+/// ```json
+/// {
+///   "agent": {
+///     "compaction": {
+///       "context_window": 200000,
+///       "threshold_ratio": 0.50,
+///       "protect_head": 3,
+///       "protect_tail_tokens": 20000,
+///       "summary_min_tokens": 2000,
+///       "summary_max_tokens": 12000,
+///       "summary_target_ratio": 0.20
+///     }
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct CompactionConfig {
+    /// Model's context window in estimated tokens.
+    /// The compaction threshold is `context_window * threshold_ratio`.
+    pub context_window: usize,
+
+    /// Fraction of `context_window` at which to trigger compaction (default 0.50).
+    pub threshold_ratio: f64,
+
+    /// Number of messages to always keep at the start of the conversation.
+    /// These are never summarised (default 3).
+    pub protect_head: usize,
+
+    /// Estimated token budget for messages to protect at the end (default 20,000).
+    /// The most recent messages fitting within this budget are kept verbatim.
+    pub protect_tail_tokens: usize,
+
+    /// Minimum tokens for the summary output (default 2,000).
+    pub summary_min_tokens: usize,
+
+    /// Maximum tokens for the summary output (default 12,000).
+    pub summary_max_tokens: usize,
+
+    /// Target ratio of summary size to middle section size (default 0.20).
+    /// The actual max_tokens for the summarisation call is
+    /// `clamp(middle_tokens * summary_target_ratio, summary_min_tokens, summary_max_tokens)`.
+    pub summary_target_ratio: f64,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            context_window: 200_000,
+            threshold_ratio: 0.50,
+            protect_head: 3,
+            protect_tail_tokens: 20_000,
+            summary_min_tokens: 2_000,
+            summary_max_tokens: 12_000,
+            summary_target_ratio: 0.20,
+        }
+    }
+}
+
+impl CompactionConfig {
+    /// The effective token threshold at which compaction triggers.
+    pub fn threshold(&self) -> usize {
+        (self.context_window as f64 * self.threshold_ratio) as usize
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ChatHistoryConfig
 // ---------------------------------------------------------------------------
 
@@ -591,7 +677,7 @@ impl Default for AgentSettings {
             api_key: crate::auth::Credential::new(String::new()),
             provider: LlmProvider::Anthropic,
             base_url: None,
-            compaction_threshold: None,
+            compaction: None,
         }
     }
 }

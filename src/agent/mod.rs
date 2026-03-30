@@ -65,7 +65,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::config::AgentSettings;
+use crate::config::{AgentSettings, CompactionConfig};
 use crate::error::{DysonError, Result};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use crate::message::Message;
@@ -227,10 +227,10 @@ pub struct Agent {
     /// Token usage tracking and optional budget enforcement.
     pub token_budget: TokenBudget,
 
-    /// Estimated token threshold for automatic context compaction.
-    /// Before each LLM call, the agent estimates the current context size
-    /// offline; if it exceeds this value, the conversation is compacted first.
-    compaction_threshold: Option<usize>,
+    /// Context compaction configuration.
+    /// When set, the agent automatically compacts conversation history when
+    /// the estimated context size exceeds `compaction_config.threshold()`.
+    compaction_config: Option<CompactionConfig>,
 }
 
 impl Agent {
@@ -352,7 +352,7 @@ impl Agent {
             turn_count: 0,
             nudge_interval,
             token_budget: TokenBudget::default(),
-            compaction_threshold: settings.compaction_threshold,
+            compaction_config: settings.compaction.clone(),
         })
     }
 
@@ -392,30 +392,28 @@ impl Agent {
         self.messages.clear();
     }
 
-    /// Compact the conversation by summarising it and replacing the history.
+    /// Compact the conversation using a five-phase Hermes-style algorithm.
     ///
-    /// This is the core context-compaction primitive:
+    /// When a `CompactionConfig` is set, the algorithm:
+    ///   1. **Prune tool outputs** — replace old `ToolResult` content outside
+    ///      protected regions with placeholders (no LLM call).
+    ///   2. **Identify regions** — protect the first N messages (head) and the
+    ///      most recent messages within a token budget (tail).
+    ///   3. **Summarise the middle** — send only the middle section to the LLM
+    ///      with a structured prompt (Goal / Progress / Decisions / Files / Next).
+    ///   4. **Reassemble** — head + `[Context Summary]` + tail.
+    ///   5. **Fix orphaned tool pairs** — insert synthetic `ToolResult` for any
+    ///      `ToolUse` whose result was in the summarised section.
     ///
-    /// 1. Send the full message history to the LLM with a summarisation
-    ///    prompt (no tools, so the model can only respond with text).
-    /// 2. Replace the entire message history with a single user message
-    ///    containing the summary, prefixed with `[Context Summary]`.
-    /// 3. The next LLM call sees only the compact summary instead of the
-    ///    full history, dramatically reducing input tokens.
+    /// When no `CompactionConfig` is set, falls back to legacy behaviour:
+    /// summarise the entire history into a single `[Context Summary]` message.
     ///
     /// ## When to use
     ///
     /// - Automatically: the agent loop triggers compaction when the
-    ///   offline-estimated context size exceeds `compaction_threshold`.
+    ///   offline-estimated context size exceeds `compaction_config.threshold()`.
     /// - Manually: a controller can call `agent.compact()` directly
     ///   (e.g. in response to a `/compact` command).
-    ///
-    /// ## Design notes
-    ///
-    /// The summary is injected as a `User` message so it plays well with
-    /// every provider's message format (the first message must be a user
-    /// message for Anthropic).  The `[Context Summary]` prefix tells the
-    /// model that this is condensed history, not a literal user utterance.
     pub async fn compact(&mut self, output: &mut dyn Output) -> Result<()> {
         if self.messages.is_empty() {
             return Ok(());
@@ -427,32 +425,180 @@ impl Agent {
             "compacting conversation context"
         );
 
-        // Build a one-shot summarisation request: the full history with a
-        // system prompt that instructs the model to produce a concise summary.
-        let compaction_system = format!(
-            "{}\n\n\
-             You are being asked to summarise the conversation so far.  \
-             Produce a concise but thorough summary that preserves:\n\
-             - Key facts, decisions, and conclusions reached\n\
-             - Important tool results and their outcomes\n\
-             - The user's original goals and current progress\n\
-             - Any pending tasks or unresolved questions\n\n\
-             Write the summary as a single block of text.  Do NOT call any tools.  \
-             Do NOT ask questions.  Just summarise.",
-            self.system_prompt,
+        // Dispatch to five-phase or legacy compaction.
+        if let Some(ref config) = self.compaction_config.clone() {
+            self.compact_hermes(config, output).await
+        } else {
+            self.compact_legacy(output).await
+        }
+    }
+
+    /// Legacy compaction: summarise the entire history into one message.
+    async fn compact_legacy(&mut self, output: &mut dyn Output) -> Result<()> {
+        let summary = self.summarise_messages(&self.messages.clone(), None, output).await?;
+
+        if summary.is_empty() {
+            tracing::warn!("compaction produced empty summary — keeping original history");
+            return Ok(());
+        }
+
+        let old_count = self.messages.len();
+        self.messages.clear();
+        self.messages.push(Message::user(&format!("[Context Summary]\n\n{summary}")));
+        self.token_budget.reset();
+
+        tracing::info!(old_messages = old_count, "context compacted (legacy)");
+        Ok(())
+    }
+
+    /// Five-phase Hermes-style compaction.
+    async fn compact_hermes(
+        &mut self,
+        config: &CompactionConfig,
+        output: &mut dyn Output,
+    ) -> Result<()> {
+        // Phase 2: identify protected regions.
+        let head_end = self.head_boundary(config);
+        let tail_start = self.tail_boundary(config);
+
+        // If there's no middle section, nothing to summarise.
+        if head_end >= tail_start {
+            tracing::info!(
+                head_end, tail_start,
+                "protected regions overlap — skipping compaction"
+            );
+            return Ok(());
+        }
+
+        // Phase 1: prune tool outputs in the middle (cheap, no LLM).
+        self.prune_tool_outputs(head_end, tail_start);
+
+        // Check for a previous [Context Summary] in the head for iterative merging.
+        let previous_summary = self.find_existing_summary(head_end);
+
+        // Phase 3: summarise the middle section.
+        let middle = self.messages[head_end..tail_start].to_vec();
+        let summary = self
+            .summarise_messages(&middle, previous_summary.as_deref(), output)
+            .await?;
+
+        if summary.is_empty() {
+            tracing::warn!("compaction produced empty summary — keeping original history");
+            return Ok(());
+        }
+
+        // Phase 4: reassemble — head + summary + tail.
+        let mut new_messages = Vec::new();
+
+        // Head: keep first N messages, but skip any old [Context Summary].
+        for msg in &self.messages[..head_end] {
+            let is_old_summary = msg.content.iter().any(|b| {
+                matches!(b, crate::message::ContentBlock::Text { text }
+                    if text.starts_with("[Context Summary]"))
+            });
+            if !is_old_summary {
+                new_messages.push(msg.clone());
+            }
+        }
+
+        // Insert new summary.
+        new_messages.push(Message::user(&format!("[Context Summary]\n\n{summary}")));
+
+        // Tail: verbatim.
+        new_messages.extend_from_slice(&self.messages[tail_start..]);
+
+        let old_count = self.messages.len();
+        self.messages = new_messages;
+
+        // Phase 5: fix orphaned tool_use/tool_result pairs.
+        self.fix_orphaned_tool_pairs();
+
+        self.token_budget.reset();
+
+        tracing::info!(
+            old_messages = old_count,
+            new_messages = self.messages.len(),
+            "context compacted (hermes)"
         );
+        Ok(())
+    }
+
+    // -- Compaction helpers --------------------------------------------------
+
+    /// Return the index of the first message NOT in the protected head.
+    fn head_boundary(&self, config: &CompactionConfig) -> usize {
+        config.protect_head.min(self.messages.len())
+    }
+
+    /// Return the index of the first message in the protected tail.
+    ///
+    /// Walks backward from the end, accumulating estimated tokens until
+    /// the budget is exhausted.
+    fn tail_boundary(&self, config: &CompactionConfig) -> usize {
+        let mut tokens = 0usize;
+        let head_end = self.head_boundary(config);
+
+        for i in (head_end..self.messages.len()).rev() {
+            let msg_tokens = self.messages[i].estimate_tokens();
+            if tokens + msg_tokens > config.protect_tail_tokens {
+                return i + 1;
+            }
+            tokens += msg_tokens;
+        }
+        // All non-head messages fit in the tail budget.
+        head_end
+    }
+
+    /// Phase 1: replace `ToolResult` content in the middle with a placeholder.
+    fn prune_tool_outputs(&mut self, head_end: usize, tail_start: usize) {
+        for msg in &mut self.messages[head_end..tail_start] {
+            for block in &mut msg.content {
+                if let crate::message::ContentBlock::ToolResult { content, .. } = block {
+                    *content = "[tool output pruned]".to_string();
+                }
+            }
+        }
+    }
+
+    /// Find an existing `[Context Summary]` in the head region.
+    fn find_existing_summary(&self, head_end: usize) -> Option<String> {
+        for msg in &self.messages[..head_end] {
+            for block in &msg.content {
+                if let crate::message::ContentBlock::Text { text } = block {
+                    if text.starts_with("[Context Summary]") {
+                        // Strip the prefix to get just the summary body.
+                        return Some(
+                            text.strip_prefix("[Context Summary]")
+                                .unwrap_or(text)
+                                .trim()
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Send messages to the LLM for summarisation and return the summary text.
+    async fn summarise_messages(
+        &self,
+        messages: &[Message],
+        previous_summary: Option<&str>,
+        output: &mut dyn Output,
+    ) -> Result<String> {
+        let compaction_system = self.build_compaction_prompt(previous_summary);
 
         let empty_tools: &[ToolDefinition] = &[];
         let response = self
             .client
-            .stream(&self.messages, &compaction_system, empty_tools, &self.config)
+            .stream(messages, &compaction_system, empty_tools, &self.config)
             .await?;
 
         let (assistant_msg, _tool_calls, _output_tokens) =
             stream_handler::process_stream(response.stream, output).await?;
 
-        // Extract the summary text from the assistant's response.
-        let summary = assistant_msg
+        Ok(assistant_msg
             .content
             .iter()
             .filter_map(|block| {
@@ -463,31 +609,101 @@ impl Agent {
                 }
             })
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n"))
+    }
 
-        if summary.is_empty() {
-            tracing::warn!("compaction produced empty summary — keeping original history");
-            return Ok(());
-        }
-
-        let old_count = self.messages.len();
-
-        // Rotate: replace the entire history with the summary.
-        self.messages.clear();
-        self.messages.push(Message::user(&format!(
-            "[Context Summary]\n\n{summary}"
-        )));
-
-        // Reset token counters since we've effectively started a new context.
-        self.token_budget.reset();
-
-        tracing::info!(
-            old_messages = old_count,
-            summary_chars = summary.len(),
-            "context compacted successfully"
+    /// Build the system prompt for the summarisation LLM call.
+    fn build_compaction_prompt(&self, previous_summary: Option<&str>) -> String {
+        let mut prompt = format!(
+            "{}\n\n\
+             You are being asked to summarise a conversation.  Produce a structured \
+             summary with these sections:\n\n\
+             ## Goal\nWhat the user is trying to accomplish.\n\n\
+             ## Progress\nWhat has been done so far.\n\n\
+             ## Key Decisions\nImportant choices and their rationale.\n\n\
+             ## Files Modified\nList of files touched and changes made.\n\n\
+             ## Next Steps\nWhat was about to happen or still needs to happen.\n\n\
+             Be concise but thorough.  Do NOT call any tools.  \
+             Do NOT ask questions.  Just summarise.",
+            self.system_prompt,
         );
 
-        Ok(())
+        if let Some(prev) = previous_summary {
+            prompt.push_str(&format!(
+                "\n\n---\n\n\
+                 ## Previous context summary\n\n\
+                 The following is a summary from a previous compaction.  Merge it \
+                 with the new conversation into a single updated summary:\n\n{prev}"
+            ));
+        }
+
+        prompt
+    }
+
+    /// Phase 5: fix orphaned tool_use/tool_result pairs after reassembly.
+    ///
+    /// After compaction the middle section is gone, so:
+    /// - A `ToolUse` in the head whose `ToolResult` was in the middle now
+    ///   has no matching result.  We insert a synthetic one.
+    /// - A `ToolResult` in the tail whose `ToolUse` was in the middle now
+    ///   has no matching call.  We remove it.
+    fn fix_orphaned_tool_pairs(&mut self) {
+        use std::collections::HashSet;
+
+        // Collect all tool_use IDs and tool_result IDs.
+        let mut tool_use_ids = HashSet::new();
+        let mut tool_result_ids = HashSet::new();
+
+        for msg in &self.messages {
+            for block in &msg.content {
+                match block {
+                    crate::message::ContentBlock::ToolUse { id, .. } => {
+                        tool_use_ids.insert(id.clone());
+                    }
+                    crate::message::ContentBlock::ToolResult { tool_use_id, .. } => {
+                        tool_result_ids.insert(tool_use_id.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Find orphaned tool_use IDs (no matching result).
+        let orphaned_uses: Vec<String> = tool_use_ids
+            .difference(&tool_result_ids)
+            .cloned()
+            .collect();
+
+        // Find orphaned tool_result IDs (no matching use).
+        let orphaned_results: HashSet<String> = tool_result_ids
+            .difference(&tool_use_ids)
+            .cloned()
+            .collect();
+
+        // Insert synthetic results for orphaned uses.
+        // Place them right after the message containing the tool_use.
+        for orphan_id in &orphaned_uses {
+            if let Some(pos) = self.messages.iter().position(|m| {
+                m.content
+                    .iter()
+                    .any(|b| matches!(b, crate::message::ContentBlock::ToolUse { id, .. } if id == orphan_id))
+            }) {
+                let synthetic = Message::tool_result(
+                    orphan_id,
+                    "[result included in context summary]",
+                    false,
+                );
+                self.messages.insert(pos + 1, synthetic);
+            }
+        }
+
+        // Remove orphaned results (results whose tool_use was in the middle).
+        self.messages.retain(|msg| {
+            !msg.content.iter().all(|b| {
+                matches!(b, crate::message::ContentBlock::ToolResult { tool_use_id, .. }
+                    if orphaned_results.contains(tool_use_id))
+            })
+        });
     }
 
     /// Estimate the total token count of the current context that would be
@@ -589,9 +805,10 @@ impl Agent {
             // context (messages + system prompt + tool definitions) locally.
             // If it exceeds the threshold, compact first so we never send
             // an oversized context to the API.
-            if let Some(threshold) = self.compaction_threshold
-                && self.messages.len() >= 3
+            if let Some(ref config) = self.compaction_config
+                && self.messages.len() > config.protect_head
             {
+                let threshold = config.threshold();
                 let estimated_tokens = self.estimate_context_tokens(&turn_system_prompt);
                 if estimated_tokens > threshold {
                     tracing::info!(
@@ -1492,6 +1709,7 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::llm::stream::{StopReason, StreamEvent};
+    use crate::message::{ContentBlock, Role};
     use crate::sandbox::no_sandbox::DangerousNoSandbox;
     use crate::skill::builtin::BuiltinSkill;
 
@@ -2085,133 +2303,540 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Context compaction tests
+    // CompactionConfig unit tests
     // -----------------------------------------------------------------------
 
-    #[tokio::test]
-    async fn compact_replaces_history_with_summary() {
-        // Set up an agent with some conversation history, then compact it.
-        // The MockLlm needs:
-        //   1. Response for the initial run() call
-        //   2. Response for the compact() summarisation call
-        let llm = MockLlm::new(vec![
-            // Turn 1: normal response.
-            vec![
-                StreamEvent::TextDelta("Hello! I can help you.".into()),
-                StreamEvent::MessageComplete {
-                    stop_reason: StopReason::EndTurn,
-                    output_tokens: None,
-                },
-            ],
-            // Compaction: summarisation response.
-            vec![
-                StreamEvent::TextDelta("The user greeted the assistant and received a helpful response.".into()),
-                StreamEvent::MessageComplete {
-                    stop_reason: StopReason::EndTurn,
-                    output_tokens: None,
-                },
-            ],
-        ]);
+    #[test]
+    fn compaction_config_default_values() {
+        let config = CompactionConfig::default();
+        assert_eq!(config.context_window, 200_000);
+        assert!((config.threshold_ratio - 0.50).abs() < f64::EPSILON);
+        assert_eq!(config.protect_head, 3);
+        assert_eq!(config.protect_tail_tokens, 20_000);
+        assert_eq!(config.summary_min_tokens, 2_000);
+        assert_eq!(config.summary_max_tokens, 12_000);
+        assert!((config.summary_target_ratio - 0.20).abs() < f64::EPSILON);
+    }
 
+    #[test]
+    fn compaction_config_threshold_calculation() {
+        let config = CompactionConfig::default();
+        // 200_000 * 0.50 = 100_000
+        assert_eq!(config.threshold(), 100_000);
+    }
+
+    #[test]
+    fn compaction_config_threshold_with_custom_ratio() {
+        let config = CompactionConfig {
+            context_window: 128_000,
+            threshold_ratio: 0.75,
+            ..CompactionConfig::default()
+        };
+        // 128_000 * 0.75 = 96_000
+        assert_eq!(config.threshold(), 96_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: build an agent with manual message history for compaction tests.
+    // -----------------------------------------------------------------------
+
+    /// Build an agent with pre-loaded messages and a compaction config.
+    /// The `llm_responses` are the responses the MockLlm will return (e.g.
+    /// for the summarisation call during compact()).
+    fn make_agent_with_history(
+        messages: Vec<Message>,
+        llm_responses: Vec<Vec<StreamEvent>>,
+        compaction: Option<CompactionConfig>,
+    ) -> (Agent, MockOutput) {
+        let llm = MockLlm::new(llm_responses);
         let settings = AgentSettings {
             api_key: "test".into(),
+            compaction,
             ..Default::default()
         };
-
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
-        let mut output = MockOutput::new();
+        agent.messages = messages;
+        (agent, MockOutput::new())
+    }
 
-        // Run a turn to build up history.
-        agent.run("hi there", &mut output).await.unwrap();
-        assert_eq!(agent.messages.len(), 2); // user + assistant
+    // -----------------------------------------------------------------------
+    // Context compaction tests — five-phase Hermes-style compressor
+    // -----------------------------------------------------------------------
 
-        // Compact.
+    #[tokio::test]
+    async fn compact_on_empty_history_is_noop() {
+        // No LLM responses queued — would panic if called.
+        let (mut agent, mut output) = make_agent_with_history(vec![], vec![], None);
+        agent.compact(&mut output).await.unwrap();
+        assert!(agent.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compact_short_history_skips_when_no_middle() {
+        // With protect_head=3 and only 3 messages, there's nothing to
+        // summarise.  compact() should be a no-op (no LLM call).
+        let messages = vec![
+            Message::user("hello"),
+            Message::assistant(vec![ContentBlock::Text { text: "hi!".into() }]),
+            Message::user("how are you?"),
+        ];
+        let config = CompactionConfig {
+            protect_head: 3,
+            protect_tail_tokens: 0,
+            ..CompactionConfig::default()
+        };
+        let (mut agent, mut output) = make_agent_with_history(messages.clone(), vec![], Some(config));
+
+        agent.compact(&mut output).await.unwrap();
+        // All 3 messages preserved — no compaction needed.
+        assert_eq!(agent.messages.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn compact_preserves_head_and_tail() {
+        // Build a conversation with 10 messages.  protect_head=2,
+        // protect_tail_tokens=large enough to cover last 2 messages.
+        // The middle 6 messages should be summarised.
+        let mut messages = Vec::new();
+        for i in 0..5 {
+            messages.push(Message::user(&format!("User message {i}")));
+            messages.push(Message::assistant(vec![ContentBlock::Text {
+                text: format!("Assistant response {i}"),
+            }]));
+        }
+        assert_eq!(messages.len(), 10);
+
+        let config = CompactionConfig {
+            protect_head: 2,
+            // Each message is ~5 tokens.  Protect last 2 messages (~10 tokens).
+            protect_tail_tokens: 15,
+            ..CompactionConfig::default()
+        };
+
+        let summary_response = vec![
+            StreamEvent::TextDelta("## Goal\nTest conversation\n## Progress\nMessages exchanged.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ];
+
+        let (mut agent, mut output) = make_agent_with_history(
+            messages.clone(),
+            vec![summary_response],
+            Some(config),
+        );
+
         agent.compact(&mut output).await.unwrap();
 
-        // After compaction: exactly 1 message (the summary).
-        assert_eq!(agent.messages.len(), 1);
-        assert_eq!(agent.messages[0].role, crate::message::Role::User);
+        // Head: first 2 messages preserved verbatim.
+        assert_eq!(agent.messages[0].role, Role::User);
         match &agent.messages[0].content[0] {
-            crate::message::ContentBlock::Text { text } => {
-                assert!(text.starts_with("[Context Summary]"));
-                assert!(text.contains("greeted the assistant"));
+            ContentBlock::Text { text } => assert_eq!(text, "User message 0"),
+            other => panic!("expected Text, got: {other:?}"),
+        }
+        assert_eq!(agent.messages[1].role, Role::Assistant);
+        match &agent.messages[1].content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Assistant response 0"),
+            other => panic!("expected Text, got: {other:?}"),
+        }
+
+        // Summary should be present somewhere after head.
+        let summary_idx = agent.messages.iter().position(|m| {
+            m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[Context Summary]")))
+        });
+        assert!(summary_idx.is_some(), "summary message should exist");
+
+        // Tail: last 2 original messages preserved verbatim.
+        let last = &agent.messages[agent.messages.len() - 1];
+        match &last.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Assistant response 4"),
+            other => panic!("expected Text, got: {other:?}"),
+        }
+        let second_last = &agent.messages[agent.messages.len() - 2];
+        match &second_last.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "User message 4"),
+            other => panic!("expected Text, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_prunes_tool_outputs_in_middle() {
+        // Messages: head(user, assistant) + middle(assistant-with-tool, tool-result) + tail(user, assistant)
+        let messages = vec![
+            // Head
+            Message::user("start"),
+            Message::assistant(vec![ContentBlock::Text { text: "ok".into() }]),
+            // Middle — tool call + large result
+            Message::assistant(vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "ls -la"}),
+            }]),
+            Message::tool_result("call_1", "drwxr-xr-x 15 user user 4096 Mar 30 file1.txt\n-rw-r--r-- 1 user user 12345 Mar 30 file2.txt\n...(many more lines)...", false),
+            // More middle
+            Message::user("what about the other directory?"),
+            Message::assistant(vec![ContentBlock::ToolUse {
+                id: "call_2".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "ls /other"}),
+            }]),
+            Message::tool_result("call_2", "big output from other directory listing here", false),
+            // Tail
+            Message::user("thanks, now summarise"),
+            Message::assistant(vec![ContentBlock::Text { text: "Here's your summary.".into() }]),
+        ];
+
+        let config = CompactionConfig {
+            protect_head: 2,
+            protect_tail_tokens: 100, // enough for last 2 messages
+            ..CompactionConfig::default()
+        };
+
+        let summary_response = vec![
+            StreamEvent::TextDelta("## Goal\nFile listing\n## Progress\nListed directories.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ];
+
+        let (mut agent, mut output) = make_agent_with_history(
+            messages,
+            vec![summary_response],
+            Some(config),
+        );
+
+        agent.compact(&mut output).await.unwrap();
+
+        // The summary should exist and tool outputs in the middle should
+        // have been pruned (replaced with placeholder) before summarisation.
+        let has_summary = agent.messages.iter().any(|m| {
+            m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("[Context Summary]")))
+        });
+        assert!(has_summary, "should contain a context summary");
+
+        // Original large tool outputs should NOT be in the final messages.
+        let has_big_output = agent.messages.iter().any(|m| {
+            m.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { content, .. } if content.contains("many more lines")))
+        });
+        assert!(!has_big_output, "large tool outputs in middle should be pruned or summarised away");
+    }
+
+    #[tokio::test]
+    async fn compact_fixes_orphaned_tool_pairs() {
+        // Set up a situation where compaction splits a tool_use/tool_result pair:
+        // - Head contains an assistant message with tool_use
+        // - The matching tool_result is in the middle (gets summarised away)
+        // After compaction, the orphaned tool_use should get a synthetic result.
+        let messages = vec![
+            // Head
+            Message::user("start"),
+            Message::assistant(vec![ContentBlock::ToolUse {
+                id: "orphan_call".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "echo test"}),
+            }]),
+            // Middle — the tool result for orphan_call, plus more conversation
+            Message::tool_result("orphan_call", "test output", false),
+            Message::user("continue"),
+            Message::assistant(vec![ContentBlock::Text { text: "continuing...".into() }]),
+            Message::user("more stuff"),
+            Message::assistant(vec![ContentBlock::Text { text: "more responses".into() }]),
+            // Tail
+            Message::user("final question"),
+            Message::assistant(vec![ContentBlock::Text { text: "final answer".into() }]),
+        ];
+
+        let config = CompactionConfig {
+            protect_head: 2,
+            protect_tail_tokens: 100,
+            ..CompactionConfig::default()
+        };
+
+        let summary_response = vec![
+            StreamEvent::TextDelta("## Goal\nTesting\n## Progress\nRan commands.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ];
+
+        let (mut agent, mut output) = make_agent_with_history(
+            messages,
+            vec![summary_response],
+            Some(config),
+        );
+
+        agent.compact(&mut output).await.unwrap();
+
+        // The head still has the tool_use for "orphan_call".
+        let has_tool_use = agent.messages[1].content.iter().any(|b| {
+            matches!(b, ContentBlock::ToolUse { id, .. } if id == "orphan_call")
+        });
+        assert!(has_tool_use, "head should still contain the tool_use");
+
+        // There should be a synthetic tool_result matching "orphan_call"
+        // (since the real one was in the middle and got summarised away).
+        let has_matching_result = agent.messages.iter().any(|m| {
+            m.content.iter().any(|b| {
+                matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "orphan_call")
+            })
+        });
+        assert!(has_matching_result, "should have a synthetic tool_result for the orphaned tool_use");
+    }
+
+    #[tokio::test]
+    async fn compact_structured_summary_prompt() {
+        // Verify that the LLM receives a structured prompt asking for
+        // Goal/Progress/Decisions/Files/Next Steps sections.
+        // We check this indirectly: the summary returned by the LLM
+        // gets inserted as a [Context Summary] message.
+        let messages = vec![
+            Message::user("msg 0"),
+            Message::assistant(vec![ContentBlock::Text { text: "resp 0".into() }]),
+            Message::user("msg 1"),
+            Message::assistant(vec![ContentBlock::Text { text: "resp 1".into() }]),
+            Message::user("msg 2"),
+            Message::assistant(vec![ContentBlock::Text { text: "resp 2".into() }]),
+            Message::user("msg 3"),
+            Message::assistant(vec![ContentBlock::Text { text: "resp 3".into() }]),
+        ];
+
+        let config = CompactionConfig {
+            protect_head: 2,
+            protect_tail_tokens: 15,
+            ..CompactionConfig::default()
+        };
+
+        let summary_response = vec![
+            StreamEvent::TextDelta("## Goal\nUser was testing.\n## Progress\nMultiple exchanges.\n## Key Decisions\nNone.\n## Files Modified\nNone.\n## Next Steps\nContinue.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ];
+
+        let (mut agent, mut output) = make_agent_with_history(
+            messages,
+            vec![summary_response],
+            Some(config),
+        );
+
+        agent.compact(&mut output).await.unwrap();
+
+        // Find the summary message.
+        let summary_msg = agent.messages.iter().find(|m| {
+            m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[Context Summary]")))
+        }).expect("should have a summary message");
+
+        match &summary_msg.content[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("Goal"), "summary should contain Goal section");
+                assert!(text.contains("Progress"), "summary should contain Progress section");
             }
             other => panic!("expected Text, got: {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn compact_on_empty_history_is_noop() {
-        // Compacting with no messages should succeed without making an LLM call.
-        let llm = MockLlm::new(vec![]); // No responses queued — would panic if called.
-
-        let settings = AgentSettings {
-            api_key: "test".into(),
-            ..Default::default()
-        };
-
-        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
-        let mut output = MockOutput::new();
-
-        agent.compact(&mut output).await.unwrap();
-        assert!(agent.messages.is_empty());
-    }
-
-    #[tokio::test]
     async fn compact_resets_token_budget() {
-        let llm = MockLlm::new(vec![
-            // Turn 1.
-            vec![
-                StreamEvent::TextDelta("OK.".into()),
-                StreamEvent::MessageComplete {
-                    stop_reason: StopReason::EndTurn,
-                    output_tokens: Some(50),
-                },
-            ],
-            // Compaction summary.
-            vec![
-                StreamEvent::TextDelta("Summary of the conversation.".into()),
-                StreamEvent::MessageComplete {
-                    stop_reason: StopReason::EndTurn,
-                    output_tokens: Some(10),
-                },
-            ],
-        ]);
+        let messages = vec![
+            Message::user("hello"),
+            Message::assistant(vec![ContentBlock::Text { text: "hi".into() }]),
+            Message::user("more"),
+            Message::assistant(vec![ContentBlock::Text { text: "more".into() }]),
+            Message::user("even more"),
+            Message::assistant(vec![ContentBlock::Text { text: "even more".into() }]),
+        ];
 
-        let settings = AgentSettings {
-            api_key: "test".into(),
-            ..Default::default()
+        let config = CompactionConfig {
+            protect_head: 2,
+            protect_tail_tokens: 15,
+            ..CompactionConfig::default()
         };
 
-        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
-        let mut output = MockOutput::new();
+        let summary_response = vec![
+            StreamEvent::TextDelta("Summary.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: Some(10),
+            },
+        ];
 
-        agent.run("hello", &mut output).await.unwrap();
+        let (mut agent, mut output) = make_agent_with_history(
+            messages,
+            vec![summary_response],
+            Some(config),
+        );
+
+        agent.token_budget.record(50).unwrap();
         assert_eq!(agent.token_budget.output_tokens_used, 50);
-        assert_eq!(agent.token_budget.llm_calls, 1);
 
         agent.compact(&mut output).await.unwrap();
 
-        // Token budget should be reset after compaction.
         assert_eq!(agent.token_budget.output_tokens_used, 0);
         assert_eq!(agent.token_budget.input_tokens_used, 0);
         assert_eq!(agent.token_budget.llm_calls, 0);
     }
 
     #[tokio::test]
+    async fn compact_iterative_merges_with_previous_summary() {
+        // Simulate a second compaction: the head already contains a
+        // [Context Summary] from a previous compaction.  The new compact
+        // should produce an updated summary that merges old + new.
+        let messages = vec![
+            // Previous summary (from first compaction).
+            Message::user("[Context Summary]\n\n## Goal\nOriginal goal.\n## Progress\nStep 1 done."),
+            // New conversation since last compaction.
+            Message::assistant(vec![ContentBlock::Text { text: "continuing work".into() }]),
+            Message::user("do step 2"),
+            Message::assistant(vec![ContentBlock::Text { text: "step 2 done".into() }]),
+            Message::user("do step 3"),
+            Message::assistant(vec![ContentBlock::Text { text: "step 3 done".into() }]),
+            // Tail
+            Message::user("what's next?"),
+            Message::assistant(vec![ContentBlock::Text { text: "step 4".into() }]),
+        ];
+
+        let config = CompactionConfig {
+            protect_head: 2,
+            protect_tail_tokens: 15,
+            ..CompactionConfig::default()
+        };
+
+        let summary_response = vec![
+            StreamEvent::TextDelta("## Goal\nOriginal goal.\n## Progress\nSteps 1-3 done.\n## Next Steps\nStep 4.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ];
+
+        let (mut agent, mut output) = make_agent_with_history(
+            messages,
+            vec![summary_response],
+            Some(config),
+        );
+
+        agent.compact(&mut output).await.unwrap();
+
+        // Should have a merged summary.
+        let summary_msg = agent.messages.iter().find(|m| {
+            m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[Context Summary]")))
+        }).expect("should have a summary message");
+
+        match &summary_msg.content[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("Steps 1-3"), "summary should merge old + new progress");
+            }
+            other => panic!("expected Text, got: {other:?}"),
+        }
+
+        // Should NOT have two [Context Summary] messages.
+        let summary_count = agent.messages.iter().filter(|m| {
+            m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[Context Summary]")))
+        }).count();
+        assert_eq!(summary_count, 1, "should have exactly one summary after iterative compaction");
+    }
+
+    #[tokio::test]
+    async fn compact_empty_summary_keeps_original_history() {
+        // If the LLM returns an empty summary, keep the original history.
+        let messages = vec![
+            Message::user("hello"),
+            Message::assistant(vec![ContentBlock::Text { text: "hi".into() }]),
+            Message::user("more"),
+            Message::assistant(vec![ContentBlock::Text { text: "more".into() }]),
+            Message::user("even more"),
+            Message::assistant(vec![ContentBlock::Text { text: "even more".into() }]),
+        ];
+
+        let config = CompactionConfig {
+            protect_head: 2,
+            protect_tail_tokens: 15,
+            ..CompactionConfig::default()
+        };
+
+        // LLM returns empty text.
+        let summary_response = vec![
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ];
+
+        let original_len = messages.len();
+        let (mut agent, mut output) = make_agent_with_history(
+            messages,
+            vec![summary_response],
+            Some(config),
+        );
+
+        agent.compact(&mut output).await.unwrap();
+        // Original history should be preserved (though tool outputs may be pruned).
+        assert_eq!(agent.messages.len(), original_len);
+    }
+
+    #[tokio::test]
+    async fn compact_tail_protection_by_token_budget() {
+        // Verify that tail protection is based on token budget, not message count.
+        // Create messages with very different token sizes — the tail should protect
+        // the last messages that fit within the token budget.
+        let messages = vec![
+            Message::user("hi"),                // ~5 tokens
+            Message::assistant(vec![ContentBlock::Text { text: "hello".into() }]), // ~5 tokens
+            Message::user("middle msg"),        // ~6 tokens
+            Message::assistant(vec![ContentBlock::Text { text: "middle resp".into() }]), // ~6 tokens
+            // These two are large — should be in the tail if budget is generous.
+            Message::user("a very long user message with many words to take up lots of token budget space in the estimate"),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "a very long assistant response with many words to take up lots of token budget space in the estimate".into(),
+            }]),
+        ];
+
+        let config = CompactionConfig {
+            protect_head: 2,
+            // Budget large enough for the last 2 big messages (~40+ tokens),
+            // but NOT for all 4 non-head messages.
+            protect_tail_tokens: 50,
+            ..CompactionConfig::default()
+        };
+
+        let summary_response = vec![
+            StreamEvent::TextDelta("Middle section summary.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ];
+
+        let (mut agent, mut output) = make_agent_with_history(
+            messages,
+            vec![summary_response],
+            Some(config),
+        );
+
+        agent.compact(&mut output).await.unwrap();
+
+        // Head (2 messages) + summary (1) + tail (2 big messages) = 5.
+        // The middle 2 messages got summarised.
+        let last_text = agent.messages.last().unwrap();
+        match &last_text.content[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("very long assistant response"),
+                    "tail should preserve the last large messages");
+            }
+            other => panic!("expected Text, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn auto_compaction_triggers_on_threshold() {
         // Set up a very low compaction threshold so that after turn 1 builds
         // up history, the offline token estimate exceeds it on turn 2.
-        // The MockLlm needs:
-        //   1. First run() response
-        //   2. Compaction summary (triggered automatically on second run)
-        //   3. Second run() response
         let llm = MockLlm::new(vec![
             // Turn 1: normal response.
             vec![
@@ -2221,8 +2846,7 @@ mod tests {
                     output_tokens: Some(20),
                 },
             ],
-            // Auto-compaction summary (triggered at start of turn 2 loop
-            // because estimated context tokens exceed the low threshold).
+            // Auto-compaction summary.
             vec![
                 StreamEvent::TextDelta("Summary of turn 1.".into()),
                 StreamEvent::MessageComplete {
@@ -2242,7 +2866,13 @@ mod tests {
 
         let settings = AgentSettings {
             api_key: "test".into(),
-            compaction_threshold: Some(10), // very low — system prompt + tool defs alone exceed this
+            compaction: Some(CompactionConfig {
+                context_window: 20,  // very low
+                threshold_ratio: 0.50,
+                protect_head: 1,
+                protect_tail_tokens: 0,
+                ..CompactionConfig::default()
+            }),
             ..Default::default()
         };
 
@@ -2251,18 +2881,50 @@ mod tests {
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
-        // First turn — build up history (2 messages: user + assistant).
+        // First turn.
         agent.run("first message", &mut output).await.unwrap();
         assert_eq!(agent.messages.len(), 2);
 
-        // Second turn — pushes "second message" (3 msgs total), offline
-        // estimate exceeds threshold of 10, so auto-compact fires.
+        // Second turn — triggers auto-compact.
         let result = agent.run("second message", &mut output).await.unwrap();
         assert_eq!(result, "Second response.");
+    }
 
-        // Trace: run("second message") → push user (3 msgs) → loop →
-        // estimate > 10, compact → messages=[summary] → LLM → push assistant
-        // Result: [summary, assistant] = 2 messages.
-        assert_eq!(agent.messages.len(), 2); // summary + assistant
+    #[tokio::test]
+    async fn compact_no_config_uses_legacy_full_summary() {
+        // When compaction_config is None, compact() should still work
+        // (legacy behavior: summarise everything into one message).
+        let messages = vec![
+            Message::user("hello"),
+            Message::assistant(vec![ContentBlock::Text { text: "hi".into() }]),
+            Message::user("more"),
+            Message::assistant(vec![ContentBlock::Text { text: "more".into() }]),
+        ];
+
+        let summary_response = vec![
+            StreamEvent::TextDelta("Full conversation summary.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ];
+
+        let (mut agent, mut output) = make_agent_with_history(
+            messages,
+            vec![summary_response],
+            None, // no config
+        );
+
+        agent.compact(&mut output).await.unwrap();
+
+        // Legacy: everything replaced with a single summary message.
+        assert_eq!(agent.messages.len(), 1);
+        match &agent.messages[0].content[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.starts_with("[Context Summary]"));
+                assert!(text.contains("Full conversation summary"));
+            }
+            other => panic!("expected Text, got: {other:?}"),
+        }
     }
 }

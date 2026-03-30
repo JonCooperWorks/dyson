@@ -256,6 +256,51 @@ Memory settings live in `dyson.json` under `workspace.memory`:
 
 ---
 
+## Context Compaction
+
+Dyson automatically compresses conversation history when the estimated token
+count approaches the model's context window.  This is separate from memory
+file limits — it handles the **conversation** buffer, not the persistent
+workspace files.
+
+Configuration lives in `dyson.json` under `agent.compaction`:
+
+```json
+{
+  "agent": {
+    "compaction": {
+      "context_window": 200000,
+      "threshold_ratio": 0.50,
+      "protect_head": 3,
+      "protect_tail_tokens": 20000,
+      "summary_min_tokens": 2000,
+      "summary_max_tokens": 12000,
+      "summary_target_ratio": 0.20
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `context_window` | `number` | `200000` | Model's context window in estimated tokens. |
+| `threshold_ratio` | `number` | `0.50` | Trigger compaction at this fraction of context_window. |
+| `protect_head` | `number` | `3` | Always keep the first N messages (never summarised). |
+| `protect_tail_tokens` | `number` | `20000` | Keep recent messages within this token budget. |
+| `summary_min_tokens` | `number` | `2000` | Minimum summary output tokens. |
+| `summary_max_tokens` | `number` | `12000` | Maximum summary output tokens. |
+| `summary_target_ratio` | `number` | `0.20` | Summary size as a fraction of the middle section. |
+
+Shorthand: `"compaction": 200000` sets `context_window` with all other fields
+defaulting.  Omit the key entirely to disable automatic compaction.
+
+The algorithm uses five phases: tool output pruning, region identification,
+structured LLM summarisation (Goal / Progress / Decisions / Files / Next Steps),
+reassembly, and orphaned tool pair repair.  See
+[comparison-hermes-agent.md](comparison-hermes-agent.md) for details.
+
+---
+
 ## Key Source Files
 
 | Component | File |
