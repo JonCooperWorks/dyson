@@ -77,6 +77,24 @@ use crate::controller::Output;
 use self::stream_handler::ToolCall;
 
 // ---------------------------------------------------------------------------
+// SilentOutput — discards all output (used by self-improvement reflection).
+// ---------------------------------------------------------------------------
+
+/// A no-op output sink used for side-channel LLM calls where we want
+/// tool execution but don't need to stream text to the user.
+struct SilentOutput;
+
+impl crate::controller::Output for SilentOutput {
+    fn text_delta(&mut self, _: &str) -> Result<()> { Ok(()) }
+    fn tool_use_start(&mut self, _: &str, _: &str) -> Result<()> { Ok(()) }
+    fn tool_use_complete(&mut self) -> Result<()> { Ok(()) }
+    fn tool_result(&mut self, _: &ToolOutput) -> Result<()> { Ok(()) }
+    fn send_file(&mut self, _: &std::path::Path) -> Result<()> { Ok(()) }
+    fn error(&mut self, _: &DysonError) -> Result<()> { Ok(()) }
+    fn flush(&mut self) -> Result<()> { Ok(()) }
+}
+
+// ---------------------------------------------------------------------------
 // TokenBudget — tracks and limits token usage across the agent session.
 // ---------------------------------------------------------------------------
 
@@ -524,12 +542,18 @@ impl Agent {
         self.messages.push(Message::user(user_input));
         self.turn_count += 1;
 
-        // Inject a memory maintenance nudge every N turns.
-        if self.nudge_interval > 0 && self.turn_count.is_multiple_of(self.nudge_interval) && let Some(ref ws) = self.tool_context.workspace {
-            let ws = ws.read().await;
-            let nudge = Self::build_nudge_message(&**ws);
-            drop(ws);
-            self.messages.push(Message::user(&nudge));
+        // Run memory maintenance as a side-channel LLM call every N turns.
+        // Unlike the old nudge approach (injecting a user message into the
+        // conversation and hoping the model acts on it), this makes a real
+        // LLM call with workspace tools and lets the model directly update
+        // memory files.  Nothing from this call enters the main conversation.
+        if self.nudge_interval > 0 && self.turn_count.is_multiple_of(self.nudge_interval) && self.tool_context.workspace.is_some() {
+            if let Err(e) = self.maintain_memory(output).await {
+                tracing::warn!(
+                    error = %e,
+                    "memory maintenance failed — continuing normally"
+                );
+            }
         }
 
         let mut final_text = String::new();
@@ -769,26 +793,553 @@ impl Agent {
             }
         }
 
+        // -- Self-improvement reflection --
+        //
+        // Every 2N turns, fire a side-channel LLM call that reviews the
+        // conversation and decides whether to create/improve skills or
+        // export training data.  This is a separate call with its own
+        // system prompt — it doesn't pollute the main conversation history.
+        if self.nudge_interval > 0
+            && self.turn_count > self.nudge_interval
+            && self.turn_count.is_multiple_of(self.nudge_interval * 2)
+            && self.tool_context.workspace.is_some()
+        {
+            if let Err(e) = self.self_improve(output).await {
+                tracing::warn!(
+                    error = %e,
+                    "self-improvement reflection failed — continuing normally"
+                );
+            }
+        }
+
         output.flush()?;
         Ok(final_text)
     }
 
-    /// Build the memory maintenance nudge message.
-    fn build_nudge_message(ws: &dyn crate::workspace::Workspace) -> String {
-        let memory_usage = ws.get("MEMORY.md")
-            .map(|c| c.chars().count())
-            .unwrap_or(0);
-        let memory_limit = ws.char_limit("MEMORY.md").unwrap_or(0);
-        let user_usage = ws.get("USER.md")
-            .map(|c| c.chars().count())
-            .unwrap_or(0);
-        let user_limit = ws.char_limit("USER.md").unwrap_or(0);
+    /// Run memory maintenance as a side-channel LLM call.
+    ///
+    /// Makes a separate LLM call with workspace tools (view, update, search,
+    /// memory_search) and a focused system prompt.  The LLM reviews the
+    /// conversation and decides what to persist to MEMORY.md, USER.md, or
+    /// memory/notes/.
+    ///
+    /// This runs in a separate message context — nothing from this call
+    /// enters the main conversation history.
+    async fn maintain_memory(&mut self, output: &mut dyn Output) -> Result<()> {
+        tracing::info!(
+            turn_count = self.turn_count,
+            "running memory maintenance"
+        );
+
+        let _ = output.text_delta("\n\n[Memory maintenance: reviewing conversation...]\n");
+        let _ = output.flush();
+
+        // Build the system prompt with current usage stats.
+        let memory_system = Self::build_memory_system_prompt(&self.tool_context).await;
+
+        // Expose only workspace tools for memory operations.
+        let memory_tool_names = [
+            "workspace_view", "workspace_update", "workspace_search", "memory_search",
+        ];
+        let memory_tools: Vec<ToolDefinition> = self
+            .tool_definitions
+            .iter()
+            .filter(|t| memory_tool_names.contains(&t.name.as_str()))
+            .cloned()
+            .collect();
+
+        if memory_tools.is_empty() {
+            return Ok(());
+        }
+
+        // Build a condensed view of the conversation for the memory call.
+        let summary = Self::summarize_for_reflection(&self.messages);
+        let mut messages = vec![Message::user(&summary)];
+        let mut actions_taken = 0usize;
+
+        for _iteration in 0..5u8 {
+            let response = match self
+                .client
+                .stream(&messages, &memory_system, &memory_tools, &self.config)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "memory maintenance LLM call failed");
+                    let _ = output.text_delta("[Memory maintenance: LLM call failed, skipping]\n");
+                    return Ok(());
+                }
+            };
+
+            let mut silent_output = SilentOutput;
+            let (assistant_msg, tool_calls, _tokens) =
+                stream_handler::process_stream(response.stream, &mut silent_output).await?;
+
+            messages.push(assistant_msg);
+
+            if tool_calls.is_empty() {
+                break;
+            }
+
+            // Execute through the normal tool dispatch (these tools ARE in
+            // self.tools, they're just not exposed to the main conversation
+            // for this purpose).
+            for call in &tool_calls {
+                let result = self.execute_tool_call_timed(call).await;
+                let tool_result_msg = match result {
+                    Ok(ref tool_output) => {
+                        actions_taken += 1;
+                        let _ = output.tool_use_start(&call.name, &call.id);
+                        let _ = output.tool_result(tool_output);
+                        let _ = output.tool_use_complete();
+                        Message::tool_result(&call.id, &tool_output.content, tool_output.is_error)
+                    }
+                    Err(ref e) => {
+                        tracing::warn!(
+                            tool = call.name.as_str(),
+                            error = %e,
+                            "memory maintenance tool call failed"
+                        );
+                        Message::tool_result(&call.id, &e.to_string(), true)
+                    }
+                };
+                messages.push(tool_result_msg);
+            }
+        }
+
+        if actions_taken == 0 {
+            let _ = output.text_delta("[Memory maintenance: no updates needed]\n");
+        } else {
+            let _ = output.text_delta(
+                &format!("[Memory maintenance: {actions_taken} update(s)]\n")
+            );
+        }
+        let _ = output.flush();
+
+        tracing::info!(
+            actions_taken = actions_taken,
+            "memory maintenance complete"
+        );
+        Ok(())
+    }
+
+    /// Build the system prompt for the memory maintenance call.
+    async fn build_memory_system_prompt(ctx: &ToolContext) -> String {
+        let (memory_usage, memory_limit, user_usage, user_limit) = if let Some(ref ws) = ctx.workspace {
+            let ws = ws.read().await;
+            let mu = ws.get("MEMORY.md").map(|c| c.chars().count()).unwrap_or(0);
+            let ml = ws.char_limit("MEMORY.md").unwrap_or(0);
+            let uu = ws.get("USER.md").map(|c| c.chars().count()).unwrap_or(0);
+            let ul = ws.char_limit("USER.md").unwrap_or(0);
+            (mu, ml, uu, ul)
+        } else {
+            (0, 0, 0, 0)
+        };
 
         format!(
-            "[System: Memory Maintenance] Consider saving important details from this conversation.\n\
-             MEMORY.md: {memory_usage}/{memory_limit} chars. USER.md: {user_usage}/{user_limit} chars.\n\
-             Use workspace_view/workspace_update. Move overflow to memory/notes/ (searchable via memory_search)."
+            "You are a memory maintenance engine for an AI agent.  Your job is to review \
+             a conversation that just happened and persist important information.\n\n\
+             You have workspace tools to view and update the agent's memory files.\n\n\
+             ## Files and limits\n\
+             - **MEMORY.md** ({memory_usage}/{memory_limit} chars): Agent's curated long-term \
+               memory.  Store key facts, decisions, patterns, and lessons learned.\n\
+             - **USER.md** ({user_usage}/{user_limit} chars): What the agent knows about the \
+               user — preferences, workflow, communication style.\n\
+             - **memory/notes/*.md**: Overflow storage for details that don't fit in \
+               MEMORY.md.  Searchable via memory_search.\n\n\
+             ## What to persist\n\
+             - Important facts, decisions, or conclusions from the conversation\n\
+             - User preferences or workflow patterns you observed\n\
+             - Technical details that would be useful in future sessions\n\
+             - Lessons learned from errors or unexpected results\n\n\
+             ## What NOT to persist\n\
+             - Trivial or one-off exchanges (greetings, simple questions)\n\
+             - Information already in the memory files\n\
+             - Raw tool output — summarize the insight, not the data\n\n\
+             First use workspace_view to read the current memory files, then decide \
+             what to add or update.  Use workspace_update to write changes.  If a \
+             file is near its limit, consolidate or move overflow to memory/notes/.\n\n\
+             Doing nothing is fine if there's nothing worth persisting."
         )
+    }
+
+    /// Run a side-channel self-improvement reflection.
+    ///
+    /// Makes a separate LLM call with a focused system prompt and only
+    /// the `skill_create` and `export_conversation` tools.  The LLM
+    /// reviews the conversation and decides whether to:
+    ///
+    /// - Create a new skill from a complex task it just solved
+    /// - Improve an existing skill based on what it learned
+    /// - Export the conversation as training data
+    /// - Do nothing (if the conversation was trivial)
+    ///
+    /// This runs in a separate message context — nothing from this call
+    /// is added to the main conversation history.  The user sees tool
+    /// use output (skill created, export written) but the reflection
+    /// reasoning is invisible.
+    ///
+    /// ## Design
+    ///
+    /// Unlike the memory nudge (which injects a user message and hopes
+    /// the model acts on it), this is a real LLM call with real tool
+    /// execution.  The model either acts or doesn't — there's no
+    /// relying on the model noticing a hint in context.
+    async fn self_improve(&mut self, output: &mut dyn Output) -> Result<()> {
+        tracing::info!(
+            turn_count = self.turn_count,
+            messages = self.messages.len(),
+            "running self-improvement reflection"
+        );
+
+        // Log to the user that reflection is happening.
+        let _ = output.text_delta("\n\n[Self-improvement: reflecting on conversation...]\n");
+        let _ = output.flush();
+
+        // Build a condensed view of the conversation for the reflection.
+        let reflection_system = Self::build_reflection_system_prompt(&self.tool_context).await;
+
+        // Self-improvement tools are NOT part of the agent's normal tool set.
+        // They live only here — the LLM can't call them during regular
+        // conversation.  We instantiate them directly and build tool
+        // definitions inline.
+        let skill_create_tool: Arc<dyn Tool> =
+            Arc::new(crate::tool::skill_create::SkillCreateTool);
+        let export_tool: Arc<dyn Tool> =
+            Arc::new(crate::tool::export_conversation::ExportConversationTool);
+
+        let reflection_tool_map: HashMap<String, Arc<dyn Tool>> = HashMap::from([
+            (skill_create_tool.name().to_string(), Arc::clone(&skill_create_tool)),
+            (export_tool.name().to_string(), Arc::clone(&export_tool)),
+        ]);
+
+        let reflection_tools: Vec<ToolDefinition> = [&skill_create_tool, &export_tool]
+            .iter()
+            .map(|t| ToolDefinition {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                input_schema: t.input_schema(),
+                agent_only: false,
+            })
+            .collect();
+
+        // Build the reflection messages: a condensed summary of what happened.
+        let summary = Self::summarize_for_reflection(&self.messages);
+        tracing::debug!(
+            summary_len = summary.len(),
+            "built reflection summary"
+        );
+
+        let reflection_messages = vec![
+            Message::user(&summary),
+        ];
+
+        // LLM call with tool loop — if it wants to use tools, run them.
+        // Cap at 3 iterations to prevent runaway loops.
+        let mut messages = reflection_messages;
+        let mut actions_taken = 0usize;
+
+        for iteration in 0..3u8 {
+            tracing::info!(
+                iteration = iteration,
+                "self-improvement LLM call"
+            );
+
+            let response = match self
+                .client
+                .stream(&messages, &reflection_system, &reflection_tools, &self.config)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "self-improvement LLM call failed");
+                    let _ = output.text_delta("[Self-improvement: LLM call failed, skipping]\n");
+                    return Ok(()); // non-fatal
+                }
+            };
+
+            // Process stream silently — we only care about tool calls.
+            let mut silent_output = SilentOutput;
+            let (assistant_msg, tool_calls, _tokens) =
+                stream_handler::process_stream(response.stream, &mut silent_output).await?;
+
+            // Log what the model said (for debugging), even though we don't
+            // show it to the user.
+            for block in &assistant_msg.content {
+                if let crate::message::ContentBlock::Text { text } = block {
+                    if !text.trim().is_empty() {
+                        tracing::info!(
+                            reasoning = text.as_str(),
+                            "self-improvement reasoning"
+                        );
+                    }
+                }
+            }
+
+            messages.push(assistant_msg);
+
+            if tool_calls.is_empty() {
+                tracing::info!("self-improvement: model decided no action needed");
+                break;
+            }
+
+            // Execute the tool calls directly against the reflection-only
+            // tools.  These bypass the agent's normal tool map and sandbox
+            // — they are internal-only tools that don't exist in the main
+            // conversation.  The sandbox still gates any child operations
+            // (e.g., bash calls inside export_conversation).
+            for call in &tool_calls {
+                tracing::info!(
+                    tool = call.name.as_str(),
+                    "self-improvement executing tool"
+                );
+
+                let tool = match reflection_tool_map.get(&call.name) {
+                    Some(t) => Arc::clone(t),
+                    None => {
+                        tracing::warn!(
+                            tool = call.name.as_str(),
+                            "self-improvement: LLM called unknown tool"
+                        );
+                        messages.push(Message::tool_result(
+                            &call.id,
+                            &format!("unknown tool '{}'", call.name),
+                            true,
+                        ));
+                        continue;
+                    }
+                };
+
+                let tool_start = std::time::Instant::now();
+                let result = tool.run(call.input.clone(), &self.tool_context).await;
+                let tool_ms = tool_start.elapsed().as_millis();
+
+                let tool_result_msg = match result {
+                    Ok(ref tool_output) => {
+                        actions_taken += 1;
+
+                        // Show tool activity to the user so they see what was
+                        // auto-created (skill files, exports).
+                        let _ = output.tool_use_start(&call.name, &call.id);
+                        let _ = output.tool_result(tool_output);
+                        let _ = output.tool_use_complete();
+
+                        tracing::info!(
+                            tool = call.name.as_str(),
+                            duration_ms = tool_ms,
+                            is_error = tool_output.is_error,
+                            result = tool_output.content.as_str(),
+                            "self-improvement tool result"
+                        );
+
+                        Message::tool_result(&call.id, &tool_output.content, tool_output.is_error)
+                    }
+                    Err(ref e) => {
+                        tracing::warn!(
+                            tool = call.name.as_str(),
+                            duration_ms = tool_ms,
+                            error = %e,
+                            "self-improvement tool call failed"
+                        );
+                        let _ = output.text_delta(
+                            &format!("[Self-improvement: {} failed: {}]\n", call.name, e)
+                        );
+                        Message::tool_result(&call.id, &e.to_string(), true)
+                    }
+                };
+                messages.push(tool_result_msg);
+            }
+        }
+
+        if actions_taken == 0 {
+            let _ = output.text_delta("[Self-improvement: no action needed]\n");
+        } else {
+            let _ = output.text_delta(
+                &format!("[Self-improvement: {actions_taken} action(s) taken]\n")
+            );
+        }
+        let _ = output.flush();
+
+        // Persist the full reflection exchange to the workspace's
+        // improvement/ directory so the user can inspect it later.
+        self.save_reflection_log(
+            &reflection_system,
+            &messages,
+            actions_taken,
+        ).await;
+
+        tracing::info!(
+            actions_taken = actions_taken,
+            "self-improvement reflection complete"
+        );
+        Ok(())
+    }
+
+    /// Save a reflection exchange to the workspace for later inspection.
+    ///
+    /// Writes the full system prompt, messages, and metadata as JSON to
+    /// `improvement/<timestamp>.json` in the workspace.  This lets users
+    /// review what the self-improvement engine decided and why.
+    async fn save_reflection_log(
+        &self,
+        system_prompt: &str,
+        messages: &[Message],
+        actions_taken: usize,
+    ) {
+        let Some(ref ws) = self.tool_context.workspace else {
+            return;
+        };
+
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let log = serde_json::json!({
+            "timestamp": epoch,
+            "turn_count": self.turn_count,
+            "actions_taken": actions_taken,
+            "system_prompt": system_prompt,
+            "messages": messages,
+        });
+
+        let content = serde_json::to_string_pretty(&log).unwrap_or_default();
+        let file_key = format!("improvement/{epoch}.json");
+
+        let mut ws = ws.write().await;
+        ws.set(&file_key, &content);
+        if let Err(e) = ws.save() {
+            tracing::warn!(
+                error = %e,
+                file = file_key.as_str(),
+                "failed to save reflection log"
+            );
+        } else {
+            tracing::info!(
+                file = file_key.as_str(),
+                actions_taken = actions_taken,
+                "saved reflection log"
+            );
+        }
+    }
+
+    /// Build the system prompt for the self-improvement reflection call.
+    async fn build_reflection_system_prompt(ctx: &ToolContext) -> String {
+        // List existing skills so the model knows what already exists.
+        let existing_skills = if let Some(ref ws) = ctx.workspace {
+            let ws = ws.read().await;
+            let skill_files = ws.skill_files();
+            if skill_files.is_empty() {
+                "No skills exist yet.".to_string()
+            } else {
+                let names: Vec<String> = skill_files
+                    .iter()
+                    .filter_map(|p| {
+                        p.file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(String::from)
+                    })
+                    .collect();
+                format!("Existing skills: {}", names.join(", "))
+            }
+        } else {
+            "No workspace configured.".to_string()
+        };
+
+        format!(
+            "You are a self-improvement engine for an AI agent.  Your job is to review \
+             a conversation that just happened and decide whether to take action.\n\n\
+             You have two tools:\n\
+             - **skill_create**: Create or improve a SKILL.md file in the workspace.  \
+               Skills are system prompt fragments that auto-load on startup, teaching \
+               the agent reusable procedures.\n\
+             - **export_conversation**: Export the conversation as ShareGPT-format \
+               training data for fine-tuning tool-calling models.\n\n\
+             ## When to create a skill\n\
+             - The agent solved a complex, multi-step task that it might encounter again\n\
+             - The agent discovered a non-obvious procedure or debugging pattern\n\
+             - The agent found a domain-specific workflow worth encoding\n\n\
+             ## When to improve a skill\n\
+             - An existing skill's instructions were insufficient and the agent had to \
+               improvise — capture what worked\n\
+             - The agent found a better approach than what the skill describes\n\n\
+             ## When to export\n\
+             - The conversation contains substantial, high-quality tool use (3+ tool \
+               calls with successful outcomes)\n\
+             - The conversation demonstrates a complete problem-solving trajectory\n\n\
+             ## When to do nothing\n\
+             - The conversation was trivial (simple Q&A, one-step tasks)\n\
+             - A matching skill already exists and doesn't need improvement\n\
+             - The conversation was mostly errors or failed attempts\n\n\
+             Doing nothing is the right choice most of the time.  Only act when there's \
+             genuine value in persisting knowledge or exporting data.\n\n\
+             {existing_skills}"
+        )
+    }
+
+    /// Summarize the conversation for the reflection LLM call.
+    ///
+    /// Instead of sending the full message history (which could be huge),
+    /// build a condensed representation: user goals, tools used, outcomes.
+    fn summarize_for_reflection(messages: &[Message]) -> String {
+        let mut summary = String::from(
+            "Review this conversation and decide whether to create/improve a skill \
+             or export training data.  Here is what happened:\n\n"
+        );
+
+        let mut tool_call_count = 0;
+        let mut tool_error_count = 0;
+        let mut tools_used: Vec<String> = Vec::new();
+
+        for msg in messages {
+            for block in &msg.content {
+                match block {
+                    crate::message::ContentBlock::Text { text } => {
+                        // Include user messages and short assistant text.
+                        let role = match msg.role {
+                            crate::message::Role::User => "User",
+                            crate::message::Role::Assistant => "Assistant",
+                        };
+                        // Truncate long text to keep the summary compact.
+                        let truncated = if text.len() > 500 {
+                            format!("{}...[truncated]", &text[..500])
+                        } else {
+                            text.clone()
+                        };
+                        summary.push_str(&format!("{role}: {truncated}\n\n"));
+                    }
+                    crate::message::ContentBlock::ToolUse { name, .. } => {
+                        tool_call_count += 1;
+                        if !tools_used.contains(name) {
+                            tools_used.push(name.clone());
+                        }
+                        summary.push_str(&format!("[Tool call: {name}]\n"));
+                    }
+                    crate::message::ContentBlock::ToolResult { is_error, content, .. } => {
+                        if *is_error {
+                            tool_error_count += 1;
+                            summary.push_str(&format!("[Tool error: {}]\n", &content[..content.len().min(200)]));
+                        } else {
+                            let truncated = if content.len() > 200 {
+                                format!("{}...", &content[..200])
+                            } else {
+                                content.clone()
+                            };
+                            summary.push_str(&format!("[Tool result: {truncated}]\n"));
+                        }
+                    }
+                }
+            }
+        }
+
+        summary.push_str(&format!(
+            "\n---\nStats: {tool_call_count} tool calls ({tool_error_count} errors), \
+             tools used: [{}], {} messages total.",
+            tools_used.join(", "),
+            messages.len(),
+        ));
+
+        summary
     }
 
     /// Check if an LLM error is retryable (rate limit, overloaded, network).
@@ -1147,21 +1698,75 @@ mod tests {
         assert_eq!(agent.messages.len(), 2);
     }
 
-    #[test]
-    fn nudge_message_contains_usage_info() {
+    #[tokio::test]
+    async fn memory_system_prompt_contains_usage_stats() {
         let ws = crate::workspace::InMemoryWorkspace::new()
             .with_file("MEMORY.md", "some memories here")
             .with_limit("MEMORY.md", 2200)
             .with_file("USER.md", "user info")
             .with_limit("USER.md", 1375);
 
-        let nudge = Agent::build_nudge_message(&ws);
-        assert!(nudge.contains("[System: Memory Maintenance]"));
-        assert!(nudge.contains("MEMORY.md:"));
-        assert!(nudge.contains("/2200 chars"));
-        assert!(nudge.contains("USER.md:"));
-        assert!(nudge.contains("/1375 chars"));
-        assert!(nudge.contains("memory_search"));
+        let workspace: Box<dyn crate::workspace::Workspace> = Box::new(ws);
+        let ctx = crate::tool::ToolContext {
+            working_dir: std::env::temp_dir(),
+            env: HashMap::new(),
+            cancellation: CancellationToken::new(),
+            workspace: Some(std::sync::Arc::new(tokio::sync::RwLock::new(workspace))),
+            depth: 0,
+        };
+
+        let prompt = Agent::build_memory_system_prompt(&ctx).await;
+        assert!(prompt.contains("MEMORY.md"));
+        assert!(prompt.contains("/2200 chars"));
+        assert!(prompt.contains("USER.md"));
+        assert!(prompt.contains("/1375 chars"));
+        assert!(prompt.contains("memory_search"));
+        assert!(prompt.contains("workspace_update"));
+    }
+
+    #[tokio::test]
+    async fn reflection_system_prompt_lists_tools() {
+        let ctx = crate::tool::ToolContext {
+            working_dir: std::env::temp_dir(),
+            env: HashMap::new(),
+            cancellation: CancellationToken::new(),
+            workspace: None,
+            depth: 0,
+        };
+        let prompt = Agent::build_reflection_system_prompt(&ctx).await;
+        assert!(prompt.contains("skill_create"));
+        assert!(prompt.contains("export_conversation"));
+        assert!(prompt.contains("When to create a skill"));
+        assert!(prompt.contains("When to do nothing"));
+    }
+
+    #[test]
+    fn summarize_for_reflection_captures_tool_stats() {
+        let messages = vec![
+            Message::user("Deploy my app"),
+            Message::assistant(vec![
+                crate::message::ContentBlock::Text {
+                    text: "I'll deploy it.".into(),
+                },
+                crate::message::ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "deploy.sh"}),
+                },
+            ]),
+            Message::tool_result("c1", "Deployed successfully", false),
+            Message::assistant(vec![crate::message::ContentBlock::Text {
+                text: "Done!".into(),
+            }]),
+        ];
+
+        let summary = Agent::summarize_for_reflection(&messages);
+        assert!(summary.contains("Deploy my app"));
+        assert!(summary.contains("[Tool call: bash]"));
+        assert!(summary.contains("Deployed successfully"));
+        assert!(summary.contains("1 tool calls (0 errors)"));
+        assert!(summary.contains("bash"));
+        assert!(summary.contains("4 messages total"));
     }
 
     // -----------------------------------------------------------------------
