@@ -2,7 +2,7 @@
 
 A streaming AI agent loop in Rust, built to understand how these things actually work — and how to secure them.
 
-> **This is an educational project.** I'm an AppSec engineer who got tired of treating AI agents as black boxes. Dyson exists so I can take agents apart, understand every moving piece, and figure out how to secure and deploy them responsibly. **If you need a production agent, you should use a real one** — see [the projects that inspired this](#inspired-by) below. If you want to understand what's happening inside the loop, read on.
+> **This is an educational project.** I'm an AppSec engineer building this to demystify AI agents — how they work, how to secure them, and how to deploy them responsibly. If you need a production agent, see [the projects that inspired this](#inspired-by). If you want to understand what's happening inside the loop, read on.
 
 ## Why
 
@@ -20,7 +20,7 @@ Dyson is heavily inspired by two projects that are worth checking out if you wan
 
 - **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — An agent framework from [Nous Research](https://nousresearch.com/) with a well-thought-out memory system: agent-curated journals, persistent identity files, periodic nudges, and full-text search. Dyson's memory architecture is modeled after Hermes, and the workspace format is compatible with the OpenClaw/TARS format that Hermes uses.
 
-Both are further along than Dyson and solve real problems. This project exists to take the ideas apart and understand how to secure them.
+If you want a production-ready agent, start with one of those. If you want to understand what's happening inside the loop and how to secure it, that's what Dyson is for.
 
 ## What you learn by reading this codebase
 
