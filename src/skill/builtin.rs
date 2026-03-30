@@ -28,11 +28,13 @@ use crate::skill::Skill;
 use crate::tool::Tool;
 use crate::tool::bash::BashTool;
 use crate::tool::edit_file::EditFileTool;
+use crate::tool::export_conversation::ExportConversationTool;
 use crate::tool::list_files::ListFilesTool;
 use crate::tool::memory_search::MemorySearchTool;
 use crate::tool::read_file::ReadFileTool;
 use crate::tool::search_files::SearchFilesTool;
 use crate::tool::send_file::SendFileTool;
+use crate::tool::skill_create::SkillCreateTool;
 use crate::tool::web_search;
 use crate::tool::workspace_view::WorkspaceViewTool;
 use crate::tool::workspace_search::WorkspaceSearchTool;
@@ -86,6 +88,8 @@ impl BuiltinSkill {
             Arc::new(WorkspaceViewTool),
             Arc::new(WorkspaceSearchTool),
             Arc::new(WorkspaceUpdateTool),
+            Arc::new(ExportConversationTool),
+            Arc::new(SkillCreateTool),
         ];
 
         if let Some(ws_cfg) = web_search_config {
@@ -160,7 +164,7 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new(None);
         let tools = skill.tools();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 13);
         assert_eq!(tools[0].name(), "bash");
         assert_eq!(tools[1].name(), "read_file");
         assert_eq!(tools[2].name(), "write_file");
@@ -172,6 +176,8 @@ mod tests {
         assert_eq!(tools[8].name(), "workspace_view");
         assert_eq!(tools[9].name(), "workspace_search");
         assert_eq!(tools[10].name(), "workspace_update");
+        assert_eq!(tools[11].name(), "export_conversation");
+        assert_eq!(tools[12].name(), "skill_create");
     }
 
     #[test]

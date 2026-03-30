@@ -54,11 +54,13 @@
 
 pub mod bash;
 pub mod edit_file;
+pub mod export_conversation;
 pub mod list_files;
 pub mod memory_search;
 pub mod read_file;
 pub mod search_files;
 pub mod send_file;
+pub mod skill_create;
 pub mod web_search;
 pub mod workspace_search;
 pub mod workspace_update;

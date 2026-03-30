@@ -44,6 +44,7 @@ pub mod chat_history;
 pub mod config;
 pub mod controller;
 pub mod error;
+pub mod export;
 pub mod llm;
 pub mod message;
 pub mod sandbox;
