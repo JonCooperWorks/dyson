@@ -532,6 +532,16 @@ impl Agent {
             self.messages.push(Message::user(&nudge));
         }
 
+        // Inject a skill creation nudge offset from the memory nudge.
+        // Fires at 2x the nudge interval (e.g., turns 10, 20, 30 if nudge=5)
+        // so it doesn't compete with memory maintenance for attention.
+        if self.nudge_interval > 0 && self.turn_count > self.nudge_interval
+            && self.turn_count.is_multiple_of(self.nudge_interval * 2)
+            && self.tool_context.workspace.is_some()
+        {
+            self.messages.push(Message::user(&Self::build_skill_nudge_message()));
+        }
+
         let mut final_text = String::new();
         let mut hit_max_iterations = false;
 
@@ -789,6 +799,24 @@ impl Agent {
              MEMORY.md: {memory_usage}/{memory_limit} chars. USER.md: {user_usage}/{user_limit} chars.\n\
              Use workspace_view/workspace_update. Move overflow to memory/notes/ (searchable via memory_search)."
         )
+    }
+
+    /// Build the skill self-improvement nudge message.
+    ///
+    /// Encourages the agent to distill complex tasks into reusable skills
+    /// and to export valuable conversations for training data.  Fires at
+    /// 2x the memory nudge interval so it's less frequent and doesn't
+    /// compete with memory maintenance.
+    fn build_skill_nudge_message() -> String {
+        "[System: Self-Improvement] Reflect on this conversation:\n\
+         - If you solved a complex or multi-step task, consider creating a reusable skill \
+           with skill_create so you handle similar tasks better next time.\n\
+         - If you improved an approach vs. a previous attempt, consider using skill_create \
+           with mode 'improve' to update the relevant skill.\n\
+         - If this conversation contains high-quality tool-use trajectories, consider \
+           exporting it with export_conversation for training data.\n\
+         Only act if genuinely useful — don't create trivial or overly specific skills."
+            .to_string()
     }
 
     /// Check if an LLM error is retryable (rate limit, overloaded, network).
@@ -1162,6 +1190,15 @@ mod tests {
         assert!(nudge.contains("USER.md:"));
         assert!(nudge.contains("/1375 chars"));
         assert!(nudge.contains("memory_search"));
+    }
+
+    #[test]
+    fn skill_nudge_message_contains_key_guidance() {
+        let nudge = Agent::build_skill_nudge_message();
+        assert!(nudge.contains("[System: Self-Improvement]"));
+        assert!(nudge.contains("skill_create"));
+        assert!(nudge.contains("export_conversation"));
+        assert!(nudge.contains("improve"));
     }
 
     // -----------------------------------------------------------------------

@@ -116,7 +116,19 @@ impl BuiltinSkill {
             "You have access to the following built-in tools:\n\n{}\n\n\
              Use these tools to help answer questions and complete tasks. \
              When running commands, prefer concise output. \
-             Check command results before proceeding to the next step.",
+             Check command results before proceeding to the next step.\n\n\
+             ## Self-Improvement\n\n\
+             After completing a complex or multi-step task, consider distilling your \
+             approach into a reusable skill using skill_create. Good candidates:\n\
+             - Multi-step procedures you might need to repeat\n\
+             - Debugging patterns that worked well\n\
+             - Domain-specific workflows (deploy, review, data analysis)\n\n\
+             When you notice an existing skill's instructions could be better based on \
+             experience, use skill_create with mode 'improve' to refine it.\n\n\
+             ## Training Data Export\n\n\
+             When a conversation contains high-quality tool-use examples (especially \
+             complex multi-step problem solving), consider using export_conversation to \
+             save it as ShareGPT-format training data.",
             tool_list.join("\n")
         );
 
