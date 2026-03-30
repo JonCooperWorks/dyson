@@ -77,6 +77,24 @@ use crate::controller::Output;
 use self::stream_handler::ToolCall;
 
 // ---------------------------------------------------------------------------
+// SilentOutput — discards all output (used by self-improvement reflection).
+// ---------------------------------------------------------------------------
+
+/// A no-op output sink used for side-channel LLM calls where we want
+/// tool execution but don't need to stream text to the user.
+struct SilentOutput;
+
+impl crate::controller::Output for SilentOutput {
+    fn text_delta(&mut self, _: &str) -> Result<()> { Ok(()) }
+    fn tool_use_start(&mut self, _: &str, _: &str) -> Result<()> { Ok(()) }
+    fn tool_use_complete(&mut self) -> Result<()> { Ok(()) }
+    fn tool_result(&mut self, _: &ToolOutput) -> Result<()> { Ok(()) }
+    fn send_file(&mut self, _: &std::path::Path) -> Result<()> { Ok(()) }
+    fn error(&mut self, _: &DysonError) -> Result<()> { Ok(()) }
+    fn flush(&mut self) -> Result<()> { Ok(()) }
+}
+
+// ---------------------------------------------------------------------------
 // TokenBudget — tracks and limits token usage across the agent session.
 // ---------------------------------------------------------------------------
 
@@ -532,16 +550,6 @@ impl Agent {
             self.messages.push(Message::user(&nudge));
         }
 
-        // Inject a skill creation nudge offset from the memory nudge.
-        // Fires at 2x the nudge interval (e.g., turns 10, 20, 30 if nudge=5)
-        // so it doesn't compete with memory maintenance for attention.
-        if self.nudge_interval > 0 && self.turn_count > self.nudge_interval
-            && self.turn_count.is_multiple_of(self.nudge_interval * 2)
-            && self.tool_context.workspace.is_some()
-        {
-            self.messages.push(Message::user(&Self::build_skill_nudge_message()));
-        }
-
         let mut final_text = String::new();
         let mut hit_max_iterations = false;
 
@@ -779,6 +787,25 @@ impl Agent {
             }
         }
 
+        // -- Self-improvement reflection --
+        //
+        // Every 2N turns, fire a side-channel LLM call that reviews the
+        // conversation and decides whether to create/improve skills or
+        // export training data.  This is a separate call with its own
+        // system prompt — it doesn't pollute the main conversation history.
+        if self.nudge_interval > 0
+            && self.turn_count > self.nudge_interval
+            && self.turn_count.is_multiple_of(self.nudge_interval * 2)
+            && self.tool_context.workspace.is_some()
+        {
+            if let Err(e) = self.self_improve(output).await {
+                tracing::warn!(
+                    error = %e,
+                    "self-improvement reflection failed — continuing normally"
+                );
+            }
+        }
+
         output.flush()?;
         Ok(final_text)
     }
@@ -801,22 +828,291 @@ impl Agent {
         )
     }
 
-    /// Build the skill self-improvement nudge message.
+    /// Run a side-channel self-improvement reflection.
     ///
-    /// Encourages the agent to distill complex tasks into reusable skills
-    /// and to export valuable conversations for training data.  Fires at
-    /// 2x the memory nudge interval so it's less frequent and doesn't
-    /// compete with memory maintenance.
-    fn build_skill_nudge_message() -> String {
-        "[System: Self-Improvement] Reflect on this conversation:\n\
-         - If you solved a complex or multi-step task, consider creating a reusable skill \
-           with skill_create so you handle similar tasks better next time.\n\
-         - If you improved an approach vs. a previous attempt, consider using skill_create \
-           with mode 'improve' to update the relevant skill.\n\
-         - If this conversation contains high-quality tool-use trajectories, consider \
-           exporting it with export_conversation for training data.\n\
-         Only act if genuinely useful — don't create trivial or overly specific skills."
-            .to_string()
+    /// Makes a separate LLM call with a focused system prompt and only
+    /// the `skill_create` and `export_conversation` tools.  The LLM
+    /// reviews the conversation and decides whether to:
+    ///
+    /// - Create a new skill from a complex task it just solved
+    /// - Improve an existing skill based on what it learned
+    /// - Export the conversation as training data
+    /// - Do nothing (if the conversation was trivial)
+    ///
+    /// This runs in a separate message context — nothing from this call
+    /// is added to the main conversation history.  The user sees tool
+    /// use output (skill created, export written) but the reflection
+    /// reasoning is invisible.
+    ///
+    /// ## Design
+    ///
+    /// Unlike the memory nudge (which injects a user message and hopes
+    /// the model acts on it), this is a real LLM call with real tool
+    /// execution.  The model either acts or doesn't — there's no
+    /// relying on the model noticing a hint in context.
+    async fn self_improve(&mut self, output: &mut dyn Output) -> Result<()> {
+        tracing::info!(
+            turn_count = self.turn_count,
+            messages = self.messages.len(),
+            "running self-improvement reflection"
+        );
+
+        // Log to the user that reflection is happening.
+        let _ = output.text_delta("\n\n[Self-improvement: reflecting on conversation...]\n");
+        let _ = output.flush();
+
+        // Build a condensed view of the conversation for the reflection.
+        let reflection_system = Self::build_reflection_system_prompt(&self.tool_context).await;
+
+        // Only expose self-improvement tools.
+        let reflection_tools: Vec<ToolDefinition> = self
+            .tool_definitions
+            .iter()
+            .filter(|t| t.name == "skill_create" || t.name == "export_conversation")
+            .cloned()
+            .collect();
+
+        if reflection_tools.is_empty() {
+            tracing::warn!("self-improvement tools not loaded — skipping reflection");
+            return Ok(());
+        }
+
+        // Build the reflection messages: a condensed summary of what happened.
+        let summary = Self::summarize_for_reflection(&self.messages);
+        tracing::debug!(
+            summary_len = summary.len(),
+            "built reflection summary"
+        );
+
+        let reflection_messages = vec![
+            Message::user(&summary),
+        ];
+
+        // LLM call with tool loop — if it wants to use tools, run them.
+        // Cap at 3 iterations to prevent runaway loops.
+        let mut messages = reflection_messages;
+        let mut actions_taken = 0usize;
+
+        for iteration in 0..3u8 {
+            tracing::info!(
+                iteration = iteration,
+                "self-improvement LLM call"
+            );
+
+            let response = match self
+                .client
+                .stream(&messages, &reflection_system, &reflection_tools, &self.config)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "self-improvement LLM call failed");
+                    let _ = output.text_delta("[Self-improvement: LLM call failed, skipping]\n");
+                    return Ok(()); // non-fatal
+                }
+            };
+
+            // Process stream silently — we only care about tool calls.
+            let mut silent_output = SilentOutput;
+            let (assistant_msg, tool_calls, _tokens) =
+                stream_handler::process_stream(response.stream, &mut silent_output).await?;
+
+            // Log what the model said (for debugging), even though we don't
+            // show it to the user.
+            for block in &assistant_msg.content {
+                if let crate::message::ContentBlock::Text { text } = block {
+                    if !text.trim().is_empty() {
+                        tracing::info!(
+                            reasoning = text.as_str(),
+                            "self-improvement reasoning"
+                        );
+                    }
+                }
+            }
+
+            messages.push(assistant_msg);
+
+            if tool_calls.is_empty() {
+                tracing::info!("self-improvement: model decided no action needed");
+                break;
+            }
+
+            // Execute the tool calls (through the sandbox like everything else).
+            for call in &tool_calls {
+                tracing::info!(
+                    tool = call.name.as_str(),
+                    "self-improvement executing tool"
+                );
+
+                let result = self.execute_tool_call_timed(call).await;
+                let tool_result_msg = match result {
+                    Ok(ref tool_output) => {
+                        actions_taken += 1;
+
+                        // Show tool activity to the user so they see what was
+                        // auto-created (skill files, exports).
+                        let _ = output.tool_use_start(&call.name, &call.id);
+                        let _ = output.tool_result(tool_output);
+                        let _ = output.tool_use_complete();
+
+                        tracing::info!(
+                            tool = call.name.as_str(),
+                            is_error = tool_output.is_error,
+                            result = tool_output.content.as_str(),
+                            "self-improvement tool result"
+                        );
+
+                        Message::tool_result(&call.id, &tool_output.content, tool_output.is_error)
+                    }
+                    Err(ref e) => {
+                        tracing::warn!(
+                            tool = call.name.as_str(),
+                            error = %e,
+                            "self-improvement tool call failed"
+                        );
+                        let _ = output.text_delta(
+                            &format!("[Self-improvement: {} failed: {}]\n", call.name, e)
+                        );
+                        Message::tool_result(&call.id, &e.to_string(), true)
+                    }
+                };
+                messages.push(tool_result_msg);
+            }
+        }
+
+        if actions_taken == 0 {
+            let _ = output.text_delta("[Self-improvement: no action needed]\n");
+        } else {
+            let _ = output.text_delta(
+                &format!("[Self-improvement: {actions_taken} action(s) taken]\n")
+            );
+        }
+        let _ = output.flush();
+
+        tracing::info!(
+            actions_taken = actions_taken,
+            "self-improvement reflection complete"
+        );
+        Ok(())
+    }
+
+    /// Build the system prompt for the self-improvement reflection call.
+    async fn build_reflection_system_prompt(ctx: &ToolContext) -> String {
+        // List existing skills so the model knows what already exists.
+        let existing_skills = if let Some(ref ws) = ctx.workspace {
+            let ws = ws.read().await;
+            let skill_files = ws.skill_files();
+            if skill_files.is_empty() {
+                "No skills exist yet.".to_string()
+            } else {
+                let names: Vec<String> = skill_files
+                    .iter()
+                    .filter_map(|p| {
+                        p.file_stem()
+                            .and_then(|s| s.to_str())
+                            .map(String::from)
+                    })
+                    .collect();
+                format!("Existing skills: {}", names.join(", "))
+            }
+        } else {
+            "No workspace configured.".to_string()
+        };
+
+        format!(
+            "You are a self-improvement engine for an AI agent.  Your job is to review \
+             a conversation that just happened and decide whether to take action.\n\n\
+             You have two tools:\n\
+             - **skill_create**: Create or improve a SKILL.md file in the workspace.  \
+               Skills are system prompt fragments that auto-load on startup, teaching \
+               the agent reusable procedures.\n\
+             - **export_conversation**: Export the conversation as ShareGPT-format \
+               training data for fine-tuning tool-calling models.\n\n\
+             ## When to create a skill\n\
+             - The agent solved a complex, multi-step task that it might encounter again\n\
+             - The agent discovered a non-obvious procedure or debugging pattern\n\
+             - The agent found a domain-specific workflow worth encoding\n\n\
+             ## When to improve a skill\n\
+             - An existing skill's instructions were insufficient and the agent had to \
+               improvise — capture what worked\n\
+             - The agent found a better approach than what the skill describes\n\n\
+             ## When to export\n\
+             - The conversation contains substantial, high-quality tool use (3+ tool \
+               calls with successful outcomes)\n\
+             - The conversation demonstrates a complete problem-solving trajectory\n\n\
+             ## When to do nothing\n\
+             - The conversation was trivial (simple Q&A, one-step tasks)\n\
+             - A matching skill already exists and doesn't need improvement\n\
+             - The conversation was mostly errors or failed attempts\n\n\
+             Doing nothing is the right choice most of the time.  Only act when there's \
+             genuine value in persisting knowledge or exporting data.\n\n\
+             {existing_skills}"
+        )
+    }
+
+    /// Summarize the conversation for the reflection LLM call.
+    ///
+    /// Instead of sending the full message history (which could be huge),
+    /// build a condensed representation: user goals, tools used, outcomes.
+    fn summarize_for_reflection(messages: &[Message]) -> String {
+        let mut summary = String::from(
+            "Review this conversation and decide whether to create/improve a skill \
+             or export training data.  Here is what happened:\n\n"
+        );
+
+        let mut tool_call_count = 0;
+        let mut tool_error_count = 0;
+        let mut tools_used: Vec<String> = Vec::new();
+
+        for msg in messages {
+            for block in &msg.content {
+                match block {
+                    crate::message::ContentBlock::Text { text } => {
+                        // Include user messages and short assistant text.
+                        let role = match msg.role {
+                            crate::message::Role::User => "User",
+                            crate::message::Role::Assistant => "Assistant",
+                        };
+                        // Truncate long text to keep the summary compact.
+                        let truncated = if text.len() > 500 {
+                            format!("{}...[truncated]", &text[..500])
+                        } else {
+                            text.clone()
+                        };
+                        summary.push_str(&format!("{role}: {truncated}\n\n"));
+                    }
+                    crate::message::ContentBlock::ToolUse { name, .. } => {
+                        tool_call_count += 1;
+                        if !tools_used.contains(name) {
+                            tools_used.push(name.clone());
+                        }
+                        summary.push_str(&format!("[Tool call: {name}]\n"));
+                    }
+                    crate::message::ContentBlock::ToolResult { is_error, content, .. } => {
+                        if *is_error {
+                            tool_error_count += 1;
+                            summary.push_str(&format!("[Tool error: {}]\n", &content[..content.len().min(200)]));
+                        } else {
+                            let truncated = if content.len() > 200 {
+                                format!("{}...", &content[..200])
+                            } else {
+                                content.clone()
+                            };
+                            summary.push_str(&format!("[Tool result: {truncated}]\n"));
+                        }
+                    }
+                }
+            }
+        }
+
+        summary.push_str(&format!(
+            "\n---\nStats: {tool_call_count} tool calls ({tool_error_count} errors), \
+             tools used: [{}], {} messages total.",
+            tools_used.join(", "),
+            messages.len(),
+        ));
+
+        summary
     }
 
     /// Check if an LLM error is retryable (rate limit, overloaded, network).
@@ -1192,13 +1488,49 @@ mod tests {
         assert!(nudge.contains("memory_search"));
     }
 
+    #[tokio::test]
+    async fn reflection_system_prompt_lists_tools() {
+        let ctx = crate::tool::ToolContext {
+            working_dir: std::env::temp_dir(),
+            env: HashMap::new(),
+            cancellation: CancellationToken::new(),
+            workspace: None,
+            depth: 0,
+        };
+        let prompt = Agent::build_reflection_system_prompt(&ctx).await;
+        assert!(prompt.contains("skill_create"));
+        assert!(prompt.contains("export_conversation"));
+        assert!(prompt.contains("When to create a skill"));
+        assert!(prompt.contains("When to do nothing"));
+    }
+
     #[test]
-    fn skill_nudge_message_contains_key_guidance() {
-        let nudge = Agent::build_skill_nudge_message();
-        assert!(nudge.contains("[System: Self-Improvement]"));
-        assert!(nudge.contains("skill_create"));
-        assert!(nudge.contains("export_conversation"));
-        assert!(nudge.contains("improve"));
+    fn summarize_for_reflection_captures_tool_stats() {
+        let messages = vec![
+            Message::user("Deploy my app"),
+            Message::assistant(vec![
+                crate::message::ContentBlock::Text {
+                    text: "I'll deploy it.".into(),
+                },
+                crate::message::ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "deploy.sh"}),
+                },
+            ]),
+            Message::tool_result("c1", "Deployed successfully", false),
+            Message::assistant(vec![crate::message::ContentBlock::Text {
+                text: "Done!".into(),
+            }]),
+        ];
+
+        let summary = Agent::summarize_for_reflection(&messages);
+        assert!(summary.contains("Deploy my app"));
+        assert!(summary.contains("[Tool call: bash]"));
+        assert!(summary.contains("Deployed successfully"));
+        assert!(summary.contains("1 tool calls (0 errors)"));
+        assert!(summary.contains("bash"));
+        assert!(summary.contains("4 messages total"));
     }
 
     // -----------------------------------------------------------------------
