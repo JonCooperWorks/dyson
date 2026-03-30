@@ -57,6 +57,14 @@ use crate::tool::ToolOutput;
 // Constants
 // ---------------------------------------------------------------------------
 
+/// Per-chat agent state, tracking the active provider and model
+/// so within-provider model switching works.
+struct ChatAgent {
+    agent: crate::agent::Agent,
+    provider_name: String,
+    model: String,
+}
+
 /// Minimum interval between message edits (milliseconds).
 const EDIT_INTERVAL_MS: u128 = 500;
 
@@ -238,7 +246,8 @@ impl super::Controller for TelegramController {
         // Per-chat agents — persistent conversation context.
         // Each chat gets its own agent that remembers previous messages.
         // /clear resets a chat's agent and deletes persisted history.
-        let agents: Arc<Mutex<HashMap<i64, crate::agent::Agent>>> =
+        // ChatAgent tracks the active provider/model for within-provider switching.
+        let agents: Arc<Mutex<HashMap<i64, ChatAgent>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         // Chat store — persists conversation history via the configured
@@ -327,12 +336,12 @@ impl super::Controller for TelegramController {
                 // /clear) so the model retains a condensed version of context.
                 if text == "/compact" {
                     let mut agents_map = agents.lock().await;
-                    if let Some(agent) = agents_map.get_mut(&chat_id.0) {
+                    if let Some(ca) = agents_map.get_mut(&chat_id.0) {
                         let mut output = TelegramOutput::new(bot.clone(), chat_id);
-                        match agent.compact(&mut output).await {
+                        match ca.agent.compact(&mut output).await {
                             Ok(()) => {
                                 let chat_key = chat_id.0.to_string();
-                                let _ = chat_store.save(&chat_key, agent.messages());
+                                let _ = chat_store.save(&chat_key, ca.agent.messages());
                                 let _ = bot.send_message(chat_id, "Context compacted.").await;
                                 tracing::info!(chat_id = chat_id.0, "conversation compacted");
                             }
@@ -374,52 +383,87 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                // /models — list available providers.
+                // /models — list available providers and models.
                 if text == "/models" {
-                    let providers = super::list_providers(&current_settings);
-                    if providers.is_empty() {
+                    if current_settings.providers.is_empty() {
                         let _ = bot.send_message(chat_id, "No providers configured.").await;
                     } else {
-                        let mut reply = String::from("Available providers:\n");
-                        for (name, pc) in &providers {
-                            reply.push_str(&format!(
-                                "  {} — {:?} ({})\n",
-                                name, pc.provider_type, pc.models.join(", "),
-                            ));
-                        }
+                        let (cp, cm) = {
+                            let agents_map = agents.lock().await;
+                            match agents_map.get(&chat_id.0) {
+                                Some(ca) => (ca.provider_name.clone(), ca.model.clone()),
+                                None => {
+                                    let pn = super::active_provider_name(&current_settings)
+                                        .unwrap_or_default();
+                                    let m = current_settings.agent.model.clone();
+                                    (pn, m)
+                                }
+                            }
+                        };
+                        let reply = super::format_provider_list(
+                            &current_settings, &cp, &cm,
+                        );
                         let _ = bot.send_message(chat_id, reply).await;
                     }
                     continue;
                 }
 
-                // /model <name> — switch to a named provider.
-                if let Some(name) = text.strip_prefix("/model ").map(str::trim) {
-                    if name.is_empty() {
-                        let _ = bot.send_message(chat_id, "Usage: /model <provider-name>").await;
+                // /model <provider> [model] — switch provider and/or model.
+                if let Some(args) = text.strip_prefix("/model ").map(str::trim) {
+                    if args.is_empty() {
+                        let _ = bot.send_message(chat_id, "Usage: /model <provider> [model]  or  /model <model>").await;
                         continue;
                     }
+                    let current_prov = {
+                        let agents_map = agents.lock().await;
+                        agents_map.get(&chat_id.0)
+                            .map(|ca| ca.provider_name.clone())
+                            .unwrap_or_else(|| {
+                                super::active_provider_name(&current_settings)
+                                    .unwrap_or_default()
+                            })
+                    };
+                    let (target_provider, target_model) = match super::parse_model_command(
+                        args,
+                        &current_settings.providers,
+                        &current_prov,
+                    ) {
+                        Ok(parsed) => parsed,
+                        Err(e) => {
+                            let _ = bot.send_message(chat_id, e).await;
+                            continue;
+                        }
+                    };
                     let existing_messages = {
                         let agents_map = agents.lock().await;
                         agents_map
                             .get(&chat_id.0)
-                            .map(|a| a.messages().to_vec())
+                            .map(|ca| ca.agent.messages().to_vec())
                             .unwrap_or_default()
                     };
                     match super::build_agent_with_provider(
                         &current_settings,
-                        name,
+                        &target_provider,
+                        target_model.as_deref(),
                         controller_prompt.as_deref(),
                         existing_messages,
                     )
                     .await
                     {
                         Ok(new_agent) => {
-                            let pc = &current_settings.providers[name];
+                            let pc = &current_settings.providers[&target_provider];
+                            let resolved = target_model.as_deref()
+                                .unwrap_or_else(|| pc.default_model())
+                                .to_string();
                             let reply = format!(
                                 "Switched to '{}' — {:?} ({})",
-                                name, pc.provider_type, pc.models.join(", "),
+                                target_provider, pc.provider_type, resolved,
                             );
-                            agents.lock().await.insert(chat_id.0, new_agent);
+                            agents.lock().await.insert(chat_id.0, ChatAgent {
+                                agent: new_agent,
+                                provider_name: target_provider,
+                                model: resolved,
+                            });
                             let _ = bot.send_message(chat_id, reply).await;
                         }
                         Err(e) => {
@@ -432,7 +476,7 @@ impl super::Controller for TelegramController {
                 }
                 if text == "/model" {
                     let _ = bot
-                        .send_message(chat_id, "Usage: /model <provider-name>")
+                        .send_message(chat_id, "Usage: /model <provider> [model]  or  /model <model>")
                         .await;
                     continue;
                 }
@@ -454,6 +498,9 @@ impl super::Controller for TelegramController {
                     // Get or create the per-chat agent.
                     let mut agents_map = agents_clone.lock().await;
                     if let std::collections::hash_map::Entry::Vacant(entry) = agents_map.entry(chat_id.0) {
+                        let provider_name = super::active_provider_name(&settings_clone)
+                            .unwrap_or_default();
+                        let model = settings_clone.agent.model.clone();
                         match crate::controller::build_agent(
                             &settings_clone,
                             prompt_clone.as_deref(),
@@ -468,7 +515,11 @@ impl super::Controller for TelegramController {
                                     );
                                     agent.set_messages(messages);
                                 }
-                                entry.insert(agent);
+                                entry.insert(ChatAgent {
+                                    agent,
+                                    provider_name,
+                                    model,
+                                });
                             }
                             Err(e) => {
                                 tracing::error!(error = %e, "failed to create agent");
@@ -477,18 +528,18 @@ impl super::Controller for TelegramController {
                             }
                         }
                     }
-                    let agent = agents_map.get_mut(&chat_id.0)
+                    let ca = agents_map.get_mut(&chat_id.0)
                         .expect("agent must exist — just inserted above");
 
                     let mut output = TelegramOutput::new(bot_clone.clone(), chat_id);
 
-                    if let Err(e) = agent.run(&text, &mut output).await {
+                    if let Err(e) = ca.agent.run(&text, &mut output).await {
                         tracing::error!(error = %e, "agent run failed");
                         let _ = bot_clone.send_message(chat_id, format!("Error: {e}")).await;
                     }
 
                     // Persist conversation history to disk after each turn.
-                    if let Err(e) = store_clone.save(&chat_key, agent.messages()) {
+                    if let Err(e) = store_clone.save(&chat_key, ca.agent.messages()) {
                         tracing::error!(error = %e, "failed to save chat history");
                     }
 

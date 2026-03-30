@@ -201,11 +201,13 @@ pub async fn build_agent(
 /// Build a new agent using a named provider, preserving conversation history.
 ///
 /// Looks up `provider_name` in `settings.providers`, builds a new agent
-/// with that provider's config, and restores the given messages.  Returns
-/// an error if the provider name is unknown.
+/// with that provider's config, and restores the given messages.  When
+/// `model` is `Some`, validates it against the provider's model list;
+/// otherwise uses the provider's default (first) model.
 pub async fn build_agent_with_provider(
     settings: &Settings,
     provider_name: &str,
+    model: Option<&str>,
     controller_prompt: Option<&str>,
     existing_messages: Vec<crate::message::Message>,
 ) -> crate::Result<crate::agent::Agent> {
@@ -213,16 +215,104 @@ pub async fn build_agent_with_provider(
         crate::error::DysonError::Config(format!("unknown provider '{provider_name}'"))
     })?;
 
+    let resolved_model = match model {
+        Some(m) => {
+            if !pc.models.iter().any(|existing| existing == m) {
+                let available = pc.models.join(", ");
+                return Err(crate::error::DysonError::Config(format!(
+                    "unknown model '{m}' for provider '{provider_name}'. Available: {available}"
+                )));
+            }
+            m.to_string()
+        }
+        None => pc.default_model().to_string(),
+    };
+
     // Build a modified settings with the new provider's fields.
     let mut switched = settings.clone();
     switched.agent.provider = pc.provider_type.clone();
-    switched.agent.model = pc.default_model().to_string();
+    switched.agent.model = resolved_model;
     switched.agent.api_key = pc.api_key.clone();
     switched.agent.base_url = pc.base_url.clone();
 
     let mut agent = build_agent(&switched, controller_prompt).await?;
     agent.set_messages(existing_messages);
     Ok(agent)
+}
+
+/// Parse a `/model` command argument into (provider_name, optional_model).
+///
+/// Resolution order:
+/// 1. If the first word matches a provider name, use it as provider.
+///    A second word (if present) is the model within that provider.
+/// 2. Otherwise, check if the entire argument is a model in the current provider.
+/// 3. If neither matches, return an error.
+pub fn parse_model_command(
+    args: &str,
+    providers: &std::collections::HashMap<String, crate::config::ProviderConfig>,
+    current_provider: &str,
+) -> Result<(String, Option<String>), String> {
+    let args = args.trim();
+    if args.is_empty() {
+        return Err("Usage: /model <provider> [model]  or  /model <model>".to_string());
+    }
+
+    // Split into at most 2 parts: potential provider + potential model.
+    let mut parts = args.splitn(2, char::is_whitespace);
+    let first = parts.next().unwrap(); // always present after empty check
+    let second = parts.next().map(str::trim);
+
+    // Case 1: first word is a known provider name.
+    if providers.contains_key(first) {
+        return Ok((first.to_string(), second.map(|s| s.to_string())));
+    }
+
+    // Case 2: not a provider — try as a model in the current provider.
+    if let Some(pc) = providers.get(current_provider) {
+        if pc.models.iter().any(|m| m == args) {
+            return Ok((current_provider.to_string(), Some(args.to_string())));
+        }
+    }
+
+    Err(format!("unknown provider or model '{first}'"))
+}
+
+/// Find the provider name in `settings.providers` that matches the active
+/// agent config (provider type + model).  Returns `None` if no match.
+pub fn active_provider_name(settings: &Settings) -> Option<String> {
+    settings.providers.iter().find_map(|(name, pc)| {
+        if pc.provider_type == settings.agent.provider
+            && pc.models.contains(&settings.agent.model)
+        {
+            Some(name.clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// Format the provider list for display, marking the active model with `*`.
+pub fn format_provider_list(
+    settings: &Settings,
+    current_provider: &str,
+    current_model: &str,
+) -> String {
+    let mut providers: Vec<_> = settings.providers.iter().collect();
+    providers.sort_by_key(|(name, _)| name.as_str());
+
+    let mut out = String::from("Available providers:\n");
+    for (name, pc) in &providers {
+        out.push_str(&format!("  {} — {:?}\n", name, pc.provider_type));
+        for model in &pc.models {
+            let marker = if *name == current_provider && model == current_model {
+                " *"
+            } else {
+                ""
+            };
+            out.push_str(&format!("    {model}{marker}\n"));
+        }
+    }
+    out
 }
 
 /// List all configured providers, sorted by name.

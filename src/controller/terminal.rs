@@ -58,6 +58,11 @@ impl super::Controller for TerminalController {
         let mut agent = super::build_agent(&current_settings, None).await?;
         let mut output = TerminalOutput::new();
 
+        // Track the active provider and model for within-provider switching.
+        let mut current_provider = super::active_provider_name(&current_settings)
+            .unwrap_or_default();
+        let mut current_model = current_settings.agent.model.clone();
+
         // Hot reload: watch config file + workspace files.
         let config_path = std::env::args()
             .skip_while(|a| a != "--config" && a != "-c")
@@ -93,7 +98,12 @@ impl super::Controller for TerminalController {
                     }
                     eprintln!("[reloaded]");
                     match super::build_agent(&current_settings, None).await {
-                        Ok(a) => agent = a,
+                        Ok(a) => {
+                            agent = a;
+                            current_provider = super::active_provider_name(&current_settings)
+                                .unwrap_or_default();
+                            current_model = current_settings.agent.model.clone();
+                        }
                         Err(e) => eprintln!("[reload error: {e}]"),
                     }
                 }
@@ -136,27 +146,39 @@ impl super::Controller for TerminalController {
             }
 
             if input == "/models" {
-                let providers = super::list_providers(&current_settings);
-                if providers.is_empty() {
+                if current_settings.providers.is_empty() {
                     eprintln!("No providers configured.");
                 } else {
-                    eprintln!("Available providers:");
-                    for (name, pc) in &providers {
-                        eprintln!("  {name} — {:?} ({})", pc.provider_type, pc.models.join(", "));
-                    }
+                    eprint!("{}", super::format_provider_list(
+                        &current_settings,
+                        &current_provider,
+                        &current_model,
+                    ));
                 }
                 continue;
             }
 
-            if let Some(name) = input.strip_prefix("/model ").map(str::trim) {
-                if name.is_empty() {
-                    eprintln!("Usage: /model <provider-name>");
+            if let Some(args) = input.strip_prefix("/model ").map(str::trim) {
+                if args.is_empty() {
+                    eprintln!("Usage: /model <provider> [model]  or  /model <model>");
                     continue;
                 }
+                let (target_provider, target_model) = match super::parse_model_command(
+                    args,
+                    &current_settings.providers,
+                    &current_provider,
+                ) {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        eprintln!("[{e}]");
+                        continue;
+                    }
+                };
                 let messages = agent.messages().to_vec();
                 match super::build_agent_with_provider(
                     &current_settings,
-                    name,
+                    &target_provider,
+                    target_model.as_deref(),
                     None,
                     messages,
                 )
@@ -164,15 +186,24 @@ impl super::Controller for TerminalController {
                 {
                     Ok(new_agent) => {
                         agent = new_agent;
+                        let pc = &current_settings.providers[&target_provider];
+                        let resolved = target_model.as_deref()
+                            .unwrap_or_else(|| pc.default_model());
                         eprintln!(
                             "[switched to '{}' — {:?} ({})]",
-                            name,
-                            current_settings.providers[name].provider_type,
-                            current_settings.providers[name].default_model(),
+                            target_provider,
+                            pc.provider_type,
+                            resolved,
                         );
+                        current_model = resolved.to_string();
+                        current_provider = target_provider;
                     }
                     Err(e) => eprintln!("[switch error: {e}]"),
                 }
+                continue;
+            }
+            if input == "/model" {
+                eprintln!("Usage: /model <provider> [model]  or  /model <model>");
                 continue;
             }
 

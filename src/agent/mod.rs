@@ -1048,8 +1048,7 @@ impl Agent {
             "running memory maintenance"
         );
 
-        let _ = output.text_delta("\n\n[Memory maintenance: reviewing conversation...]\n");
-        let _ = output.flush();
+        tracing::info!("\n\n[Memory maintenance: reviewing conversation...]\n");
 
         // Build the system prompt with current usage stats.
         let memory_system = Self::build_memory_system_prompt(&self.tool_context).await;
@@ -1083,7 +1082,7 @@ impl Agent {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, "memory maintenance LLM call failed");
-                    let _ = output.text_delta("[Memory maintenance: LLM call failed, skipping]\n");
+                    tracing::info!("[Memory maintenance: LLM call failed, skipping]\n");
                     return Ok(());
                 }
             };
@@ -1125,10 +1124,10 @@ impl Agent {
         }
 
         if actions_taken == 0 {
-            let _ = output.text_delta("[Memory maintenance: no updates needed]\n");
+            tracing::info!("[Memory maintenance: no updates needed]\n");
         } else {
-            let _ = output.text_delta(
-                &format!("[Memory maintenance: {actions_taken} update(s)]\n")
+            tracing::info!(
+                "{}", format!("[Memory maintenance: {actions_taken} update(s)]\n")
             );
         }
         let _ = output.flush();
@@ -1210,8 +1209,7 @@ impl Agent {
         );
 
         // Log to the user that reflection is happening.
-        let _ = output.text_delta("\n\n[Self-improvement: reflecting on conversation...]\n");
-        let _ = output.flush();
+        tracing::info!("\n\n[Self-improvement: reflecting on conversation...]\n");
 
         // Build a condensed view of the conversation for the reflection.
         let reflection_system = Self::build_reflection_system_prompt(&self.tool_context).await;
@@ -1270,7 +1268,6 @@ impl Agent {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(error = %e, "self-improvement LLM call failed");
-                    let _ = output.text_delta("[Self-improvement: LLM call failed, skipping]\n");
                     return Ok(()); // non-fatal
                 }
             };
@@ -1358,8 +1355,8 @@ impl Agent {
                             error = %e,
                             "self-improvement tool call failed"
                         );
-                        let _ = output.text_delta(
-                            &format!("[Self-improvement: {} failed: {}]\n", call.name, e)
+                        tracing::info!(
+                            "{}", format!("[Self-improvement: {} failed: {}]\n", call.name, e)
                         );
                         Message::tool_result(&call.id, &e.to_string(), true)
                     }
@@ -1369,10 +1366,10 @@ impl Agent {
         }
 
         if actions_taken == 0 {
-            let _ = output.text_delta("[Self-improvement: no action needed]\n");
+            tracing::info!("[Self-improvement: no action needed]\n");
         } else {
-            let _ = output.text_delta(
-                &format!("[Self-improvement: {actions_taken} action(s) taken]\n")
+            tracing::info!(
+                "{}", format!("[Self-improvement: {actions_taken} action(s) taken]\n")
             );
         }
         let _ = output.flush();
