@@ -55,7 +55,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::config::{
-    BuiltinSkillConfig, ControllerConfig, LocalSkillConfig,
+    BuiltinSkillConfig, CompactionConfig, ControllerConfig, LocalSkillConfig,
     McpConfig, McpTransportConfig, ProviderConfig, SandboxConfig, Settings, SkillConfig,
     SubagentAgentConfig, SubagentSkillConfig,
 };
@@ -144,8 +144,30 @@ struct JsonAgent {
     system_prompt: Option<String>,
     /// Name of the provider from the `"providers"` map.
     provider: Option<String>,
-    /// Input token threshold for automatic context compaction.
-    compaction_threshold: Option<usize>,
+    /// Context compaction configuration.  Accepts either:
+    /// - an integer: shorthand for `{ "context_window": <value> }` with defaults
+    /// - an object: full `CompactionConfig` with optional fields
+    compaction: Option<JsonCompaction>,
+}
+
+/// Flexible deserialization for the `"compaction"` field.
+///
+/// Accepts either a bare integer (context window shorthand) or a full object.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum JsonCompaction {
+    /// Shorthand: just the context_window size, e.g. `"compaction": 200000`.
+    Window(usize),
+    /// Full config object with optional fields.
+    Full {
+        context_window: Option<usize>,
+        threshold_ratio: Option<f64>,
+        protect_head: Option<usize>,
+        protect_tail_tokens: Option<usize>,
+        summary_min_tokens: Option<usize>,
+        summary_max_tokens: Option<usize>,
+        summary_target_ratio: Option<f64>,
+    },
 }
 
 /// The `"skills"` object.
@@ -508,8 +530,34 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
         if let Some(prompt) = agent.system_prompt {
             settings.agent.system_prompt = prompt;
         }
-        if let Some(threshold) = agent.compaction_threshold {
-            settings.agent.compaction_threshold = Some(threshold);
+        if let Some(compaction) = agent.compaction {
+            let config = match compaction {
+                JsonCompaction::Window(window) => {
+                    let mut c = CompactionConfig::default();
+                    c.context_window = window;
+                    c
+                }
+                JsonCompaction::Full {
+                    context_window,
+                    threshold_ratio,
+                    protect_head,
+                    protect_tail_tokens,
+                    summary_min_tokens,
+                    summary_max_tokens,
+                    summary_target_ratio,
+                } => {
+                    let mut c = CompactionConfig::default();
+                    if let Some(v) = context_window { c.context_window = v; }
+                    if let Some(v) = threshold_ratio { c.threshold_ratio = v; }
+                    if let Some(v) = protect_head { c.protect_head = v; }
+                    if let Some(v) = protect_tail_tokens { c.protect_tail_tokens = v; }
+                    if let Some(v) = summary_min_tokens { c.summary_min_tokens = v; }
+                    if let Some(v) = summary_max_tokens { c.summary_max_tokens = v; }
+                    if let Some(v) = summary_target_ratio { c.summary_target_ratio = v; }
+                    c
+                }
+            };
+            settings.agent.compaction = Some(config);
         }
     }
 

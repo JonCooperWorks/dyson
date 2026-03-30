@@ -109,6 +109,22 @@ Hermes extends the concept with five memory layers, including:
 - Skill-local memory
 - Cross-session user modeling that deepens over time
 
+### Context Compaction
+
+Both frameworks automatically compress conversation history when approaching
+the model's context window, using the same five-phase algorithm:
+
+| Phase | Description |
+|-------|-------------|
+| **1 — Tool output pruning** | Replace old tool results with placeholders (no LLM call) |
+| **2 — Region identification** | Protect head (first N messages) and tail (recent token budget) |
+| **3 — Structured summarisation** | Summarise the middle via LLM (Goal / Progress / Decisions / Files / Next Steps) |
+| **4 — Reassembly** | Head + `[Context Summary]` + tail |
+| **5 — Orphan repair** | Fix broken tool_use / tool_result pairs at boundaries |
+
+Dyson's implementation supports iterative summaries — when compacting a
+conversation that was already compacted, it merges the old and new summaries.
+
 ### Key Difference
 
 Hermes Agent **actively learns** — it creates skills from experience, improves
