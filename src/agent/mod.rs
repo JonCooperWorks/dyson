@@ -989,11 +989,67 @@ impl Agent {
         }
         let _ = output.flush();
 
+        // Persist the full reflection exchange to the workspace's
+        // improvement/ directory so the user can inspect it later.
+        self.save_reflection_log(
+            &reflection_system,
+            &messages,
+            actions_taken,
+        ).await;
+
         tracing::info!(
             actions_taken = actions_taken,
             "self-improvement reflection complete"
         );
         Ok(())
+    }
+
+    /// Save a reflection exchange to the workspace for later inspection.
+    ///
+    /// Writes the full system prompt, messages, and metadata as JSON to
+    /// `improvement/<timestamp>.json` in the workspace.  This lets users
+    /// review what the self-improvement engine decided and why.
+    async fn save_reflection_log(
+        &self,
+        system_prompt: &str,
+        messages: &[Message],
+        actions_taken: usize,
+    ) {
+        let Some(ref ws) = self.tool_context.workspace else {
+            return;
+        };
+
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let log = serde_json::json!({
+            "timestamp": epoch,
+            "turn_count": self.turn_count,
+            "actions_taken": actions_taken,
+            "system_prompt": system_prompt,
+            "messages": messages,
+        });
+
+        let content = serde_json::to_string_pretty(&log).unwrap_or_default();
+        let file_key = format!("improvement/{epoch}.json");
+
+        let mut ws = ws.write().await;
+        ws.set(&file_key, &content);
+        if let Err(e) = ws.save() {
+            tracing::warn!(
+                error = %e,
+                file = file_key.as_str(),
+                "failed to save reflection log"
+            );
+        } else {
+            tracing::info!(
+                file = file_key.as_str(),
+                actions_taken = actions_taken,
+                "saved reflection log"
+            );
+        }
     }
 
     /// Build the system prompt for the self-improvement reflection call.
