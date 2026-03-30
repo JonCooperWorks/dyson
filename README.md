@@ -2,13 +2,25 @@
 
 A streaming AI agent loop in Rust, built to understand how these things actually work — and how to secure them.
 
+> **This is an educational project.** I'm an AppSec engineer building this to demystify AI agents — how they work, how to secure them, and how to deploy them responsibly. If you need a production agent, see [the projects that inspired this](#inspired-by). If you want to understand what's happening inside the loop, read on.
+
 ## Why
 
-AI agents are black boxes that run tools in a loop. They read your files, execute commands, make network requests. If you're going to trust one with access to your system, you should understand exactly what's happening inside that loop.
+AI agents run tools in a loop. They read your files, execute commands, make network requests. If you're going to trust one with access to your system, you should understand exactly what's happening inside that loop.
 
-Dyson is a from-scratch implementation of the core agent pattern: **LLM streams a response → detects tool calls → executes them → feeds results back → repeats**. Every component is a trait, every decision point is a hook, and every file is heavily annotated explaining *why* it works the way it does.
+As someone who works in application security, I found myself reviewing agent deployments without a clear mental model of what was actually going on under the hood. The best way to understand something is to build it from scratch — so that's what Dyson is. A from-scratch implementation of the core agent pattern: **LLM streams a response → detects tool calls → executes them → feeds results back → repeats**. Every component is a trait, every decision point is a hook, and every file is heavily annotated explaining *why* it works the way it does.
 
-The goal isn't to replace Claude Code or Cursor — it's to build the mental model for how agent loops work, where the security boundaries are, and what controls are possible.
+The goal isn't to replace Claude Code or Cursor — it's to demystify how agent loops work, where the security boundaries are, and what controls are possible.
+
+## Inspired by
+
+Dyson is heavily inspired by two projects that are worth checking out if you want something production-ready:
+
+- **[OpenClaw](https://github.com/openclaw/openclaw)** — A personal AI assistant that runs on your own hardware with support for dozens of channels (Telegram, Slack, Discord, WhatsApp, Signal, etc.), browser control, a skill registry, and voice. Dyson's multi-controller architecture and workspace file format come directly from how OpenClaw handles channels and agent identity.
+
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — An agent framework from [Nous Research](https://nousresearch.com/) with a well-thought-out memory system: agent-curated journals, persistent identity files, periodic nudges, and full-text search. Dyson's memory architecture is modeled after Hermes, and the workspace format is compatible with the OpenClaw format that Hermes uses.
+
+If you want a production-ready agent, start with one of those. If you want to understand what's happening inside the loop and how to secure it, that's what Dyson is for.
 
 ## What you learn by reading this codebase
 
@@ -238,14 +250,4 @@ Every file has extensive annotations in the style of [rLLM](https://github.com/j
 cargo test
 ```
 
-339 tests covering SSE parsing, message serialization, config loading, bash execution, stream handling, sandbox decisions, secret resolution, provider registry, workspace persistence, web search, and the agent loop with mock LLM clients.
-
-## Future
-
-- **More tools** — read_file, write_file, edit_file
-- **More search providers** — Tavily, Google Custom Search
-- **More sandboxes** — blacklist, S3 redirect, audit, composite
-- **More controllers** — Slack, Discord, HTTP API
-- **More secret resolvers** — Vault, AWS SSM, 1Password, GCP
-- **Conversation persistence** — save/restore message history
-- **Graceful shutdown** — SIGINT handling, tool cancellation
+500+ tests covering SSE parsing, message serialization, config loading, bash execution, stream handling, sandbox decisions, secret resolution, provider registry, workspace persistence, web search, and the agent loop with mock LLM clients.
