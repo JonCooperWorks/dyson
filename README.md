@@ -251,13 +251,3 @@ cargo test
 ```
 
 339 tests covering SSE parsing, message serialization, config loading, bash execution, stream handling, sandbox decisions, secret resolution, provider registry, workspace persistence, web search, and the agent loop with mock LLM clients.
-
-## Future
-
-- **More tools** — read_file, write_file, edit_file
-- **More search providers** — Tavily, Google Custom Search
-- **More sandboxes** — blacklist, S3 redirect, audit, composite
-- **More controllers** — Slack, Discord, HTTP API
-- **More secret resolvers** — Vault, AWS SSM, 1Password, GCP
-- **Conversation persistence** — save/restore message history
-- **Graceful shutdown** — SIGINT handling, tool cancellation
