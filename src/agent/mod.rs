@@ -542,12 +542,18 @@ impl Agent {
         self.messages.push(Message::user(user_input));
         self.turn_count += 1;
 
-        // Inject a memory maintenance nudge every N turns.
-        if self.nudge_interval > 0 && self.turn_count.is_multiple_of(self.nudge_interval) && let Some(ref ws) = self.tool_context.workspace {
-            let ws = ws.read().await;
-            let nudge = Self::build_nudge_message(&**ws);
-            drop(ws);
-            self.messages.push(Message::user(&nudge));
+        // Run memory maintenance as a side-channel LLM call every N turns.
+        // Unlike the old nudge approach (injecting a user message into the
+        // conversation and hoping the model acts on it), this makes a real
+        // LLM call with workspace tools and lets the model directly update
+        // memory files.  Nothing from this call enters the main conversation.
+        if self.nudge_interval > 0 && self.turn_count.is_multiple_of(self.nudge_interval) && self.tool_context.workspace.is_some() {
+            if let Err(e) = self.maintain_memory(output).await {
+                tracing::warn!(
+                    error = %e,
+                    "memory maintenance failed — continuing normally"
+                );
+            }
         }
 
         let mut final_text = String::new();
@@ -810,21 +816,150 @@ impl Agent {
         Ok(final_text)
     }
 
-    /// Build the memory maintenance nudge message.
-    fn build_nudge_message(ws: &dyn crate::workspace::Workspace) -> String {
-        let memory_usage = ws.get("MEMORY.md")
-            .map(|c| c.chars().count())
-            .unwrap_or(0);
-        let memory_limit = ws.char_limit("MEMORY.md").unwrap_or(0);
-        let user_usage = ws.get("USER.md")
-            .map(|c| c.chars().count())
-            .unwrap_or(0);
-        let user_limit = ws.char_limit("USER.md").unwrap_or(0);
+    /// Run memory maintenance as a side-channel LLM call.
+    ///
+    /// Makes a separate LLM call with workspace tools (view, update, search,
+    /// memory_search) and a focused system prompt.  The LLM reviews the
+    /// conversation and decides what to persist to MEMORY.md, USER.md, or
+    /// memory/notes/.
+    ///
+    /// This runs in a separate message context — nothing from this call
+    /// enters the main conversation history.
+    async fn maintain_memory(&mut self, output: &mut dyn Output) -> Result<()> {
+        tracing::info!(
+            turn_count = self.turn_count,
+            "running memory maintenance"
+        );
+
+        let _ = output.text_delta("\n\n[Memory maintenance: reviewing conversation...]\n");
+        let _ = output.flush();
+
+        // Build the system prompt with current usage stats.
+        let memory_system = Self::build_memory_system_prompt(&self.tool_context).await;
+
+        // Expose only workspace tools for memory operations.
+        let memory_tool_names = [
+            "workspace_view", "workspace_update", "workspace_search", "memory_search",
+        ];
+        let memory_tools: Vec<ToolDefinition> = self
+            .tool_definitions
+            .iter()
+            .filter(|t| memory_tool_names.contains(&t.name.as_str()))
+            .cloned()
+            .collect();
+
+        if memory_tools.is_empty() {
+            return Ok(());
+        }
+
+        // Build a condensed view of the conversation for the memory call.
+        let summary = Self::summarize_for_reflection(&self.messages);
+        let mut messages = vec![Message::user(&summary)];
+        let mut actions_taken = 0usize;
+
+        for _iteration in 0..5u8 {
+            let response = match self
+                .client
+                .stream(&messages, &memory_system, &memory_tools, &self.config)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "memory maintenance LLM call failed");
+                    let _ = output.text_delta("[Memory maintenance: LLM call failed, skipping]\n");
+                    return Ok(());
+                }
+            };
+
+            let mut silent_output = SilentOutput;
+            let (assistant_msg, tool_calls, _tokens) =
+                stream_handler::process_stream(response.stream, &mut silent_output).await?;
+
+            messages.push(assistant_msg);
+
+            if tool_calls.is_empty() {
+                break;
+            }
+
+            // Execute through the normal tool dispatch (these tools ARE in
+            // self.tools, they're just not exposed to the main conversation
+            // for this purpose).
+            for call in &tool_calls {
+                let result = self.execute_tool_call_timed(call).await;
+                let tool_result_msg = match result {
+                    Ok(ref tool_output) => {
+                        actions_taken += 1;
+                        let _ = output.tool_use_start(&call.name, &call.id);
+                        let _ = output.tool_result(tool_output);
+                        let _ = output.tool_use_complete();
+                        Message::tool_result(&call.id, &tool_output.content, tool_output.is_error)
+                    }
+                    Err(ref e) => {
+                        tracing::warn!(
+                            tool = call.name.as_str(),
+                            error = %e,
+                            "memory maintenance tool call failed"
+                        );
+                        Message::tool_result(&call.id, &e.to_string(), true)
+                    }
+                };
+                messages.push(tool_result_msg);
+            }
+        }
+
+        if actions_taken == 0 {
+            let _ = output.text_delta("[Memory maintenance: no updates needed]\n");
+        } else {
+            let _ = output.text_delta(
+                &format!("[Memory maintenance: {actions_taken} update(s)]\n")
+            );
+        }
+        let _ = output.flush();
+
+        tracing::info!(
+            actions_taken = actions_taken,
+            "memory maintenance complete"
+        );
+        Ok(())
+    }
+
+    /// Build the system prompt for the memory maintenance call.
+    async fn build_memory_system_prompt(ctx: &ToolContext) -> String {
+        let (memory_usage, memory_limit, user_usage, user_limit) = if let Some(ref ws) = ctx.workspace {
+            let ws = ws.read().await;
+            let mu = ws.get("MEMORY.md").map(|c| c.chars().count()).unwrap_or(0);
+            let ml = ws.char_limit("MEMORY.md").unwrap_or(0);
+            let uu = ws.get("USER.md").map(|c| c.chars().count()).unwrap_or(0);
+            let ul = ws.char_limit("USER.md").unwrap_or(0);
+            (mu, ml, uu, ul)
+        } else {
+            (0, 0, 0, 0)
+        };
 
         format!(
-            "[System: Memory Maintenance] Consider saving important details from this conversation.\n\
-             MEMORY.md: {memory_usage}/{memory_limit} chars. USER.md: {user_usage}/{user_limit} chars.\n\
-             Use workspace_view/workspace_update. Move overflow to memory/notes/ (searchable via memory_search)."
+            "You are a memory maintenance engine for an AI agent.  Your job is to review \
+             a conversation that just happened and persist important information.\n\n\
+             You have workspace tools to view and update the agent's memory files.\n\n\
+             ## Files and limits\n\
+             - **MEMORY.md** ({memory_usage}/{memory_limit} chars): Agent's curated long-term \
+               memory.  Store key facts, decisions, patterns, and lessons learned.\n\
+             - **USER.md** ({user_usage}/{user_limit} chars): What the agent knows about the \
+               user — preferences, workflow, communication style.\n\
+             - **memory/notes/*.md**: Overflow storage for details that don't fit in \
+               MEMORY.md.  Searchable via memory_search.\n\n\
+             ## What to persist\n\
+             - Important facts, decisions, or conclusions from the conversation\n\
+             - User preferences or workflow patterns you observed\n\
+             - Technical details that would be useful in future sessions\n\
+             - Lessons learned from errors or unexpected results\n\n\
+             ## What NOT to persist\n\
+             - Trivial or one-off exchanges (greetings, simple questions)\n\
+             - Information already in the memory files\n\
+             - Raw tool output — summarize the insight, not the data\n\n\
+             First use workspace_view to read the current memory files, then decide \
+             what to add or update.  Use workspace_update to write changes.  If a \
+             file is near its limit, consolidate or move overflow to memory/notes/.\n\n\
+             Doing nothing is fine if there's nothing worth persisting."
         )
     }
 
@@ -1563,21 +1698,30 @@ mod tests {
         assert_eq!(agent.messages.len(), 2);
     }
 
-    #[test]
-    fn nudge_message_contains_usage_info() {
+    #[tokio::test]
+    async fn memory_system_prompt_contains_usage_stats() {
         let ws = crate::workspace::InMemoryWorkspace::new()
             .with_file("MEMORY.md", "some memories here")
             .with_limit("MEMORY.md", 2200)
             .with_file("USER.md", "user info")
             .with_limit("USER.md", 1375);
 
-        let nudge = Agent::build_nudge_message(&ws);
-        assert!(nudge.contains("[System: Memory Maintenance]"));
-        assert!(nudge.contains("MEMORY.md:"));
-        assert!(nudge.contains("/2200 chars"));
-        assert!(nudge.contains("USER.md:"));
-        assert!(nudge.contains("/1375 chars"));
-        assert!(nudge.contains("memory_search"));
+        let workspace: Box<dyn crate::workspace::Workspace> = Box::new(ws);
+        let ctx = crate::tool::ToolContext {
+            working_dir: std::env::temp_dir(),
+            env: HashMap::new(),
+            cancellation: CancellationToken::new(),
+            workspace: Some(std::sync::Arc::new(tokio::sync::RwLock::new(workspace))),
+            depth: 0,
+        };
+
+        let prompt = Agent::build_memory_system_prompt(&ctx).await;
+        assert!(prompt.contains("MEMORY.md"));
+        assert!(prompt.contains("/2200 chars"));
+        assert!(prompt.contains("USER.md"));
+        assert!(prompt.contains("/1375 chars"));
+        assert!(prompt.contains("memory_search"));
+        assert!(prompt.contains("workspace_update"));
     }
 
     #[tokio::test]
