@@ -29,6 +29,11 @@ pub struct FormattedResult {
     /// Human-readable summary (includes timing, file paths, etc.).
     pub summary: String,
 
+    /// The actual tool output content.  This is the primary payload — the raw
+    /// stdout/stderr (for bash) or file contents (for reads).  Without this,
+    /// the LLM can see *metadata* about the result but not the result itself.
+    pub output: String,
+
     /// Important lines extracted from the output (errors, compilation messages, etc.).
     pub key_lines: Vec<String>,
 
@@ -48,8 +53,9 @@ impl FormattedResult {
         let mut parts = Vec::new();
         parts.push(self.summary.clone());
 
-        if !self.key_lines.is_empty() {
-            parts.push(self.key_lines.join("\n"));
+        // Include the actual output so the LLM can see command results.
+        if !self.output.is_empty() {
+            parts.push(self.output.clone());
         }
 
         if self.truncated {
@@ -135,6 +141,7 @@ impl ResultFormatter {
 
         FormattedResult {
             summary,
+            output: output.content.clone(),
             key_lines,
             exit_code,
             truncated,
@@ -161,10 +168,9 @@ impl ResultFormatter {
             path, len, ms,
         );
 
-        // Don't include raw file content as key lines — it's not useful for
-        // the LLM to see duplicated content.
         FormattedResult {
             summary,
+            output: output.content.clone(),
             key_lines: Vec::new(),
             exit_code: None,
             truncated,
@@ -192,6 +198,7 @@ impl ResultFormatter {
 
         FormattedResult {
             summary,
+            output: output.content.clone(),
             key_lines: Vec::new(),
             exit_code: None,
             truncated,
@@ -219,6 +226,7 @@ impl ResultFormatter {
 
         FormattedResult {
             summary,
+            output: output.content.clone(),
             key_lines,
             exit_code: None,
             truncated,
