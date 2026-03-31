@@ -463,4 +463,5 @@ in its system prompt.
 
 See also: [Architecture Overview](architecture-overview.md) ·
 [Agent Loop](agent-loop.md) · [Sandbox](sandbox.md) ·
+[Tool Execution Pipeline](tool-execution-pipeline.md) ·
 [Tool Forwarding over MCP](tool-forwarding-over-mcp.md)

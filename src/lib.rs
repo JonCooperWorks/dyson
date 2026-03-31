@@ -20,6 +20,10 @@
 //     ├── sandbox       — Sandbox trait, DangerousNoSandbox
 //     ├── llm           — LlmClient trait, Anthropic/OpenAI/Claude Code clients
 //     ├── agent         — Agent loop, stream handler
+//     ├── dependency_analyzer — Resource conflict detection, parallel/sequential grouping
+//     ├── result_formatter    — Structured, LLM-optimized tool output formatting
+//     ├── tool_limiter        — Per-turn rate limiting and cooldown enforcement
+//     ├── tool_hooks          — Pre/post tool execution lifecycle hooks
 //     ├── workspace     — Workspace trait + OpenClawWorkspace (agent identity/memory)
 //     ├── chat_history  — ChatHistory trait + DiskChatHistory (per-chat messages)
 //     ├── controller    — Controller trait, terminal REPL, Telegram bot

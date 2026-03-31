@@ -75,7 +75,9 @@ Agent
   ├── system_prompt: String                ← base + skill fragments
   ├── config: CompletionConfig             ← model, max_tokens, temp
   ├── messages: Vec<Message>               ← conversation history
-  └── tool_context: ToolContext            ← working dir, env, cancel
+  ├── tool_context: ToolContext            ← working dir, env, cancel
+  ├── limiter: ToolLimiter                 ← per-turn rate limiting
+  └── formatter: ResultFormatter           ← structured output formatting
 ```
 
 ---
@@ -233,4 +235,5 @@ retry.  `DysonError` propagates up and may abort the turn.
 
 See also: [Agent Loop](agent-loop.md) · [LLM Clients](llm-clients.md) ·
 [Tools & Skills](tools-and-skills.md) · [Sandbox](sandbox.md) ·
+[Tool Execution Pipeline](tool-execution-pipeline.md) ·
 [Tool Forwarding over MCP](tool-forwarding-over-mcp.md)

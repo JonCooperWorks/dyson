@@ -9,6 +9,7 @@ overview, then dive into the component that interests you.
 | [Agent Loop](agent-loop.md) | The core loop: stream → detect tool calls → execute → repeat. Internal-tools providers (Claude Code) |
 | [LLM Clients](llm-clients.md) | Anthropic, OpenAI, and Claude Code streaming. SSE parsing, thinking tokens, provider abstraction |
 | [Tools & Skills](tools-and-skills.md) | Tool trait, Skill trait, BuiltinSkill, LocalSkill, adding new tools |
+| [Tool Execution Pipeline](tool-execution-pipeline.md) | Rate limiting, dependency analysis, result formatting, lifecycle hooks |
 | [Sandbox](sandbox.md) | OS sandbox (Seatbelt/bubblewrap), Allow/Deny/Redirect, composition, MCP result sandboxing |
 | [Memory](memory.md) | Tiered memory (always-in-context, FTS5 search, journals), nudges, character limits |
 | [Chat Persistence](chat-persistence.md) | ChatHistory trait, per-chat agents, `/clear` and `/memory` commands |
@@ -62,6 +63,10 @@ src/
     openrouter.rs         OpenRouter (OpenAI-compatible wrapper with custom headers)
     claude_code.rs        Claude Code CLI subprocess (MCP server + bearer token)
     codex.rs              Codex CLI subprocess
+  dependency_analyzer.rs  Dependency-aware tool call grouping (parallel vs sequential)
+  result_formatter.rs     Structured, LLM-optimized tool output formatting
+  tool_limiter.rs         Per-turn rate limiting and cooldown enforcement
+  tool_hooks.rs           Pre/post tool execution lifecycle hooks
   agent/
     mod.rs                Agent struct, the streaming loop
     stream_handler.rs     Consumes StreamEvents → Messages + ToolCalls (filters thinking)
