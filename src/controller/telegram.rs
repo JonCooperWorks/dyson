@@ -43,7 +43,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, InputFile, MessageId, ParseMode};
+use teloxide::types::{
+    ChatId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MessageId, ParseMode,
+};
 use tokio::sync::Mutex;
 
 use serde::Deserialize;
@@ -295,6 +297,64 @@ impl super::Controller for TelegramController {
             for update in &updates {
                 offset = i64::from(update.id.0) + 1;
 
+                // Handle callback queries (inline keyboard button presses).
+                if let teloxide::types::UpdateKind::CallbackQuery(cb) = &update.kind {
+                    let cb_chat_id = cb.message.as_ref().map(|m| m.chat().id);
+                    let cb_data = cb.data.clone().unwrap_or_default();
+
+                    // Acknowledge the callback to remove the loading spinner.
+                    let _ = bot.answer_callback_query(&cb.id).await;
+
+                    if let Some(chat_id) = cb_chat_id {
+                        // Check access control.
+                        if !allowed_ids.is_empty() && !allowed_ids.contains(&chat_id.0) {
+                            continue;
+                        }
+
+                        // Parse callback data: "model:{provider}:{model}"
+                        if let Some(rest) = cb_data.strip_prefix("model:") {
+                            if let Some((provider, model)) = rest.split_once(':') {
+                                let existing_messages = {
+                                    let agents_map = agents.lock().await;
+                                    agents_map
+                                        .get(&chat_id.0)
+                                        .map(|ca| ca.agent.messages().to_vec())
+                                        .unwrap_or_default()
+                                };
+                                match super::build_agent_with_provider(
+                                    &current_settings,
+                                    provider,
+                                    Some(model),
+                                    controller_prompt.as_deref(),
+                                    existing_messages,
+                                )
+                                .await
+                                {
+                                    Ok(new_agent) => {
+                                        let pc = &current_settings.providers[provider];
+                                        let reply = format!(
+                                            "Switched to '{}' — {:?} ({})",
+                                            provider, pc.provider_type, model,
+                                        );
+                                        agents.lock().await.insert(chat_id.0, ChatAgent {
+                                            agent: new_agent,
+                                            provider_name: provider.to_string(),
+                                            model: model.to_string(),
+                                        });
+                                        let _ = bot.send_message(chat_id, reply).await;
+                                    }
+                                    Err(e) => {
+                                        let _ = bot
+                                            .send_message(chat_id, format!("Switch error: {e}"))
+                                            .await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 // Extract text message.
                 let msg = match &update.kind {
                     teloxide::types::UpdateKind::Message(m) => m.clone(),
@@ -383,7 +443,7 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                // /models — list available providers and models.
+                // /models — list available providers and models as clickable buttons.
                 if text == "/models" {
                     if current_settings.providers.is_empty() {
                         let _ = bot.send_message(chat_id, "No providers configured.").await;
@@ -400,10 +460,13 @@ impl super::Controller for TelegramController {
                                 }
                             }
                         };
-                        let reply = super::format_provider_list(
+                        let keyboard = build_model_keyboard(
                             &current_settings, &cp, &cm,
                         );
-                        let _ = bot.send_message(chat_id, reply).await;
+                        let _ = bot
+                            .send_message(chat_id, "Select a model:")
+                            .reply_markup(keyboard)
+                            .await;
                     }
                     continue;
                 }
@@ -550,6 +613,41 @@ impl super::Controller for TelegramController {
 
         Ok(())
     }
+}
+
+/// Build an inline keyboard listing all providers and models.
+///
+/// Each button shows the model name (with a check mark for the active one).
+/// The callback data encodes `model:{provider}:{model}` so the handler
+/// can switch to the selected model.
+fn build_model_keyboard(
+    settings: &Settings,
+    current_provider: &str,
+    current_model: &str,
+) -> InlineKeyboardMarkup {
+    let mut providers: Vec<_> = settings.providers.iter().collect();
+    providers.sort_by_key(|(name, _)| name.as_str());
+
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+    for (name, pc) in &providers {
+        // Provider header row (non-clickable label).
+        let label = format!("{} — {:?}", name, pc.provider_type);
+        // Use a callback with empty payload so tapping the header is a no-op.
+        rows.push(vec![InlineKeyboardButton::callback(label, "noop")]);
+
+        for model in &pc.models {
+            let active = *name == current_provider && model == current_model;
+            let display = if active {
+                format!("✓ {model}")
+            } else {
+                model.clone()
+            };
+            let data = format!("model:{name}:{model}");
+            rows.push(vec![InlineKeyboardButton::callback(display, data)]);
+        }
+    }
+
+    InlineKeyboardMarkup::new(rows)
 }
 
 /// Save a note to the workspace MEMORY.md file.
