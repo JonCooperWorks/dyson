@@ -7,6 +7,10 @@ calls, execute them through the sandbox, feed results back, repeat.
 **Key files:**
 - `src/agent/mod.rs` — `Agent` struct, `run()`, `execute_tool_call()`
 - `src/agent/stream_handler.rs` — `process_stream()`, `ToolCall`
+- `src/tool_limiter.rs` — `ToolLimiter` (per-turn rate limiting)
+- `src/dependency_analyzer.rs` — `DependencyAnalyzer` (parallel vs sequential grouping)
+- `src/result_formatter.rs` — `ResultFormatter` (structured LLM-optimized output)
+- `src/tool_hooks.rs` — `ToolHook` trait (pre/post execution lifecycle hooks)
 
 ---
 
@@ -39,6 +43,8 @@ pub struct Agent {
 | `max_iterations` | Hard limit on LLM turns per `run()` call (default: 20) |
 | `messages` | Conversation history — persists across `run()` calls |
 | `tool_context` | Working directory, env vars, cancellation token |
+| `limiter` | Per-turn tool call rate limiter (`ToolLimiter`) |
+| `formatter` | Structured result formatter for LLM-optimized output (`ResultFormatter`) |
 
 ### Construction
 
@@ -75,10 +81,23 @@ then loops:
 2. CHECK
      if tool_calls.is_empty() → break (LLM is done)
 
-3. EXECUTE
+3. LIMIT
      for each tool_call:
-       decision = sandbox.check(name, input, ctx)
+       limiter.check(name)
+         Over limit → push error tool_result, skip execution
+         Within limit → add to allowed list
 
+4. ANALYZE
+     phases = DependencyAnalyzer.analyze(allowed_calls)
+       Groups calls into Parallel and Sequential phases
+       based on resource conflicts (file paths, git state)
+
+5. EXECUTE (per phase)
+     Parallel phases  → futures::join_all(...)
+     Sequential phases → one-by-one in order
+
+     Each call goes through the sandbox:
+       decision = sandbox.check(name, input, ctx)
        match decision:
          Allow { input }             → tool.run(input, ctx)
                                        sandbox.after(name, input, &mut output)
@@ -86,9 +105,14 @@ then loops:
          Redirect { name2, input2 }  → tools[name2].run(input2, ctx)
                                        sandbox.after(name2, input2, &mut output)
 
-       messages.push(tool_result(call.id, output))
+6. FORMAT
+     formatted = ResultFormatter.format(call, output, duration)
+     messages.push(tool_result(call.id, formatted.to_llm_message()))
 
-4. LOOP
+7. RESET
+     limiter.reset_turn()
+
+8. LOOP
      Back to step 1 — LLM sees tool results on next iteration
 ```
 
@@ -239,4 +263,5 @@ try a different approach, or explain the failure to the user.
 ---
 
 See also: [Architecture Overview](architecture-overview.md) ·
-[LLM Clients](llm-clients.md) · [Sandbox](sandbox.md)
+[LLM Clients](llm-clients.md) · [Sandbox](sandbox.md) ·
+[Tool Execution Pipeline](tool-execution-pipeline.md)

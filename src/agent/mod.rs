@@ -24,32 +24,44 @@
 //       if tool_calls.is_empty():
 //           break  // LLM is done, no more tools to run
 //
+//       // 1. LIMIT — check per-turn rate limits
 //       for call in tool_calls:
-//           decision = sandbox.check(call.name, call.input, ctx)
-//           match decision:
-//               Allow { input }  → result = tool.run(input, ctx)
-//                                   sandbox.after(call.name, &input, &mut result)
-//               Deny { reason }  → result = ToolOutput::error(reason)
-//               Redirect { .. }  → result = other_tool.run(...)
-//                                   sandbox.after(...)
-//           messages.push(tool_result(call.id, result))
+//           if limiter.check(call.name) fails:
+//               push error tool_result, skip call
 //
+//       // 2. ANALYZE — group by resource dependencies
+//       phases = DependencyAnalyzer.analyze(allowed_calls)
+//
+//       // 3. EXECUTE — run phases in order
+//       for phase in phases:
+//           Parallel  → join_all(execute_tool_call_timed(...))
+//           Sequential → execute one-by-one
+//           Each call: sandbox.check() → tool.run() → sandbox.after()
+//
+//       // 4. FORMAT — structured results for LLM
+//       for each result:
+//           formatted = formatter.format(call, output, duration)
+//           messages.push(tool_result(call.id, formatted.to_llm_message()))
+//
+//       limiter.reset_turn()
 //       // loop — LLM sees tool results on next iteration
 //
 // Architecture:
 //
 //   Agent owns:
-//     ┌─────────────────────────────────────────────────┐
-//     │  client:  Box<dyn LlmClient>                    │
-//     │  sandbox: Box<dyn Sandbox>     ← gates all calls│
-//     │  skills:  Vec<Box<dyn Skill>>                   │
-//     │  tools:   HashMap<name, Arc<dyn Tool>>          │
-//     │  tool_definitions: Vec<ToolDefinition>          │
-//     │  system_prompt: String                          │
-//     │  config: CompletionConfig                       │
-//     │  messages: Vec<Message>        ← conversation   │
-//     │  max_iterations: usize                          │
-//     └─────────────────────────────────────────────────┘
+//     ┌──────────────────────────────────────────────────┐
+//     │  client:  Box<dyn LlmClient>                     │
+//     │  sandbox: Arc<dyn Sandbox>     ← gates all calls │
+//     │  skills:  Vec<Box<dyn Skill>>                    │
+//     │  tools:   HashMap<name, Arc<dyn Tool>>           │
+//     │  tool_definitions: Vec<ToolDefinition>           │
+//     │  system_prompt: String                           │
+//     │  config: CompletionConfig                        │
+//     │  messages: Vec<Message>        ← conversation    │
+//     │  max_iterations: usize                           │
+//     │  limiter: ToolLimiter          ← rate limiting   │
+//     │  formatter: ResultFormatter    ← output format   │
+//     └──────────────────────────────────────────────────┘
 //
 // Why does Agent own both skills AND a flat tools map?
 //   Skills own tools (for lifecycle management), but the agent needs O(1)
