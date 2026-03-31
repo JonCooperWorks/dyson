@@ -70,6 +70,25 @@ pub struct ToolCall {
     pub input: serde_json::Value,
 }
 
+impl ToolCall {
+    /// Create a new tool call with a generated ID.
+    ///
+    /// Useful for tests and programmatic construction.  The ID is derived
+    /// from the tool name so it's deterministic but unique enough for
+    /// single-turn test scenarios.
+    pub fn new(name: impl Into<String>, input: serde_json::Value) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let name = name.into();
+        Self {
+            id: format!("call_{}_{}", name, n),
+            name,
+            input,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // process_stream — the main entry point.
 // ---------------------------------------------------------------------------

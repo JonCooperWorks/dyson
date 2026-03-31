@@ -43,14 +43,18 @@ pub mod auth;
 pub mod chat_history;
 pub mod config;
 pub mod controller;
+pub mod dependency_analyzer;
 pub mod error;
 pub mod export;
 pub mod llm;
 pub mod message;
+pub mod result_formatter;
 pub mod sandbox;
 pub mod secret;
 pub mod skill;
 pub mod tool;
+pub mod tool_hooks;
+pub mod tool_limiter;
 pub(crate) mod util;
 pub mod workspace;
 
