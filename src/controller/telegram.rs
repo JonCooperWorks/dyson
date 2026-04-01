@@ -380,16 +380,14 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                // /clear — save learnings, rotate conversation history, and
-                // start fresh.  The learning agent runs first so important
-                // information is persisted to the workspace before the
-                // conversation is dropped.
+                // /clear — rotate conversation history and start fresh.
+                // Agent::clear() spawns a background task to synthesise
+                // learnings into workspace memory before dropping messages.
                 if text == "/clear" {
                     {
                         let mut agents_map = agents.lock().await;
                         if let Some(ca) = agents_map.get_mut(&chat_id.0) {
-                            let mut output = TelegramOutput::new(bot.clone(), chat_id);
-                            ca.agent.save_learnings(&mut output).await;
+                            ca.agent.clear();
                         }
                     }
                     agents.lock().await.remove(&chat_id.0);
