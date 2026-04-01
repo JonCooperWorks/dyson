@@ -131,6 +131,8 @@ impl super::Controller for TerminalController {
             }
 
             if input == "/clear" {
+                eprintln!("[saving learnings...]");
+                agent.save_learnings(&mut output).await;
                 agent.clear();
                 eprintln!("[context cleared]");
                 continue;

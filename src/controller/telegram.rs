@@ -380,10 +380,18 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                // /clear — rotate conversation history and start fresh.
-                // The old history is preserved as a timestamped file
-                // for review or RAG indexing.
+                // /clear — save learnings, rotate conversation history, and
+                // start fresh.  The learning agent runs first so important
+                // information is persisted to the workspace before the
+                // conversation is dropped.
                 if text == "/clear" {
+                    {
+                        let mut agents_map = agents.lock().await;
+                        if let Some(ca) = agents_map.get_mut(&chat_id.0) {
+                            let mut output = TelegramOutput::new(bot.clone(), chat_id);
+                            ca.agent.save_learnings(&mut output).await;
+                        }
+                    }
                     agents.lock().await.remove(&chat_id.0);
                     let _ = chat_store.rotate(&chat_id.0.to_string());
                     let _ = bot.send_message(chat_id, "Context cleared.").await;

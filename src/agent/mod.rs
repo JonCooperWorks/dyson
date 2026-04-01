@@ -415,6 +415,31 @@ impl Agent {
         self.messages.clear();
     }
 
+    /// Run memory maintenance and self-improvement before a `/clear`.
+    ///
+    /// When a user clears the conversation, all in-memory context is lost.
+    /// Calling this first gives the learning agent a chance to synthesise
+    /// important information into persistent workspace files (MEMORY.md,
+    /// USER.md, skills, etc.) so the knowledge survives the reset.
+    ///
+    /// This is intentionally a *best-effort* operation — failures are logged
+    /// but never block the clear itself.
+    pub async fn save_learnings(&mut self, output: &mut dyn Output) {
+        if self.tool_context.workspace.is_none() || self.messages.is_empty() {
+            return;
+        }
+
+        tracing::info!("saving learnings before /clear");
+
+        if let Err(e) = self.maintain_memory(output).await {
+            tracing::warn!(error = %e, "pre-clear memory maintenance failed");
+        }
+
+        if let Err(e) = self.self_improve(output).await {
+            tracing::warn!(error = %e, "pre-clear self-improvement failed");
+        }
+    }
+
     /// Compact the conversation using a five-phase Hermes-style algorithm.
     ///
     /// When a `CompactionConfig` is set, the algorithm:
