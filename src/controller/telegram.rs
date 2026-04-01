@@ -582,16 +582,30 @@ impl super::Controller for TelegramController {
                     let chat_key = chat_id.0.to_string();
 
                     // -- Resolve media into ContentBlocks --
-                    let content_blocks = match extract_content(
-                        &bot_clone, &msg, &text,
+                    let model_name = settings_clone.agent.model.clone();
+                    let extracted = match extract_content(
+                        &bot_clone, &msg, &text, &model_name,
                     ).await {
-                        Ok(blocks) => blocks,
+                        Ok(e) => e,
                         Err(e) => {
                             tracing::error!(error = %e, "failed to extract media content");
                             let _ = bot_clone.send_message(chat_id, format!("Media error: {e}")).await;
                             return;
                         }
                     };
+
+                    // Notify the user about unsupported media.
+                    let has_unsupported = !extracted.unsupported.is_empty();
+                    for msg in &extracted.unsupported {
+                        let _ = bot_clone.send_message(chat_id, msg).await;
+                    }
+
+                    // If there are no content blocks left, nothing to send.
+                    if extracted.blocks.is_empty() {
+                        return;
+                    }
+
+                    let content_blocks = extracted.blocks;
 
                     // Get or create the per-chat agent.
                     let mut agents_map = agents_clone.lock().await;
@@ -644,9 +658,12 @@ impl super::Controller for TelegramController {
                         let _ = bot_clone.send_message(chat_id, format!("Error: {e}")).await;
                     }
 
-                    // Persist conversation history to disk after each turn.
-                    if let Err(e) = store_clone.save(&chat_key, ca.agent.messages()) {
-                        tracing::error!(error = %e, "failed to save chat history");
+                    // Persist conversation history to disk after each turn,
+                    // but skip if the message contained unsupported media.
+                    if !has_unsupported {
+                        if let Err(e) = store_clone.save(&chat_key, ca.agent.messages()) {
+                            tracing::error!(error = %e, "failed to save chat history");
+                        }
                     }
 
                     drop(agents_map);
@@ -718,12 +735,22 @@ fn save_memory_note(
 /// Handles text, photos, voice notes, and image documents.  Text from
 /// `msg.text()` or `msg.caption()` is combined with resolved media
 /// blocks into a single Vec<ContentBlock>.
+/// Result of extracting content from a Telegram message.
+struct ExtractedContent {
+    /// Content blocks to send to the agent.
+    blocks: Vec<ContentBlock>,
+    /// Friendly messages about unsupported media (sent to user, not saved to history).
+    unsupported: Vec<String>,
+}
+
 async fn extract_content(
     bot: &Bot,
     msg: &teloxide::types::Message,
     text: &str,
-) -> crate::Result<Vec<ContentBlock>> {
+    model: &str,
+) -> crate::Result<ExtractedContent> {
     let mut blocks = Vec::new();
+    let mut unsupported: Vec<String> = Vec::new();
 
     // Add text content if present.
     if !text.is_empty() {
@@ -755,9 +782,7 @@ async fn extract_content(
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to process photo");
-                            blocks.push(ContentBlock::Text {
-                                text: format!("[Failed to process photo: {e}]"),
-                            });
+                            unsupported.push(format!("{model} doesn't support vision"));
                         }
                     }
                 }
@@ -797,9 +822,7 @@ async fn extract_content(
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "failed to transcribe voice note");
-                        blocks.push(ContentBlock::Text {
-                            text: format!("[Voice transcription failed: {e}]"),
-                        });
+                        unsupported.push(format!("{model} doesn't support audio"));
                     }
                 }
             }
@@ -840,9 +863,7 @@ async fn extract_content(
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to process document image");
-                            blocks.push(ContentBlock::Text {
-                                text: format!("[Failed to process image: {e}]"),
-                            });
+                            unsupported.push(format!("{model} doesn't support vision"));
                         }
                     }
                 }
@@ -858,13 +879,13 @@ async fn extract_content(
 
     // If somehow we have no blocks at all (shouldn't happen given the
     // earlier checks), return a fallback.
-    if blocks.is_empty() {
+    if blocks.is_empty() && unsupported.is_empty() {
         blocks.push(ContentBlock::Text {
             text: "[Empty message received]".to_string(),
         });
     }
 
-    Ok(blocks)
+    Ok(ExtractedContent { blocks, unsupported })
 }
 
 /// Download a file from Telegram by file_id.
