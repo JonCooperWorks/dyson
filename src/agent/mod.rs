@@ -1110,11 +1110,7 @@ impl Agent {
         }
 
         // Build a condensed view of the conversation for the memory call.
-        let summary = Self::summarize_for_reflection(
-            &self.messages,
-            "Review this conversation and identify information worth persisting \
-             to long-term memory.  Here is what happened:\n\n",
-        );
+        let summary = Self::summarize_for_reflection(&self.messages);
         let mut messages = vec![Message::user(&summary)];
         let mut actions_taken = 0usize;
 
@@ -1199,22 +1195,15 @@ impl Agent {
 
         format!(
             "You are a memory maintenance engine for an AI agent.  Your job is to review \
-             a conversation and maintain the agent's long-term memory files.\n\n\
+             a conversation that just happened and persist important information.\n\n\
              You have workspace tools to view and update the agent's memory files.\n\n\
              ## Files and limits\n\
              - **MEMORY.md** ({memory_usage}/{memory_limit} chars): Agent's curated long-term \
                memory.  Store key facts, decisions, patterns, and lessons learned.\n\
              - **USER.md** ({user_usage}/{user_limit} chars): What the agent knows about the \
                user — preferences, workflow, communication style.\n\
-             - **memory/notes/*.md**: Overflow storage for details that don't fit above.  \
-               Searchable via memory_search.\n\n\
-             ## Workflow (IMPORTANT)\n\
-             1. Use workspace_view to read the current content of MEMORY.md and/or USER.md.\n\
-             2. Identify new information from the conversation worth remembering.\n\
-             3. **Synthesize** the existing content with new insights into a single, cohesive \
-                document.  Do NOT simply append — rewrite the entire file so it reads as one \
-                well-organized summary with no redundancy.\n\
-             4. Write the result using workspace_update with **mode \"set\"** (full replace).\n\n\
+             - **memory/notes/*.md**: Overflow storage for details that don't fit in \
+               MEMORY.md.  Searchable via memory_search.\n\n\
              ## What to persist\n\
              - Important facts, decisions, or conclusions from the conversation\n\
              - User preferences or workflow patterns you observed\n\
@@ -1222,12 +1211,14 @@ impl Agent {
              - Lessons learned from errors or unexpected results\n\n\
              ## What NOT to persist\n\
              - Trivial or one-off exchanges (greetings, simple questions)\n\
+             - Information already in the memory files\n\
              - Raw tool output — summarize the insight, not the data\n\n\
-             ## Writing guidelines\n\
-             - Be concise — every character counts against the limit\n\
-             - Merge related points rather than listing them separately\n\
-             - If a file is near its limit, tighten the prose or move lower-priority \
-               details to memory/notes/\n\n\
+             First use workspace_view to read the current memory files.  Then \
+             synthesize new information into the existing content — rewrite the \
+             file as one cohesive, concise document rather than appending.  Use \
+             workspace_update with mode \"set\" to replace the full file.  If a \
+             file is near its limit, tighten prose or move lower-priority details \
+             to memory/notes/.\n\n\
              Doing nothing is fine if there's nothing worth persisting."
         )
     }
@@ -1292,11 +1283,7 @@ impl Agent {
             .collect();
 
         // Build the reflection messages: a condensed summary of what happened.
-        let summary = Self::summarize_for_reflection(
-            &self.messages,
-            "Review this conversation and decide whether to create/improve a skill \
-             or export training data.  Here is what happened:\n\n",
-        );
+        let summary = Self::summarize_for_reflection(&self.messages);
         tracing::debug!(
             summary_len = summary.len(),
             "built reflection summary"
@@ -1552,8 +1539,11 @@ impl Agent {
     ///
     /// Instead of sending the full message history (which could be huge),
     /// build a condensed representation: user goals, tools used, outcomes.
-    fn summarize_for_reflection(messages: &[Message], preamble: &str) -> String {
-        let mut summary = String::from(preamble);
+    fn summarize_for_reflection(messages: &[Message]) -> String {
+        let mut summary = String::from(
+            "Review this conversation and decide whether to create/improve a skill \
+             or export training data.  Here is what happened:\n\n"
+        );
 
         let mut tool_call_count = 0;
         let mut tool_error_count = 0;
@@ -2064,7 +2054,7 @@ mod tests {
             }]),
         ];
 
-        let summary = Agent::summarize_for_reflection(&messages, "Test preamble:\n\n");
+        let summary = Agent::summarize_for_reflection(&messages);
         assert!(summary.contains("Deploy my app"));
         assert!(summary.contains("[Tool call: bash]"));
         assert!(summary.contains("Deployed successfully"));
