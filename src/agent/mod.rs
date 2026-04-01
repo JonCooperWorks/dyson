@@ -252,6 +252,10 @@ pub struct Agent {
 
     /// Structured result formatter for LLM-optimized tool output.
     formatter: ResultFormatter,
+
+    /// Retained so the background learning task can build its own LLM
+    /// client without sharing the agent's.
+    agent_settings: crate::config::AgentSettings,
 }
 
 impl Agent {
@@ -376,6 +380,7 @@ impl Agent {
             compaction_config: settings.compaction.clone(),
             limiter: ToolLimiter::for_agent(),
             formatter: ResultFormatter::default(),
+            agent_settings: settings.clone(),
         })
     }
 
@@ -395,24 +400,47 @@ impl Agent {
         self.tool_context.depth = depth;
     }
 
-    /// Clear conversation history, starting fresh.
+    /// Clear conversation history, saving learnings in the background.
     ///
-    /// Resets the agent to a blank slate by dropping all accumulated
-    /// messages.  This is the in-memory half of the `/clear` flow — the
-    /// caller (e.g. the Telegram controller) is responsible for also
-    /// rotating persisted history via [`ChatHistory::rotate`] so old
-    /// conversations are archived rather than lost.
-    ///
-    /// ## Full `/clear` flow (Telegram)
-    ///
-    /// 1. Remove the [`Agent`] from the in-memory map (drops all state).
-    /// 2. Call [`ChatHistory::rotate`] to rename the on-disk history file
-    ///    with a timestamp, preserving it for review or RAG indexing.
-    /// 3. Reply "Context cleared." to the user.
-    /// 4. The next incoming message creates a fresh `Agent` with an empty
-    ///    history.
+    /// Messages are cleared immediately so the caller can continue.  A
+    /// background task summarises the conversation via the LLM and writes
+    /// the result to the workspace — no tools, no blocking.
     pub fn clear(&mut self) {
+        self.spawn_save_learnings("clear");
         self.messages.clear();
+    }
+
+    /// Spawn a background task that summarises the conversation and
+    /// writes the synthesis to the workspace's MEMORY.md file.
+    ///
+    /// Builds its own LLM client so it doesn't share state with the
+    /// main agent.  Uses [`SilentOutput`] and never blocks the caller.
+    fn spawn_save_learnings(&self, reason: &'static str) {
+        let workspace = match self.tool_context.workspace {
+            Some(ref ws) => Arc::clone(ws),
+            None => return,
+        };
+        if self.messages.is_empty() {
+            return;
+        }
+
+        let settings = self.agent_settings.clone();
+        let config = self.config.clone();
+        let summary = Self::summarize_for_reflection(&self.messages);
+
+        tokio::spawn(async move {
+            tracing::info!(reason, "background: saving learnings");
+
+            let client = crate::llm::create_client(&settings, None, false);
+
+            if let Err(e) = synthesize_to_workspace(
+                &*client, &config, &summary, &workspace,
+            ).await {
+                tracing::warn!(error = %e, reason, "background learning synthesis failed");
+            }
+
+            tracing::info!(reason, "background: learnings saved");
+        });
     }
 
     /// Compact the conversation using a five-phase Hermes-style algorithm.
@@ -441,6 +469,11 @@ impl Agent {
         if self.messages.is_empty() {
             return Ok(());
         }
+
+        // Save learnings in the background before compaction condenses
+        // the conversation.  This doesn't block — compaction proceeds
+        // immediately while the LLM synthesises in parallel.
+        self.spawn_save_learnings("compact");
 
         tracing::info!(
             messages = self.messages.len(),
@@ -1777,6 +1810,87 @@ impl Agent {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Background learning synthesis
+// ---------------------------------------------------------------------------
+
+/// Summarise a conversation and merge the result into the workspace's
+/// MEMORY.md.  This is the workhorse behind `spawn_save_learnings` —
+/// it runs entirely in a background task with no tools, just a single
+/// LLM call and a workspace write.
+async fn synthesize_to_workspace(
+    client: &dyn LlmClient,
+    config: &CompletionConfig,
+    conversation_summary: &str,
+    workspace: &Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
+) -> Result<()> {
+    // Read the current memory so the LLM can synthesise rather than
+    // duplicate.
+    let current_memory = {
+        let ws = workspace.read().await;
+        ws.get("MEMORY.md").unwrap_or_default()
+    };
+
+    let system = "\
+        You are a memory maintenance engine.  You will receive the current \
+        contents of MEMORY.md and a summary of a conversation that is about \
+        to be cleared.  Your job is to produce an updated MEMORY.md that \
+        incorporates any important new information from the conversation.\n\n\
+        Rules:\n\
+        - Output ONLY the new file contents, no commentary or markdown fences.\n\
+        - Synthesise — merge new information into the existing text rather \
+          than appending.\n\
+        - Be concise.  Keep the file under 4000 characters.\n\
+        - Omit trivial exchanges (greetings, simple lookups).\n\
+        - Preserve existing information unless it's been superseded.\n\
+        - If there is nothing worth persisting, output the existing file \
+          unchanged.";
+
+    let user_message = format!(
+        "## Current MEMORY.md\n\n{current_memory}\n\n\
+         ## Conversation summary\n\n{conversation_summary}"
+    );
+
+    let messages = vec![Message::user(&user_message)];
+    let empty_tools: Vec<ToolDefinition> = Vec::new();
+
+    let response = client.stream(&messages, system, &empty_tools, config).await?;
+
+    let mut silent = SilentOutput;
+    let (assistant_msg, _, _) =
+        stream_handler::process_stream(response.stream, &mut silent).await?;
+
+    // Extract the text from the response.
+    let new_memory: String = assistant_msg
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            crate::message::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if new_memory.trim().is_empty() {
+        tracing::info!("learning synthesis produced empty output — skipping write");
+        return Ok(());
+    }
+
+    // Write back to workspace.
+    {
+        let mut ws = workspace.write().await;
+        ws.set("MEMORY.md", new_memory.trim());
+        ws.save()?;
+    }
+
+    tracing::info!(
+        new_len = new_memory.len(),
+        "MEMORY.md updated by background learning synthesis"
+    );
+
+    Ok(())
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -2061,6 +2175,42 @@ mod tests {
         assert!(summary.contains("1 tool calls (0 errors)"));
         assert!(summary.contains("bash"));
         assert!(summary.contains("4 messages total"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Background learning synthesis tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn synthesize_to_workspace_updates_memory() {
+        let ws = crate::workspace::InMemoryWorkspace::new()
+            .with_file("MEMORY.md", "Old memory content.");
+
+        let workspace: Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>> =
+            Arc::new(tokio::sync::RwLock::new(Box::new(ws)));
+
+        let llm = MockLlm::new(vec![vec![
+            StreamEvent::TextDelta("Updated memory with new learnings.".into()),
+            StreamEvent::MessageComplete { stop_reason: StopReason::EndTurn, output_tokens: None },
+        ]]);
+
+        let config = CompletionConfig {
+            model: "test".to_string(),
+            max_tokens: 1024,
+            temperature: None,
+        };
+
+        let summary = "User asked about Rust lifetimes and learned about borrowing.";
+
+        let result = synthesize_to_workspace(
+            &llm, &config, summary, &workspace,
+        ).await;
+
+        assert!(result.is_ok(), "synthesis should succeed");
+
+        let ws = workspace.read().await;
+        let memory = ws.get("MEMORY.md").unwrap();
+        assert_eq!(memory, "Updated memory with new learnings.");
     }
 
     // -----------------------------------------------------------------------

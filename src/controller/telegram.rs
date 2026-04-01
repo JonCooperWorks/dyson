@@ -381,9 +381,15 @@ impl super::Controller for TelegramController {
                 }
 
                 // /clear — rotate conversation history and start fresh.
-                // The old history is preserved as a timestamped file
-                // for review or RAG indexing.
+                // Agent::clear() spawns a background task to synthesise
+                // learnings into workspace memory before dropping messages.
                 if text == "/clear" {
+                    {
+                        let mut agents_map = agents.lock().await;
+                        if let Some(ca) = agents_map.get_mut(&chat_id.0) {
+                            ca.agent.clear();
+                        }
+                    }
                     agents.lock().await.remove(&chat_id.0);
                     let _ = chat_store.rotate(&chat_id.0.to_string());
                     let _ = bot.send_message(chat_id, "Context cleared.").await;
