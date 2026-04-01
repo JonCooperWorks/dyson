@@ -176,7 +176,6 @@ pub const MAX_SUBAGENT_DEPTH: u8 = 3;
 /// Tools should use this instead of querying the environment directly.
 /// This makes tools testable (inject a fake working dir, mock env) and
 /// ensures consistent behavior across the agent session.
-#[derive(Clone)]
 pub struct ToolContext {
     /// The working directory for this agent session.
     ///

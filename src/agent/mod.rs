@@ -189,10 +189,7 @@ impl TokenBudget {
 /// conversations.
 pub struct Agent {
     /// LLM client for streaming completions.
-    ///
-    /// Wrapped in `Arc` so the learning agent can share the client with a
-    /// background task on `/clear` and `/compact` without cloning.
-    client: Arc<dyn LlmClient>,
+    client: Box<dyn LlmClient>,
 
     /// Sandbox that gates all tool execution.
     ///
@@ -255,6 +252,10 @@ pub struct Agent {
 
     /// Structured result formatter for LLM-optimized tool output.
     formatter: ResultFormatter,
+
+    /// Retained so the background learning task can build its own LLM
+    /// client without sharing the agent's.
+    agent_settings: crate::config::AgentSettings,
 }
 
 impl Agent {
@@ -275,7 +276,6 @@ impl Agent {
         workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
         nudge_interval: usize,
     ) -> Result<Self> {
-        let client: Arc<dyn LlmClient> = Arc::from(client);
         // -- Flatten tools from all skills --
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
         let mut tool_to_skill: HashMap<String, usize> = HashMap::new();
@@ -380,6 +380,7 @@ impl Agent {
             compaction_config: settings.compaction.clone(),
             limiter: ToolLimiter::for_agent(),
             formatter: ResultFormatter::default(),
+            agent_settings: settings.clone(),
         })
     }
 
@@ -412,9 +413,8 @@ impl Agent {
     /// Spawn a background task that summarises the conversation and
     /// writes the synthesis to the workspace's MEMORY.md file.
     ///
-    /// The task shares the LLM client (Arc) and workspace (Arc<RwLock>)
-    /// with the main agent.  It uses [`SilentOutput`] and never blocks
-    /// the caller.
+    /// Builds its own LLM client so it doesn't share state with the
+    /// main agent.  Uses [`SilentOutput`] and never blocks the caller.
     fn spawn_save_learnings(&self, reason: &'static str) {
         let workspace = match self.tool_context.workspace {
             Some(ref ws) => Arc::clone(ws),
@@ -424,12 +424,14 @@ impl Agent {
             return;
         }
 
-        let client = Arc::clone(&self.client);
+        let settings = self.agent_settings.clone();
         let config = self.config.clone();
         let summary = Self::summarize_for_reflection(&self.messages);
 
         tokio::spawn(async move {
             tracing::info!(reason, "background: saving learnings");
+
+            let client = crate::llm::create_client(&settings, None, false);
 
             if let Err(e) = synthesize_to_workspace(
                 &*client, &config, &summary, &workspace,
