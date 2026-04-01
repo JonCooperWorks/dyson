@@ -111,6 +111,20 @@ pub enum ContentBlock {
         content: String,
         is_error: bool,
     },
+
+    /// A base64-encoded image for vision-capable models.
+    ///
+    /// Images are resized and encoded by the media resolver before reaching
+    /// the message pipeline.  Each provider serializes this differently:
+    /// - Anthropic: `{"type": "image", "source": {"type": "base64", ...}}`
+    /// - OpenAI:    `{"type": "image_url", "image_url": {"url": "data:...;base64,..."}}`
+    /// - CLI subprocess clients: `[Image attached]` placeholder text
+    Image {
+        /// Base64-encoded image data.
+        data: String,
+        /// MIME type, e.g. `"image/jpeg"`, `"image/png"`.
+        media_type: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +176,12 @@ impl ContentBlock {
                     + content.split_whitespace().count()
                     + 5 // JSON structure overhead
             }
+            ContentBlock::Image { data, .. } => {
+                // Anthropic charges ~1600 tokens for a 1568x1568 image.
+                // Rough heuristic based on base64 data size.
+                let decoded_bytes = data.len() * 3 / 4;
+                (decoded_bytes / 750).max(100)
+            }
         }
     }
 }
@@ -195,6 +215,22 @@ impl Message {
     pub fn assistant(content: Vec<ContentBlock>) -> Self {
         Message {
             role: Role::Assistant,
+            content,
+        }
+    }
+
+    /// Create a user message from multiple content blocks (text + images).
+    ///
+    /// Used by the Telegram controller when a message contains media.
+    /// ```ignore
+    /// let msg = Message::user_multimodal(vec![
+    ///     ContentBlock::Text { text: "What's in this image?".into() },
+    ///     ContentBlock::Image { data: base64_data, media_type: "image/jpeg".into() },
+    /// ]);
+    /// ```
+    pub fn user_multimodal(content: Vec<ContentBlock>) -> Self {
+        Message {
+            role: Role::User,
             content,
         }
     }

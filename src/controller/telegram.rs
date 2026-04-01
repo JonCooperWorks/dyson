@@ -53,6 +53,8 @@ use serde::Deserialize;
 use crate::config::{ControllerConfig, Settings};
 use crate::controller::Output;
 use crate::error::DysonError;
+use crate::media;
+use crate::message::ContentBlock;
 use crate::tool::ToolOutput;
 
 // ---------------------------------------------------------------------------
@@ -303,7 +305,7 @@ impl super::Controller for TelegramController {
                     let cb_data = cb.data.clone().unwrap_or_default();
 
                     // Acknowledge the callback to remove the loading spinner.
-                    let _ = bot.answer_callback_query(&cb.id).await;
+                    let _ = bot.answer_callback_query(cb.id.clone()).await;
 
                     if let Some(chat_id) = cb_chat_id {
                         // Check access control.
@@ -355,16 +357,31 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                // Extract text message.
+                // Extract the Telegram message.
                 let msg = match &update.kind {
                     teloxide::types::UpdateKind::Message(m) => m.clone(),
                     _ => continue,
                 };
 
-                let text = match msg.text() {
-                    Some(t) if !t.is_empty() => t.to_string(),
-                    _ => continue,
-                };
+                // Extract text from either text or caption (for media messages).
+                // Commands are only parsed from text, not media-only messages.
+                let text = msg.text().or(msg.caption())
+                    .filter(|t| !t.is_empty())
+                    .map(|t| t.to_string());
+
+                // Check if the message has any processable content at all.
+                let has_media = msg.photo().is_some()
+                    || msg.voice().is_some()
+                    || msg.document().map_or(false, |d| {
+                        d.mime_type.as_ref().map_or(false, |m| m.as_ref().starts_with("image/"))
+                    });
+
+                if text.is_none() && !has_media {
+                    continue;
+                }
+
+                // Unwrap text for command parsing (empty string if media-only).
+                let text = text.unwrap_or_default();
 
                 let chat_id = msg.chat.id;
 
@@ -564,6 +581,18 @@ impl super::Controller for TelegramController {
                 tokio::spawn(async move {
                     let chat_key = chat_id.0.to_string();
 
+                    // -- Resolve media into ContentBlocks --
+                    let content_blocks = match extract_content(
+                        &bot_clone, &msg, &text,
+                    ).await {
+                        Ok(blocks) => blocks,
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to extract media content");
+                            let _ = bot_clone.send_message(chat_id, format!("Media error: {e}")).await;
+                            return;
+                        }
+                    };
+
                     // Get or create the per-chat agent.
                     let mut agents_map = agents_clone.lock().await;
                     if let std::collections::hash_map::Entry::Vacant(entry) = agents_map.entry(chat_id.0) {
@@ -602,7 +631,15 @@ impl super::Controller for TelegramController {
 
                     let mut output = TelegramOutput::new(bot_clone.clone(), chat_id);
 
-                    if let Err(e) = ca.agent.run(&text, &mut output).await {
+                    // Use run_with_blocks for multimodal, run for text-only.
+                    let has_non_text = content_blocks.iter().any(|b| !matches!(b, ContentBlock::Text { .. }));
+                    let result = if has_non_text {
+                        ca.agent.run_with_blocks(content_blocks, &mut output).await
+                    } else {
+                        ca.agent.run(&text, &mut output).await
+                    };
+
+                    if let Err(e) = result {
                         tracing::error!(error = %e, "agent run failed");
                         let _ = bot_clone.send_message(chat_id, format!("Error: {e}")).await;
                     }
@@ -670,6 +707,190 @@ fn save_memory_note(
     workspace.save()?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Media extraction helpers
+// ---------------------------------------------------------------------------
+
+/// Extract content blocks from a Telegram message.
+///
+/// Handles text, photos, voice notes, and image documents.  Text from
+/// `msg.text()` or `msg.caption()` is combined with resolved media
+/// blocks into a single Vec<ContentBlock>.
+async fn extract_content(
+    bot: &Bot,
+    msg: &teloxide::types::Message,
+    text: &str,
+) -> crate::Result<Vec<ContentBlock>> {
+    let mut blocks = Vec::new();
+
+    // Add text content if present.
+    if !text.is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: text.to_string(),
+        });
+    }
+
+    // Photos: pick the largest resolution (last in the array).
+    if let Some(photos) = msg.photo() {
+        if let Some(photo) = photos.last() {
+            tracing::info!(
+                file_id = photo.file.id.0.as_str(),
+                width = photo.width,
+                height = photo.height,
+                "downloading photo from Telegram"
+            );
+            match download_telegram_file(bot, &photo.file.id.0).await {
+                Ok(data) => {
+                    match media::resolve(media::MediaInput::Image {
+                        data,
+                        mime_type: "image/jpeg".to_string(),
+                    }).await {
+                        Ok(media::ResolvedMedia::Images(image_blocks)) => {
+                            blocks.extend(image_blocks);
+                        }
+                        Ok(media::ResolvedMedia::Transcription(t)) => {
+                            blocks.push(ContentBlock::Text { text: t });
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to process photo");
+                            blocks.push(ContentBlock::Text {
+                                text: format!("[Failed to process photo: {e}]"),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to download photo");
+                    blocks.push(ContentBlock::Text {
+                        text: format!("[Failed to download photo: {e}]"),
+                    });
+                }
+            }
+        }
+    }
+
+    // Voice notes: transcribe via Whisper.
+    if let Some(voice) = msg.voice() {
+        tracing::info!(
+            file_id = voice.file.id.0.as_str(),
+            "downloading voice note from Telegram"
+        );
+        let mime = voice.mime_type.as_ref()
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "audio/ogg".to_string());
+
+        match download_telegram_file(bot, &voice.file.id.0).await {
+            Ok(data) => {
+                match media::resolve(media::MediaInput::Audio {
+                    data,
+                    mime_type: mime,
+                }).await {
+                    Ok(media::ResolvedMedia::Transcription(t)) => {
+                        blocks.push(ContentBlock::Text {
+                            text: format!("[Voice transcription]: {t}"),
+                        });
+                    }
+                    Ok(media::ResolvedMedia::Images(_)) => {
+                        // Shouldn't happen for audio, but handle gracefully.
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to transcribe voice note");
+                        blocks.push(ContentBlock::Text {
+                            text: format!("[Voice transcription failed: {e}]"),
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to download voice note");
+                blocks.push(ContentBlock::Text {
+                    text: format!("[Failed to download voice note: {e}]"),
+                });
+            }
+        }
+    }
+
+    // Documents with image MIME types (e.g. uncompressed photos).
+    if let Some(doc) = msg.document() {
+        let is_image = doc.mime_type.as_ref()
+            .map_or(false, |m| m.as_ref().starts_with("image/"));
+        if is_image {
+            tracing::info!(
+                file_id = doc.file.id.0.as_str(),
+                file_name = doc.file_name.as_deref().unwrap_or("unknown"),
+                "downloading image document from Telegram"
+            );
+            let mime = doc.mime_type.as_ref()
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "image/jpeg".to_string());
+
+            match download_telegram_file(bot, &doc.file.id.0).await {
+                Ok(data) => {
+                    match media::resolve(media::MediaInput::Image {
+                        data,
+                        mime_type: mime,
+                    }).await {
+                        Ok(media::ResolvedMedia::Images(image_blocks)) => {
+                            blocks.extend(image_blocks);
+                        }
+                        Ok(media::ResolvedMedia::Transcription(t)) => {
+                            blocks.push(ContentBlock::Text { text: t });
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to process document image");
+                            blocks.push(ContentBlock::Text {
+                                text: format!("[Failed to process image: {e}]"),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to download document");
+                    blocks.push(ContentBlock::Text {
+                        text: format!("[Failed to download document: {e}]"),
+                    });
+                }
+            }
+        }
+    }
+
+    // If somehow we have no blocks at all (shouldn't happen given the
+    // earlier checks), return a fallback.
+    if blocks.is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: "[Empty message received]".to_string(),
+        });
+    }
+
+    Ok(blocks)
+}
+
+/// Download a file from Telegram by file_id.
+///
+/// Uses the Bot API to get the file path, then downloads from the
+/// Telegram file server.
+async fn download_telegram_file(bot: &Bot, file_id: &str) -> crate::Result<Vec<u8>> {
+    let file = bot.get_file(teloxide::types::FileId(file_id.to_string()))
+        .await
+        .map_err(|e| DysonError::Llm(format!("Telegram get_file failed: {e}")))?;
+
+    let token = bot.token();
+    let url = format!(
+        "https://api.telegram.org/file/bot{}/{}",
+        token, file.path
+    );
+
+    let response = reqwest::get(&url)
+        .await
+        .map_err(|e| DysonError::Http(e))?;
+
+    let bytes = response.bytes()
+        .await
+        .map_err(|e| DysonError::Http(e))?;
+
+    Ok(bytes.to_vec())
 }
 
 // ---------------------------------------------------------------------------

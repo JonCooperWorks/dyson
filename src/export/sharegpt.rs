@@ -107,6 +107,9 @@ pub fn to_sharegpt(
                 } => {
                     tool_results.push((content.clone(), *is_error));
                 }
+                ContentBlock::Image { media_type, .. } => {
+                    text_parts.push(format!("[Image: {media_type}]"));
+                }
             }
         }
 

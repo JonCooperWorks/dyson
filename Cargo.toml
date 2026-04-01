@@ -6,7 +6,7 @@ description = "Streaming, composable AI agent loop in Rust"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["stream", "json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream", "json", "rustls", "query"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
@@ -19,16 +19,18 @@ tokio-stream = { version = "0.1", features = ["io-util"] }
 tokio-util = "0.7"
 futures = "0.3"
 pin-project-lite = "0.2"
-rand = "0.9"
-teloxide = { version = "0.13", default-features = false, features = ["macros", "rustls"] }
+rand = "0.10"
+teloxide = { version = "0.17", default-features = false, features = ["macros", "rustls"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 regex = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 zeroize = "1"
 glob = "0.3"
 ignore = "0.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

@@ -16,7 +16,7 @@
 // ===========================================================================
 
 use async_trait::async_trait;
-use rand::Rng;
+use rand::RngExt;
 
 use crate::auth::{Auth, AuthInfo, Credential};
 use crate::error::{DysonError, Result};

@@ -531,6 +531,9 @@ pub(crate) fn format_prompt(messages: &[Message], tools: &[ToolDefinition]) -> S
                         let label = if *is_error { "Tool error" } else { "Tool result" };
                         prompt.push_str(&format!("{label}: {content}\n\n"));
                     }
+                    ContentBlock::Image { .. } => {
+                        prompt.push_str("[Image attached]\n\n");
+                    }
                 }
             }
         }

@@ -120,6 +120,16 @@ fn message_to_anthropic(msg: &Message) -> serde_json::Value {
                     "is_error": is_error,
                 })
             }
+            ContentBlock::Image { data, media_type } => {
+                serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data,
+                    }
+                })
+            }
         })
         .collect();
 

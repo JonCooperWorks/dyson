@@ -51,6 +51,7 @@ pub mod dependency_analyzer;
 pub mod error;
 pub mod export;
 pub mod llm;
+pub mod media;
 pub mod message;
 pub mod result_formatter;
 pub mod sandbox;

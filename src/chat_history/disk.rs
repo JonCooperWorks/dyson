@@ -13,12 +13,17 @@
 // ```
 // ===========================================================================
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::chat_history::ChatHistory;
 use crate::error::Result;
-use crate::message::Message;
+use crate::message::{ContentBlock, Message};
 use crate::workspace::openclaw::resolve_tilde;
+
+/// Prefix used in the `data` field to indicate externalized image data.
+/// This cannot be valid base64, so there's no collision risk.
+const MEDIA_REF_PREFIX: &str = "@media/";
 
 // ---------------------------------------------------------------------------
 // DiskChatHistory
@@ -49,6 +54,11 @@ impl DiskChatHistory {
         self.dir.join(format!("{chat_id}.json"))
     }
 
+    /// Directory for externalized media files for a given chat.
+    fn media_dir(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(format!("{chat_id}_media"))
+    }
+
     /// Generate a timestamp string for rotation filenames.
     fn rotation_timestamp() -> String {
         let now = std::time::SystemTime::now()
@@ -70,7 +80,12 @@ impl DiskChatHistory {
 impl ChatHistory for DiskChatHistory {
     fn save(&self, chat_id: &str, messages: &[Message]) -> Result<()> {
         let path = self.chat_path(chat_id);
-        let json = serde_json::to_string_pretty(messages)?;
+        let media_dir = self.media_dir(chat_id);
+
+        // Externalize image data to avoid bloating the JSON file.
+        let messages = externalize_images(messages, &media_dir)?;
+
+        let json = serde_json::to_string_pretty(&messages)?;
         std::fs::write(&path, json)?;
         tracing::debug!(chat_id = chat_id, path = %path.display(), "chat history saved");
         Ok(())
@@ -82,7 +97,12 @@ impl ChatHistory for DiskChatHistory {
             return Ok(Vec::new());
         }
         let content = std::fs::read_to_string(&path)?;
-        let messages: Vec<Message> = serde_json::from_str(&content)?;
+        let mut messages: Vec<Message> = serde_json::from_str(&content)?;
+        let media_dir = self.media_dir(chat_id);
+
+        // Restore externalized image data.
+        restore_images(&mut messages, &media_dir);
+
         tracing::debug!(
             chat_id = chat_id,
             messages = messages.len(),
@@ -107,6 +127,122 @@ impl ChatHistory for DiskChatHistory {
         );
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Image externalization — keep chat JSON small.
+// ---------------------------------------------------------------------------
+
+/// Replace inline base64 image data with file references.
+///
+/// Hashes the data, writes it to `{media_dir}/{hash}.b64`, and replaces
+/// the `data` field with `@media/{hash}`.  Skips images that are already
+/// externalized.
+fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<Message>> {
+    // Collect all unique hashes we need to write.
+    let mut to_write: HashMap<String, String> = HashMap::new();
+    let mut needs_externalization = false;
+
+    for msg in messages {
+        for block in &msg.content {
+            if let ContentBlock::Image { data, .. } = block {
+                if !data.starts_with(MEDIA_REF_PREFIX) {
+                    needs_externalization = true;
+                    let hash = simple_hash(data);
+                    to_write.entry(hash).or_insert_with(|| data.clone());
+                }
+            }
+        }
+    }
+
+    if !needs_externalization {
+        return Ok(messages.to_vec());
+    }
+
+    // Create media directory and write files.
+    std::fs::create_dir_all(media_dir)?;
+    for (hash, data) in &to_write {
+        let file_path = media_dir.join(format!("{hash}.b64"));
+        if !file_path.exists() {
+            std::fs::write(&file_path, data)?;
+        }
+    }
+
+    // Clone messages with data replaced by references.
+    let messages: Vec<Message> = messages
+        .iter()
+        .map(|msg| {
+            let content: Vec<ContentBlock> = msg
+                .content
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Image { data, media_type } if !data.starts_with(MEDIA_REF_PREFIX) => {
+                        let hash = simple_hash(data);
+                        ContentBlock::Image {
+                            data: format!("{MEDIA_REF_PREFIX}{hash}"),
+                            media_type: media_type.clone(),
+                        }
+                    }
+                    other => other.clone(),
+                })
+                .collect();
+            Message {
+                role: msg.role.clone(),
+                content,
+            }
+        })
+        .collect();
+
+    tracing::debug!(
+        images = to_write.len(),
+        media_dir = %media_dir.display(),
+        "externalized image data"
+    );
+
+    Ok(messages)
+}
+
+/// Restore externalized image data from files.
+///
+/// Scans for Image blocks where `data` starts with `@media/`, reads the
+/// referenced file, and restores the full base64 data.
+fn restore_images(messages: &mut [Message], media_dir: &PathBuf) {
+    for msg in messages.iter_mut() {
+        for block in msg.content.iter_mut() {
+            if let ContentBlock::Image { data, .. } = block {
+                if let Some(hash) = data.strip_prefix(MEDIA_REF_PREFIX) {
+                    let file_path = media_dir.join(format!("{hash}.b64"));
+                    match std::fs::read_to_string(&file_path) {
+                        Ok(content) => {
+                            *data = content;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                hash = hash,
+                                error = %e,
+                                "failed to restore externalized image — keeping reference"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Simple hash of a string — first 16 hex chars of a basic hash.
+///
+/// Not cryptographic, just needs to be deterministic and collision-resistant
+/// enough for a handful of images per conversation.
+fn simple_hash(data: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    let h1 = hasher.finish();
+    // Hash again with a different seed for 128 bits of collision resistance.
+    data.len().hash(&mut hasher);
+    let h2 = hasher.finish();
+    format!("{h1:016x}{h2:016x}")
 }
 
 // ===========================================================================
@@ -190,6 +326,53 @@ mod tests {
     fn rotate_nonexistent_is_ok() {
         let (dir, store) = temp_store("rotate_none");
         store.rotate("nonexistent").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_and_load_with_images() {
+        let (dir, store) = temp_store("images");
+
+        let messages = vec![
+            Message::user_multimodal(vec![
+                ContentBlock::Text { text: "What's this?".into() },
+                ContentBlock::Image {
+                    data: "aGVsbG8gd29ybGQ=".into(), // "hello world" in base64
+                    media_type: "image/jpeg".into(),
+                },
+            ]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "It's a greeting.".into(),
+            }]),
+        ];
+
+        store.save("img_chat", &messages).unwrap();
+
+        // The JSON file should NOT contain the raw base64 data.
+        let json = std::fs::read_to_string(dir.join("img_chat.json")).unwrap();
+        assert!(!json.contains("aGVsbG8gd29ybGQ="), "base64 should be externalized");
+        assert!(json.contains("@media/"), "should contain media reference");
+
+        // Media directory should exist with a .b64 file.
+        let media_dir = dir.join("img_chat_media");
+        assert!(media_dir.exists(), "media dir should exist");
+        let media_files: Vec<_> = std::fs::read_dir(&media_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(media_files.len(), 1, "should have one media file");
+
+        // Load should restore the original data.
+        let loaded = store.load("img_chat").unwrap();
+        assert_eq!(loaded.len(), 2);
+        match &loaded[0].content[1] {
+            ContentBlock::Image { data, media_type } => {
+                assert_eq!(data, "aGVsbG8gd29ybGQ=", "base64 should be restored");
+                assert_eq!(media_type, "image/jpeg");
+            }
+            other => panic!("expected Image, got: {other:?}"),
+        }
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

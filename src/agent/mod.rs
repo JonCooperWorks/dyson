@@ -812,6 +812,28 @@ impl Agent {
     pub async fn run(&mut self, user_input: &str, output: &mut dyn Output) -> Result<String> {
         // Append the user's message to history.
         self.messages.push(Message::user(user_input));
+        self.run_inner(output).await
+    }
+
+    /// Run the agent loop with pre-built content blocks (text + images).
+    ///
+    /// Like [`run()`], but accepts arbitrary content blocks instead of
+    /// plain text.  Used by controllers that handle multimodal input
+    /// (e.g. Telegram photos, voice notes).
+    pub async fn run_with_blocks(
+        &mut self,
+        blocks: Vec<crate::message::ContentBlock>,
+        output: &mut dyn Output,
+    ) -> Result<String> {
+        self.messages.push(Message::user_multimodal(blocks));
+        self.run_inner(output).await
+    }
+
+    /// Inner agent loop shared by [`run()`] and [`run_with_blocks()`].
+    ///
+    /// Assumes the caller has already pushed the user message to
+    /// `self.messages`.
+    async fn run_inner(&mut self, output: &mut dyn Output) -> Result<String> {
         self.turn_count += 1;
 
         // Run memory maintenance as a side-channel LLM call every N turns.
@@ -1618,6 +1640,9 @@ impl Agent {
                             };
                             summary.push_str(&format!("[Tool result: {truncated}]\n"));
                         }
+                    }
+                    crate::message::ContentBlock::Image { media_type, .. } => {
+                        summary.push_str(&format!("[Image: {media_type}]\n"));
                     }
                 }
             }

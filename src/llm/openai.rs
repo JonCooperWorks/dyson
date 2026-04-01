@@ -309,6 +309,38 @@ fn message_to_openai(msg: &Message) -> serde_json::Value {
         });
     }
 
+    // Check if this message contains any image blocks.
+    let has_images = msg
+        .content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. }));
+
+    if has_images {
+        // Vision-capable format: content is an array of typed blocks.
+        let content_array: Vec<serde_json::Value> = msg
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(serde_json::json!({
+                    "type": "text",
+                    "text": text,
+                })),
+                ContentBlock::Image { data, media_type } => Some(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{media_type};base64,{data}"),
+                    }
+                })),
+                _ => None,
+            })
+            .collect();
+
+        return serde_json::json!({
+            "role": role_str,
+            "content": content_array,
+        });
+    }
+
     // Simple text message.
     let text: String = msg
         .content

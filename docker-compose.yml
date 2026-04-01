@@ -1,0 +1,12 @@
+services:
+  dyson:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./dyson.json:/etc/dyson/dyson.json:ro
+      - dyson-data:/data
+
+volumes:
+  dyson-data:
