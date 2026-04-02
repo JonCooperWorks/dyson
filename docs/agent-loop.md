@@ -119,40 +119,20 @@ then loops:
      Back to step 1 — LLM sees tool results on next iteration
 ```
 
-### Internal-tools providers (Claude Code)
+### Internal-tools providers (Claude Code, Codex)
 
-Some providers run their own internal agent loop with built-in tools.  Claude
-Code, for example, has Bash, Read, Write, Edit, etc. and executes them inside
-the `claude -p` subprocess.  The streaming output includes `ToolUseStart` and
-`ToolUseComplete` events for these internal tool calls, but Dyson must NOT
-re-execute them — they already ran.
+Some providers run their own agent loop with built-in tools. When `handles_tools_internally()` returns `true`:
 
-The `LlmClient` trait exposes `handles_tools_internally()` (default `false`).
-When a provider returns `true`:
-
-1. **Tool definitions are not sent** — the provider has its own tools, so
-   Dyson passes an empty `&[]` instead of `self.tool_definitions`.
-2. **The loop breaks after one iteration** — even if `tool_calls` is non-empty,
-   the agent treats it like a text-only response and breaks.  ToolUse stream
-   events are still rendered to output (so the user sees what the provider is
-   doing), but Dyson does not attempt to execute them.
-
-Without this check, Dyson would try to re-execute every internal tool call,
-fail (the tools aren't in Dyson's registry), push error results, and spawn
-another subprocess — repeating up to `max_iterations` times.
+1. Dyson's tool definitions are **not** sent (provider has its own)
+2. The loop **breaks after one iteration** — tool events are displayed but not re-executed
 
 ### Iteration limit
 
-The `max_iterations` guard prevents infinite loops.  If the LLM keeps
-requesting tools without converging, the agent stops after `max_iterations`
-turns and emits a warning.  Each "turn" is one LLM call + tool execution.
+`max_iterations` (default 20) prevents infinite loops. Each "turn" = one LLM call + tool execution.
 
 ### Conversation persistence
 
-The `messages` field is **not** cleared between `run()` calls.  This means
-multi-turn conversations work naturally — the LLM has full context from
-previous turns.  In interactive mode, the user types multiple messages and
-the conversation accumulates.
+`messages` persists across `run()` calls — multi-turn conversations accumulate naturally.
 
 ---
 
@@ -165,87 +145,26 @@ pub async fn process_stream(
 ) -> Result<(Message, Vec<ToolCall>)>
 ```
 
-The stream handler is the bridge between the raw `StreamEvent` stream from
-the LLM client and the structured data the agent loop needs.
+Bridges raw `StreamEvent`s to structured data:
 
-### What it does
+1. Renders events to `Output` (text deltas, tool markers)
+2. Accumulates content blocks (`Text`, `ToolUse`)
+3. Collects `ToolCall { id, name, input }` structs from `ToolUseComplete` events
 
-1. **Consumes events** from the stream one by one
-2. **Renders to output** — `TextDelta` → `output.text_delta()`,
-   `ToolUseStart` → `output.tool_use_start()`, etc.
-3. **Accumulates content blocks** — text deltas become `ContentBlock::Text`,
-   tool use events become `ContentBlock::ToolUse`
-4. **Collects tool calls** — `ToolUseComplete` events are collected as
-   `ToolCall { id, name, input }` structs
-
-### Text flushing
-
-Text arrives as many small `TextDelta` events.  The handler accumulates them
-into a buffer.  When a non-text event arrives (e.g., `ToolUseStart`) or the
-message completes, the buffer is flushed as a `ContentBlock::Text`.  This
-preserves the interleaving order: text block, tool_use block, text block.
-
-### ToolCall struct
-
-```rust
-pub struct ToolCall {
-    pub id: String,      // matches the LLM's tool_use block ID
-    pub name: String,    // tool name (e.g., "bash")
-    pub input: Value,    // parsed JSON input
-}
-```
-
-The agent loop uses these to look up the tool, run it through the sandbox,
-and build a `tool_result` message with the matching `id`.
+Text deltas are buffered and flushed as a `ContentBlock::Text` when a non-text event arrives, preserving interleaving order.
 
 ---
 
 ## Tool Execution Flow
 
-A single tool call goes through this sequence:
-
 ```
-ToolCall { id: "call_1", name: "bash", input: {"command": "ls"} }
-  │
-  ▼
-sandbox.check("bash", {"command":"ls"}, ctx)
-  │
-  ├─ Allow { input: {"command":"ls"} }
-  │    │
-  │    ▼
-  │  tools["bash"].run({"command":"ls"}, ctx)
-  │    │
-  │    ▼
-  │  ToolOutput { content: "Cargo.toml\nsrc/", is_error: false }
-  │    │
-  │    ▼
-  │  sandbox.after("bash", {"command":"ls"}, &mut output)
-  │    │
-  │    ▼
-  │  output.tool_result(&output)
-  │    │
-  │    ▼
-  │  Message::tool_result("call_1", "Cargo.toml\nsrc/", false)
-  │
-  ├─ Deny { reason: "blocked by policy" }
-  │    │
-  │    ▼
-  │  Message::tool_result("call_1", "Denied by sandbox: blocked by policy", true)
-  │
-  └─ Redirect { tool_name: "s3_read", input: {"key": "ls"} }
-       │
-       ▼
-     tools["s3_read"].run({"key":"ls"}, ctx)
-       ...same flow as Allow...
+sandbox.check(name, input, ctx)
+  → Allow { input }      → tool.run() → sandbox.after() → tool_result
+  → Deny { reason }      → error tool_result (reason as content)
+  → Redirect { tool, in} → other_tool.run() → sandbox.after() → tool_result
 ```
 
-### Invariant: every tool_use gets a tool_result
-
-The Anthropic API rejects messages where a `tool_use` block in an assistant
-message has no corresponding `tool_result`.  Dyson ensures this invariant by
-always producing a `tool_result` — even for denied calls (where the deny
-reason becomes the error content) and for infrastructure failures (where the
-error message becomes the content with `is_error: true`).
+**Invariant:** every `tool_use` gets a `tool_result` — even denied calls and infra failures. The Anthropic API rejects orphaned tool_use blocks.
 
 ---
 
@@ -259,9 +178,7 @@ error message becomes the content with `is_error: true`).
 | `sandbox.check()` returns `Err` | `Err` propagates up (infrastructure failure) |
 | Max iterations reached | Warning emitted, loop exits, last text returned |
 
-The key insight: tool-level errors are **not** fatal.  They're reported back
-to the LLM as error `tool_result` blocks, and the LLM can decide to retry,
-try a different approach, or explain the failure to the user.
+Tool-level errors are **not** fatal — they're reported to the LLM as error `tool_result` blocks, and the LLM can retry or adjust.
 
 ---
 

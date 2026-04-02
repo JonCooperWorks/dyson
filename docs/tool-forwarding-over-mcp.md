@@ -154,89 +154,22 @@ that Dyson's own agent loop would use with the Anthropic or OpenAI backends.
 
 ### Lifecycle
 
-The MCP server's lifetime is tied to the LLM stream:
-
-```
-stream() called
-  └─ McpHttpServer starts (tokio task)
-  └─ claude -p spawned
-  └─ async_stream closure holds:
-       - child process (stdin/stdout)
-       - JoinHandle for MCP server task
-  └─ Stream consumed by agent loop...
-  └─ Turn complete (or cancelled)
-  └─ Stream dropped
-       └─ JoinHandle dropped → task aborted → server stops
-       └─ Child process stdin closed → process exits
-```
-
-A new server is created per LLM turn.  This is fine: binding a TCP socket
-is ~0.1ms, and each turn takes seconds.  Per-turn servers simplify lifecycle:
-no shutdown coordination, no stale connections, no port leaks.
+A new MCP server is created per LLM turn and cleaned up when the stream drops. Per-turn servers simplify lifecycle: no shutdown coordination, no stale connections, no port leaks.
 
 ---
 
 ## Security
 
-- **Loopback-only**: The server binds to `127.0.0.1`, not `0.0.0.0`.  Only
-  local processes can reach it.  No network exposure.
-
-- **Bearer token authentication**: Every request must include an
-  `Authorization: Bearer <token>` header.  The token is a 64-character hex
-  string generated from 32 bytes of CSPRNG output at server startup.  Requests
-  without a valid token receive HTTP 401.  This prevents other local
-  processes from accessing the workspace even if they discover the port.
-
-- **Token lifecycle**: A new token is generated per LLM turn (each call to
-  `stream()`).  The token is passed to Claude Code via `--mcp-config`:
-  ```json
-  {
-    "mcpServers": {
-      "dyson-workspace": {
-        "type": "url",
-        "url": "http://127.0.0.1:54321/mcp",
-        "headers": {
-          "Authorization": "Bearer <token>"
-        }
-      }
-    }
-  }
-  ```
-  The token is **not** in shell history — Dyson spawns `claude -p`
-  programmatically via `tokio::process::Command`, not through a shell.
-  It **is** visible in `ps` output while the process is running (the
-  `--mcp-config` JSON is a CLI argument), but the token is ephemeral
-  (regenerated every LLM turn), only usable on loopback, and gone from
-  `ps` as soon as the process exits.  The token is zeroized in memory
-  when the server is dropped.
-
-- **Defense in depth**: Loopback binding + bearer auth + ephemeral port
-  together ensure that only the intended `claude -p` subprocess can access
-  the workspace.
+- **Loopback-only** — binds to `127.0.0.1`, no network exposure
+- **Bearer token** — 64-char hex from CSPRNG, regenerated per LLM turn, zeroized on drop. Requests without valid token get HTTP 401
+- **Not in shell history** — subprocess spawned programmatically; token visible in `ps` but ephemeral and loopback-only
+- **Defense in depth** — loopback + bearer auth + ephemeral port ensures only the intended subprocess connects
 
 ---
 
 ## Sandbox Plumbing
 
-The `dangerous_no_sandbox` flag flows through the entire chain:
-
-```
-CLI (--dangerous-no-sandbox)
-  → Settings.dangerous_no_sandbox
-    → create_client(settings, workspace, dangerous_no_sandbox)
-      → ClaudeCodeClient.dangerous_no_sandbox
-        → McpHttpServer.dangerous_no_sandbox
-          → (future) sandbox.check() before tool.run()
-```
-
-Today this flag has **no effect** on MCP tool calls.  Workspace tools are
-pure in-memory operations (reading/writing a HashMap behind an RwLock) that
-don't need sandboxing.
-
-The hook is here so that when we add tools that touch the filesystem or
-execute commands via MCP, we can gate them through the sandbox system without
-changing any APIs, types, or call sites.  The plumbing is done; only the
-enforcement logic needs to be added.
+The `dangerous_no_sandbox` flag flows from CLI → Settings → ClaudeCodeClient → McpHttpServer. Currently a no-op for MCP tool calls (workspace tools are in-memory), but plumbed for future tools that need sandboxing.
 
 ---
 

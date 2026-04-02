@@ -34,10 +34,7 @@ User-defined subagents in `dyson.json` are appended after built-ins.
 
 ## Why Subagents?
 
-Different tasks benefit from different models.  A Claude parent might delegate
-research to a GPT subagent, or a fast model might delegate complex reasoning
-to a slower, more capable one.  Subagents enable this delegation pattern while
-maintaining security (shared sandbox) and memory (shared workspace).
+Different tasks benefit from different models. Subagents enable delegation (e.g., Claude delegates research to GPT) while sharing the parent's sandbox and workspace.
 
 ---
 
@@ -138,103 +135,23 @@ Subagents inherit the parent's loaded tools (builtins, MCP, local skills) via
 
 ## Design Decisions
 
-### 1. Shared Sandbox
-
-Parent and child share the same sandbox via `Arc<dyn Sandbox>`.  This is
-non-negotiable — a subagent must not bypass the parent's security policy.
-If the parent's sandbox denies `rm -rf /`, so does the child's.
-
-### 2. Shared Workspace
-
-Subagents share the parent's workspace so they can read/write the same memory
-files.  This enables collaboration between parent and child.
-
-### 3. Conversation Isolation
-
-Each subagent invocation starts with a fresh conversation.  The child's
-internal messages never leak into the parent's history — only the final text
-does.  This keeps the parent's context window clean.
-
-### 4. Recursion Depth Limit
-
-`ToolContext` carries a `depth` counter (max = 3, configurable via
-`MAX_SUBAGENT_DEPTH`).  Additionally, subagent tools are excluded from
-children's tool sets during two-phase construction, preventing direct
-recursion.
-
-### 5. Output Capture
-
-`CaptureOutput` implements `Output` by collecting text into a `String`.
-Tool events (tool_use_start, tool_result) are logged for debugging but not
-included in the captured text — only the LLM's natural language output
-matters for the parent.
-
-### 6. Two-Phase Skill Construction
-
-`create_skills()` uses two phases:
-
-1. **Phase A**: Load all non-subagent skills (builtin, MCP, local)
-2. **Phase B**: Flatten loaded tools, construct `SubagentSkill` with those tools
-
-This avoids the chicken-and-egg problem: subagent tools need the parent's
-tools to exist first, but they're also part of the skill list that feeds
-the parent.
+- **Shared sandbox** — parent and child share `Arc<dyn Sandbox>`. Non-negotiable: a subagent cannot bypass the parent's security policy.
+- **Shared workspace** — same memory files, enabling collaboration.
+- **Conversation isolation** — each invocation starts fresh. Only the final text returns to the parent.
+- **Recursion depth limit** — `ToolContext.depth` maxes at 3. Subagent tools are excluded from children's tool sets.
+- **Output capture** — `CaptureOutput` collects text only; tool events are logged but not returned.
+- **Two-phase construction** — Phase A loads non-subagent skills; Phase B builds `SubagentSkill` from the flattened tool set. Avoids the chicken-and-egg problem.
 
 ---
 
 ## Components
 
-### CaptureOutput
-
-```rust
-pub struct CaptureOutput { text: String }
-```
-
-Collects `text_delta` events.  Tool events are logged but discarded.
-Use `capture.text()` to get the accumulated result.
-
-### FilteredSkill
-
-```rust
-struct FilteredSkill { tools: Vec<Arc<dyn Tool>> }
-```
-
-Lightweight `Skill` wrapper around pre-loaded tools.  No lifecycle hooks
-needed — tools are already initialized by the parent's skills.
-
-### SubagentTool
-
-```rust
-pub struct SubagentTool {
-    config: SubagentAgentConfig,
-    provider: LlmProvider,
-    api_key: Credential,
-    sandbox: Arc<dyn Sandbox>,
-    workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
-    inherited_tools: Vec<Arc<dyn Tool>>,
-}
-```
-
-The `Tool` impl that spawns a child `Agent` per invocation.  Input schema:
-
-```json
-{
-  "task": "string (required) — what the subagent should do",
-  "context": "string (optional) — background information"
-}
-```
-
-### SubagentSkill
-
-```rust
-pub struct SubagentSkill {
-    tools: Vec<Arc<dyn Tool>>,
-    system_prompt: String,
-}
-```
-
-Bundles `SubagentTool` instances into a `Skill`.  Contributes a system prompt
-fragment listing available subagents so the parent LLM knows when to delegate.
+| Component | Purpose |
+|-----------|---------|
+| `CaptureOutput` | Collects `text_delta` events; tool events logged but discarded |
+| `FilteredSkill` | Lightweight `Skill` wrapper around pre-loaded parent tools |
+| `SubagentTool` | `Tool` impl that spawns a child `Agent` per invocation. Input: `{ "task": "...", "context": "..." }` |
+| `SubagentSkill` | Bundles `SubagentTool`s into a `Skill` with system prompt listing available subagents |
 
 ---
 

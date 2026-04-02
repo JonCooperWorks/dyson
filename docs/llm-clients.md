@@ -79,67 +79,23 @@ are API-based; Claude Code and Codex are CLI-subprocess-based.
 
 `AnthropicClient` in `src/llm/anthropic.rs`.
 
-### SSE Event Flow
+### SSE Flow
 
-```
-POST /v1/messages (stream: true)
-  ↓
-event: message_start
-  data: {"type":"message_start","message":{"id":"msg_...","role":"assistant"}}
+Anthropic uses explicit content block lifecycle events:
 
-event: content_block_start
-  data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+1. `message_start` → `content_block_start` (text or tool_use) → `content_block_delta` (fragments) → `content_block_stop` → `message_delta` (stop_reason)
+2. Text deltas → `StreamEvent::TextDelta`
+3. Tool use: `content_block_start` → `ToolUseStart`, `input_json_delta` fragments accumulated, `content_block_stop` → `ToolUseComplete` (parsed JSON)
 
-event: content_block_delta
-  data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
-  → StreamEvent::TextDelta("Hello")
-
-event: content_block_stop
-  data: {"type":"content_block_stop","index":0}
-
-event: content_block_start
-  data: {...,"content_block":{"type":"tool_use","id":"call_1","name":"bash"}}
-  → StreamEvent::ToolUseStart { id: "call_1", name: "bash" }
-
-event: content_block_delta
-  data: {...,"delta":{"type":"input_json_delta","partial_json":"{\"command\""}}
-  → StreamEvent::ToolUseInputDelta("{\"command\"")
-  → (also accumulated in internal buffer)
-
-event: content_block_stop
-  data: {"type":"content_block_stop","index":1}
-  → parse accumulated JSON → StreamEvent::ToolUseComplete { id, name, input }
-
-event: message_delta
-  data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}
-  → StreamEvent::MessageComplete { stop_reason: ToolUse }
-```
-
-### SSE Parser
-
-The `SseParser` struct handles three concerns:
-
-1. **Line buffering** — bytes from reqwest can split anywhere (mid-line,
-   mid-UTF8-character).  The parser buffers until complete `\n`-delimited
-   lines are available.
-
-2. **SSE protocol** — extracts `data:` lines, ignores `event:` lines (the
-   event type is determined from the JSON `type` field instead).
-
-3. **Tool use accumulation** — tracks a `HashMap<usize, ToolUseBuffer>` keyed
-   by content block index.  Each `input_json_delta` appends to the buffer.
-   On `content_block_stop`, the accumulated JSON is parsed and
-   `ToolUseComplete` is emitted.
+The SSE parser handles line buffering (reqwest can split mid-UTF8), `data:` extraction, and tool use accumulation via `HashMap<usize, ToolUseBuffer>`.
 
 ### Message Serialization
 
-`Message::to_anthropic_value()` handles the conversion:
-
 | Internal | Anthropic wire format |
 |----------|----------------------|
-| `Role::User` + `Text` | `{"role":"user","content":[{"type":"text","text":"..."}]}` |
-| `Role::Assistant` + `ToolUse` | `{"role":"assistant","content":[{"type":"tool_use",...}]}` |
-| `Role::User` + `ToolResult` | `{"role":"user","content":[{"type":"tool_result",...}]}` |
+| `User` + `Text` | `{"role":"user","content":[{"type":"text",...}]}` |
+| `Assistant` + `ToolUse` | `{"role":"assistant","content":[{"type":"tool_use",...}]}` |
+| `User` + `ToolResult` | `{"role":"user","content":[{"type":"tool_result",...}]}` |
 
 ---
 
@@ -153,55 +109,21 @@ Works with any OpenAI-compatible endpoint:
 - **Together** — `https://api.together.xyz`
 - **vLLM** — `http://localhost:8000`
 
-### SSE Event Flow
+### SSE Flow
 
-```
-POST /v1/chat/completions (stream: true)
-  ↓
-data: {"choices":[{"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
-  → StreamEvent::TextDelta("Hello")
+OpenAI streams `choices[0].delta` objects. Key differences from Anthropic:
 
-data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",
-        "function":{"name":"bash","arguments":""}}]},"finish_reason":null}]}
-  → StreamEvent::ToolUseStart { id: "call_1", name: "bash" }
-
-data: {"choices":[{"delta":{"tool_calls":[{"index":0,
-        "function":{"arguments":"{\"command\":"}}]},"finish_reason":null}]}
-  → StreamEvent::ToolUseInputDelta("{\"command\":")
-
-...more argument fragments...
-
-data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
-  → flush accumulated tool calls → StreamEvent::ToolUseComplete(s)
-  → StreamEvent::MessageComplete { stop_reason: ToolUse }
-
-data: [DONE]
-```
-
-### Key Differences from Anthropic
-
-1. **Tool calls are separate from content** — OpenAI puts them in
-   `delta.tool_calls[]`, not in the content array.  Tool calls are indexed
-   by position in the array, not by content block index.
-
-2. **Tool calls flush on finish_reason** — Anthropic emits `content_block_stop`
-   per block.  OpenAI accumulates all tool calls and flushes them when
-   `finish_reason: "tool_calls"` arrives.
-
-3. **Tool results use role "tool"** — Anthropic puts tool results in
-   `role: "user"` messages.  OpenAI has a dedicated `role: "tool"` with a
-   `tool_call_id` field.  The `message_to_openai()` function handles this
-   conversion.
+- Tool calls live in `delta.tool_calls[]` (not content blocks), indexed by position
+- All tool calls flush when `finish_reason: "tool_calls"` arrives (no per-block stop events)
+- Stream ends with `data: [DONE]` sentinel
 
 ### Message Serialization
 
-`message_to_openai()` in `src/llm/openai.rs`:
-
 | Internal | OpenAI wire format |
 |----------|-------------------|
-| `Role::User` + `Text` | `{"role":"user","content":"..."}` |
-| `Role::Assistant` + `ToolUse` | `{"role":"assistant","content":null,"tool_calls":[...]}` |
-| `Role::User` + `ToolResult` | `{"role":"tool","tool_call_id":"...","content":"..."}` |
+| `User` + `Text` | `{"role":"user","content":"..."}` |
+| `Assistant` + `ToolUse` | `{"role":"assistant","tool_calls":[...]}` |
+| `User` + `ToolResult` | `{"role":"tool","tool_call_id":"...","content":"..."}` |
 
 ---
 
@@ -209,43 +131,11 @@ data: [DONE]
 
 `ClaudeCodeClient` in `src/llm/claude_code.rs`.
 
-Unlike Anthropic and OpenAI, Claude Code is not a raw API — it's a full agent
-with its own tool-use loop.  Dyson spawns `claude -p --output-format stream-json`
-as a subprocess and streams the output.
+A full agent, not a raw API. Dyson spawns `claude -p --output-format stream-json` as a subprocess. Claude Code has built-in tools (Bash, Read, Write, Edit, etc.) and executes them internally — Dyson displays ToolUse events but does not re-execute them (`handles_tools_internally() = true`).
 
-### Key difference: internal tool execution
+**Workspace via MCP:** Dyson starts an in-process MCP server with bearer token auth and passes it to Claude Code via `--mcp-config`, giving it access to workspace tools. See [Tool Forwarding over MCP](tool-forwarding-over-mcp.md).
 
-Claude Code has built-in tools (Bash, Read, Write, Edit, Grep, etc.) and
-executes them inside its own subprocess.  The streaming output includes
-ToolUse events for these internal calls, but they are **informational only**.
-Dyson displays them to the user (so they can see what Claude Code is doing)
-but does not re-execute them.
-
-This is controlled by `handles_tools_internally()` returning `true`.  The
-agent loop checks this flag and:
-- Skips sending Dyson's tool definitions (Claude Code has its own)
-- Breaks after one iteration regardless of tool_calls in the stream
-
-Without this, Dyson would see the internal tool calls, try to execute them
-(failing because they're not in Dyson's tool registry), and loop up to
-`max_iterations` times — spawning a new `claude -p` process each iteration.
-
-### Workspace via MCP
-
-When a workspace is configured, Dyson starts an in-process HTTP MCP server
-(`McpHttpServer` in `src/skill/mcp/serve.rs`) and passes the connection URL
-to Claude Code via `--mcp-config`.  The server requires bearer token
-authentication — a 64-char hex token is generated per LLM turn and included
-in the MCP config's `headers`.  This gives Claude Code access to
-`workspace_view`, `workspace_search`, and `workspace_update` as native MCP
-tools.  See [Tool Forwarding over MCP](tool-forwarding-over-mcp.md) for
-details.
-
-### Conversation history
-
-The `claude -p` command is stateless — each invocation is a fresh session.
-For multi-turn context, Dyson formats the entire conversation history into
-a single text prompt via the shared `format_prompt()` utility in `llm/mod.rs`.
+**History:** `claude -p` is stateless — Dyson formats conversation history into a single prompt via `format_prompt()`.
 
 ---
 
@@ -253,99 +143,21 @@ a single text prompt via the shared `format_prompt()` utility in `llm/mod.rs`.
 
 `CodexClient` in `src/llm/codex.rs`.
 
-Similar to Claude Code, Codex is a full agent with its own tool-use loop.
-Dyson spawns `codex exec --json` as a subprocess and streams JSONL events.
-
-### Sandbox gating
-
-Codex has two approval modes:
-- **`--full-auto`** (default) — skips approval prompts but keeps Codex's
-  workspace sandbox active
-- **`--dangerously-bypass-approvals-and-sandbox`** — only used when Dyson's
-  `--dangerous-no-sandbox` flag is set
-
-### Workspace via MCP
-
-When a workspace is configured, Dyson starts an in-process HTTP MCP server
-and registers it with Codex via `-c mcp_servers.dyson-workspace.url=<url>`
-config override.
-
-### Conversation history
-
-Like Claude Code, `codex exec` is stateless.  Multi-turn context uses the
-same shared `format_prompt()` utility.
+Same pattern as Claude Code — spawns `codex exec --json` as a subprocess with `handles_tools_internally() = true`. Uses `--full-auto` by default; `--dangerously-bypass-approvals-and-sandbox` only when Dyson's `--dangerous-no-sandbox` is set. Workspace MCP and stateless history work the same way.
 
 ---
 
 ## Thinking / Reasoning Tokens
 
-Some models emit internal reasoning tokens before the visible response:
-- **Anthropic** (extended thinking): `content_block_start` with type `"thinking"`,
-  followed by `thinking_delta` events
-- **OpenAI** (o-series, DeepSeek): `reasoning_content` field in the delta object
-
-Dyson captures these as `StreamEvent::ThinkingDelta` and **logs them** at
-debug level (`tracing::debug!`) but does **not** send them to the user via
-the `Output` trait.  This means:
-
-- Terminal and Telegram users see only the final response
-- Developers can inspect thinking by running with `RUST_LOG=debug`
-- The thinking tokens are not included in conversation history messages
-
-All four LLM clients (Anthropic, OpenAI, Claude Code, Codex) handle thinking tokens.
+Some models emit reasoning tokens (Anthropic's extended thinking, OpenAI's o-series). Captured as `StreamEvent::ThinkingDelta`, logged at `debug` level, **not** sent to output or included in conversation history. Inspect with `RUST_LOG=debug`.
 
 ---
 
 ## Provider Selection
 
-The provider is selected via CLI flags or config:
+Select via `--provider` CLI flag or `agent.provider` in `dyson.json`. API keys resolve from env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`); CLI providers need none.
 
-```bash
-# Anthropic (default)
-dyson --dangerous-no-sandbox "hello"
-
-# OpenAI
-dyson --dangerous-no-sandbox --provider openai "hello"
-
-# Claude Code CLI
-dyson --dangerous-no-sandbox --provider claude-code "hello"
-
-# Codex CLI
-dyson --dangerous-no-sandbox --provider codex "hello"
-
-# Ollama (via OpenAI-compatible endpoint)
-dyson --dangerous-no-sandbox --provider openai --base-url http://localhost:11434 "hello"
-```
-
-Or in `dyson.json`:
-
-```json
-{
-  "agent": {
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-20250514"
-  }
-}
-```
-
-The API key is resolved from the provider-specific environment variable:
-- Anthropic: `ANTHROPIC_API_KEY`
-- OpenAI: `OPENAI_API_KEY`
-- Claude Code: no API key needed (uses CLI's stored auth)
-- Codex: no API key needed (uses CLI's stored auth)
-
----
-
-## Adding a New Provider
-
-1. Create `src/llm/my_provider.rs`
-2. Implement `LlmClient` — the only method is `stream()`
-3. Add a `MyProvider` variant to `LlmProvider` in `src/config/mod.rs`
-4. Wire it up in `create_client()` in `src/llm/mod.rs`
-
-The stream must emit `StreamEvent`s in the correct order.  The stream handler
-doesn't care about provider-specific details — it just pattern-matches on
-events.
+See [Adding a Provider](adding-a-provider.md) for the 3-step process.
 
 ---
 

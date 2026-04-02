@@ -171,11 +171,7 @@ LlmClient.stream()
 | `MessageComplete { stop_reason }` | SSE parser | stream_handler → flush text |
 | `Error(DysonError)` | SSE parser | stream_handler → return Err |
 
-The `ToolUseComplete` event is **synthetic** — it's not a direct SSE event.
-The LLM client accumulates `ToolUseInputDelta` fragments and emits
-`ToolUseComplete` when the content block finishes.  This keeps the stream
-handler simple: it just pattern-matches on events without tracking
-accumulation state.
+`ToolUseComplete` is synthetic — the LLM client accumulates `ToolUseInputDelta` fragments and emits `ToolUseComplete` when the block finishes, keeping the stream handler stateless.
 
 ---
 
@@ -196,42 +192,19 @@ enum DysonError {
 }
 ```
 
-**Error vs tool-level error:** `DysonError` means the tool couldn't run at
-all (can't spawn bash, network down).  `ToolOutput { is_error: true }` means
-the tool ran but the operation failed (command exited non-zero, file not
-found).  The LLM sees tool-level errors as `tool_result` blocks and can
-retry.  `DysonError` propagates up and may abort the turn.
+`DysonError` = tool couldn't run (infra failure, propagates up). `ToolOutput { is_error: true }` = tool ran but failed (LLM sees it, can retry).
 
 ---
 
 ## Key Design Decisions
 
-- **Stream everything.** The `LlmClient` trait returns a `Stream`.  Text
-  tokens go to the user immediately.  Tool calls are assembled from deltas
-  and dispatched when complete.  No buffering.
-
-- **MCP is not special.** MCP is implemented as `McpSkill` — just another
-  `Skill` impl.  The agent loop has zero awareness of MCP.  Dyson also
-  acts as an MCP *server* to expose workspace tools to Claude Code (with
-  bearer token auth).
-
-- **Skills own tools.** Every tool is registered through a skill.  The agent
-  has a flat `HashMap<String, Arc<dyn Tool>>` for O(1) dispatch, but skills
-  retain ownership for lifecycle management.
-
-- **Sandbox gates everything.** Every tool call goes through
-  `Sandbox.check()` before execution.  This is mandatory (not optional) —
-  `DangerousNoSandbox` is an explicit opt-out, not the absence of a sandbox.
-
-- **Config is parse-once, use-everywhere.** Foreign formats (Claude Desktop
-  JSON, Cursor's mcp.json) will parse into the same `Settings` struct.  The
-  agent never sees the original format.
-
-- **Async all the way down.** Tools, skills, sandbox, LLM client — all async.
-  The tokio runtime multiplexes I/O efficiently.
-
-- **The UI is a trait.** `Output` abstracts rendering.  Terminal, JSON, TUI,
-  websocket — all plug in without touching the agent.
+- **Stream everything** — text tokens go to the user immediately; no buffering
+- **MCP is not special** — `McpSkill` is just another `Skill` impl; Dyson also serves as an MCP server
+- **Skills own tools** — `Arc<dyn Tool>` shared via flat HashMap for O(1) dispatch
+- **Sandbox gates everything** — mandatory; `DangerousNoSandbox` is an explicit opt-out
+- **Config is parse-once** — all formats merge into one `Settings` struct
+- **Async all the way down** — tools, skills, sandbox, LLM client all async on tokio
+- **The UI is a trait** — `Output` abstracts rendering (terminal, JSON, TUI, websocket)
 
 ---
 

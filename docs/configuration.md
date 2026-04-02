@@ -318,22 +318,5 @@ for the SKILL.md format.
 
 ---
 
-## Future: Portable Config Loading
-
-Dyson will support loading MCP server definitions from other tools' config
-files:
-
-| Source | File | Status |
-|--------|------|--------|
-| Dyson native | `dyson.json` | Implemented |
-| Claude Desktop | `claude_desktop_config.json` | Planned |
-| Cursor | `.cursor/mcp.json` | Planned |
-| VS Code | `.vscode/mcp.json` | Planned |
-
-All formats parse into the same `Settings` struct.  The agent never knows
-which format was originally used.
-
----
-
 See also: [Architecture Overview](architecture-overview.md) ·
 [LLM Clients](llm-clients.md) · [Tools & Skills](tools-and-skills.md)

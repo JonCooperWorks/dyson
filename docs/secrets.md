@@ -117,23 +117,7 @@ two schemes:
 
 ## InsecureEnvironmentVariable
 
-The default resolver.  Reads from `std::env::var()`.
-
-**The name is intentionally alarming.**  Environment variables are visible in
-`/proc/*/environ`, in shell history, in CI logs, and inherited by every child
-process the agent spawns.  This is fine for development.  In production, use
-a real secret manager.
-
-```rust
-pub struct InsecureEnvironmentVariable;
-
-impl SecretResolver for InsecureEnvironmentVariable {
-    fn resolve(&self, key: &str) -> Result<String> {
-        std::env::var(key)  // + error handling for empty/missing
-    }
-    fn scheme(&self) -> &str { "insecure_env" }
-}
-```
+The default resolver — reads from `std::env::var()`. The name is intentionally alarming: env vars are visible in `/proc/*/environ`, shell history, CI logs, and inherited by child processes. Fine for development; use a real secret manager in production.
 
 ---
 
@@ -143,73 +127,13 @@ impl SecretResolver for InsecureEnvironmentVariable {
 2. Implement `SecretResolver`
 3. Register it in `SecretRegistry::default()` or at startup
 
-Example skeleton for AWS SSM:
-
-```rust
-pub struct AwsSsmResolver {
-    client: aws_sdk_ssm::Client,
-}
-
-impl SecretResolver for AwsSsmResolver {
-    fn resolve(&self, key: &str) -> Result<String> {
-        // key is the SSM parameter path, e.g. "/dyson/api-key"
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            self.client
-                .get_parameter()
-                .name(key)
-                .with_decryption(true)
-                .send()
-                .await
-                .map(|out| out.parameter().unwrap().value().unwrap().to_string())
-                .map_err(|e| DysonError::Config(format!("SSM error: {e}")))
-        })
-    }
-
-    fn scheme(&self) -> &str { "ssm" }
-}
-```
-
-Then in config:
-```json
-{
-  "providers": {
-    "claude": {
-      "type": "anthropic",
-      "api_key": "ssm:/production/anthropic-api-key"
-    }
-  }
-}
-```
+Implement `SecretResolver` (two methods: `resolve(key)` and `scheme()`), then register in `SecretRegistry::default()`. Config usage: `"api_key": "ssm:/production/anthropic-api-key"`.
 
 ---
 
-## How Secrets Flow Through Config Loading
+## Config Loading Flow
 
-```
-dyson.json loaded
-  │
-  ▼
-SecretRegistry::default()
-  │  registers: "insecure_env" → InsecureEnvironmentVariable
-  │  registers: "env" → InsecureEnvironmentVariable (alias)
-  │
-  ▼
-build_settings(json_root, &secrets)
-  │
-  ├── provider api_key = { "resolver": "insecure_env", "name": "ANTHROPIC_API_KEY" }
-  │     → secrets.resolve(SecretValue::Reference { ... })
-  │     → InsecureEnvironmentVariable.resolve("ANTHROPIC_API_KEY")
-  │     → "sk-ant-..."
-  │
-  ├── controller config has secret references
-  │     → resolve_secrets_in_value() walks the JSON tree
-  │     → resolves each { "resolver": ..., "name": ... } object in place
-  │
-  └── provider api_key absent
-        → resolve_with_env_fallback("", "ANTHROPIC_API_KEY")
-        → std::env::var("ANTHROPIC_API_KEY")
-```
+At load time, `build_settings()` walks the JSON tree and resolves each `{ "resolver": ..., "name": ... }` object via the `SecretRegistry`. For API-based providers, missing keys fall back to the provider-specific env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 
 ---
 

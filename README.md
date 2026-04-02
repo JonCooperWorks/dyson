@@ -14,13 +14,10 @@ The goal isn't to replace Claude Code or Cursor — it's to demystify how agent 
 
 ## Inspired by
 
-Dyson is heavily inspired by two projects that are worth checking out if you want something production-ready:
+- **[OpenClaw](https://github.com/openclaw/openclaw)** — Multi-channel AI assistant. Dyson's controller architecture and workspace format come from OpenClaw.
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — Self-improving agent from [Nous Research](https://nousresearch.com/). Dyson's memory system is modeled after Hermes.
 
-- **[OpenClaw](https://github.com/openclaw/openclaw)** — A personal AI assistant that runs on your own hardware with support for dozens of channels (Telegram, Slack, Discord, WhatsApp, Signal, etc.), browser control, a skill registry, and voice. Dyson's multi-controller architecture and workspace file format come directly from how OpenClaw handles channels and agent identity.
-
-- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — An agent framework from [Nous Research](https://nousresearch.com/) with a well-thought-out memory system: agent-curated journals, persistent identity files, periodic nudges, and full-text search. Dyson's memory architecture is modeled after Hermes, and the workspace format is compatible with the OpenClaw format that Hermes uses.
-
-If you want a production-ready agent, start with one of those. If you want to understand what's happening inside the loop and how to secure it, that's what Dyson is for.
+For a production agent, start with one of those. For understanding the loop and securing it, that's Dyson.
 
 ## What you learn by reading this codebase
 
@@ -111,100 +108,30 @@ The `--dangerous-no-sandbox` flag is required — it's an explicit acknowledgmen
 
 ## Configuration
 
-Dyson uses JSON config files (`dyson.json`). See the `examples/` folder for ready-to-use configs:
+Dyson uses JSON config files (`dyson.json`). See [`examples/`](examples/) for ready-to-use configs, or the full [Configuration](docs/configuration.md) docs.
 
-| Example | What it does |
-|---------|-------------|
-| [`examples/claude-code-telegram.json`](examples/claude-code-telegram.json) | Claude Code as LLM, Telegram bot, Context7 MCP server |
-| [`examples/local-llm-telegram.json`](examples/local-llm-telegram.json) | Local model (rLLM/Ollama) as LLM, Telegram bot |
-
-### Minimal config
+Minimal:
 
 ```json
-{
-  "agent": {
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-20250514"
-  }
-}
+{ "agent": { "provider": "anthropic", "model": "claude-sonnet-4-20250514" } }
 ```
 
-### Web search
-
-Give models access to web search by adding a `web_search` section. Supports
-Brave Search (API key required) and SearXNG (free public instances, no key):
+With web search, MCP, and Telegram:
 
 ```json
 {
-  "web_search": {
-    "provider": "searxng",
-    "base_url": "https://searx.be"
-  }
-}
-```
-
-Or with Brave Search:
-
-```json
-{
-  "web_search": {
-    "provider": "brave",
-    "api_key": { "resolver": "insecure_env", "name": "BRAVE_API_KEY" }
-  }
-}
-```
-
-The `web_search` tool only appears when configured — otherwise models don't see it.
-The search backend is a trait (`SearchProvider`), so adding new providers is straightforward.
-
-### Full config with MCP, Telegram, web search, and secrets
-
-```json
-{
-  "agent": {
-    "provider": "claude-code",
-    "model": "sonnet"
-  },
-  "web_search": {
-    "provider": "searxng",
-    "base_url": "https://searx.be"
-  },
+  "agent": { "provider": "claude-code", "model": "sonnet" },
+  "web_search": { "provider": "searxng", "base_url": "https://searx.be" },
   "mcp_servers": {
-    "context7": {
-      "url": "https://mcp.context7.com/mcp",
-      "headers": {
-        "CONTEXT7_API_KEY": {
-          "resolver": "insecure_env",
-          "name": "CONTEXT7_API_KEY"
-        }
-      }
-    }
+    "context7": { "url": "https://mcp.context7.com/mcp" }
   },
   "controllers": [
-    {
-      "type": "telegram",
-      "bot_token": { "resolver": "insecure_env", "name": "TELEGRAM_API_KEY" },
-      "allowed_chat_ids": [123456789]
-    }
-  ],
-  "skills": {
-    "builtin": {
-      "tools": ["bash"]
-    }
-  }
+    { "type": "telegram", "bot_token": { "resolver": "insecure_env", "name": "TELEGRAM_API_KEY" } }
+  ]
 }
 ```
 
-### Secrets
-
-Every secret can be a literal string or a resolver reference:
-
-```json
-"bot_token": "literal-token-here"
-"bot_token": { "resolver": "insecure_env", "name": "TELEGRAM_API_KEY" }
-```
-
-The `insecure_env` resolver reads from environment variables. Future resolvers: Vault, AWS SSM, 1Password CLI.
+Secrets can be literal strings or resolver references (`{ "resolver": "insecure_env", "name": "ENV_VAR" }`). See [Secrets](docs/secrets.md).
 
 ## Project structure
 

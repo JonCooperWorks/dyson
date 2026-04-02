@@ -64,35 +64,9 @@ Prevents runaway tool use by enforcing two constraints:
 | Per-turn limit | 50 calls per tool | Prevents infinite tool loops |
 | Cooldown | 1 second (0 for agent mode) | Rate-limits across turns |
 
-```rust
-pub struct ToolLimiter {
-    per_turn_limit: usize,
-    cooldown: Duration,
-    turn_counts: HashMap<String, usize>,
-    last_call: HashMap<String, Instant>,
-}
-```
+`check(tool_name)` enforces both constraints atomically — returns `Err` if either fails, otherwise increments the counter and records the timestamp.
 
-### How it works
-
-`check(tool_name)` does two things atomically:
-1. Checks if the per-turn count for this tool has reached the limit
-2. Checks if enough time has elapsed since the last call (cooldown)
-
-If either check fails, it returns `Err(DysonError::Tool { .. })`.  On success,
-it increments the counter and records the timestamp.
-
-### Agent vs external mode
-
-`ToolLimiter::for_agent()` creates a limiter with zero cooldown.  Within a
-single agent turn, multiple calls to the same tool (e.g., reading 10 files)
-should not be delayed by cooldown — that's what per-turn limits prevent.
-Cooldown is useful for rate-limiting external callers or cross-turn bursts.
-
-### Turn reset
-
-`reset_turn()` clears per-turn counters but preserves cooldown timestamps.
-Called at the end of each agent loop iteration.
+`ToolLimiter::for_agent()` uses zero cooldown (multiple same-tool calls within one turn are fine). `reset_turn()` clears per-turn counters at the end of each iteration.
 
 ---
 
@@ -166,27 +140,7 @@ Result: `[Parallel([0, 1]), Sequential([2])]`
 
 ## Stage 3: Execution
 
-The agent loop iterates through phases in order:
-
-```rust
-for phase in phases {
-    match phase {
-        ExecutionPhase::Parallel(indices) => {
-            let futs = indices.iter()
-                .map(|&idx| self.execute_tool_call_timed(call));
-            futures::future::join_all(futs).await;
-        }
-        ExecutionPhase::Sequential(indices) => {
-            for &idx in &indices {
-                self.execute_tool_call_timed(call).await;
-            }
-        }
-    }
-}
-```
-
-Each individual tool call still goes through the sandbox (`sandbox.check()`)
-before execution — dependency analysis doesn't bypass security.
+Phases execute in order: `Parallel` phases use `join_all()`, `Sequential` phases run one-by-one. Each call still goes through `sandbox.check()` — dependency analysis doesn't bypass security.
 
 ---
 
@@ -220,18 +174,7 @@ Lines containing any of these markers are extracted (up to 20):
 `Compiling`, `Finished`, `error`, `warning`, `Error`, `Warning`,
 `FAILED`, `PASSED`, `panic`, `thread '`
 
-### LLM message construction
-
-`FormattedResult.to_llm_message()` combines the summary, output content, and
-truncation notice into the string sent as the `tool_result` content block.
-This ensures the LLM sees both the metadata summary and the actual command
-output.
-
-### Truncation
-
-Outputs exceeding 30,000 characters are marked as truncated.  The
-`full_output_available` flag indicates the raw output can be retrieved
-separately if needed.
+`to_llm_message()` combines summary + output + truncation notice into the `tool_result` content. Outputs exceeding 30,000 characters are truncated.
 
 ---
 
@@ -265,35 +208,16 @@ pub enum HookDecision {
 | `PostToolUse` | Observational only — decisions ignored, all hooks called |
 | `PostToolUseFailure` | Observational only — decisions ignored, all hooks called |
 
-### Example hooks
+### Example: block dangerous commands
 
-**Block dangerous commands:**
 ```rust
 impl ToolHook for BlockDangerousHook {
     fn on_event(&self, event: &ToolHookEvent) -> HookDecision {
         if let ToolHookEvent::PreToolUse { call } = event {
             if let Some(cmd) = call.input.get("command").and_then(|v| v.as_str()) {
                 if cmd.contains("rm -rf") {
-                    return HookDecision::Block {
-                        reason: "dangerous command blocked".into(),
-                    };
+                    return HookDecision::Block { reason: "dangerous command blocked".into() };
                 }
-            }
-        }
-        HookDecision::Allow
-    }
-}
-```
-
-**Add timeout to bash calls:**
-```rust
-impl ToolHook for AddTimeoutHook {
-    fn on_event(&self, event: &ToolHookEvent) -> HookDecision {
-        if let ToolHookEvent::PreToolUse { call } = event {
-            if call.name == "bash" {
-                let mut input = call.input.clone();
-                input["timeout"] = json!(30);
-                return HookDecision::Modify { input };
             }
         }
         HookDecision::Allow
