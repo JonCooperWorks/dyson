@@ -321,28 +321,43 @@ pub fn resolve_and_validate_path(
         working_dir.join(user_path)
     };
 
-    let resolved = if candidate.exists() {
-        candidate
-            .canonicalize()
-            .map_err(|e| format!("cannot resolve path '{}': {e}", candidate.display()))?
-    } else {
-        // File does not exist yet — canonicalize the nearest existing ancestor.
-        let mut ancestor = candidate.clone();
-        loop {
-            if !ancestor.pop() {
-                // Reached filesystem root without finding an existing dir.
-                return Err(format!("no existing ancestor for '{user_path}'"));
+    // Try to canonicalize directly — eliminates TOCTOU race between
+    // exists() and canonicalize() by going straight to the syscall.
+    let resolved = match candidate.canonicalize() {
+        Ok(canon) => canon,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File does not exist yet — canonicalize the nearest existing ancestor.
+            let mut ancestor = candidate.clone();
+            loop {
+                if !ancestor.pop() {
+                    // Reached filesystem root without finding an existing dir.
+                    return Err(format!("no existing ancestor for '{user_path}'"));
+                }
+                match ancestor.canonicalize() {
+                    Ok(canon) => {
+                        // Re-append the remaining components.
+                        let suffix = candidate
+                            .strip_prefix(&ancestor)
+                            .map_err(|e| format!("path error: {e}"))?;
+                        break canon.join(suffix);
+                    }
+                    Err(ref inner) if inner.kind() == std::io::ErrorKind::NotFound => {
+                        continue; // ancestor doesn't exist either, keep popping
+                    }
+                    Err(inner) => {
+                        return Err(format!(
+                            "cannot resolve ancestor '{}': {inner}",
+                            ancestor.display()
+                        ));
+                    }
+                }
             }
-            if ancestor.exists() {
-                let canon = ancestor.canonicalize().map_err(|e| {
-                    format!("cannot resolve ancestor '{}': {e}", ancestor.display())
-                })?;
-                // Re-append the remaining components.
-                let suffix = candidate
-                    .strip_prefix(&ancestor)
-                    .map_err(|e| format!("path error: {e}"))?;
-                break canon.join(suffix);
-            }
+        }
+        Err(e) => {
+            return Err(format!(
+                "cannot resolve path '{}': {e}",
+                candidate.display()
+            ))
         }
     };
 

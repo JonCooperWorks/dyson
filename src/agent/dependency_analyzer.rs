@@ -219,13 +219,30 @@ fn extract_resources(call: &ToolCall) -> Vec<ResourceAccess> {
 /// - `earlier` writes to a resource that `later` reads or writes (WAR, WAW)
 /// - `earlier` reads a resource that `later` writes (RAW) — to preserve ordering
 fn has_dependency(earlier: &[ResourceAccess], later: &[ResourceAccess]) -> bool {
-    for e in earlier {
-        for l in later {
-            if e.resource == l.resource {
-                // Any combination where at least one is a write creates a dependency.
-                if e.kind == AccessKind::Write || l.kind == AccessKind::Write {
-                    return true;
-                }
+    use std::collections::HashSet;
+
+    // Build sets for O(1) lookup instead of O(n*m) nested iteration.
+    let earlier_writes: HashSet<&Resource> = earlier
+        .iter()
+        .filter(|a| a.kind == AccessKind::Write)
+        .map(|a| &a.resource)
+        .collect();
+    let earlier_reads: HashSet<&Resource> = earlier
+        .iter()
+        .filter(|a| a.kind == AccessKind::Read)
+        .map(|a| &a.resource)
+        .collect();
+
+    for l in later {
+        if l.kind == AccessKind::Write {
+            // RAW or WAW: earlier read or wrote this resource.
+            if earlier_writes.contains(&l.resource) || earlier_reads.contains(&l.resource) {
+                return true;
+            }
+        } else {
+            // WAR: earlier wrote to resource that later reads.
+            if earlier_writes.contains(&l.resource) {
+                return true;
             }
         }
     }

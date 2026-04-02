@@ -303,17 +303,17 @@ impl super::Agent {
     /// - A `ToolResult` in the tail whose `ToolUse` was in the middle now
     ///   has no matching call.  We remove it.
     pub(super) fn fix_orphaned_tool_pairs(&mut self) {
-        use std::collections::HashSet;
+        use std::collections::{HashMap, HashSet};
 
-        // Collect all tool_use IDs and tool_result IDs.
-        let mut tool_use_ids = HashSet::new();
-        let mut tool_result_ids = HashSet::new();
+        // Collect all tool_use IDs (with positions) and tool_result IDs.
+        let mut tool_use_positions: HashMap<String, usize> = HashMap::new();
+        let mut tool_result_ids: HashSet<String> = HashSet::new();
 
-        for msg in &self.messages {
+        for (pos, msg) in self.messages.iter().enumerate() {
             for block in &msg.content {
                 match block {
                     ContentBlock::ToolUse { id, .. } => {
-                        tool_use_ids.insert(id.clone());
+                        tool_use_positions.insert(id.clone(), pos);
                     }
                     ContentBlock::ToolResult { tool_use_id, .. } => {
                         tool_result_ids.insert(tool_use_id.clone());
@@ -323,29 +323,32 @@ impl super::Agent {
             }
         }
 
-        // Find orphaned tool_use IDs (no matching result).
-        let orphaned_uses: Vec<String> =
-            tool_use_ids.difference(&tool_result_ids).cloned().collect();
+        // Find orphaned tool_use IDs (no matching result) with their positions.
+        let mut orphaned_uses: Vec<(String, usize)> = tool_use_positions
+            .iter()
+            .filter(|(id, _)| !tool_result_ids.contains(id.as_str()))
+            .map(|(id, &pos)| (id.clone(), pos))
+            .collect();
 
         // Find orphaned tool_result IDs (no matching use).
-        let orphaned_results: HashSet<String> =
-            tool_result_ids.difference(&tool_use_ids).cloned().collect();
+        let tool_use_ids: HashSet<&str> =
+            tool_use_positions.keys().map(|s| s.as_str()).collect();
+        let orphaned_results: HashSet<String> = tool_result_ids
+            .iter()
+            .filter(|id| !tool_use_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
 
         // Insert synthetic results for orphaned uses.
-        // Place them right after the message containing the tool_use.
-        for orphan_id in &orphaned_uses {
-            if let Some(pos) = self.messages.iter().position(|m| {
-                m.content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == orphan_id))
-            }) {
-                let synthetic = Message::tool_result(
-                    orphan_id,
-                    "[result included in context summary]",
-                    false,
-                );
-                self.messages.insert(pos + 1, synthetic);
-            }
+        // Sort by descending position so earlier inserts don't shift later indices.
+        orphaned_uses.sort_by(|a, b| b.1.cmp(&a.1));
+        for (orphan_id, pos) in &orphaned_uses {
+            let synthetic = Message::tool_result(
+                orphan_id,
+                "[result included in context summary]",
+                false,
+            );
+            self.messages.insert(pos + 1, synthetic);
         }
 
         // Remove orphaned results (results whose tool_use was in the middle).
@@ -367,17 +370,6 @@ impl super::Agent {
 
         let message_tokens: usize = self.messages.iter().map(|m| m.estimate_tokens()).sum();
 
-        let tool_tokens: usize = self
-            .tool_definitions
-            .iter()
-            .map(|t| {
-                t.name.split_whitespace().count()
-                    + t.description.split_whitespace().count()
-                    + t.input_schema.to_string().split_whitespace().count()
-                    + 10 // per-tool JSON framing overhead
-            })
-            .sum();
-
-        system_tokens + message_tokens + tool_tokens
+        system_tokens + message_tokens + self.cached_tool_tokens
     }
 }

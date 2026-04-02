@@ -50,19 +50,25 @@ pub struct FormattedResult {
 impl FormattedResult {
     /// Render this result into a string suitable for the LLM's tool_result message.
     pub fn to_llm_message(&self) -> String {
-        let mut parts = Vec::new();
-        parts.push(self.summary.clone());
-
-        // Include the actual output so the LLM can see command results.
+        let extra = if self.output.is_empty() {
+            0
+        } else {
+            1 + self.output.len()
+        } + if self.truncated {
+            "\n[output truncated]".len()
+        } else {
+            0
+        };
+        let mut result = String::with_capacity(self.summary.len() + extra);
+        result.push_str(&self.summary);
         if !self.output.is_empty() {
-            parts.push(self.output.clone());
+            result.push('\n');
+            result.push_str(&self.output);
         }
-
         if self.truncated {
-            parts.push("[output truncated]".to_string());
+            result.push_str("\n[output truncated]");
         }
-
-        parts.join("\n")
+        result
     }
 }
 

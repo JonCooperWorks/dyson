@@ -181,6 +181,11 @@ pub struct Agent {
     /// Structured result formatter for LLM-optimized tool output.
     formatter: ResultFormatter,
 
+    /// Cached sum of estimated tokens for all tool definitions.
+    /// Tool definitions are immutable after construction, so this is computed
+    /// once in `new()` and reused in `estimate_context_tokens()`.
+    cached_tool_tokens: usize,
+
     /// Retained so the background learning task can build its own LLM
     /// client without sharing the agent's.
     agent_settings: crate::config::AgentSettings,
@@ -238,6 +243,17 @@ impl Agent {
                 tool_to_skill.insert(name, skill_idx);
             }
         }
+
+        // Pre-compute tool definition token estimate (immutable after construction).
+        let cached_tool_tokens: usize = tool_definitions
+            .iter()
+            .map(|t| {
+                t.name.split_whitespace().count()
+                    + t.description.split_whitespace().count()
+                    + t.input_schema.to_string().split_whitespace().count()
+                    + 10 // per-tool JSON framing overhead
+            })
+            .sum();
 
         tracing::info!(
             tool_count = tools.len(),
@@ -314,6 +330,7 @@ impl Agent {
             compaction_config: settings.compaction,
             limiter: ToolLimiter::for_agent(),
             formatter: ResultFormatter::default(),
+            cached_tool_tokens,
             agent_settings: settings.clone(),
             tools_disabled: false,
             message_rate_limiter: settings.rate_limit.as_ref().map(|rl| {
@@ -503,7 +520,8 @@ impl Agent {
             }
         }
 
-        // Build the full turn system prompt, only allocating if skills injected fragments.
+        // Build the full turn system prompt, only allocating a new String
+        // when skills injected per-turn fragments (the uncommon case).
         let turn_system_prompt = if skill_fragments.is_empty() {
             self.system_prompt.clone()
         } else {

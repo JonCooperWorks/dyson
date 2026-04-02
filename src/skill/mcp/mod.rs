@@ -336,8 +336,13 @@ impl Tool for McpRemoteTool {
                 McpContent::Text { text } => Some(text.as_str()),
                 McpContent::Unknown => None,
             })
-            .collect::<Vec<_>>()
-            .join("\n");
+            .fold(String::new(), |mut acc, s| {
+                if !acc.is_empty() {
+                    acc.push('\n');
+                }
+                acc.push_str(s);
+                acc
+            });
 
         Ok(ToolOutput {
             content,
