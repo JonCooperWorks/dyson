@@ -412,7 +412,6 @@ impl super::Controller for TelegramController {
                             ca.agent.clear();
                         }
                     }
-                    agents.lock().await.remove(&chat_id.0);
                     let _ = chat_store.rotate(&chat_id.0.to_string());
                     let _ = bot.send_message(chat_id, "Context cleared.").await;
                     tracing::info!(chat_id = chat_id.0, "conversation rotated and cleared");

@@ -124,6 +124,7 @@ pub fn classify_llm_error(err: &str) -> LlmErrorKind {
     } else if err.contains("image input")
         || err.contains("vision")
         || err.contains("No endpoints found")
+        || err.contains("image(s) may be provided")
     {
         LlmErrorKind::NoVision
     } else {
@@ -208,6 +209,10 @@ mod tests {
         assert_eq!(classify_llm_error("does not support image input"), LlmErrorKind::NoVision);
         assert_eq!(classify_llm_error("vision not supported"), LlmErrorKind::NoVision);
         assert_eq!(classify_llm_error("No endpoints found"), LlmErrorKind::NoVision);
+        assert_eq!(
+            classify_llm_error("At most 0 image(s) may be provided in one prompt."),
+            LlmErrorKind::NoVision
+        );
     }
 
     #[test]
