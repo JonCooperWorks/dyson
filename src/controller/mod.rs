@@ -387,6 +387,20 @@ pub trait Output: Send {
     /// An error occurred.
     fn error(&mut self, error: &DysonError) -> std::result::Result<(), DysonError>;
 
+    /// Called when the LLM returns a non-retryable error during the agent loop.
+    ///
+    /// The controller inspects the error and returns a [`LlmRecovery`] action
+    /// telling the agent loop how to proceed.  The default implementation
+    /// returns [`LlmRecovery::GiveUp`], which propagates the error to the
+    /// caller unchanged.
+    ///
+    /// Controllers may use this hook to send user-facing messages (e.g.
+    /// "model doesn't support tools") before returning a recovery action.
+    fn on_llm_error(&mut self, error: &DysonError) -> crate::error::LlmRecovery {
+        let _ = error;
+        crate::error::LlmRecovery::GiveUp
+    }
+
     /// Flush any buffered output.
     fn flush(&mut self) -> std::result::Result<(), DysonError>;
 }

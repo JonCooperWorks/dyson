@@ -52,7 +52,7 @@ use serde::Deserialize;
 
 use crate::config::{ControllerConfig, Settings};
 use crate::controller::Output;
-use crate::error::DysonError;
+use crate::error::{classify_llm_error, DysonError, LlmErrorKind, LlmRecovery};
 use crate::media;
 use crate::message::ContentBlock;
 use crate::tool::ToolOutput;
@@ -425,7 +425,7 @@ impl super::Controller for TelegramController {
                 if text == "/compact" {
                     let mut agents_map = agents.lock().await;
                     if let Some(ca) = agents_map.get_mut(&chat_id.0) {
-                        let mut output = TelegramOutput::new(bot.clone(), chat_id);
+                        let mut output = TelegramOutput::new(bot.clone(), chat_id, true);
                         match ca.agent.compact(&mut output).await {
                             Ok(()) => {
                                 let chat_key = chat_id.0.to_string();
@@ -656,7 +656,8 @@ impl super::Controller for TelegramController {
                         .get_mut(&chat_id.0)
                         .expect("agent must exist — just inserted above");
 
-                    let mut output = TelegramOutput::new(bot_clone.clone(), chat_id);
+                    let mut output =
+                        TelegramOutput::new(bot_clone.clone(), chat_id, !text.is_empty());
 
                     // Run the agent.
                     let has_non_text = content_blocks
@@ -669,68 +670,8 @@ impl super::Controller for TelegramController {
                     };
 
                     if let Err(e) = result {
-                        match classify_llm_error(&e.to_string()) {
-                            LlmErrorKind::NoToolUse => {
-                                tracing::warn!(error = %e, "model does not support tool use");
-
-                                // Undo the failed user message, disable tools
-                                // for this agent, and convert existing tool
-                                // blocks in history to text so the provider
-                                // doesn't reject them.
-                                ca.agent.pop_last_message();
-                                ca.agent.disable_tools();
-                                ca.agent.strip_tool_history();
-
-                                let _ = bot_clone
-                                    .send_message(
-                                        chat_id,
-                                        format!("{} doesn't support tool use", ca.model),
-                                    )
-                                    .await;
-
-                                // Retry the user's message without tools.
-                                if !text.is_empty()
-                                    && let Err(e) = ca.agent.run(&text, &mut output).await
-                                {
-                                    tracing::error!(error = %e, "tool-less retry failed");
-                                    let _ = bot_clone
-                                        .send_message(chat_id, format!("Error: {e}"))
-                                        .await;
-                                }
-                            }
-                            LlmErrorKind::NoVision => {
-                                tracing::warn!(error = %e, "model does not support image input");
-
-                                // Undo the failed user message and strip all
-                                // images from history so old vision-model images
-                                // don't poison subsequent turns.
-                                ca.agent.pop_last_message();
-                                ca.agent.strip_images();
-
-                                let _ = bot_clone
-                                    .send_message(
-                                        chat_id,
-                                        format!("{} doesn't support vision", ca.model),
-                                    )
-                                    .await;
-
-                                // If there was a caption, retry with just the text.
-                                if !text.is_empty()
-                                    && let Err(e) = ca.agent.run(&text, &mut output).await
-                                {
-                                    tracing::error!(error = %e, "text-only retry failed");
-                                    let _ = bot_clone
-                                        .send_message(chat_id, format!("Error: {e}"))
-                                        .await;
-                                }
-                            }
-                            LlmErrorKind::Other => {
-                                tracing::error!(error = %e, "agent run failed");
-                                let _ = bot_clone
-                                    .send_message(chat_id, format!("Error: {e}"))
-                                    .await;
-                            }
-                        }
+                        tracing::error!(error = %e, "agent run failed");
+                        // Error already rendered to user via on_llm_error hook.
                     }
 
                     // Persist conversation history to disk after each turn.
@@ -798,29 +739,6 @@ fn save_memory_note(settings: &Settings, note: &str) -> crate::Result<()> {
 // ---------------------------------------------------------------------------
 // Media extraction helpers
 // ---------------------------------------------------------------------------
-
-/// Categorise an LLM error so the controller can attempt recovery.
-enum LlmErrorKind {
-    /// The model doesn't support tool/function calling.
-    NoToolUse,
-    /// The model doesn't support image/vision input.
-    NoVision,
-    /// Any other (unrecoverable) error.
-    Other,
-}
-
-fn classify_llm_error(err: &str) -> LlmErrorKind {
-    if err.contains("tool use") || err.contains("tool_use") {
-        LlmErrorKind::NoToolUse
-    } else if err.contains("image input")
-        || err.contains("vision")
-        || err.contains("No endpoints found")
-    {
-        LlmErrorKind::NoVision
-    } else {
-        LlmErrorKind::Other
-    }
-}
 
 /// Extract content blocks from a Telegram message.
 ///
@@ -1010,15 +928,19 @@ pub struct TelegramOutput {
     current_message_id: Option<MessageId>,
     last_edit: Instant,
     rt: tokio::runtime::Handle,
+    /// Whether the current user message contains text (used by
+    /// [`on_llm_error`] to decide if a vision-less retry is worthwhile).
+    has_text: bool,
 }
 
 impl TelegramOutput {
-    pub fn new(bot: Bot, chat_id: ChatId) -> Self {
+    pub fn new(bot: Bot, chat_id: ChatId, has_text: bool) -> Self {
         Self {
             bot,
             chat_id,
             text_buffer: String::new(),
             current_message_id: None,
+            has_text,
             last_edit: Instant::now(),
             rt: tokio::runtime::Handle::current(),
         }
@@ -1176,6 +1098,32 @@ impl Output for TelegramOutput {
         let text = format!("❌ Error: {error}");
         self.send_message(&text)?;
         Ok(())
+    }
+
+    fn on_llm_error(&mut self, error: &DysonError) -> LlmRecovery {
+        match classify_llm_error(&error.to_string()) {
+            LlmErrorKind::NoToolUse => {
+                let _ = self
+                    .send_message("⚠️ Model doesn't support tool use — retrying without tools.");
+                LlmRecovery::RetryWithoutTools
+            }
+            LlmErrorKind::NoVision if self.has_text => {
+                let _ = self
+                    .send_message("⚠️ Model doesn't support vision — retrying with text only.");
+                LlmRecovery::RetryWithoutImages
+            }
+            LlmErrorKind::NoVision => {
+                let _ = self.send_message("⚠️ Model doesn't support vision.");
+                let escaped = escape_html(&error.to_string());
+                let _ = self.send_message(&format!("<pre>{escaped}</pre>"));
+                LlmRecovery::GiveUp
+            }
+            LlmErrorKind::Other => {
+                let escaped = escape_html(&error.to_string());
+                let _ = self.send_message(&format!("❌ Error:\n<pre>{escaped}</pre>"));
+                LlmRecovery::GiveUp
+            }
+        }
     }
 
     fn flush(&mut self) -> Result<(), DysonError> {

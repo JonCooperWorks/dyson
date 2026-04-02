@@ -85,6 +85,49 @@ pub enum DysonError {
 }
 
 // ---------------------------------------------------------------------------
+// LLM error recovery
+// ---------------------------------------------------------------------------
+
+/// Recovery action a controller requests after an LLM error.
+///
+/// Returned by [`Output::on_llm_error`] to tell the agent loop how to
+/// proceed when a non-retryable LLM error occurs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmRecovery {
+    /// Abandon this turn — propagate the error to the caller.
+    GiveUp,
+    /// Disable tools, strip tool history, and retry the user message.
+    RetryWithoutTools,
+    /// Strip images from history and retry the user message.
+    RetryWithoutImages,
+}
+
+/// Coarse classification of an LLM error for recovery decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmErrorKind {
+    /// The model doesn't support tool/function calling.
+    NoToolUse,
+    /// The model doesn't support image/vision input.
+    NoVision,
+    /// Any other (unrecoverable) error.
+    Other,
+}
+
+/// Classify an LLM error string so controllers can decide on recovery.
+pub fn classify_llm_error(err: &str) -> LlmErrorKind {
+    if err.contains("tool use") || err.contains("tool_use") {
+        LlmErrorKind::NoToolUse
+    } else if err.contains("image input")
+        || err.contains("vision")
+        || err.contains("No endpoints found")
+    {
+        LlmErrorKind::NoVision
+    } else {
+        LlmErrorKind::Other
+    }
+}
+
+// ---------------------------------------------------------------------------
 // From impls for types that don't use #[from]
 // ---------------------------------------------------------------------------
 
@@ -148,5 +191,24 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
         let dyson_err: DysonError = io_err.into();
         assert!(dyson_err.to_string().contains("gone"));
+    }
+
+    #[test]
+    fn classify_llm_error_detects_no_tool_use() {
+        assert_eq!(classify_llm_error("does not support tool use"), LlmErrorKind::NoToolUse);
+        assert_eq!(classify_llm_error("tool_use not available"), LlmErrorKind::NoToolUse);
+    }
+
+    #[test]
+    fn classify_llm_error_detects_no_vision() {
+        assert_eq!(classify_llm_error("does not support image input"), LlmErrorKind::NoVision);
+        assert_eq!(classify_llm_error("vision not supported"), LlmErrorKind::NoVision);
+        assert_eq!(classify_llm_error("No endpoints found"), LlmErrorKind::NoVision);
+    }
+
+    #[test]
+    fn classify_llm_error_defaults_to_other() {
+        assert_eq!(classify_llm_error("rate limited"), LlmErrorKind::Other);
+        assert_eq!(classify_llm_error("internal server error"), LlmErrorKind::Other);
     }
 }

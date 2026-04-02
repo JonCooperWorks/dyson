@@ -80,7 +80,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::{AgentSettings, CompactionConfig};
 use crate::controller::Output;
 use crate::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
-use crate::error::{DysonError, Result};
+use crate::error::{DysonError, LlmRecovery, Result};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use crate::message::{ContentBlock, Message};
 use crate::result_formatter::ResultFormatter;
@@ -954,6 +954,8 @@ impl Agent {
             }
         }
 
+        let mut recovered_this_turn = false;
+
         for iteration in 0..self.max_iterations {
             // -- Auto-compact if estimated context tokens exceed threshold --
             //
@@ -997,6 +999,7 @@ impl Agent {
             let response = {
                 let mut last_err = None;
                 let mut response_opt = None;
+                let mut recovery: Option<LlmRecovery> = None;
                 for attempt in 0..=self.max_retries {
                     // Determine tools_for_llm inside the loop so retries
                     // behave identically.  On the first successful response
@@ -1035,9 +1038,46 @@ impl Agent {
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                             last_err = Some(e);
                         }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            // Non-retryable error — ask the controller for a
+                            // recovery decision.  Only allow one recovery per
+                            // turn to prevent infinite loops.
+                            if recovered_this_turn {
+                                return Err(e);
+                            }
+                            let action = output.on_llm_error(&e);
+                            if action == LlmRecovery::GiveUp {
+                                return Err(e);
+                            }
+                            recovery = Some(action);
+                            break;
+                        }
                     }
                 }
+
+                // If the controller requested recovery, apply it and retry
+                // the turn from the top of the outer iteration loop.
+                if let Some(action) = recovery {
+                    let user_msg = self.pop_last_message();
+                    match action {
+                        LlmRecovery::RetryWithoutTools => {
+                            tracing::warn!("controller requested retry without tools");
+                            self.disable_tools();
+                            self.strip_tool_history();
+                        }
+                        LlmRecovery::RetryWithoutImages => {
+                            tracing::warn!("controller requested retry without images");
+                            self.strip_images();
+                        }
+                        LlmRecovery::GiveUp => unreachable!(),
+                    }
+                    if let Some(msg) = user_msg {
+                        self.messages.push(msg);
+                    }
+                    recovered_this_turn = true;
+                    continue;
+                }
+
                 response_opt.ok_or_else(|| last_err.unwrap())?
             };
 
