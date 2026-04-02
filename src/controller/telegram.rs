@@ -52,7 +52,7 @@ use serde::Deserialize;
 
 use crate::config::{ControllerConfig, Settings};
 use crate::controller::Output;
-use crate::error::DysonError;
+use crate::error::{classify_llm_error, DysonError, LlmErrorKind, LlmRecovery};
 use crate::media;
 use crate::message::ContentBlock;
 use crate::tool::ToolOutput;
@@ -669,68 +669,8 @@ impl super::Controller for TelegramController {
                     };
 
                     if let Err(e) = result {
-                        match classify_llm_error(&e.to_string()) {
-                            LlmErrorKind::NoToolUse => {
-                                tracing::warn!(error = %e, "model does not support tool use");
-
-                                // Undo the failed user message, disable tools
-                                // for this agent, and convert existing tool
-                                // blocks in history to text so the provider
-                                // doesn't reject them.
-                                ca.agent.pop_last_message();
-                                ca.agent.disable_tools();
-                                ca.agent.strip_tool_history();
-
-                                let _ = bot_clone
-                                    .send_message(
-                                        chat_id,
-                                        format!("{} doesn't support tool use", ca.model),
-                                    )
-                                    .await;
-
-                                // Retry the user's message without tools.
-                                if !text.is_empty()
-                                    && let Err(e) = ca.agent.run(&text, &mut output).await
-                                {
-                                    tracing::error!(error = %e, "tool-less retry failed");
-                                    let _ = bot_clone
-                                        .send_message(chat_id, format!("Error: {e}"))
-                                        .await;
-                                }
-                            }
-                            LlmErrorKind::NoVision => {
-                                tracing::warn!(error = %e, "model does not support image input");
-
-                                // Undo the failed user message and strip all
-                                // images from history so old vision-model images
-                                // don't poison subsequent turns.
-                                ca.agent.pop_last_message();
-                                ca.agent.strip_images();
-
-                                let _ = bot_clone
-                                    .send_message(
-                                        chat_id,
-                                        format!("{} doesn't support vision", ca.model),
-                                    )
-                                    .await;
-
-                                // If there was a caption, retry with just the text.
-                                if !text.is_empty()
-                                    && let Err(e) = ca.agent.run(&text, &mut output).await
-                                {
-                                    tracing::error!(error = %e, "text-only retry failed");
-                                    let _ = bot_clone
-                                        .send_message(chat_id, format!("Error: {e}"))
-                                        .await;
-                                }
-                            }
-                            LlmErrorKind::Other => {
-                                tracing::error!(error = %e, "agent run failed");
-                                let _ = bot_clone
-                                    .send_message(chat_id, format!("Error: {e}"))
-                                    .await;
-                            }
-                        }
+                        tracing::error!(error = %e, "agent run failed");
+                        // Error already rendered to user via on_llm_error hook.
                     }
 
                     // Persist conversation history to disk after each turn.
@@ -798,29 +738,6 @@ fn save_memory_note(settings: &Settings, note: &str) -> crate::Result<()> {
 // ---------------------------------------------------------------------------
 // Media extraction helpers
 // ---------------------------------------------------------------------------
-
-/// Categorise an LLM error so the controller can attempt recovery.
-enum LlmErrorKind {
-    /// The model doesn't support tool/function calling.
-    NoToolUse,
-    /// The model doesn't support image/vision input.
-    NoVision,
-    /// Any other (unrecoverable) error.
-    Other,
-}
-
-fn classify_llm_error(err: &str) -> LlmErrorKind {
-    if err.contains("tool use") || err.contains("tool_use") {
-        LlmErrorKind::NoToolUse
-    } else if err.contains("image input")
-        || err.contains("vision")
-        || err.contains("No endpoints found")
-    {
-        LlmErrorKind::NoVision
-    } else {
-        LlmErrorKind::Other
-    }
-}
 
 /// Extract content blocks from a Telegram message.
 ///
@@ -1176,6 +1093,26 @@ impl Output for TelegramOutput {
         let text = format!("❌ Error: {error}");
         self.send_message(&text)?;
         Ok(())
+    }
+
+    fn on_llm_error(&mut self, error: &DysonError) -> LlmRecovery {
+        match classify_llm_error(&error.to_string()) {
+            LlmErrorKind::NoToolUse => {
+                let _ = self
+                    .send_message("⚠️ Model doesn't support tool use — retrying without tools.");
+                LlmRecovery::RetryWithoutTools
+            }
+            LlmErrorKind::NoVision => {
+                let _ = self
+                    .send_message("⚠️ Model doesn't support vision — retrying with text only.");
+                LlmRecovery::RetryWithoutImages
+            }
+            LlmErrorKind::Other => {
+                let escaped = escape_html(&error.to_string());
+                let _ = self.send_message(&format!("❌ Error:\n<pre>{escaped}</pre>"));
+                LlmRecovery::GiveUp
+            }
+        }
     }
 
     fn flush(&mut self) -> Result<(), DysonError> {
