@@ -81,7 +81,7 @@ use crate::config::{AgentSettings, CompactionConfig};
 use crate::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
 use crate::error::{DysonError, Result};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
-use crate::message::Message;
+use crate::message::{ContentBlock, Message};
 use crate::result_formatter::ResultFormatter;
 use crate::sandbox::{Sandbox, SandboxDecision};
 use crate::skill::Skill;
@@ -794,6 +794,27 @@ impl Agent {
     /// Replace the conversation history (for restoring from persistence).
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
+    }
+
+    /// Remove and return the last message in the conversation history.
+    pub fn pop_last_message(&mut self) -> Option<Message> {
+        self.messages.pop()
+    }
+
+    /// Replace all `ContentBlock::Image` blocks in the conversation history
+    /// with `[image]` placeholder text.  Called when the active model does
+    /// not support vision — sanitises the entire history so subsequent
+    /// turns don't replay rejected image data.
+    pub fn strip_images(&mut self) {
+        for msg in &mut self.messages {
+            for block in &mut msg.content {
+                if matches!(block, ContentBlock::Image { .. }) {
+                    *block = ContentBlock::Text {
+                        text: "[image]".to_string(),
+                    };
+                }
+            }
+        }
     }
 
     /// Run the agent loop for a single user message.
@@ -3247,6 +3268,106 @@ mod tests {
             // pipeline.
             let result = limiter.check("bash");
             assert!(result.is_err(), "second immediate call should be rate-limited");
+        }
+
+        #[test]
+        fn pop_last_message_removes_last() {
+            let mut messages = vec![
+                Message::user("hello"),
+                Message::user("world"),
+            ];
+            let settings = AgentSettings {
+                api_key: "test".into(),
+                ..Default::default()
+            };
+            let llm = MockLlm::new(vec![]);
+            let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+            let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+            let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
+            agent.set_messages(messages.clone());
+
+            let popped = agent.pop_last_message();
+            assert_eq!(popped.unwrap().content[0], ContentBlock::Text { text: "world".into() });
+            assert_eq!(agent.messages().len(), 1);
+        }
+
+        #[test]
+        fn pop_last_message_on_empty_returns_none() {
+            let settings = AgentSettings {
+                api_key: "test".into(),
+                ..Default::default()
+            };
+            let llm = MockLlm::new(vec![]);
+            let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+            let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+            let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
+
+            assert!(agent.pop_last_message().is_none());
+        }
+
+        #[test]
+        fn strip_images_replaces_image_blocks_with_placeholder() {
+            let settings = AgentSettings {
+                api_key: "test".into(),
+                ..Default::default()
+            };
+            let llm = MockLlm::new(vec![]);
+            let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+            let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+            let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
+
+            agent.set_messages(vec![
+                Message::user_multimodal(vec![
+                    ContentBlock::Text { text: "look at this".into() },
+                    ContentBlock::Image {
+                        data: "base64data".into(),
+                        media_type: "image/jpeg".into(),
+                    },
+                ]),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text { text: "I see a cat".into() }],
+                },
+                Message::user("thanks"),
+            ]);
+
+            agent.strip_images();
+
+            // The image block should be replaced with "[image]" text.
+            let first_msg = &agent.messages()[0];
+            assert_eq!(first_msg.content.len(), 2);
+            assert_eq!(
+                first_msg.content[1],
+                ContentBlock::Text { text: "[image]".into() },
+            );
+
+            // Text-only messages should be untouched.
+            assert_eq!(agent.messages()[2].content[0], ContentBlock::Text { text: "thanks".into() });
+        }
+
+        #[test]
+        fn strip_images_noop_when_no_images() {
+            let settings = AgentSettings {
+                api_key: "test".into(),
+                ..Default::default()
+            };
+            let llm = MockLlm::new(vec![]);
+            let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+            let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+            let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
+
+            agent.set_messages(vec![
+                Message::user("hello"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text { text: "hi".into() }],
+                },
+            ]);
+
+            agent.strip_images();
+
+            assert_eq!(agent.messages().len(), 2);
+            assert_eq!(agent.messages()[0].content[0], ContentBlock::Text { text: "hello".into() });
         }
     }
 }

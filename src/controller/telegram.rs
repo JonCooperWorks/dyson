@@ -582,11 +582,10 @@ impl super::Controller for TelegramController {
                     let chat_key = chat_id.0.to_string();
 
                     // -- Resolve media into ContentBlocks --
-                    let model_name = settings_clone.agent.model.clone();
-                    let extracted = match extract_content(
-                        &bot_clone, &msg, &text, &model_name,
+                    let content_blocks = match extract_content(
+                        &bot_clone, &msg, &text,
                     ).await {
-                        Ok(e) => e,
+                        Ok(blocks) => blocks,
                         Err(e) => {
                             tracing::error!(error = %e, "failed to extract media content");
                             let _ = bot_clone.send_message(chat_id, format!("Media error: {e}")).await;
@@ -594,26 +593,6 @@ impl super::Controller for TelegramController {
                         }
                     };
 
-                    // Notify the user about unsupported media and replace
-                    // image/audio blocks with text placeholders so the caption
-                    // is still sent to the agent and persisted in history.
-                    for msg in &extracted.unsupported {
-                        let _ = bot_clone.send_message(chat_id, msg).await;
-                    }
-
-                    let content_blocks = if extracted.unsupported.is_empty() {
-                        extracted.blocks
-                    } else {
-                        // Keep only text blocks and add placeholders.
-                        let mut blocks: Vec<_> = extracted.placeholders;
-                        blocks.extend(
-                            extracted.blocks.into_iter()
-                                .filter(|b| matches!(b, ContentBlock::Text { .. }))
-                        );
-                        blocks
-                    };
-
-                    // If there are no content blocks left, nothing to send.
                     if content_blocks.is_empty() {
                         return;
                     }
@@ -629,7 +608,6 @@ impl super::Controller for TelegramController {
                             prompt_clone.as_deref(),
                         ).await {
                             Ok(mut agent) => {
-                                // Restore conversation history from disk.
                                 if let Ok(messages) = store_clone.load(&chat_key) && !messages.is_empty() {
                                     tracing::info!(
                                         chat_id = chat_id.0,
@@ -656,8 +634,9 @@ impl super::Controller for TelegramController {
 
                     let mut output = TelegramOutput::new(bot_clone.clone(), chat_id);
 
-                    // Use run_with_blocks for multimodal, run for text-only.
-                    let has_non_text = content_blocks.iter().any(|b| !matches!(b, ContentBlock::Text { .. }));
+                    // Run the agent.
+                    let has_non_text = content_blocks.iter()
+                        .any(|b| !matches!(b, ContentBlock::Text { .. }));
                     let result = if has_non_text {
                         ca.agent.run_with_blocks(content_blocks, &mut output).await
                     } else {
@@ -665,13 +644,29 @@ impl super::Controller for TelegramController {
                     };
 
                     if let Err(e) = result {
-                        let err_str = e.to_string();
-                        if has_non_text && (err_str.contains("image") || err_str.contains("vision")) {
+                        if is_vision_error(&e.to_string()) {
                             tracing::warn!(error = %e, "model does not support image input");
+
+                            // Undo the failed user message and strip all images
+                            // from history so old vision-model images don't
+                            // poison subsequent turns.
+                            ca.agent.pop_last_message();
+                            ca.agent.strip_images();
+
                             let _ = bot_clone.send_message(
                                 chat_id,
-                                format!("{model_name} doesn't support vision"),
+                                format!("{} doesn't support vision", ca.model),
                             ).await;
+
+                            // If there was a caption, retry with just the text.
+                            if !text.is_empty() {
+                                if let Err(e) = ca.agent.run(&text, &mut output).await {
+                                    tracing::error!(error = %e, "text-only retry failed");
+                                    let _ = bot_clone.send_message(
+                                        chat_id, format!("Error: {e}"),
+                                    ).await;
+                                }
+                            }
                         } else {
                             tracing::error!(error = %e, "agent run failed");
                             let _ = bot_clone.send_message(chat_id, format!("Error: {e}")).await;
@@ -747,32 +742,26 @@ fn save_memory_note(
 // Media extraction helpers
 // ---------------------------------------------------------------------------
 
-/// Extract content blocks from a Telegram message.
-///
-/// Handles text, photos, voice notes, and image documents.  Text from
-/// `msg.text()` or `msg.caption()` is combined with resolved media
-/// blocks into a single Vec<ContentBlock>.
-/// Result of extracting content from a Telegram message.
-struct ExtractedContent {
-    /// Content blocks to send to the agent.
-    blocks: Vec<ContentBlock>,
-    /// Placeholder text blocks to persist in history instead of unsupported media.
-    placeholders: Vec<ContentBlock>,
-    /// Friendly messages about unsupported media (sent to user, not saved to history).
-    unsupported: Vec<String>,
+/// Check if an LLM error indicates the model doesn't support image input.
+fn is_vision_error(err: &str) -> bool {
+    err.contains("image input")
+        || err.contains("vision")
+        || err.contains("No endpoints found")
 }
 
+/// Extract content blocks from a Telegram message.
+///
+/// Downloads and processes media (photos, voice notes, image documents)
+/// into `ContentBlock`s.  This function is media-only — it does not know
+/// about model capabilities.  If a model rejects the resulting blocks,
+/// the caller handles cleanup.
 async fn extract_content(
     bot: &Bot,
     msg: &teloxide::types::Message,
     text: &str,
-    model: &str,
-) -> crate::Result<ExtractedContent> {
+) -> crate::Result<Vec<ContentBlock>> {
     let mut blocks = Vec::new();
-    let mut placeholders: Vec<ContentBlock> = Vec::new();
-    let mut unsupported: Vec<String> = Vec::new();
 
-    // Add text content if present.
     if !text.is_empty() {
         blocks.push(ContentBlock::Text {
             text: text.to_string(),
@@ -789,25 +778,21 @@ async fn extract_content(
                 "downloading photo from Telegram"
             );
             match download_telegram_file(bot, &photo.file.id.0).await {
-                Ok(data) => {
-                    match media::resolve(media::MediaInput::Image {
-                        data,
-                        mime_type: "image/jpeg".to_string(),
-                    }).await {
-                        Ok(media::ResolvedMedia::Images(image_blocks)) => {
-                            blocks.extend(image_blocks);
-                        }
-                        Ok(media::ResolvedMedia::Transcription(t)) => {
-                            blocks.push(ContentBlock::Text { text: t });
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to process photo");
-                            let msg = format!("{model} doesn't support vision");
-                            placeholders.push(ContentBlock::Text { text: format!("[{msg}]") });
-                            unsupported.push(msg);
-                        }
+                Ok(data) => match media::resolve(media::MediaInput::Image {
+                    data,
+                    mime_type: "image/jpeg".to_string(),
+                }).await {
+                    Ok(media::ResolvedMedia::Images(imgs)) => blocks.extend(imgs),
+                    Ok(media::ResolvedMedia::Transcription(t)) => {
+                        blocks.push(ContentBlock::Text { text: t });
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to process photo");
+                        blocks.push(ContentBlock::Text {
+                            text: format!("[Image could not be processed: {e}]"),
+                        });
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to download photo");
                     blocks.push(ContentBlock::Text {
@@ -829,27 +814,23 @@ async fn extract_content(
             .unwrap_or_else(|| "audio/ogg".to_string());
 
         match download_telegram_file(bot, &voice.file.id.0).await {
-            Ok(data) => {
-                match media::resolve(media::MediaInput::Audio {
-                    data,
-                    mime_type: mime,
-                }).await {
-                    Ok(media::ResolvedMedia::Transcription(t)) => {
-                        blocks.push(ContentBlock::Text {
-                            text: format!("[Voice transcription]: {t}"),
-                        });
-                    }
-                    Ok(media::ResolvedMedia::Images(_)) => {
-                        // Shouldn't happen for audio, but handle gracefully.
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to transcribe voice note");
-                        let msg = format!("{model} doesn't support audio");
-                        placeholders.push(ContentBlock::Text { text: format!("[{msg}]") });
-                        unsupported.push(msg);
-                    }
+            Ok(data) => match media::resolve(media::MediaInput::Audio {
+                data,
+                mime_type: mime,
+            }).await {
+                Ok(media::ResolvedMedia::Transcription(t)) => {
+                    blocks.push(ContentBlock::Text {
+                        text: format!("[Voice transcription]: {t}"),
+                    });
                 }
-            }
+                Ok(media::ResolvedMedia::Images(_)) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to transcribe voice note");
+                    blocks.push(ContentBlock::Text {
+                        text: format!("[Voice transcription failed: {e}]"),
+                    });
+                }
+            },
             Err(e) => {
                 tracing::warn!(error = %e, "failed to download voice note");
                 blocks.push(ContentBlock::Text {
@@ -874,25 +855,21 @@ async fn extract_content(
                 .unwrap_or_else(|| "image/jpeg".to_string());
 
             match download_telegram_file(bot, &doc.file.id.0).await {
-                Ok(data) => {
-                    match media::resolve(media::MediaInput::Image {
-                        data,
-                        mime_type: mime,
-                    }).await {
-                        Ok(media::ResolvedMedia::Images(image_blocks)) => {
-                            blocks.extend(image_blocks);
-                        }
-                        Ok(media::ResolvedMedia::Transcription(t)) => {
-                            blocks.push(ContentBlock::Text { text: t });
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to process document image");
-                            let msg = format!("{model} doesn't support vision");
-                            placeholders.push(ContentBlock::Text { text: format!("[{msg}]") });
-                            unsupported.push(msg);
-                        }
+                Ok(data) => match media::resolve(media::MediaInput::Image {
+                    data,
+                    mime_type: mime,
+                }).await {
+                    Ok(media::ResolvedMedia::Images(imgs)) => blocks.extend(imgs),
+                    Ok(media::ResolvedMedia::Transcription(t)) => {
+                        blocks.push(ContentBlock::Text { text: t });
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to process document image");
+                        blocks.push(ContentBlock::Text {
+                            text: format!("[Image could not be processed: {e}]"),
+                        });
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to download document");
                     blocks.push(ContentBlock::Text {
@@ -903,15 +880,13 @@ async fn extract_content(
         }
     }
 
-    // If somehow we have no blocks at all (shouldn't happen given the
-    // earlier checks), return a fallback.
-    if blocks.is_empty() && unsupported.is_empty() {
+    if blocks.is_empty() {
         blocks.push(ContentBlock::Text {
             text: "[Empty message received]".to_string(),
         });
     }
 
-    Ok(ExtractedContent { blocks, placeholders, unsupported })
+    Ok(blocks)
 }
 
 /// Download a file from Telegram by file_id.
@@ -1624,5 +1599,33 @@ mod tests {
             markdown_to_telegram_html("hello **world** 🌍"),
             "hello <b>world</b> 🌍"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Vision error detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_vision_error_detects_openrouter_404() {
+        assert!(is_vision_error(
+            "OpenAI API returned 404 Not Found: {\"error\":{\"message\":\"No endpoints found that support image input\",\"code\":404}}"
+        ));
+    }
+
+    #[test]
+    fn is_vision_error_detects_image_input_message() {
+        assert!(is_vision_error("does not support image input"));
+    }
+
+    #[test]
+    fn is_vision_error_detects_vision_keyword() {
+        assert!(is_vision_error("model does not support vision capabilities"));
+    }
+
+    #[test]
+    fn is_vision_error_ignores_unrelated_errors() {
+        assert!(!is_vision_error("rate limit exceeded"));
+        assert!(!is_vision_error("invalid API key"));
+        assert!(!is_vision_error("context length exceeded"));
     }
 }
