@@ -425,7 +425,7 @@ impl super::Controller for TelegramController {
                 if text == "/compact" {
                     let mut agents_map = agents.lock().await;
                     if let Some(ca) = agents_map.get_mut(&chat_id.0) {
-                        let mut output = TelegramOutput::new(bot.clone(), chat_id);
+                        let mut output = TelegramOutput::new(bot.clone(), chat_id, true);
                         match ca.agent.compact(&mut output).await {
                             Ok(()) => {
                                 let chat_key = chat_id.0.to_string();
@@ -656,7 +656,8 @@ impl super::Controller for TelegramController {
                         .get_mut(&chat_id.0)
                         .expect("agent must exist — just inserted above");
 
-                    let mut output = TelegramOutput::new(bot_clone.clone(), chat_id);
+                    let mut output =
+                        TelegramOutput::new(bot_clone.clone(), chat_id, !text.is_empty());
 
                     // Run the agent.
                     let has_non_text = content_blocks
@@ -927,15 +928,19 @@ pub struct TelegramOutput {
     current_message_id: Option<MessageId>,
     last_edit: Instant,
     rt: tokio::runtime::Handle,
+    /// Whether the current user message contains text (used by
+    /// [`on_llm_error`] to decide if a vision-less retry is worthwhile).
+    has_text: bool,
 }
 
 impl TelegramOutput {
-    pub fn new(bot: Bot, chat_id: ChatId) -> Self {
+    pub fn new(bot: Bot, chat_id: ChatId, has_text: bool) -> Self {
         Self {
             bot,
             chat_id,
             text_buffer: String::new(),
             current_message_id: None,
+            has_text,
             last_edit: Instant::now(),
             rt: tokio::runtime::Handle::current(),
         }
@@ -1102,10 +1107,16 @@ impl Output for TelegramOutput {
                     .send_message("⚠️ Model doesn't support tool use — retrying without tools.");
                 LlmRecovery::RetryWithoutTools
             }
-            LlmErrorKind::NoVision => {
+            LlmErrorKind::NoVision if self.has_text => {
                 let _ = self
                     .send_message("⚠️ Model doesn't support vision — retrying with text only.");
                 LlmRecovery::RetryWithoutImages
+            }
+            LlmErrorKind::NoVision => {
+                let _ = self.send_message("⚠️ Model doesn't support vision.");
+                let escaped = escape_html(&error.to_string());
+                let _ = self.send_message(&format!("<pre>{escaped}</pre>"));
+                LlmRecovery::GiveUp
             }
             LlmErrorKind::Other => {
                 let escaped = escape_html(&error.to_string());
