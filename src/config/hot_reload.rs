@@ -276,6 +276,24 @@ impl HotReloader {
                 }
             }
         }
+
+        // Watch skills/ directory (mtime changes when dirs are added/removed)
+        // and each skill's SKILL.md for content changes.
+        let skills_dir = ws_path.join("skills");
+        if skills_dir.is_dir() {
+            let mtime = Self::get_mtime(&skills_dir);
+            watched.insert(skills_dir.clone(), mtime);
+
+            if let Ok(entries) = std::fs::read_dir(&skills_dir) {
+                for entry in entries.flatten() {
+                    let skill_md = entry.path().join("SKILL.md");
+                    if skill_md.is_file() {
+                        let mtime = Self::get_mtime(&skill_md);
+                        watched.insert(skill_md, mtime);
+                    }
+                }
+            }
+        }
     }
 }
 

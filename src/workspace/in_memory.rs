@@ -224,11 +224,11 @@ mod tests {
     }
 
     #[test]
-    fn skill_files_returns_empty() {
+    fn skill_dirs_returns_empty() {
         let ws = InMemoryWorkspace::new();
         assert!(
-            ws.skill_files().is_empty(),
-            "InMemoryWorkspace should return no skill files"
+            ws.skill_dirs().is_empty(),
+            "InMemoryWorkspace should return no skill dirs"
         );
     }
 }

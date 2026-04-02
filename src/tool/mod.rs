@@ -56,6 +56,7 @@ pub mod bash;
 pub mod edit_file;
 pub mod export_conversation;
 pub mod list_files;
+pub mod load_skill;
 pub mod memory_search;
 pub mod read_file;
 pub mod search_files;

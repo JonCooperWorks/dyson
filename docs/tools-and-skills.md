@@ -338,24 +338,63 @@ the agent loop needed.
 
 | Skill | Status | Tools | Source |
 |-------|--------|-------|--------|
-| `BuiltinSkill` | Implemented | bash, workspace_*, memory_search, web_search | Compiled into Dyson |
+| `BuiltinSkill` | Implemented | bash, workspace_*, memory_search, web_search, load_skill | Compiled into Dyson |
 | `McpSkill` | Implemented | Discovered via `tools/list` | MCP server (stdio/HTTP) |
-| `LocalSkill` | Implemented | None (prompt-only) | SKILL.md files |
+| `LocalSkill` | Implemented | None (system prompt list only) | skills/*/SKILL.md |
+| `SkillListSkill` | Implemented | None (system prompt only) | Generated from discovered skills |
 
-All three implement the same `Skill` trait.  The agent loop treats them
+All skill types implement the same `Skill` trait.  The agent loop treats them
 identically.
 
 ---
 
 ## LocalSkill — Workspace-Managed Skills
 
-Local skills follow the **Hermes pattern**: they live inside the workspace
-directory as agent-curated content, auto-discovered at startup.  No explicit
-config entries needed — just drop a `.md` file in the `skills/` directory.
+Local skills live inside the workspace as agent-curated content, auto-discovered
+at startup.  Each skill is a directory containing a `SKILL.md` file.
 
 **Key files:**
-- `src/skill/local.rs` — `LocalSkill` struct and SKILL.md parser
+- `src/skill/local.rs` — `LocalSkill` parser, `SkillListSkill`
 - `src/skill/mod.rs` — Workspace discovery in `create_skills()`
+- `src/tool/load_skill.rs` — `LoadSkillTool` (on-demand loading)
+- `src/tool/skill_create.rs` — `SkillCreateTool` (create/update/improve)
+
+### Two-Phase Loading
+
+Skills use a **list + load** pattern inspired by Claude Code:
+
+1. **Startup**: Scan `skills/*/SKILL.md`, extract name + description from
+   frontmatter.  Build a compact `<available_skills>` list in the system prompt.
+   The full body is NOT injected — this keeps context lean even with many skills.
+
+2. **Runtime**: When the LLM decides a skill is relevant, it calls the
+   `load_skill` tool to fetch the full instructions on demand.
+
+```
+Startup system prompt:
+  <available_skills>
+  - code-review: Reviews code for quality and security issues
+  - deploy-helper: Guides deployment with health checks
+  </available_skills>
+
+LLM sees "review this PR" → calls load_skill("code-review") → gets full instructions
+```
+
+### Directory Structure
+
+Each skill lives in its own directory under `skills/`:
+
+```
+~/.dyson/
+  skills/
+    code-review/
+      SKILL.md         ← required: frontmatter + instructions
+      references/      ← optional: supporting docs
+      scripts/         ← optional: helper scripts
+      examples/        ← optional: example files
+    deploy-helper/
+      SKILL.md
+```
 
 ### SKILL.md Format
 
@@ -371,78 +410,105 @@ You are a code review expert. When asked to review code:
 3. Provide actionable feedback
 ```
 
-The file has two parts:
-
 | Part | Description |
 |------|-------------|
 | **Frontmatter** | YAML-like key-value pairs between `---` delimiters |
-| **Body** | The system prompt fragment injected into the agent's context |
+| **Body** | Full instructions loaded on demand via `load_skill` |
 
 #### Frontmatter fields
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | Yes | Unique skill identifier (used for logging) |
-| `description` | No | One-line summary (for future skill selection) |
+| `name` | Yes | Unique skill identifier |
+| `description` | No | One-line summary shown in `<available_skills>` list |
 
 ### Discovery
 
-Skills are discovered from two sources, loaded in this order:
+Skills are discovered from two sources:
 
 1. **Config-defined** (`dyson.json` → `skills.local`):
    ```json
    {
      "skills": {
        "local": [
-         { "name": "code-review", "path": "./skills/code-review.md" }
+         { "name": "code-review", "path": "./skills/code-review" }
        ]
      }
    }
    ```
-   Paths can be absolute or relative to the working directory.
+   Paths point to the skill directory (not the SKILL.md file).
 
-2. **Workspace-discovered** (Hermes-style auto-scan):
+2. **Workspace auto-scan**:
    ```
-   ~/.dyson/
-     skills/
-       code-review.md    ← auto-discovered
-       writing-style.md  ← auto-discovered
+   ~/.dyson/skills/*/SKILL.md
    ```
-   Every `.md` file in the workspace's `skills/` directory is loaded
-   automatically.  The directory is created when the workspace initializes.
+   Every subdirectory of `skills/` that contains a `SKILL.md` file is
+   discovered automatically.  The directory is created when the workspace
+   initializes.
 
-Config-defined skills load first, then workspace skills.  Both use the
-same `LocalSkill::from_file()` parser and `SKILL.md` format.
+### Tools
 
-### What local skills do
+| Tool | Purpose |
+|------|---------|
+| `load_skill` | Load a skill's full instructions by name |
+| `skill_create` | Create, update, or improve skills |
 
-Local skills contribute a **system prompt fragment** but **no tools**.
-They guide the agent's behaviour through instructions — for example,
-coding conventions, review checklists, or domain expertise.
+#### `load_skill`
 
-```rust
-impl Skill for LocalSkill {
-    fn name(&self) -> &str { &self.name }
-    fn tools(&self) -> &[Arc<dyn Tool>] { &[] }          // no tools
-    fn system_prompt(&self) -> Option<&str> { Some(&self.system_prompt) }
+```json
+{ "skill_name": "code-review" }
+```
+
+Returns the full body of `skills/code-review/SKILL.md` (without frontmatter).
+If the skill doesn't exist, returns an error listing available skills.
+
+#### `skill_create`
+
+```json
+{
+  "name": "code-review",
+  "description": "Reviews code for quality and security",
+  "instructions": "When asked to review code:\n1. Read the code\n...",
+  "mode": "create"
 }
 ```
+
+Modes: `create` (new skill, fails if exists), `update` (overwrite),
+`improve` (append to existing).  Creates the directory structure
+`skills/<name>/SKILL.md` automatically.
+
+### Hot Reload
+
+The hot reloader watches `skills/` for changes:
+- **New/removed skill directories**: detected via `skills/` directory mtime
+- **Modified SKILL.md files**: each file's mtime is tracked individually
+
+When changes are detected, the agent rebuilds with the updated skill list.
+The `[reloaded]` message appears in the terminal.
+
+### Migration from v1
+
+Workspaces with flat skill files (`skills/code-review.md`) are automatically
+migrated to directory format (`skills/code-review/SKILL.md`) on first load.
+The migration is handled by workspace v1→v2 migration in
+`src/workspace/migrate.rs`.
 
 ### Error handling
 
 | Error | Behaviour |
 |-------|-----------|
-| Missing file | Logged, skill skipped |
-| No frontmatter (`---` delimiters) | `DysonError::Config` |
-| Missing `name` field | `DysonError::Config` |
-| Empty body | `DysonError::Config` |
+| Missing SKILL.md | Directory skipped |
+| No frontmatter (`---`) | `DysonError::Config`, skill skipped |
+| Missing `name` field | `DysonError::Config`, skill skipped |
+| Empty body | `DysonError::Config`, skill skipped |
 
 Failed skills never stop the agent — they're logged and skipped.
 
 ### Example: adding a workspace skill
 
 ```bash
-cat > ~/.dyson/skills/rust-conventions.md << 'EOF'
+mkdir -p ~/.dyson/skills/rust-conventions
+cat > ~/.dyson/skills/rust-conventions/SKILL.md << 'EOF'
 ---
 name: rust-conventions
 description: Enforces project Rust coding standards
@@ -456,8 +522,9 @@ When writing or reviewing Rust code:
 EOF
 ```
 
-Next time the agent starts, it will automatically include these conventions
-in its system prompt.
+The skill appears in the `<available_skills>` list after the next reload.
+The LLM calls `load_skill("rust-conventions")` when it needs the full
+instructions.
 
 ---
 

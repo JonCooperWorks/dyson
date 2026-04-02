@@ -29,6 +29,7 @@ use crate::tool::Tool;
 use crate::tool::bash::BashTool;
 use crate::tool::edit_file::EditFileTool;
 use crate::tool::list_files::ListFilesTool;
+use crate::tool::load_skill::LoadSkillTool;
 use crate::tool::memory_search::MemorySearchTool;
 use crate::tool::read_file::ReadFileTool;
 use crate::tool::search_files::SearchFilesTool;
@@ -86,6 +87,7 @@ impl BuiltinSkill {
             Arc::new(WorkspaceViewTool),
             Arc::new(WorkspaceSearchTool),
             Arc::new(WorkspaceUpdateTool),
+            Arc::new(LoadSkillTool),
         ];
 
         if let Some(ws_cfg) = web_search_config {
@@ -160,7 +162,7 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new(None);
         let tools = skill.tools();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
         assert_eq!(tools[0].name(), "bash");
         assert_eq!(tools[1].name(), "read_file");
         assert_eq!(tools[2].name(), "write_file");
@@ -172,6 +174,7 @@ mod tests {
         assert_eq!(tools[8].name(), "workspace_view");
         assert_eq!(tools[9].name(), "workspace_search");
         assert_eq!(tools[10].name(), "workspace_update");
+        assert_eq!(tools[11].name(), "load_skill");
     }
 
     #[test]

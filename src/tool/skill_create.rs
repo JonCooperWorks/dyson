@@ -114,7 +114,7 @@ impl Tool for SkillCreateTool {
             return Ok(ToolOutput::error("'instructions' is required"));
         }
 
-        let file_key = format!("skills/{name}.md");
+        let file_key = format!("skills/{name}/SKILL.md");
 
         let mut ws = ws.write().await;
 
@@ -140,8 +140,7 @@ impl Tool for SkillCreateTool {
 
                 Ok(ToolOutput::success(format!(
                     "Created skill '{name}' at {file_key}. \
-                     It will auto-load on the next agent startup and inject its instructions \
-                     into the system prompt."
+                     It will appear in the <available_skills> list after the next reload."
                 )))
             }
             "update" => {
@@ -157,7 +156,7 @@ impl Tool for SkillCreateTool {
 
                 Ok(ToolOutput::success(format!(
                     "{verb} skill '{name}' at {file_key}. \
-                     Changes take effect on the next agent startup."
+                     Changes take effect after the next reload."
                 )))
             }
             "improve" => {
@@ -188,7 +187,7 @@ impl Tool for SkillCreateTool {
 
                 Ok(ToolOutput::success(format!(
                     "Improved skill '{name}'. Appended new instructions and updated description. \
-                     Changes take effect on the next agent startup."
+                     Changes take effect after the next reload."
                 )))
             }
             other => Ok(ToolOutput::error(format!(
@@ -318,12 +317,13 @@ mod tests {
         assert!(content.contains("Do the thing."));
 
         // Verify it parses as a valid LocalSkill.
-        let skill = crate::skill::local::LocalSkill::from_file(
-            // Write to temp file for parsing.
+        let skill = crate::skill::local::LocalSkill::from_dir(
+            // Write to temp dir for parsing.
             &{
-                let path = std::env::temp_dir().join("dyson-test-skill.md");
-                std::fs::write(&path, &content).unwrap();
-                path
+                let dir = std::env::temp_dir().join("dyson-test-skill-dir");
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("SKILL.md"), &content).unwrap();
+                dir
             },
         )
         .unwrap();
@@ -365,7 +365,7 @@ mod tests {
         // Verify it was written to the workspace.
         let ws = ctx.workspace.unwrap();
         let ws = ws.read().await;
-        let content = ws.get("skills/code-review.md").unwrap();
+        let content = ws.get("skills/code-review/SKILL.md").unwrap();
         assert!(content.contains("name: code-review"));
         assert!(content.contains("Read the code"));
     }
@@ -373,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn create_duplicate_fails() {
         let ws = InMemoryWorkspace::new()
-            .with_file("skills/existing.md", "---\nname: existing\ndescription: x\n---\n\nBody.");
+            .with_file("skills/existing/SKILL.md", "---\nname: existing\ndescription: x\n---\n\nBody.");
         let ctx = make_ctx(ws);
         let tool = SkillCreateTool;
 
@@ -396,7 +396,7 @@ mod tests {
     #[tokio::test]
     async fn update_overwrites() {
         let ws = InMemoryWorkspace::new()
-            .with_file("skills/deploy.md", "---\nname: deploy\ndescription: old\n---\n\nOld.");
+            .with_file("skills/deploy/SKILL.md", "---\nname: deploy\ndescription: old\n---\n\nOld.");
         let ctx = make_ctx(ws);
         let tool = SkillCreateTool;
 
@@ -418,7 +418,7 @@ mod tests {
 
         let ws = ctx.workspace.unwrap();
         let ws = ws.read().await;
-        let content = ws.get("skills/deploy.md").unwrap();
+        let content = ws.get("skills/deploy/SKILL.md").unwrap();
         assert!(content.contains("New deploy instructions"));
         assert!(!content.contains("Old."));
     }
@@ -427,7 +427,7 @@ mod tests {
     async fn improve_appends() {
         let ws = InMemoryWorkspace::new()
             .with_file(
-                "skills/review.md",
+                "skills/review/SKILL.md",
                 "---\nname: review\ndescription: Reviews code\n---\n\nOriginal approach.",
             );
         let ctx = make_ctx(ws);
@@ -451,7 +451,7 @@ mod tests {
 
         let ws = ctx.workspace.unwrap();
         let ws = ws.read().await;
-        let content = ws.get("skills/review.md").unwrap();
+        let content = ws.get("skills/review/SKILL.md").unwrap();
         assert!(content.contains("Original approach."));
         assert!(content.contains("## Improvements"));
         assert!(content.contains("SQL injection"));

@@ -214,7 +214,7 @@ pub async fn create_skills(
             }
             crate::config::SkillConfig::Local(cfg) => {
                 let path = std::path::Path::new(&cfg.path);
-                match local::LocalSkill::from_file(path) {
+                match local::LocalSkill::from_dir(path) {
                     Ok(skill) => {
                         tracing::info!(
                             name = skill.name(),
@@ -240,26 +240,44 @@ pub async fn create_skills(
     }
 
     // Auto-discover skills from the workspace's skills/ directory.
+    //
+    // Skills are loaded in two phases:
+    //   1. Collect name + description from each skill directory
+    //   2. Build a compact <available_skills> list for the system prompt
+    //
+    // The full skill body is NOT loaded into the system prompt — it's
+    // fetched on-demand via the load_skill tool.
+    let mut skill_list: Vec<(String, String)> = Vec::new();
+
     if let Some(ws) = workspace {
-        for path in ws.skill_files() {
-            match local::LocalSkill::from_file(&path) {
+        for dir in ws.skill_dirs() {
+            match local::LocalSkill::from_dir(&dir) {
                 Ok(skill) => {
                     tracing::info!(
                         name = skill.name(),
-                        path = %path.display(),
-                        "workspace skill loaded"
+                        path = %dir.display(),
+                        "workspace skill discovered"
                     );
+                    skill_list.push((
+                        skill.name().to_string(),
+                        skill.skill_description().to_string(),
+                    ));
                     skills.push(Box::new(skill));
                 }
                 Err(e) => {
                     tracing::error!(
-                        path = %path.display(),
+                        path = %dir.display(),
                         error = %e,
                         "workspace skill failed to load — skipping"
                     );
                 }
             }
         }
+    }
+
+    // Inject the <available_skills> list into the system prompt.
+    if !skill_list.is_empty() {
+        skills.push(Box::new(local::SkillListSkill::new(&skill_list)));
     }
 
     // -- Phase B: Construct subagent skill from loaded tools --

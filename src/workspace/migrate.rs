@@ -41,7 +41,7 @@ use std::path::Path;
 use crate::error::{DysonError, Result};
 
 /// Current workspace version.  Bump this when adding a new migration.
-pub const CURRENT_WORKSPACE_VERSION: u64 = 1;
+pub const CURRENT_WORKSPACE_VERSION: u64 = 2;
 
 /// Version file name.
 const VERSION_FILE: &str = ".workspace_version";
@@ -72,6 +72,21 @@ enum Step {
     /// Bail with an error if a path exists (ambiguous state).
     #[allow(dead_code)]
     BailIf(&'static str, &'static str),
+
+    /// Promote flat files in a directory to subdirectories.
+    ///
+    /// Scans `dir` for files with extension `ext`, creates a subdirectory
+    /// named after each file's stem, and moves the file into it as `target`.
+    ///
+    /// Example: `PromoteFilesToDirs { dir: "skills", ext: "md", target: "SKILL.md" }`
+    /// turns `skills/code-review.md` into `skills/code-review/SKILL.md`.
+    ///
+    /// Skips files where the target directory already exists (idempotent).
+    PromoteFilesToDirs {
+        dir: &'static str,
+        ext: &'static str,
+        target: &'static str,
+    },
 }
 
 /// A versioned migration: a description + a list of steps.
@@ -102,6 +117,23 @@ fn migrations() -> &'static [Migration] {
             description: "Create memory/notes/ directory for Tier 2 overflow",
             steps: &[
                 Step::CreateDir("memory/notes"),
+            ],
+        },
+        // v1 → v2: Promote flat skill files to directories.
+        //
+        // skills/code-review.md → skills/code-review/SKILL.md
+        //
+        // This enables each skill to have its own directory for references,
+        // scripts, and examples alongside the SKILL.md file.
+        Migration {
+            from_version: 1,
+            description: "Promote skills/*.md to skills/<name>/SKILL.md directories",
+            steps: &[
+                Step::PromoteFilesToDirs {
+                    dir: "skills",
+                    ext: "md",
+                    target: "SKILL.md",
+                },
             ],
         },
     ]
@@ -224,6 +256,64 @@ fn apply_steps(workspace_path: &Path, steps: &[Step]) -> Result<()> {
             Step::BailIf(path, message) => {
                 if workspace_path.join(path).exists() {
                     return Err(DysonError::Config((*message).into()));
+                }
+            }
+            Step::PromoteFilesToDirs { dir, ext, target } => {
+                let full_dir = workspace_path.join(dir);
+                if !full_dir.is_dir() {
+                    continue;
+                }
+                let entries: Vec<_> = std::fs::read_dir(&full_dir)
+                    .map_err(|e| {
+                        DysonError::Config(format!(
+                            "workspace migration: cannot read {}: {e}",
+                            full_dir.display()
+                        ))
+                    })?
+                    .filter_map(|e| e.ok())
+                    .collect();
+
+                for entry in entries {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let file_ext = path.extension().and_then(|e| e.to_str());
+                    if file_ext != Some(ext) {
+                        continue;
+                    }
+                    let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                        Some(s) => s.to_string(),
+                        None => continue,
+                    };
+
+                    let sub_dir = full_dir.join(&stem);
+                    if sub_dir.exists() {
+                        // Already promoted — skip.
+                        continue;
+                    }
+
+                    std::fs::create_dir_all(&sub_dir).map_err(|e| {
+                        DysonError::Config(format!(
+                            "workspace migration: cannot create {}: {e}",
+                            sub_dir.display()
+                        ))
+                    })?;
+
+                    let dest = sub_dir.join(target);
+                    std::fs::rename(&path, &dest).map_err(|e| {
+                        DysonError::Config(format!(
+                            "workspace migration: cannot rename {} to {}: {e}",
+                            path.display(),
+                            dest.display()
+                        ))
+                    })?;
+
+                    tracing::info!(
+                        from = %path.display(),
+                        to = %dest.display(),
+                        "promoted skill file to directory"
+                    );
                 }
             }
         }
@@ -409,6 +499,124 @@ mod tests {
             std::fs::read_to_string(dir.join("sub/dir/file.md")).unwrap(),
             "data"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------------------
+    // v1 → v2: PromoteFilesToDirs tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn v1_to_v2_promotes_skill_files() {
+        let dir = temp_dir("v1-to-v2");
+        write_version(&dir, 1).unwrap();
+        std::fs::create_dir_all(dir.join("skills")).unwrap();
+
+        // Create flat skill files.
+        std::fs::write(
+            dir.join("skills/code-review.md"),
+            "---\nname: code-review\n---\n\nReview code.",
+        ).unwrap();
+        std::fs::write(
+            dir.join("skills/deploy.md"),
+            "---\nname: deploy\n---\n\nDeploy things.",
+        ).unwrap();
+
+        let applied = migrate(&dir).unwrap();
+        assert!(applied);
+
+        // Flat files should be gone.
+        assert!(!dir.join("skills/code-review.md").exists());
+        assert!(!dir.join("skills/deploy.md").exists());
+
+        // Directory structure should exist.
+        assert!(dir.join("skills/code-review/SKILL.md").is_file());
+        assert!(dir.join("skills/deploy/SKILL.md").is_file());
+
+        // Content preserved.
+        let content = std::fs::read_to_string(dir.join("skills/code-review/SKILL.md")).unwrap();
+        assert!(content.contains("Review code."));
+
+        // Version updated.
+        assert_eq!(read_version(&dir), CURRENT_WORKSPACE_VERSION);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v1_to_v2_skips_already_promoted() {
+        let dir = temp_dir("v1-to-v2-skip");
+        write_version(&dir, 1).unwrap();
+        std::fs::create_dir_all(dir.join("skills/existing")).unwrap();
+        std::fs::write(
+            dir.join("skills/existing/SKILL.md"),
+            "already here",
+        ).unwrap();
+        // Also a flat file named "existing.md" — should be skipped because
+        // skills/existing/ already exists.
+        std::fs::write(dir.join("skills/existing.md"), "flat version").unwrap();
+
+        let applied = migrate(&dir).unwrap();
+        assert!(applied);
+
+        // The directory version should be preserved (not overwritten).
+        let content = std::fs::read_to_string(dir.join("skills/existing/SKILL.md")).unwrap();
+        assert_eq!(content, "already here");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v1_to_v2_ignores_non_md_files() {
+        let dir = temp_dir("v1-to-v2-nonmd");
+        write_version(&dir, 1).unwrap();
+        std::fs::create_dir_all(dir.join("skills")).unwrap();
+        std::fs::write(dir.join("skills/notes.txt"), "not a skill").unwrap();
+
+        let applied = migrate(&dir).unwrap();
+        assert!(applied);
+
+        // .txt file should be untouched.
+        assert!(dir.join("skills/notes.txt").is_file());
+        assert!(!dir.join("skills/notes").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v1_to_v2_no_skills_dir() {
+        let dir = temp_dir("v1-to-v2-noskills");
+        write_version(&dir, 1).unwrap();
+
+        // No skills/ directory at all — should succeed.
+        let applied = migrate(&dir).unwrap();
+        assert!(applied);
+        assert_eq!(read_version(&dir), CURRENT_WORKSPACE_VERSION);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v0_to_v2_full_chain() {
+        let dir = temp_dir("v0-to-v2");
+        std::fs::create_dir_all(dir.join("memory")).unwrap();
+        std::fs::create_dir_all(dir.join("skills")).unwrap();
+        std::fs::write(
+            dir.join("skills/test.md"),
+            "---\nname: test\n---\n\nTest skill.",
+        ).unwrap();
+
+        let applied = migrate(&dir).unwrap();
+        assert!(applied);
+
+        // v0→v1: memory/notes/ created.
+        assert!(dir.join("memory/notes").is_dir());
+
+        // v1→v2: skill promoted.
+        assert!(dir.join("skills/test/SKILL.md").is_file());
+
+        assert_eq!(read_version(&dir), CURRENT_WORKSPACE_VERSION);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

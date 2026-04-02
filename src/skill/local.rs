@@ -30,29 +30,59 @@ use crate::tool::Tool;
 // LocalSkill
 // ---------------------------------------------------------------------------
 
-/// A skill loaded from a SKILL.md file on disk.
+/// A skill loaded from a `skills/<name>/SKILL.md` file on disk.
 ///
-/// Local skills contribute a system prompt fragment but no tools — they
-/// guide the agent's behaviour through instructions rather than providing
-/// new capabilities.
+/// Local skills no longer inject their full body into the system prompt.
+/// Instead, their name and description are collected into a compact
+/// `<available_skills>` list, and the full instructions are loaded on
+/// demand via the `load_skill` tool.
 #[derive(Debug)]
 pub struct LocalSkill {
     name: String,
-    #[allow(dead_code)]
     description: String,
-    system_prompt: String,
+    body: String,
 }
 
 impl LocalSkill {
-    /// Load a local skill from a file path.
-    pub fn from_file(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
+    /// Load a local skill from a directory containing `SKILL.md`.
+    pub fn from_dir(dir: &Path) -> Result<Self> {
+        let skill_md = dir.join("SKILL.md");
+        let content = std::fs::read_to_string(&skill_md).map_err(|e| {
             DysonError::Config(format!(
                 "failed to read skill file {}: {e}",
-                path.display()
+                skill_md.display()
             ))
         })?;
-        Self::parse(&content, path)
+        Self::parse(&content, &skill_md)
+    }
+
+    /// The skill's description (from frontmatter).
+    pub fn skill_description(&self) -> &str {
+        &self.description
+    }
+
+    /// The skill's full instruction body (the system prompt text).
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    /// Extract just the body (instructions) from SKILL.md content.
+    ///
+    /// Returns `None` if parsing fails.  Used by `load_skill` to return
+    /// instructions without frontmatter.
+    pub fn parse_body(content: &str) -> Option<String> {
+        let trimmed = content.trim_start();
+        if !trimmed.starts_with("---") {
+            return None;
+        }
+        let after_open = &trimmed[3..].trim_start_matches(['\r', '\n']);
+        let close_pos = after_open.find("\n---")?;
+        let body = after_open[close_pos + 4..].trim();
+        if body.is_empty() {
+            None
+        } else {
+            Some(body.to_string())
+        }
     }
 
     /// Parse SKILL.md content into a LocalSkill.
@@ -122,7 +152,7 @@ impl LocalSkill {
         Ok(Self {
             name,
             description: description.unwrap_or_default(),
-            system_prompt: body.to_string(),
+            body: body.to_string(),
         })
     }
 }
@@ -138,7 +168,57 @@ impl super::Skill for LocalSkill {
     }
 
     fn system_prompt(&self) -> Option<&str> {
-        Some(&self.system_prompt)
+        // Full body is loaded on-demand via the load_skill tool.
+        // The <available_skills> list is contributed by SkillListSkill.
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SkillListSkill — injects <available_skills> list into system prompt.
+// ---------------------------------------------------------------------------
+
+/// A lightweight skill that contributes the `<available_skills>` list to
+/// the system prompt.  No tools — just a prompt fragment listing all
+/// discovered skills by name and description.
+pub struct SkillListSkill {
+    prompt: String,
+}
+
+impl SkillListSkill {
+    /// Build from a list of (name, description) pairs.
+    pub fn new(skills: &[(String, String)]) -> Self {
+        let prompt = if skills.is_empty() {
+            String::new()
+        } else {
+            let mut lines = String::from("<available_skills>\n");
+            for (name, desc) in skills {
+                lines.push_str(&format!("- {name}: {desc}\n"));
+            }
+            lines.push_str("</available_skills>\n\n\
+                Use the load_skill tool to load a skill's full instructions before applying it.");
+            lines
+        };
+        Self { prompt }
+    }
+}
+
+#[async_trait]
+impl super::Skill for SkillListSkill {
+    fn name(&self) -> &str {
+        "skill-list"
+    }
+
+    fn tools(&self) -> &[Arc<dyn Tool>] {
+        &[]
+    }
+
+    fn system_prompt(&self) -> Option<&str> {
+        if self.prompt.is_empty() {
+            None
+        } else {
+            Some(&self.prompt)
+        }
     }
 }
 
@@ -170,7 +250,7 @@ Analyze code quality and security.
         assert_eq!(skill.name, "code-review");
         assert_eq!(skill.description, "Reviews code for quality");
         assert_eq!(
-            skill.system_prompt,
+            skill.body,
             "You are a code review expert.\nAnalyze code quality and security."
         );
     }
@@ -228,34 +308,33 @@ Do something.
         let skill = LocalSkill::parse(content, &test_path()).unwrap();
         assert_eq!(skill.name, "minimal");
         assert_eq!(skill.description, "");
-        assert_eq!(skill.system_prompt, "Do something.");
+        assert_eq!(skill.body, "Do something.");
     }
 
     #[test]
-    fn from_file_loads_real_file() {
+    fn from_dir_loads_skill() {
         let dir = std::env::temp_dir().join(format!(
             "dyson-skill-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test-skill.md");
         std::fs::write(
-            &path,
-            "---\nname: file-test\ndescription: loaded from disk\n---\n\nDo the thing.\n",
+            dir.join("SKILL.md"),
+            "---\nname: dir-test\ndescription: loaded from dir\n---\n\nDo the thing.\n",
         )
         .unwrap();
 
-        let skill = LocalSkill::from_file(&path).unwrap();
-        assert_eq!(skill.name, "file-test");
-        assert_eq!(skill.description, "loaded from disk");
-        assert_eq!(skill.system_prompt, "Do the thing.");
+        let skill = LocalSkill::from_dir(&dir).unwrap();
+        assert_eq!(skill.name, "dir-test");
+        assert_eq!(skill.description, "loaded from dir");
+        assert_eq!(skill.body, "Do the thing.");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn from_file_errors_on_missing_file() {
-        let err = LocalSkill::from_file(Path::new("/nonexistent/skill.md")).unwrap_err();
+    fn from_dir_errors_on_missing_dir() {
+        let err = LocalSkill::from_dir(Path::new("/nonexistent/skill")).unwrap_err();
         assert!(err.to_string().contains("failed to read skill file"));
     }
 
@@ -286,11 +365,11 @@ Body text.
 ";
         let skill = LocalSkill::parse(content, &test_path()).unwrap();
         assert_eq!(skill.name, "flexible");
-        assert_eq!(skill.system_prompt, "Body text.");
+        assert_eq!(skill.body, "Body text.");
     }
 
     #[test]
-    fn skill_trait_provides_system_prompt() {
+    fn skill_trait_does_not_inject_system_prompt() {
         use crate::skill::Skill;
 
         let content = "\
@@ -303,6 +382,51 @@ Custom instructions here.
         let skill = LocalSkill::parse(content, &test_path()).unwrap();
         assert_eq!(skill.name(), "prompt-test");
         assert!(skill.tools().is_empty());
-        assert_eq!(skill.system_prompt(), Some("Custom instructions here."));
+        // system_prompt returns None — full body loaded on-demand.
+        assert_eq!(skill.system_prompt(), None);
+        // But body() still returns the instructions.
+        assert_eq!(skill.body(), "Custom instructions here.");
+    }
+
+    #[test]
+    fn accessors_work() {
+        let content = "\
+---
+name: test-skill
+description: A test skill
+---
+
+Instructions here.
+";
+        let skill = LocalSkill::parse(content, &test_path()).unwrap();
+        assert_eq!(skill.skill_description(), "A test skill");
+        assert_eq!(skill.body(), "Instructions here.");
+    }
+
+    // -------------------------------------------------------------------
+    // SkillListSkill tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn skill_list_empty_returns_none() {
+        use crate::skill::Skill;
+        let skill = SkillListSkill::new(&[]);
+        assert!(skill.system_prompt().is_none());
+    }
+
+    #[test]
+    fn skill_list_builds_prompt() {
+        use crate::skill::Skill;
+        let skills = vec![
+            ("code-review".into(), "Reviews code".into()),
+            ("deploy".into(), "Deploys things".into()),
+        ];
+        let skill = SkillListSkill::new(&skills);
+        let prompt = skill.system_prompt().unwrap();
+        assert!(prompt.contains("<available_skills>"));
+        assert!(prompt.contains("- code-review: Reviews code"));
+        assert!(prompt.contains("- deploy: Deploys things"));
+        assert!(prompt.contains("</available_skills>"));
+        assert!(prompt.contains("load_skill"));
     }
 }

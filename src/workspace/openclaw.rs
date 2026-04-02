@@ -421,23 +421,23 @@ impl Workspace for OpenClawWorkspace {
         }
     }
 
-    fn skill_files(&self) -> Vec<std::path::PathBuf> {
+    fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
         let skills_dir = self.path.join("skills");
         if !skills_dir.is_dir() {
             return vec![];
         }
 
-        let mut paths = Vec::new();
+        let mut dirs = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&skills_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "md") && path.is_file() {
-                    paths.push(path);
+                if path.is_dir() && path.join("SKILL.md").is_file() {
+                    dirs.push(path);
                 }
             }
         }
-        paths.sort();
-        paths
+        dirs.sort();
+        dirs
     }
 
     fn programs_dir(&self) -> Option<std::path::PathBuf> {
@@ -695,65 +695,69 @@ mod tests {
     }
 
     #[test]
-    fn skill_files_returns_empty_when_no_skills() {
+    fn skill_dirs_returns_empty_when_no_skills() {
         let (dir, ws) = temp_workspace();
         // skills/ directory exists but is empty
         assert!(dir.join("skills").is_dir());
-        assert!(ws.skill_files().is_empty());
+        assert!(ws.skill_dirs().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn skill_files_discovers_md_files() {
+    fn skill_dirs_discovers_skill_directories() {
         let (dir, ws) = temp_workspace();
         let skills_dir = dir.join("skills");
 
-        // Create skill files
+        // Create skill directories with SKILL.md
+        let cr = skills_dir.join("code-review");
+        std::fs::create_dir_all(&cr).unwrap();
         std::fs::write(
-            skills_dir.join("code-review.md"),
+            cr.join("SKILL.md"),
             "---\nname: code-review\n---\n\nReview code.",
-        )
-        .unwrap();
-        std::fs::write(
-            skills_dir.join("writing.md"),
-            "---\nname: writing\n---\n\nWrite well.",
-        )
-        .unwrap();
-        // Non-.md files should be ignored
-        std::fs::write(skills_dir.join("notes.txt"), "not a skill").unwrap();
+        ).unwrap();
 
-        let paths = ws.skill_files();
-        assert_eq!(paths.len(), 2, "should find exactly 2 .md files");
-        let names: Vec<String> = paths
+        let wr = skills_dir.join("writing");
+        std::fs::create_dir_all(&wr).unwrap();
+        std::fs::write(
+            wr.join("SKILL.md"),
+            "---\nname: writing\n---\n\nWrite well.",
+        ).unwrap();
+
+        // A directory without SKILL.md should be ignored
+        let orphan = skills_dir.join("orphan");
+        std::fs::create_dir_all(&orphan).unwrap();
+
+        let dirs = ws.skill_dirs();
+        assert_eq!(dirs.len(), 2, "should find exactly 2 skill directories");
+        let names: Vec<String> = dirs
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        assert!(names.contains(&"code-review.md".to_string()));
-        assert!(names.contains(&"writing.md".to_string()));
+        assert!(names.contains(&"code-review".to_string()));
+        assert!(names.contains(&"writing".to_string()));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn skill_files_ignores_subdirectories() {
+    fn skill_dirs_ignores_flat_files() {
         let (dir, ws) = temp_workspace();
         let skills_dir = dir.join("skills");
 
-        // Create a subdirectory with an .md file — should not be discovered
-        let subdir = skills_dir.join("nested");
-        std::fs::create_dir_all(&subdir).unwrap();
-        std::fs::write(subdir.join("deep.md"), "---\nname: deep\n---\n\nDeep.").unwrap();
+        // A flat .md file should not be discovered (legacy format)
+        std::fs::write(skills_dir.join("legacy.md"), "old style").unwrap();
 
-        // Create a top-level skill
+        // A proper skill directory
+        let proper = skills_dir.join("proper");
+        std::fs::create_dir_all(&proper).unwrap();
         std::fs::write(
-            skills_dir.join("top.md"),
-            "---\nname: top\n---\n\nTop level.",
-        )
-        .unwrap();
+            proper.join("SKILL.md"),
+            "---\nname: proper\n---\n\nProper skill.",
+        ).unwrap();
 
-        let paths = ws.skill_files();
-        assert_eq!(paths.len(), 1, "should only find top-level .md files");
-        assert!(paths[0].file_name().unwrap() == "top.md");
+        let dirs = ws.skill_dirs();
+        assert_eq!(dirs.len(), 1, "should only find directory-based skills");
+        assert!(dirs[0].file_name().unwrap() == "proper");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

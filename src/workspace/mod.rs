@@ -112,15 +112,14 @@ pub trait Workspace: Send + Sync {
         vec![]
     }
 
-    /// Discover skill files in the workspace's `skills/` directory.
+    /// Discover skill directories in the workspace's `skills/` directory.
     ///
-    /// Returns absolute paths to `.md` files in the `skills/` subdirectory.
-    /// Following the Hermes pattern, skills are workspace-managed content
-    /// that the agent can create, edit, and discover — not just external
-    /// files referenced by config.
+    /// Returns absolute paths to skill directories (e.g., `skills/code-review/`)
+    /// that contain a `SKILL.md` file.  Each skill lives in its own directory
+    /// to support references, scripts, and examples alongside the skill file.
     ///
     /// Default implementation returns empty (InMemoryWorkspace, etc.).
-    fn skill_files(&self) -> Vec<std::path::PathBuf> {
+    fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
         vec![]
     }
 

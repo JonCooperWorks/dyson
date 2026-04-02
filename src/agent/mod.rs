@@ -1562,14 +1562,14 @@ impl Agent {
         // List existing skills so the model knows what already exists.
         let existing_skills = if let Some(ref ws) = ctx.workspace {
             let ws = ws.read().await;
-            let skill_files = ws.skill_files();
-            if skill_files.is_empty() {
+            let skill_dirs = ws.skill_dirs();
+            if skill_dirs.is_empty() {
                 "No skills exist yet.".to_string()
             } else {
-                let names: Vec<String> = skill_files
+                let names: Vec<String> = skill_dirs
                     .iter()
                     .filter_map(|p| {
-                        p.file_stem()
+                        p.file_name()
                             .and_then(|s| s.to_str())
                             .map(String::from)
                     })
