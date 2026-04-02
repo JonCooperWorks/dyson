@@ -511,3 +511,227 @@ fn mcp_server_generates_unique_tokens() {
         "different server instances should have different tokens"
     );
 }
+
+// =========================================================================
+// 9. Constant-time token comparison
+// =========================================================================
+
+#[tokio::test]
+async fn bearer_auth_uses_constant_time_comparison() {
+    // Verify that BearerTokenAuth uses constant-time comparison by checking
+    // that it still correctly accepts/rejects tokens (functional test).
+    // The actual constant-time property is verified by code inspection —
+    // the test ensures the comparison function works after the change.
+    use dyson::auth::bearer::BearerTokenAuth;
+    use dyson::auth::Auth;
+
+    let auth = BearerTokenAuth::new("a]b]c]d]e]f]0123456789abcdef0123456789abcdef0123456789abcdef01".into());
+
+    // Correct token.
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert(
+        "authorization",
+        "Bearer a]b]c]d]e]f]0123456789abcdef0123456789abcdef0123456789abcdef01"
+            .parse()
+            .unwrap(),
+    );
+    assert!(
+        auth.validate_request(&headers).await.is_ok(),
+        "correct token must be accepted"
+    );
+
+    // Wrong token — differs only in last character.
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert(
+        "authorization",
+        "Bearer a]b]c]d]e]f]0123456789abcdef0123456789abcdef0123456789abcdef02"
+            .parse()
+            .unwrap(),
+    );
+    assert!(
+        auth.validate_request(&headers).await.is_err(),
+        "wrong token must be rejected (even if only last char differs)"
+    );
+}
+
+#[tokio::test]
+async fn api_key_auth_uses_constant_time_comparison() {
+    use dyson::auth::api_key::ApiKeyAuth;
+    use dyson::auth::Auth;
+
+    let auth = ApiKeyAuth::new("x-api-key", "sk-test-key-12345".into());
+
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert("x-api-key", "sk-test-key-12345".parse().unwrap());
+    assert!(auth.validate_request(&headers).await.is_ok());
+
+    let mut headers = hyper::HeaderMap::new();
+    headers.insert("x-api-key", "sk-test-key-12346".parse().unwrap());
+    assert!(auth.validate_request(&headers).await.is_err());
+}
+
+// =========================================================================
+// 10. Agent-level rate limiting
+// =========================================================================
+
+#[test]
+fn rate_limiter_allows_within_limit() {
+    use dyson::agent::rate_limiter::RateLimiter;
+
+    let limiter = RateLimiter::new(5, std::time::Duration::from_secs(60));
+    for _ in 0..5 {
+        assert!(limiter.check().is_ok(), "should allow up to the limit");
+    }
+}
+
+#[test]
+fn rate_limiter_rejects_over_limit() {
+    use dyson::agent::rate_limiter::RateLimiter;
+
+    let limiter = RateLimiter::new(3, std::time::Duration::from_secs(60));
+    for _ in 0..3 {
+        limiter.check().unwrap();
+    }
+    assert!(
+        limiter.check().is_err(),
+        "should reject once limit is exceeded"
+    );
+}
+
+#[test]
+fn rate_limiter_resets_after_window() {
+    use dyson::agent::rate_limiter::RateLimiter;
+
+    let limiter = RateLimiter::new(2, std::time::Duration::from_millis(50));
+    limiter.check().unwrap();
+    limiter.check().unwrap();
+    assert!(limiter.check().is_err());
+
+    // Wait for the window to expire.
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    assert!(
+        limiter.check().is_ok(),
+        "should allow again after window expires"
+    );
+}
+
+// =========================================================================
+// 11. Web search query length limit
+// =========================================================================
+
+#[tokio::test]
+async fn web_search_rejects_oversized_query() {
+    use dyson::tool::{Tool, ToolContext};
+
+    // Create a mock provider that always returns empty results.
+    struct EmptyProvider;
+    #[async_trait::async_trait]
+    impl dyson::tool::web_search::SearchProvider for EmptyProvider {
+        async fn search(
+            &self,
+            _query: &str,
+            _num_results: usize,
+        ) -> dyson::Result<Vec<dyson::tool::web_search::SearchResult>> {
+            Ok(vec![])
+        }
+    }
+
+    let tool = dyson::tool::web_search::WebSearchTool::new(std::sync::Arc::new(EmptyProvider));
+    let ctx = ToolContext::from_cwd().unwrap();
+
+    // A query over 500 characters should be rejected.
+    let long_query = "a".repeat(501);
+    let result = tool
+        .run(serde_json::json!({"query": long_query}), &ctx)
+        .await
+        .unwrap();
+    assert!(
+        result.is_error,
+        "queries over 500 chars should be rejected to prevent data exfiltration"
+    );
+}
+
+// =========================================================================
+// 12. Bash env var filtering
+// =========================================================================
+
+#[tokio::test]
+async fn bash_does_not_leak_secret_env_vars() {
+    use dyson::tool::bash::BashTool;
+    use dyson::tool::{Tool, ToolContext};
+
+    let tool = BashTool::default();
+    let mut ctx = ToolContext::from_cwd().unwrap();
+
+    // Inject a fake secret into the tool context's env.
+    ctx.env
+        .insert("DYSON_TEST_API_KEY".into(), "super-secret-value".into());
+    ctx.env
+        .insert("DYSON_TEST_TOKEN".into(), "another-secret".into());
+    ctx.env.insert("PATH".into(), std::env::var("PATH").unwrap_or_default());
+
+    let input = serde_json::json!({"command": "env"});
+    let output = tool.run(input, &ctx).await.unwrap();
+
+    assert!(
+        !output.content.contains("super-secret-value"),
+        "bash output should not contain secret env var values"
+    );
+    assert!(
+        !output.content.contains("another-secret"),
+        "bash output should not contain token env var values"
+    );
+    // PATH should still be present.
+    assert!(
+        output.content.contains("PATH="),
+        "safe env vars like PATH should still be passed"
+    );
+}
+
+// =========================================================================
+// 13. list_files / search_files path validation
+// =========================================================================
+
+#[tokio::test]
+async fn list_files_rejects_path_traversal() {
+    use dyson::tool::{Tool, ToolContext};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = ToolContext {
+        working_dir: tmp.path().to_path_buf(),
+        env: std::collections::HashMap::new(),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+        workspace: None,
+        depth: 0,
+    };
+
+    let tool = dyson::tool::list_files::ListFilesTool;
+    let input = serde_json::json!({"pattern": "*", "path": "../../../etc"});
+    let output = tool.run(input, &ctx).await.unwrap();
+    assert!(
+        output.is_error,
+        "list_files should reject path traversal via the 'path' parameter"
+    );
+}
+
+#[tokio::test]
+async fn search_files_rejects_path_traversal() {
+    use dyson::tool::{Tool, ToolContext};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = ToolContext {
+        working_dir: tmp.path().to_path_buf(),
+        env: std::collections::HashMap::new(),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+        workspace: None,
+        depth: 0,
+    };
+
+    let tool = dyson::tool::search_files::SearchFilesTool;
+    let input = serde_json::json!({"pattern": ".*", "path": "../../../etc"});
+    let output = tool.run(input, &ctx).await.unwrap();
+    assert!(
+        output.is_error,
+        "search_files should reject path traversal via the 'path' parameter"
+    );
+}

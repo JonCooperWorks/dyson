@@ -82,6 +82,10 @@ pub enum DysonError {
     /// The operation was cancelled (e.g. Ctrl-C during a tool call).
     #[error("Cancelled")]
     Cancelled,
+
+    /// Rate limit exceeded — too many messages in the time window.
+    #[error("Rate limited: {limit} messages per {window_secs}s exceeded")]
+    RateLimit { limit: usize, window_secs: u64 },
 }
 
 // ---------------------------------------------------------------------------

@@ -270,6 +270,17 @@ impl Tool for WebSearchTool {
             return Ok(ToolOutput::error("query is required"));
         }
 
+        // Limit query length to prevent data exfiltration via search queries.
+        const MAX_QUERY_LEN: usize = 500;
+        if query.len() > MAX_QUERY_LEN {
+            return Ok(ToolOutput::error(format!(
+                "query too long ({} chars, max {MAX_QUERY_LEN}). Shorten the query.",
+                query.len(),
+            )));
+        }
+
+        tracing::info!(query = query.as_str(), "web search query");
+
         let num_results = input["num_results"].as_u64().unwrap_or(5).clamp(1, 10) as usize;
 
         // Race the search against cancellation (Ctrl-C).

@@ -69,11 +69,19 @@ impl Auth for BearerTokenAuth {
     }
 
     async fn validate_request(&self, headers: &hyper::HeaderMap) -> Result<AuthInfo> {
+        use subtle::ConstantTimeEq;
+
         let valid = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|t| t == self.token.expose())
+            .map(|t| {
+                let expected = self.token.expose().as_bytes();
+                let provided = t.as_bytes();
+                // Length check + constant-time comparison to prevent timing attacks.
+                provided.len() == expected.len()
+                    && bool::from(provided.ct_eq(expected))
+            })
             .unwrap_or(false);
 
         if valid {

@@ -346,6 +346,7 @@ impl Tool for SubagentTool {
             provider: self.provider.clone(),
             base_url: self.base_url.clone(),
             compaction: None,
+            rate_limit: None,
         };
 
         // -- Create the child's LLM client --

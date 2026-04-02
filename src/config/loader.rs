@@ -148,6 +148,14 @@ struct JsonAgent {
     /// - an integer: shorthand for `{ "context_window": <value> }` with defaults
     /// - an object: full `CompactionConfig` with optional fields
     compaction: Option<JsonCompaction>,
+    /// Rate limiting: `{ "max_messages": 30, "window_secs": 60 }`.
+    rate_limit: Option<JsonRateLimit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JsonRateLimit {
+    max_messages: usize,
+    window_secs: u64,
 }
 
 /// Flexible deserialization for the `"compaction"` field.
@@ -569,6 +577,13 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                 }
             };
             settings.agent.compaction = Some(config);
+        }
+
+        if let Some(rl) = agent.rate_limit {
+            settings.agent.rate_limit = Some(crate::config::RateLimitConfig {
+                max_messages: rl.max_messages,
+                window_secs: rl.window_secs,
+            });
         }
     }
 

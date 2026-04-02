@@ -70,6 +70,7 @@
 //   duplication, just shared references.
 // ===========================================================================
 
+pub mod rate_limiter;
 pub mod stream_handler;
 
 use std::collections::HashMap;
@@ -276,6 +277,10 @@ pub struct Agent {
     /// Retained so the background learning task can build its own LLM
     /// client without sharing the agent's.
     agent_settings: crate::config::AgentSettings,
+
+    /// Per-agent message rate limiter.
+    /// Checked at the start of every `run()` call.  Invisible to controllers.
+    message_rate_limiter: Option<rate_limiter::RateLimiter>,
 }
 
 impl Agent {
@@ -404,6 +409,12 @@ impl Agent {
             formatter: ResultFormatter::default(),
             agent_settings: settings.clone(),
             tools_disabled: false,
+            message_rate_limiter: settings.rate_limit.as_ref().map(|rl| {
+                rate_limiter::RateLimiter::new(
+                    rl.max_messages,
+                    std::time::Duration::from_secs(rl.window_secs),
+                )
+            }),
         })
     }
 
@@ -910,6 +921,11 @@ impl Agent {
     /// Assumes the caller has already pushed the user message to
     /// `self.messages`.
     async fn run_inner(&mut self, output: &mut dyn Output) -> Result<String> {
+        // Check per-agent rate limit before processing.
+        if let Some(ref limiter) = self.message_rate_limiter {
+            limiter.check()?;
+        }
+
         self.turn_count += 1;
 
         // Run memory maintenance as a side-channel LLM call every N turns.

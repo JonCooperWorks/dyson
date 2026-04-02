@@ -63,7 +63,11 @@ impl Tool for SearchFilesTool {
         };
 
         let search_dir = if let Some(sub) = input["path"].as_str() {
-            ctx.working_dir.join(sub)
+            // Validate the path doesn't escape the working directory.
+            match super::resolve_and_validate_path(&ctx.working_dir, sub) {
+                Ok(resolved) => resolved,
+                Err(e) => return Ok(ToolOutput::error(e)),
+            }
         } else {
             ctx.working_dir.clone()
         };

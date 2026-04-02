@@ -126,11 +126,27 @@ impl Tool for BashTool {
         tracing::debug!(command = command, "executing bash command");
 
         // -- Spawn the child process --
-        let child = tokio::process::Command::new("bash")
-            .arg("-c")
+        //
+        // Start with a clean environment and selectively add safe variables.
+        // This prevents leaking secrets (API keys, tokens) from the parent
+        // process environment into commands the LLM can observe via `env`
+        // or `printenv`.
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c")
             .arg(command)
             .current_dir(&ctx.working_dir)
-            .envs(&ctx.env)
+            .env_clear();
+
+        // Allow-list of safe environment variable prefixes/names to pass through.
+        for (key, value) in &ctx.env {
+            if is_safe_env_var(key) {
+                cmd.env(key, value);
+            } else {
+                tracing::debug!(key = key.as_str(), "filtering secret env var from bash");
+            }
+        }
+
+        let child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -222,6 +238,45 @@ impl Tool for BashTool {
             ))),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Environment variable filtering
+// ---------------------------------------------------------------------------
+
+/// Check if an environment variable name is safe to pass to child processes.
+///
+/// Blocks variables whose names match common secret patterns to prevent
+/// the LLM from reading API keys, tokens, and passwords via `env` or
+/// `printenv`.  Allows standard system variables through.
+fn is_safe_env_var(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+
+    // Block common secret patterns.
+    const SECRET_SUFFIXES: &[&str] = &[
+        "_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIALS", "_CREDENTIAL",
+    ];
+    const SECRET_PREFIXES: &[&str] = &["SECRET_", "CREDENTIALS_"];
+    const SECRET_EXACT: &[&str] = &[
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "GITHUB_TOKEN",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    ];
+
+    if SECRET_EXACT.iter().any(|&s| upper == s) {
+        return false;
+    }
+    if SECRET_SUFFIXES.iter().any(|&s| upper.ends_with(s)) {
+        return false;
+    }
+    if SECRET_PREFIXES.iter().any(|&s| upper.starts_with(s)) {
+        return false;
+    }
+
+    true
 }
 
 // ===========================================================================

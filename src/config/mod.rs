@@ -222,6 +222,40 @@ pub struct AgentSettings {
     /// the conversation while summarising the middle.
     /// `None` = automatic compaction disabled (default).
     pub compaction: Option<CompactionConfig>,
+
+    /// Rate limiting configuration.
+    ///
+    /// Limits the number of user messages processed per time window.
+    /// Applied per agent instance (which means per-chat for Telegram,
+    /// per-session for terminal).  `None` = no rate limit (default).
+    pub rate_limit: Option<RateLimitConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// RateLimitConfig
+// ---------------------------------------------------------------------------
+
+/// Per-agent rate limiting configuration.
+///
+/// Controls how many user messages an agent will process within a sliding
+/// time window.  Configured in dyson.json under `agent.rate_limit`.
+///
+/// ```json
+/// {
+///   "agent": {
+///     "rate_limit": {
+///       "max_messages": 30,
+///       "window_secs": 60
+///     }
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    /// Maximum messages allowed within the window.
+    pub max_messages: usize,
+    /// Window duration in seconds.
+    pub window_secs: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -677,6 +711,7 @@ impl Default for AgentSettings {
             provider: LlmProvider::Anthropic,
             base_url: None,
             compaction: None,
+            rate_limit: None,
         }
     }
 }

@@ -31,6 +31,7 @@ glob = "0.3"
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 base64 = "0.22"
+subtle = "2"
 
 [dev-dependencies]
 tempfile = "3"
