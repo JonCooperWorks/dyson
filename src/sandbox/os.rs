@@ -1151,7 +1151,7 @@ mod tests {
         let tool = BashTool::default();
         let ctx = ToolContext::from_cwd().unwrap();
         let output = tool
-            .run(serde_json::json!({"command": cmd}), &ctx)
+            .run(&serde_json::json!({"command": cmd}), &ctx)
             .await
             .unwrap();
         assert!(
@@ -1202,7 +1202,7 @@ mod tests {
         let tool = BashTool::default();
         let ctx = ToolContext::from_cwd().unwrap();
         let output = tool
-            .run(serde_json::json!({"command": cmd}), &ctx)
+            .run(&serde_json::json!({"command": cmd}), &ctx)
             .await
             .unwrap();
         assert!(
