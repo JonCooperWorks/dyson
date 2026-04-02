@@ -594,18 +594,29 @@ impl super::Controller for TelegramController {
                         }
                     };
 
-                    // Notify the user about unsupported media.
-                    let has_unsupported = !extracted.unsupported.is_empty();
+                    // Notify the user about unsupported media and replace
+                    // image/audio blocks with text placeholders so the caption
+                    // is still sent to the agent and persisted in history.
                     for msg in &extracted.unsupported {
                         let _ = bot_clone.send_message(chat_id, msg).await;
                     }
 
+                    let content_blocks = if extracted.unsupported.is_empty() {
+                        extracted.blocks
+                    } else {
+                        // Keep only text blocks and add placeholders.
+                        let mut blocks: Vec<_> = extracted.placeholders;
+                        blocks.extend(
+                            extracted.blocks.into_iter()
+                                .filter(|b| matches!(b, ContentBlock::Text { .. }))
+                        );
+                        blocks
+                    };
+
                     // If there are no content blocks left, nothing to send.
-                    if extracted.blocks.is_empty() {
+                    if content_blocks.is_empty() {
                         return;
                     }
-
-                    let content_blocks = extracted.blocks;
 
                     // Get or create the per-chat agent.
                     let mut agents_map = agents_clone.lock().await;
@@ -654,16 +665,22 @@ impl super::Controller for TelegramController {
                     };
 
                     if let Err(e) = result {
-                        tracing::error!(error = %e, "agent run failed");
-                        let _ = bot_clone.send_message(chat_id, format!("Error: {e}")).await;
+                        let err_str = e.to_string();
+                        if has_non_text && (err_str.contains("image") || err_str.contains("vision")) {
+                            tracing::warn!(error = %e, "model does not support image input");
+                            let _ = bot_clone.send_message(
+                                chat_id,
+                                format!("{model_name} doesn't support vision"),
+                            ).await;
+                        } else {
+                            tracing::error!(error = %e, "agent run failed");
+                            let _ = bot_clone.send_message(chat_id, format!("Error: {e}")).await;
+                        }
                     }
 
-                    // Persist conversation history to disk after each turn,
-                    // but skip if the message contained unsupported media.
-                    if !has_unsupported {
-                        if let Err(e) = store_clone.save(&chat_key, ca.agent.messages()) {
-                            tracing::error!(error = %e, "failed to save chat history");
-                        }
+                    // Persist conversation history to disk after each turn.
+                    if let Err(e) = store_clone.save(&chat_key, ca.agent.messages()) {
+                        tracing::error!(error = %e, "failed to save chat history");
                     }
 
                     drop(agents_map);
@@ -739,6 +756,8 @@ fn save_memory_note(
 struct ExtractedContent {
     /// Content blocks to send to the agent.
     blocks: Vec<ContentBlock>,
+    /// Placeholder text blocks to persist in history instead of unsupported media.
+    placeholders: Vec<ContentBlock>,
     /// Friendly messages about unsupported media (sent to user, not saved to history).
     unsupported: Vec<String>,
 }
@@ -750,6 +769,7 @@ async fn extract_content(
     model: &str,
 ) -> crate::Result<ExtractedContent> {
     let mut blocks = Vec::new();
+    let mut placeholders: Vec<ContentBlock> = Vec::new();
     let mut unsupported: Vec<String> = Vec::new();
 
     // Add text content if present.
@@ -782,7 +802,9 @@ async fn extract_content(
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to process photo");
-                            unsupported.push(format!("{model} doesn't support vision"));
+                            let msg = format!("{model} doesn't support vision");
+                            placeholders.push(ContentBlock::Text { text: format!("[{msg}]") });
+                            unsupported.push(msg);
                         }
                     }
                 }
@@ -822,7 +844,9 @@ async fn extract_content(
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "failed to transcribe voice note");
-                        unsupported.push(format!("{model} doesn't support audio"));
+                        let msg = format!("{model} doesn't support audio");
+                        placeholders.push(ContentBlock::Text { text: format!("[{msg}]") });
+                        unsupported.push(msg);
                     }
                 }
             }
@@ -863,7 +887,9 @@ async fn extract_content(
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to process document image");
-                            unsupported.push(format!("{model} doesn't support vision"));
+                            let msg = format!("{model} doesn't support vision");
+                            placeholders.push(ContentBlock::Text { text: format!("[{msg}]") });
+                            unsupported.push(msg);
                         }
                     }
                 }
@@ -885,7 +911,7 @@ async fn extract_content(
         });
     }
 
-    Ok(ExtractedContent { blocks, unsupported })
+    Ok(ExtractedContent { blocks, placeholders, unsupported })
 }
 
 /// Download a file from Telegram by file_id.
