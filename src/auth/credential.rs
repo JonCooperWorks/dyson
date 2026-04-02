@@ -144,22 +144,25 @@ mod tests {
         let secret_len_bytes = secret_len.to_ne_bytes();
 
         // Before drop: the String's length field should be present.
-        let pre_drop_bytes: Vec<u8> = unsafe {
-            std::slice::from_raw_parts(raw as *const u8, struct_size).to_vec()
-        };
+        let pre_drop_bytes: Vec<u8> =
+            unsafe { std::slice::from_raw_parts(raw as *const u8, struct_size).to_vec() };
         let pre_match_count = pre_drop_bytes
             .windows(secret_len_bytes.len())
             .filter(|w| *w == secret_len_bytes)
             .count();
-        assert!(pre_match_count > 0, "length field should be present before drop");
+        assert!(
+            pre_match_count > 0,
+            "length field should be present before drop"
+        );
 
         // Drop (triggers zeroize).
-        unsafe { std::ptr::drop_in_place(raw); }
+        unsafe {
+            std::ptr::drop_in_place(raw);
+        }
 
         // After drop: the length field should be zeroed.
-        let post_drop_bytes: Vec<u8> = unsafe {
-            std::slice::from_raw_parts(raw as *const u8, struct_size).to_vec()
-        };
+        let post_drop_bytes: Vec<u8> =
+            unsafe { std::slice::from_raw_parts(raw as *const u8, struct_size).to_vec() };
         let post_match_count = post_drop_bytes
             .windows(secret_len_bytes.len())
             .filter(|w| *w == secret_len_bytes)

@@ -44,10 +44,7 @@ fn path_traversal_allows_valid_paths() {
 #[test]
 fn path_traversal_rejects_symlinks() {
     // Create a temp directory with a symlink.
-    let dir = std::env::temp_dir().join(format!(
-        "dyson-symlink-test-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("dyson-symlink-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
     let target = dir.join("real_file.txt");
@@ -126,8 +123,8 @@ fn workspace_search_does_not_hang_on_pathological_regex() {
     use dyson::workspace::InMemoryWorkspace;
     use dyson::workspace::Workspace;
 
-    let ws = InMemoryWorkspace::new()
-        .with_file("test.md", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!");
+    let ws =
+        InMemoryWorkspace::new().with_file("test.md", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!");
 
     // A pattern that could cause catastrophic backtracking without size limits.
     // The OpenClawWorkspace has a 10MB compiled size limit; InMemoryWorkspace
@@ -155,10 +152,7 @@ fn config_rejects_file_larger_than_1mb() {
     use std::io::Write;
 
     // Create a temp file larger than 1MB.
-    let dir = std::env::temp_dir().join(format!(
-        "dyson-config-size-test-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("dyson-config-size-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let config_path = dir.join("huge-dyson.json");
 
@@ -283,9 +277,8 @@ fn credential_zeroizes_on_drop() {
     let secret_len_bytes = secret.len().to_ne_bytes();
 
     // Before drop: the String's length field should be present.
-    let pre_drop_bytes: Vec<u8> = unsafe {
-        std::slice::from_raw_parts(raw as *const u8, struct_size).to_vec()
-    };
+    let pre_drop_bytes: Vec<u8> =
+        unsafe { std::slice::from_raw_parts(raw as *const u8, struct_size).to_vec() };
     let pre_match_count = pre_drop_bytes
         .windows(secret_len_bytes.len())
         .filter(|w| *w == secret_len_bytes)
@@ -301,9 +294,8 @@ fn credential_zeroizes_on_drop() {
     }
 
     // After drop: the String's length should have been zeroed.
-    let post_drop_bytes: Vec<u8> = unsafe {
-        std::slice::from_raw_parts(raw as *const u8, struct_size).to_vec()
-    };
+    let post_drop_bytes: Vec<u8> =
+        unsafe { std::slice::from_raw_parts(raw as *const u8, struct_size).to_vec() };
     let post_match_count = post_drop_bytes
         .windows(secret_len_bytes.len())
         .filter(|w| *w == secret_len_bytes)
@@ -330,7 +322,10 @@ fn credential_debug_redacts_secret() {
         !debug.contains("sk-ant-super-secret"),
         "Debug output must not contain the secret value"
     );
-    assert!(debug.contains("***"), "Debug output should show redacted marker");
+    assert!(
+        debug.contains("***"),
+        "Debug output should show redacted marker"
+    );
 }
 
 // =========================================================================
@@ -343,8 +338,9 @@ async fn mcp_server_binds_to_loopback_only() {
     use tokio::sync::RwLock;
 
     // Create a minimal workspace for the MCP server.
-    let ws: Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> =
-        Arc::new(RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())));
+    let ws: Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> = Arc::new(RwLock::new(Box::new(
+        dyson::workspace::InMemoryWorkspace::new(),
+    )));
 
     let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, true));
     let (port, handle, token) = server.start().await.unwrap();
@@ -353,10 +349,7 @@ async fn mcp_server_binds_to_loopback_only() {
     assert!(port > 0, "port should be a valid non-zero port");
 
     // Verify the address is loopback by connecting to it.
-    let addr = std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        port,
-    );
+    let addr = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
     assert!(
         addr.ip().is_loopback(),
         "MCP server address must be loopback, got {}",
@@ -401,8 +394,9 @@ async fn mcp_server_rejects_unauthorized_request() {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
-    let ws: Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> =
-        Arc::new(RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())));
+    let ws: Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> = Arc::new(RwLock::new(Box::new(
+        dyson::workspace::InMemoryWorkspace::new(),
+    )));
 
     let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, true));
     let (port, handle, _token) = server.start().await.unwrap();
@@ -439,8 +433,9 @@ async fn mcp_server_rejects_wrong_bearer_token() {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
-    let ws: Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> =
-        Arc::new(RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())));
+    let ws: Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> = Arc::new(RwLock::new(Box::new(
+        dyson::workspace::InMemoryWorkspace::new(),
+    )));
 
     let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, true));
     let (port, handle, _token) = server.start().await.unwrap();
@@ -477,8 +472,9 @@ async fn mcp_server_rejects_wrong_bearer_token() {
 fn mcp_server_bearer_token_is_64_hex_chars() {
     use tokio::sync::RwLock;
 
-    let ws: std::sync::Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> =
-        std::sync::Arc::new(RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())));
+    let ws: std::sync::Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> = std::sync::Arc::new(
+        RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())),
+    );
 
     let server = dyson::skill::mcp::serve::McpHttpServer::new(ws, true);
     let token = server.bearer_token();
@@ -499,10 +495,12 @@ fn mcp_server_bearer_token_is_64_hex_chars() {
 fn mcp_server_generates_unique_tokens() {
     use tokio::sync::RwLock;
 
-    let ws1: std::sync::Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> =
-        std::sync::Arc::new(RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())));
-    let ws2: std::sync::Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> =
-        std::sync::Arc::new(RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())));
+    let ws1: std::sync::Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> = std::sync::Arc::new(
+        RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())),
+    );
+    let ws2: std::sync::Arc<RwLock<Box<dyn dyson::workspace::Workspace>>> = std::sync::Arc::new(
+        RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())),
+    );
 
     let server1 = dyson::skill::mcp::serve::McpHttpServer::new(ws1, true);
     let server2 = dyson::skill::mcp::serve::McpHttpServer::new(ws2, true);

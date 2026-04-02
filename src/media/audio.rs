@@ -101,11 +101,7 @@ pub async fn transcribe(data: &[u8], mime_type: &str) -> crate::Result<String> {
 
 /// Find the whisper binary on the system.
 async fn find_whisper() -> Option<PathBuf> {
-    let output = Command::new("which")
-        .arg("whisper")
-        .output()
-        .await
-        .ok()?;
+    let output = Command::new("which").arg("whisper").output().await.ok()?;
 
     if output.status.success() {
         let path = String::from_utf8_lossy(&output.stdout).trim().to_string();

@@ -98,10 +98,7 @@ impl SearchProvider for BraveSearchProvider {
             .map(|arr| {
                 arr.iter()
                     .map(|r| {
-                        let snippet = r["description"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
+                        let snippet = r["description"].as_str().unwrap_or("").to_string();
                         // Truncate long snippets to keep output compact.
                         let snippet = truncate(&snippet, 200);
                         SearchResult {
@@ -151,11 +148,7 @@ impl SearchProvider for SearxngSearchProvider {
         let resp = self
             .client
             .get(&url)
-            .query(&[
-                ("q", query),
-                ("format", "json"),
-                ("pageno", "1"),
-            ])
+            .query(&[("q", query), ("format", "json"), ("pageno", "1")])
             .send()
             .await
             .map_err(|e| DysonError::tool("web_search", format!("request failed: {e}")))?;
@@ -180,10 +173,7 @@ impl SearchProvider for SearxngSearchProvider {
                 arr.iter()
                     .take(num_results)
                     .map(|r| {
-                        let snippet = r["content"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
+                        let snippet = r["content"].as_str().unwrap_or("").to_string();
                         let snippet = truncate(&snippet, 200);
                         SearchResult {
                             title: r["title"].as_str().unwrap_or("").to_string(),
@@ -210,9 +200,7 @@ impl SearchProvider for SearxngSearchProvider {
 /// - `"searxng"` — SearXNG instance (requires `base_url`, no API key needed)
 ///
 /// Future providers can be added with a new match arm.
-pub fn create_provider(
-    config: &crate::config::WebSearchConfig,
-) -> Result<Arc<dyn SearchProvider>> {
+pub fn create_provider(config: &crate::config::WebSearchConfig) -> Result<Arc<dyn SearchProvider>> {
     match config.provider.as_str() {
         "brave" => Ok(Arc::new(BraveSearchProvider::new(config.api_key.clone()))),
         "searxng" => {
@@ -276,19 +264,13 @@ impl Tool for WebSearchTool {
     }
 
     async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let query = input["query"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let query = input["query"].as_str().unwrap_or("").to_string();
 
         if query.is_empty() {
             return Ok(ToolOutput::error("query is required"));
         }
 
-        let num_results = input["num_results"]
-            .as_u64()
-            .unwrap_or(5)
-            .clamp(1, 10) as usize;
+        let num_results = input["num_results"].as_u64().unwrap_or(5).clamp(1, 10) as usize;
 
         // Race the search against cancellation (Ctrl-C).
         let results = tokio::select! {
@@ -384,7 +366,10 @@ mod tests {
     async fn no_results_returns_message() {
         let tool = mock_tool(vec![]);
         let ctx = ToolContext::from_cwd().unwrap();
-        let result = tool.run(json!({"query": "nonexistent"}), &ctx).await.unwrap();
+        let result = tool
+            .run(json!({"query": "nonexistent"}), &ctx)
+            .await
+            .unwrap();
         assert!(!result.is_error);
         assert!(result.content.contains("No results found"));
     }
@@ -415,9 +400,21 @@ mod tests {
     #[tokio::test]
     async fn respects_num_results() {
         let tool = mock_tool(vec![
-            SearchResult { title: "A".into(), url: "a".into(), snippet: "a".into() },
-            SearchResult { title: "B".into(), url: "b".into(), snippet: "b".into() },
-            SearchResult { title: "C".into(), url: "c".into(), snippet: "c".into() },
+            SearchResult {
+                title: "A".into(),
+                url: "a".into(),
+                snippet: "a".into(),
+            },
+            SearchResult {
+                title: "B".into(),
+                url: "b".into(),
+                snippet: "b".into(),
+            },
+            SearchResult {
+                title: "C".into(),
+                url: "c".into(),
+                snippet: "c".into(),
+            },
         ]);
         let ctx = ToolContext::from_cwd().unwrap();
         let result = tool

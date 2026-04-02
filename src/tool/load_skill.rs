@@ -47,9 +47,10 @@ impl Tool for LoadSkillTool {
     }
 
     async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
-        let ws = ctx.workspace.as_ref().ok_or_else(|| {
-            DysonError::tool("load_skill", "no workspace configured")
-        })?;
+        let ws = ctx
+            .workspace
+            .as_ref()
+            .ok_or_else(|| DysonError::tool("load_skill", "no workspace configured"))?;
 
         let skill_name = input["skill_name"]
             .as_str()
@@ -81,11 +82,7 @@ impl Tool for LoadSkillTool {
                 let available = ws.skill_dirs();
                 let names: Vec<String> = available
                     .iter()
-                    .filter_map(|p| {
-                        p.file_name()
-                            .and_then(|s| s.to_str())
-                            .map(String::from)
-                    })
+                    .filter_map(|p| p.file_name().and_then(|s| s.to_str()).map(String::from))
                     .collect();
 
                 if names.is_empty() {
@@ -171,10 +168,7 @@ mod tests {
         let ctx = make_ctx(ws);
         let tool = LoadSkillTool;
 
-        let result = tool
-            .run(json!({"skill_name": ""}), &ctx)
-            .await
-            .unwrap();
+        let result = tool.run(json!({"skill_name": ""}), &ctx).await.unwrap();
 
         assert!(result.is_error);
         assert!(result.content.contains("required"));

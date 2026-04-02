@@ -46,7 +46,13 @@ pub async fn run(
     });
 
     let mut settings = dyson::config::loader::load_settings(config_path.as_deref())?;
-    super::apply_overrides(&mut settings, dangerous_no_sandbox, provider, base_url, workspace)?;
+    super::apply_overrides(
+        &mut settings,
+        dangerous_no_sandbox,
+        provider,
+        base_url,
+        workspace,
+    )?;
 
     tracing::info!(
         model = settings.agent.model,
@@ -67,9 +73,7 @@ pub async fn run(
         for config in &settings.controllers {
             match config.controller_type.as_str() {
                 "terminal" => {
-                    controllers.push(Box::new(
-                        dyson::controller::terminal::TerminalController,
-                    ));
+                    controllers.push(Box::new(dyson::controller::terminal::TerminalController));
                 }
                 "telegram" => {
                     if let Some(ctrl) =

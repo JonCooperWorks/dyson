@@ -35,9 +35,9 @@ use crate::tool::read_file::ReadFileTool;
 use crate::tool::search_files::SearchFilesTool;
 use crate::tool::send_file::SendFileTool;
 use crate::tool::web_search;
-use crate::tool::workspace_view::WorkspaceViewTool;
 use crate::tool::workspace_search::WorkspaceSearchTool;
 use crate::tool::workspace_update::WorkspaceUpdateTool;
+use crate::tool::workspace_view::WorkspaceViewTool;
 use crate::tool::write_file::WriteFileTool;
 
 // ---------------------------------------------------------------------------

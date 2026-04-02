@@ -155,9 +155,21 @@ async fn main() -> dyson::error::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { noinput, daemonize, import_openclaw, path, env_vars, dangerous_no_sandbox } => {
-            command::init::run(noinput, daemonize, import_openclaw, path, env_vars, dangerous_no_sandbox)
-        }
+        Commands::Init {
+            noinput,
+            daemonize,
+            import_openclaw,
+            path,
+            env_vars,
+            dangerous_no_sandbox,
+        } => command::init::run(
+            noinput,
+            daemonize,
+            import_openclaw,
+            path,
+            env_vars,
+            dangerous_no_sandbox,
+        ),
         Commands::Listen {
             config,
             dangerous_no_sandbox,

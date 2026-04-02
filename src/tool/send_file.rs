@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
-use crate::tool::{resolve_and_validate_path, Tool, ToolContext, ToolOutput};
+use crate::tool::{Tool, ToolContext, ToolOutput, resolve_and_validate_path};
 
 pub struct SendFileTool;
 

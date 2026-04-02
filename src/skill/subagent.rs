@@ -77,7 +77,7 @@ use crate::controller::Output;
 use crate::error::{DysonError, Result};
 use crate::sandbox::Sandbox;
 use crate::skill::Skill;
-use crate::tool::{Tool, ToolContext, ToolOutput, MAX_SUBAGENT_DEPTH};
+use crate::tool::{MAX_SUBAGENT_DEPTH, Tool, ToolContext, ToolOutput};
 
 // ---------------------------------------------------------------------------
 // CaptureOutput — collects agent output into a String.
@@ -92,6 +92,7 @@ use crate::tool::{Tool, ToolContext, ToolOutput, MAX_SUBAGENT_DEPTH};
 /// Tool events (tool_use_start, tool_result) are logged for debugging
 /// but not included in the captured text — only the LLM's natural
 /// language output matters for the parent.
+#[derive(Default)]
 pub struct CaptureOutput {
     /// Accumulated text from TextDelta events.
     text: String,
@@ -487,11 +488,7 @@ impl SubagentSkill {
                 inherited,
             );
 
-            let tool_names: Vec<&str> = tool
-                .inherited_tools
-                .iter()
-                .map(|t| t.name())
-                .collect();
+            let tool_names: Vec<&str> = tool.inherited_tools.iter().map(|t| t.name()).collect();
             tracing::info!(
                 subagent = cfg.name,
                 provider = cfg.provider,
@@ -499,10 +496,7 @@ impl SubagentSkill {
                 "subagent configured"
             );
 
-            prompt_lines.push(format!(
-                "- **{}**: {}",
-                cfg.name, cfg.description,
-            ));
+            prompt_lines.push(format!("- **{}**: {}", cfg.name, cfg.description,));
 
             tools.push(Arc::new(tool));
         }
@@ -723,9 +717,7 @@ mod tests {
         let mut output = CaptureOutput::new();
         output.tool_use_start("id_1", "bash").unwrap();
         output.tool_use_complete().unwrap();
-        output
-            .tool_result(&ToolOutput::success("result"))
-            .unwrap();
+        output.tool_result(&ToolOutput::success("result")).unwrap();
         // Tool events should not add to the captured text.
         assert_eq!(output.text(), "");
     }
@@ -733,9 +725,7 @@ mod tests {
     #[test]
     fn capture_output_handles_errors() {
         let mut output = CaptureOutput::new();
-        output
-            .error(&DysonError::Llm("test error".into()))
-            .unwrap();
+        output.error(&DysonError::Llm("test error".into())).unwrap();
         // Errors are logged, not captured as text.
         assert_eq!(output.text(), "");
     }
@@ -877,14 +867,16 @@ mod tests {
         };
 
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(FilteredSkill { tools: vec![] })];
-        let sandbox: Arc<dyn Sandbox> =
-            Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
         let mut agent =
             crate::agent::Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         agent.set_depth(1);
 
         let mut capture = CaptureOutput::new();
-        let result = agent.run("Research Rust patterns", &mut capture).await.unwrap();
+        let result = agent
+            .run("Research Rust patterns", &mut capture)
+            .await
+            .unwrap();
 
         assert_eq!(result, "Research complete.");
         assert_eq!(capture.text(), "Research complete.");
@@ -965,11 +957,8 @@ mod tests {
 
     #[test]
     fn filtered_skill_exposes_tools() {
-        let tool: Arc<dyn Tool> =
-            Arc::new(crate::tool::bash::BashTool::default());
-        let skill = FilteredSkill {
-            tools: vec![tool],
-        };
+        let tool: Arc<dyn Tool> = Arc::new(crate::tool::bash::BashTool::default());
+        let skill = FilteredSkill { tools: vec![tool] };
 
         assert_eq!(skill.name(), "inherited");
         assert_eq!(skill.tools().len(), 1);
@@ -1010,8 +999,7 @@ mod tests {
             tools: None,
         }];
 
-        let sandbox: Arc<dyn Sandbox> =
-            Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
         let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[]);
 
         assert_eq!(skill.name(), "subagents");
@@ -1039,8 +1027,7 @@ mod tests {
             tools: None,
         }];
 
-        let sandbox: Arc<dyn Sandbox> =
-            Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
         let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[]);
 
         // Should have skipped the subagent with unknown provider.
@@ -1069,10 +1056,7 @@ mod tests {
             Arc::new(crate::tool::read_file::ReadFileTool),
             Arc::new(crate::tool::write_file::WriteFileTool),
         ];
-        let filtered = filter_tools(
-            &tools,
-            &Some(vec!["bash".into(), "read_file".into()]),
-        );
+        let filtered = filter_tools(&tools, &Some(vec!["bash".into(), "read_file".into()]));
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].name(), "bash");
         assert_eq!(filtered[1].name(), "read_file");
@@ -1080,22 +1064,15 @@ mod tests {
 
     #[test]
     fn filter_tools_ignores_unknown_names() {
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(crate::tool::bash::BashTool::default()),
-        ];
-        let filtered = filter_tools(
-            &tools,
-            &Some(vec!["bash".into(), "nonexistent".into()]),
-        );
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(crate::tool::bash::BashTool::default())];
+        let filtered = filter_tools(&tools, &Some(vec!["bash".into(), "nonexistent".into()]));
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name(), "bash");
     }
 
     #[test]
     fn filter_tools_empty_filter_returns_none() {
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(crate::tool::bash::BashTool::default()),
-        ];
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(crate::tool::bash::BashTool::default())];
         let filtered = filter_tools(&tools, &Some(vec![]));
         assert_eq!(filtered.len(), 0);
     }
@@ -1151,8 +1128,7 @@ mod tests {
             tools: None,
         }];
 
-        let sandbox: Arc<dyn Sandbox> =
-            Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
         let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[]);
 
         // Should have resolved successfully (1 tool, not skipped).

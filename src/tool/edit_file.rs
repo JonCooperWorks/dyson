@@ -119,9 +119,7 @@ impl Tool for EditFileTool {
             )));
         }
 
-        Ok(ToolOutput::success(format!(
-            "Applied edit to {file_path}"
-        )))
+        Ok(ToolOutput::success(format!("Applied edit to {file_path}")))
     }
 }
 
@@ -143,8 +141,11 @@ mod tests {
     #[tokio::test]
     async fn edit_replaces_string() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("test.rs"), "fn hello() {\n    println!(\"hello\");\n}\n")
-            .unwrap();
+        std::fs::write(
+            tmp.path().join("test.rs"),
+            "fn hello() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
 
         let tool = EditFileTool;
         let input = serde_json::json!({

@@ -55,15 +55,14 @@ impl Tool for WriteFileTool {
         };
 
         // Create parent directories if needed.
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                    return Ok(ToolOutput::error(format!(
-                        "cannot create directories for '{}': {e}",
-                        path.display()
-                    )));
-                }
-            }
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+            && let Err(e) = tokio::fs::create_dir_all(parent).await
+        {
+            return Ok(ToolOutput::error(format!(
+                "cannot create directories for '{}': {e}",
+                path.display()
+            )));
         }
 
         let bytes = content.len();

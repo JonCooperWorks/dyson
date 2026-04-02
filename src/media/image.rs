@@ -12,8 +12,8 @@
 // ===========================================================================
 
 use base64::Engine;
-use image::imageops::FilterType;
 use image::ImageReader;
+use image::imageops::FilterType;
 use std::io::Cursor;
 
 use crate::message::ContentBlock;
@@ -32,7 +32,7 @@ pub fn process_image(data: &[u8]) -> crate::Result<ContentBlock> {
     // Decode from any supported format.
     let img = ImageReader::new(Cursor::new(data))
         .with_guessed_format()
-        .map_err(|e| crate::DysonError::Io(e))?
+        .map_err(crate::DysonError::Io)?
         .decode()
         .map_err(|e| crate::DysonError::Config(format!("failed to decode image: {e}")))?;
 

@@ -176,7 +176,9 @@ pub async fn create_skills(
     settings: &crate::config::Settings,
     workspace: Option<&dyn crate::workspace::Workspace>,
     sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox>,
-    workspace_arc: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    workspace_arc: Option<
+        std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
+    >,
 ) -> Vec<Box<dyn Skill>> {
     let mut skills: Vec<Box<dyn Skill>> = Vec::new();
     let mut subagent_configs: Vec<crate::config::SubagentAgentConfig> = Vec::new();
@@ -300,7 +302,8 @@ pub async fn create_skills(
 
         tracing::info!(
             builtin_subagents = subagent::builtin_subagent_configs().len(),
-            user_subagents = all_subagent_configs.len() - subagent::builtin_subagent_configs().len(),
+            user_subagents =
+                all_subagent_configs.len() - subagent::builtin_subagent_configs().len(),
             parent_tools = parent_tools.len(),
             "constructing subagent skill"
         );

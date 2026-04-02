@@ -165,7 +165,9 @@ impl Skill for McpSkill {
             }
         });
 
-        let init_result = transport.send_request("initialize", Some(init_params)).await?;
+        let init_result = transport
+            .send_request("initialize", Some(init_params))
+            .await?;
 
         tracing::debug!(
             server = server_name,
@@ -179,15 +181,17 @@ impl Skill for McpSkill {
             .await?;
 
         // -- Discover tools --
-        let tools_result = transport.send_request("tools/list", Some(serde_json::json!({}))).await?;
+        let tools_result = transport
+            .send_request("tools/list", Some(serde_json::json!({})))
+            .await?;
 
         let tool_defs: Vec<McpToolDef> = match tools_result.get("tools") {
-            Some(tools_json) => serde_json::from_value(tools_json.clone()).map_err(|e| {
-                DysonError::Mcp {
+            Some(tools_json) => {
+                serde_json::from_value(tools_json.clone()).map_err(|e| DysonError::Mcp {
                     server: server_name.clone(),
                     message: format!("failed to parse tools/list: {e}"),
-                }
-            })?,
+                })?
+            }
             None => vec![],
         };
 
@@ -208,7 +212,9 @@ impl Skill for McpSkill {
             tools.push(Arc::new(McpRemoteTool {
                 tool_name: def.name,
                 description: desc,
-                input_schema: def.input_schema.unwrap_or(serde_json::json!({"type": "object"})),
+                input_schema: def
+                    .input_schema
+                    .unwrap_or(serde_json::json!({"type": "object"})),
                 transport: Arc::clone(&transport),
                 server_name: server_name.clone(),
             }));

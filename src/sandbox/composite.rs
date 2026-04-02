@@ -266,10 +266,7 @@ mod tests {
     #[tokio::test]
     async fn deny_short_circuits() {
         // DenyRm should block, PrefixSandbox should never run.
-        let sandbox = CompositeSandbox::new(vec![
-            Box::new(DenyRmSandbox),
-            Box::new(PrefixSandbox),
-        ]);
+        let sandbox = CompositeSandbox::new(vec![Box::new(DenyRmSandbox), Box::new(PrefixSandbox)]);
         let ctx = ToolContext::from_cwd().unwrap();
         let input = serde_json::json!({"command": "rm -rf /"});
 
@@ -286,10 +283,8 @@ mod tests {
     async fn allows_chain_rewrites() {
         // PrefixSandbox rewrites "ls" → "echo ls".
         // DangerousNoSandbox passes it through unchanged.
-        let sandbox = CompositeSandbox::new(vec![
-            Box::new(PrefixSandbox),
-            Box::new(DangerousNoSandbox),
-        ]);
+        let sandbox =
+            CompositeSandbox::new(vec![Box::new(PrefixSandbox), Box::new(DangerousNoSandbox)]);
         let ctx = ToolContext::from_cwd().unwrap();
         let input = serde_json::json!({"command": "ls"});
 
@@ -304,9 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_matching_tool_passes_through() {
-        let sandbox = CompositeSandbox::new(vec![
-            Box::new(DenyRmSandbox),
-        ]);
+        let sandbox = CompositeSandbox::new(vec![Box::new(DenyRmSandbox)]);
         let ctx = ToolContext::from_cwd().unwrap();
         let input = serde_json::json!({"query": "test"});
 
@@ -331,10 +324,8 @@ mod tests {
 
     #[tokio::test]
     async fn deny_then_allow_stops_at_deny() {
-        let sandbox = CompositeSandbox::new(vec![
-            Box::new(DenyRmSandbox),
-            Box::new(DangerousNoSandbox),
-        ]);
+        let sandbox =
+            CompositeSandbox::new(vec![Box::new(DenyRmSandbox), Box::new(DangerousNoSandbox)]);
         let ctx = ToolContext::from_cwd().unwrap();
 
         // "rm" gets denied.

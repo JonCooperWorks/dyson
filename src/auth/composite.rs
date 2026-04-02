@@ -71,7 +71,12 @@ mod tests {
 
         let built = req.build().unwrap();
         assert_eq!(
-            built.headers().get("authorization").unwrap().to_str().unwrap(),
+            built
+                .headers()
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "Bearer my-token"
         );
         assert_eq!(

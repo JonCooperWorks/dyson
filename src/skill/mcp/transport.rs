@@ -42,8 +42,8 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -189,10 +189,13 @@ impl McpTransport for StdioTransport {
         let json = serde_json::to_string(&request)?;
         {
             let mut stdin = self.stdin.lock().await;
-            stdin.write_all(json.as_bytes()).await.map_err(|e| DysonError::Mcp {
-                server: method.to_string(),
-                message: format!("stdin write failed: {e}"),
-            })?;
+            stdin
+                .write_all(json.as_bytes())
+                .await
+                .map_err(|e| DysonError::Mcp {
+                    server: method.to_string(),
+                    message: format!("stdin write failed: {e}"),
+                })?;
             stdin.write_all(b"\n").await.map_err(|e| DysonError::Mcp {
                 server: method.to_string(),
                 message: format!("stdin write failed: {e}"),
@@ -230,10 +233,13 @@ impl McpTransport for StdioTransport {
         let json = serde_json::to_string(&notification)?;
 
         let mut stdin = self.stdin.lock().await;
-        stdin.write_all(json.as_bytes()).await.map_err(|e| DysonError::Mcp {
-            server: method.to_string(),
-            message: format!("stdin write failed: {e}"),
-        })?;
+        stdin
+            .write_all(json.as_bytes())
+            .await
+            .map_err(|e| DysonError::Mcp {
+                server: method.to_string(),
+                message: format!("stdin write failed: {e}"),
+            })?;
         stdin.write_all(b"\n").await.map_err(|e| DysonError::Mcp {
             server: method.to_string(),
             message: format!("stdin write failed: {e}"),

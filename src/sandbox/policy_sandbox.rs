@@ -67,10 +67,7 @@ pub struct PolicySandbox {
 
 impl PolicySandbox {
     /// Create from parsed config.
-    pub fn new(
-        tool_policies: &HashMap<String, ToolPolicyConfig>,
-        working_dir: &Path,
-    ) -> Self {
+    pub fn new(tool_policies: &HashMap<String, ToolPolicyConfig>, working_dir: &Path) -> Self {
         let policies = PolicyTable::from_config(tool_policies, working_dir);
         Self {
             policies,
@@ -178,9 +175,9 @@ fn check_bash(
             "bash command wrapped in OS sandbox (macOS seatbelt, policy-based)"
         );
 
-        return Ok(SandboxDecision::Allow {
+        Ok(SandboxDecision::Allow {
             input: serde_json::json!({ "command": sandboxed }),
-        });
+        })
     }
 
     #[cfg(target_os = "linux")]
@@ -200,9 +197,7 @@ fn check_bash(
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        tracing::warn!(
-            "OS sandbox not available on this platform — running unsandboxed"
-        );
+        tracing::warn!("OS sandbox not available on this platform — running unsandboxed");
         Ok(SandboxDecision::Allow {
             input: input.clone(),
         })
@@ -416,10 +411,10 @@ fn resolve_canonical(path: &Path) -> PathBuf {
             return normalized;
         }
         if ancestor.exists() {
-            if let Ok(canon) = std::fs::canonicalize(&ancestor) {
-                if let Ok(suffix) = normalized.strip_prefix(&ancestor) {
-                    return canon.join(suffix);
-                }
+            if let Ok(canon) = std::fs::canonicalize(&ancestor)
+                && let Ok(suffix) = normalized.strip_prefix(&ancestor)
+            {
+                return canon.join(suffix);
             }
             return normalized;
         }
@@ -791,7 +786,12 @@ mod tests {
     async fn workspace_tools_always_pass() {
         let s = sandbox_default();
         let ctx = ctx();
-        for tool in &["workspace_view", "workspace_search", "workspace_update", "memory_search"] {
+        for tool in &[
+            "workspace_view",
+            "workspace_search",
+            "workspace_update",
+            "memory_search",
+        ] {
             let input = serde_json::json!({});
             let decision = s.check(tool, &input, &ctx).await.unwrap();
             assert!(
@@ -935,9 +935,9 @@ mod tests {
         overrides.insert(
             "write_file".into(),
             ToolPolicyConfig {
-                file_write: Some(crate::sandbox::policy::ToolPolicyPathConfig::RestrictTo(vec![
-                    "/tmp/output".into(),
-                ])),
+                file_write: Some(crate::sandbox::policy::ToolPolicyPathConfig::RestrictTo(
+                    vec!["/tmp/output".into()],
+                )),
                 ..Default::default()
             },
         );

@@ -86,9 +86,7 @@ pub enum Role {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     /// Plain text content (user input or LLM output).
-    Text {
-        text: String,
-    },
+    Text { text: String },
 
     /// The LLM is requesting to use a tool.
     ///
@@ -172,9 +170,7 @@ impl ContentBlock {
                 content,
                 ..
             } => {
-                tool_use_id.split_whitespace().count()
-                    + content.split_whitespace().count()
-                    + 5 // JSON structure overhead
+                tool_use_id.split_whitespace().count() + content.split_whitespace().count() + 5 // JSON structure overhead
             }
             ContentBlock::Image { data, .. } => {
                 // Anthropic charges ~1600 tokens for a 1568x1568 image.
@@ -251,7 +247,6 @@ impl Message {
             }],
         }
     }
-
 }
 
 // ===========================================================================
@@ -362,5 +357,4 @@ mod tests {
         // 3 + 2 words + 4 overhead = 9
         assert_eq!(msg.estimate_tokens(), 9);
     }
-
 }

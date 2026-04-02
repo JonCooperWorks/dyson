@@ -144,7 +144,6 @@ pub struct SandboxConfig {
     pub tool_policies: std::collections::HashMap<String, crate::sandbox::policy::ToolPolicyConfig>,
 }
 
-
 // ---------------------------------------------------------------------------
 // ControllerConfig — type + opaque config blob.
 // ---------------------------------------------------------------------------
@@ -687,9 +686,7 @@ impl Default for Settings {
         Self {
             agent: AgentSettings::default(),
             providers: std::collections::HashMap::new(),
-            skills: vec![SkillConfig::Builtin(BuiltinSkillConfig {
-                tools: vec![],
-            })],
+            skills: vec![SkillConfig::Builtin(BuiltinSkillConfig { tools: vec![] })],
             controllers: vec![],
             sandbox: SandboxConfig::default(),
             workspace: WorkspaceConfig::default(),

@@ -49,15 +49,28 @@ struct ResourceAccess {
 
 /// Git subcommands that mutate repository state.
 const GIT_WRITE_COMMANDS: &[&str] = &[
-    "git add", "git commit", "git push", "git checkout",
-    "git reset", "git merge", "git rebase", "git pull",
-    "git stash", "git rm", "git mv", "git tag",
+    "git add",
+    "git commit",
+    "git push",
+    "git checkout",
+    "git reset",
+    "git merge",
+    "git rebase",
+    "git pull",
+    "git stash",
+    "git rm",
+    "git mv",
+    "git tag",
 ];
 
 /// Git subcommands that only read repository state.
 const GIT_READ_COMMANDS: &[&str] = &[
-    "git status", "git log", "git diff", "git show",
-    "git branch", "git remote",
+    "git status",
+    "git log",
+    "git diff",
+    "git show",
+    "git branch",
+    "git remote",
 ];
 
 fn classify_git_command(command: &str) -> Option<AccessKind> {
@@ -98,10 +111,7 @@ impl DependencyAnalyzer {
         }
 
         // Step 1: Extract resource accesses for each call.
-        let accesses: Vec<Vec<ResourceAccess>> = calls
-            .iter()
-            .map(|call| extract_resources(call))
-            .collect();
+        let accesses: Vec<Vec<ResourceAccess>> = calls.iter().map(extract_resources).collect();
 
         // Step 2: Build dependency edges.
         // depends_on[i] contains indices of calls that call i depends on.
@@ -121,7 +131,11 @@ impl DependencyAnalyzer {
         let mut depth = vec![0usize; n];
         for i in 0..n {
             if !depends_on[i].is_empty() {
-                depth[i] = depends_on[i].iter().map(|&j| depth[j] + 1).max().unwrap_or(0);
+                depth[i] = depends_on[i]
+                    .iter()
+                    .map(|&j| depth[j] + 1)
+                    .max()
+                    .unwrap_or(0);
             }
         }
 
@@ -180,13 +194,13 @@ fn extract_resources(call: &ToolCall) -> Vec<ResourceAccess> {
             }
         }
         "bash" => {
-            if let Some(command) = call.input.get("command").and_then(|v| v.as_str()) {
-                if let Some(kind) = classify_git_command(command) {
-                    resources.push(ResourceAccess {
-                        resource: Resource::Git,
-                        kind,
-                    });
-                }
+            if let Some(command) = call.input.get("command").and_then(|v| v.as_str())
+                && let Some(kind) = classify_git_command(command)
+            {
+                resources.push(ResourceAccess {
+                    resource: Resource::Git,
+                    kind,
+                });
             }
         }
         _ => {}
@@ -266,9 +280,11 @@ mod test_dependency_analyzer {
             ToolCall::new("file_write", json!({"path": "x.txt"})),
         ];
         let phases = DependencyAnalyzer::analyze(&calls);
-        assert!(phases
-            .iter()
-            .any(|p| matches!(p, ExecutionPhase::Sequential(_))));
+        assert!(
+            phases
+                .iter()
+                .any(|p| matches!(p, ExecutionPhase::Sequential(_)))
+        );
     }
 
     #[test]

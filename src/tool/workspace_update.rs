@@ -53,21 +53,14 @@ impl Tool for WorkspaceUpdateTool {
     }
 
     async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
-        let ws = ctx.workspace.as_ref().ok_or_else(|| {
-            DysonError::tool("workspace_update", "no workspace configured")
-        })?;
+        let ws = ctx
+            .workspace
+            .as_ref()
+            .ok_or_else(|| DysonError::tool("workspace_update", "no workspace configured"))?;
 
-        let file = input["file"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let content = input["content"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let mode = input["mode"]
-            .as_str()
-            .unwrap_or("append");
+        let file = input["file"].as_str().unwrap_or("").to_string();
+        let content = input["content"].as_str().unwrap_or("").to_string();
+        let mode = input["mode"].as_str().unwrap_or("append");
 
         if file.is_empty() {
             return Ok(ToolOutput::error("file is required"));
@@ -87,7 +80,11 @@ impl Tool for WorkspaceUpdateTool {
                 "set" => content.chars().count(),
                 "append" => {
                     let existing = ws.get(&file).unwrap_or_default();
-                    let extra = if existing.is_empty() || existing.ends_with('\n') { 0 } else { 1 };
+                    let extra = if existing.is_empty() || existing.ends_with('\n') {
+                        0
+                    } else {
+                        1
+                    };
                     existing.chars().count() + extra + content.chars().count()
                 }
                 _ => 0,

@@ -38,14 +38,12 @@ impl Tool for WorkspaceSearchTool {
     }
 
     async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
-        let ws = ctx.workspace.as_ref().ok_or_else(|| {
-            DysonError::tool("workspace_search", "no workspace configured")
-        })?;
+        let ws = ctx
+            .workspace
+            .as_ref()
+            .ok_or_else(|| DysonError::tool("workspace_search", "no workspace configured"))?;
 
-        let pattern = input["pattern"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let pattern = input["pattern"].as_str().unwrap_or("").to_string();
 
         if pattern.is_empty() {
             return Ok(ToolOutput::error("pattern is required"));

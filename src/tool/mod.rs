@@ -283,7 +283,9 @@ pub fn validate_workspace_path(path: &str) -> std::result::Result<(), String> {
     if p.is_absolute() {
         return Err(format!("absolute paths are not allowed: '{path}'"));
     }
-    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(format!("path traversal is not allowed: '{path}'"));
     }
     // Check each prefix for symlinks that could escape the workspace.
@@ -419,8 +421,7 @@ mod tests {
 
     #[test]
     fn with_file_attaches_single_file() {
-        let output = ToolOutput::success("done")
-            .with_file("/tmp/report.pdf");
+        let output = ToolOutput::success("done").with_file("/tmp/report.pdf");
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0], PathBuf::from("/tmp/report.pdf"));
     }
@@ -445,8 +446,7 @@ mod tests {
 
     #[test]
     fn with_file_on_error_output() {
-        let output = ToolOutput::error("failed but here's a log")
-            .with_file("/tmp/debug.log");
+        let output = ToolOutput::error("failed but here's a log").with_file("/tmp/debug.log");
         assert!(output.is_error);
         assert_eq!(output.files.len(), 1);
     }

@@ -245,19 +245,19 @@ fn apply_steps(root: &mut Value, steps: &[Step]) -> Result<()> {
                 }
             }
             Step::RenameWrapArray(parent_path, old_key, new_key) => {
-                if let Some(parent) = get_path_mut(root, parent_path) {
-                    if let Some(map) = parent.as_object_mut() {
-                        for (_name, child) in map.iter_mut() {
-                            if let Some(obj) = child.as_object_mut() {
-                                if let Some(val) = obj.remove(*old_key) {
-                                    let wrapped = if val.is_array() {
-                                        val
-                                    } else {
-                                        Value::Array(vec![val])
-                                    };
-                                    obj.insert((*new_key).into(), wrapped);
-                                }
-                            }
+                if let Some(parent) = get_path_mut(root, parent_path)
+                    && let Some(map) = parent.as_object_mut()
+                {
+                    for (_name, child) in map.iter_mut() {
+                        if let Some(obj) = child.as_object_mut()
+                            && let Some(val) = obj.remove(*old_key)
+                        {
+                            let wrapped = if val.is_array() {
+                                val
+                            } else {
+                                Value::Array(vec![val])
+                            };
+                            obj.insert((*new_key).into(), wrapped);
                         }
                     }
                 }
@@ -447,7 +447,10 @@ mod tests {
         assert!(root["providers"]["claude"].is_object());
         assert!(root["providers"].get("default").is_none());
         // But v2 still ran — model → models.
-        assert_eq!(root["providers"]["claude"]["models"], json!(["claude-sonnet-4"]));
+        assert_eq!(
+            root["providers"]["claude"]["models"],
+            json!(["claude-sonnet-4"])
+        );
     }
 
     #[test]
@@ -559,7 +562,10 @@ mod tests {
         assert!(applied);
 
         // Both providers have models arrays.
-        assert_eq!(root["providers"]["claude"]["models"], json!(["claude-sonnet-4"]));
+        assert_eq!(
+            root["providers"]["claude"]["models"],
+            json!(["claude-sonnet-4"])
+        );
         assert_eq!(root["providers"]["gpt"]["models"], json!(["gpt-4o"]));
 
         // Old model field removed.
@@ -634,7 +640,10 @@ mod tests {
         assert!(root["providers"]["default"].is_object());
         assert_eq!(root["providers"]["default"]["type"], "anthropic");
         assert_eq!(root["providers"]["default"]["api_key"], "sk-ant-test");
-        assert_eq!(root["providers"]["default"]["base_url"], "https://api.anthropic.com");
+        assert_eq!(
+            root["providers"]["default"]["base_url"],
+            "https://api.anthropic.com"
+        );
 
         // v2 wrapped model into models array.
         assert_eq!(
@@ -686,13 +695,19 @@ mod tests {
         assert_eq!(root["config_version"], CURRENT_VERSION);
 
         // v1 skipped (providers already exists), but v2 ran.
-        assert_eq!(root["providers"]["claude"]["models"], json!(["claude-sonnet-4-20250514"]));
+        assert_eq!(
+            root["providers"]["claude"]["models"],
+            json!(["claude-sonnet-4-20250514"])
+        );
         assert_eq!(root["providers"]["gpt"]["models"], json!(["gpt-4o"]));
         // local had no model → no models field.
         assert!(root["providers"]["local"].get("models").is_none());
 
         // Secret references preserved through migration.
-        assert_eq!(root["providers"]["gpt"]["api_key"]["resolver"], "insecure_env");
+        assert_eq!(
+            root["providers"]["gpt"]["api_key"]["resolver"],
+            "insecure_env"
+        );
 
         // agent.model removed by v2.
         assert!(root["agent"].get("model").is_none());
@@ -836,7 +851,10 @@ mod tests {
         // v1: inline provider extracted into providers.default.
         assert_eq!(root["providers"]["default"]["type"], "openai");
         assert_eq!(root["providers"]["default"]["api_key"], "not-needed");
-        assert_eq!(root["providers"]["default"]["base_url"], "http://localhost:8080");
+        assert_eq!(
+            root["providers"]["default"]["base_url"],
+            "http://localhost:8080"
+        );
 
         // v2: model wrapped into models array, agent.model removed.
         assert_eq!(root["providers"]["default"]["models"], json!(["phi-4"]));

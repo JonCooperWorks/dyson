@@ -2,6 +2,38 @@
 // Shared utility functions.
 // ===========================================================================
 
+/// Maximum bytes of tool output before truncation.
+///
+/// 100KB is generous enough for most tool calls (file listings, test output,
+/// grep results) but small enough to leave room in the LLM's context window
+/// for the conversation history and system prompt.
+pub(crate) const MAX_OUTPUT_BYTES: usize = 100 * 1024;
+
+/// Truncate output to [`MAX_OUTPUT_BYTES`], appending a notice if truncated.
+///
+/// We truncate on a UTF-8 char boundary to avoid producing invalid strings.
+/// The notice tells the LLM how much was cut so it can request specific
+/// portions if needed.
+pub(crate) fn truncate_output(output: &str) -> String {
+    if output.len() <= MAX_OUTPUT_BYTES {
+        return output.to_string();
+    }
+
+    // Find the last valid char boundary at or before MAX_OUTPUT_BYTES.
+    let mut end = MAX_OUTPUT_BYTES;
+    while !output.is_char_boundary(end) && end > 0 {
+        end -= 1;
+    }
+
+    let truncated = &output[..end];
+    let remaining = output.len() - end;
+    format!(
+        "{truncated}\n\n... (output truncated — {remaining} bytes omitted, \
+         total was {} bytes)",
+        output.len()
+    )
+}
+
 /// Convert a Unix timestamp (seconds since epoch) to a (year, month, day) tuple.
 ///
 /// Uses a civil-date algorithm derived from Howard Hinnant's `chrono`-compatible
@@ -50,5 +82,20 @@ mod tests {
     fn known_date() {
         // 2025-01-15 00:00:00 UTC = 1736899200
         assert_eq!(unix_to_ymd(1736899200), (2025, 1, 15));
+    }
+
+    #[test]
+    fn truncation() {
+        let long_output = "x".repeat(MAX_OUTPUT_BYTES + 1000);
+        let truncated = truncate_output(&long_output);
+        assert!(truncated.len() < long_output.len());
+        assert!(truncated.contains("truncated"));
+        assert!(truncated.contains("1000 bytes omitted"));
+    }
+
+    #[test]
+    fn no_truncation_for_short_output() {
+        let short = "hello world";
+        assert_eq!(truncate_output(short), short);
     }
 }

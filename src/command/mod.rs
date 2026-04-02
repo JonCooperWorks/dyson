@@ -37,8 +37,7 @@ use dyson::config::Settings;
 /// Panics if the `HOME` environment variable is not set, since operating
 /// without a home directory would produce confusing relative-path behaviour.
 pub fn dirs_config_path() -> PathBuf {
-    let home = std::env::var("HOME")
-        .expect("HOME environment variable must be set");
+    let home = std::env::var("HOME").expect("HOME environment variable must be set");
     PathBuf::from(home).join(".dyson").join("dyson.json")
 }
 

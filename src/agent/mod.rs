@@ -78,6 +78,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{AgentSettings, CompactionConfig};
+use crate::controller::Output;
 use crate::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
 use crate::error::{DysonError, Result};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
@@ -87,7 +88,6 @@ use crate::sandbox::{Sandbox, SandboxDecision};
 use crate::skill::Skill;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::tool_limiter::ToolLimiter;
-use crate::controller::Output;
 
 use self::stream_handler::ToolCall;
 
@@ -100,13 +100,27 @@ use self::stream_handler::ToolCall;
 struct SilentOutput;
 
 impl crate::controller::Output for SilentOutput {
-    fn text_delta(&mut self, _: &str) -> Result<()> { Ok(()) }
-    fn tool_use_start(&mut self, _: &str, _: &str) -> Result<()> { Ok(()) }
-    fn tool_use_complete(&mut self) -> Result<()> { Ok(()) }
-    fn tool_result(&mut self, _: &ToolOutput) -> Result<()> { Ok(()) }
-    fn send_file(&mut self, _: &std::path::Path) -> Result<()> { Ok(()) }
-    fn error(&mut self, _: &DysonError) -> Result<()> { Ok(()) }
-    fn flush(&mut self) -> Result<()> { Ok(()) }
+    fn text_delta(&mut self, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn tool_use_start(&mut self, _: &str, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn tool_use_complete(&mut self) -> Result<()> {
+        Ok(())
+    }
+    fn tool_result(&mut self, _: &ToolOutput) -> Result<()> {
+        Ok(())
+    }
+    fn send_file(&mut self, _: &std::path::Path) -> Result<()> {
+        Ok(())
+    }
+    fn error(&mut self, _: &DysonError) -> Result<()> {
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +162,9 @@ impl TokenBudget {
     pub fn record(&mut self, output_tokens: usize) -> Result<()> {
         self.output_tokens_used += output_tokens;
         self.llm_calls += 1;
-        if let Some(max) = self.max_output_tokens && self.output_tokens_used > max {
+        if let Some(max) = self.max_output_tokens
+            && self.output_tokens_used > max
+        {
             return Err(DysonError::Llm(format!(
                 "token budget exceeded: {}/{max} output tokens used",
                 self.output_tokens_used,
@@ -273,7 +289,9 @@ impl Agent {
         sandbox: Arc<dyn Sandbox>,
         skills: Vec<Box<dyn Skill>>,
         settings: &AgentSettings,
-        workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+        workspace: Option<
+            std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
+        >,
         nudge_interval: usize,
     ) -> Result<Self> {
         // -- Flatten tools from all skills --
@@ -433,9 +451,7 @@ impl Agent {
 
             let client = crate::llm::create_client(&settings, None, false);
 
-            if let Err(e) = synthesize_to_workspace(
-                &*client, &config, &summary, &workspace,
-            ).await {
+            if let Err(e) = synthesize_to_workspace(&*client, &config, &summary, &workspace).await {
                 tracing::warn!(error = %e, reason, "background learning synthesis failed");
             }
 
@@ -491,7 +507,9 @@ impl Agent {
 
     /// Legacy compaction: summarise the entire history into one message.
     async fn compact_legacy(&mut self, output: &mut dyn Output) -> Result<()> {
-        let summary = self.summarise_messages(&self.messages.clone(), None, output).await?;
+        let summary = self
+            .summarise_messages(&self.messages.clone(), None, output)
+            .await?;
 
         if summary.is_empty() {
             tracing::warn!("compaction produced empty summary — keeping original history");
@@ -500,7 +518,8 @@ impl Agent {
 
         let old_count = self.messages.len();
         self.messages.clear();
-        self.messages.push(Message::user(&format!("[Context Summary]\n\n{summary}")));
+        self.messages
+            .push(Message::user(&format!("[Context Summary]\n\n{summary}")));
         self.token_budget.reset();
 
         tracing::info!(old_messages = old_count, "context compacted (legacy)");
@@ -520,7 +539,8 @@ impl Agent {
         // If there's no middle section, nothing to summarise.
         if head_end >= tail_start {
             tracing::info!(
-                head_end, tail_start,
+                head_end,
+                tail_start,
                 "protected regions overlap — skipping compaction"
             );
             return Ok(());
@@ -620,16 +640,16 @@ impl Agent {
     fn find_existing_summary(&self, head_end: usize) -> Option<String> {
         for msg in &self.messages[..head_end] {
             for block in &msg.content {
-                if let crate::message::ContentBlock::Text { text } = block {
-                    if text.starts_with("[Context Summary]") {
-                        // Strip the prefix to get just the summary body.
-                        return Some(
-                            text.strip_prefix("[Context Summary]")
-                                .unwrap_or(text)
-                                .trim()
-                                .to_string(),
-                        );
-                    }
+                if let crate::message::ContentBlock::Text { text } = block
+                    && text.starts_with("[Context Summary]")
+                {
+                    // Strip the prefix to get just the summary body.
+                    return Some(
+                        text.strip_prefix("[Context Summary]")
+                            .unwrap_or(text)
+                            .trim()
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -725,16 +745,12 @@ impl Agent {
         }
 
         // Find orphaned tool_use IDs (no matching result).
-        let orphaned_uses: Vec<String> = tool_use_ids
-            .difference(&tool_result_ids)
-            .cloned()
-            .collect();
+        let orphaned_uses: Vec<String> =
+            tool_use_ids.difference(&tool_result_ids).cloned().collect();
 
         // Find orphaned tool_result IDs (no matching use).
-        let orphaned_results: HashSet<String> = tool_result_ids
-            .difference(&tool_use_ids)
-            .cloned()
-            .collect();
+        let orphaned_results: HashSet<String> =
+            tool_result_ids.difference(&tool_use_ids).cloned().collect();
 
         // Insert synthetic results for orphaned uses.
         // Place them right after the message containing the tool_use.
@@ -862,13 +878,15 @@ impl Agent {
         // conversation and hoping the model acts on it), this makes a real
         // LLM call with workspace tools and lets the model directly update
         // memory files.  Nothing from this call enters the main conversation.
-        if self.nudge_interval > 0 && self.turn_count.is_multiple_of(self.nudge_interval) && self.tool_context.workspace.is_some() {
-            if let Err(e) = self.maintain_memory(output).await {
-                tracing::warn!(
-                    error = %e,
-                    "memory maintenance failed — continuing normally"
-                );
-            }
+        if self.nudge_interval > 0
+            && self.turn_count.is_multiple_of(self.nudge_interval)
+            && self.tool_context.workspace.is_some()
+            && let Err(e) = self.maintain_memory(output).await
+        {
+            tracing::warn!(
+                error = %e,
+                "memory maintenance failed — continuing normally"
+            );
         }
 
         let mut final_text = String::new();
@@ -1029,7 +1047,8 @@ impl Agent {
             for (i, call) in tool_calls.iter().enumerate() {
                 if let Err(e) = self.limiter.check(&call.name) {
                     tracing::warn!(tool = call.name, error = %e, "tool call rate-limited");
-                    self.messages.push(Message::tool_result(&call.id, &e.to_string(), true));
+                    self.messages
+                        .push(Message::tool_result(&call.id, &e.to_string(), true));
                 } else {
                     limited_calls.push(i);
                 }
@@ -1039,22 +1058,21 @@ impl Agent {
             //
             // Build a sub-slice of allowed calls, analyze their dependencies,
             // and execute them in the correct order (parallel or sequential).
-            let allowed_calls: Vec<&ToolCall> = limited_calls.iter()
-                .map(|&i| &tool_calls[i])
-                .collect();
+            let allowed_calls: Vec<&ToolCall> =
+                limited_calls.iter().map(|&i| &tool_calls[i]).collect();
 
             if !allowed_calls.is_empty() {
                 // DependencyAnalyzer works on a contiguous slice, so we
                 // create owned copies for analysis and map indices back.
-                let calls_for_analysis: Vec<ToolCall> = allowed_calls.iter()
-                    .map(|c| (*c).clone())
-                    .collect();
+                let calls_for_analysis: Vec<ToolCall> =
+                    allowed_calls.iter().map(|c| (*c).clone()).collect();
                 let phases = DependencyAnalyzer::analyze(&calls_for_analysis);
 
                 for phase in phases {
                     match phase {
                         ExecutionPhase::Parallel(indices) => {
-                            let futs: Vec<_> = indices.iter()
+                            let futs: Vec<_> = indices
+                                .iter()
                                 .map(|&idx| self.execute_tool_call_timed(allowed_calls[idx]))
                                 .collect();
                             let results = futures::future::join_all(futs).await;
@@ -1137,13 +1155,12 @@ impl Agent {
             && self.turn_count > self.nudge_interval
             && self.turn_count.is_multiple_of(self.nudge_interval * 2)
             && self.tool_context.workspace.is_some()
+            && let Err(e) = self.self_improve(output).await
         {
-            if let Err(e) = self.self_improve(output).await {
-                tracing::warn!(
-                    error = %e,
-                    "self-improvement reflection failed — continuing normally"
-                );
-            }
+            tracing::warn!(
+                error = %e,
+                "self-improvement reflection failed — continuing normally"
+            );
         }
 
         output.flush()?;
@@ -1160,10 +1177,7 @@ impl Agent {
     /// This runs in a separate message context — nothing from this call
     /// enters the main conversation history.
     async fn maintain_memory(&mut self, output: &mut dyn Output) -> Result<()> {
-        tracing::info!(
-            turn_count = self.turn_count,
-            "running memory maintenance"
-        );
+        tracing::info!(turn_count = self.turn_count, "running memory maintenance");
 
         tracing::info!("\n\n[Memory maintenance: reviewing conversation...]\n");
 
@@ -1172,7 +1186,10 @@ impl Agent {
 
         // Expose only workspace tools for memory operations.
         let memory_tool_names = [
-            "workspace_view", "workspace_update", "workspace_search", "memory_search",
+            "workspace_view",
+            "workspace_update",
+            "workspace_search",
+            "memory_search",
         ];
         let memory_tools: Vec<ToolDefinition> = self
             .tool_definitions
@@ -1244,30 +1261,29 @@ impl Agent {
             tracing::info!("[Memory maintenance: no updates needed]\n");
         } else {
             tracing::info!(
-                "{}", format!("[Memory maintenance: {actions_taken} update(s)]\n")
+                "{}",
+                format!("[Memory maintenance: {actions_taken} update(s)]\n")
             );
         }
         let _ = output.flush();
 
-        tracing::info!(
-            actions_taken = actions_taken,
-            "memory maintenance complete"
-        );
+        tracing::info!(actions_taken = actions_taken, "memory maintenance complete");
         Ok(())
     }
 
     /// Build the system prompt for the memory maintenance call.
     async fn build_memory_system_prompt(ctx: &ToolContext) -> String {
-        let (memory_usage, memory_limit, user_usage, user_limit) = if let Some(ref ws) = ctx.workspace {
-            let ws = ws.read().await;
-            let mu = ws.get("MEMORY.md").map(|c| c.chars().count()).unwrap_or(0);
-            let ml = ws.char_limit("MEMORY.md").unwrap_or(0);
-            let uu = ws.get("USER.md").map(|c| c.chars().count()).unwrap_or(0);
-            let ul = ws.char_limit("USER.md").unwrap_or(0);
-            (mu, ml, uu, ul)
-        } else {
-            (0, 0, 0, 0)
-        };
+        let (memory_usage, memory_limit, user_usage, user_limit) =
+            if let Some(ref ws) = ctx.workspace {
+                let ws = ws.read().await;
+                let mu = ws.get("MEMORY.md").map(|c| c.chars().count()).unwrap_or(0);
+                let ml = ws.char_limit("MEMORY.md").unwrap_or(0);
+                let uu = ws.get("USER.md").map(|c| c.chars().count()).unwrap_or(0);
+                let ul = ws.char_limit("USER.md").unwrap_or(0);
+                (mu, ml, uu, ul)
+            } else {
+                (0, 0, 0, 0)
+            };
 
         format!(
             "You are a memory maintenance engine for an AI agent.  Your job is to review \
@@ -1338,13 +1354,15 @@ impl Agent {
         // They live only here — the LLM can't call them during regular
         // conversation.  We instantiate them directly and build tool
         // definitions inline.
-        let skill_create_tool: Arc<dyn Tool> =
-            Arc::new(crate::tool::skill_create::SkillCreateTool);
+        let skill_create_tool: Arc<dyn Tool> = Arc::new(crate::tool::skill_create::SkillCreateTool);
         let export_tool: Arc<dyn Tool> =
             Arc::new(crate::tool::export_conversation::ExportConversationTool);
 
         let reflection_tool_map: HashMap<String, Arc<dyn Tool>> = HashMap::from([
-            (skill_create_tool.name().to_string(), Arc::clone(&skill_create_tool)),
+            (
+                skill_create_tool.name().to_string(),
+                Arc::clone(&skill_create_tool),
+            ),
             (export_tool.name().to_string(), Arc::clone(&export_tool)),
         ]);
 
@@ -1360,14 +1378,9 @@ impl Agent {
 
         // Build the reflection messages: a condensed summary of what happened.
         let summary = Self::summarize_for_reflection(&self.messages);
-        tracing::debug!(
-            summary_len = summary.len(),
-            "built reflection summary"
-        );
+        tracing::debug!(summary_len = summary.len(), "built reflection summary");
 
-        let reflection_messages = vec![
-            Message::user(&summary),
-        ];
+        let reflection_messages = vec![Message::user(&summary)];
 
         // LLM call with tool loop — if it wants to use tools, run them.
         // Cap at 3 iterations to prevent runaway loops.
@@ -1375,14 +1388,16 @@ impl Agent {
         let mut actions_taken = 0usize;
 
         for iteration in 0..3u8 {
-            tracing::info!(
-                iteration = iteration,
-                "self-improvement LLM call"
-            );
+            tracing::info!(iteration = iteration, "self-improvement LLM call");
 
             let response = match self
                 .client
-                .stream(&messages, &reflection_system, &reflection_tools, &self.config)
+                .stream(
+                    &messages,
+                    &reflection_system,
+                    &reflection_tools,
+                    &self.config,
+                )
                 .await
             {
                 Ok(r) => r,
@@ -1400,13 +1415,10 @@ impl Agent {
             // Log what the model said (for debugging), even though we don't
             // show it to the user.
             for block in &assistant_msg.content {
-                if let crate::message::ContentBlock::Text { text } = block {
-                    if !text.trim().is_empty() {
-                        tracing::info!(
-                            reasoning = text.as_str(),
-                            "self-improvement reasoning"
-                        );
-                    }
+                if let crate::message::ContentBlock::Text { text } = block
+                    && !text.trim().is_empty()
+                {
+                    tracing::info!(reasoning = text.as_str(), "self-improvement reasoning");
                 }
             }
 
@@ -1423,10 +1435,7 @@ impl Agent {
             // conversation.  The sandbox still gates any child operations
             // (e.g., bash calls inside export_conversation).
             for call in &tool_calls {
-                tracing::info!(
-                    tool = call.name.as_str(),
-                    "self-improvement executing tool"
-                );
+                tracing::info!(tool = call.name.as_str(), "self-improvement executing tool");
 
                 let tool = match reflection_tool_map.get(&call.name) {
                     Some(t) => Arc::clone(t),
@@ -1476,7 +1485,8 @@ impl Agent {
                             "self-improvement tool call failed"
                         );
                         tracing::info!(
-                            "{}", format!("[Self-improvement: {} failed: {}]\n", call.name, e)
+                            "{}",
+                            format!("[Self-improvement: {} failed: {}]\n", call.name, e)
                         );
                         Message::tool_result(&call.id, &e.to_string(), true)
                     }
@@ -1489,18 +1499,16 @@ impl Agent {
             tracing::info!("[Self-improvement: no action needed]\n");
         } else {
             tracing::info!(
-                "{}", format!("[Self-improvement: {actions_taken} action(s) taken]\n")
+                "{}",
+                format!("[Self-improvement: {actions_taken} action(s) taken]\n")
             );
         }
         let _ = output.flush();
 
         // Persist the full reflection exchange to the workspace's
         // improvement/ directory so the user can inspect it later.
-        self.save_reflection_log(
-            &reflection_system,
-            &messages,
-            actions_taken,
-        ).await;
+        self.save_reflection_log(&reflection_system, &messages, actions_taken)
+            .await;
 
         tracing::info!(
             actions_taken = actions_taken,
@@ -1568,11 +1576,7 @@ impl Agent {
             } else {
                 let names: Vec<String> = skill_dirs
                     .iter()
-                    .filter_map(|p| {
-                        p.file_name()
-                            .and_then(|s| s.to_str())
-                            .map(String::from)
-                    })
+                    .filter_map(|p| p.file_name().and_then(|s| s.to_str()).map(String::from))
                     .collect();
                 format!("Existing skills: {}", names.join(", "))
             }
@@ -1618,7 +1622,7 @@ impl Agent {
     fn summarize_for_reflection(messages: &[Message]) -> String {
         let mut summary = String::from(
             "Review this conversation and decide whether to create/improve a skill \
-             or export training data.  Here is what happened:\n\n"
+             or export training data.  Here is what happened:\n\n",
         );
 
         let mut tool_call_count = 0;
@@ -1649,10 +1653,15 @@ impl Agent {
                         }
                         summary.push_str(&format!("[Tool call: {name}]\n"));
                     }
-                    crate::message::ContentBlock::ToolResult { is_error, content, .. } => {
+                    crate::message::ContentBlock::ToolResult {
+                        is_error, content, ..
+                    } => {
                         if *is_error {
                             tool_error_count += 1;
-                            summary.push_str(&format!("[Tool error: {}]\n", &content[..content.len().min(200)]));
+                            summary.push_str(&format!(
+                                "[Tool error: {}]\n",
+                                &content[..content.len().min(200)]
+                            ));
                         } else {
                             let truncated = if content.len() > 200 {
                                 format!("{}...", &content[..200])
@@ -1719,7 +1728,9 @@ impl Agent {
                 }
 
                 // Format the result for the LLM.
-                let formatted = self.formatter.format(call, tool_output, std::time::Duration::ZERO);
+                let formatted = self
+                    .formatter
+                    .format(call, tool_output, std::time::Duration::ZERO);
                 let content = formatted.to_llm_message();
                 Message::tool_result(&call.id, &content, tool_output.is_error)
             }
@@ -1763,14 +1774,15 @@ impl Agent {
     /// is observational, not control flow.
     async fn notify_after_tool(&self, tool_name: &str, output: &ToolOutput) {
         if let Some(&skill_idx) = self.tool_to_skill.get(tool_name)
-            && let Err(e) = self.skills[skill_idx].after_tool(tool_name, output).await {
-                tracing::warn!(
-                    skill = self.skills[skill_idx].name(),
-                    tool = tool_name,
-                    error = %e,
-                    "skill after_tool hook failed"
-                );
-            }
+            && let Err(e) = self.skills[skill_idx].after_tool(tool_name, output).await
+        {
+            tracing::warn!(
+                skill = self.skills[skill_idx].name(),
+                tool = tool_name,
+                error = %e,
+                "skill after_tool hook failed"
+            );
+        }
     }
 
     /// Execute a single tool call, routing through the sandbox.
@@ -1781,10 +1793,7 @@ impl Agent {
     /// 2. On Allow: look up tool → `tool.run()` → `sandbox.after()`
     /// 3. On Deny: return error ToolOutput
     /// 4. On Redirect: look up redirected tool → run it → `sandbox.after()`
-    async fn execute_tool_call(
-        &self,
-        call: &ToolCall,
-    ) -> Result<ToolOutput> {
+    async fn execute_tool_call(&self, call: &ToolCall) -> Result<ToolOutput> {
         // -- Ask the sandbox --
         let decision = self
             .sandbox
@@ -1794,9 +1803,10 @@ impl Agent {
         match decision {
             SandboxDecision::Allow { input } => {
                 // Look up the tool.
-                let tool = self.tools.get(&call.name).ok_or_else(|| {
-                    DysonError::tool(&call.name, "unknown tool")
-                })?;
+                let tool = self
+                    .tools
+                    .get(&call.name)
+                    .ok_or_else(|| DysonError::tool(&call.name, "unknown tool"))?;
 
                 // Execute the tool.
                 let mut tool_output = match tool.run(input.clone(), &self.tool_context).await {
@@ -1816,7 +1826,11 @@ impl Agent {
             }
 
             SandboxDecision::Deny { reason } => {
-                tracing::info!(tool = call.name, reason = reason, "tool call denied by sandbox");
+                tracing::info!(
+                    tool = call.name,
+                    reason = reason,
+                    "tool call denied by sandbox"
+                );
                 let tool_output = ToolOutput::error(format!("Denied by sandbox: {reason}"));
                 Ok(tool_output)
             }
@@ -1900,7 +1914,9 @@ async fn synthesize_to_workspace(
     let messages = vec![Message::user(&user_message)];
     let empty_tools: Vec<ToolDefinition> = Vec::new();
 
-    let response = client.stream(&messages, system, &empty_tools, config).await?;
+    let response = client
+        .stream(&messages, system, &empty_tools, config)
+        .await?;
 
     let mut silent = SilentOutput;
     let (assistant_msg, _, _) =
@@ -1949,7 +1965,6 @@ mod tests {
     use crate::sandbox::no_sandbox::DangerousNoSandbox;
     use crate::skill::builtin::BuiltinSkill;
 
-
     // -----------------------------------------------------------------------
     // Mock LLM client that returns a fixed response.
     // -----------------------------------------------------------------------
@@ -1987,11 +2002,7 @@ mod tests {
             _tools: &[ToolDefinition],
             _config: &CompletionConfig,
         ) -> Result<crate::llm::StreamResponse> {
-            let events = self
-                .responses
-                .lock()
-                .unwrap()
-                .remove(0);
+            let events = self.responses.lock().unwrap().remove(0);
             Ok(crate::llm::StreamResponse {
                 stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
                 tool_mode: self.tool_mode,
@@ -2023,15 +2034,25 @@ mod tests {
             self.text.push_str(text);
             Ok(())
         }
-        fn tool_use_start(&mut self, _: &str, _: &str) -> Result<()> { Ok(()) }
-        fn tool_use_complete(&mut self) -> Result<()> { Ok(()) }
-        fn tool_result(&mut self, _: &ToolOutput) -> Result<()> { Ok(()) }
+        fn tool_use_start(&mut self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn tool_use_complete(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn tool_result(&mut self, _: &ToolOutput) -> Result<()> {
+            Ok(())
+        }
         fn send_file(&mut self, path: &std::path::Path) -> Result<()> {
             self.sent_files.push(path.to_path_buf());
             Ok(())
         }
-        fn error(&mut self, _: &DysonError) -> Result<()> { Ok(()) }
-        fn flush(&mut self) -> Result<()> { Ok(()) }
+        fn error(&mut self, _: &DysonError) -> Result<()> {
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2104,7 +2125,10 @@ mod tests {
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         let mut output = MockOutput::new();
 
-        let result = agent.run("run echo test_output", &mut output).await.unwrap();
+        let result = agent
+            .run("run echo test_output", &mut output)
+            .await
+            .unwrap();
         assert_eq!(result, "Done.");
 
         // Conversation should have: user, assistant (tool_use), tool_result, assistant (text)
@@ -2237,7 +2261,10 @@ mod tests {
 
         let llm = MockLlm::new(vec![vec![
             StreamEvent::TextDelta("Updated memory with new learnings.".into()),
-            StreamEvent::MessageComplete { stop_reason: StopReason::EndTurn, output_tokens: None },
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
         ]]);
 
         let config = CompletionConfig {
@@ -2248,9 +2275,7 @@ mod tests {
 
         let summary = "User asked about Rust lifetimes and learned about borrowing.";
 
-        let result = synthesize_to_workspace(
-            &llm, &config, summary, &workspace,
-        ).await;
+        let result = synthesize_to_workspace(&llm, &config, summary, &workspace).await;
 
         assert!(result.is_ok(), "synthesis should succeed");
 
@@ -2333,8 +2358,12 @@ mod tests {
         assert!(Agent::is_retryable(&DysonError::Llm("HTTP 503".into())));
 
         // Non-retryable errors.
-        assert!(!Agent::is_retryable(&DysonError::Llm("authentication failed".into())));
-        assert!(!Agent::is_retryable(&DysonError::Config("bad config".into())));
+        assert!(!Agent::is_retryable(&DysonError::Llm(
+            "authentication failed".into()
+        )));
+        assert!(!Agent::is_retryable(&DysonError::Config(
+            "bad config".into()
+        )));
         assert!(!Agent::is_retryable(&DysonError::Cancelled));
     }
 
@@ -2434,8 +2463,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::tool::Tool for MockFileTool {
-        fn name(&self) -> &str { "send_test_file" }
-        fn description(&self) -> &str { "Returns a file" }
+        fn name(&self) -> &str {
+            "send_test_file"
+        }
+        fn description(&self) -> &str {
+            "Returns a file"
+        }
         fn input_schema(&self) -> serde_json::Value {
             serde_json::json!({
                 "type": "object",
@@ -2468,7 +2501,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Skill for MockFileSkill {
-        fn name(&self) -> &str { "mock_file_skill" }
+        fn name(&self) -> &str {
+            "mock_file_skill"
+        }
         fn tools(&self) -> &[Arc<dyn crate::tool::Tool>] {
             &self.tools
         }
@@ -2517,8 +2552,14 @@ mod tests {
 
         // Verify that send_file was called for both attached files.
         assert_eq!(output.sent_files.len(), 2);
-        assert_eq!(output.sent_files[0], std::path::PathBuf::from("/tmp/test_report.pdf"));
-        assert_eq!(output.sent_files[1], std::path::PathBuf::from("/tmp/data.csv"));
+        assert_eq!(
+            output.sent_files[0],
+            std::path::PathBuf::from("/tmp/test_report.pdf")
+        );
+        assert_eq!(
+            output.sent_files[1],
+            std::path::PathBuf::from("/tmp/data.csv")
+        );
     }
 
     #[tokio::test]
@@ -2659,7 +2700,8 @@ mod tests {
             protect_tail_tokens: 0,
             ..CompactionConfig::default()
         };
-        let (mut agent, mut output) = make_agent_with_history(messages.clone(), vec![], Some(config));
+        let (mut agent, mut output) =
+            make_agent_with_history(messages.clone(), vec![], Some(config));
 
         agent.compact(&mut output).await.unwrap();
         // All 3 messages preserved — no compaction needed.
@@ -2688,18 +2730,17 @@ mod tests {
         };
 
         let summary_response = vec![
-            StreamEvent::TextDelta("## Goal\nTest conversation\n## Progress\nMessages exchanged.".into()),
+            StreamEvent::TextDelta(
+                "## Goal\nTest conversation\n## Progress\nMessages exchanged.".into(),
+            ),
             StreamEvent::MessageComplete {
                 stop_reason: StopReason::EndTurn,
                 output_tokens: None,
             },
         ];
 
-        let (mut agent, mut output) = make_agent_with_history(
-            messages.clone(),
-            vec![summary_response],
-            Some(config),
-        );
+        let (mut agent, mut output) =
+            make_agent_with_history(messages.clone(), vec![summary_response], Some(config));
 
         agent.compact(&mut output).await.unwrap();
 
@@ -2747,7 +2788,11 @@ mod tests {
                 name: "bash".into(),
                 input: serde_json::json!({"command": "ls -la"}),
             }]),
-            Message::tool_result("call_1", "drwxr-xr-x 15 user user 4096 Mar 30 file1.txt\n-rw-r--r-- 1 user user 12345 Mar 30 file2.txt\n...(many more lines)...", false),
+            Message::tool_result(
+                "call_1",
+                "drwxr-xr-x 15 user user 4096 Mar 30 file1.txt\n-rw-r--r-- 1 user user 12345 Mar 30 file2.txt\n...(many more lines)...",
+                false,
+            ),
             // More middle
             Message::user("what about the other directory?"),
             Message::assistant(vec![ContentBlock::ToolUse {
@@ -2755,10 +2800,16 @@ mod tests {
                 name: "bash".into(),
                 input: serde_json::json!({"command": "ls /other"}),
             }]),
-            Message::tool_result("call_2", "big output from other directory listing here", false),
+            Message::tool_result(
+                "call_2",
+                "big output from other directory listing here",
+                false,
+            ),
             // Tail
             Message::user("thanks, now summarise"),
-            Message::assistant(vec![ContentBlock::Text { text: "Here's your summary.".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "Here's your summary.".into(),
+            }]),
         ];
 
         let config = CompactionConfig {
@@ -2768,25 +2819,26 @@ mod tests {
         };
 
         let summary_response = vec![
-            StreamEvent::TextDelta("## Goal\nFile listing\n## Progress\nListed directories.".into()),
+            StreamEvent::TextDelta(
+                "## Goal\nFile listing\n## Progress\nListed directories.".into(),
+            ),
             StreamEvent::MessageComplete {
                 stop_reason: StopReason::EndTurn,
                 output_tokens: None,
             },
         ];
 
-        let (mut agent, mut output) = make_agent_with_history(
-            messages,
-            vec![summary_response],
-            Some(config),
-        );
+        let (mut agent, mut output) =
+            make_agent_with_history(messages, vec![summary_response], Some(config));
 
         agent.compact(&mut output).await.unwrap();
 
         // The summary should exist and tool outputs in the middle should
         // have been pruned (replaced with placeholder) before summarisation.
         let has_summary = agent.messages.iter().any(|m| {
-            m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("[Context Summary]")))
+            m.content.iter().any(
+                |b| matches!(b, ContentBlock::Text { text } if text.contains("[Context Summary]")),
+            )
         });
         assert!(has_summary, "should contain a context summary");
 
@@ -2794,7 +2846,10 @@ mod tests {
         let has_big_output = agent.messages.iter().any(|m| {
             m.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { content, .. } if content.contains("many more lines")))
         });
-        assert!(!has_big_output, "large tool outputs in middle should be pruned or summarised away");
+        assert!(
+            !has_big_output,
+            "large tool outputs in middle should be pruned or summarised away"
+        );
     }
 
     #[tokio::test]
@@ -2814,12 +2869,18 @@ mod tests {
             // Middle — the tool result for orphan_call, plus more conversation
             Message::tool_result("orphan_call", "test output", false),
             Message::user("continue"),
-            Message::assistant(vec![ContentBlock::Text { text: "continuing...".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "continuing...".into(),
+            }]),
             Message::user("more stuff"),
-            Message::assistant(vec![ContentBlock::Text { text: "more responses".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "more responses".into(),
+            }]),
             // Tail
             Message::user("final question"),
-            Message::assistant(vec![ContentBlock::Text { text: "final answer".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "final answer".into(),
+            }]),
         ];
 
         let config = CompactionConfig {
@@ -2836,18 +2897,16 @@ mod tests {
             },
         ];
 
-        let (mut agent, mut output) = make_agent_with_history(
-            messages,
-            vec![summary_response],
-            Some(config),
-        );
+        let (mut agent, mut output) =
+            make_agent_with_history(messages, vec![summary_response], Some(config));
 
         agent.compact(&mut output).await.unwrap();
 
         // The head still has the tool_use for "orphan_call".
-        let has_tool_use = agent.messages[1].content.iter().any(|b| {
-            matches!(b, ContentBlock::ToolUse { id, .. } if id == "orphan_call")
-        });
+        let has_tool_use = agent.messages[1]
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == "orphan_call"));
         assert!(has_tool_use, "head should still contain the tool_use");
 
         // There should be a synthetic tool_result matching "orphan_call"
@@ -2857,7 +2916,10 @@ mod tests {
                 matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "orphan_call")
             })
         });
-        assert!(has_matching_result, "should have a synthetic tool_result for the orphaned tool_use");
+        assert!(
+            has_matching_result,
+            "should have a synthetic tool_result for the orphaned tool_use"
+        );
     }
 
     #[tokio::test]
@@ -2868,13 +2930,21 @@ mod tests {
         // gets inserted as a [Context Summary] message.
         let messages = vec![
             Message::user("msg 0"),
-            Message::assistant(vec![ContentBlock::Text { text: "resp 0".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "resp 0".into(),
+            }]),
             Message::user("msg 1"),
-            Message::assistant(vec![ContentBlock::Text { text: "resp 1".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "resp 1".into(),
+            }]),
             Message::user("msg 2"),
-            Message::assistant(vec![ContentBlock::Text { text: "resp 2".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "resp 2".into(),
+            }]),
             Message::user("msg 3"),
-            Message::assistant(vec![ContentBlock::Text { text: "resp 3".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "resp 3".into(),
+            }]),
         ];
 
         let config = CompactionConfig {
@@ -2891,11 +2961,8 @@ mod tests {
             },
         ];
 
-        let (mut agent, mut output) = make_agent_with_history(
-            messages,
-            vec![summary_response],
-            Some(config),
-        );
+        let (mut agent, mut output) =
+            make_agent_with_history(messages, vec![summary_response], Some(config));
 
         agent.compact(&mut output).await.unwrap();
 
@@ -2907,7 +2974,10 @@ mod tests {
         match &summary_msg.content[0] {
             ContentBlock::Text { text } => {
                 assert!(text.contains("Goal"), "summary should contain Goal section");
-                assert!(text.contains("Progress"), "summary should contain Progress section");
+                assert!(
+                    text.contains("Progress"),
+                    "summary should contain Progress section"
+                );
             }
             other => panic!("expected Text, got: {other:?}"),
         }
@@ -2919,9 +2989,13 @@ mod tests {
             Message::user("hello"),
             Message::assistant(vec![ContentBlock::Text { text: "hi".into() }]),
             Message::user("more"),
-            Message::assistant(vec![ContentBlock::Text { text: "more".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "more".into(),
+            }]),
             Message::user("even more"),
-            Message::assistant(vec![ContentBlock::Text { text: "even more".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "even more".into(),
+            }]),
         ];
 
         let config = CompactionConfig {
@@ -2938,11 +3012,8 @@ mod tests {
             },
         ];
 
-        let (mut agent, mut output) = make_agent_with_history(
-            messages,
-            vec![summary_response],
-            Some(config),
-        );
+        let (mut agent, mut output) =
+            make_agent_with_history(messages, vec![summary_response], Some(config));
 
         agent.token_budget.record(50).unwrap();
         assert_eq!(agent.token_budget.output_tokens_used, 50);
@@ -2961,16 +3032,26 @@ mod tests {
         // should produce an updated summary that merges old + new.
         let messages = vec![
             // Previous summary (from first compaction).
-            Message::user("[Context Summary]\n\n## Goal\nOriginal goal.\n## Progress\nStep 1 done."),
+            Message::user(
+                "[Context Summary]\n\n## Goal\nOriginal goal.\n## Progress\nStep 1 done.",
+            ),
             // New conversation since last compaction.
-            Message::assistant(vec![ContentBlock::Text { text: "continuing work".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "continuing work".into(),
+            }]),
             Message::user("do step 2"),
-            Message::assistant(vec![ContentBlock::Text { text: "step 2 done".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "step 2 done".into(),
+            }]),
             Message::user("do step 3"),
-            Message::assistant(vec![ContentBlock::Text { text: "step 3 done".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "step 3 done".into(),
+            }]),
             // Tail
             Message::user("what's next?"),
-            Message::assistant(vec![ContentBlock::Text { text: "step 4".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "step 4".into(),
+            }]),
         ];
 
         let config = CompactionConfig {
@@ -2980,18 +3061,18 @@ mod tests {
         };
 
         let summary_response = vec![
-            StreamEvent::TextDelta("## Goal\nOriginal goal.\n## Progress\nSteps 1-3 done.\n## Next Steps\nStep 4.".into()),
+            StreamEvent::TextDelta(
+                "## Goal\nOriginal goal.\n## Progress\nSteps 1-3 done.\n## Next Steps\nStep 4."
+                    .into(),
+            ),
             StreamEvent::MessageComplete {
                 stop_reason: StopReason::EndTurn,
                 output_tokens: None,
             },
         ];
 
-        let (mut agent, mut output) = make_agent_with_history(
-            messages,
-            vec![summary_response],
-            Some(config),
-        );
+        let (mut agent, mut output) =
+            make_agent_with_history(messages, vec![summary_response], Some(config));
 
         agent.compact(&mut output).await.unwrap();
 
@@ -3002,7 +3083,10 @@ mod tests {
 
         match &summary_msg.content[0] {
             ContentBlock::Text { text } => {
-                assert!(text.contains("Steps 1-3"), "summary should merge old + new progress");
+                assert!(
+                    text.contains("Steps 1-3"),
+                    "summary should merge old + new progress"
+                );
             }
             other => panic!("expected Text, got: {other:?}"),
         }
@@ -3011,7 +3095,10 @@ mod tests {
         let summary_count = agent.messages.iter().filter(|m| {
             m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[Context Summary]")))
         }).count();
-        assert_eq!(summary_count, 1, "should have exactly one summary after iterative compaction");
+        assert_eq!(
+            summary_count, 1,
+            "should have exactly one summary after iterative compaction"
+        );
     }
 
     #[tokio::test]
@@ -3021,9 +3108,13 @@ mod tests {
             Message::user("hello"),
             Message::assistant(vec![ContentBlock::Text { text: "hi".into() }]),
             Message::user("more"),
-            Message::assistant(vec![ContentBlock::Text { text: "more".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "more".into(),
+            }]),
             Message::user("even more"),
-            Message::assistant(vec![ContentBlock::Text { text: "even more".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "even more".into(),
+            }]),
         ];
 
         let config = CompactionConfig {
@@ -3033,19 +3124,14 @@ mod tests {
         };
 
         // LLM returns empty text.
-        let summary_response = vec![
-            StreamEvent::MessageComplete {
-                stop_reason: StopReason::EndTurn,
-                output_tokens: None,
-            },
-        ];
+        let summary_response = vec![StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        }];
 
         let original_len = messages.len();
-        let (mut agent, mut output) = make_agent_with_history(
-            messages,
-            vec![summary_response],
-            Some(config),
-        );
+        let (mut agent, mut output) =
+            make_agent_with_history(messages, vec![summary_response], Some(config));
 
         agent.compact(&mut output).await.unwrap();
         // Original history should be preserved (though tool outputs may be pruned).
@@ -3085,11 +3171,8 @@ mod tests {
             },
         ];
 
-        let (mut agent, mut output) = make_agent_with_history(
-            messages,
-            vec![summary_response],
-            Some(config),
-        );
+        let (mut agent, mut output) =
+            make_agent_with_history(messages, vec![summary_response], Some(config));
 
         agent.compact(&mut output).await.unwrap();
 
@@ -3098,8 +3181,10 @@ mod tests {
         let last_text = agent.messages.last().unwrap();
         match &last_text.content[0] {
             ContentBlock::Text { text } => {
-                assert!(text.contains("very long assistant response"),
-                    "tail should preserve the last large messages");
+                assert!(
+                    text.contains("very long assistant response"),
+                    "tail should preserve the last large messages"
+                );
             }
             other => panic!("expected Text, got: {other:?}"),
         }
@@ -3139,7 +3224,7 @@ mod tests {
         let settings = AgentSettings {
             api_key: "test".into(),
             compaction: Some(CompactionConfig {
-                context_window: 20,  // very low
+                context_window: 20, // very low
                 threshold_ratio: 0.50,
                 protect_head: 1,
                 protect_tail_tokens: 0,
@@ -3170,7 +3255,9 @@ mod tests {
             Message::user("hello"),
             Message::assistant(vec![ContentBlock::Text { text: "hi".into() }]),
             Message::user("more"),
-            Message::assistant(vec![ContentBlock::Text { text: "more".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "more".into(),
+            }]),
         ];
 
         let summary_response = vec![
@@ -3231,11 +3318,7 @@ mod tests {
 
             // 3. Format the result.
             let output = ToolOutput::success("hello");
-            let formatted = formatter.format(
-                &call,
-                &output,
-                std::time::Duration::from_millis(10),
-            );
+            let formatted = formatter.format(&call, &output, std::time::Duration::from_millis(10));
             assert!(formatted.summary.contains("10ms"));
             assert!(!formatted.to_llm_message().is_empty());
         }
@@ -3248,7 +3331,11 @@ mod tests {
                 ToolCall::new("file_read", serde_json::json!({"path": "out.txt"})),
             ];
             let phases = DependencyAnalyzer::analyze(&calls);
-            assert!(phases.len() >= 2, "expected at least 2 phases, got {}", phases.len());
+            assert!(
+                phases.len() >= 2,
+                "expected at least 2 phases, got {}",
+                phases.len()
+            );
         }
 
         #[test]
@@ -3267,15 +3354,15 @@ mod tests {
             // due to cooldown — but that still proves limits work in the
             // pipeline.
             let result = limiter.check("bash");
-            assert!(result.is_err(), "second immediate call should be rate-limited");
+            assert!(
+                result.is_err(),
+                "second immediate call should be rate-limited"
+            );
         }
 
         #[test]
         fn pop_last_message_removes_last() {
-            let mut messages = vec![
-                Message::user("hello"),
-                Message::user("world"),
-            ];
+            let messages = vec![Message::user("hello"), Message::user("world")];
             let settings = AgentSettings {
                 api_key: "test".into(),
                 ..Default::default()
@@ -3287,7 +3374,12 @@ mod tests {
             agent.set_messages(messages.clone());
 
             let popped = agent.pop_last_message();
-            assert_eq!(popped.unwrap().content[0], ContentBlock::Text { text: "world".into() });
+            assert_eq!(
+                popped.unwrap().content[0],
+                ContentBlock::Text {
+                    text: "world".into()
+                }
+            );
             assert_eq!(agent.messages().len(), 1);
         }
 
@@ -3318,7 +3410,9 @@ mod tests {
 
             agent.set_messages(vec![
                 Message::user_multimodal(vec![
-                    ContentBlock::Text { text: "look at this".into() },
+                    ContentBlock::Text {
+                        text: "look at this".into(),
+                    },
                     ContentBlock::Image {
                         data: "base64data".into(),
                         media_type: "image/jpeg".into(),
@@ -3326,7 +3420,9 @@ mod tests {
                 ]),
                 Message {
                     role: Role::Assistant,
-                    content: vec![ContentBlock::Text { text: "I see a cat".into() }],
+                    content: vec![ContentBlock::Text {
+                        text: "I see a cat".into(),
+                    }],
                 },
                 Message::user("thanks"),
             ]);
@@ -3338,11 +3434,18 @@ mod tests {
             assert_eq!(first_msg.content.len(), 2);
             assert_eq!(
                 first_msg.content[1],
-                ContentBlock::Text { text: "[image]".into() },
+                ContentBlock::Text {
+                    text: "[image]".into()
+                },
             );
 
             // Text-only messages should be untouched.
-            assert_eq!(agent.messages()[2].content[0], ContentBlock::Text { text: "thanks".into() });
+            assert_eq!(
+                agent.messages()[2].content[0],
+                ContentBlock::Text {
+                    text: "thanks".into()
+                }
+            );
         }
 
         #[test]
@@ -3367,7 +3470,12 @@ mod tests {
             agent.strip_images();
 
             assert_eq!(agent.messages().len(), 2);
-            assert_eq!(agent.messages()[0].content[0], ContentBlock::Text { text: "hello".into() });
+            assert_eq!(
+                agent.messages()[0].content[0],
+                ContentBlock::Text {
+                    text: "hello".into()
+                }
+            );
         }
     }
 }

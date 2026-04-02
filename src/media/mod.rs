@@ -22,15 +22,9 @@ use crate::message::ContentBlock;
 /// Raw media input from a controller.
 pub enum MediaInput {
     /// A raw image (JPEG, PNG, WebP, GIF).
-    Image {
-        data: Vec<u8>,
-        mime_type: String,
-    },
+    Image { data: Vec<u8>, mime_type: String },
     /// A raw audio file (OGG/Opus from Telegram voice notes, etc.).
-    Audio {
-        data: Vec<u8>,
-        mime_type: String,
-    },
+    Audio { data: Vec<u8>, mime_type: String },
 }
 
 /// Resolved media ready for the message pipeline.

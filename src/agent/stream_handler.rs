@@ -42,10 +42,10 @@ use std::pin::Pin;
 use futures::Stream;
 use tokio_stream::StreamExt;
 
+use crate::controller::Output;
 use crate::error::Result;
 use crate::llm::stream::StreamEvent;
 use crate::message::{ContentBlock, Message};
-use crate::controller::Output;
 
 // ---------------------------------------------------------------------------
 // ToolCall — a fully-formed tool call ready for execution.
@@ -143,7 +143,10 @@ pub async fn process_stream(
             StreamEvent::TextDelta(text) => {
                 if first_token_time.is_none() {
                     first_token_time = Some(std::time::Instant::now());
-                    let ttft_ms = first_token_time.unwrap().duration_since(stream_start).as_millis();
+                    let ttft_ms = first_token_time
+                        .unwrap()
+                        .duration_since(stream_start)
+                        .as_millis();
                     tracing::info!(ttft_ms = ttft_ms, "first token received");
                 }
                 // Rough token count: split on whitespace boundaries.

@@ -41,7 +41,10 @@ impl OpenRouterClient {
     ///   2. `StaticHeadersAuth` — `HTTP-Referer` and `X-Title` (if provided)
     pub fn new(api_key: &str, base_url: Option<&str>) -> Self {
         let mut headers = std::collections::HashMap::new();
-        headers.insert("HTTP-Referer".to_string(), "https://github.com/dyson".to_string());
+        headers.insert(
+            "HTTP-Referer".to_string(),
+            "https://github.com/dyson".to_string(),
+        );
         headers.insert("X-Title".to_string(), "Dyson".to_string());
 
         let auth: Box<dyn Auth> = Box::new(CompositeAuth::new(vec![

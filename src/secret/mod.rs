@@ -208,8 +208,7 @@ impl SecretRegistry {
             SecretValue::Literal(s) => s.clone(),
             SecretValue::Reference { resolver, name } => {
                 let r = self.resolvers.get(resolver.as_str()).ok_or_else(|| {
-                    let available: Vec<&str> =
-                        self.resolvers.keys().map(|s| s.as_str()).collect();
+                    let available: Vec<&str> = self.resolvers.keys().map(|s| s.as_str()).collect();
                     DysonError::Config(format!(
                         "unknown secret resolver '{resolver}'.  \
                          Available: [{}].",
@@ -217,11 +216,7 @@ impl SecretRegistry {
                     ))
                 })?;
 
-                tracing::trace!(
-                    resolver = resolver,
-                    name = name,
-                    "resolving secret"
-                );
+                tracing::trace!(resolver = resolver, name = name, "resolving secret");
 
                 r.resolve(name)?
             }
@@ -362,10 +357,8 @@ mod tests {
 
     #[test]
     fn deserialize_reference() {
-        let val: SecretValue = serde_json::from_str(
-            r#"{"resolver":"insecure_env","name":"MY_KEY"}"#,
-        )
-        .unwrap();
+        let val: SecretValue =
+            serde_json::from_str(r#"{"resolver":"insecure_env","name":"MY_KEY"}"#).unwrap();
         match val {
             SecretValue::Reference { resolver, name } => {
                 assert_eq!(resolver, "insecure_env");
@@ -382,7 +375,9 @@ mod tests {
             fn resolve(&self, key: &str) -> Result<String> {
                 Ok(format!("mock:{key}"))
             }
-            fn scheme(&self) -> &str { "mock" }
+            fn scheme(&self) -> &str {
+                "mock"
+            }
         }
 
         let mut registry = SecretRegistry::default();

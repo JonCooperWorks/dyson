@@ -259,12 +259,7 @@ impl ClaudeCodeClient {
     ///
     /// Extracted as a method so the flag logic is unit-testable without
     /// spawning a subprocess.
-    fn build_args(
-        &self,
-        model: &str,
-        system: &str,
-        mcp_config_json: Option<&str>,
-    ) -> Vec<String> {
+    fn build_args(&self, model: &str, system: &str, mcp_config_json: Option<&str>) -> Vec<String> {
         let mut args = vec![
             "-p".to_string(),
             "--output-format".to_string(),
@@ -383,11 +378,7 @@ impl LlmClient for ClaudeCodeClient {
         }
 
         // -- Build the command --
-        let args = self.build_args(
-            &config.model,
-            system,
-            mcp_config_json.as_deref(),
-        );
+        let args = self.build_args(&config.model, system, mcp_config_json.as_deref());
 
         let mut cmd = tokio::process::Command::new(&self.claude_path);
         for arg in &args {
@@ -411,9 +402,10 @@ impl LlmClient for ClaudeCodeClient {
         // We must close stdin so claude knows the input is complete.
         // The `take()` gives us ownership of the stdin handle; dropping
         // it closes the pipe.
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            DysonError::Llm("failed to open stdin for claude process".into())
-        })?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| DysonError::Llm("failed to open stdin for claude process".into()))?;
 
         // Write in a spawned task so we don't block the stream setup.
         // For large conversation histories, this could take a moment.
@@ -424,9 +416,10 @@ impl LlmClient for ClaudeCodeClient {
         });
 
         // -- Read stdout line by line and parse JSON events --
-        let stdout = child.stdout.take().ok_or_else(|| {
-            DysonError::Llm("failed to open stdout for claude process".into())
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| DysonError::Llm("failed to open stdout for claude process".into()))?;
 
         let reader = BufReader::new(stdout);
 
@@ -532,7 +525,8 @@ impl StreamParserState {
                                 if let Some(text) = delta["text"].as_str() {
                                     let idx = inner["index"].as_u64().unwrap_or(0) as usize;
                                     if self.thinking_blocks.contains(&idx) {
-                                        events.push(Ok(StreamEvent::ThinkingDelta(text.to_string())));
+                                        events
+                                            .push(Ok(StreamEvent::ThinkingDelta(text.to_string())));
                                     } else {
                                         self.got_stream_deltas = true;
                                         events.push(Ok(StreamEvent::TextDelta(text.to_string())));
@@ -545,7 +539,9 @@ impl StreamParserState {
                                     if let Some(buf) = self.tool_buffers.get_mut(&idx) {
                                         buf.json.push_str(partial);
                                     }
-                                    events.push(Ok(StreamEvent::ToolUseInputDelta(partial.to_string())));
+                                    events.push(Ok(StreamEvent::ToolUseInputDelta(
+                                        partial.to_string(),
+                                    )));
                                 }
                             }
                             _ => {}
@@ -560,9 +556,14 @@ impl StreamParserState {
                         if block_type == "tool_use" {
                             let id = block["id"].as_str().unwrap_or("").to_string();
                             let name = block["name"].as_str().unwrap_or("").to_string();
-                            self.tool_buffers.insert(idx, ToolCallBuffer {
-                                id: id.clone(), name: name.clone(), json: String::new(),
-                            });
+                            self.tool_buffers.insert(
+                                idx,
+                                ToolCallBuffer {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                    json: String::new(),
+                                },
+                            );
                             events.push(Ok(StreamEvent::ToolUseStart { id, name }));
                         } else if block_type == "thinking" {
                             self.thinking_blocks.insert(idx);
@@ -585,7 +586,9 @@ impl StreamParserState {
                     self.completed = true;
                     if json["is_error"].as_bool() == Some(true) {
                         let error_msg = json["result"].as_str().unwrap_or("unknown error");
-                        events.push(Err(DysonError::Llm(format!("Claude Code error: {error_msg}"))));
+                        events.push(Err(DysonError::Llm(format!(
+                            "Claude Code error: {error_msg}"
+                        ))));
                     } else {
                         let stop_reason = match json["stop_reason"].as_str() {
                             Some("end_turn") => StopReason::EndTurn,
@@ -593,7 +596,10 @@ impl StreamParserState {
                             Some("max_tokens") => StopReason::MaxTokens,
                             _ => StopReason::EndTurn,
                         };
-                        events.push(Ok(StreamEvent::MessageComplete { stop_reason, output_tokens: None }));
+                        events.push(Ok(StreamEvent::MessageComplete {
+                            stop_reason,
+                            output_tokens: None,
+                        }));
                     }
                 }
             }
@@ -697,7 +703,10 @@ mod tests {
             r#"{"type":"result","subtype":"error","is_error":true,"result":"Rate limit exceeded","duration_ms":100,"total_cost_usd":0.0}"#
         );
         assert_eq!(events.len(), 1);
-        assert!(events[0].is_err(), "error result should yield Err, not Ok(MessageComplete)");
+        assert!(
+            events[0].is_err(),
+            "error result should yield Err, not Ok(MessageComplete)"
+        );
         let err_msg = format!("{}", events[0].as_ref().unwrap_err());
         assert!(err_msg.contains("Rate limit exceeded"));
     }
@@ -725,7 +734,10 @@ mod tests {
         );
         let final_events = state.finalize();
         assert_eq!(final_events.len(), 1);
-        assert!(final_events[0].is_err(), "finalize without result should yield Err");
+        assert!(
+            final_events[0].is_err(),
+            "finalize without result should yield Err"
+        );
     }
 
     #[test]
@@ -782,7 +794,10 @@ mod tests {
 
         state.parse_line(r#"{"type":"assistant","message":{"content":[]}}"#);
 
-        assert!(state.tool_buffers.is_empty(), "tool_buffers should be cleared on turn boundary");
+        assert!(
+            state.tool_buffers.is_empty(),
+            "tool_buffers should be cleared on turn boundary"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -827,12 +842,7 @@ mod tests {
     #[test]
     fn build_args_forwards_extra_mcp_configs() {
         let extra = r#"{"mcpServers":{"extra":{"type":"stdio"}}}"#.to_string();
-        let client = ClaudeCodeClient::new(
-            Some("claude"),
-            vec![extra.clone()],
-            None,
-            false,
-        );
+        let client = ClaudeCodeClient::new(Some("claude"), vec![extra.clone()], None, false);
         let args = client.build_args("sonnet", "", None);
         assert!(args.contains(&extra));
     }

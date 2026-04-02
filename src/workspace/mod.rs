@@ -200,10 +200,7 @@ pub fn migrate_workspace(
     target.import_files(&files);
     target.save()?;
 
-    tracing::info!(
-        files = count,
-        "workspace migration complete"
-    );
+    tracing::info!(files = count, "workspace migration complete");
 
     Ok(MigrationResult {
         files_migrated: count,
@@ -263,13 +260,11 @@ mod tests {
 
     #[test]
     fn migrate_openclaw_to_in_memory() {
-        let dir = std::env::temp_dir().join(format!(
-            "dyson-migrate-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("dyson-migrate-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let mut source = OpenClawWorkspace::load(&dir, crate::config::MemoryConfig::default()).unwrap();
+        let mut source =
+            OpenClawWorkspace::load(&dir, crate::config::MemoryConfig::default()).unwrap();
         source.set("SOUL.md", "Custom soul.");
         source.set("MEMORY.md", "Important memory.");
         source.save().unwrap();
@@ -290,13 +285,11 @@ mod tests {
             .with_file("SOUL.md", "Migrated soul.")
             .with_file("memory/2026-03-20.md", "Journal entry.");
 
-        let dir = std::env::temp_dir().join(format!(
-            "dyson-migrate-target-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("dyson-migrate-target-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        let mut target = OpenClawWorkspace::load(&dir, crate::config::MemoryConfig::default()).unwrap();
+        let mut target =
+            OpenClawWorkspace::load(&dir, crate::config::MemoryConfig::default()).unwrap();
         let result = migrate_workspace(&source, &mut target).unwrap();
 
         assert_eq!(result.files_migrated, 2);
@@ -324,11 +317,9 @@ mod tests {
 
     #[test]
     fn migrate_overwrites_existing_target_files() {
-        let source = InMemoryWorkspace::new()
-            .with_file("SOUL.md", "New soul.");
+        let source = InMemoryWorkspace::new().with_file("SOUL.md", "New soul.");
 
-        let mut target = InMemoryWorkspace::new()
-            .with_file("SOUL.md", "Old soul.");
+        let mut target = InMemoryWorkspace::new().with_file("SOUL.md", "Old soul.");
 
         migrate_workspace(&source, &mut target).unwrap();
 

@@ -237,12 +237,7 @@ impl LlmClient for CodexClient {
         }
 
         // -- Build the command --
-        let args = self.build_args(
-            &config.model,
-            system,
-            &prompt,
-            mcp_url.as_deref(),
-        );
+        let args = self.build_args(&config.model, system, &prompt, mcp_url.as_deref());
 
         let mut cmd = tokio::process::Command::new(&self.codex_path);
         for arg in &args {
@@ -262,9 +257,10 @@ impl LlmClient for CodexClient {
         })?;
 
         // -- Read stdout line by line and parse JSONL events --
-        let stdout = child.stdout.take().ok_or_else(|| {
-            DysonError::Llm("failed to open stdout for codex process".into())
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| DysonError::Llm("failed to open stdout for codex process".into()))?;
 
         let reader = BufReader::new(stdout);
 
@@ -351,21 +347,17 @@ impl StreamParserState {
 
             "turn.failed" => {
                 self.completed = true;
-                let error_msg = json["error"]["message"]
-                    .as_str()
-                    .unwrap_or("unknown error");
-                events.push(Err(DysonError::Llm(
-                    format!("Codex CLI error: {error_msg}"),
-                )));
+                let error_msg = json["error"]["message"].as_str().unwrap_or("unknown error");
+                events.push(Err(DysonError::Llm(format!(
+                    "Codex CLI error: {error_msg}"
+                ))));
             }
 
             "error" => {
-                let error_msg = json["message"]
-                    .as_str()
-                    .unwrap_or("unknown error");
-                events.push(Err(DysonError::Llm(
-                    format!("Codex CLI error: {error_msg}"),
-                )));
+                let error_msg = json["message"].as_str().unwrap_or("unknown error");
+                events.push(Err(DysonError::Llm(format!(
+                    "Codex CLI error: {error_msg}"
+                ))));
             }
 
             "item.started" => {
@@ -374,14 +366,8 @@ impl StreamParserState {
 
                 match item_type {
                     "command_execution" => {
-                        let command = item["command"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        let id = item["id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
+                        let command = item["command"].as_str().unwrap_or("").to_string();
+                        let id = item["id"].as_str().unwrap_or("").to_string();
                         events.push(Ok(StreamEvent::ToolUseStart {
                             id,
                             name: "bash".to_string(),
@@ -391,24 +377,12 @@ impl StreamParserState {
                         )));
                     }
                     "mcp_tool_call" => {
-                        let tool = item["tool"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        let id = item["id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        events.push(Ok(StreamEvent::ToolUseStart {
-                            id,
-                            name: tool,
-                        }));
+                        let tool = item["tool"].as_str().unwrap_or("").to_string();
+                        let id = item["id"].as_str().unwrap_or("").to_string();
+                        events.push(Ok(StreamEvent::ToolUseStart { id, name: tool }));
                     }
                     "web_search" => {
-                        let id = item["id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
+                        let id = item["id"].as_str().unwrap_or("").to_string();
                         events.push(Ok(StreamEvent::ToolUseStart {
                             id,
                             name: "web_search".to_string(),
@@ -438,18 +412,9 @@ impl StreamParserState {
                         }
                     }
                     "command_execution" => {
-                        let id = item["id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        let command = item["command"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        let output = item["aggregated_output"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
+                        let id = item["id"].as_str().unwrap_or("").to_string();
+                        let command = item["command"].as_str().unwrap_or("").to_string();
+                        let output = item["aggregated_output"].as_str().unwrap_or("").to_string();
                         let exit_code = item["exit_code"].as_i64();
                         let input = serde_json::json!({
                             "command": command,
@@ -463,10 +428,7 @@ impl StreamParserState {
                         }));
                     }
                     "file_change" => {
-                        let id = item["id"]
-                            .as_str()
-                            .unwrap_or("file_change")
-                            .to_string();
+                        let id = item["id"].as_str().unwrap_or("file_change").to_string();
                         let changes = item["changes"].clone();
                         events.push(Ok(StreamEvent::ToolUseStart {
                             id: id.clone(),
@@ -479,14 +441,8 @@ impl StreamParserState {
                         }));
                     }
                     "mcp_tool_call" => {
-                        let id = item["id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        let tool = item["tool"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
+                        let id = item["id"].as_str().unwrap_or("").to_string();
+                        let tool = item["tool"].as_str().unwrap_or("").to_string();
                         let input = item["arguments"].clone();
                         events.push(Ok(StreamEvent::ToolUseComplete {
                             id,
@@ -495,14 +451,8 @@ impl StreamParserState {
                         }));
                     }
                     "web_search" => {
-                        let id = item["id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        let query = item["query"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
+                        let id = item["id"].as_str().unwrap_or("").to_string();
+                        let query = item["query"].as_str().unwrap_or("").to_string();
                         events.push(Ok(StreamEvent::ToolUseComplete {
                             id,
                             name: "web_search".to_string(),
@@ -545,10 +495,8 @@ mod tests {
 
     #[test]
     fn parse_thread_started() {
-        let json: serde_json::Value = serde_json::from_str(
-            r#"{"type":"thread.started","thread_id":"test-123"}"#,
-        )
-        .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"type":"thread.started","thread_id":"test-123"}"#).unwrap();
         assert_eq!(json["type"].as_str().unwrap(), "thread.started");
         assert_eq!(json["thread_id"].as_str().unwrap(), "test-123");
     }
@@ -571,9 +519,8 @@ mod tests {
     #[test]
     fn turn_failed_yields_error() {
         let mut state = StreamParserState::new();
-        let events = state.parse_line(
-            r#"{"type":"turn.failed","error":{"message":"Rate limit exceeded"}}"#,
-        );
+        let events =
+            state.parse_line(r#"{"type":"turn.failed","error":{"message":"Rate limit exceeded"}}"#);
         assert_eq!(events.len(), 1);
         assert!(events[0].is_err());
         let err_msg = format!("{}", events[0].as_ref().unwrap_err());
@@ -583,9 +530,7 @@ mod tests {
     #[test]
     fn stream_error_yields_error() {
         let mut state = StreamParserState::new();
-        let events = state.parse_line(
-            r#"{"type":"error","message":"Auth token expired"}"#,
-        );
+        let events = state.parse_line(r#"{"type":"error","message":"Auth token expired"}"#);
         assert_eq!(events.len(), 1);
         assert!(events[0].is_err());
         let err_msg = format!("{}", events[0].as_ref().unwrap_err());
@@ -732,7 +677,10 @@ mod tests {
         let events2 = state.parse_line(
             r#"{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}"#,
         );
-        assert!(events2.is_empty(), "duplicate turn.completed should be ignored");
+        assert!(
+            events2.is_empty(),
+            "duplicate turn.completed should be ignored"
+        );
     }
 
     #[test]
@@ -802,7 +750,9 @@ mod tests {
         let client = CodexClient::new(Some("codex"), None, false);
         let args = client.build_args("o3", "", "test", None);
         assert!(
-            !args.iter().any(|a| a.starts_with("developer_instructions=")),
+            !args
+                .iter()
+                .any(|a| a.starts_with("developer_instructions=")),
             "should not include developer_instructions for empty system prompt"
         );
     }
@@ -811,9 +761,9 @@ mod tests {
     fn build_args_includes_mcp_url() {
         let client = CodexClient::new(Some("codex"), None, false);
         let args = client.build_args("o3", "", "test", Some("http://127.0.0.1:9999/mcp"));
-        assert!(args.contains(
-            &"mcp_servers.dyson-workspace.url=http://127.0.0.1:9999/mcp".to_string()
-        ));
+        assert!(
+            args.contains(&"mcp_servers.dyson-workspace.url=http://127.0.0.1:9999/mcp".to_string())
+        );
     }
 
     #[test]

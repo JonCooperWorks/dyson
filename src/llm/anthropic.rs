@@ -68,7 +68,10 @@ use tokio_stream::StreamExt;
 use crate::auth::Auth;
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, SseLineBuffer, ToolCallBuffer, ToolDefinition, finalize_tool_call, MAX_TOOL_JSON, MAX_ACTIVE_TOOL_BUFFERS};
+use crate::llm::{
+    CompletionConfig, LlmClient, MAX_ACTIVE_TOOL_BUFFERS, MAX_TOOL_JSON, SseLineBuffer,
+    ToolCallBuffer, ToolDefinition, finalize_tool_call,
+};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -192,9 +195,7 @@ impl AnthropicClient {
         Self {
             client: reqwest::Client::new(),
             auth,
-            base_url: base_url
-                .unwrap_or("https://api.anthropic.com")
-                .to_string(),
+            base_url: base_url.unwrap_or("https://api.anthropic.com").to_string(),
         }
     }
 }
@@ -300,9 +301,7 @@ impl LlmClient for AnthropicClient {
                 529 => "Anthropic API overloaded — try again shortly".to_string(),
                 _ => format!("HTTP {status}"),
             };
-            return Err(DysonError::Llm(format!(
-                "Anthropic API error: {summary}"
-            )));
+            return Err(DysonError::Llm(format!("Anthropic API error: {summary}")));
         }
 
         // -- Transform the SSE byte stream into StreamEvents --
@@ -463,11 +462,9 @@ impl SseParser {
                     // that sends many content_block_start events without
                     // matching content_block_stop events.
                     if self.tool_buffers.len() >= MAX_ACTIVE_TOOL_BUFFERS {
-                        return Some(StreamEvent::Error(DysonError::Llm(
-                            format!(
-                                "too many concurrent tool calls ({MAX_ACTIVE_TOOL_BUFFERS}) — aborting stream"
-                            ),
-                        )));
+                        return Some(StreamEvent::Error(DysonError::Llm(format!(
+                            "too many concurrent tool calls ({MAX_ACTIVE_TOOL_BUFFERS}) — aborting stream"
+                        ))));
                     }
 
                     // Start accumulating JSON for this tool call.
@@ -572,7 +569,10 @@ impl SseParser {
 
                 let output_tokens = json["usage"]["output_tokens"].as_u64().map(|n| n as usize);
 
-                Some(StreamEvent::MessageComplete { stop_reason, output_tokens })
+                Some(StreamEvent::MessageComplete {
+                    stop_reason,
+                    output_tokens,
+                })
             }
 
             // -- error --
@@ -614,7 +614,7 @@ mod tests {
     fn parse_text_delta() {
         let events = parse_sse(
             "event: content_block_delta\n\
-             data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n"
+             data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
         );
         assert_eq!(events.len(), 1);
         match events[0].as_ref().unwrap() {
@@ -662,7 +662,7 @@ mod tests {
     #[test]
     fn parse_message_complete() {
         let events = parse_sse(
-            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n"
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n",
         );
         assert_eq!(events.len(), 1);
         match events[0].as_ref().unwrap() {
@@ -676,7 +676,7 @@ mod tests {
     #[test]
     fn parse_tool_use_stop_reason() {
         let events = parse_sse(
-            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n"
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}\n\n",
         );
         match events[0].as_ref().unwrap() {
             StreamEvent::MessageComplete { stop_reason, .. } => {
@@ -689,7 +689,7 @@ mod tests {
     #[test]
     fn parse_error_event() {
         let events = parse_sse(
-            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
         );
         assert_eq!(events.len(), 1);
         match events[0].as_ref().unwrap() {
@@ -708,9 +708,8 @@ mod tests {
         assert!(events1.is_empty(), "no complete line yet");
 
         // Second chunk: rest of the line + newline.
-        let events2 = parser.feed(
-            b"ta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n"
-        );
+        let events2 = parser
+            .feed(b"ta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n");
         assert_eq!(events2.len(), 1);
         match events2[0].as_ref().unwrap() {
             StreamEvent::TextDelta(text) => assert_eq!(text, "Hi"),
@@ -736,18 +735,20 @@ mod tests {
 
         let events = parse_sse(sse);
 
-        let thinking: Vec<_> = events.iter().filter(|e| {
-            matches!(e.as_ref().unwrap(), StreamEvent::ThinkingDelta(_))
-        }).collect();
+        let thinking: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.as_ref().unwrap(), StreamEvent::ThinkingDelta(_)))
+            .collect();
         assert_eq!(thinking.len(), 1);
         match thinking[0].as_ref().unwrap() {
             StreamEvent::ThinkingDelta(t) => assert_eq!(t, "Let me reason..."),
             other => panic!("expected ThinkingDelta, got: {other:?}"),
         }
 
-        let text: Vec<_> = events.iter().filter(|e| {
-            matches!(e.as_ref().unwrap(), StreamEvent::TextDelta(_))
-        }).collect();
+        let text: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.as_ref().unwrap(), StreamEvent::TextDelta(_)))
+            .collect();
         assert_eq!(text.len(), 1);
         match text[0].as_ref().unwrap() {
             StreamEvent::TextDelta(t) => assert_eq!(t, "The answer."),
@@ -761,7 +762,7 @@ mod tests {
             "event: ping\n\
              data: {\"type\":\"ping\"}\n\n\
              event: message_start\n\
-             data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"role\":\"assistant\"}}\n\n"
+             data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_123\",\"role\":\"assistant\"}}\n\n",
         );
         assert!(events.is_empty());
     }
@@ -867,11 +868,14 @@ mod tests {
     #[test]
     fn message_delta_includes_output_tokens() {
         let events = parse_sse(
-            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n"
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":42}}\n\n",
         );
         assert_eq!(events.len(), 1);
         match events[0].as_ref().unwrap() {
-            StreamEvent::MessageComplete { stop_reason, output_tokens } => {
+            StreamEvent::MessageComplete {
+                stop_reason,
+                output_tokens,
+            } => {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
                 assert_eq!(*output_tokens, Some(42));
             }
@@ -882,7 +886,7 @@ mod tests {
     #[test]
     fn message_delta_without_usage_has_none_tokens() {
         let events = parse_sse(
-            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
         );
         assert_eq!(events.len(), 1);
         match events[0].as_ref().unwrap() {
@@ -913,9 +917,9 @@ mod tests {
 
             if i >= 10 {
                 // After 10+ MB, should get an error event.
-                let has_error = events.iter().any(|e| {
-                    matches!(e, Ok(StreamEvent::TextDelta(t)) if t.contains("10 MB"))
-                });
+                let has_error = events
+                    .iter()
+                    .any(|e| matches!(e, Ok(StreamEvent::TextDelta(t)) if t.contains("10 MB")));
                 assert!(
                     has_error,
                     "expected tool buffer overflow error on chunk {i}"

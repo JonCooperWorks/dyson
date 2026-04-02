@@ -93,10 +93,7 @@ mod tests {
 
     #[tokio::test]
     async fn delegates_apply() {
-        let auth = TracingAuth::new(
-            Box::new(BearerTokenAuth::new("test-token".into())),
-            "test",
-        );
+        let auth = TracingAuth::new(Box::new(BearerTokenAuth::new("test-token".into())), "test");
 
         let client = reqwest::Client::new();
         let req = client.post("http://localhost/test");
@@ -104,7 +101,12 @@ mod tests {
 
         let built = req.build().unwrap();
         assert_eq!(
-            built.headers().get("authorization").unwrap().to_str().unwrap(),
+            built
+                .headers()
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "Bearer test-token"
         );
     }
@@ -119,10 +121,7 @@ mod tests {
 
     #[tokio::test]
     async fn delegates_validate_failure() {
-        let auth = TracingAuth::new(
-            Box::new(BearerTokenAuth::new("correct".into())),
-            "test",
-        );
+        let auth = TracingAuth::new(Box::new(BearerTokenAuth::new("correct".into())), "test");
 
         let mut headers = hyper::HeaderMap::new();
         headers.insert("authorization", "Bearer wrong".parse().unwrap());

@@ -58,7 +58,10 @@ use tokio_stream::StreamExt;
 use crate::auth::Auth;
 use crate::error::{DysonError, Result};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, SseLineBuffer, ToolCallBuffer, ToolDefinition, finalize_tool_call, MAX_TOOL_JSON, MAX_ACTIVE_TOOL_BUFFERS};
+use crate::llm::{
+    CompletionConfig, LlmClient, MAX_ACTIVE_TOOL_BUFFERS, MAX_TOOL_JSON, SseLineBuffer,
+    ToolCallBuffer, ToolDefinition, finalize_tool_call,
+};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -493,10 +496,7 @@ impl OpenAiSseParser {
                             return events;
                         }
 
-                        let name = tc["function"]["name"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
+                        let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
 
                         self.tool_buffers.insert(
                             index,
@@ -579,7 +579,6 @@ impl OpenAiSseParser {
 
         events
     }
-
 }
 
 // ===========================================================================
@@ -598,7 +597,7 @@ mod tests {
     #[test]
     fn parse_text_delta() {
         let events = parse_sse(
-            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n"
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
         );
         assert_eq!(events.len(), 1);
         match events[0].as_ref().unwrap() {
@@ -644,7 +643,7 @@ mod tests {
     #[test]
     fn parse_stop_finish_reason() {
         let events = parse_sse(
-            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
         );
         match events.last().unwrap().as_ref().unwrap() {
             StreamEvent::MessageComplete { stop_reason, .. } => {
@@ -661,21 +660,23 @@ mod tests {
         let events = parse_sse(
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Let me think...\"},\"finish_reason\":null}]}\n\n\
              data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"The answer.\"},\"finish_reason\":null}]}\n\n\
-             data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+             data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
         );
 
-        let thinking: Vec<_> = events.iter().filter(|e| {
-            matches!(e.as_ref().unwrap(), StreamEvent::ThinkingDelta(_))
-        }).collect();
+        let thinking: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.as_ref().unwrap(), StreamEvent::ThinkingDelta(_)))
+            .collect();
         assert_eq!(thinking.len(), 1);
         match thinking[0].as_ref().unwrap() {
             StreamEvent::ThinkingDelta(t) => assert_eq!(t, "Let me think..."),
             other => panic!("expected ThinkingDelta, got: {other:?}"),
         }
 
-        let text: Vec<_> = events.iter().filter(|e| {
-            matches!(e.as_ref().unwrap(), StreamEvent::TextDelta(_))
-        }).collect();
+        let text: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.as_ref().unwrap(), StreamEvent::TextDelta(_)))
+            .collect();
         assert_eq!(text.len(), 1);
         match text[0].as_ref().unwrap() {
             StreamEvent::TextDelta(t) => assert_eq!(t, "The answer."),
@@ -730,20 +731,28 @@ mod tests {
             b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n\
               data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
         );
-        let complete_count = events1.iter().filter(|e| {
-            matches!(e, Ok(StreamEvent::MessageComplete { .. }))
-        }).count();
-        assert_eq!(complete_count, 1, "first batch should have exactly one MessageComplete");
+        let complete_count = events1
+            .iter()
+            .filter(|e| matches!(e, Ok(StreamEvent::MessageComplete { .. })))
+            .count();
+        assert_eq!(
+            complete_count, 1,
+            "first batch should have exactly one MessageComplete"
+        );
 
         // Second chunk: usage data with finish_reason again.
         let events2 = parser.feed(
             b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":5}}\n\n\
               data: [DONE]\n\n"
         );
-        let complete_count2 = events2.iter().filter(|e| {
-            matches!(e, Ok(StreamEvent::MessageComplete { .. }))
-        }).count();
-        assert_eq!(complete_count2, 0, "duplicate finish_reason should not emit another MessageComplete");
+        let complete_count2 = events2
+            .iter()
+            .filter(|e| matches!(e, Ok(StreamEvent::MessageComplete { .. })))
+            .count();
+        assert_eq!(
+            complete_count2, 0,
+            "duplicate finish_reason should not emit another MessageComplete"
+        );
     }
 
     #[test]
@@ -754,7 +763,10 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(events[0].is_err());
         let err_msg = format!("{}", events[0].as_ref().unwrap_err());
-        assert!(err_msg.contains("10 MB"), "error should mention size limit, got: {err_msg}");
+        assert!(
+            err_msg.contains("10 MB"),
+            "error should mention size limit, got: {err_msg}"
+        );
     }
 
     #[test]
@@ -789,9 +801,9 @@ mod tests {
             );
             let events = parser.feed(delta.as_bytes());
             if i >= 10 {
-                let has_overflow = events.iter().any(|e| {
-                    matches!(e, Ok(StreamEvent::TextDelta(t)) if t.contains("10 MB"))
-                });
+                let has_overflow = events
+                    .iter()
+                    .any(|e| matches!(e, Ok(StreamEvent::TextDelta(t)) if t.contains("10 MB")));
                 assert!(has_overflow, "expected tool buffer overflow on chunk {i}");
             }
         }

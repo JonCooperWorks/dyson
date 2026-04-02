@@ -47,12 +47,7 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Maximum bytes of command output before truncation.
-///
-/// 100KB is generous enough for most tool calls (file listings, test output,
-/// grep results) but small enough to leave room in the LLM's context window
-/// for the conversation history and system prompt.
-const MAX_OUTPUT_BYTES: usize = 100 * 1024;
+use crate::util::truncate_output;
 
 // ---------------------------------------------------------------------------
 // BashTool
@@ -221,43 +216,12 @@ impl Tool for BashTool {
             Some((Err(e), _, _)) => Err(DysonError::tool("bash", format!("process error: {e}"))),
 
             // Timeout — process was killed above.
-            None => {
-                Ok(ToolOutput::error(format!(
-                    "Command timed out after {} seconds and was killed",
-                    self.timeout.as_secs()
-                )))
-            }
+            None => Ok(ToolOutput::error(format!(
+                "Command timed out after {} seconds and was killed",
+                self.timeout.as_secs()
+            ))),
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Output truncation
-// ---------------------------------------------------------------------------
-
-/// Truncate output to MAX_OUTPUT_BYTES, appending a notice if truncated.
-///
-/// We truncate on a UTF-8 char boundary to avoid producing invalid strings.
-/// The notice tells the LLM how much was cut so it can request specific
-/// portions if needed.
-fn truncate_output(output: &str) -> String {
-    if output.len() <= MAX_OUTPUT_BYTES {
-        return output.to_string();
-    }
-
-    // Find the last valid char boundary at or before MAX_OUTPUT_BYTES.
-    let mut end = MAX_OUTPUT_BYTES;
-    while !output.is_char_boundary(end) && end > 0 {
-        end -= 1;
-    }
-
-    let truncated = &output[..end];
-    let remaining = output.len() - end;
-    format!(
-        "{truncated}\n\n... (output truncated — {remaining} bytes omitted, \
-         total was {} bytes)",
-        output.len()
-    )
 }
 
 // ===========================================================================
@@ -316,20 +280,5 @@ mod tests {
         let output = tool.run(input, &test_ctx()).await.unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("timed out"));
-    }
-
-    #[test]
-    fn truncation() {
-        let long_output = "x".repeat(MAX_OUTPUT_BYTES + 1000);
-        let truncated = truncate_output(&long_output);
-        assert!(truncated.len() < long_output.len());
-        assert!(truncated.contains("truncated"));
-        assert!(truncated.contains("1000 bytes omitted"));
-    }
-
-    #[test]
-    fn no_truncation_for_short_output() {
-        let short = "hello world";
-        assert_eq!(truncate_output(short), short);
     }
 }

@@ -249,10 +249,7 @@ impl McpHttpServer {
     /// let server = Arc::new(McpHttpServer::new(ws, true));
     /// let (port, handle, token) = server.start().await?;
     /// ```
-    pub fn new(
-        workspace: Arc<RwLock<Box<dyn Workspace>>>,
-        dangerous_no_sandbox: bool,
-    ) -> Self {
+    pub fn new(workspace: Arc<RwLock<Box<dyn Workspace>>>, dangerous_no_sandbox: bool) -> Self {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
 
         // Create the three workspace tools.  These are the same Tool impls
@@ -352,10 +349,7 @@ impl McpHttpServer {
                         async move { Ok::<_, Infallible>(server.handle_request(req).await) }
                     });
 
-                    if let Err(e) = http1::Builder::new()
-                        .serve_connection(io, service)
-                        .await
-                    {
+                    if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
                         tracing::debug!(error = %e, "MCP HTTP connection error");
                     }
                 });
@@ -392,22 +386,25 @@ impl McpHttpServer {
     /// - All other errors → HTTP 200 with JSON-RPC error in response body
     ///   (per JSON-RPC spec, transport errors use HTTP status codes, but
     ///   application errors are returned in the JSON-RPC response)
-    async fn handle_request(
-        &self,
-        req: Request<hyper::body::Incoming>,
-    ) -> Response<Full<Bytes>> {
+    async fn handle_request(&self, req: Request<hyper::body::Incoming>) -> Response<Full<Bytes>> {
         if req.method() != hyper::Method::POST || req.uri().path() != "/mcp" {
-            return json_response(StatusCode::NOT_FOUND, &serde_json::json!({
-                "error": "not found"
-            }));
+            return json_response(
+                StatusCode::NOT_FOUND,
+                &serde_json::json!({
+                    "error": "not found"
+                }),
+            );
         }
 
         // Authenticate the request via the Auth trait.
         if self.auth.validate_request(req.headers()).await.is_err() {
             tracing::warn!("MCP server: rejected unauthorized request");
-            return json_response(StatusCode::UNAUTHORIZED, &serde_json::json!({
-                "error": "unauthorized"
-            }));
+            return json_response(
+                StatusCode::UNAUTHORIZED,
+                &serde_json::json!({
+                    "error": "unauthorized"
+                }),
+            );
         }
 
         // Read the full request body with a size limit.
@@ -426,9 +423,12 @@ impl McpHttpServer {
                 content_length = len,
                 "MCP server: rejecting oversized request"
             );
-            return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({
-                "error": "request body too large"
-            }));
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({
+                    "error": "request body too large"
+                }),
+            );
         }
 
         let body = match req.collect().await {
@@ -439,17 +439,23 @@ impl McpHttpServer {
                         body_len = bytes.len(),
                         "MCP server: rejecting oversized request body"
                     );
-                    return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({
-                        "error": "request body too large"
-                    }));
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        &serde_json::json!({
+                            "error": "request body too large"
+                        }),
+                    );
                 }
                 bytes
             }
             Err(e) => {
                 tracing::warn!(error = %e, "MCP server: failed to read request body");
-                return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({
-                    "error": "failed to read body"
-                }));
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    &serde_json::json!({
+                        "error": "failed to read body"
+                    }),
+                );
             }
         };
 
@@ -458,15 +464,18 @@ impl McpHttpServer {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, "MCP server: invalid JSON");
-                return json_response(StatusCode::BAD_REQUEST, &JsonRpcResponse {
-                    id: None,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -32700,
-                        message: "Parse error".into(),
-                        data: None,
-                    }),
-                });
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    &JsonRpcResponse {
+                        id: None,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: -32700,
+                            message: "Parse error".into(),
+                            data: None,
+                        }),
+                    },
+                );
             }
         };
 
@@ -772,10 +781,7 @@ impl McpHttpServer {
 /// Used by all handlers to produce consistent response formatting.
 /// The `unwrap()` on `Response::builder()` is safe because we're
 /// constructing a response with valid, hardcoded headers.
-fn json_response<T: serde::Serialize>(
-    status: StatusCode,
-    body: &T,
-) -> Response<Full<Bytes>> {
+fn json_response<T: serde::Serialize>(status: StatusCode, body: &T) -> Response<Full<Bytes>> {
     let json = serde_json::to_vec(body).unwrap_or_default();
     Response::builder()
         .status(status)
@@ -913,10 +919,7 @@ mod tests {
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
         assert_eq!(tools.len(), 3);
 
-        let names: Vec<&str> = tools
-            .iter()
-            .filter_map(|t| t["name"].as_str())
-            .collect();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"workspace_view"));
         assert!(names.contains(&"workspace_search"));
         assert!(names.contains(&"workspace_update"));
@@ -935,9 +938,7 @@ mod tests {
             "name": "workspace_view",
             "arguments": { "file": "identity" }
         });
-        let resp = server
-            .dispatch(Some(3), "tools/call", Some(params))
-            .await;
+        let resp = server.dispatch(Some(3), "tools/call", Some(params)).await;
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         assert_eq!(result["isError"], false);
@@ -955,9 +956,7 @@ mod tests {
             "name": "nonexistent",
             "arguments": {}
         });
-        let resp = server
-            .dispatch(Some(4), "tools/call", Some(params))
-            .await;
+        let resp = server.dispatch(Some(4), "tools/call", Some(params)).await;
         assert!(resp.error.is_none()); // No JSON-RPC error
         let result = resp.result.unwrap();
         assert_eq!(result["isError"], true); // Tool-level error in result body

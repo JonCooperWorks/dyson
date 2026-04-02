@@ -92,7 +92,10 @@ impl Tool for ExportConversationTool {
         // Ensure parent directory exists.
         if let Some(parent) = output_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                DysonError::tool("export_conversation", format!("cannot create directory: {e}"))
+                DysonError::tool(
+                    "export_conversation",
+                    format!("cannot create directory: {e}"),
+                )
             })?;
         }
 
@@ -118,8 +121,7 @@ impl Tool for ExportConversationTool {
             None
         };
 
-        let conversation =
-            sharegpt::to_sharegpt(&messages, system_prompt.as_deref(), id);
+        let conversation = sharegpt::to_sharegpt(&messages, system_prompt.as_deref(), id);
 
         let conversations = vec![conversation];
         let json = sharegpt::to_sharegpt_json(&conversations)?;
@@ -145,7 +147,10 @@ impl ExportConversationTool {
     ///
     /// Searches the workspace's chat history directory for JSON files
     /// containing serialized message arrays.
-    async fn find_messages(&self, ctx: &ToolContext) -> crate::Result<Vec<crate::message::Message>> {
+    async fn find_messages(
+        &self,
+        ctx: &ToolContext,
+    ) -> crate::Result<Vec<crate::message::Message>> {
         // Strategy: look for chat history files in common locations.
         // DiskChatHistory stores files as `<chat_id>.json` in the history dir.
         let mut candidates = vec![
@@ -163,13 +168,9 @@ impl ExportConversationTool {
 
             // Find the most recently modified JSON file.
             let mut entries: Vec<_> = std::fs::read_dir(dir)
-                .map_err(|e| DysonError::Io(e))?
+                .map_err(DysonError::Io)?
                 .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .is_some_and(|ext| ext == "json")
-                })
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
                 .collect();
 
             entries.sort_by_key(|e| {
@@ -179,8 +180,7 @@ impl ExportConversationTool {
             });
 
             if let Some(entry) = entries.last() {
-                let content = std::fs::read_to_string(entry.path())
-                    .map_err(|e| DysonError::Io(e))?;
+                let content = std::fs::read_to_string(entry.path()).map_err(DysonError::Io)?;
                 if let Ok(messages) = serde_json::from_str::<Vec<crate::message::Message>>(&content)
                 {
                     return Ok(messages);

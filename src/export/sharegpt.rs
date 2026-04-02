@@ -75,13 +75,13 @@ pub fn to_sharegpt(
     let mut turns = Vec::new();
 
     // Optionally inject the system prompt as the first turn.
-    if let Some(prompt) = system_prompt {
-        if !prompt.is_empty() {
-            turns.push(ShareGptTurn {
-                from: "system".to_string(),
-                value: prompt.to_string(),
-            });
-        }
+    if let Some(prompt) = system_prompt
+        && !prompt.is_empty()
+    {
+        turns.push(ShareGptTurn {
+            from: "system".to_string(),
+            value: prompt.to_string(),
+        });
     }
 
     for message in messages {
@@ -98,8 +98,8 @@ pub fn to_sharegpt(
                     }
                 }
                 ContentBlock::ToolUse { name, input, .. } => {
-                    let input_str = serde_json::to_string(input)
-                        .unwrap_or_else(|_| "{}".to_string());
+                    let input_str =
+                        serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
                     tool_calls.push(format!("<tool_call>{name}({input_str})</tool_call>"));
                 }
                 ContentBlock::ToolResult {
@@ -173,8 +173,7 @@ pub fn to_sharegpt(
 /// This is the format expected by most fine-tuning frameworks:
 /// a JSON array where each element is a conversation object.
 pub fn to_sharegpt_json(conversations: &[ShareGptConversation]) -> crate::Result<String> {
-    serde_json::to_string_pretty(conversations)
-        .map_err(|e| crate::DysonError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))
+    Ok(serde_json::to_string_pretty(conversations)?)
 }
 
 fn role_to_sharegpt(role: &Role) -> &'static str {
@@ -262,9 +261,7 @@ mod tests {
 
     #[test]
     fn tool_error_result() {
-        let messages = vec![
-            Message::tool_result("call_1", "command not found", true),
-        ];
+        let messages = vec![Message::tool_result("call_1", "command not found", true)];
 
         let conv = to_sharegpt(&messages, None, None);
         assert_eq!(conv.conversations.len(), 1);
@@ -289,15 +286,16 @@ mod tests {
     fn batch_json_serialization() {
         let convs = vec![
             to_sharegpt(
-                &[Message::user("Hi"), Message::assistant(vec![ContentBlock::Text { text: "Hello!".into() }])],
+                &[
+                    Message::user("Hi"),
+                    Message::assistant(vec![ContentBlock::Text {
+                        text: "Hello!".into(),
+                    }]),
+                ],
                 None,
                 Some("conv-1".into()),
             ),
-            to_sharegpt(
-                &[Message::user("Bye")],
-                None,
-                Some("conv-2".into()),
-            ),
+            to_sharegpt(&[Message::user("Bye")], None, Some("conv-2".into())),
         ];
 
         let json = to_sharegpt_json(&convs).unwrap();
@@ -308,23 +306,21 @@ mod tests {
 
     #[test]
     fn multiple_tool_calls_in_one_message() {
-        let messages = vec![
-            Message::assistant(vec![
-                ContentBlock::Text {
-                    text: "I'll run two commands.".into(),
-                },
-                ContentBlock::ToolUse {
-                    id: "c1".into(),
-                    name: "bash".into(),
-                    input: json!({"command": "ls"}),
-                },
-                ContentBlock::ToolUse {
-                    id: "c2".into(),
-                    name: "bash".into(),
-                    input: json!({"command": "pwd"}),
-                },
-            ]),
-        ];
+        let messages = vec![Message::assistant(vec![
+            ContentBlock::Text {
+                text: "I'll run two commands.".into(),
+            },
+            ContentBlock::ToolUse {
+                id: "c1".into(),
+                name: "bash".into(),
+                input: json!({"command": "ls"}),
+            },
+            ContentBlock::ToolUse {
+                id: "c2".into(),
+                name: "bash".into(),
+                input: json!({"command": "pwd"}),
+            },
+        ])];
 
         let conv = to_sharegpt(&messages, None, None);
         assert_eq!(conv.conversations.len(), 1);

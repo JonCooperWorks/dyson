@@ -55,9 +55,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::config::{
-    BuiltinSkillConfig, CompactionConfig, ControllerConfig, LocalSkillConfig,
-    McpConfig, McpTransportConfig, ProviderConfig, SandboxConfig, Settings, SkillConfig,
-    SubagentAgentConfig, SubagentSkillConfig,
+    BuiltinSkillConfig, CompactionConfig, ControllerConfig, LocalSkillConfig, McpConfig,
+    McpTransportConfig, ProviderConfig, SandboxConfig, Settings, SkillConfig, SubagentAgentConfig,
+    SubagentSkillConfig,
 };
 use crate::error::{DysonError, Result};
 use crate::secret::{SecretRegistry, SecretValue};
@@ -356,9 +356,8 @@ pub fn load_settings(path: Option<&Path>) -> Result<Settings> {
 /// between `metadata()` and `read_to_string()` where the file could be
 /// swapped between the two calls.
 fn read_config_file(path: &Path) -> Result<String> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        DysonError::Config(format!("cannot read config {}: {e}", path.display()))
-    })?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| DysonError::Config(format!("cannot read config {}: {e}", path.display())))?;
     if content.len() as u64 > MAX_CONFIG_SIZE {
         return Err(DysonError::Config(format!(
             "config file {} is too large ({} bytes, max {} bytes)",
@@ -425,10 +424,7 @@ fn write_back_config(path: &Path, value: &serde_json::Value) {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        path,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
+                    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
                 }
                 tracing::info!(path = %path.display(), "wrote migrated config to disk");
             }
@@ -481,9 +477,11 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
             };
 
             let models = if jp.models.is_empty() {
-                vec![crate::llm::registry::lookup(&provider_type)
-                    .default_model
-                    .into()]
+                vec![
+                    crate::llm::registry::lookup(&provider_type)
+                        .default_model
+                        .into(),
+                ]
             } else {
                 jp.models
             };
@@ -532,11 +530,10 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
         }
         if let Some(compaction) = agent.compaction {
             let config = match compaction {
-                JsonCompaction::Window(window) => {
-                    let mut c = CompactionConfig::default();
-                    c.context_window = window;
-                    c
-                }
+                JsonCompaction::Window(window) => CompactionConfig {
+                    context_window: window,
+                    ..Default::default()
+                },
                 JsonCompaction::Full {
                     context_window,
                     threshold_ratio,
@@ -547,13 +544,27 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                     summary_target_ratio,
                 } => {
                     let mut c = CompactionConfig::default();
-                    if let Some(v) = context_window { c.context_window = v; }
-                    if let Some(v) = threshold_ratio { c.threshold_ratio = v; }
-                    if let Some(v) = protect_head { c.protect_head = v; }
-                    if let Some(v) = protect_tail_tokens { c.protect_tail_tokens = v; }
-                    if let Some(v) = summary_min_tokens { c.summary_min_tokens = v; }
-                    if let Some(v) = summary_max_tokens { c.summary_max_tokens = v; }
-                    if let Some(v) = summary_target_ratio { c.summary_target_ratio = v; }
+                    if let Some(v) = context_window {
+                        c.context_window = v;
+                    }
+                    if let Some(v) = threshold_ratio {
+                        c.threshold_ratio = v;
+                    }
+                    if let Some(v) = protect_head {
+                        c.protect_head = v;
+                    }
+                    if let Some(v) = protect_tail_tokens {
+                        c.protect_tail_tokens = v;
+                    }
+                    if let Some(v) = summary_min_tokens {
+                        c.summary_min_tokens = v;
+                    }
+                    if let Some(v) = summary_max_tokens {
+                        c.summary_max_tokens = v;
+                    }
+                    if let Some(v) = summary_target_ratio {
+                        c.summary_target_ratio = v;
+                    }
                     c
                 }
             };
@@ -579,16 +590,12 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                 }
                 None => {
                     // No "tools" key — all builtins.
-                    skill_configs.push(SkillConfig::Builtin(BuiltinSkillConfig {
-                        tools: vec![],
-                    }));
+                    skill_configs.push(SkillConfig::Builtin(BuiltinSkillConfig { tools: vec![] }));
                 }
             }
         } else {
             // No "builtin" section — include all builtins by default.
-            skill_configs.push(SkillConfig::Builtin(BuiltinSkillConfig {
-                tools: vec![],
-            }));
+            skill_configs.push(SkillConfig::Builtin(BuiltinSkillConfig { tools: vec![] }));
         }
 
         // -- Local skills --
@@ -651,9 +658,7 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                         .as_object()
                         .map(|obj| {
                             obj.iter()
-                                .filter_map(|(k, v)| {
-                                    v.as_str().map(|s| (k.clone(), s.to_string()))
-                                })
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -664,14 +669,11 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                         env,
                     }
                 } else if let Some(url) = server_json["url"].as_str() {
-                    let headers: std::collections::HashMap<String, String> = server_json
-                        ["headers"]
+                    let headers: std::collections::HashMap<String, String> = server_json["headers"]
                         .as_object()
                         .map(|obj| {
                             obj.iter()
-                                .filter_map(|(k, v)| {
-                                    v.as_str().map(|s| (k.clone(), s.to_string()))
-                                })
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                                 .collect()
                         })
                         .unwrap_or_default();
@@ -786,10 +788,7 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
     // object and resolve any { "resolver": ..., "name": ... } values.
     if let Some(controllers) = root.controllers {
         for mut ctrl_json in controllers {
-            let ctrl_type = ctrl_json["type"]
-                .as_str()
-                .unwrap_or("unknown")
-                .to_string();
+            let ctrl_type = ctrl_json["type"].as_str().unwrap_or("unknown").to_string();
 
             // Resolve secrets in the controller config.
             resolve_secrets_in_value(&mut ctrl_json, secrets);
@@ -855,10 +854,7 @@ fn resolve_secrets_in_value(value: &mut serde_json::Value, secrets: &SecretRegis
     match value {
         serde_json::Value::Object(map) => {
             // Check if THIS object is a secret reference.
-            if map.len() == 2
-                && map.contains_key("resolver")
-                && map.contains_key("name")
-            {
+            if map.len() == 2 && map.contains_key("resolver") && map.contains_key("name") {
                 let secret_val = SecretValue::Reference {
                     resolver: map["resolver"].as_str().unwrap_or("").to_string(),
                     name: map["name"].as_str().unwrap_or("").to_string(),
@@ -918,7 +914,10 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
             Ok(Some(key)) => provider.api_key = key,
             Ok(None) => {}
             Err(_) => {
-                tracing::debug!(provider = name.as_str(), "no API key for provider (not active, skipping)");
+                tracing::debug!(
+                    provider = name.as_str(),
+                    "no API key for provider (not active, skipping)"
+                );
             }
         }
     }
@@ -937,7 +936,11 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
     // SECURITY: warn if any provider sends API keys over plain HTTP to a
     // remote host.  Localhost is fine (Ollama, vLLM, etc.), but a remote
     // HTTP endpoint would transmit the key in cleartext.
-    warn_http_with_api_key(&settings.agent.base_url, settings.agent.api_key.expose(), "active agent");
+    warn_http_with_api_key(
+        &settings.agent.base_url,
+        settings.agent.api_key.expose(),
+        "active agent",
+    );
     for (name, provider) in &settings.providers {
         warn_http_with_api_key(&provider.base_url, provider.api_key.expose(), name);
     }
@@ -1060,7 +1063,10 @@ mod tests {
         let settings = build_settings(Some(root), &secrets);
 
         // The secret reference should be resolved to the plain string.
-        assert_eq!(settings.controllers[0].config["bot_token"], "resolved_token");
+        assert_eq!(
+            settings.controllers[0].config["bot_token"],
+            "resolved_token"
+        );
         unsafe { std::env::remove_var("DYSON_JSON_TEST_TOKEN") };
     }
 
@@ -1113,14 +1119,20 @@ mod tests {
         let settings = build_settings(Some(root), &secrets);
 
         // Active provider applied to agent.
-        assert_eq!(settings.agent.provider, crate::config::LlmProvider::Anthropic);
+        assert_eq!(
+            settings.agent.provider,
+            crate::config::LlmProvider::Anthropic
+        );
         assert_eq!(settings.agent.model, "claude-opus-4-20250514");
         assert_eq!(settings.agent.api_key, "sk-ant");
 
         // All providers in the map.
         assert_eq!(settings.providers.len(), 3);
         assert_eq!(settings.providers["gpt"].default_model(), "gpt-4o");
-        assert_eq!(settings.providers["local"].base_url.as_deref(), Some("http://localhost:11434"));
+        assert_eq!(
+            settings.providers["local"].base_url.as_deref(),
+            Some("http://localhost:11434")
+        );
     }
 
     #[test]
@@ -1145,7 +1157,10 @@ mod tests {
         // Agent-level model overrides provider's default model.
         assert_eq!(settings.agent.model, "claude-opus-4-20250514");
         // Provider's models list is unchanged.
-        assert_eq!(settings.providers["claude"].default_model(), "claude-sonnet-4-20250514");
+        assert_eq!(
+            settings.providers["claude"].default_model(),
+            "claude-sonnet-4-20250514"
+        );
     }
 
     #[test]
@@ -1161,7 +1176,10 @@ mod tests {
         let settings = build_settings(Some(root), &secrets);
 
         // Falls back to defaults when provider name not found.
-        assert_eq!(settings.agent.provider, crate::config::LlmProvider::Anthropic);
+        assert_eq!(
+            settings.agent.provider,
+            crate::config::LlmProvider::Anthropic
+        );
         assert_eq!(settings.agent.model, "claude-sonnet-4-20250514");
     }
 
@@ -1188,9 +1206,15 @@ mod tests {
 
         // The active agent should fail because base_url is set without an
         // explicit api_key — env-var fallback must be refused.
-        assert!(result.is_err(), "should refuse env-var fallback with custom base_url");
+        assert!(
+            result.is_err(),
+            "should refuse env-var fallback with custom base_url"
+        );
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("base_url"), "error should mention base_url");
+        assert!(
+            err_msg.contains("base_url"),
+            "error should mention base_url"
+        );
 
         // The provider in the map should also NOT have the env key.
         assert!(
@@ -1220,7 +1244,10 @@ mod tests {
         let mut settings = build_settings(Some(root), &secrets);
         let result = resolve_api_keys(&mut settings, &secrets);
 
-        assert!(result.is_ok(), "env-var fallback should work without custom base_url");
+        assert!(
+            result.is_ok(),
+            "env-var fallback should work without custom base_url"
+        );
         assert_eq!(settings.agent.api_key, "sk-legit-key");
         assert_eq!(settings.providers["claude"].api_key, "sk-legit-key");
 

@@ -215,7 +215,7 @@ impl super::Controller for TelegramController {
              - Use line breaks for readability.\n\
              - Markdown formatting is fine — it will be converted automatically.\n\
              - You can send files to the user. When a tool produces a file, it will \
-             be delivered as a Telegram document automatically."
+             be delivered as a Telegram document automatically.",
         )
     }
 
@@ -239,9 +239,9 @@ impl super::Controller for TelegramController {
                 let p = std::path::PathBuf::from("dyson.json");
                 if p.exists() { Some(p) } else { None }
             });
-        let workspace_path = crate::workspace::OpenClawWorkspace::resolve_path(
-            Some(settings.workspace.connection_string.expose()),
-        );
+        let workspace_path = crate::workspace::OpenClawWorkspace::resolve_path(Some(
+            settings.workspace.connection_string.expose(),
+        ));
         let mut reloader = crate::config::hot_reload::HotReloader::new(
             config_path.as_deref(),
             workspace_path.as_deref(),
@@ -251,8 +251,7 @@ impl super::Controller for TelegramController {
         // Each chat gets its own agent that remembers previous messages.
         // /clear resets a chat's agent and deletes persisted history.
         // ChatAgent tracks the active provider/model for within-provider switching.
-        let agents: Arc<Mutex<HashMap<i64, ChatAgent>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let agents: Arc<Mutex<HashMap<i64, ChatAgent>>> = Arc::new(Mutex::new(HashMap::new()));
 
         // Chat store — persists conversation history via the configured
         // backend.  Uses the ChatHistory trait so the backend can be
@@ -261,7 +260,6 @@ impl super::Controller for TelegramController {
             let store = crate::chat_history::create_chat_history(&settings.chat_history)?;
             Arc::from(store)
         };
-
 
         // Manual polling loop instead of teloxide::repl.
         // teloxide::repl swallows SIGINT and can't be Ctrl-C'd.
@@ -314,42 +312,45 @@ impl super::Controller for TelegramController {
                         }
 
                         // Parse callback data: "model:{provider}:{model}"
-                        if let Some(rest) = cb_data.strip_prefix("model:") {
-                            if let Some((provider, model)) = rest.split_once(':') {
-                                let existing_messages = {
-                                    let agents_map = agents.lock().await;
-                                    agents_map
-                                        .get(&chat_id.0)
-                                        .map(|ca| ca.agent.messages().to_vec())
-                                        .unwrap_or_default()
-                                };
-                                match super::build_agent_with_provider(
-                                    &current_settings,
-                                    provider,
-                                    Some(model),
-                                    controller_prompt.as_deref(),
-                                    existing_messages,
-                                )
-                                .await
-                                {
-                                    Ok(new_agent) => {
-                                        let pc = &current_settings.providers[provider];
-                                        let reply = format!(
-                                            "Switched to '{}' — {:?} ({})",
-                                            provider, pc.provider_type, model,
-                                        );
-                                        agents.lock().await.insert(chat_id.0, ChatAgent {
+                        if let Some(rest) = cb_data.strip_prefix("model:")
+                            && let Some((provider, model)) = rest.split_once(':')
+                        {
+                            let existing_messages = {
+                                let agents_map = agents.lock().await;
+                                agents_map
+                                    .get(&chat_id.0)
+                                    .map(|ca| ca.agent.messages().to_vec())
+                                    .unwrap_or_default()
+                            };
+                            match super::build_agent_with_provider(
+                                &current_settings,
+                                provider,
+                                Some(model),
+                                controller_prompt.as_deref(),
+                                existing_messages,
+                            )
+                            .await
+                            {
+                                Ok(new_agent) => {
+                                    let pc = &current_settings.providers[provider];
+                                    let reply = format!(
+                                        "Switched to '{}' — {:?} ({})",
+                                        provider, pc.provider_type, model,
+                                    );
+                                    agents.lock().await.insert(
+                                        chat_id.0,
+                                        ChatAgent {
                                             agent: new_agent,
                                             provider_name: provider.to_string(),
                                             model: model.to_string(),
-                                        });
-                                        let _ = bot.send_message(chat_id, reply).await;
-                                    }
-                                    Err(e) => {
-                                        let _ = bot
-                                            .send_message(chat_id, format!("Switch error: {e}"))
-                                            .await;
-                                    }
+                                        },
+                                    );
+                                    let _ = bot.send_message(chat_id, reply).await;
+                                }
+                                Err(e) => {
+                                    let _ = bot
+                                        .send_message(chat_id, format!("Switch error: {e}"))
+                                        .await;
                                 }
                             }
                         }
@@ -365,15 +366,19 @@ impl super::Controller for TelegramController {
 
                 // Extract text from either text or caption (for media messages).
                 // Commands are only parsed from text, not media-only messages.
-                let text = msg.text().or(msg.caption())
+                let text = msg
+                    .text()
+                    .or(msg.caption())
                     .filter(|t| !t.is_empty())
                     .map(|t| t.to_string());
 
                 // Check if the message has any processable content at all.
                 let has_media = msg.photo().is_some()
                     || msg.voice().is_some()
-                    || msg.document().map_or(false, |d| {
-                        d.mime_type.as_ref().map_or(false, |m| m.as_ref().starts_with("image/"))
+                    || msg.document().is_some_and(|d| {
+                        d.mime_type
+                            .as_ref()
+                            .is_some_and(|m| m.as_ref().starts_with("image/"))
                     });
 
                 if text.is_none() && !has_media {
@@ -429,12 +434,16 @@ impl super::Controller for TelegramController {
                                 tracing::info!(chat_id = chat_id.0, "conversation compacted");
                             }
                             Err(e) => {
-                                let _ = bot.send_message(chat_id, format!("Compaction failed: {e}")).await;
+                                let _ = bot
+                                    .send_message(chat_id, format!("Compaction failed: {e}"))
+                                    .await;
                                 tracing::error!(error = %e, "compaction failed");
                             }
                         }
                     } else {
-                        let _ = bot.send_message(chat_id, "No active conversation to compact.").await;
+                        let _ = bot
+                            .send_message(chat_id, "No active conversation to compact.")
+                            .await;
                     }
                     continue;
                 }
@@ -446,10 +455,7 @@ impl super::Controller for TelegramController {
                         let _ = bot.send_message(chat_id, "Usage: /memory <note>").await;
                         continue;
                     }
-                    match save_memory_note(
-                        &current_settings,
-                        note,
-                    ) {
+                    match save_memory_note(&current_settings, note) {
                         Ok(()) => {
                             let _ = bot.send_message(chat_id, "Saved to memory.").await;
                             tracing::info!(chat_id = chat_id.0, "memory note saved");
@@ -483,9 +489,7 @@ impl super::Controller for TelegramController {
                                 }
                             }
                         };
-                        let keyboard = build_model_keyboard(
-                            &current_settings, &cp, &cm,
-                        );
+                        let keyboard = build_model_keyboard(&current_settings, &cp, &cm);
                         let _ = bot
                             .send_message(chat_id, "Select a model:")
                             .reply_markup(keyboard)
@@ -497,16 +501,21 @@ impl super::Controller for TelegramController {
                 // /model <provider> [model] — switch provider and/or model.
                 if let Some(args) = text.strip_prefix("/model ").map(str::trim) {
                     if args.is_empty() {
-                        let _ = bot.send_message(chat_id, "Usage: /model <provider> [model]  or  /model <model>").await;
+                        let _ = bot
+                            .send_message(
+                                chat_id,
+                                "Usage: /model <provider> [model]  or  /model <model>",
+                            )
+                            .await;
                         continue;
                     }
                     let current_prov = {
                         let agents_map = agents.lock().await;
-                        agents_map.get(&chat_id.0)
+                        agents_map
+                            .get(&chat_id.0)
                             .map(|ca| ca.provider_name.clone())
                             .unwrap_or_else(|| {
-                                super::active_provider_name(&current_settings)
-                                    .unwrap_or_default()
+                                super::active_provider_name(&current_settings).unwrap_or_default()
                             })
                     };
                     let (target_provider, target_model) = match super::parse_model_command(
@@ -538,18 +547,22 @@ impl super::Controller for TelegramController {
                     {
                         Ok(new_agent) => {
                             let pc = &current_settings.providers[&target_provider];
-                            let resolved = target_model.as_deref()
+                            let resolved = target_model
+                                .as_deref()
                                 .unwrap_or_else(|| pc.default_model())
                                 .to_string();
                             let reply = format!(
                                 "Switched to '{}' — {:?} ({})",
                                 target_provider, pc.provider_type, resolved,
                             );
-                            agents.lock().await.insert(chat_id.0, ChatAgent {
-                                agent: new_agent,
-                                provider_name: target_provider,
-                                model: resolved,
-                            });
+                            agents.lock().await.insert(
+                                chat_id.0,
+                                ChatAgent {
+                                    agent: new_agent,
+                                    provider_name: target_provider,
+                                    model: resolved,
+                                },
+                            );
                             let _ = bot.send_message(chat_id, reply).await;
                         }
                         Err(e) => {
@@ -562,7 +575,10 @@ impl super::Controller for TelegramController {
                 }
                 if text == "/model" {
                     let _ = bot
-                        .send_message(chat_id, "Usage: /model <provider> [model]  or  /model <model>")
+                        .send_message(
+                            chat_id,
+                            "Usage: /model <provider> [model]  or  /model <model>",
+                        )
                         .await;
                     continue;
                 }
@@ -582,13 +598,13 @@ impl super::Controller for TelegramController {
                     let chat_key = chat_id.0.to_string();
 
                     // -- Resolve media into ContentBlocks --
-                    let content_blocks = match extract_content(
-                        &bot_clone, &msg, &text,
-                    ).await {
+                    let content_blocks = match extract_content(&bot_clone, &msg, &text).await {
                         Ok(blocks) => blocks,
                         Err(e) => {
                             tracing::error!(error = %e, "failed to extract media content");
-                            let _ = bot_clone.send_message(chat_id, format!("Media error: {e}")).await;
+                            let _ = bot_clone
+                                .send_message(chat_id, format!("Media error: {e}"))
+                                .await;
                             return;
                         }
                     };
@@ -599,16 +615,22 @@ impl super::Controller for TelegramController {
 
                     // Get or create the per-chat agent.
                     let mut agents_map = agents_clone.lock().await;
-                    if let std::collections::hash_map::Entry::Vacant(entry) = agents_map.entry(chat_id.0) {
-                        let provider_name = super::active_provider_name(&settings_clone)
-                            .unwrap_or_default();
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        agents_map.entry(chat_id.0)
+                    {
+                        let provider_name =
+                            super::active_provider_name(&settings_clone).unwrap_or_default();
                         let model = settings_clone.agent.model.clone();
                         match crate::controller::build_agent(
                             &settings_clone,
                             prompt_clone.as_deref(),
-                        ).await {
+                        )
+                        .await
+                        {
                             Ok(mut agent) => {
-                                if let Ok(messages) = store_clone.load(&chat_key) && !messages.is_empty() {
+                                if let Ok(messages) = store_clone.load(&chat_key)
+                                    && !messages.is_empty()
+                                {
                                     tracing::info!(
                                         chat_id = chat_id.0,
                                         messages = messages.len(),
@@ -624,18 +646,21 @@ impl super::Controller for TelegramController {
                             }
                             Err(e) => {
                                 tracing::error!(error = %e, "failed to create agent");
-                                let _ = bot_clone.send_message(chat_id, format!("Error: {e}")).await;
+                                let _ =
+                                    bot_clone.send_message(chat_id, format!("Error: {e}")).await;
                                 return;
                             }
                         }
                     }
-                    let ca = agents_map.get_mut(&chat_id.0)
+                    let ca = agents_map
+                        .get_mut(&chat_id.0)
                         .expect("agent must exist — just inserted above");
 
                     let mut output = TelegramOutput::new(bot_clone.clone(), chat_id);
 
                     // Run the agent.
-                    let has_non_text = content_blocks.iter()
+                    let has_non_text = content_blocks
+                        .iter()
                         .any(|b| !matches!(b, ContentBlock::Text { .. }));
                     let result = if has_non_text {
                         ca.agent.run_with_blocks(content_blocks, &mut output).await
@@ -653,19 +678,20 @@ impl super::Controller for TelegramController {
                             ca.agent.pop_last_message();
                             ca.agent.strip_images();
 
-                            let _ = bot_clone.send_message(
-                                chat_id,
-                                format!("{} doesn't support vision", ca.model),
-                            ).await;
+                            let _ = bot_clone
+                                .send_message(
+                                    chat_id,
+                                    format!("{} doesn't support vision", ca.model),
+                                )
+                                .await;
 
                             // If there was a caption, retry with just the text.
-                            if !text.is_empty() {
-                                if let Err(e) = ca.agent.run(&text, &mut output).await {
-                                    tracing::error!(error = %e, "text-only retry failed");
-                                    let _ = bot_clone.send_message(
-                                        chat_id, format!("Error: {e}"),
-                                    ).await;
-                                }
+                            if !text.is_empty()
+                                && let Err(e) = ca.agent.run(&text, &mut output).await
+                            {
+                                tracing::error!(error = %e, "text-only retry failed");
+                                let _ =
+                                    bot_clone.send_message(chat_id, format!("Error: {e}")).await;
                             }
                         } else {
                             tracing::error!(error = %e, "agent run failed");
@@ -723,10 +749,7 @@ fn build_model_keyboard(
 }
 
 /// Save a note to the workspace MEMORY.md file.
-fn save_memory_note(
-    settings: &Settings,
-    note: &str,
-) -> crate::Result<()> {
+fn save_memory_note(settings: &Settings, note: &str) -> crate::Result<()> {
     let mut workspace = crate::workspace::create_workspace(&settings.workspace)?;
 
     let today = crate::workspace::OpenClawWorkspace::today_date();
@@ -744,9 +767,7 @@ fn save_memory_note(
 
 /// Check if an LLM error indicates the model doesn't support image input.
 fn is_vision_error(err: &str) -> bool {
-    err.contains("image input")
-        || err.contains("vision")
-        || err.contains("No endpoints found")
+    err.contains("image input") || err.contains("vision") || err.contains("No endpoints found")
 }
 
 /// Extract content blocks from a Telegram message.
@@ -769,36 +790,38 @@ async fn extract_content(
     }
 
     // Photos: pick the largest resolution (last in the array).
-    if let Some(photos) = msg.photo() {
-        if let Some(photo) = photos.last() {
-            tracing::info!(
-                file_id = photo.file.id.0.as_str(),
-                width = photo.width,
-                height = photo.height,
-                "downloading photo from Telegram"
-            );
-            match download_telegram_file(bot, &photo.file.id.0).await {
-                Ok(data) => match media::resolve(media::MediaInput::Image {
-                    data,
-                    mime_type: "image/jpeg".to_string(),
-                }).await {
-                    Ok(media::ResolvedMedia::Images(imgs)) => blocks.extend(imgs),
-                    Ok(media::ResolvedMedia::Transcription(t)) => {
-                        blocks.push(ContentBlock::Text { text: t });
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to process photo");
-                        blocks.push(ContentBlock::Text {
-                            text: format!("[Image could not be processed: {e}]"),
-                        });
-                    }
-                },
+    if let Some(photos) = msg.photo()
+        && let Some(photo) = photos.last()
+    {
+        tracing::info!(
+            file_id = photo.file.id.0.as_str(),
+            width = photo.width,
+            height = photo.height,
+            "downloading photo from Telegram"
+        );
+        match download_telegram_file(bot, &photo.file.id.0).await {
+            Ok(data) => match media::resolve(media::MediaInput::Image {
+                data,
+                mime_type: "image/jpeg".to_string(),
+            })
+            .await
+            {
+                Ok(media::ResolvedMedia::Images(imgs)) => blocks.extend(imgs),
+                Ok(media::ResolvedMedia::Transcription(t)) => {
+                    blocks.push(ContentBlock::Text { text: t });
+                }
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to download photo");
+                    tracing::warn!(error = %e, "failed to process photo");
                     blocks.push(ContentBlock::Text {
-                        text: format!("[Failed to download photo: {e}]"),
+                        text: format!("[Image could not be processed: {e}]"),
                     });
                 }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to download photo");
+                blocks.push(ContentBlock::Text {
+                    text: format!("[Failed to download photo: {e}]"),
+                });
             }
         }
     }
@@ -809,7 +832,9 @@ async fn extract_content(
             file_id = voice.file.id.0.as_str(),
             "downloading voice note from Telegram"
         );
-        let mime = voice.mime_type.as_ref()
+        let mime = voice
+            .mime_type
+            .as_ref()
             .map(|m| m.to_string())
             .unwrap_or_else(|| "audio/ogg".to_string());
 
@@ -817,7 +842,9 @@ async fn extract_content(
             Ok(data) => match media::resolve(media::MediaInput::Audio {
                 data,
                 mime_type: mime,
-            }).await {
+            })
+            .await
+            {
                 Ok(media::ResolvedMedia::Transcription(t)) => {
                     blocks.push(ContentBlock::Text {
                         text: format!("[Voice transcription]: {t}"),
@@ -842,15 +869,19 @@ async fn extract_content(
 
     // Documents with image MIME types (e.g. uncompressed photos).
     if let Some(doc) = msg.document() {
-        let is_image = doc.mime_type.as_ref()
-            .map_or(false, |m| m.as_ref().starts_with("image/"));
+        let is_image = doc
+            .mime_type
+            .as_ref()
+            .is_some_and(|m| m.as_ref().starts_with("image/"));
         if is_image {
             tracing::info!(
                 file_id = doc.file.id.0.as_str(),
                 file_name = doc.file_name.as_deref().unwrap_or("unknown"),
                 "downloading image document from Telegram"
             );
-            let mime = doc.mime_type.as_ref()
+            let mime = doc
+                .mime_type
+                .as_ref()
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| "image/jpeg".to_string());
 
@@ -858,7 +889,9 @@ async fn extract_content(
                 Ok(data) => match media::resolve(media::MediaInput::Image {
                     data,
                     mime_type: mime,
-                }).await {
+                })
+                .await
+                {
                     Ok(media::ResolvedMedia::Images(imgs)) => blocks.extend(imgs),
                     Ok(media::ResolvedMedia::Transcription(t)) => {
                         blocks.push(ContentBlock::Text { text: t });
@@ -894,23 +927,17 @@ async fn extract_content(
 /// Uses the Bot API to get the file path, then downloads from the
 /// Telegram file server.
 async fn download_telegram_file(bot: &Bot, file_id: &str) -> crate::Result<Vec<u8>> {
-    let file = bot.get_file(teloxide::types::FileId(file_id.to_string()))
+    let file = bot
+        .get_file(teloxide::types::FileId(file_id.to_string()))
         .await
         .map_err(|e| DysonError::Llm(format!("Telegram get_file failed: {e}")))?;
 
     let token = bot.token();
-    let url = format!(
-        "https://api.telegram.org/file/bot{}/{}",
-        token, file.path
-    );
+    let url = format!("https://api.telegram.org/file/bot{}/{}", token, file.path);
 
-    let response = reqwest::get(&url)
-        .await
-        .map_err(|e| DysonError::Http(e))?;
+    let response = reqwest::get(&url).await.map_err(DysonError::Http)?;
 
-    let bytes = response.bytes()
-        .await
-        .map_err(|e| DysonError::Http(e))?;
+    let bytes = response.bytes().await.map_err(DysonError::Http)?;
 
     Ok(bytes.to_vec())
 }
@@ -974,11 +1001,7 @@ impl TelegramOutput {
         }
     }
 
-    fn edit_message(
-        &self,
-        message_id: MessageId,
-        text: &str,
-    ) -> Result<(), DysonError> {
+    fn edit_message(&self, message_id: MessageId, text: &str) -> Result<(), DysonError> {
         let bot = self.bot.clone();
         let chat_id = self.chat_id;
         let text = text.to_string();
@@ -1065,7 +1088,8 @@ impl Output for TelegramOutput {
         let bot = self.bot.clone();
         let chat_id = self.chat_id;
         let _ = self.block_on(async {
-            bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await
+            bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
+                .await
         });
         Ok(())
     }
@@ -1083,15 +1107,15 @@ impl Output for TelegramOutput {
         let chat_id = self.chat_id;
         let input_file = InputFile::file(path);
 
-        let result = self.block_on(async {
-            bot.send_document(chat_id, input_file).await
-        });
+        let result = self.block_on(async { bot.send_document(chat_id, input_file).await });
 
         match result {
             Ok(_) => Ok(()),
             Err(e) => {
                 tracing::error!(error = %e, path = %path.display(), "failed to send file via Telegram");
-                Err(DysonError::Llm(format!("Telegram send_document failed: {e}")))
+                Err(DysonError::Llm(format!(
+                    "Telegram send_document failed: {e}"
+                )))
             }
         }
     }
@@ -1256,8 +1280,7 @@ fn convert_inline(s: &str) -> String {
     let s = convert_pattern(&s, "__", "<b>", "</b>");
     let s = convert_pattern(&s, "~~", "<s>", "</s>");
     let s = convert_pattern(&s, "*", "<i>", "</i>");
-    let s = convert_pattern(&s, "_", "<i>", "</i>");
-    s
+    convert_pattern(&s, "_", "<i>", "</i>")
 }
 
 /// Convert `` `inline code` `` spans.
@@ -1301,21 +1324,18 @@ fn convert_links(s: &str) -> String {
             let link_text = &rest[..bracket_end];
             let after_bracket = &rest[bracket_end + 1..];
 
-            if after_bracket.starts_with('(') {
-                if let Some(paren_end) = after_bracket.find(')') {
-                    let url = &after_bracket[1..paren_end];
-                    // Un-escape HTML entities in URL for the href attribute.
-                    let raw_url = url
-                        .replace("&amp;", "&")
-                        .replace("&lt;", "<")
-                        .replace("&gt;", ">");
-                    out.push_str(&format!(
-                        "<a href=\"{}\">{}</a>",
-                        raw_url, link_text
-                    ));
-                    rest = &after_bracket[paren_end + 1..];
-                    continue;
-                }
+            if after_bracket.starts_with('(')
+                && let Some(paren_end) = after_bracket.find(')')
+            {
+                let url = &after_bracket[1..paren_end];
+                // Un-escape HTML entities in URL for the href attribute.
+                let raw_url = url
+                    .replace("&amp;", "&")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">");
+                out.push_str(&format!("<a href=\"{}\">{}</a>", raw_url, link_text));
+                rest = &after_bracket[paren_end + 1..];
+                continue;
             }
 
             // Not a valid link — emit the bracket and text literally.
@@ -1345,26 +1365,26 @@ fn convert_pattern(s: &str, marker: &str, open: &str, close: &str) -> String {
 
         // Skip content inside <code>, <pre>, <a> tags — don't convert
         // markdown inside already-converted spans.
-        if rest.starts_with("<code>") {
-            if let Some(end) = rest.find("</code>") {
-                out.push_str(&rest[..end + 7]);
-                pos += end + 7;
-                continue;
-            }
+        if rest.starts_with("<code>")
+            && let Some(end) = rest.find("</code>")
+        {
+            out.push_str(&rest[..end + 7]);
+            pos += end + 7;
+            continue;
         }
-        if rest.starts_with("<pre>") {
-            if let Some(end) = rest.find("</pre>") {
-                out.push_str(&rest[..end + 6]);
-                pos += end + 6;
-                continue;
-            }
+        if rest.starts_with("<pre>")
+            && let Some(end) = rest.find("</pre>")
+        {
+            out.push_str(&rest[..end + 6]);
+            pos += end + 6;
+            continue;
         }
-        if rest.starts_with("<a ") {
-            if let Some(end) = rest.find("</a>") {
-                out.push_str(&rest[..end + 4]);
-                pos += end + 4;
-                continue;
-            }
+        if rest.starts_with("<a ")
+            && let Some(end) = rest.find("</a>")
+        {
+            out.push_str(&rest[..end + 4]);
+            pos += end + 4;
+            continue;
         }
 
         if rest.starts_with(marker) {
@@ -1372,7 +1392,7 @@ fn convert_pattern(s: &str, marker: &str, open: &str, close: &str) -> String {
             // (avoids converting mid-word underscores).
             if mlen == 1 {
                 let prev_char = s[..pos].chars().next_back();
-                if prev_char.map_or(false, |c| c.is_ascii_alphanumeric()) {
+                if prev_char.is_some_and(|c| c.is_ascii_alphanumeric()) {
                     out.push_str(marker);
                     pos += mlen;
                     continue;
@@ -1388,7 +1408,7 @@ fn convert_pattern(s: &str, marker: &str, open: &str, close: &str) -> String {
                 // followed by alphanumeric (mid-word).
                 if mlen == 1 {
                     let next_char = s[after..].chars().next();
-                    if next_char.map_or(false, |c| c.is_ascii_alphanumeric()) {
+                    if next_char.is_some_and(|c| c.is_ascii_alphanumeric()) {
                         out.push_str(marker);
                         pos += mlen;
                         continue;
@@ -1423,10 +1443,7 @@ mod tests {
 
     #[test]
     fn plain_text_passthrough() {
-        assert_eq!(
-            markdown_to_telegram_html("Hello world"),
-            "Hello world"
-        );
+        assert_eq!(markdown_to_telegram_html("Hello world"), "Hello world");
     }
 
     #[test]
@@ -1487,10 +1504,7 @@ mod tests {
     #[test]
     fn fenced_code_block_escapes_html() {
         let input = "```\na < b\n```";
-        assert_eq!(
-            markdown_to_telegram_html(input),
-            "<pre>a &lt; b</pre>"
-        );
+        assert_eq!(markdown_to_telegram_html(input), "<pre>a &lt; b</pre>");
     }
 
     #[test]
@@ -1503,18 +1517,9 @@ mod tests {
 
     #[test]
     fn heading() {
-        assert_eq!(
-            markdown_to_telegram_html("# Title"),
-            "<b>Title</b>"
-        );
-        assert_eq!(
-            markdown_to_telegram_html("## Subtitle"),
-            "<b>Subtitle</b>"
-        );
-        assert_eq!(
-            markdown_to_telegram_html("### Deep"),
-            "<b>Deep</b>"
-        );
+        assert_eq!(markdown_to_telegram_html("# Title"), "<b>Title</b>");
+        assert_eq!(markdown_to_telegram_html("## Subtitle"), "<b>Subtitle</b>");
+        assert_eq!(markdown_to_telegram_html("### Deep"), "<b>Deep</b>");
     }
 
     #[test]
@@ -1542,10 +1547,7 @@ mod tests {
 
     #[test]
     fn unclosed_backtick_kept() {
-        assert_eq!(
-            markdown_to_telegram_html("use `foo here"),
-            "use `foo here"
-        );
+        assert_eq!(markdown_to_telegram_html("use `foo here"), "use `foo here");
     }
 
     #[test]
@@ -1555,10 +1557,7 @@ mod tests {
 
     #[test]
     fn mid_word_underscores_preserved() {
-        assert_eq!(
-            markdown_to_telegram_html("some_var_name"),
-            "some_var_name"
-        );
+        assert_eq!(markdown_to_telegram_html("some_var_name"), "some_var_name");
     }
 
     #[test]
@@ -1619,7 +1618,9 @@ mod tests {
 
     #[test]
     fn is_vision_error_detects_vision_keyword() {
-        assert!(is_vision_error("model does not support vision capabilities"));
+        assert!(is_vision_error(
+            "model does not support vision capabilities"
+        ));
     }
 
     #[test]

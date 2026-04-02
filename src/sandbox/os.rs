@@ -249,9 +249,7 @@ impl Sandbox for OsSandbox {
 
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            tracing::warn!(
-                "OS sandbox not available on this platform — running unsandboxed"
-            );
+            tracing::warn!("OS sandbox not available on this platform — running unsandboxed");
             Ok(SandboxDecision::Allow {
                 input: input.clone(),
             })
@@ -598,8 +596,8 @@ pub fn build_seatbelt_command_from_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use crate::tool::ToolContext;
+    use std::path::PathBuf;
 
     // -----------------------------------------------------------------------
     // Seatbelt command builder tests (run on ALL platforms)
@@ -768,8 +766,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn macos_actually_blocks_network() {
-        use crate::tool::bash::BashTool;
         use crate::tool::Tool;
+        use crate::tool::bash::BashTool;
 
         let sandbox = OsSandbox::default_profile("/tmp");
         let ctx = ToolContext::from_cwd().unwrap();
@@ -780,7 +778,10 @@ mod tests {
             SandboxDecision::Allow { input } => {
                 let tool = BashTool::default();
                 let output = tool.run(input, &ctx).await.unwrap();
-                assert!(output.is_error, "expected network to be blocked by seatbelt");
+                assert!(
+                    output.is_error,
+                    "expected network to be blocked by seatbelt"
+                );
             }
             _ => panic!("expected Allow"),
         }
@@ -789,8 +790,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn linux_actually_blocks_network() {
-        use crate::tool::bash::BashTool;
         use crate::tool::Tool;
+        use crate::tool::bash::BashTool;
 
         let sandbox = OsSandbox::default_profile("/tmp");
         let ctx = ToolContext::from_cwd().unwrap();
@@ -822,7 +823,10 @@ mod tests {
         let original_len = content.len();
         let mut output = ToolOutput::success(content);
 
-        sandbox.after("some_mcp_tool", &input, &mut output).await.unwrap();
+        sandbox
+            .after("some_mcp_tool", &input, &mut output)
+            .await
+            .unwrap();
 
         assert!(
             output.content.len() < original_len,
@@ -861,7 +865,10 @@ mod tests {
         // Network is always shared now — --unshare-net should NOT be present.
         assert!(!cmd.contains("--unshare-net"), "should not unshare network");
         assert!(cmd.contains("--ro-bind / /"), "should have read-only root");
-        assert!(cmd.contains("--bind '/workspace' '/workspace'"), "should bind working dir");
+        assert!(
+            cmd.contains("--bind '/workspace' '/workspace'"),
+            "should bind working dir"
+        );
         assert!(cmd.contains("--die-with-parent"));
         assert!(cmd.contains("bash -c 'ls'"));
     }
@@ -908,8 +915,14 @@ mod tests {
         let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
         assert!(cmd.contains("--bind '/workspace' '/workspace'"));
         // /tmp should use --tmpfs for isolation, not --bind.
-        assert!(cmd.contains("--tmpfs /tmp"), "should use isolated /tmp: {cmd}");
-        assert!(!cmd.contains("--bind '/tmp'"), "should NOT bind host /tmp: {cmd}");
+        assert!(
+            cmd.contains("--tmpfs /tmp"),
+            "should use isolated /tmp: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--bind '/tmp'"),
+            "should NOT bind host /tmp: {cmd}"
+        );
     }
 
     #[test]
@@ -921,7 +934,10 @@ mod tests {
             process_exec: Access::Deny,
         };
         let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
-        assert!(cmd.contains("--unshare-pid"), "should isolate PID namespace");
+        assert!(
+            cmd.contains("--unshare-pid"),
+            "should isolate PID namespace"
+        );
     }
 
     #[test]
@@ -946,15 +962,33 @@ mod tests {
         };
         let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
         // Should NOT have --ro-bind / / (restricted reads).
-        assert!(!cmd.contains("--ro-bind / /"), "should not bind entire root: {cmd}");
+        assert!(
+            !cmd.contains("--ro-bind / /"),
+            "should not bind entire root: {cmd}"
+        );
         // Should have essential system dirs.
-        assert!(cmd.contains("--ro-bind /usr /usr"), "should bind /usr: {cmd}");
-        assert!(cmd.contains("--ro-bind /bin /bin"), "should bind /bin: {cmd}");
-        assert!(cmd.contains("--ro-bind /etc /etc"), "should bind /etc: {cmd}");
+        assert!(
+            cmd.contains("--ro-bind /usr /usr"),
+            "should bind /usr: {cmd}"
+        );
+        assert!(
+            cmd.contains("--ro-bind /bin /bin"),
+            "should bind /bin: {cmd}"
+        );
+        assert!(
+            cmd.contains("--ro-bind /etc /etc"),
+            "should bind /etc: {cmd}"
+        );
         // Should have read-only bind for allowed read path.
-        assert!(cmd.contains("--ro-bind '/workspace' '/workspace'"), "should ro-bind workspace: {cmd}");
+        assert!(
+            cmd.contains("--ro-bind '/workspace' '/workspace'"),
+            "should ro-bind workspace: {cmd}"
+        );
         // Should have writable bind for allowed write path.
-        assert!(cmd.contains("--bind '/workspace' '/workspace'"), "should bind workspace writable: {cmd}");
+        assert!(
+            cmd.contains("--bind '/workspace' '/workspace'"),
+            "should bind workspace writable: {cmd}"
+        );
     }
 
     #[test]
@@ -967,11 +1001,20 @@ mod tests {
         };
         let cmd = build_bwrap_command_from_policy("echo ok", &policy, "/workspace");
         // Should NOT have --ro-bind / /.
-        assert!(!cmd.contains("--ro-bind / /"), "should not bind entire root: {cmd}");
+        assert!(
+            !cmd.contains("--ro-bind / /"),
+            "should not bind entire root: {cmd}"
+        );
         // Should still have essential system dirs for bash to work.
-        assert!(cmd.contains("--ro-bind /usr /usr"), "should bind /usr: {cmd}");
+        assert!(
+            cmd.contains("--ro-bind /usr /usr"),
+            "should bind /usr: {cmd}"
+        );
         // Should have no writable binds.
-        assert!(!cmd.contains("--bind '/"), "should have no writable binds: {cmd}");
+        assert!(
+            !cmd.contains("--bind '/"),
+            "should have no writable binds: {cmd}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1077,7 +1120,10 @@ mod tests {
         // Safe path should be present.
         assert!(cmd.contains("subpath \"/workspace\""));
         // Unsafe path should be rejected (not present in output).
-        assert!(!cmd.contains("with\"quote"), "path with quote should be sanitized out: {cmd}");
+        assert!(
+            !cmd.contains("with\"quote"),
+            "path with quote should be sanitized out: {cmd}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1087,8 +1133,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn linux_policy_blocks_network() {
-        use crate::tool::bash::BashTool;
         use crate::tool::Tool;
+        use crate::tool::bash::BashTool;
 
         let policy = SandboxPolicy {
             network: Access::Deny,
@@ -1108,7 +1154,10 @@ mod tests {
             .run(serde_json::json!({"command": cmd}), &ctx)
             .await
             .unwrap();
-        assert!(output.is_error, "expected network to be blocked by bwrap policy");
+        assert!(
+            output.is_error,
+            "expected network to be blocked by bwrap policy"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1135,8 +1184,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn linux_policy_blocks_writes_outside_allowed() {
-        use crate::tool::bash::BashTool;
         use crate::tool::Tool;
+        use crate::tool::bash::BashTool;
 
         let policy = SandboxPolicy {
             network: Access::Deny,

@@ -206,16 +206,17 @@ pub fn create_sandbox(
     // file_read, file_write, process_exec).  The enforcement translates
     // intent into platform-specific mechanisms.
     if !disabled.iter().any(|s| s == "os") {
-        let working_dir = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+        let working_dir =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
 
         tracing::info!(
             tool_policies = config.tool_policies.len(),
             "policy sandbox enabled"
         );
-        sandboxes.push(Box::new(
-            policy_sandbox::PolicySandbox::new(&config.tool_policies, &working_dir),
-        ));
+        sandboxes.push(Box::new(policy_sandbox::PolicySandbox::new(
+            &config.tool_policies,
+            &working_dir,
+        )));
     } else {
         tracing::info!("OS sandbox disabled via config");
     }

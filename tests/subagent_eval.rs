@@ -187,8 +187,7 @@ async fn subagent_child_agent_returns_result_via_capture_output() {
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(
         dyson::skill::subagent::tests_support::FilteredSkillPublic::new(vec![]),
     )];
-    let sandbox: Arc<dyn Sandbox> =
-        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(Box::new(child_llm), sandbox, skills, &settings, None, 0).unwrap();
     agent.set_depth(1); // This is a child agent.
 
@@ -272,7 +271,10 @@ async fn subagent_shares_sandbox_with_parent() {
     child.set_depth(1);
 
     let mut child_output = MockOutput::new();
-    child.run("run echo child", &mut child_output).await.unwrap();
+    child
+        .run("run echo child", &mut child_output)
+        .await
+        .unwrap();
 
     // Both parent and child bash calls should be recorded.
     let all_calls = sandbox.calls();
@@ -301,12 +303,19 @@ async fn subagent_conversation_isolated_from_parent() {
         ..Default::default()
     };
 
-    let sandbox: Arc<dyn Sandbox> =
-        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let skills: Vec<Box<dyn Skill>> =
         vec![Box::new(dyson::skill::builtin::BuiltinSkill::new(None))];
 
-    let mut parent = Agent::new(Box::new(parent_llm), sandbox.clone(), skills, &settings, None, 0).unwrap();
+    let mut parent = Agent::new(
+        Box::new(parent_llm),
+        sandbox.clone(),
+        skills,
+        &settings,
+        None,
+        0,
+    )
+    .unwrap();
     let mut output = MockOutput::new();
 
     parent.run("hello", &mut output).await.unwrap();
@@ -317,7 +326,15 @@ async fn subagent_conversation_isolated_from_parent() {
     let child_llm = MockLlm::new(vec![text_response_events("Child says hi.")]);
     let child_skills: Vec<Box<dyn Skill>> =
         vec![Box::new(dyson::skill::builtin::BuiltinSkill::new(None))];
-    let mut child = Agent::new(Box::new(child_llm), sandbox, child_skills, &settings, None, 0).unwrap();
+    let mut child = Agent::new(
+        Box::new(child_llm),
+        sandbox,
+        child_skills,
+        &settings,
+        None,
+        0,
+    )
+    .unwrap();
     child.set_depth(1);
 
     let mut capture = dyson::skill::subagent::CaptureOutput::new();
@@ -336,8 +353,7 @@ async fn subagent_conversation_isolated_from_parent() {
 
 #[tokio::test]
 async fn depth_propagates_to_child_tool_context() {
-    let sandbox: Arc<dyn Sandbox> =
-        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let settings = AgentSettings {
         api_key: "test".into(),
         ..Default::default()

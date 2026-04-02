@@ -336,9 +336,7 @@ pub(crate) struct SseLineBuffer {
 
 impl SseLineBuffer {
     pub fn new() -> Self {
-        Self {
-            buffer: Vec::new(),
-        }
+        Self { buffer: Vec::new() }
     }
 
     /// Feed raw bytes and return complete `data:` payloads.
@@ -411,8 +409,8 @@ pub(crate) async fn start_mcp_server(
     workspace: &std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
     dangerous_no_sandbox: bool,
 ) -> Result<McpServerInfo> {
-    use std::sync::Arc;
     use crate::skill::mcp::serve::McpHttpServer;
+    use std::sync::Arc;
 
     let server = Arc::new(McpHttpServer::new(
         Arc::clone(workspace),
@@ -425,7 +423,12 @@ pub(crate) async fn start_mcp_server(
 
     let url = format!("http://127.0.0.1:{port}/mcp");
 
-    Ok(McpServerInfo { port, handle, token, url })
+    Ok(McpServerInfo {
+        port,
+        handle,
+        token,
+        url,
+    })
 }
 
 /// Resolve the absolute path to a CLI binary by name.
@@ -454,7 +457,10 @@ pub(crate) fn resolve_binary_path(name: &str) -> String {
             None
         })
         .unwrap_or_else(|| {
-            tracing::warn!(binary = name, "could not resolve path — falling back to bare name");
+            tracing::warn!(
+                binary = name,
+                "could not resolve path — falling back to bare name"
+            );
             name.to_string()
         })
 }
@@ -521,14 +527,16 @@ pub(crate) fn format_prompt(messages: &[Message], tools: &[ToolDefinition]) -> S
                         prompt.push_str(&format!("{role_label}: {text}\n\n"));
                     }
                     ContentBlock::ToolUse { name, input, .. } => {
-                        prompt.push_str(&format!(
-                            "[Used tool: {name} with input: {input}]\n\n"
-                        ));
+                        prompt.push_str(&format!("[Used tool: {name} with input: {input}]\n\n"));
                     }
                     ContentBlock::ToolResult {
                         content, is_error, ..
                     } => {
-                        let label = if *is_error { "Tool error" } else { "Tool result" };
+                        let label = if *is_error {
+                            "Tool error"
+                        } else {
+                            "Tool result"
+                        };
                         prompt.push_str(&format!("{label}: {content}\n\n"));
                     }
                     ContentBlock::Image { .. } => {
@@ -638,9 +646,7 @@ mod tests {
     #[test]
     fn sse_line_buffer_extracts_data_payloads() {
         let mut buf = SseLineBuffer::new();
-        let payloads = buf
-            .feed(b"data: {\"type\":\"text\"}\n\n")
-            .unwrap();
+        let payloads = buf.feed(b"data: {\"type\":\"text\"}\n\n").unwrap();
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0], "{\"type\":\"text\"}");
     }
@@ -747,7 +753,12 @@ mod tests {
         match event {
             stream::StreamEvent::ToolUseComplete { input, .. } => {
                 // Should contain the parse error info, not an empty object.
-                assert!(input["_parse_error"].as_str().unwrap().contains("malformed"));
+                assert!(
+                    input["_parse_error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("malformed")
+                );
                 assert_eq!(input["_raw_json"], "{broken json");
             }
             other => panic!("expected ToolUseComplete, got: {other:?}"),

@@ -115,9 +115,7 @@ fn migrations() -> &'static [Migration] {
         Migration {
             from_version: 0,
             description: "Create memory/notes/ directory for Tier 2 overflow",
-            steps: &[
-                Step::CreateDir("memory/notes"),
-            ],
+            steps: &[Step::CreateDir("memory/notes")],
         },
         // v1 → v2: Promote flat skill files to directories.
         //
@@ -128,13 +126,11 @@ fn migrations() -> &'static [Migration] {
         Migration {
             from_version: 1,
             description: "Promote skills/*.md to skills/<name>/SKILL.md directories",
-            steps: &[
-                Step::PromoteFilesToDirs {
-                    dir: "skills",
-                    ext: "md",
-                    target: "SKILL.md",
-                },
-            ],
+            steps: &[Step::PromoteFilesToDirs {
+                dir: "skills",
+                ext: "md",
+                target: "SKILL.md",
+            }],
         },
     ]
 }
@@ -431,10 +427,7 @@ mod tests {
         std::fs::write(dir.join("marker"), "").unwrap();
 
         // SkipIf should prevent CreateDir from running.
-        let steps = &[
-            Step::SkipIf("marker"),
-            Step::CreateDir("should-not-exist"),
-        ];
+        let steps = &[Step::SkipIf("marker"), Step::CreateDir("should-not-exist")];
         apply_steps(&dir, steps).unwrap();
         assert!(!dir.join("should-not-exist").exists());
 
@@ -470,7 +463,10 @@ mod tests {
         apply_steps(&dir, steps).unwrap();
 
         assert!(!dir.join("old.md").exists());
-        assert_eq!(std::fs::read_to_string(dir.join("new.md")).unwrap(), "content");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new.md")).unwrap(),
+            "content"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -517,11 +513,13 @@ mod tests {
         std::fs::write(
             dir.join("skills/code-review.md"),
             "---\nname: code-review\n---\n\nReview code.",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(
             dir.join("skills/deploy.md"),
             "---\nname: deploy\n---\n\nDeploy things.",
-        ).unwrap();
+        )
+        .unwrap();
 
         let applied = migrate(&dir).unwrap();
         assert!(applied);
@@ -549,10 +547,7 @@ mod tests {
         let dir = temp_dir("v1-to-v2-skip");
         write_version(&dir, 1).unwrap();
         std::fs::create_dir_all(dir.join("skills/existing")).unwrap();
-        std::fs::write(
-            dir.join("skills/existing/SKILL.md"),
-            "already here",
-        ).unwrap();
+        std::fs::write(dir.join("skills/existing/SKILL.md"), "already here").unwrap();
         // Also a flat file named "existing.md" — should be skipped because
         // skills/existing/ already exists.
         std::fs::write(dir.join("skills/existing.md"), "flat version").unwrap();
@@ -605,7 +600,8 @@ mod tests {
         std::fs::write(
             dir.join("skills/test.md"),
             "---\nname: test\n---\n\nTest skill.",
-        ).unwrap();
+        )
+        .unwrap();
 
         let applied = migrate(&dir).unwrap();
         assert!(applied);

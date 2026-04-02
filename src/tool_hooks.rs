@@ -96,8 +96,8 @@ pub fn dispatch_hooks(hooks: &[Box<dyn ToolHook>], event: &ToolHookEvent) -> Hoo
 mod test_tool_hooks {
     use super::*;
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // -- Test hook implementations --
 

@@ -177,10 +177,7 @@ pub async fn build_agent(
         Some(std::sync::Arc::clone(&workspace)),
         settings.dangerous_no_sandbox,
     );
-    let sandbox = crate::sandbox::create_sandbox(
-        &settings.sandbox,
-        settings.dangerous_no_sandbox,
-    );
+    let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, settings.dangerous_no_sandbox);
     let skills = {
         let ws = workspace.read().await;
         crate::skill::create_skills(
@@ -188,10 +185,18 @@ pub async fn build_agent(
             Some(&**ws),
             std::sync::Arc::clone(&sandbox),
             Some(std::sync::Arc::clone(&workspace)),
-        ).await
+        )
+        .await
     };
 
-    crate::agent::Agent::new(client, sandbox, skills, &agent_settings, Some(workspace), nudge_interval)
+    crate::agent::Agent::new(
+        client,
+        sandbox,
+        skills,
+        &agent_settings,
+        Some(workspace),
+        nudge_interval,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -268,10 +273,10 @@ pub fn parse_model_command(
     }
 
     // Case 2: not a provider — try as a model in the current provider.
-    if let Some(pc) = providers.get(current_provider) {
-        if pc.models.iter().any(|m| m == args) {
-            return Ok((current_provider.to_string(), Some(args.to_string())));
-        }
+    if let Some(pc) = providers.get(current_provider)
+        && pc.models.iter().any(|m| m == args)
+    {
+        return Ok((current_provider.to_string(), Some(args.to_string())));
     }
 
     Err(format!("unknown provider or model '{first}'"))
@@ -281,8 +286,7 @@ pub fn parse_model_command(
 /// agent config (provider type + model).  Returns `None` if no match.
 pub fn active_provider_name(settings: &Settings) -> Option<String> {
     settings.providers.iter().find_map(|(name, pc)| {
-        if pc.provider_type == settings.agent.provider
-            && pc.models.contains(&settings.agent.model)
+        if pc.provider_type == settings.agent.provider && pc.models.contains(&settings.agent.model)
         {
             Some(name.clone())
         } else {

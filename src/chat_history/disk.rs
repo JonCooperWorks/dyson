@@ -145,12 +145,12 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
 
     for msg in messages {
         for block in &msg.content {
-            if let ContentBlock::Image { data, .. } = block {
-                if !data.starts_with(MEDIA_REF_PREFIX) {
-                    needs_externalization = true;
-                    let hash = simple_hash(data);
-                    to_write.entry(hash).or_insert_with(|| data.clone());
-                }
+            if let ContentBlock::Image { data, .. } = block
+                && !data.starts_with(MEDIA_REF_PREFIX)
+            {
+                needs_externalization = true;
+                let hash = simple_hash(data);
+                to_write.entry(hash).or_insert_with(|| data.clone());
             }
         }
     }
@@ -176,7 +176,9 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
                 .content
                 .iter()
                 .map(|block| match block {
-                    ContentBlock::Image { data, media_type } if !data.starts_with(MEDIA_REF_PREFIX) => {
+                    ContentBlock::Image { data, media_type }
+                        if !data.starts_with(MEDIA_REF_PREFIX) =>
+                    {
                         let hash = simple_hash(data);
                         ContentBlock::Image {
                             data: format!("{MEDIA_REF_PREFIX}{hash}"),
@@ -206,23 +208,23 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
 ///
 /// Scans for Image blocks where `data` starts with `@media/`, reads the
 /// referenced file, and restores the full base64 data.
-fn restore_images(messages: &mut [Message], media_dir: &PathBuf) {
+fn restore_images(messages: &mut [Message], media_dir: &std::path::Path) {
     for msg in messages.iter_mut() {
         for block in msg.content.iter_mut() {
-            if let ContentBlock::Image { data, .. } = block {
-                if let Some(hash) = data.strip_prefix(MEDIA_REF_PREFIX) {
-                    let file_path = media_dir.join(format!("{hash}.b64"));
-                    match std::fs::read_to_string(&file_path) {
-                        Ok(content) => {
-                            *data = content;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                hash = hash,
-                                error = %e,
-                                "failed to restore externalized image — keeping reference"
-                            );
-                        }
+            if let ContentBlock::Image { data, .. } = block
+                && let Some(hash) = data.strip_prefix(MEDIA_REF_PREFIX)
+            {
+                let file_path = media_dir.join(format!("{hash}.b64"));
+                match std::fs::read_to_string(&file_path) {
+                    Ok(content) => {
+                        *data = content;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            hash = hash,
+                            error = %e,
+                            "failed to restore externalized image — keeping reference"
+                        );
                     }
                 }
             }
@@ -255,8 +257,8 @@ mod tests {
     use crate::message::Message;
 
     fn temp_store(name: &str) -> (PathBuf, DiskChatHistory) {
-        let dir = std::env::temp_dir()
-            .join(format!("dyson_chat_test_{}_{}", name, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("dyson_chat_test_{}_{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = DiskChatHistory::new(dir.clone()).unwrap();
         (dir, store)
@@ -294,7 +296,9 @@ mod tests {
     fn rotate_preserves_old_and_clears_current() {
         let (dir, store) = temp_store("rotate");
 
-        store.save("chat_1", &[Message::user("old message")]).unwrap();
+        store
+            .save("chat_1", &[Message::user("old message")])
+            .unwrap();
         assert!(!store.load("chat_1").unwrap().is_empty());
 
         store.rotate("chat_1").unwrap();
@@ -306,11 +310,7 @@ mod tests {
         let files: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("chat_1.")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with("chat_1."))
             .collect();
         assert_eq!(files.len(), 1);
 
@@ -335,7 +335,9 @@ mod tests {
 
         let messages = vec![
             Message::user_multimodal(vec![
-                ContentBlock::Text { text: "What's this?".into() },
+                ContentBlock::Text {
+                    text: "What's this?".into(),
+                },
                 ContentBlock::Image {
                     data: "aGVsbG8gd29ybGQ=".into(), // "hello world" in base64
                     media_type: "image/jpeg".into(),
@@ -350,7 +352,10 @@ mod tests {
 
         // The JSON file should NOT contain the raw base64 data.
         let json = std::fs::read_to_string(dir.join("img_chat.json")).unwrap();
-        assert!(!json.contains("aGVsbG8gd29ybGQ="), "base64 should be externalized");
+        assert!(
+            !json.contains("aGVsbG8gd29ybGQ="),
+            "base64 should be externalized"
+        );
         assert!(json.contains("@media/"), "should contain media reference");
 
         // Media directory should exist with a .b64 file.
@@ -395,11 +400,7 @@ mod tests {
         let files: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("chat_1")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with("chat_1"))
             .collect();
         assert_eq!(files.len(), 2);
 

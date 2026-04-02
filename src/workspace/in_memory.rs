@@ -146,8 +146,7 @@ mod tests {
 
     #[test]
     fn basic_operations() {
-        let mut ws = InMemoryWorkspace::new()
-            .with_file("SOUL.md", "Be helpful.");
+        let mut ws = InMemoryWorkspace::new().with_file("SOUL.md", "Be helpful.");
 
         assert_eq!(ws.get("SOUL.md").unwrap(), "Be helpful.");
         assert!(ws.get("nonexistent").is_none());
@@ -177,8 +176,10 @@ mod tests {
 
     #[test]
     fn search_supports_regex() {
-        let ws = InMemoryWorkspace::new()
-            .with_file("MEMORY.md", "learned Rust in 2026\nlearned Go in 2025\nforgot Java");
+        let ws = InMemoryWorkspace::new().with_file(
+            "MEMORY.md",
+            "learned Rust in 2026\nlearned Go in 2025\nforgot Java",
+        );
 
         let results = ws.search(r"learned\s+\w+\s+in\s+\d{4}");
         assert_eq!(results.len(), 1);
@@ -187,8 +188,8 @@ mod tests {
 
     #[test]
     fn search_falls_back_on_invalid_regex() {
-        let ws = InMemoryWorkspace::new()
-            .with_file("MEMORY.md", "open bracket [ here\nno bracket here");
+        let ws =
+            InMemoryWorkspace::new().with_file("MEMORY.md", "open bracket [ here\nno bracket here");
 
         let results = ws.search("[");
         assert_eq!(results.len(), 1);
@@ -215,8 +216,7 @@ mod tests {
 
     #[test]
     fn system_prompt_includes_user_profile() {
-        let ws = InMemoryWorkspace::new()
-            .with_file("USER.md", "User likes Rust.");
+        let ws = InMemoryWorkspace::new().with_file("USER.md", "User likes Rust.");
 
         let prompt = ws.system_prompt();
         assert!(prompt.contains("USER PROFILE"));

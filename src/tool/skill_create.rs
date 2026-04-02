@@ -88,13 +88,22 @@ impl Tool for SkillCreateTool {
     }
 
     async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
-        let ws = ctx.workspace.as_ref().ok_or_else(|| {
-            DysonError::tool("skill_create", "no workspace configured")
-        })?;
+        let ws = ctx
+            .workspace
+            .as_ref()
+            .ok_or_else(|| DysonError::tool("skill_create", "no workspace configured"))?;
 
         let name = input["name"].as_str().unwrap_or("").trim().to_string();
-        let description = input["description"].as_str().unwrap_or("").trim().to_string();
-        let instructions = input["instructions"].as_str().unwrap_or("").trim().to_string();
+        let description = input["description"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let instructions = input["instructions"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let mode = input["mode"].as_str().unwrap_or("create");
 
         // Validate inputs.
@@ -133,9 +142,7 @@ impl Tool for SkillCreateTool {
                 ws.save()?;
 
                 // Journal the creation for memory.
-                ws.journal(&format!(
-                    "Created new skill '{name}': {description}"
-                ));
+                ws.journal(&format!("Created new skill '{name}': {description}"));
                 ws.save()?;
 
                 Ok(ToolOutput::success(format!(
@@ -145,13 +152,15 @@ impl Tool for SkillCreateTool {
             }
             "update" => {
                 let content = format_skill_md(&name, &description, &instructions);
-                let verb = if existing.is_some() { "Updated" } else { "Created" };
+                let verb = if existing.is_some() {
+                    "Updated"
+                } else {
+                    "Created"
+                };
                 ws.set(&file_key, &content);
                 ws.save()?;
 
-                ws.journal(&format!(
-                    "{verb} skill '{name}': {description}"
-                ));
+                ws.journal(&format!("{verb} skill '{name}': {description}"));
                 ws.save()?;
 
                 Ok(ToolOutput::success(format!(
@@ -171,18 +180,12 @@ impl Tool for SkillCreateTool {
 
                 // Parse existing skill to preserve structure, then append
                 // improvement notes to the body.
-                let improved = append_improvements(
-                    &existing_content,
-                    &description,
-                    &instructions,
-                );
+                let improved = append_improvements(&existing_content, &description, &instructions);
 
                 ws.set(&file_key, &improved);
                 ws.save()?;
 
-                ws.journal(&format!(
-                    "Improved skill '{name}': {description}"
-                ));
+                ws.journal(&format!("Improved skill '{name}': {description}"));
                 ws.save()?;
 
                 Ok(ToolOutput::success(format!(
@@ -209,20 +212,14 @@ fn is_valid_skill_name(name: &str) -> bool {
 
 /// Format a complete SKILL.md file.
 fn format_skill_md(name: &str, description: &str, instructions: &str) -> String {
-    format!(
-        "---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n"
-    )
+    format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n")
 }
 
 /// Append improvement notes to an existing SKILL.md.
 ///
 /// Preserves the frontmatter structure but updates the description
 /// and appends new instructions to the body.
-fn append_improvements(
-    existing: &str,
-    new_description: &str,
-    new_instructions: &str,
-) -> String {
+fn append_improvements(existing: &str, new_description: &str, new_instructions: &str) -> String {
     // Try to parse the existing structure.
     let trimmed = existing.trim_start();
     if !trimmed.starts_with("---") {
@@ -255,9 +252,7 @@ fn append_improvements(
             new_frontmatter.push_str(&format!("description: {new_description}\n"));
         }
 
-        format!(
-            "---\n{new_frontmatter}---\n\n{body}\n\n## Improvements\n\n{new_instructions}\n"
-        )
+        format!("---\n{new_frontmatter}---\n\n{body}\n\n## Improvements\n\n{new_instructions}\n")
     } else {
         // Malformed — just append.
         format!("{existing}\n\n## Improvements\n\n{new_instructions}\n")
@@ -299,11 +294,11 @@ mod tests {
     fn invalid_skill_names() {
         assert!(!is_valid_skill_name(""));
         assert!(!is_valid_skill_name("Code-Review")); // uppercase
-        assert!(!is_valid_skill_name("my skill"));     // space
-        assert!(!is_valid_skill_name("-leading"));      // leading hyphen
-        assert!(!is_valid_skill_name("trailing-"));     // trailing hyphen
-        assert!(!is_valid_skill_name("my_skill"));      // underscore
-        assert!(!is_valid_skill_name("../escape"));     // path traversal
+        assert!(!is_valid_skill_name("my skill")); // space
+        assert!(!is_valid_skill_name("-leading")); // leading hyphen
+        assert!(!is_valid_skill_name("trailing-")); // trailing hyphen
+        assert!(!is_valid_skill_name("my_skill")); // underscore
+        assert!(!is_valid_skill_name("../escape")); // path traversal
     }
 
     #[test]
@@ -372,8 +367,10 @@ mod tests {
 
     #[tokio::test]
     async fn create_duplicate_fails() {
-        let ws = InMemoryWorkspace::new()
-            .with_file("skills/existing/SKILL.md", "---\nname: existing\ndescription: x\n---\n\nBody.");
+        let ws = InMemoryWorkspace::new().with_file(
+            "skills/existing/SKILL.md",
+            "---\nname: existing\ndescription: x\n---\n\nBody.",
+        );
         let ctx = make_ctx(ws);
         let tool = SkillCreateTool;
 
@@ -395,8 +392,10 @@ mod tests {
 
     #[tokio::test]
     async fn update_overwrites() {
-        let ws = InMemoryWorkspace::new()
-            .with_file("skills/deploy/SKILL.md", "---\nname: deploy\ndescription: old\n---\n\nOld.");
+        let ws = InMemoryWorkspace::new().with_file(
+            "skills/deploy/SKILL.md",
+            "---\nname: deploy\ndescription: old\n---\n\nOld.",
+        );
         let ctx = make_ctx(ws);
         let tool = SkillCreateTool;
 
@@ -425,11 +424,10 @@ mod tests {
 
     #[tokio::test]
     async fn improve_appends() {
-        let ws = InMemoryWorkspace::new()
-            .with_file(
-                "skills/review/SKILL.md",
-                "---\nname: review\ndescription: Reviews code\n---\n\nOriginal approach.",
-            );
+        let ws = InMemoryWorkspace::new().with_file(
+            "skills/review/SKILL.md",
+            "---\nname: review\ndescription: Reviews code\n---\n\nOriginal approach.",
+        );
         let ctx = make_ctx(ws);
         let tool = SkillCreateTool;
 

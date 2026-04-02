@@ -65,10 +65,7 @@ impl Auth for BearerTokenAuth {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::RequestBuilder> {
-        Ok(request.header(
-            "Authorization",
-            format!("Bearer {}", self.token.expose()),
-        ))
+        Ok(request.header("Authorization", format!("Bearer {}", self.token.expose())))
     }
 
     async fn validate_request(&self, headers: &hyper::HeaderMap) -> Result<AuthInfo> {

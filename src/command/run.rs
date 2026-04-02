@@ -36,7 +36,13 @@ pub async fn run(
     });
 
     let mut settings = dyson::config::loader::load_settings(config_path.as_deref())?;
-    super::apply_overrides(&mut settings, dangerous_no_sandbox, provider, base_url, workspace)?;
+    super::apply_overrides(
+        &mut settings,
+        dangerous_no_sandbox,
+        provider,
+        base_url,
+        workspace,
+    )?;
 
     let workspace = dyson::workspace::create_workspace(&settings.workspace)?;
     let mut agent_settings = settings.agent.clone();
@@ -55,10 +61,7 @@ pub async fn run(
         Some(std::sync::Arc::clone(&workspace)),
         settings.dangerous_no_sandbox,
     );
-    let sandbox = dyson::sandbox::create_sandbox(
-        &settings.sandbox,
-        settings.dangerous_no_sandbox,
-    );
+    let sandbox = dyson::sandbox::create_sandbox(&settings.sandbox, settings.dangerous_no_sandbox);
     let skills = {
         let ws = workspace.read().await;
         dyson::skill::create_skills(
@@ -66,13 +69,21 @@ pub async fn run(
             Some(&**ws),
             std::sync::Arc::clone(&sandbox),
             Some(std::sync::Arc::clone(&workspace)),
-        ).await
+        )
+        .await
     };
     let nudge_interval = {
         let ws = workspace.read().await;
         ws.nudge_interval()
     };
-    let mut agent = dyson::agent::Agent::new(client, sandbox, skills, &agent_settings, Some(workspace), nudge_interval)?;
+    let mut agent = dyson::agent::Agent::new(
+        client,
+        sandbox,
+        skills,
+        &agent_settings,
+        Some(workspace),
+        nudge_interval,
+    )?;
     let mut output = dyson::controller::terminal::TerminalOutput::new();
     agent.run(&prompt, &mut output).await?;
     println!();

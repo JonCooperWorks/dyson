@@ -34,14 +34,16 @@ pub fn run(
     env_vars: Vec<String>,
     dangerous_no_sandbox: bool,
 ) -> dyson::error::Result<()> {
-    let home = std::env::var("HOME")
-        .map_err(|_| dyson::error::DysonError::Config("HOME environment variable not set".into()))?;
+    let home = std::env::var("HOME").map_err(|_| {
+        dyson::error::DysonError::Config("HOME environment variable not set".into())
+    })?;
     let base = path.unwrap_or_else(|| PathBuf::from(&home).join(".dyson"));
 
     if !noinput {
         return Err(dyson::error::DysonError::Config(
             "interactive init not yet implemented.  Use --noinput for defaults.\n\
-             Usage: dyson init --noinput".into()
+             Usage: dyson init --noinput"
+                .into(),
         ));
     }
 
@@ -97,7 +99,10 @@ pub fn run(
 
     // Load workspace — runs migrations (v0 → current), then creates
     // default files for anything missing (USER.md, HEARTBEAT.md, etc.).
-    let _ = dyson::workspace::OpenClawWorkspace::load(&workspace_dir, dyson::config::MemoryConfig::default())?;
+    let _ = dyson::workspace::OpenClawWorkspace::load(
+        &workspace_dir,
+        dyson::config::MemoryConfig::default(),
+    )?;
     eprintln!("  workspace ready at {}", workspace_dir.display());
 
     // Install binary to PATH.
@@ -136,11 +141,15 @@ fn is_openclaw_workspace(path: &Path) -> bool {
 fn import_openclaw_workspace(source: &Path, dest: &Path) -> dyson::error::Result<()> {
     if !source.exists() {
         return Err(dyson::error::DysonError::Config(format!(
-            "OpenClaw workspace not found: {}", source.display()
+            "OpenClaw workspace not found: {}",
+            source.display()
         )));
     }
 
-    eprintln!("  importing OpenClaw workspace from {}...", source.display());
+    eprintln!(
+        "  importing OpenClaw workspace from {}...",
+        source.display()
+    );
 
     let mut count = 0;
 
@@ -223,7 +232,11 @@ fn install_to_path(base: &Path) -> dyson::error::Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::symlink(&installed_bin, &symlink_path)?;
 
-    eprintln!("  symlinked {} -> {}", symlink_path.display(), installed_bin.display());
+    eprintln!(
+        "  symlinked {} -> {}",
+        symlink_path.display(),
+        installed_bin.display()
+    );
 
     // Check if ~/.local/bin is actually on PATH.
     let path_var = std::env::var("PATH").unwrap_or_default();
@@ -247,7 +260,12 @@ fn install_to_path(base: &Path) -> dyson::error::Result<()> {
 /// Falls back to /etc/systemd/system/dyson.service with sudo if
 /// user services aren't available.
 #[allow(unused_variables)]
-fn install_systemd_service(base: &Path, config_path: &Path, env_vars: &[String], dangerous_no_sandbox: bool) -> dyson::error::Result<()> {
+fn install_systemd_service(
+    base: &Path,
+    config_path: &Path,
+    env_vars: &[String],
+    dangerous_no_sandbox: bool,
+) -> dyson::error::Result<()> {
     #[cfg(not(target_os = "linux"))]
     {
         eprintln!("--daemonize is only supported on Linux (systemd).");
@@ -310,8 +328,7 @@ fn install_systemd_service(base: &Path, config_path: &Path, env_vars: &[String],
         );
 
         // Try user service first (no sudo needed).
-        let user_service_dir = PathBuf::from(&home)
-            .join(".config/systemd/user");
+        let user_service_dir = PathBuf::from(&home).join(".config/systemd/user");
         let user_service_path = user_service_dir.join("dyson.service");
 
         eprintln!("installing systemd service...");

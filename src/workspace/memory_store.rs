@@ -36,7 +36,10 @@ impl MemoryStore {
     /// Open (or create) the FTS5 database at the given path.
     pub fn open(path: &Path) -> Result<Self> {
         let conn = rusqlite::Connection::open(path).map_err(|e| {
-            DysonError::Config(format!("cannot open memory store at {}: {e}", path.display()))
+            DysonError::Config(format!(
+                "cannot open memory store at {}: {e}",
+                path.display()
+            ))
         })?;
 
         conn.execute_batch(
@@ -44,7 +47,9 @@ impl MemoryStore {
         )
         .map_err(|e| DysonError::Config(format!("cannot create FTS5 table: {e}")))?;
 
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Open an in-memory database (for testing).
@@ -57,7 +62,9 @@ impl MemoryStore {
         )
         .map_err(|e| DysonError::Config(format!("cannot create FTS5 table: {e}")))?;
 
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Insert or update a file in the FTS5 index.
@@ -129,8 +136,14 @@ mod tests {
     #[test]
     fn index_and_search() {
         let store = MemoryStore::open_in_memory().unwrap();
-        store.index("memory/notes/rust.md", "Rust is a systems programming language focused on safety.");
-        store.index("memory/notes/go.md", "Go is a statically typed language designed at Google.");
+        store.index(
+            "memory/notes/rust.md",
+            "Rust is a systems programming language focused on safety.",
+        );
+        store.index(
+            "memory/notes/go.md",
+            "Go is a statically typed language designed at Google.",
+        );
 
         let results = store.search("rust safety");
         assert_eq!(results.len(), 1);

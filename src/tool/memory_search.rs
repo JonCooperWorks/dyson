@@ -40,14 +40,12 @@ impl Tool for MemorySearchTool {
     }
 
     async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
-        let ws = ctx.workspace.as_ref().ok_or_else(|| {
-            DysonError::tool("memory_search", "no workspace configured")
-        })?;
+        let ws = ctx
+            .workspace
+            .as_ref()
+            .ok_or_else(|| DysonError::tool("memory_search", "no workspace configured"))?;
 
-        let query = input["query"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let query = input["query"].as_str().unwrap_or("").to_string();
 
         if query.is_empty() {
             return Ok(ToolOutput::error("query is required"));

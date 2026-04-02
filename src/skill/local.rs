@@ -195,8 +195,10 @@ impl SkillListSkill {
             for (name, desc) in skills {
                 lines.push_str(&format!("- {name}: {desc}\n"));
             }
-            lines.push_str("</available_skills>\n\n\
-                Use the load_skill tool to load a skill's full instructions before applying it.");
+            lines.push_str(
+                "</available_skills>\n\n\
+                Use the load_skill tool to load a skill's full instructions before applying it.",
+            );
             lines
         };
         Self { prompt }
@@ -293,7 +295,10 @@ name: empty-body
 ---
 ";
         let err = LocalSkill::parse(content, &test_path()).unwrap_err();
-        assert!(err.to_string().contains("body (system prompt) must not be empty"));
+        assert!(
+            err.to_string()
+                .contains("body (system prompt) must not be empty")
+        );
     }
 
     #[test]
@@ -313,10 +318,7 @@ Do something.
 
     #[test]
     fn from_dir_loads_skill() {
-        let dir = std::env::temp_dir().join(format!(
-            "dyson-skill-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("dyson-skill-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("SKILL.md"),

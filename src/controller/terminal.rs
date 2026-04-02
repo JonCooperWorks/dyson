@@ -59,8 +59,8 @@ impl super::Controller for TerminalController {
         let mut output = TerminalOutput::new();
 
         // Track the active provider and model for within-provider switching.
-        let mut current_provider = super::active_provider_name(&current_settings)
-            .unwrap_or_default();
+        let mut current_provider =
+            super::active_provider_name(&current_settings).unwrap_or_default();
         let mut current_model = current_settings.agent.model.clone();
 
         // Hot reload: watch config file + workspace files.
@@ -73,19 +73,16 @@ impl super::Controller for TerminalController {
                 if p.exists() { Some(p) } else { None }
             });
 
-        let workspace_path = crate::workspace::OpenClawWorkspace::resolve_path(
-            Some(settings.workspace.connection_string.expose()),
-        );
+        let workspace_path = crate::workspace::OpenClawWorkspace::resolve_path(Some(
+            settings.workspace.connection_string.expose(),
+        ));
 
         let mut reloader = crate::config::hot_reload::HotReloader::new(
             config_path.as_deref(),
             workspace_path.as_deref(),
         );
 
-        eprintln!(
-            "Dyson v{} — type /exit to quit",
-            env!("CARGO_PKG_VERSION")
-        );
+        eprintln!("Dyson v{} — type /exit to quit", env!("CARGO_PKG_VERSION"));
         eprintln!();
 
         loop {
@@ -100,8 +97,8 @@ impl super::Controller for TerminalController {
                     match super::build_agent(&current_settings, None).await {
                         Ok(a) => {
                             agent = a;
-                            current_provider = super::active_provider_name(&current_settings)
-                                .unwrap_or_default();
+                            current_provider =
+                                super::active_provider_name(&current_settings).unwrap_or_default();
                             current_model = current_settings.agent.model.clone();
                         }
                         Err(e) => eprintln!("[reload error: {e}]"),
@@ -149,11 +146,14 @@ impl super::Controller for TerminalController {
                 if current_settings.providers.is_empty() {
                     eprintln!("No providers configured.");
                 } else {
-                    eprint!("{}", super::format_provider_list(
-                        &current_settings,
-                        &current_provider,
-                        &current_model,
-                    ));
+                    eprint!(
+                        "{}",
+                        super::format_provider_list(
+                            &current_settings,
+                            &current_provider,
+                            &current_model,
+                        )
+                    );
                 }
                 continue;
             }
@@ -187,13 +187,12 @@ impl super::Controller for TerminalController {
                     Ok(new_agent) => {
                         agent = new_agent;
                         let pc = &current_settings.providers[&target_provider];
-                        let resolved = target_model.as_deref()
+                        let resolved = target_model
+                            .as_deref()
                             .unwrap_or_else(|| pc.default_model());
                         eprintln!(
                             "[switched to '{}' — {:?} ({})]",
-                            target_provider,
-                            pc.provider_type,
-                            resolved,
+                            target_provider, pc.provider_type, resolved,
                         );
                         current_model = resolved.to_string();
                         current_provider = target_provider;

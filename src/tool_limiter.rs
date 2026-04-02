@@ -91,10 +91,7 @@ impl ToolLimiter {
             if elapsed < self.cooldown {
                 return Err(DysonError::Tool {
                     tool: tool_name.to_string(),
-                    message: format!(
-                        "cooldown not elapsed ({:?} < {:?})",
-                        elapsed, self.cooldown
-                    ),
+                    message: format!("cooldown not elapsed ({:?} < {:?})", elapsed, self.cooldown),
                 });
             }
         }

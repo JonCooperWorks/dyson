@@ -37,9 +37,10 @@ impl Tool for WorkspaceViewTool {
     }
 
     async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
-        let ws = ctx.workspace.as_ref().ok_or_else(|| {
-            DysonError::tool("workspace_view", "no workspace configured")
-        })?;
+        let ws = ctx
+            .workspace
+            .as_ref()
+            .ok_or_else(|| DysonError::tool("workspace_view", "no workspace configured"))?;
 
         let ws = ws.read().await;
 
@@ -54,7 +55,11 @@ impl Tool for WorkspaceViewTool {
                         let files = ws.list_files();
                         Ok(ToolOutput::error(format!(
                             "File not found: '{file}'\n\nAvailable files:\n{}",
-                            files.iter().map(|f| format!("  - {f}")).collect::<Vec<_>>().join("\n")
+                            files
+                                .iter()
+                                .map(|f| format!("  - {f}"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
                         )))
                     }
                 }
@@ -65,7 +70,11 @@ impl Tool for WorkspaceViewTool {
                     Ok(ToolOutput::success("Workspace is empty."))
                 } else {
                     Ok(ToolOutput::success(
-                        files.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n")
+                        files
+                            .iter()
+                            .map(|f| format!("- {f}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
                     ))
                 }
             }

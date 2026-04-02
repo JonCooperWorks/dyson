@@ -96,8 +96,12 @@ impl ResultFormatter {
 
         match call.name.as_str() {
             "bash" => self.format_bash(call, output, duration, truncated, full_output_available),
-            "file_read" => self.format_file_read(call, output, duration, truncated, full_output_available),
-            "file_write" => self.format_file_write(call, output, duration, truncated, full_output_available),
+            "file_read" => {
+                self.format_file_read(call, output, duration, truncated, full_output_available)
+            }
+            "file_write" => {
+                self.format_file_write(call, output, duration, truncated, full_output_available)
+            }
             _ => self.format_generic(call, output, duration, truncated, full_output_available),
         }
     }
@@ -111,13 +115,14 @@ impl ResultFormatter {
         full_output_available: bool,
     ) -> FormattedResult {
         let ms = duration.as_millis();
-        let command = call.input.get("command")
+        let command = call
+            .input
+            .get("command")
             .and_then(|v| v.as_str())
             .unwrap_or("<unknown>");
 
         let exit_code = if output.is_error {
-            if output.content.contains("command not found")
-                || output.content.contains("not found")
+            if output.content.contains("command not found") || output.content.contains("not found")
             {
                 Some(127)
             } else {
@@ -127,7 +132,11 @@ impl ResultFormatter {
             Some(0)
         };
 
-        let status = if output.is_error { "failed" } else { "completed" };
+        let status = if output.is_error {
+            "failed"
+        } else {
+            "completed"
+        };
         let summary = format!(
             "bash: `{}` {} in {}ms (exit {})",
             truncate_str(command, 80),
@@ -157,16 +166,15 @@ impl ResultFormatter {
         truncated: bool,
         full_output_available: bool,
     ) -> FormattedResult {
-        let path = call.input.get("path")
+        let path = call
+            .input
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or("<unknown>");
         let len = output.content.len();
         let ms = duration.as_millis();
 
-        let summary = format!(
-            "file_read: {} ({} bytes, {}ms)",
-            path, len, ms,
-        );
+        let summary = format!("file_read: {} ({} bytes, {}ms)", path, len, ms,);
 
         FormattedResult {
             summary,
@@ -186,15 +194,14 @@ impl ResultFormatter {
         truncated: bool,
         full_output_available: bool,
     ) -> FormattedResult {
-        let path = call.input.get("path")
+        let path = call
+            .input
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or("<unknown>");
         let ms = duration.as_millis();
 
-        let summary = format!(
-            "file_write: {} — {} ({}ms)",
-            path, output.content, ms,
-        );
+        let summary = format!("file_write: {} — {} ({}ms)", path, output.content, ms,);
 
         FormattedResult {
             summary,
@@ -217,10 +224,7 @@ impl ResultFormatter {
         let ms = duration.as_millis();
         let status = if output.is_error { "error" } else { "ok" };
 
-        let summary = format!(
-            "{}: {} ({}ms)",
-            call.name, status, ms,
-        );
+        let summary = format!("{}: {} ({}ms)", call.name, status, ms,);
 
         let key_lines = extract_key_lines(&output.content);
 
@@ -252,8 +256,16 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 /// errors, warnings, or other important markers.
 fn extract_key_lines(content: &str) -> Vec<String> {
     let markers = [
-        "Compiling", "Finished", "error", "warning", "Error", "Warning",
-        "FAILED", "PASSED", "panic", "thread '",
+        "Compiling",
+        "Finished",
+        "error",
+        "warning",
+        "Error",
+        "Warning",
+        "FAILED",
+        "PASSED",
+        "panic",
+        "thread '",
     ];
 
     content

@@ -75,12 +75,10 @@ impl OpenClawWorkspace {
                 path.display()
             ))
         })?;
-        std::fs::create_dir_all(path.join("memory")).map_err(|e| {
-            DysonError::Config(format!("cannot create memory dir: {e}"))
-        })?;
-        std::fs::create_dir_all(path.join("skills")).map_err(|e| {
-            DysonError::Config(format!("cannot create skills dir: {e}"))
-        })?;
+        std::fs::create_dir_all(path.join("memory"))
+            .map_err(|e| DysonError::Config(format!("cannot create memory dir: {e}")))?;
+        std::fs::create_dir_all(path.join("skills"))
+            .map_err(|e| DysonError::Config(format!("cannot create skills dir: {e}")))?;
 
         // Run workspace migrations before reading files.
         let migrated = crate::workspace::migrate::migrate(path)?;
@@ -91,9 +89,9 @@ impl OpenClawWorkspace {
         let mut files = HashMap::new();
 
         // Read top-level .md files.
-        for entry in std::fs::read_dir(path).map_err(|e| {
-            DysonError::Config(format!("cannot read workspace dir: {e}"))
-        })? {
+        for entry in std::fs::read_dir(path)
+            .map_err(|e| DysonError::Config(format!("cannot read workspace dir: {e}")))?
+        {
             let entry = entry.map_err(DysonError::Io)?;
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".md") && entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
@@ -158,7 +156,10 @@ impl OpenClawWorkspace {
     }
 
     /// Load from a connection string (path with ~ expansion).
-    pub fn load_from_connection_string(connection_string: &str, memory_config: MemoryConfig) -> Result<Self> {
+    pub fn load_from_connection_string(
+        connection_string: &str,
+        memory_config: MemoryConfig,
+    ) -> Result<Self> {
         let path = resolve_tilde(connection_string);
         Self::load(&path, memory_config)
     }
@@ -317,10 +318,7 @@ impl Workspace for OpenClawWorkspace {
             std::fs::write(&file_path, content)?;
         }
 
-        tracing::debug!(
-            files = self.files.len(),
-            "workspace saved"
-        );
+        tracing::debug!(files = self.files.len(), "workspace saved");
 
         Ok(())
     }
@@ -509,10 +507,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "dyson-test-{}-{id}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("dyson-test-{}-{id}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let ws = OpenClawWorkspace::load(&dir, MemoryConfig::default()).unwrap();
         (dir, ws)
@@ -601,7 +596,10 @@ mod tests {
     #[test]
     fn search_finds_matches() {
         let (dir, mut ws) = temp_workspace();
-        ws.set("MEMORY.md", "# Memory\n\nI learned about Rust.\nRust is great.");
+        ws.set(
+            "MEMORY.md",
+            "# Memory\n\nI learned about Rust.\nRust is great.",
+        );
         let results = ws.search("rust");
         assert!(!results.is_empty());
         let (name, lines) = &results.iter().find(|(n, _)| n == "MEMORY.md").unwrap();
@@ -613,7 +611,10 @@ mod tests {
     #[test]
     fn search_supports_regex() {
         let (dir, mut ws) = temp_workspace();
-        ws.set("MEMORY.md", "learned Rust in 2026\nlearned Go in 2025\nforgot Java");
+        ws.set(
+            "MEMORY.md",
+            "learned Rust in 2026\nlearned Go in 2025\nforgot Java",
+        );
         // Regex: lines containing "learned" followed by a year
         let results = ws.search(r"learned\s+\w+\s+in\s+\d{4}");
         let (_, lines) = results.iter().find(|(n, _)| n == "MEMORY.md").unwrap();
@@ -670,7 +671,10 @@ mod tests {
     #[test]
     fn memory_search_via_fts5() {
         let (dir, mut ws) = temp_workspace();
-        ws.set("memory/notes/rust.md", "Rust is a systems programming language.");
+        ws.set(
+            "memory/notes/rust.md",
+            "Rust is a systems programming language.",
+        );
         ws.save().unwrap();
 
         let results = ws.memory_search("rust programming");
@@ -714,14 +718,16 @@ mod tests {
         std::fs::write(
             cr.join("SKILL.md"),
             "---\nname: code-review\n---\n\nReview code.",
-        ).unwrap();
+        )
+        .unwrap();
 
         let wr = skills_dir.join("writing");
         std::fs::create_dir_all(&wr).unwrap();
         std::fs::write(
             wr.join("SKILL.md"),
             "---\nname: writing\n---\n\nWrite well.",
-        ).unwrap();
+        )
+        .unwrap();
 
         // A directory without SKILL.md should be ignored
         let orphan = skills_dir.join("orphan");
@@ -753,7 +759,8 @@ mod tests {
         std::fs::write(
             proper.join("SKILL.md"),
             "---\nname: proper\n---\n\nProper skill.",
-        ).unwrap();
+        )
+        .unwrap();
 
         let dirs = ws.skill_dirs();
         assert_eq!(dirs.len(), 1, "should only find directory-based skills");

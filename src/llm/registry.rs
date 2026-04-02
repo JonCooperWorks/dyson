@@ -181,9 +181,7 @@ pub fn registry() -> &'static [ProviderEntry] {
                 default_model: "claude-sonnet-4-20250514",
                 env_var: Some("ANTHROPIC_API_KEY"),
                 requires_api_key: true,
-                create_client: |c| {
-                    Box::new(anthropic::AnthropicClient::new(c.api_key, c.base_url))
-                },
+                create_client: |c| Box::new(anthropic::AnthropicClient::new(c.api_key, c.base_url)),
             },
             ProviderEntry {
                 provider: LlmProvider::OpenAi,
@@ -192,9 +190,7 @@ pub fn registry() -> &'static [ProviderEntry] {
                 default_model: "gpt-4o",
                 env_var: Some("OPENAI_API_KEY"),
                 requires_api_key: true,
-                create_client: |c| {
-                    Box::new(openai::OpenAiClient::new(c.api_key, c.base_url))
-                },
+                create_client: |c| Box::new(openai::OpenAiClient::new(c.api_key, c.base_url)),
             },
             ProviderEntry {
                 provider: LlmProvider::OpenRouter,

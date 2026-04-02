@@ -284,10 +284,8 @@ fn parse_path_access(config: &ToolPolicyPathConfig, working_dir: &Path) -> PathA
             _ => PathAccess::Deny,
         },
         ToolPolicyPathConfig::RestrictTo(paths) => {
-            let resolved: Vec<PathBuf> = paths
-                .iter()
-                .map(|p| expand_path(p, working_dir))
-                .collect();
+            let resolved: Vec<PathBuf> =
+                paths.iter().map(|p| expand_path(p, working_dir)).collect();
             PathAccess::RestrictTo(resolved)
         }
     }
@@ -453,10 +451,7 @@ mod tests {
 
     #[test]
     fn path_access_restrict_to_multiple_prefixes() {
-        let pa = PathAccess::RestrictTo(vec![
-            PathBuf::from("/workspace"),
-            PathBuf::from("/tmp"),
-        ]);
+        let pa = PathAccess::RestrictTo(vec![PathBuf::from("/workspace"), PathBuf::from("/tmp")]);
         assert!(pa.allows_path(Path::new("/workspace/file.txt")));
         assert!(pa.allows_path(Path::new("/tmp/scratch")));
         assert!(!pa.allows_path(Path::new("/etc/shadow")));
@@ -541,10 +536,23 @@ mod tests {
 
     #[test]
     fn workspace_tools_always_allowed() {
-        for name in &["workspace_view", "workspace_search", "workspace_update", "memory_search"] {
+        for name in &[
+            "workspace_view",
+            "workspace_search",
+            "workspace_update",
+            "memory_search",
+        ] {
             let p = default_policy(name, &wd());
-            assert_eq!(p.file_read, PathAccess::Allow, "{name} should allow file_read");
-            assert_eq!(p.file_write, PathAccess::Allow, "{name} should allow file_write");
+            assert_eq!(
+                p.file_read,
+                PathAccess::Allow,
+                "{name} should allow file_read"
+            );
+            assert_eq!(
+                p.file_write,
+                PathAccess::Allow,
+                "{name} should allow file_write"
+            );
         }
     }
 
@@ -585,9 +593,7 @@ mod tests {
     #[test]
     fn resolve_overrides_file_write_restrict_to() {
         let config = ToolPolicyConfig {
-            file_write: Some(ToolPolicyPathConfig::RestrictTo(vec![
-                "/tmp/custom".into(),
-            ])),
+            file_write: Some(ToolPolicyPathConfig::RestrictTo(vec!["/tmp/custom".into()])),
             ..Default::default()
         };
         let p = resolve_policy("web_search", &config, &wd());

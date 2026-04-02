@@ -135,14 +135,19 @@ mod tests {
     fn resolves_set_var() {
         unsafe { std::env::set_var("DYSON_INSECURE_TEST_1", "value123") };
         let resolver = InsecureEnvironmentVariable;
-        assert_eq!(resolver.resolve("DYSON_INSECURE_TEST_1").unwrap(), "value123");
+        assert_eq!(
+            resolver.resolve("DYSON_INSECURE_TEST_1").unwrap(),
+            "value123"
+        );
         unsafe { std::env::remove_var("DYSON_INSECURE_TEST_1") };
     }
 
     #[test]
     fn errors_on_missing_var() {
         let resolver = InsecureEnvironmentVariable;
-        let err = resolver.resolve("DYSON_DEFINITELY_NOT_SET_99999").unwrap_err();
+        let err = resolver
+            .resolve("DYSON_DEFINITELY_NOT_SET_99999")
+            .unwrap_err();
         assert!(err.to_string().contains("not found"));
         assert!(err.to_string().contains("export"));
     }

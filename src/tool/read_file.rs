@@ -6,9 +6,7 @@ use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput, resolve_and_validate_path};
-
-/// Maximum bytes of file output before truncation.
-const MAX_OUTPUT_BYTES: usize = 100 * 1024;
+use crate::util::truncate_output;
 
 pub struct ReadFileTool;
 
@@ -61,7 +59,12 @@ impl Tool for ReadFileTool {
 
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
-            Err(e) => return Ok(ToolOutput::error(format!("cannot read '{}': {e}", path.display()))),
+            Err(e) => {
+                return Ok(ToolOutput::error(format!(
+                    "cannot read '{}': {e}",
+                    path.display()
+                )));
+            }
         };
 
         let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize;
@@ -81,14 +84,7 @@ impl Tool for ReadFileTool {
         }
 
         // Truncate if too large.
-        if output.len() > MAX_OUTPUT_BYTES {
-            let mut cut = MAX_OUTPUT_BYTES;
-            while !output.is_char_boundary(cut) && cut > 0 {
-                cut -= 1;
-            }
-            output.truncate(cut);
-            output.push_str("\n\n... (output truncated)");
-        }
+        output = truncate_output(&output);
 
         if output.is_empty() {
             output = "(empty file)".to_string();

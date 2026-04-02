@@ -166,10 +166,11 @@ impl HotReloader {
 
             // Check if a pending change has settled.
             if let Some(ref pending) = self.pending_change
-                && pending.detected_at.elapsed() >= DEBOUNCE_DURATION {
-                    // Debounce complete — commit the change.
-                    return self.commit_reload(&current_mtimes);
-                }
+                && pending.detected_at.elapsed() >= DEBOUNCE_DURATION
+            {
+                // Debounce complete — commit the change.
+                return self.commit_reload(&current_mtimes);
+            }
 
             return Ok((false, None));
         }
@@ -233,22 +234,21 @@ impl HotReloader {
         // If the config file specifically changed, reload settings.
         let mut new_settings = None;
         if let Some(ref config_path) = self.config_path
-            && config_path.exists() {
-                match crate::config::loader::load_settings(Some(config_path)) {
-                    Ok(s) => new_settings = Some(s),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "config reload failed — keeping old");
-                    }
+            && config_path.exists()
+        {
+            match crate::config::loader::load_settings(Some(config_path)) {
+                Ok(s) => new_settings = Some(s),
+                Err(e) => {
+                    tracing::warn!(error = %e, "config reload failed — keeping old");
                 }
             }
+        }
 
         Ok((true, new_settings))
     }
 
     fn get_mtime(path: &Path) -> Option<SystemTime> {
-        std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .ok()
+        std::fs::metadata(path).and_then(|m| m.modified()).ok()
     }
 
     fn scan_workspace(ws_path: &Path, watched: &mut HashMap<PathBuf, Option<SystemTime>>) {
@@ -373,7 +373,10 @@ mod tests {
         // Blocking check should wait for debounce and report the change
         // in a single call.
         let (changed, _) = reloader.check().unwrap();
-        assert!(changed, "blocking check should wait for debounce and report change");
+        assert!(
+            changed,
+            "blocking check should wait for debounce and report change"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

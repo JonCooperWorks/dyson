@@ -8,9 +8,7 @@ use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
-
-/// Maximum output bytes before truncation.
-const MAX_OUTPUT_BYTES: usize = 100 * 1024;
+use crate::util::MAX_OUTPUT_BYTES;
 
 /// Maximum number of matching lines to collect.
 const MAX_MATCHES: usize = 500;
