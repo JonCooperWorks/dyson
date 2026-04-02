@@ -208,10 +208,19 @@ pub struct BuiltinSkill {
 
 Currently provides:
 - `BashTool` — shell command execution with timeout
+- `ReadFileTool` — read workspace files with optional line range
+- `WriteFileTool` — create or overwrite files
+- `EditFileTool` — pattern-based find-and-replace editing
+- `ListFilesTool` — glob-based file discovery
+- `SearchFilesTool` — regex content search across files
 - `MemorySearchTool` — full-text search over memory files
 - `WorkspaceViewTool` — view/list workspace files
 - `WorkspaceSearchTool` — search across workspace files
 - `WorkspaceUpdateTool` — update workspace files (set/append)
+- `LoadSkillTool` — on-demand skill loading
+- `SkillCreateTool` — create, update, or improve skills
+- `SendFileTool` — send file to user via controller
+- `ExportConversationTool` — export chat history in ShareGPT format
 - `WebSearchTool` — web search via pluggable provider (conditional — see below)
 
 The system prompt is generated dynamically from the loaded tools — each
@@ -338,9 +347,10 @@ the agent loop needed.
 
 | Skill | Status | Tools | Source |
 |-------|--------|-------|--------|
-| `BuiltinSkill` | Implemented | bash, workspace_*, memory_search, web_search, load_skill | Compiled into Dyson |
+| `BuiltinSkill` | Implemented | bash, read/write/edit_file, list/search_files, workspace_*, memory_search, web_search, load_skill, skill_create, send_file, export_conversation | Compiled into Dyson |
 | `McpSkill` | Implemented | Discovered via `tools/list` | MCP server (stdio/HTTP) |
 | `LocalSkill` | Implemented | None (system prompt list only) | skills/*/SKILL.md |
+| `SubagentSkill` | Implemented | Subagent tools (planner, researcher, user-defined) | Config + parent tools |
 | `SkillListSkill` | Implemented | None (system prompt only) | Generated from discovered skills |
 
 All skill types implement the same `Skill` trait.  The agent loop treats them

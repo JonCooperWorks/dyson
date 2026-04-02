@@ -5,9 +5,9 @@ A four-stage pipeline checks limits, analyzes dependencies, executes in the
 correct order, and formats results for LLM consumption.
 
 **Key files:**
-- `src/tool_limiter.rs` — `ToolLimiter` (per-turn rate limiting and cooldown)
-- `src/dependency_analyzer.rs` — `DependencyAnalyzer` (resource conflict detection, phase grouping)
-- `src/result_formatter.rs` — `ResultFormatter`, `FormattedResult` (structured LLM-optimized output)
+- `src/agent/tool_limiter.rs` — `ToolLimiter` (per-turn rate limiting and cooldown)
+- `src/agent/dependency_analyzer.rs` — `DependencyAnalyzer` (resource conflict detection, phase grouping)
+- `src/agent/result_formatter.rs` — `ResultFormatter`, `FormattedResult` (structured LLM-optimized output)
 - `src/tool_hooks.rs` — `ToolHook` trait, `ToolHookEvent`, `dispatch_hooks()` (lifecycle hooks)
 - `src/agent/mod.rs` — Pipeline integration in the agent loop
 

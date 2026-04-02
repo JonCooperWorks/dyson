@@ -215,12 +215,22 @@ src/
   error.rs             DysonError — unified error type
   message.rs           Message, Role, ContentBlock
   config/              Settings, JSON loader
-  tool/                Tool trait + bash, web search, workspace tools
-  skill/               Skill trait, BuiltinSkill, MCP skill
+  tool/                Tool trait + bash, file ops (read/write/edit), search, memory, web search, skills, export
+  skill/               Skill trait, BuiltinSkill, MCP skill, LocalSkill, SubagentSkill
   sandbox/             Sandbox trait, OsSandbox, DangerousNoSandbox
   secret/              SecretResolver trait, InsecureEnvironmentVariable
   llm/                 LlmClient trait + provider registry + Anthropic, OpenAI, OpenRouter, Claude Code, Codex
-  agent/               The loop + stream handler
+  agent/
+    mod.rs             The streaming agent loop
+    stream_handler.rs  Stream event → Message + ToolCall conversion
+    compaction.rs      Five-phase context window summarization
+    dependency_analyzer.rs  Tool call batching (parallel vs sequential)
+    result_formatter.rs     Structured, LLM-optimized output formatting
+    token_budget.rs    Cumulative token usage tracking
+    tool_limiter.rs    Per-turn tool call rate limiting
+    rate_limiter.rs    Per-agent message rate limiting
+    reflection.rs      Agent state introspection
+    silent_output.rs   Null output sink for internal LLM calls
   controller/          Controller trait + terminal, Telegram
 examples/              Example dyson.json configs
 docs/                  Component documentation
@@ -238,11 +248,13 @@ Every file has extensive annotations in the style of [rLLM](https://github.com/j
 | [Tools & Skills](docs/tools-and-skills.md) | Tool trait, Skill trait, MCP skill, adding new tools |
 | [Sandbox](docs/sandbox.md) | Allow/Deny/Redirect, OsSandbox, future designs |
 | [Secrets](docs/secrets.md) | Per-secret resolver routing, InsecureEnvironmentVariable |
+| [Tool Execution Pipeline](docs/tool-execution-pipeline.md) | Rate limiting, dependency analysis, result formatting, lifecycle hooks |
 | [Configuration](docs/configuration.md) | dyson.json format, provider selection |
 | [Adding a Provider](docs/adding-a-provider.md) | 3-step process to add a new LLM provider |
 | [Memory](docs/memory.md) | Tiered memory system, FTS5 search, journals |
 | [Chat Persistence](docs/chat-persistence.md) | ChatHistory trait, per-chat agents |
 | [Tool Forwarding over MCP](docs/tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth |
+| [Subagents](docs/subagents.md) | Child agents with different models, tool inheritance, delegation |
 
 ## Tests
 

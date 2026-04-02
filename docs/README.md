@@ -16,7 +16,9 @@ overview, then dive into the component that interests you.
 | [Configuration](configuration.md) | dyson.json format, provider selection, skill config, env var resolution |
 | [Secrets](secrets.md) | Per-secret scheme routing, InsecureEnvironmentVariable, zeroize, adding resolvers |
 | [Tool Forwarding over MCP](tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth, bidirectional MCP |
+| [Subagents](subagents.md) | Child agents with different models, tool inheritance, delegation patterns |
 | [Adding a Provider](adding-a-provider.md) | How to add a new LLM provider (3-step process via the registry) |
+| [Comparison: Hermes Agent](comparison-hermes-agent.md) | Side-by-side with Hermes Agent (Nous Research) |
 
 **Key source files:**
 
@@ -33,14 +35,25 @@ src/
   tool/
     mod.rs                Tool trait, ToolContext, ToolOutput
     bash.rs               Shell execution with timeout
-    workspace_view.rs     Read workspace files
+    read_file.rs          Read workspace files with optional line range
+    write_file.rs         Create or overwrite files
+    edit_file.rs          Pattern-based find-and-replace editing
+    list_files.rs         Glob-based file discovery
+    search_files.rs       Regex content search across files
+    workspace_view.rs     View workspace files
     workspace_search.rs   Search workspace files by pattern
     workspace_update.rs   Write/append workspace files
     memory_search.rs      FTS5 memory search
+    web_search.rs         Web search (Brave, SearXNG)
+    load_skill.rs         On-demand skill loading
+    skill_create.rs       Create/update/improve skills
+    send_file.rs          Send file to user via controller
+    export_conversation.rs  Export chat history (ShareGPT format)
   skill/
     mod.rs                Skill trait, create_skills() factory
     builtin.rs            BuiltinSkill (wraps built-in tools)
     local.rs              LocalSkill (SKILL.md parser, workspace discovery)
+    subagent.rs           SubagentSkill (child agents as tools)
     mcp/
       mod.rs              McpSkill (client — connects to external MCP servers)
       serve.rs            McpHttpServer (server — exposes workspace tools with bearer auth)
@@ -63,13 +76,18 @@ src/
     openrouter.rs         OpenRouter (OpenAI-compatible wrapper with custom headers)
     claude_code.rs        Claude Code CLI subprocess (MCP server + bearer token)
     codex.rs              Codex CLI subprocess
-  dependency_analyzer.rs  Dependency-aware tool call grouping (parallel vs sequential)
-  result_formatter.rs     Structured, LLM-optimized tool output formatting
-  tool_limiter.rs         Per-turn rate limiting and cooldown enforcement
   tool_hooks.rs           Pre/post tool execution lifecycle hooks
   agent/
     mod.rs                Agent struct, the streaming loop
     stream_handler.rs     Consumes StreamEvents → Messages + ToolCalls (filters thinking)
+    compaction.rs         Five-phase context window summarization (Hermes-style)
+    dependency_analyzer.rs  Dependency-aware tool call grouping (parallel vs sequential)
+    result_formatter.rs   Structured, LLM-optimized tool output formatting
+    token_budget.rs       Cumulative token usage tracking
+    tool_limiter.rs       Per-turn rate limiting and cooldown enforcement
+    rate_limiter.rs       Per-agent message rate limiting
+    reflection.rs         Agent state introspection
+    silent_output.rs      Null output sink for internal LLM calls (compaction, learning)
   workspace/
     mod.rs                Workspace trait, skill_files() discovery
     openclaw.rs           OpenClawWorkspace (filesystem, skills/ auto-discovery)

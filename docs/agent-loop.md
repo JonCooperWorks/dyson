@@ -7,9 +7,12 @@ calls, execute them through the sandbox, feed results back, repeat.
 **Key files:**
 - `src/agent/mod.rs` — `Agent` struct, `run()`, `execute_tool_call()`
 - `src/agent/stream_handler.rs` — `process_stream()`, `ToolCall`
-- `src/tool_limiter.rs` — `ToolLimiter` (per-turn rate limiting)
-- `src/dependency_analyzer.rs` — `DependencyAnalyzer` (parallel vs sequential grouping)
-- `src/result_formatter.rs` — `ResultFormatter` (structured LLM-optimized output)
+- `src/agent/tool_limiter.rs` — `ToolLimiter` (per-turn rate limiting)
+- `src/agent/dependency_analyzer.rs` — `DependencyAnalyzer` (parallel vs sequential grouping)
+- `src/agent/result_formatter.rs` — `ResultFormatter` (structured LLM-optimized output)
+- `src/agent/compaction.rs` — Five-phase context window summarization
+- `src/agent/token_budget.rs` — Cumulative token usage tracking
+- `src/agent/reflection.rs` — Agent state introspection
 - `src/tool_hooks.rs` — `ToolHook` trait (pre/post execution lifecycle hooks)
 
 ---

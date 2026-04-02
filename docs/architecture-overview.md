@@ -77,7 +77,9 @@ Agent
   ├── messages: Vec<Message>               ← conversation history
   ├── tool_context: ToolContext            ← working dir, env, cancel
   ├── limiter: ToolLimiter                 ← per-turn rate limiting
-  └── formatter: ResultFormatter           ← structured output formatting
+  ├── formatter: ResultFormatter           ← structured output formatting
+  ├── token_budget: TokenBudget            ← cumulative token usage tracking
+  └── compaction_config: CompactionConfig  ← context window management
 ```
 
 ---
