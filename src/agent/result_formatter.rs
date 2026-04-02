@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use crate::agent::stream_handler::ToolCall;
+use super::stream_handler::ToolCall;
 use crate::tool::ToolOutput;
 
 // ---------------------------------------------------------------------------

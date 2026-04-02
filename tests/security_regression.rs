@@ -90,7 +90,7 @@ async fn bash_timeout_kills_process() {
     // Run a command that would take 10 seconds -- it should be killed by the timeout.
     let input = serde_json::json!({"command": "sleep 10"});
     let start = Instant::now();
-    let output = tool.run(input, &ctx).await.unwrap();
+    let output = tool.run(&input, &ctx).await.unwrap();
     let elapsed = start.elapsed();
 
     // Should complete well before 10 seconds.
@@ -642,7 +642,7 @@ async fn web_search_rejects_oversized_query() {
     // A query over 500 characters should be rejected.
     let long_query = "a".repeat(501);
     let result = tool
-        .run(serde_json::json!({"query": long_query}), &ctx)
+        .run(&serde_json::json!({"query": long_query}), &ctx)
         .await
         .unwrap();
     assert!(
@@ -671,7 +671,7 @@ async fn bash_does_not_leak_secret_env_vars() {
     ctx.env.insert("PATH".into(), std::env::var("PATH").unwrap_or_default());
 
     let input = serde_json::json!({"command": "env"});
-    let output = tool.run(input, &ctx).await.unwrap();
+    let output = tool.run(&input, &ctx).await.unwrap();
 
     assert!(
         !output.content.contains("super-secret-value"),
@@ -707,7 +707,7 @@ async fn list_files_rejects_path_traversal() {
 
     let tool = dyson::tool::list_files::ListFilesTool;
     let input = serde_json::json!({"pattern": "*", "path": "../../../etc"});
-    let output = tool.run(input, &ctx).await.unwrap();
+    let output = tool.run(&input, &ctx).await.unwrap();
     assert!(
         output.is_error,
         "list_files should reject path traversal via the 'path' parameter"
@@ -729,7 +729,7 @@ async fn search_files_rejects_path_traversal() {
 
     let tool = dyson::tool::search_files::SearchFilesTool;
     let input = serde_json::json!({"pattern": ".*", "path": "../../../etc"});
-    let output = tool.run(input, &ctx).await.unwrap();
+    let output = tool.run(&input, &ctx).await.unwrap();
     assert!(
         output.is_error,
         "search_files should reject path traversal via the 'path' parameter"

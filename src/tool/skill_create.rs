@@ -87,7 +87,7 @@ impl Tool for SkillCreateTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
         let ws = ctx
             .workspace
             .as_ref()
@@ -344,7 +344,7 @@ mod tests {
 
         let result = tool
             .run(
-                json!({
+                &json!({
                     "name": "code-review",
                     "description": "Reviews code for quality",
                     "instructions": "1. Read the code\n2. Check for issues\n3. Report findings"
@@ -376,7 +376,7 @@ mod tests {
 
         let result = tool
             .run(
-                json!({
+                &json!({
                     "name": "existing",
                     "description": "New desc",
                     "instructions": "New body"
@@ -401,7 +401,7 @@ mod tests {
 
         let result = tool
             .run(
-                json!({
+                &json!({
                     "name": "deploy",
                     "description": "New deploy skill",
                     "instructions": "New deploy instructions",
@@ -433,7 +433,7 @@ mod tests {
 
         let result = tool
             .run(
-                json!({
+                &json!({
                     "name": "review",
                     "description": "Reviews code with security focus",
                     "instructions": "Also check for SQL injection and XSS.",
@@ -464,7 +464,7 @@ mod tests {
 
         let result = tool
             .run(
-                json!({
+                &json!({
                     "name": "ghost",
                     "description": "desc",
                     "instructions": "inst",
@@ -487,7 +487,7 @@ mod tests {
 
         let result = tool
             .run(
-                json!({
+                &json!({
                     "name": "Bad Name!",
                     "description": "desc",
                     "instructions": "inst"
@@ -508,7 +508,7 @@ mod tests {
         let tool = SkillCreateTool;
 
         tool.run(
-            json!({
+            &json!({
                 "name": "logged",
                 "description": "test logging",
                 "instructions": "body"

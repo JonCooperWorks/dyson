@@ -582,7 +582,7 @@ impl Default for MemoryConfig {
 ///   }
 /// }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct CompactionConfig {
     /// Model's context window in estimated tokens.
     /// The compaction threshold is `context_window * threshold_ratio`.

@@ -777,7 +777,7 @@ mod tests {
         match decision {
             SandboxDecision::Allow { input } => {
                 let tool = BashTool::default();
-                let output = tool.run(input, &ctx).await.unwrap();
+                let output = tool.run(&input, &ctx).await.unwrap();
                 assert!(
                     output.is_error,
                     "expected network to be blocked by seatbelt"
@@ -801,7 +801,7 @@ mod tests {
         match decision {
             SandboxDecision::Allow { input } => {
                 let tool = BashTool::default();
-                let output = tool.run(input, &ctx).await.unwrap();
+                let output = tool.run(&input, &ctx).await.unwrap();
                 assert!(output.is_error, "expected network to be blocked by bwrap");
             }
             _ => panic!("expected Allow"),

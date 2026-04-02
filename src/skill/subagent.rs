@@ -297,7 +297,7 @@ impl Tool for SubagentTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         // -- Check recursion depth --
         //
         // This is a safety net.  The primary recursion prevention is that
@@ -916,7 +916,7 @@ mod tests {
         };
 
         let input = serde_json::json!({"task": "should fail"});
-        let result = tool.run(input, &ctx).await.unwrap();
+        let result = tool.run(&input, &ctx).await.unwrap();
 
         assert!(result.is_error);
         assert!(result.content.contains("Maximum subagent nesting depth"));
@@ -948,7 +948,7 @@ mod tests {
         let ctx = ToolContext::from_cwd().unwrap();
         let input = serde_json::json!({}); // No "task" field
 
-        let result = tool.run(input, &ctx).await;
+        let result = tool.run(&input, &ctx).await;
         assert!(result.is_err());
     }
 

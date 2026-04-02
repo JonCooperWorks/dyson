@@ -49,7 +49,7 @@ impl Tool for EditFileTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let file_path = input["file_path"]
             .as_str()
             .ok_or_else(|| DysonError::tool("edit_file", "missing or invalid 'file_path'"))?;
@@ -153,7 +153,7 @@ mod tests {
             "old_string": "println!(\"hello\")",
             "new_string": "println!(\"world\")"
         });
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(!output.is_error);
 
         let content = std::fs::read_to_string(tmp.path().join("test.rs")).unwrap();
@@ -172,7 +172,7 @@ mod tests {
             "old_string": "aaa",
             "new_string": "ccc"
         });
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("2 times"));
     }
@@ -188,7 +188,7 @@ mod tests {
             "old_string": "xyz",
             "new_string": "abc"
         });
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("not found"));
     }

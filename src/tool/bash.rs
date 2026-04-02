@@ -117,7 +117,7 @@ impl Tool for BashTool {
     /// - Can't spawn bash → `DysonError::Tool` (not Io, because we add context)
     /// - Timeout → `ToolOutput::error` (not DysonError — the tool *ran*, it just took too long)
     /// - Non-zero exit → `ToolOutput { is_error: true }` (normal tool-level error)
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         // -- Extract the command string --
         let command = input["command"]
             .as_str()
@@ -297,7 +297,7 @@ mod tests {
     async fn echo_hello() {
         let tool = BashTool::default();
         let input = serde_json::json!({"command": "echo hello"});
-        let output = tool.run(input, &test_ctx()).await.unwrap();
+        let output = tool.run(&input, &test_ctx()).await.unwrap();
         assert_eq!(output.content.trim(), "hello");
         assert!(!output.is_error);
     }
@@ -306,7 +306,7 @@ mod tests {
     async fn nonzero_exit_is_error() {
         let tool = BashTool::default();
         let input = serde_json::json!({"command": "false"});
-        let output = tool.run(input, &test_ctx()).await.unwrap();
+        let output = tool.run(&input, &test_ctx()).await.unwrap();
         assert!(output.is_error);
     }
 
@@ -314,7 +314,7 @@ mod tests {
     async fn captures_stderr() {
         let tool = BashTool::default();
         let input = serde_json::json!({"command": "echo oops >&2"});
-        let output = tool.run(input, &test_ctx()).await.unwrap();
+        let output = tool.run(&input, &test_ctx()).await.unwrap();
         assert!(output.content.contains("oops"));
     }
 
@@ -322,7 +322,7 @@ mod tests {
     async fn missing_command_field() {
         let tool = BashTool::default();
         let input = serde_json::json!({"wrong_field": "ls"});
-        let result = tool.run(input, &test_ctx()).await;
+        let result = tool.run(&input, &test_ctx()).await;
         assert!(result.is_err());
     }
 
@@ -332,7 +332,7 @@ mod tests {
             timeout: Duration::from_millis(100),
         };
         let input = serde_json::json!({"command": "sleep 10"});
-        let output = tool.run(input, &test_ctx()).await.unwrap();
+        let output = tool.run(&input, &test_ctx()).await.unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("timed out"));
     }

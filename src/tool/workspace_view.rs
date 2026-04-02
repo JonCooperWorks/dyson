@@ -36,7 +36,7 @@ impl Tool for WorkspaceViewTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
         let ws = ctx
             .workspace
             .as_ref()

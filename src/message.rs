@@ -231,6 +231,17 @@ impl Message {
         }
     }
 
+    /// Return a reference to the last text block's content, if any.
+    pub fn last_text(&self) -> Option<&str> {
+        self.content.iter().rev().find_map(|block| {
+            if let ContentBlock::Text { text } = block {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        })
+    }
+
     /// Create a tool result message.
     ///
     /// Although this conceptually "belongs" to the tool, it is sent as a

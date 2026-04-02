@@ -44,7 +44,7 @@ impl Tool for ListFilesTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let pattern = input["pattern"]
             .as_str()
             .ok_or_else(|| DysonError::tool("list_files", "missing or invalid 'pattern'"))?;
@@ -145,7 +145,7 @@ mod tests {
 
         let tool = ListFilesTool;
         let input = serde_json::json!({"pattern": "*.rs"});
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("a.rs"));
         assert!(output.content.contains("b.rs"));
@@ -157,7 +157,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = ListFilesTool;
         let input = serde_json::json!({"pattern": "[invalid"});
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(output.is_error);
     }
 

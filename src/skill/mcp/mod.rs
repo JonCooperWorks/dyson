@@ -300,7 +300,7 @@ impl Tool for McpRemoteTool {
     ///
     /// The response contains `content` (array of text/image blocks) and
     /// an `isError` flag.
-    async fn run(&self, input: serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         tracing::debug!(
             server = self.server_name,
             tool = self.tool_name,

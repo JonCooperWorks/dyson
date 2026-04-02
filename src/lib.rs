@@ -19,11 +19,9 @@
 //     ├── skill         — Skill trait, BuiltinSkill
 //     ├── sandbox       — Sandbox trait, DangerousNoSandbox
 //     ├── llm           — LlmClient trait, Anthropic/OpenAI/Claude Code clients
-//     ├── agent         — Agent loop, stream handler
-//     ├── dependency_analyzer — Resource conflict detection, parallel/sequential grouping
-//     ├── result_formatter    — Structured, LLM-optimized tool output formatting
-//     ├── tool_limiter        — Per-turn rate limiting and cooldown enforcement
-//     ├── tool_hooks          — Pre/post tool execution lifecycle hooks
+//     ├── agent         — Agent loop, stream handler, dependency analysis,
+//     │                   result formatting, rate limiting
+//     ├── tool_hooks    — Pre/post tool execution lifecycle hooks
 //     ├── workspace     — Workspace trait + OpenClawWorkspace (agent identity/memory)
 //     ├── chat_history  — ChatHistory trait + DiskChatHistory (per-chat messages)
 //     ├── controller    — Controller trait, terminal REPL, Telegram bot
@@ -47,19 +45,16 @@ pub mod auth;
 pub mod chat_history;
 pub mod config;
 pub mod controller;
-pub mod dependency_analyzer;
 pub mod error;
 pub mod export;
 pub mod llm;
 pub mod media;
 pub mod message;
-pub mod result_formatter;
 pub mod sandbox;
 pub mod secret;
 pub mod skill;
 pub mod tool;
 pub mod tool_hooks;
-pub mod tool_limiter;
 pub(crate) mod util;
 pub mod workspace;
 

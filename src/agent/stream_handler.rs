@@ -118,8 +118,8 @@ pub async fn process_stream(
     stream: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>,
     output: &mut dyn Output,
 ) -> Result<(Message, Vec<ToolCall>, usize)> {
-    let mut content_blocks: Vec<ContentBlock> = Vec::new();
-    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut content_blocks: Vec<ContentBlock> = Vec::with_capacity(4);
+    let mut tool_calls: Vec<ToolCall> = Vec::with_capacity(4);
 
     // Buffer for accumulating text deltas into a single Text content block.
     let mut current_text = String::new();

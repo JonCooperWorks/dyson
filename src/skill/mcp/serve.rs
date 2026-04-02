@@ -748,7 +748,7 @@ impl McpHttpServer {
         // tool.run() returns Result<ToolOutput>.  We map both cases to
         // MCP response format: Ok → content + isError from ToolOutput,
         // Err → content with error message + isError: true.
-        match tool.run(arguments, &ctx).await {
+        match tool.run(&arguments, &ctx).await {
             Ok(output) => JsonRpcResponse {
                 id,
                 result: Some(serde_json::json!({

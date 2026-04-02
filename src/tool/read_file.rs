@@ -47,7 +47,7 @@ impl Tool for ReadFileTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let file_path = input["file_path"]
             .as_str()
             .ok_or_else(|| DysonError::tool("read_file", "missing or invalid 'file_path'"))?;
@@ -121,7 +121,7 @@ mod tests {
 
         let tool = ReadFileTool;
         let input = serde_json::json!({"file_path": "test.txt"});
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("line one"));
         assert!(output.content.contains("line three"));
@@ -138,7 +138,7 @@ mod tests {
 
         let tool = ReadFileTool;
         let input = serde_json::json!({"file_path": "test.txt", "offset": 3, "limit": 2});
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("line 3"));
         assert!(output.content.contains("line 4"));
@@ -150,7 +150,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = ReadFileTool;
         let input = serde_json::json!({"file_path": "nope.txt"});
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(output.is_error);
     }
 

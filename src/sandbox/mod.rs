@@ -29,7 +29,7 @@
 //     ▼
 //   sandbox.check("bash", input, ctx)
 //     │
-//     ├── Allow { input }     → tool.run(input, ctx) → sandbox.after(...)
+//     ├── Allow { input }     → tool.run(&input, ctx) → sandbox.after(...)
 //     ├── Deny { reason }     → ToolOutput::error(reason) back to LLM
 //     └── Redirect { name, input } → different_tool.run(...) → sandbox.after(...)
 //

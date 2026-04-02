@@ -263,7 +263,7 @@ impl Tool for WebSearchTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let query = input["query"].as_str().unwrap_or("").to_string();
 
         if query.is_empty() {
@@ -368,7 +368,7 @@ mod tests {
     async fn empty_query_returns_error() {
         let tool = mock_tool(vec![]);
         let ctx = ToolContext::from_cwd().unwrap();
-        let result = tool.run(json!({"query": ""}), &ctx).await.unwrap();
+        let result = tool.run(&json!({"query": ""}), &ctx).await.unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("required"));
     }
@@ -378,7 +378,7 @@ mod tests {
         let tool = mock_tool(vec![]);
         let ctx = ToolContext::from_cwd().unwrap();
         let result = tool
-            .run(json!({"query": "nonexistent"}), &ctx)
+            .run(&json!({"query": "nonexistent"}), &ctx)
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -400,7 +400,7 @@ mod tests {
             },
         ]);
         let ctx = ToolContext::from_cwd().unwrap();
-        let result = tool.run(json!({"query": "rust"}), &ctx).await.unwrap();
+        let result = tool.run(&json!({"query": "rust"}), &ctx).await.unwrap();
         assert!(!result.is_error);
         assert!(result.content.contains("### 1. Rust Lang"));
         assert!(result.content.contains("### 2. Tokio"));
@@ -429,7 +429,7 @@ mod tests {
         ]);
         let ctx = ToolContext::from_cwd().unwrap();
         let result = tool
-            .run(json!({"query": "test", "num_results": 2}), &ctx)
+            .run(&json!({"query": "test", "num_results": 2}), &ctx)
             .await
             .unwrap();
         assert!(result.content.contains("Found 2 result(s)"));

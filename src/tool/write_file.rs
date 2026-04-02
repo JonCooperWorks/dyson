@@ -41,7 +41,7 @@ impl Tool for WriteFileTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let file_path = input["file_path"]
             .as_str()
             .ok_or_else(|| DysonError::tool("write_file", "missing or invalid 'file_path'"))?;
@@ -103,7 +103,7 @@ mod tests {
             "file_path": "hello.txt",
             "content": "hello world"
         });
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(!output.is_error);
 
         let content = std::fs::read_to_string(tmp.path().join("hello.txt")).unwrap();
@@ -118,7 +118,7 @@ mod tests {
             "file_path": "a/b/c.txt",
             "content": "nested"
         });
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(!output.is_error);
 
         let content = std::fs::read_to_string(tmp.path().join("a/b/c.txt")).unwrap();
@@ -135,7 +135,7 @@ mod tests {
             "file_path": "existing.txt",
             "content": "new"
         });
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(!output.is_error);
 
         let content = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();

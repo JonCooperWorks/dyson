@@ -6,7 +6,7 @@
 // sequential) to ensure correct ordering.
 // ===========================================================================
 
-use crate::agent::stream_handler::ToolCall;
+use super::stream_handler::ToolCall;
 
 // ---------------------------------------------------------------------------
 // ExecutionPhase
@@ -105,13 +105,13 @@ impl DependencyAnalyzer {
     /// The returned phases should be executed in order.  Calls within a
     /// `Parallel` phase can run concurrently; calls within a `Sequential`
     /// phase must run one after another.
-    pub fn analyze(calls: &[ToolCall]) -> Vec<ExecutionPhase> {
+    pub fn analyze(calls: &[&ToolCall]) -> Vec<ExecutionPhase> {
         if calls.is_empty() {
             return Vec::new();
         }
 
         // Step 1: Extract resource accesses for each call.
-        let accesses: Vec<Vec<ResourceAccess>> = calls.iter().map(extract_resources).collect();
+        let accesses: Vec<Vec<ResourceAccess>> = calls.iter().map(|c| extract_resources(c)).collect();
 
         // Step 2: Build dependency edges.
         // depends_on[i] contains indices of calls that call i depends on.
@@ -259,7 +259,8 @@ mod test_dependency_analyzer {
             ToolCall::new("bash", json!({"command": "ls"})),
             ToolCall::new("bash", json!({"command": "cat README"})),
         ];
-        let phases = DependencyAnalyzer::analyze(&calls);
+        let refs: Vec<&ToolCall> = calls.iter().collect();
+        let phases = DependencyAnalyzer::analyze(&refs);
         assert_eq!(phases.len(), 1);
         assert!(matches!(phases[0], ExecutionPhase::Parallel(_)));
     }
@@ -270,7 +271,8 @@ mod test_dependency_analyzer {
             ToolCall::new("file_write", json!({"path": "f.txt"})),
             ToolCall::new("file_read", json!({"path": "f.txt"})),
         ];
-        assert!(DependencyAnalyzer::analyze(&calls).len() >= 2);
+        let refs: Vec<&ToolCall> = calls.iter().collect();
+        assert!(DependencyAnalyzer::analyze(&refs).len() >= 2);
     }
 
     #[test]
@@ -279,7 +281,8 @@ mod test_dependency_analyzer {
             ToolCall::new("file_write", json!({"path": "x.txt"})),
             ToolCall::new("file_write", json!({"path": "x.txt"})),
         ];
-        let phases = DependencyAnalyzer::analyze(&calls);
+        let refs: Vec<&ToolCall> = calls.iter().collect();
+        let phases = DependencyAnalyzer::analyze(&refs);
         assert!(
             phases
                 .iter()
@@ -294,7 +297,8 @@ mod test_dependency_analyzer {
             ToolCall::new("bash", json!({"command": "echo B"})),
             ToolCall::new("file_read", json!({"path": "unrelated.txt"})),
         ];
-        assert!(!DependencyAnalyzer::analyze(&calls).is_empty());
+        let refs: Vec<&ToolCall> = calls.iter().collect();
+        assert!(!DependencyAnalyzer::analyze(&refs).is_empty());
     }
 
     #[test]
@@ -303,6 +307,7 @@ mod test_dependency_analyzer {
             ToolCall::new("bash", json!({"command": "git add ."})),
             ToolCall::new("bash", json!({"command": "git status"})),
         ];
-        assert!(DependencyAnalyzer::analyze(&calls).len() >= 2);
+        let refs: Vec<&ToolCall> = calls.iter().collect();
+        assert!(DependencyAnalyzer::analyze(&refs).len() >= 2);
     }
 }

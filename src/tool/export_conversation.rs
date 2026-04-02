@@ -56,7 +56,7 @@ impl Tool for ExportConversationTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
         // Read messages from the workspace's conversation context.
         // The agent loop passes messages via a special metadata channel —
         // but since tools don't have direct access to the agent's message
@@ -237,7 +237,7 @@ mod tests {
         let tool = ExportConversationTool;
 
         let result = tool
-            .run(json!({"path": "test_export.json"}), &ctx)
+            .run(&json!({"path": "test_export.json"}), &ctx)
             .await
             .unwrap();
 
@@ -278,7 +278,7 @@ mod tests {
         let tool = ExportConversationTool;
 
         let result = tool
-            .run(json!({"path": "tools_export.json"}), &ctx)
+            .run(&json!({"path": "tools_export.json"}), &ctx)
             .await
             .unwrap();
 
@@ -301,7 +301,7 @@ mod tests {
         let (ctx, _tmp) = make_ctx_with_history(&messages);
         let tool = ExportConversationTool;
 
-        let result = tool.run(json!({}), &ctx).await.unwrap();
+        let result = tool.run(&json!({}), &ctx).await.unwrap();
         assert!(!result.is_error);
         assert!(result.content.contains("sharegpt_export_"));
     }
@@ -317,7 +317,7 @@ mod tests {
         };
 
         let tool = ExportConversationTool;
-        let result = tool.run(json!({}), &ctx).await.unwrap();
+        let result = tool.run(&json!({}), &ctx).await.unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("No conversation messages"));
     }
@@ -329,7 +329,7 @@ mod tests {
         let tool = ExportConversationTool;
 
         let result = tool
-            .run(json!({"path": "id_export.json", "id": "conv-42"}), &ctx)
+            .run(&json!({"path": "id_export.json", "id": "conv-42"}), &ctx)
             .await
             .unwrap();
 
@@ -346,7 +346,7 @@ mod tests {
         let tool = ExportConversationTool;
 
         let result = tool
-            .run(json!({"path": "attached.json"}), &ctx)
+            .run(&json!({"path": "attached.json"}), &ctx)
             .await
             .unwrap();
 

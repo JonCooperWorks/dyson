@@ -52,7 +52,7 @@ impl Tool for SearchFilesTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let pattern_str = input["pattern"]
             .as_str()
             .ok_or_else(|| DysonError::tool("search_files", "missing or invalid 'pattern'"))?;
@@ -193,7 +193,7 @@ mod tests {
 
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "fn \\w+"});
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("fn hello"));
         assert!(output.content.contains("fn world"));
@@ -206,7 +206,7 @@ mod tests {
 
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "zzzzz"});
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("No matches"));
     }
@@ -216,7 +216,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "[invalid"});
-        let output = tool.run(input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
         assert!(output.is_error);
     }
 

@@ -33,7 +33,7 @@
 //   Sandbox.check(name, input, ctx)  ← gates every call
 //     │
 //     ▼
-//   tool.run(input, ctx)  → ToolOutput
+//   tool.run(&input, ctx)  → ToolOutput
 //     │
 //     ▼
 //   Sandbox.after(name, input, &mut output)  ← post-processing
@@ -110,7 +110,7 @@ use crate::error::Result;
 ///             "required": ["input"]
 ///         })
 ///     }
-///     async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+///     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
 ///         let val = input["input"].as_str().unwrap_or("default");
 ///         Ok(ToolOutput::success(format!("Got: {val}")))
 ///     }
@@ -158,7 +158,7 @@ pub trait Tool: Send + Sync {
     /// Returns `ToolOutput` on success (which may still indicate a
     /// "tool-level error" via `is_error`), or `DysonError` for
     /// infrastructure failures.
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput>;
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput>;
 }
 
 // ---------------------------------------------------------------------------

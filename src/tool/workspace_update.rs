@@ -52,7 +52,7 @@ impl Tool for WorkspaceUpdateTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
         let ws = ctx
             .workspace
             .as_ref()
@@ -154,7 +154,7 @@ mod tests {
 
         let result = tool
             .run(
-                serde_json::json!({
+                &serde_json::json!({
                     "file": "MEMORY.md",
                     "content": "short content",
                     "mode": "set"
@@ -176,7 +176,7 @@ mod tests {
 
         let result = tool
             .run(
-                serde_json::json!({
+                &serde_json::json!({
                     "file": "MEMORY.md",
                     "content": "this content is way too long for the limit",
                     "mode": "set"
@@ -200,7 +200,7 @@ mod tests {
 
         let result = tool
             .run(
-                serde_json::json!({
+                &serde_json::json!({
                     "file": "MEMORY.md",
                     "content": "more content that overflows",
                     "mode": "append"
@@ -222,7 +222,7 @@ mod tests {
 
         let result = tool
             .run(
-                serde_json::json!({
+                &serde_json::json!({
                     "file": "SOUL.md",
                     "content": "anything goes",
                     "mode": "set"

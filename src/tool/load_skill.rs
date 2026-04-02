@@ -46,7 +46,7 @@ impl Tool for LoadSkillTool {
         })
     }
 
-    async fn run(&self, input: serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
         let ws = ctx
             .workspace
             .as_ref()
@@ -133,7 +133,7 @@ mod tests {
         let tool = LoadSkillTool;
 
         let result = tool
-            .run(json!({"skill_name": "code-review"}), &ctx)
+            .run(&json!({"skill_name": "code-review"}), &ctx)
             .await
             .unwrap();
 
@@ -154,7 +154,7 @@ mod tests {
         let tool = LoadSkillTool;
 
         let result = tool
-            .run(json!({"skill_name": "nonexistent"}), &ctx)
+            .run(&json!({"skill_name": "nonexistent"}), &ctx)
             .await
             .unwrap();
 
@@ -168,7 +168,7 @@ mod tests {
         let ctx = make_ctx(ws);
         let tool = LoadSkillTool;
 
-        let result = tool.run(json!({"skill_name": ""}), &ctx).await.unwrap();
+        let result = tool.run(&json!({"skill_name": ""}), &ctx).await.unwrap();
 
         assert!(result.is_error);
         assert!(result.content.contains("required"));

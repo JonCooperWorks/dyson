@@ -70,8 +70,15 @@
 //   duplication, just shared references.
 // ===========================================================================
 
+mod compaction;
+mod dependency_analyzer;
 pub mod rate_limiter;
+mod reflection;
+mod result_formatter;
+mod silent_output;
 pub mod stream_handler;
+pub mod token_budget;
+mod tool_limiter;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,120 +87,20 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{AgentSettings, CompactionConfig};
 use crate::controller::Output;
-use crate::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
 use crate::error::{DysonError, LlmRecovery, Result};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use crate::message::{ContentBlock, Message};
-use crate::result_formatter::ResultFormatter;
 use crate::sandbox::{Sandbox, SandboxDecision};
 use crate::skill::Skill;
 use crate::tool::{Tool, ToolContext, ToolOutput};
-use crate::tool_limiter::ToolLimiter;
+
+use self::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
+use self::result_formatter::ResultFormatter;
+use self::tool_limiter::ToolLimiter;
 
 use self::stream_handler::ToolCall;
 
-// ---------------------------------------------------------------------------
-// SilentOutput — discards all output (used by self-improvement reflection).
-// ---------------------------------------------------------------------------
-
-/// A no-op output sink used for side-channel LLM calls where we want
-/// tool execution but don't need to stream text to the user.
-struct SilentOutput;
-
-impl crate::controller::Output for SilentOutput {
-    fn text_delta(&mut self, _: &str) -> Result<()> {
-        Ok(())
-    }
-    fn tool_use_start(&mut self, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
-    fn tool_use_complete(&mut self) -> Result<()> {
-        Ok(())
-    }
-    fn tool_result(&mut self, _: &ToolOutput) -> Result<()> {
-        Ok(())
-    }
-    fn send_file(&mut self, _: &std::path::Path) -> Result<()> {
-        Ok(())
-    }
-    fn error(&mut self, _: &DysonError) -> Result<()> {
-        Ok(())
-    }
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// TokenBudget — tracks and limits token usage across the agent session.
-// ---------------------------------------------------------------------------
-
-/// Token usage tracking and optional budget enforcement.
-///
-/// Hooks into the agent loop via `process_stream`'s reported `output_tokens`.
-/// When a `max_output_tokens` budget is set, the agent loop stops with an
-/// error once the cumulative output tokens exceed the limit.
-///
-/// ## Usage
-///
-/// ```ignore
-/// let mut budget = TokenBudget::default();
-/// budget.max_output_tokens = Some(100_000); // cap at 100k output tokens
-/// ```
-#[derive(Debug, Clone, Default)]
-pub struct TokenBudget {
-    /// Maximum cumulative output tokens before the agent refuses to continue.
-    /// `None` = unlimited (default).
-    pub max_output_tokens: Option<usize>,
-
-    /// Cumulative output tokens used across all turns in this session.
-    pub output_tokens_used: usize,
-
-    /// Cumulative input tokens used across all turns in this session.
-    pub input_tokens_used: usize,
-
-    /// Number of LLM calls made in this session (across all `run()` calls).
-    pub llm_calls: usize,
-}
-
-impl TokenBudget {
-    /// Record tokens from a completed LLM turn.
-    ///
-    /// Returns `Err` if the budget is exceeded after recording.
-    pub fn record(&mut self, output_tokens: usize) -> Result<()> {
-        self.output_tokens_used += output_tokens;
-        self.llm_calls += 1;
-        if let Some(max) = self.max_output_tokens
-            && self.output_tokens_used > max
-        {
-            return Err(DysonError::Llm(format!(
-                "token budget exceeded: {}/{max} output tokens used",
-                self.output_tokens_used,
-            )));
-        }
-        Ok(())
-    }
-
-    /// Check if there's budget remaining (without recording).
-    pub fn has_budget(&self) -> bool {
-        match self.max_output_tokens {
-            Some(max) => self.output_tokens_used < max,
-            None => true,
-        }
-    }
-
-    /// Record input tokens from a completed LLM turn (informational only).
-    pub fn record_input(&mut self, input_tokens: usize) {
-        self.input_tokens_used += input_tokens;
-    }
-
-    /// Reset the budget counters (e.g., on `clear()`).
-    pub fn reset(&mut self) {
-        self.output_tokens_used = 0;
-        self.input_tokens_used = 0;
-        self.llm_calls = 0;
-    }
-}
+use self::token_budget::TokenBudget;
 
 // ---------------------------------------------------------------------------
 // Agent
@@ -404,7 +311,7 @@ impl Agent {
             turn_count: 0,
             nudge_interval,
             token_budget: TokenBudget::default(),
-            compaction_config: settings.compaction.clone(),
+            compaction_config: settings.compaction,
             limiter: ToolLimiter::for_agent(),
             formatter: ResultFormatter::default(),
             agent_settings: settings.clone(),
@@ -442,380 +349,6 @@ impl Agent {
     pub fn clear(&mut self) {
         self.spawn_save_learnings("clear");
         self.messages.clear();
-    }
-
-    /// Spawn a background task that summarises the conversation and
-    /// writes the synthesis to the workspace's MEMORY.md file.
-    ///
-    /// Builds its own LLM client so it doesn't share state with the
-    /// main agent.  Uses [`SilentOutput`] and never blocks the caller.
-    fn spawn_save_learnings(&self, reason: &'static str) {
-        let workspace = match self.tool_context.workspace {
-            Some(ref ws) => Arc::clone(ws),
-            None => return,
-        };
-        if self.messages.is_empty() {
-            return;
-        }
-
-        let settings = self.agent_settings.clone();
-        let config = self.config.clone();
-        let summary = Self::summarize_for_reflection(&self.messages);
-
-        tokio::spawn(async move {
-            tracing::info!(reason, "background: saving learnings");
-
-            let client = crate::llm::create_client(&settings, None, false);
-
-            if let Err(e) = synthesize_to_workspace(&*client, &config, &summary, &workspace).await {
-                tracing::warn!(error = %e, reason, "background learning synthesis failed");
-            }
-
-            tracing::info!(reason, "background: learnings saved");
-        });
-    }
-
-    /// Compact the conversation using a five-phase Hermes-style algorithm.
-    ///
-    /// When a `CompactionConfig` is set, the algorithm:
-    ///   1. **Prune tool outputs** — replace old `ToolResult` content outside
-    ///      protected regions with placeholders (no LLM call).
-    ///   2. **Identify regions** — protect the first N messages (head) and the
-    ///      most recent messages within a token budget (tail).
-    ///   3. **Summarise the middle** — send only the middle section to the LLM
-    ///      with a structured prompt (Goal / Progress / Decisions / Files / Next).
-    ///   4. **Reassemble** — head + `[Context Summary]` + tail.
-    ///   5. **Fix orphaned tool pairs** — insert synthetic `ToolResult` for any
-    ///      `ToolUse` whose result was in the summarised section.
-    ///
-    /// When no `CompactionConfig` is set, falls back to legacy behaviour:
-    /// summarise the entire history into a single `[Context Summary]` message.
-    ///
-    /// ## When to use
-    ///
-    /// - Automatically: the agent loop triggers compaction when the
-    ///   offline-estimated context size exceeds `compaction_config.threshold()`.
-    /// - Manually: a controller can call `agent.compact()` directly
-    ///   (e.g. in response to a `/compact` command).
-    pub async fn compact(&mut self, output: &mut dyn Output) -> Result<()> {
-        if self.messages.is_empty() {
-            return Ok(());
-        }
-
-        // Save learnings in the background before compaction condenses
-        // the conversation.  This doesn't block — compaction proceeds
-        // immediately while the LLM synthesises in parallel.
-        self.spawn_save_learnings("compact");
-
-        tracing::info!(
-            messages = self.messages.len(),
-            estimated_tokens = self.estimate_context_tokens(&self.system_prompt),
-            "compacting conversation context"
-        );
-
-        // Dispatch to five-phase or legacy compaction.
-        if let Some(ref config) = self.compaction_config.clone() {
-            self.compact_hermes(config, output).await
-        } else {
-            self.compact_legacy(output).await
-        }
-    }
-
-    /// Legacy compaction: summarise the entire history into one message.
-    async fn compact_legacy(&mut self, output: &mut dyn Output) -> Result<()> {
-        let summary = self
-            .summarise_messages(&self.messages.clone(), None, output)
-            .await?;
-
-        if summary.is_empty() {
-            tracing::warn!("compaction produced empty summary — keeping original history");
-            return Ok(());
-        }
-
-        let old_count = self.messages.len();
-        self.messages.clear();
-        self.messages
-            .push(Message::user(&format!("[Context Summary]\n\n{summary}")));
-        self.token_budget.reset();
-
-        tracing::info!(old_messages = old_count, "context compacted (legacy)");
-        Ok(())
-    }
-
-    /// Five-phase Hermes-style compaction.
-    async fn compact_hermes(
-        &mut self,
-        config: &CompactionConfig,
-        output: &mut dyn Output,
-    ) -> Result<()> {
-        // Phase 2: identify protected regions.
-        let head_end = self.head_boundary(config);
-        let tail_start = self.tail_boundary(config);
-
-        // If there's no middle section, nothing to summarise.
-        if head_end >= tail_start {
-            tracing::info!(
-                head_end,
-                tail_start,
-                "protected regions overlap — skipping compaction"
-            );
-            return Ok(());
-        }
-
-        // Phase 1: prune tool outputs in the middle (cheap, no LLM).
-        self.prune_tool_outputs(head_end, tail_start);
-
-        // Check for a previous [Context Summary] in the head for iterative merging.
-        let previous_summary = self.find_existing_summary(head_end);
-
-        // Phase 3: summarise the middle section.
-        let middle = self.messages[head_end..tail_start].to_vec();
-        let summary = self
-            .summarise_messages(&middle, previous_summary.as_deref(), output)
-            .await?;
-
-        if summary.is_empty() {
-            tracing::warn!("compaction produced empty summary — keeping original history");
-            return Ok(());
-        }
-
-        // Phase 4: reassemble — head + summary + tail.
-        let mut new_messages = Vec::new();
-
-        // Head: keep first N messages, but skip any old [Context Summary].
-        for msg in &self.messages[..head_end] {
-            let is_old_summary = msg.content.iter().any(|b| {
-                matches!(b, crate::message::ContentBlock::Text { text }
-                    if text.starts_with("[Context Summary]"))
-            });
-            if !is_old_summary {
-                new_messages.push(msg.clone());
-            }
-        }
-
-        // Insert new summary.
-        new_messages.push(Message::user(&format!("[Context Summary]\n\n{summary}")));
-
-        // Tail: verbatim.
-        new_messages.extend_from_slice(&self.messages[tail_start..]);
-
-        let old_count = self.messages.len();
-        self.messages = new_messages;
-
-        // Phase 5: fix orphaned tool_use/tool_result pairs.
-        self.fix_orphaned_tool_pairs();
-
-        self.token_budget.reset();
-
-        tracing::info!(
-            old_messages = old_count,
-            new_messages = self.messages.len(),
-            "context compacted (hermes)"
-        );
-        Ok(())
-    }
-
-    // -- Compaction helpers --------------------------------------------------
-
-    /// Return the index of the first message NOT in the protected head.
-    fn head_boundary(&self, config: &CompactionConfig) -> usize {
-        config.protect_head.min(self.messages.len())
-    }
-
-    /// Return the index of the first message in the protected tail.
-    ///
-    /// Walks backward from the end, accumulating estimated tokens until
-    /// the budget is exhausted.
-    fn tail_boundary(&self, config: &CompactionConfig) -> usize {
-        let mut tokens = 0usize;
-        let head_end = self.head_boundary(config);
-
-        for i in (head_end..self.messages.len()).rev() {
-            let msg_tokens = self.messages[i].estimate_tokens();
-            if tokens + msg_tokens > config.protect_tail_tokens {
-                return i + 1;
-            }
-            tokens += msg_tokens;
-        }
-        // All non-head messages fit in the tail budget.
-        head_end
-    }
-
-    /// Phase 1: replace `ToolResult` content in the middle with a placeholder.
-    fn prune_tool_outputs(&mut self, head_end: usize, tail_start: usize) {
-        for msg in &mut self.messages[head_end..tail_start] {
-            for block in &mut msg.content {
-                if let crate::message::ContentBlock::ToolResult { content, .. } = block {
-                    *content = "[tool output pruned]".to_string();
-                }
-            }
-        }
-    }
-
-    /// Find an existing `[Context Summary]` in the head region.
-    fn find_existing_summary(&self, head_end: usize) -> Option<String> {
-        for msg in &self.messages[..head_end] {
-            for block in &msg.content {
-                if let crate::message::ContentBlock::Text { text } = block
-                    && text.starts_with("[Context Summary]")
-                {
-                    // Strip the prefix to get just the summary body.
-                    return Some(
-                        text.strip_prefix("[Context Summary]")
-                            .unwrap_or(text)
-                            .trim()
-                            .to_string(),
-                    );
-                }
-            }
-        }
-        None
-    }
-
-    /// Send messages to the LLM for summarisation and return the summary text.
-    async fn summarise_messages(
-        &self,
-        messages: &[Message],
-        previous_summary: Option<&str>,
-        output: &mut dyn Output,
-    ) -> Result<String> {
-        let compaction_system = self.build_compaction_prompt(previous_summary);
-
-        let empty_tools: &[ToolDefinition] = &[];
-        let response = self
-            .client
-            .stream(messages, &compaction_system, empty_tools, &self.config)
-            .await?;
-
-        let (assistant_msg, _tool_calls, _output_tokens) =
-            stream_handler::process_stream(response.stream, output).await?;
-
-        Ok(assistant_msg
-            .content
-            .iter()
-            .filter_map(|block| {
-                if let crate::message::ContentBlock::Text { text } = block {
-                    Some(text.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n"))
-    }
-
-    /// Build the system prompt for the summarisation LLM call.
-    fn build_compaction_prompt(&self, previous_summary: Option<&str>) -> String {
-        let mut prompt = format!(
-            "{}\n\n\
-             You are being asked to summarise a conversation.  Produce a structured \
-             summary with these sections:\n\n\
-             ## Goal\nWhat the user is trying to accomplish.\n\n\
-             ## Progress\nWhat has been done so far.\n\n\
-             ## Key Decisions\nImportant choices and their rationale.\n\n\
-             ## Files Modified\nList of files touched and changes made.\n\n\
-             ## Next Steps\nWhat was about to happen or still needs to happen.\n\n\
-             Be concise but thorough.  Do NOT call any tools.  \
-             Do NOT ask questions.  Just summarise.",
-            self.system_prompt,
-        );
-
-        if let Some(prev) = previous_summary {
-            prompt.push_str(&format!(
-                "\n\n---\n\n\
-                 ## Previous context summary\n\n\
-                 The following is a summary from a previous compaction.  Merge it \
-                 with the new conversation into a single updated summary:\n\n{prev}"
-            ));
-        }
-
-        prompt
-    }
-
-    /// Phase 5: fix orphaned tool_use/tool_result pairs after reassembly.
-    ///
-    /// After compaction the middle section is gone, so:
-    /// - A `ToolUse` in the head whose `ToolResult` was in the middle now
-    ///   has no matching result.  We insert a synthetic one.
-    /// - A `ToolResult` in the tail whose `ToolUse` was in the middle now
-    ///   has no matching call.  We remove it.
-    fn fix_orphaned_tool_pairs(&mut self) {
-        use std::collections::HashSet;
-
-        // Collect all tool_use IDs and tool_result IDs.
-        let mut tool_use_ids = HashSet::new();
-        let mut tool_result_ids = HashSet::new();
-
-        for msg in &self.messages {
-            for block in &msg.content {
-                match block {
-                    crate::message::ContentBlock::ToolUse { id, .. } => {
-                        tool_use_ids.insert(id.clone());
-                    }
-                    crate::message::ContentBlock::ToolResult { tool_use_id, .. } => {
-                        tool_result_ids.insert(tool_use_id.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        // Find orphaned tool_use IDs (no matching result).
-        let orphaned_uses: Vec<String> =
-            tool_use_ids.difference(&tool_result_ids).cloned().collect();
-
-        // Find orphaned tool_result IDs (no matching use).
-        let orphaned_results: HashSet<String> =
-            tool_result_ids.difference(&tool_use_ids).cloned().collect();
-
-        // Insert synthetic results for orphaned uses.
-        // Place them right after the message containing the tool_use.
-        for orphan_id in &orphaned_uses {
-            if let Some(pos) = self.messages.iter().position(|m| {
-                m.content
-                    .iter()
-                    .any(|b| matches!(b, crate::message::ContentBlock::ToolUse { id, .. } if id == orphan_id))
-            }) {
-                let synthetic = Message::tool_result(
-                    orphan_id,
-                    "[result included in context summary]",
-                    false,
-                );
-                self.messages.insert(pos + 1, synthetic);
-            }
-        }
-
-        // Remove orphaned results (results whose tool_use was in the middle).
-        self.messages.retain(|msg| {
-            !msg.content.iter().all(|b| {
-                matches!(b, crate::message::ContentBlock::ToolResult { tool_use_id, .. }
-                    if orphaned_results.contains(tool_use_id))
-            })
-        });
-    }
-
-    /// Estimate the total token count of the current context that would be
-    /// sent to the LLM (messages + system prompt + tool definitions).
-    ///
-    /// This is a local/offline estimate using whitespace splitting — no API
-    /// call needed.  Used to decide whether to compact before the next call.
-    fn estimate_context_tokens(&self, system_prompt: &str) -> usize {
-        let system_tokens = system_prompt.split_whitespace().count();
-
-        let message_tokens: usize = self.messages.iter().map(|m| m.estimate_tokens()).sum();
-
-        let tool_tokens: usize = self
-            .tool_definitions
-            .iter()
-            .map(|t| {
-                t.name.split_whitespace().count()
-                    + t.description.split_whitespace().count()
-                    + t.input_schema.to_string().split_whitespace().count()
-                    + 10 // per-tool JSON framing overhead
-            })
-            .sum();
-
-        system_tokens + message_tokens + tool_tokens
     }
 
     /// Get the current conversation messages (for persistence).
@@ -952,12 +485,12 @@ impl Agent {
         // Each skill can inject per-turn context (refreshed tokens, timestamps,
         // etc.) via before_turn().  These fragments are appended to the system
         // prompt for this run() call only — they don't persist.
-        let mut turn_system_prompt = self.system_prompt.clone();
+        let mut skill_fragments = String::new();
         for skill in &self.skills {
             match skill.before_turn().await {
                 Ok(Some(fragment)) => {
-                    turn_system_prompt.push_str("\n\n");
-                    turn_system_prompt.push_str(&fragment);
+                    skill_fragments.push_str("\n\n");
+                    skill_fragments.push_str(&fragment);
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -969,6 +502,18 @@ impl Agent {
                 }
             }
         }
+
+        // Build the full turn system prompt, only allocating if skills injected fragments.
+        let turn_system_prompt = if skill_fragments.is_empty() {
+            self.system_prompt.clone()
+        } else {
+            let mut prompt = String::with_capacity(
+                self.system_prompt.len() + skill_fragments.len(),
+            );
+            prompt.push_str(&self.system_prompt);
+            prompt.push_str(&skill_fragments);
+            prompt
+        };
 
         let mut recovered_this_turn = false;
 
@@ -1108,10 +653,9 @@ impl Agent {
             let (assistant_msg, tool_calls, output_tokens) =
                 stream_handler::process_stream(response.stream, output).await?;
 
-            self.messages.push(assistant_msg.clone());
-
             // -- Record token usage and check budget --
             if let Err(e) = self.token_budget.record(output_tokens) {
+                self.messages.push(assistant_msg);
                 tracing::warn!(
                     used = self.token_budget.output_tokens_used,
                     "token budget exceeded — stopping agent loop"
@@ -1129,20 +673,21 @@ impl Agent {
             // loop until max_iterations, spawning a new subprocess each time.
             if tool_calls.is_empty() || tool_mode == crate::llm::ToolMode::Observe {
                 // Extract the final text from the assistant message.
-                for block in &assistant_msg.content {
-                    if let crate::message::ContentBlock::Text { text } = block {
-                        final_text = text.clone();
-                    }
+                if let Some(text) = assistant_msg.last_text() {
+                    final_text = text.to_string();
                 }
+                self.messages.push(assistant_msg);
                 output.flush()?;
                 break;
             }
+
+            self.messages.push(assistant_msg);
 
             // -- Check tool call limits --
             //
             // Each call is checked against per-turn limits and cooldown.
             // Calls that exceed limits get an error result without execution.
-            let mut limited_calls: Vec<usize> = Vec::new();
+            let mut limited_calls: Vec<usize> = Vec::with_capacity(tool_calls.len());
             for (i, call) in tool_calls.iter().enumerate() {
                 if let Err(e) = self.limiter.check(&call.name) {
                     tracing::warn!(tool = call.name, error = %e, "tool call rate-limited");
@@ -1161,11 +706,7 @@ impl Agent {
                 limited_calls.iter().map(|&i| &tool_calls[i]).collect();
 
             if !allowed_calls.is_empty() {
-                // DependencyAnalyzer works on a contiguous slice, so we
-                // create owned copies for analysis and map indices back.
-                let calls_for_analysis: Vec<ToolCall> =
-                    allowed_calls.iter().map(|c| (*c).clone()).collect();
-                let phases = DependencyAnalyzer::analyze(&calls_for_analysis);
+                let phases = DependencyAnalyzer::analyze(&allowed_calls);
 
                 for phase in phases {
                     match phase {
@@ -1227,10 +768,8 @@ impl Agent {
                 Ok(response) => {
                     let (assistant_msg, _tool_calls, _output_tokens) =
                         stream_handler::process_stream(response.stream, output).await?;
-                    for block in &assistant_msg.content {
-                        if let crate::message::ContentBlock::Text { text } = block {
-                            final_text = text.clone();
-                        }
+                    if let Some(text) = assistant_msg.last_text() {
+                        final_text = text.to_string();
                     }
                     self.messages.push(assistant_msg);
                 }
@@ -1264,527 +803,6 @@ impl Agent {
 
         output.flush()?;
         Ok(final_text)
-    }
-
-    /// Run memory maintenance as a side-channel LLM call.
-    ///
-    /// Makes a separate LLM call with workspace tools (view, update, search,
-    /// memory_search) and a focused system prompt.  The LLM reviews the
-    /// conversation and decides what to persist to MEMORY.md, USER.md, or
-    /// memory/notes/.
-    ///
-    /// This runs in a separate message context — nothing from this call
-    /// enters the main conversation history.
-    async fn maintain_memory(&mut self, output: &mut dyn Output) -> Result<()> {
-        tracing::info!(turn_count = self.turn_count, "running memory maintenance");
-
-        tracing::info!("\n\n[Memory maintenance: reviewing conversation...]\n");
-
-        // Build the system prompt with current usage stats.
-        let memory_system = Self::build_memory_system_prompt(&self.tool_context).await;
-
-        // Expose only workspace tools for memory operations.
-        let memory_tool_names = [
-            "workspace_view",
-            "workspace_update",
-            "workspace_search",
-            "memory_search",
-        ];
-        let memory_tools: Vec<ToolDefinition> = self
-            .tool_definitions
-            .iter()
-            .filter(|t| memory_tool_names.contains(&t.name.as_str()))
-            .cloned()
-            .collect();
-
-        if memory_tools.is_empty() {
-            return Ok(());
-        }
-
-        // Build a condensed view of the conversation for the memory call.
-        let summary = Self::summarize_for_reflection(&self.messages);
-        let mut messages = vec![Message::user(&summary)];
-        let mut actions_taken = 0usize;
-
-        for _iteration in 0..5u8 {
-            let response = match self
-                .client
-                .stream(&messages, &memory_system, &memory_tools, &self.config)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "memory maintenance LLM call failed");
-                    tracing::info!("[Memory maintenance: LLM call failed, skipping]\n");
-                    return Ok(());
-                }
-            };
-
-            let mut silent_output = SilentOutput;
-            let (assistant_msg, tool_calls, _tokens) =
-                stream_handler::process_stream(response.stream, &mut silent_output).await?;
-
-            messages.push(assistant_msg);
-
-            if tool_calls.is_empty() {
-                break;
-            }
-
-            // Execute through the normal tool dispatch (these tools ARE in
-            // self.tools, they're just not exposed to the main conversation
-            // for this purpose).
-            for call in &tool_calls {
-                let result = self.execute_tool_call_timed(call).await;
-                let tool_result_msg = match result {
-                    Ok(ref tool_output) => {
-                        actions_taken += 1;
-                        let _ = output.tool_use_start(&call.name, &call.id);
-                        let _ = output.tool_result(tool_output);
-                        let _ = output.tool_use_complete();
-                        Message::tool_result(&call.id, &tool_output.content, tool_output.is_error)
-                    }
-                    Err(ref e) => {
-                        tracing::warn!(
-                            tool = call.name.as_str(),
-                            error = %e,
-                            "memory maintenance tool call failed"
-                        );
-                        Message::tool_result(&call.id, &e.to_string(), true)
-                    }
-                };
-                messages.push(tool_result_msg);
-            }
-        }
-
-        if actions_taken == 0 {
-            tracing::info!("[Memory maintenance: no updates needed]\n");
-        } else {
-            tracing::info!(
-                "{}",
-                format!("[Memory maintenance: {actions_taken} update(s)]\n")
-            );
-        }
-        let _ = output.flush();
-
-        tracing::info!(actions_taken = actions_taken, "memory maintenance complete");
-        Ok(())
-    }
-
-    /// Build the system prompt for the memory maintenance call.
-    async fn build_memory_system_prompt(ctx: &ToolContext) -> String {
-        let (memory_usage, memory_limit, user_usage, user_limit) =
-            if let Some(ref ws) = ctx.workspace {
-                let ws = ws.read().await;
-                let mu = ws.get("MEMORY.md").map(|c| c.chars().count()).unwrap_or(0);
-                let ml = ws.char_limit("MEMORY.md").unwrap_or(0);
-                let uu = ws.get("USER.md").map(|c| c.chars().count()).unwrap_or(0);
-                let ul = ws.char_limit("USER.md").unwrap_or(0);
-                (mu, ml, uu, ul)
-            } else {
-                (0, 0, 0, 0)
-            };
-
-        format!(
-            "You are a memory maintenance engine for an AI agent.  Your job is to review \
-             a conversation that just happened and persist important information.\n\n\
-             You have workspace tools to view and update the agent's memory files.\n\n\
-             ## Files and limits\n\
-             - **MEMORY.md** ({memory_usage}/{memory_limit} chars): Agent's curated long-term \
-               memory.  Store key facts, decisions, patterns, and lessons learned.\n\
-             - **USER.md** ({user_usage}/{user_limit} chars): What the agent knows about the \
-               user — preferences, workflow, communication style.\n\
-             - **memory/notes/*.md**: Overflow storage for details that don't fit in \
-               MEMORY.md.  Searchable via memory_search.\n\n\
-             ## What to persist\n\
-             - Important facts, decisions, or conclusions from the conversation\n\
-             - User preferences or workflow patterns you observed\n\
-             - Technical details that would be useful in future sessions\n\
-             - Lessons learned from errors or unexpected results\n\n\
-             ## What NOT to persist\n\
-             - Trivial or one-off exchanges (greetings, simple questions)\n\
-             - Information already in the memory files\n\
-             - Raw tool output — summarize the insight, not the data\n\n\
-             First use workspace_view to read the current memory files.  Then \
-             synthesize new information into the existing content — rewrite the \
-             file as one cohesive, concise document rather than appending.  Use \
-             workspace_update with mode \"set\" to replace the full file.  If a \
-             file is near its limit, tighten prose or move lower-priority details \
-             to memory/notes/.\n\n\
-             Doing nothing is fine if there's nothing worth persisting."
-        )
-    }
-
-    /// Run a side-channel self-improvement reflection.
-    ///
-    /// Makes a separate LLM call with a focused system prompt and only
-    /// the `skill_create` and `export_conversation` tools.  The LLM
-    /// reviews the conversation and decides whether to:
-    ///
-    /// - Create a new skill from a complex task it just solved
-    /// - Improve an existing skill based on what it learned
-    /// - Export the conversation as training data
-    /// - Do nothing (if the conversation was trivial)
-    ///
-    /// This runs in a separate message context — nothing from this call
-    /// is added to the main conversation history.  The user sees tool
-    /// use output (skill created, export written) but the reflection
-    /// reasoning is invisible.
-    ///
-    /// ## Design
-    ///
-    /// Unlike the memory nudge (which injects a user message and hopes
-    /// the model acts on it), this is a real LLM call with real tool
-    /// execution.  The model either acts or doesn't — there's no
-    /// relying on the model noticing a hint in context.
-    async fn self_improve(&mut self, output: &mut dyn Output) -> Result<()> {
-        tracing::info!(
-            turn_count = self.turn_count,
-            messages = self.messages.len(),
-            "running self-improvement reflection"
-        );
-
-        // Log to the user that reflection is happening.
-        tracing::info!("\n\n[Self-improvement: reflecting on conversation...]\n");
-
-        // Build a condensed view of the conversation for the reflection.
-        let reflection_system = Self::build_reflection_system_prompt(&self.tool_context).await;
-
-        // Self-improvement tools are NOT part of the agent's normal tool set.
-        // They live only here — the LLM can't call them during regular
-        // conversation.  We instantiate them directly and build tool
-        // definitions inline.
-        let skill_create_tool: Arc<dyn Tool> = Arc::new(crate::tool::skill_create::SkillCreateTool);
-        let export_tool: Arc<dyn Tool> =
-            Arc::new(crate::tool::export_conversation::ExportConversationTool);
-
-        let reflection_tool_map: HashMap<String, Arc<dyn Tool>> = HashMap::from([
-            (
-                skill_create_tool.name().to_string(),
-                Arc::clone(&skill_create_tool),
-            ),
-            (export_tool.name().to_string(), Arc::clone(&export_tool)),
-        ]);
-
-        let reflection_tools: Vec<ToolDefinition> = [&skill_create_tool, &export_tool]
-            .iter()
-            .map(|t| ToolDefinition {
-                name: t.name().to_string(),
-                description: t.description().to_string(),
-                input_schema: t.input_schema(),
-                agent_only: false,
-            })
-            .collect();
-
-        // Build the reflection messages: a condensed summary of what happened.
-        let summary = Self::summarize_for_reflection(&self.messages);
-        tracing::debug!(summary_len = summary.len(), "built reflection summary");
-
-        let reflection_messages = vec![Message::user(&summary)];
-
-        // LLM call with tool loop — if it wants to use tools, run them.
-        // Cap at 3 iterations to prevent runaway loops.
-        let mut messages = reflection_messages;
-        let mut actions_taken = 0usize;
-
-        for iteration in 0..3u8 {
-            tracing::info!(iteration = iteration, "self-improvement LLM call");
-
-            let response = match self
-                .client
-                .stream(
-                    &messages,
-                    &reflection_system,
-                    &reflection_tools,
-                    &self.config,
-                )
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "self-improvement LLM call failed");
-                    return Ok(()); // non-fatal
-                }
-            };
-
-            // Process stream silently — we only care about tool calls.
-            let mut silent_output = SilentOutput;
-            let (assistant_msg, tool_calls, _tokens) =
-                stream_handler::process_stream(response.stream, &mut silent_output).await?;
-
-            // Log what the model said (for debugging), even though we don't
-            // show it to the user.
-            for block in &assistant_msg.content {
-                if let crate::message::ContentBlock::Text { text } = block
-                    && !text.trim().is_empty()
-                {
-                    tracing::info!(reasoning = text.as_str(), "self-improvement reasoning");
-                }
-            }
-
-            messages.push(assistant_msg);
-
-            if tool_calls.is_empty() {
-                tracing::info!("self-improvement: model decided no action needed");
-                break;
-            }
-
-            // Execute the tool calls directly against the reflection-only
-            // tools.  These bypass the agent's normal tool map and sandbox
-            // — they are internal-only tools that don't exist in the main
-            // conversation.  The sandbox still gates any child operations
-            // (e.g., bash calls inside export_conversation).
-            for call in &tool_calls {
-                tracing::info!(tool = call.name.as_str(), "self-improvement executing tool");
-
-                let tool = match reflection_tool_map.get(&call.name) {
-                    Some(t) => Arc::clone(t),
-                    None => {
-                        tracing::warn!(
-                            tool = call.name.as_str(),
-                            "self-improvement: LLM called unknown tool"
-                        );
-                        messages.push(Message::tool_result(
-                            &call.id,
-                            &format!("unknown tool '{}'", call.name),
-                            true,
-                        ));
-                        continue;
-                    }
-                };
-
-                let tool_start = std::time::Instant::now();
-                let result = tool.run(call.input.clone(), &self.tool_context).await;
-                let tool_ms = tool_start.elapsed().as_millis();
-
-                let tool_result_msg = match result {
-                    Ok(ref tool_output) => {
-                        actions_taken += 1;
-
-                        // Show tool activity to the user so they see what was
-                        // auto-created (skill files, exports).
-                        let _ = output.tool_use_start(&call.name, &call.id);
-                        let _ = output.tool_result(tool_output);
-                        let _ = output.tool_use_complete();
-
-                        tracing::info!(
-                            tool = call.name.as_str(),
-                            duration_ms = tool_ms,
-                            is_error = tool_output.is_error,
-                            result = tool_output.content.as_str(),
-                            "self-improvement tool result"
-                        );
-
-                        Message::tool_result(&call.id, &tool_output.content, tool_output.is_error)
-                    }
-                    Err(ref e) => {
-                        tracing::warn!(
-                            tool = call.name.as_str(),
-                            duration_ms = tool_ms,
-                            error = %e,
-                            "self-improvement tool call failed"
-                        );
-                        tracing::info!(
-                            "{}",
-                            format!("[Self-improvement: {} failed: {}]\n", call.name, e)
-                        );
-                        Message::tool_result(&call.id, &e.to_string(), true)
-                    }
-                };
-                messages.push(tool_result_msg);
-            }
-        }
-
-        if actions_taken == 0 {
-            tracing::info!("[Self-improvement: no action needed]\n");
-        } else {
-            tracing::info!(
-                "{}",
-                format!("[Self-improvement: {actions_taken} action(s) taken]\n")
-            );
-        }
-        let _ = output.flush();
-
-        // Persist the full reflection exchange to the workspace's
-        // improvement/ directory so the user can inspect it later.
-        self.save_reflection_log(&reflection_system, &messages, actions_taken)
-            .await;
-
-        tracing::info!(
-            actions_taken = actions_taken,
-            "self-improvement reflection complete"
-        );
-        Ok(())
-    }
-
-    /// Save a reflection exchange to the workspace for later inspection.
-    ///
-    /// Writes the full system prompt, messages, and metadata as JSON to
-    /// `improvement/<timestamp>.json` in the workspace.  This lets users
-    /// review what the self-improvement engine decided and why.
-    async fn save_reflection_log(
-        &self,
-        system_prompt: &str,
-        messages: &[Message],
-        actions_taken: usize,
-    ) {
-        let Some(ref ws) = self.tool_context.workspace else {
-            return;
-        };
-
-        let epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let log = serde_json::json!({
-            "timestamp": epoch,
-            "turn_count": self.turn_count,
-            "actions_taken": actions_taken,
-            "system_prompt": system_prompt,
-            "messages": messages,
-        });
-
-        let content = serde_json::to_string_pretty(&log).unwrap_or_default();
-        let file_key = format!("improvement/{epoch}.json");
-
-        let mut ws = ws.write().await;
-        ws.set(&file_key, &content);
-        if let Err(e) = ws.save() {
-            tracing::warn!(
-                error = %e,
-                file = file_key.as_str(),
-                "failed to save reflection log"
-            );
-        } else {
-            tracing::info!(
-                file = file_key.as_str(),
-                actions_taken = actions_taken,
-                "saved reflection log"
-            );
-        }
-    }
-
-    /// Build the system prompt for the self-improvement reflection call.
-    async fn build_reflection_system_prompt(ctx: &ToolContext) -> String {
-        // List existing skills so the model knows what already exists.
-        let existing_skills = if let Some(ref ws) = ctx.workspace {
-            let ws = ws.read().await;
-            let skill_dirs = ws.skill_dirs();
-            if skill_dirs.is_empty() {
-                "No skills exist yet.".to_string()
-            } else {
-                let names: Vec<String> = skill_dirs
-                    .iter()
-                    .filter_map(|p| p.file_name().and_then(|s| s.to_str()).map(String::from))
-                    .collect();
-                format!("Existing skills: {}", names.join(", "))
-            }
-        } else {
-            "No workspace configured.".to_string()
-        };
-
-        format!(
-            "You are a self-improvement engine for an AI agent.  Your job is to review \
-             a conversation that just happened and decide whether to take action.\n\n\
-             You have two tools:\n\
-             - **skill_create**: Create or improve a SKILL.md file in the workspace.  \
-               Skills are system prompt fragments that auto-load on startup, teaching \
-               the agent reusable procedures.\n\
-             - **export_conversation**: Export the conversation as ShareGPT-format \
-               training data for fine-tuning tool-calling models.\n\n\
-             ## When to create a skill\n\
-             - The agent solved a complex, multi-step task that it might encounter again\n\
-             - The agent discovered a non-obvious procedure or debugging pattern\n\
-             - The agent found a domain-specific workflow worth encoding\n\n\
-             ## When to improve a skill\n\
-             - An existing skill's instructions were insufficient and the agent had to \
-               improvise — capture what worked\n\
-             - The agent found a better approach than what the skill describes\n\n\
-             ## When to export\n\
-             - The conversation contains substantial, high-quality tool use (3+ tool \
-               calls with successful outcomes)\n\
-             - The conversation demonstrates a complete problem-solving trajectory\n\n\
-             ## When to do nothing\n\
-             - The conversation was trivial (simple Q&A, one-step tasks)\n\
-             - A matching skill already exists and doesn't need improvement\n\
-             - The conversation was mostly errors or failed attempts\n\n\
-             Doing nothing is the right choice most of the time.  Only act when there's \
-             genuine value in persisting knowledge or exporting data.\n\n\
-             {existing_skills}"
-        )
-    }
-
-    /// Summarize the conversation for the reflection LLM call.
-    ///
-    /// Instead of sending the full message history (which could be huge),
-    /// build a condensed representation: user goals, tools used, outcomes.
-    fn summarize_for_reflection(messages: &[Message]) -> String {
-        let mut summary = String::from(
-            "Review this conversation and decide whether to create/improve a skill \
-             or export training data.  Here is what happened:\n\n",
-        );
-
-        let mut tool_call_count = 0;
-        let mut tool_error_count = 0;
-        let mut tools_used: Vec<String> = Vec::new();
-
-        for msg in messages {
-            for block in &msg.content {
-                match block {
-                    crate::message::ContentBlock::Text { text } => {
-                        // Include user messages and short assistant text.
-                        let role = match msg.role {
-                            crate::message::Role::User => "User",
-                            crate::message::Role::Assistant => "Assistant",
-                        };
-                        // Truncate long text to keep the summary compact.
-                        let truncated = if text.len() > 500 {
-                            format!("{}...[truncated]", &text[..500])
-                        } else {
-                            text.clone()
-                        };
-                        summary.push_str(&format!("{role}: {truncated}\n\n"));
-                    }
-                    crate::message::ContentBlock::ToolUse { name, .. } => {
-                        tool_call_count += 1;
-                        if !tools_used.contains(name) {
-                            tools_used.push(name.clone());
-                        }
-                        summary.push_str(&format!("[Tool call: {name}]\n"));
-                    }
-                    crate::message::ContentBlock::ToolResult {
-                        is_error, content, ..
-                    } => {
-                        if *is_error {
-                            tool_error_count += 1;
-                            summary.push_str(&format!(
-                                "[Tool error: {}]\n",
-                                &content[..content.len().min(200)]
-                            ));
-                        } else {
-                            let truncated = if content.len() > 200 {
-                                format!("{}...", &content[..200])
-                            } else {
-                                content.clone()
-                            };
-                            summary.push_str(&format!("[Tool result: {truncated}]\n"));
-                        }
-                    }
-                    crate::message::ContentBlock::Image { media_type, .. } => {
-                        summary.push_str(&format!("[Image: {media_type}]\n"));
-                    }
-                }
-            }
-        }
-
-        summary.push_str(&format!(
-            "\n---\nStats: {tool_call_count} tool calls ({tool_error_count} errors), \
-             tools used: [{}], {} messages total.",
-            tools_used.join(", "),
-            messages.len(),
-        ));
-
-        summary
     }
 
     /// Check if an LLM error is retryable (rate limit, overloaded, network).
@@ -1908,7 +926,7 @@ impl Agent {
                     .ok_or_else(|| DysonError::tool(&call.name, "unknown tool"))?;
 
                 // Execute the tool.
-                let mut tool_output = match tool.run(input.clone(), &self.tool_context).await {
+                let mut tool_output = match tool.run(&input, &self.tool_context).await {
                     Ok(out) => out,
                     Err(e) => ToolOutput::error(e.to_string()),
                 };
@@ -1950,7 +968,7 @@ impl Agent {
                 })?;
 
                 // Execute the redirected tool.
-                let mut tool_output = match tool.run(input.clone(), &self.tool_context).await {
+                let mut tool_output = match tool.run(&input, &self.tool_context).await {
                     Ok(out) => out,
                     Err(e) => ToolOutput::error(e.to_string()),
                 };
@@ -1967,89 +985,6 @@ impl Agent {
             }
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Background learning synthesis
-// ---------------------------------------------------------------------------
-
-/// Summarise a conversation and merge the result into the workspace's
-/// MEMORY.md.  This is the workhorse behind `spawn_save_learnings` —
-/// it runs entirely in a background task with no tools, just a single
-/// LLM call and a workspace write.
-async fn synthesize_to_workspace(
-    client: &dyn LlmClient,
-    config: &CompletionConfig,
-    conversation_summary: &str,
-    workspace: &Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
-) -> Result<()> {
-    // Read the current memory so the LLM can synthesise rather than
-    // duplicate.
-    let current_memory = {
-        let ws = workspace.read().await;
-        ws.get("MEMORY.md").unwrap_or_default()
-    };
-
-    let system = "\
-        You are a memory maintenance engine.  You will receive the current \
-        contents of MEMORY.md and a summary of a conversation that is about \
-        to be cleared.  Your job is to produce an updated MEMORY.md that \
-        incorporates any important new information from the conversation.\n\n\
-        Rules:\n\
-        - Output ONLY the new file contents, no commentary or markdown fences.\n\
-        - Synthesise — merge new information into the existing text rather \
-          than appending.\n\
-        - Be concise.  Keep the file under 4000 characters.\n\
-        - Omit trivial exchanges (greetings, simple lookups).\n\
-        - Preserve existing information unless it's been superseded.\n\
-        - If there is nothing worth persisting, output the existing file \
-          unchanged.";
-
-    let user_message = format!(
-        "## Current MEMORY.md\n\n{current_memory}\n\n\
-         ## Conversation summary\n\n{conversation_summary}"
-    );
-
-    let messages = vec![Message::user(&user_message)];
-    let empty_tools: Vec<ToolDefinition> = Vec::new();
-
-    let response = client
-        .stream(&messages, system, &empty_tools, config)
-        .await?;
-
-    let mut silent = SilentOutput;
-    let (assistant_msg, _, _) =
-        stream_handler::process_stream(response.stream, &mut silent).await?;
-
-    // Extract the text from the response.
-    let new_memory: String = assistant_msg
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            crate::message::ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if new_memory.trim().is_empty() {
-        tracing::info!("learning synthesis produced empty output — skipping write");
-        return Ok(());
-    }
-
-    // Write back to workspace.
-    {
-        let mut ws = workspace.write().await;
-        ws.set("MEMORY.md", new_memory.trim());
-        ws.save()?;
-    }
-
-    tracing::info!(
-        new_len = new_memory.len(),
-        "MEMORY.md updated by background learning synthesis"
-    );
-
-    Ok(())
 }
 
 // ===========================================================================
@@ -2374,7 +1309,7 @@ mod tests {
 
         let summary = "User asked about Rust lifetimes and learned about borrowing.";
 
-        let result = synthesize_to_workspace(&llm, &config, summary, &workspace).await;
+        let result = reflection::synthesize_to_workspace(&llm, &config, summary, &workspace).await;
 
         assert!(result.is_ok(), "synthesis should succeed");
 
@@ -2576,7 +1511,7 @@ mod tests {
         }
         async fn run(
             &self,
-            _input: serde_json::Value,
+            _input: &serde_json::Value,
             _ctx: &crate::tool::ToolContext,
         ) -> Result<ToolOutput> {
             Ok(ToolOutput::success("Here is your file.")
@@ -3392,9 +2327,9 @@ mod tests {
 
     mod test_tool_calling_integration {
         use super::*;
-        use crate::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
-        use crate::result_formatter::ResultFormatter;
-        use crate::tool_limiter::ToolLimiter;
+        use super::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
+        use super::result_formatter::ResultFormatter;
+        use super::tool_limiter::ToolLimiter;
 
         #[test]
         fn full_pipeline_single_call() {
@@ -3411,7 +2346,7 @@ mod tests {
             assert!(limiter.check(&call.name).is_ok());
 
             // 2. Dependency analysis: single call → one parallel phase.
-            let phases = DependencyAnalyzer::analyze(&[call.clone()]);
+            let phases = DependencyAnalyzer::analyze(&[&call]);
             assert_eq!(phases.len(), 1);
             assert!(matches!(phases[0], ExecutionPhase::Parallel(_)));
 
@@ -3429,7 +2364,8 @@ mod tests {
                 ToolCall::new("file_write", serde_json::json!({"path": "out.txt"})),
                 ToolCall::new("file_read", serde_json::json!({"path": "out.txt"})),
             ];
-            let phases = DependencyAnalyzer::analyze(&calls);
+            let refs: Vec<&ToolCall> = calls.iter().collect();
+            let phases = DependencyAnalyzer::analyze(&refs);
             assert!(
                 phases.len() >= 2,
                 "expected at least 2 phases, got {}",
