@@ -231,6 +231,10 @@ pub struct Agent {
     /// Tool definitions sent to the LLM so it knows what tools are available.
     tool_definitions: Vec<ToolDefinition>,
 
+    /// When `true`, tool definitions are omitted from LLM requests.
+    /// Set when the active model doesn't support tool use.
+    tools_disabled: bool,
+
     /// Composed system prompt: base prompt + all skill prompt fragments.
     system_prompt: String,
 
@@ -399,6 +403,7 @@ impl Agent {
             limiter: ToolLimiter::for_agent(),
             formatter: ResultFormatter::default(),
             agent_settings: settings.clone(),
+            tools_disabled: false,
         })
     }
 
@@ -833,6 +838,40 @@ impl Agent {
         }
     }
 
+    /// Mark the agent as unable to use tools.  Subsequent LLM calls will
+    /// omit tool definitions from the request.
+    pub fn disable_tools(&mut self) {
+        self.tools_disabled = true;
+    }
+
+    /// Replace all `ContentBlock::ToolUse` and `ContentBlock::ToolResult`
+    /// blocks in the conversation history with text placeholders.
+    ///
+    /// Called when the active model doesn't support tool use — the OpenAI
+    /// serializer would otherwise emit `role: "tool"` messages and
+    /// `tool_calls` arrays that providers reject when no tool definitions
+    /// are provided.
+    pub fn strip_tool_history(&mut self) {
+        for msg in &mut self.messages {
+            for block in &mut msg.content {
+                match block {
+                    ContentBlock::ToolUse { name, .. } => {
+                        *block = ContentBlock::Text {
+                            text: format!("[tool call: {name}]"),
+                        };
+                    }
+                    ContentBlock::ToolResult { content, .. } => {
+                        let preview: String = content.chars().take(200).collect();
+                        *block = ContentBlock::Text {
+                            text: format!("[tool result: {preview}]"),
+                        };
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// Run the agent loop for a single user message.
     ///
     /// Appends the user message to the conversation history, then loops:
@@ -962,7 +1001,11 @@ impl Agent {
                     // Determine tools_for_llm inside the loop so retries
                     // behave identically.  On the first successful response
                     // we learn the tool_mode.
-                    let tools_for_llm = self.tool_definitions.as_slice();
+                    let tools_for_llm = if self.tools_disabled {
+                        &[]
+                    } else {
+                        self.tool_definitions.as_slice()
+                    };
 
                     match self
                         .client

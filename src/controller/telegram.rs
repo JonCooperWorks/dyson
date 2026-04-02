@@ -669,33 +669,67 @@ impl super::Controller for TelegramController {
                     };
 
                     if let Err(e) = result {
-                        if is_vision_error(&e.to_string()) {
-                            tracing::warn!(error = %e, "model does not support image input");
+                        match classify_llm_error(&e.to_string()) {
+                            LlmErrorKind::NoToolUse => {
+                                tracing::warn!(error = %e, "model does not support tool use");
 
-                            // Undo the failed user message and strip all images
-                            // from history so old vision-model images don't
-                            // poison subsequent turns.
-                            ca.agent.pop_last_message();
-                            ca.agent.strip_images();
+                                // Undo the failed user message, disable tools
+                                // for this agent, and convert existing tool
+                                // blocks in history to text so the provider
+                                // doesn't reject them.
+                                ca.agent.pop_last_message();
+                                ca.agent.disable_tools();
+                                ca.agent.strip_tool_history();
 
-                            let _ = bot_clone
-                                .send_message(
-                                    chat_id,
-                                    format!("{} doesn't support vision", ca.model),
-                                )
-                                .await;
+                                let _ = bot_clone
+                                    .send_message(
+                                        chat_id,
+                                        format!("{} doesn't support tool use", ca.model),
+                                    )
+                                    .await;
 
-                            // If there was a caption, retry with just the text.
-                            if !text.is_empty()
-                                && let Err(e) = ca.agent.run(&text, &mut output).await
-                            {
-                                tracing::error!(error = %e, "text-only retry failed");
-                                let _ =
-                                    bot_clone.send_message(chat_id, format!("Error: {e}")).await;
+                                // Retry the user's message without tools.
+                                if !text.is_empty()
+                                    && let Err(e) = ca.agent.run(&text, &mut output).await
+                                {
+                                    tracing::error!(error = %e, "tool-less retry failed");
+                                    let _ = bot_clone
+                                        .send_message(chat_id, format!("Error: {e}"))
+                                        .await;
+                                }
                             }
-                        } else {
-                            tracing::error!(error = %e, "agent run failed");
-                            let _ = bot_clone.send_message(chat_id, format!("Error: {e}")).await;
+                            LlmErrorKind::NoVision => {
+                                tracing::warn!(error = %e, "model does not support image input");
+
+                                // Undo the failed user message and strip all
+                                // images from history so old vision-model images
+                                // don't poison subsequent turns.
+                                ca.agent.pop_last_message();
+                                ca.agent.strip_images();
+
+                                let _ = bot_clone
+                                    .send_message(
+                                        chat_id,
+                                        format!("{} doesn't support vision", ca.model),
+                                    )
+                                    .await;
+
+                                // If there was a caption, retry with just the text.
+                                if !text.is_empty()
+                                    && let Err(e) = ca.agent.run(&text, &mut output).await
+                                {
+                                    tracing::error!(error = %e, "text-only retry failed");
+                                    let _ = bot_clone
+                                        .send_message(chat_id, format!("Error: {e}"))
+                                        .await;
+                                }
+                            }
+                            LlmErrorKind::Other => {
+                                tracing::error!(error = %e, "agent run failed");
+                                let _ = bot_clone
+                                    .send_message(chat_id, format!("Error: {e}"))
+                                    .await;
+                            }
                         }
                     }
 
@@ -765,9 +799,27 @@ fn save_memory_note(settings: &Settings, note: &str) -> crate::Result<()> {
 // Media extraction helpers
 // ---------------------------------------------------------------------------
 
-/// Check if an LLM error indicates the model doesn't support image input.
-fn is_vision_error(err: &str) -> bool {
-    err.contains("image input") || err.contains("vision") || err.contains("No endpoints found")
+/// Categorise an LLM error so the controller can attempt recovery.
+enum LlmErrorKind {
+    /// The model doesn't support tool/function calling.
+    NoToolUse,
+    /// The model doesn't support image/vision input.
+    NoVision,
+    /// Any other (unrecoverable) error.
+    Other,
+}
+
+fn classify_llm_error(err: &str) -> LlmErrorKind {
+    if err.contains("tool use") || err.contains("tool_use") {
+        LlmErrorKind::NoToolUse
+    } else if err.contains("image input")
+        || err.contains("vision")
+        || err.contains("No endpoints found")
+    {
+        LlmErrorKind::NoVision
+    } else {
+        LlmErrorKind::Other
+    }
 }
 
 /// Extract content blocks from a Telegram message.
@@ -1601,32 +1653,57 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Vision error detection
+    // LLM error classification
     // -----------------------------------------------------------------------
 
     #[test]
-    fn is_vision_error_detects_openrouter_404() {
-        assert!(is_vision_error(
-            "OpenAI API returned 404 Not Found: {\"error\":{\"message\":\"No endpoints found that support image input\",\"code\":404}}"
+    fn classify_vision_openrouter_404() {
+        assert!(matches!(
+            classify_llm_error(
+                "OpenAI API returned 404 Not Found: {\"error\":{\"message\":\"No endpoints found that support image input\",\"code\":404}}"
+            ),
+            LlmErrorKind::NoVision,
         ));
     }
 
     #[test]
-    fn is_vision_error_detects_image_input_message() {
-        assert!(is_vision_error("does not support image input"));
-    }
-
-    #[test]
-    fn is_vision_error_detects_vision_keyword() {
-        assert!(is_vision_error(
-            "model does not support vision capabilities"
+    fn classify_vision_image_input() {
+        assert!(matches!(
+            classify_llm_error("does not support image input"),
+            LlmErrorKind::NoVision,
         ));
     }
 
     #[test]
-    fn is_vision_error_ignores_unrelated_errors() {
-        assert!(!is_vision_error("rate limit exceeded"));
-        assert!(!is_vision_error("invalid API key"));
-        assert!(!is_vision_error("context length exceeded"));
+    fn classify_vision_keyword() {
+        assert!(matches!(
+            classify_llm_error("model does not support vision capabilities"),
+            LlmErrorKind::NoVision,
+        ));
+    }
+
+    #[test]
+    fn classify_tool_use_error() {
+        assert!(matches!(
+            classify_llm_error(
+                "OpenAI API returned 404 Not Found: {\"error\":{\"message\":\"No endpoints found that support tool use\",\"code\":404}}"
+            ),
+            LlmErrorKind::NoToolUse,
+        ));
+    }
+
+    #[test]
+    fn classify_tool_use_underscore() {
+        assert!(matches!(
+            classify_llm_error("model does not support tool_use"),
+            LlmErrorKind::NoToolUse,
+        ));
+    }
+
+    #[test]
+    fn classify_unrelated_errors() {
+        assert!(matches!(classify_llm_error("rate limit exceeded"), LlmErrorKind::Other));
+        assert!(matches!(classify_llm_error("invalid API key"), LlmErrorKind::Other));
+        assert!(matches!(classify_llm_error("context length exceeded"), LlmErrorKind::Other));
     }
 }
