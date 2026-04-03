@@ -86,7 +86,7 @@ impl MemoryStore {
             tracing::warn!(key = key, error = %e, "memory store failed to insert");
             return;
         }
-        tracing::info!(key = key, "memory store indexed");
+        tracing::debug!(key = key, "memory store indexed");
     }
 
     /// Search the FTS5 index.  Returns matching files with snippet highlights.
@@ -126,7 +126,7 @@ impl MemoryStore {
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
             .unwrap_or_default();
 
-        tracing::info!(query = query, results = results.len(), "memory store search");
+        tracing::debug!(query = query, results = results.len(), "memory store search");
         results
     }
 
@@ -140,7 +140,7 @@ impl MemoryStore {
             tracing::warn!(key = key, error = %e, "memory store failed to remove");
             return;
         }
-        tracing::info!(key = key, "memory store entry removed");
+        tracing::debug!(key = key, "memory store entry removed");
     }
 }
 
