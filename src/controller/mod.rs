@@ -565,7 +565,7 @@ pub async fn execute_command(
 /// `tracing_appender::rolling::daily` creates files like `dyson.log.2026-04-03`.
 /// We pick the most recent one by sorting the matching filenames.
 pub fn read_log_tail(n: usize) -> Result<String, String> {
-    use std::io::{BufRead, BufReader};
+    use std::io::{Read as _, Seek, SeekFrom};
 
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let log_dir = PathBuf::from(home).join(".dyson");
@@ -592,15 +592,61 @@ pub fn read_log_tail(n: usize) -> Result<String, String> {
     log_files.reverse();
 
     let path = &log_files[0];
-    let file =
+    let mut file =
         std::fs::File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-    let reader = BufReader::new(file);
-    let all_lines: Vec<String> = reader
-        .lines()
-        .collect::<std::io::Result<_>>()
-        .map_err(|e| e.to_string())?;
-    let start = all_lines.len().saturating_sub(n);
-    Ok(all_lines[start..].join("\n"))
+
+    // Read from the end of the file in chunks to find the last `n` lines,
+    // avoiding loading the entire file into memory.
+    let file_len = file
+        .metadata()
+        .map_err(|e| e.to_string())?
+        .len();
+
+    if file_len == 0 {
+        return Ok(String::new());
+    }
+
+    const CHUNK: u64 = 8192;
+    let mut newlines_found = 0usize;
+    let mut tail_start = 0u64; // byte offset where the tail begins
+    let mut offset = file_len;
+
+    // Walk backwards through the file one chunk at a time.
+    'outer: while offset > 0 {
+        let read_start = offset.saturating_sub(CHUNK);
+        let read_len = (offset - read_start) as usize;
+        file.seek(SeekFrom::Start(read_start)).map_err(|e| e.to_string())?;
+
+        let mut buf = vec![0u8; read_len];
+        file.read_exact(&mut buf).map_err(|e| e.to_string())?;
+
+        // Scan the chunk from back to front for newline characters.
+        for i in (0..read_len).rev() {
+            if buf[i] == b'\n' {
+                newlines_found += 1;
+                // We need n+1 newlines to capture n complete lines (the last
+                // newline may be at EOF, so the +1 accounts for that).
+                if newlines_found > n {
+                    tail_start = read_start + (i as u64) + 1;
+                    break 'outer;
+                }
+            }
+        }
+
+        offset = read_start;
+    }
+
+    // Read from tail_start to end of file.
+    file.seek(SeekFrom::Start(tail_start)).map_err(|e| e.to_string())?;
+    let mut result = String::new();
+    file.read_to_string(&mut result).map_err(|e| e.to_string())?;
+
+    // Trim a single trailing newline so the caller gets clean lines.
+    if result.ends_with('\n') {
+        result.pop();
+    }
+
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
