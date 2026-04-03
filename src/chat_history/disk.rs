@@ -85,8 +85,9 @@ impl ChatHistory for DiskChatHistory {
         // Externalize image data to avoid bloating the JSON file.
         let messages = externalize_images(messages, &media_dir)?;
 
-        let json = serde_json::to_string_pretty(&messages)?;
-        std::fs::write(&path, json)?;
+        let file = std::fs::File::create(&path)?;
+        let writer = std::io::BufWriter::new(file);
+        serde_json::to_writer_pretty(writer, &messages)?;
         tracing::debug!(chat_id = chat_id, path = %path.display(), "chat history saved");
         Ok(())
     }
@@ -139,8 +140,11 @@ impl ChatHistory for DiskChatHistory {
 /// the `data` field with `@media/{hash}`.  Skips images that are already
 /// externalized.
 fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<Message>> {
-    // Collect all unique hashes we need to write.
-    let mut to_write: HashMap<String, String> = HashMap::new();
+    // Build a map from raw data pointer → hash in a single pass.
+    // Uses the data string's pointer as key to avoid rehashing in the
+    // replacement pass.  The hash is computed once per unique image.
+    let mut hash_cache: HashMap<*const str, String> = HashMap::new();
+    let mut to_write: HashMap<String, &str> = HashMap::new();
     let mut needs_externalization = false;
 
     for msg in messages {
@@ -149,8 +153,12 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
                 && !data.starts_with(MEDIA_REF_PREFIX)
             {
                 needs_externalization = true;
-                let hash = simple_hash(data);
-                to_write.entry(hash).or_insert_with(|| data.clone());
+                let ptr: *const str = data.as_str();
+                hash_cache.entry(ptr).or_insert_with(|| {
+                    let hash = simple_hash(data);
+                    to_write.entry(hash.clone()).or_insert(data.as_str());
+                    hash
+                });
             }
         }
     }
@@ -168,7 +176,7 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
         }
     }
 
-    // Clone messages with data replaced by references.
+    // Clone messages with data replaced by references (hash lookup, no rehash).
     let messages: Vec<Message> = messages
         .iter()
         .map(|msg| {
@@ -179,7 +187,8 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
                     ContentBlock::Image { data, media_type }
                         if !data.starts_with(MEDIA_REF_PREFIX) =>
                     {
-                        let hash = simple_hash(data);
+                        let ptr: *const str = data.as_str();
+                        let hash = &hash_cache[&ptr];
                         ContentBlock::Image {
                             data: format!("{MEDIA_REF_PREFIX}{hash}"),
                             media_type: media_type.clone(),

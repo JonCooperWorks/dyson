@@ -163,12 +163,6 @@ impl ContentBlock {
         match self {
             ContentBlock::Text { text } => text.split_whitespace().count().max(1),
             ContentBlock::ToolUse { id, name, input } => {
-                // Estimate input tokens from the Value tree size without
-                // serializing to a String.  serde_json's internal byte
-                // count is not exposed, but we can walk the top level:
-                // for objects/arrays, count keys+values; for primitives,
-                // use a fixed estimate.  A rough heuristic: serialize
-                // length ≈ 4 bytes per token on average.
                 let input_token_estimate = estimate_json_tokens(input);
                 name.len() / 4 + 1
                     + id.len() / 4 + 1
@@ -373,6 +367,21 @@ mod tests {
         };
         let tokens = block.estimate_tokens();
         // Should include name, id, JSON input, plus overhead.
+        assert!(tokens >= 10, "expected at least 10, got {tokens}");
+    }
+
+    #[test]
+    fn estimate_json_tokens_nested() {
+        let value = serde_json::json!({
+            "command": "ls -la /tmp",
+            "options": {
+                "verbose": true,
+                "count": 42
+            },
+            "tags": ["a", "b", "c"]
+        });
+        let tokens = super::estimate_json_tokens(&value);
+        // Should count all leaves + structural overhead, no allocations.
         assert!(tokens >= 10, "expected at least 10, got {tokens}");
     }
 

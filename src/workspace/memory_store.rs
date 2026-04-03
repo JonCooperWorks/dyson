@@ -42,6 +42,10 @@ impl MemoryStore {
             ))
         })?;
 
+        // WAL mode improves concurrent read/write performance.
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(|e| DysonError::Config(format!("cannot set WAL mode: {e}")))?;
+
         conn.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(key, content);",
         )
@@ -73,16 +77,16 @@ impl MemoryStore {
     pub fn index(&self, key: &str, content: &str) {
         let conn = self.conn.lock().unwrap();
         // Delete existing entry first (upsert pattern for FTS5).
-        if let Err(e) = conn.execute(
-            "DELETE FROM memory_fts WHERE key = ?1",
-            rusqlite::params![key],
-        ) {
+        if let Err(e) = conn
+            .prepare_cached("DELETE FROM memory_fts WHERE key = ?1")
+            .and_then(|mut stmt| stmt.execute(rusqlite::params![key]))
+        {
             tracing::warn!(key = key, error = %e, "memory store failed to delete before index");
         }
-        if let Err(e) = conn.execute(
-            "INSERT INTO memory_fts (key, content) VALUES (?1, ?2)",
-            rusqlite::params![key, content],
-        ) {
+        if let Err(e) = conn
+            .prepare_cached("INSERT INTO memory_fts (key, content) VALUES (?1, ?2)")
+            .and_then(|mut stmt| stmt.execute(rusqlite::params![key, content]))
+        {
             tracing::warn!(key = key, error = %e, "memory store failed to insert");
             return;
         }
@@ -133,10 +137,10 @@ impl MemoryStore {
     /// Remove a file from the FTS5 index.
     pub fn remove(&self, key: &str) {
         let conn = self.conn.lock().unwrap();
-        if let Err(e) = conn.execute(
-            "DELETE FROM memory_fts WHERE key = ?1",
-            rusqlite::params![key],
-        ) {
+        if let Err(e) = conn
+            .prepare_cached("DELETE FROM memory_fts WHERE key = ?1")
+            .and_then(|mut stmt| stmt.execute(rusqlite::params![key]))
+        {
             tracing::warn!(key = key, error = %e, "memory store failed to remove");
             return;
         }

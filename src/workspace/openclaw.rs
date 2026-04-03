@@ -329,9 +329,8 @@ impl Workspace for OpenClawWorkspace {
     fn save(&self) -> Result<()> {
         let mut dirty = self.dirty.lock().unwrap();
 
-        // Only write files that have been modified since the last save.
         if dirty.is_empty() {
-            tracing::debug!("workspace save: nothing dirty, skipping");
+            tracing::debug!("workspace save skipped — no dirty files");
             return Ok(());
         }
 
@@ -351,7 +350,7 @@ impl Workspace for OpenClawWorkspace {
         let dirty_count = dirty.len();
         dirty.clear();
 
-        tracing::debug!(dirty_files = dirty_count, "workspace saved");
+        tracing::debug!(files = dirty_count, "workspace saved");
 
         Ok(())
     }
@@ -368,6 +367,13 @@ impl Workspace for OpenClawWorkspace {
             .size_limit(10 * 1024 * 1024) // 10 MB compiled size limit (prevents ReDoS)
             .build();
 
+        // Pre-compute lowercase pattern for the fallback path (invalid regex).
+        let pattern_lower = if re.is_err() {
+            Some(pattern.to_lowercase())
+        } else {
+            None
+        };
+
         let mut results = Vec::new();
 
         for (name, content) in &self.files {
@@ -375,7 +381,9 @@ impl Workspace for OpenClawWorkspace {
                 .lines()
                 .filter(|line| match &re {
                     Ok(re) => re.is_match(line),
-                    Err(_) => line.to_lowercase().contains(&pattern.to_lowercase()),
+                    Err(_) => line
+                        .to_lowercase()
+                        .contains(pattern_lower.as_deref().unwrap_or(pattern)),
                 })
                 .map(|line| line.to_string())
                 .collect();

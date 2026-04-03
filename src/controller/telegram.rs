@@ -467,7 +467,13 @@ impl super::Controller for TelegramController {
                     let result = tokio::task::spawn_blocking(move || super::read_log_tail(n)).await;
                     match result {
                         Ok(Ok(lines)) => {
-                            let _ = bot.send_message(chat_id, lines).await;
+                            // Split long log output to respect Telegram's 4096-char
+                            // message limit.  Without this, the API rejects the
+                            // message and teloxide retries with backoff, causing
+                            // multi-minute delays.
+                            for part in split_for_telegram(&lines) {
+                                let _ = bot.send_message(chat_id, part).await;
+                            }
                         }
                         Ok(Err(e)) => {
                             let _ = bot

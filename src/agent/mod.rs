@@ -144,7 +144,7 @@ pub struct Agent {
     tools_disabled: bool,
 
     /// Composed system prompt: base prompt + all skill prompt fragments.
-    system_prompt: String,
+    system_prompt: Arc<str>,
 
     /// LLM configuration (model, max_tokens, temperature).
     config: CompletionConfig,
@@ -324,7 +324,7 @@ impl Agent {
             tools,
             tool_to_skill,
             tool_definitions,
-            system_prompt,
+            system_prompt: Arc::from(system_prompt),
             config,
             max_iterations: settings.max_iterations,
             max_retries: 3,
@@ -524,17 +524,19 @@ impl Agent {
             }
         }
 
-        // Build the full turn system prompt, only allocating a new String
-        // when skills injected per-turn fragments (the uncommon case).
-        let turn_system_prompt = if skill_fragments.is_empty() {
-            self.system_prompt.clone()
+        // Build the full turn system prompt.  The common case (no skill
+        // fragments) just clones the Arc — an atomic refcount bump, no
+        // heap allocation.  Only when skills inject per-turn fragments do
+        // we allocate a new String.
+        let turn_system_prompt: Arc<str> = if skill_fragments.is_empty() {
+            Arc::clone(&self.system_prompt)
         } else {
             let mut prompt = String::with_capacity(
                 self.system_prompt.len() + skill_fragments.len(),
             );
             prompt.push_str(&self.system_prompt);
             prompt.push_str(&skill_fragments);
-            prompt
+            Arc::from(prompt)
         };
 
         let mut recovered_this_turn = false;
