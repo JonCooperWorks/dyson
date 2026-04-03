@@ -5,7 +5,7 @@ edition = "2024"
 description = "Streaming, composable AI agent loop in Rust"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "signal", "process", "sync", "time"] }
 reqwest = { version = "0.13", default-features = false, features = ["stream", "json", "rustls", "query"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,6 +32,11 @@ ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 base64 = "0.22"
 subtle = "2"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
 
 [dev-dependencies]
 tempfile = "3"
