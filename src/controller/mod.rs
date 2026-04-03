@@ -672,6 +672,18 @@ pub trait Output: Send {
         crate::error::LlmRecovery::GiveUp
     }
 
+    /// Show or hide a typing indicator.
+    ///
+    /// Called with `visible = true` just before the LLM call starts (after
+    /// the user sends input) and `visible = false` once the first response
+    /// token arrives.  Controllers that support a typing indicator should
+    /// display/clear it accordingly.
+    ///
+    /// The default implementation is a no-op.
+    fn typing_indicator(&mut self, _visible: bool) -> std::result::Result<(), DysonError> {
+        Ok(())
+    }
+
     /// Flush any buffered output.
     fn flush(&mut self) -> std::result::Result<(), DysonError>;
 }

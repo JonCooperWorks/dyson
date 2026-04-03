@@ -565,6 +565,9 @@ impl Agent {
                 "starting LLM call"
             );
 
+            // Show a typing indicator while waiting for the LLM to respond.
+            output.typing_indicator(true)?;
+
             // -- Stream LLM response (with retry/backoff) --
             //
             // When the provider handles tools internally (e.g., Claude Code),

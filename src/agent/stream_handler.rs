@@ -129,6 +129,7 @@ pub async fn process_stream(
     let mut first_token_time: Option<std::time::Instant> = None;
     let mut token_count: usize = 0;
     let mut api_output_tokens: Option<usize> = None;
+    let mut typing_cleared = false;
 
     tokio::pin!(stream);
 
@@ -149,6 +150,10 @@ pub async fn process_stream(
                         .as_millis();
                     tracing::info!(ttft_ms = ttft_ms, "first token received");
                 }
+                if !typing_cleared {
+                    output.typing_indicator(false)?;
+                    typing_cleared = true;
+                }
                 // Rough token count: split on whitespace boundaries.
                 // Not exact, but good enough for tok/s estimation.
                 token_count += text.split_whitespace().count().max(1);
@@ -157,6 +162,10 @@ pub async fn process_stream(
             }
 
             StreamEvent::ToolUseStart { ref id, ref name } => {
+                if !typing_cleared {
+                    output.typing_indicator(false)?;
+                    typing_cleared = true;
+                }
                 flush_text(&mut current_text, &mut content_blocks);
                 tracing::info!(tool = name, id = id, "tool call started");
                 output.tool_use_start(id, name)?;
