@@ -391,4 +391,5 @@ mod tests {
             other => panic!("expected Text, got: {other:?}"),
         }
     }
+
 }
