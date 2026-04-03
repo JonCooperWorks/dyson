@@ -46,6 +46,8 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use futures::Stream;
 
+use std::fmt::Write as _;
+
 use crate::error::Result;
 use crate::llm::stream::StreamEvent;
 use crate::message::{ContentBlock, Message, Role};
@@ -407,24 +409,26 @@ impl SseLineBuffer {
         let mut payloads = Vec::new();
 
         while let Some(newline_pos) = self.buffer.iter().position(|&b| b == b'\n') {
-            // Drain the line including the newline byte.
-            let line_bytes: Vec<u8> = self.buffer.drain(..=newline_pos).collect();
-            let line = String::from_utf8_lossy(&line_bytes);
-            let line = line.trim();
+            // Decode the line in-place from the buffer without allocating a
+            // separate Vec — just borrow the slice and drain afterward.
+            let line = std::str::from_utf8(&self.buffer[..newline_pos])
+                .map(|s| s.trim())
+                .unwrap_or_else(|_| {
+                    // Fallback for invalid UTF-8: use lossy conversion.
+                    // This path is rare for SSE streams.
+                    ""
+                });
 
             // Skip empty lines, comments, and event: lines.
-            if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
-                continue;
-            }
-
-            if let Some(data) = line.strip_prefix("data:") {
-                let data = data.trim();
-                if data == "[DONE]" {
-                    payloads.push("[DONE]".to_string());
-                } else {
+            if !(line.is_empty() || line.starts_with(':') || line.starts_with("event:")) {
+                if let Some(data) = line.strip_prefix("data:") {
+                    let data = data.trim();
                     payloads.push(data.to_string());
                 }
             }
+
+            // Drain the line including the newline byte.
+            self.buffer.drain(..=newline_pos);
         }
 
         Ok(payloads)
@@ -576,10 +580,10 @@ pub(crate) fn format_prompt(messages: &[Message], tools: &[ToolDefinition]) -> S
             for block in &msg.content {
                 match block {
                     ContentBlock::Text { text } => {
-                        prompt.push_str(&format!("{role_label}: {text}\n\n"));
+                        let _ = write!(prompt, "{role_label}: {text}\n\n");
                     }
                     ContentBlock::ToolUse { name, input, .. } => {
-                        prompt.push_str(&format!("[Used tool: {name} with input: {input}]\n\n"));
+                        let _ = write!(prompt, "[Used tool: {name} with input: {input}]\n\n");
                     }
                     ContentBlock::ToolResult {
                         content, is_error, ..
@@ -589,7 +593,7 @@ pub(crate) fn format_prompt(messages: &[Message], tools: &[ToolDefinition]) -> S
                         } else {
                             "Tool result"
                         };
-                        prompt.push_str(&format!("{label}: {content}\n\n"));
+                        let _ = write!(prompt, "{label}: {content}\n\n");
                     }
                     ContentBlock::Image { .. } => {
                         prompt.push_str("[Image attached]\n\n");
@@ -614,10 +618,11 @@ pub(crate) fn format_prompt(messages: &[Message], tools: &[ToolDefinition]) -> S
     if !tools.is_empty() {
         prompt.push_str("\n\n[Available tools:]\n");
         for tool in tools {
-            prompt.push_str(&format!(
+            let _ = write!(
+                prompt,
                 "\n- **{}**: {}\n  Input schema: {}\n",
                 tool.name, tool.description, tool.input_schema
-            ));
+            );
         }
     }
 

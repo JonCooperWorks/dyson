@@ -155,14 +155,24 @@ impl ContentBlock {
     /// Uses whitespace splitting (consistent with `stream_handler.rs`) to
     /// approximate token count without calling a tokenizer.  Good enough
     /// for deciding when to compact — not meant for billing accuracy.
+    ///
+    /// For `ToolUse` blocks, estimates based on the JSON byte length
+    /// divided by 4 (average bytes per token) to avoid serializing the
+    /// entire `serde_json::Value` tree on every call.
     pub fn estimate_tokens(&self) -> usize {
         match self {
             ContentBlock::Text { text } => text.split_whitespace().count().max(1),
             ContentBlock::ToolUse { id, name, input } => {
-                let input_str = input.to_string();
-                name.split_whitespace().count()
-                    + id.split_whitespace().count()
-                    + input_str.split_whitespace().count()
+                // Estimate input tokens from the Value tree size without
+                // serializing to a String.  serde_json's internal byte
+                // count is not exposed, but we can walk the top level:
+                // for objects/arrays, count keys+values; for primitives,
+                // use a fixed estimate.  A rough heuristic: serialize
+                // length ≈ 4 bytes per token on average.
+                let input_token_estimate = estimate_json_tokens(input);
+                name.len() / 4 + 1
+                    + id.len() / 4 + 1
+                    + input_token_estimate
                     + 10 // JSON structure overhead
             }
             ContentBlock::ToolResult {
@@ -178,6 +188,28 @@ impl ContentBlock {
                 let decoded_bytes = data.len() * 3 / 4;
                 (decoded_bytes / 750).max(100)
             }
+        }
+    }
+}
+
+/// Estimate token count from a `serde_json::Value` without serializing it.
+///
+/// Walks the JSON tree and sums approximate token counts.  Much cheaper
+/// than `value.to_string().split_whitespace().count()` because it avoids
+/// allocating the serialized string entirely.
+fn estimate_json_tokens(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) => 1,
+        serde_json::Value::Number(_) => 1,
+        serde_json::Value::String(s) => s.split_whitespace().count().max(1),
+        serde_json::Value::Array(arr) => {
+            arr.iter().map(estimate_json_tokens).sum::<usize>() + 2
+        }
+        serde_json::Value::Object(map) => {
+            map.iter()
+                .map(|(k, v)| k.len() / 4 + 1 + estimate_json_tokens(v))
+                .sum::<usize>()
+                + 2
         }
     }
 }

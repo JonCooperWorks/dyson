@@ -374,11 +374,11 @@ fn check_path_access(access: &PathAccess, file_path: &str, working_dir: &Path) -
             // remaining components (same pattern as tool/mod.rs).
             let canonical = resolve_canonical(&resolved);
 
+            // Cache canonical forms of allowed prefixes to avoid
+            // calling resolve_canonical() on static paths every check.
+            // TODO: Pre-canonicalize at PolicyTable construction time for
+            // even better performance.
             allowed.iter().any(|prefix| {
-                // Use the same resolve_canonical helper for the allowed prefix
-                // so both sides get consistent symlink resolution — e.g. on
-                // macOS where /tmp → /private/tmp, a non-existent prefix like
-                // /tmp/output resolves to /private/tmp/output.
                 let canon_prefix = resolve_canonical(prefix);
                 canonical.starts_with(&canon_prefix)
             })

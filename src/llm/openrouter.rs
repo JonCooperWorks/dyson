@@ -11,6 +11,7 @@
 //      calls as text instead of via the `tool_calls` array.
 // ===========================================================================
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
@@ -117,7 +118,7 @@ struct TextToolExtractorStream {
     /// Events buffered from the inner stream, waiting to be emitted.
     buffered_events: Vec<StreamEvent>,
     /// Synthetic events generated from extracted tool calls.
-    pending_events: Vec<Result<StreamEvent>>,
+    pending_events: VecDeque<Result<StreamEvent>>,
     /// Whether the inner stream has completed.
     inner_done: bool,
     /// Whether we found any structured tool calls (skip extraction if so).
@@ -134,7 +135,7 @@ impl TextToolExtractorStream {
             handler,
             text_buffer: String::new(),
             buffered_events: Vec::new(),
-            pending_events: Vec::new(),
+            pending_events: VecDeque::new(),
             inner_done: false,
             has_structured_tools: false,
         }
@@ -146,10 +147,10 @@ impl TextToolExtractorStream {
         if self.has_structured_tools || self.text_buffer.is_empty() {
             // Re-emit buffered events as-is, plus the MessageComplete.
             for event in self.buffered_events.drain(..) {
-                self.pending_events.push(Ok(event));
+                self.pending_events.push_back(Ok(event));
             }
             self.pending_events
-                .push(Ok(StreamEvent::MessageComplete {
+                .push_back(Ok(StreamEvent::MessageComplete {
                     stop_reason: StopReason::EndTurn,
                     output_tokens,
                 }));
@@ -160,7 +161,7 @@ impl TextToolExtractorStream {
             // Emit cleaned text (if any).
             if !cleaned.is_empty() {
                 self.pending_events
-                    .push(Ok(StreamEvent::TextDelta(cleaned)));
+                    .push_back(Ok(StreamEvent::TextDelta(cleaned)));
             }
 
             // Emit synthetic tool call events.
@@ -169,12 +170,12 @@ impl TextToolExtractorStream {
                 let n = COUNTER.fetch_add(1, Ordering::Relaxed);
                 let id = format!("text_call_{}_{}", call.name, n);
                 self.pending_events
-                    .push(Ok(StreamEvent::ToolUseStart {
+                    .push_back(Ok(StreamEvent::ToolUseStart {
                         id: id.clone(),
                         name: call.name.clone(),
                     }));
                 self.pending_events
-                    .push(Ok(StreamEvent::ToolUseComplete {
+                    .push_back(Ok(StreamEvent::ToolUseComplete {
                         id,
                         name: call.name.clone(),
                         input: call.input.clone(),
@@ -183,17 +184,17 @@ impl TextToolExtractorStream {
 
             // Change stop reason to ToolUse.
             self.pending_events
-                .push(Ok(StreamEvent::MessageComplete {
+                .push_back(Ok(StreamEvent::MessageComplete {
                     stop_reason: StopReason::ToolUse,
                     output_tokens,
                 }));
         } else {
             // No tool calls found — re-emit everything as-is.
             for event in self.buffered_events.drain(..) {
-                self.pending_events.push(Ok(event));
+                self.pending_events.push_back(Ok(event));
             }
             self.pending_events
-                .push(Ok(StreamEvent::MessageComplete {
+                .push_back(Ok(StreamEvent::MessageComplete {
                     stop_reason: StopReason::EndTurn,
                     output_tokens,
                 }));
@@ -212,7 +213,7 @@ impl Stream for TextToolExtractorStream {
 
         // Drain pending events first.
         if !this.pending_events.is_empty() {
-            return Poll::Ready(Some(this.pending_events.remove(0)));
+            return Poll::Ready(Some(this.pending_events.pop_front().unwrap()));
         }
 
         if this.inner_done {
@@ -236,10 +237,10 @@ impl Stream for TextToolExtractorStream {
                     this.has_structured_tools = true;
                     // Flush any buffered text events first.
                     for buffered in this.buffered_events.drain(..) {
-                        this.pending_events.push(Ok(buffered));
+                        this.pending_events.push_back(Ok(buffered));
                     }
-                    this.pending_events.push(Ok(event));
-                    Poll::Ready(Some(this.pending_events.remove(0)))
+                    this.pending_events.push_back(Ok(event));
+                    Poll::Ready(Some(this.pending_events.pop_front().unwrap()))
                 }
                 StreamEvent::MessageComplete { output_tokens, .. } => {
                     this.inner_done = true;
@@ -247,7 +248,7 @@ impl Stream for TextToolExtractorStream {
                     if this.pending_events.is_empty() {
                         Poll::Ready(None)
                     } else {
-                        Poll::Ready(Some(this.pending_events.remove(0)))
+                        Poll::Ready(Some(this.pending_events.pop_front().unwrap()))
                     }
                 }
                 // ThinkingDelta, Error — pass through immediately.
@@ -268,7 +269,7 @@ impl Stream for TextToolExtractorStream {
                 if this.pending_events.is_empty() {
                     Poll::Ready(None)
                 } else {
-                    Poll::Ready(Some(this.pending_events.remove(0)))
+                    Poll::Ready(Some(this.pending_events.pop_front().unwrap()))
                 }
             }
             Poll::Pending => Poll::Pending,

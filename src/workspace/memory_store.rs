@@ -86,7 +86,7 @@ impl MemoryStore {
             tracing::warn!(key = key, error = %e, "memory store failed to insert");
             return;
         }
-        tracing::info!(key = key, "memory store indexed");
+        tracing::debug!(key = key, "memory store indexed");
     }
 
     /// Search the FTS5 index.  Returns matching files with snippet highlights.
@@ -103,7 +103,7 @@ impl MemoryStore {
         }
 
         let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "SELECT key, snippet(memory_fts, 1, '**', '**', '...', 64) \
              FROM memory_fts WHERE memory_fts MATCH ?1 \
              ORDER BY rank LIMIT 20",
@@ -126,7 +126,7 @@ impl MemoryStore {
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
             .unwrap_or_default();
 
-        tracing::info!(query = query, results = results.len(), "memory store search");
+        tracing::debug!(query = query, results = results.len(), "memory store search");
         results
     }
 
@@ -140,7 +140,7 @@ impl MemoryStore {
             tracing::warn!(key = key, error = %e, "memory store failed to remove");
             return;
         }
-        tracing::info!(key = key, "memory store entry removed");
+        tracing::debug!(key = key, "memory store entry removed");
     }
 }
 

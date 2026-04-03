@@ -2,6 +2,8 @@
 // ReadFile tool — read file contents with optional line range.
 // ===========================================================================
 
+use std::fmt::Write as _;
+
 use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
@@ -57,6 +59,11 @@ impl Tool for ReadFileTool {
             Err(e) => return Ok(ToolOutput::error(e)),
         };
 
+        let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize;
+        let limit = input["limit"].as_u64().map(|l| l as usize);
+
+        // Read only the lines we need using skip/take to avoid loading
+        // the entire file when offset/limit are specified.
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(e) => {
@@ -67,27 +74,24 @@ impl Tool for ReadFileTool {
             }
         };
 
-        let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize;
-        let limit = input["limit"].as_u64().map(|l| l as usize);
-
-        let lines: Vec<&str> = content.lines().collect();
-        let start = (offset - 1).min(lines.len());
-        let end = match limit {
-            Some(l) => (start + l).min(lines.len()),
-            None => lines.len(),
+        let start = offset - 1;
+        let iter = content.lines().skip(start);
+        let iter: Box<dyn Iterator<Item = &str>> = match limit {
+            Some(l) => Box::new(iter.take(l)),
+            None => Box::new(iter),
         };
 
         let mut output = String::new();
-        for (i, line) in lines[start..end].iter().enumerate() {
+        for (i, line) in iter.enumerate() {
             let line_num = start + i + 1;
-            output.push_str(&format!("{line_num:>6}\t{line}\n"));
+            let _ = write!(output, "{line_num:>6}\t{line}\n");
         }
 
         // Truncate if too large.
-        output = truncate_output(&output);
+        let output = truncate_output(&output);
 
         if output.is_empty() {
-            output = "(empty file)".to_string();
+            return Ok(ToolOutput::success("(empty file)"));
         }
 
         Ok(ToolOutput::success(output))

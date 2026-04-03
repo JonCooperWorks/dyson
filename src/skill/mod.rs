@@ -291,6 +291,7 @@ pub async fn create_skills(
     // Built-in subagents (planner, researcher) are always included.
     // User-defined subagents from dyson.json are appended after them,
     // so user configs can override built-ins by using the same name.
+    let builtin_count = subagent::builtin_subagent_configs().len();
     let mut all_subagent_configs = subagent::builtin_subagent_configs();
     all_subagent_configs.extend(subagent_configs);
 
@@ -301,9 +302,8 @@ pub async fn create_skills(
             .collect();
 
         tracing::info!(
-            builtin_subagents = subagent::builtin_subagent_configs().len(),
-            user_subagents =
-                all_subagent_configs.len() - subagent::builtin_subagent_configs().len(),
+            builtin_subagents = builtin_count,
+            user_subagents = all_subagent_configs.len() - builtin_count,
             parent_tools = parent_tools.len(),
             "constructing subagent skill"
         );

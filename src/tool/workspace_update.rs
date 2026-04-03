@@ -76,25 +76,25 @@ impl Tool for WorkspaceUpdateTool {
 
         // Check character limits before writing.
         if let Some(limit) = ws.char_limit(&file) {
+            let existing = ws.get(&file).unwrap_or_default();
+            let existing_char_count = existing.chars().count();
             let would_be_len = match mode {
                 "set" => content.chars().count(),
                 "append" => {
-                    let existing = ws.get(&file).unwrap_or_default();
                     let extra = if existing.is_empty() || existing.ends_with('\n') {
                         0
                     } else {
                         1
                     };
-                    existing.chars().count() + extra + content.chars().count()
+                    existing_char_count + extra + content.chars().count()
                 }
                 _ => 0,
             };
 
             if would_be_len > limit {
-                let current = ws.get(&file).map(|c| c.chars().count()).unwrap_or(0);
                 return Ok(ToolOutput::error(format!(
                     "Would exceed character limit for '{file}': {would_be_len}/{limit} chars. \
-                     Current usage: {current}/{limit}. Consolidate content or move overflow \
+                     Current usage: {existing_char_count}/{limit}. Consolidate content or move overflow \
                      to memory/notes/ (searchable via memory_search)."
                 )));
             }

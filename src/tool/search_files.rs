@@ -124,14 +124,13 @@ impl Tool for SearchFilesTool {
                     Err(_) => continue,
                 };
 
-                let rel_path = if let Ok(canon) = path.canonicalize() {
-                    canon
-                        .strip_prefix(&working_dir_canon)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|_| path.to_string_lossy().to_string())
-                } else {
-                    path.to_string_lossy().to_string()
-                };
+                // Compute relative path without a per-file canonicalize()
+                // syscall — strip_prefix on the walk-root-relative path is
+                // a pure memory operation.
+                let rel_path = path
+                    .strip_prefix(&working_dir_canon)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
                 let reader = BufReader::new(file);
                 for (line_num, line_result) in reader.lines().enumerate() {

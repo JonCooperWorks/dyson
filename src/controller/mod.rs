@@ -347,7 +347,7 @@ pub async fn check_and_reload_agent(
     current_model: &mut String,
     controller_prompt: Option<&str>,
 ) -> ReloadOutcome {
-    let (changed, new_settings) = match reloader.check() {
+    let (changed, new_settings) = match reloader.check().await {
         Ok(result) => result,
         Err(e) => return ReloadOutcome::Error(format!("config reload check failed: {e}")),
     };
@@ -551,9 +551,10 @@ pub async fn execute_command(
             .trim()
             .parse()
             .unwrap_or(20);
-        return match read_log_tail(n) {
-            Ok(lines) => CommandResult::Logs(lines),
-            Err(e) => CommandResult::LogsError(e),
+        return match tokio::task::spawn_blocking(move || read_log_tail(n)).await {
+            Ok(Ok(lines)) => CommandResult::Logs(lines),
+            Ok(Err(e)) => CommandResult::LogsError(e),
+            Err(e) => CommandResult::LogsError(format!("task failed: {e}")),
         };
     }
 
