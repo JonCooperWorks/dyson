@@ -113,6 +113,20 @@ impl OpenClawWorkspace {
             }
         }
 
+        // Read skills/*/SKILL.md files so load_skill can find them via ws.get().
+        let skills_dir = path.join("skills");
+        if skills_dir.exists() {
+            for entry in std::fs::read_dir(&skills_dir)? {
+                let entry = entry?;
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                let skill_md = entry.path().join("SKILL.md");
+                if entry.path().is_dir() && skill_md.is_file() {
+                    let content = std::fs::read_to_string(&skill_md)?;
+                    files.insert(format!("skills/{dir_name}/SKILL.md"), content);
+                }
+            }
+        }
+
         // Open (or create) the FTS5 memory store.
         let memory_store = MemoryStore::open(&path.join("memory.db"))?;
 
@@ -776,6 +790,31 @@ mod tests {
             dir.join("skills").is_dir(),
             "workspace load should create skills/ directory"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_reads_skill_files_into_hashmap() {
+        let (dir, _ws) = temp_workspace();
+
+        // Create a skill on disk.
+        let skill_dir = dir.join("skills/diagnostics");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: diagnostics\ndescription: Run diagnostics\n---\n\nStep 1: Check logs.",
+        )
+        .unwrap();
+
+        // Reload workspace — skill should now be in the files HashMap.
+        let ws = OpenClawWorkspace::load(&dir, MemoryConfig::default()).unwrap();
+        let content = ws.get("skills/diagnostics/SKILL.md");
+        assert!(
+            content.is_some(),
+            "skills/diagnostics/SKILL.md should be loadable via ws.get()"
+        );
+        assert!(content.unwrap().contains("Step 1: Check logs."));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
