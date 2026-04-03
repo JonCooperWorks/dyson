@@ -47,6 +47,8 @@ impl MemoryStore {
         )
         .map_err(|e| DysonError::Config(format!("cannot create FTS5 table: {e}")))?;
 
+        tracing::info!(path = %path.display(), "memory store opened");
+
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -71,14 +73,20 @@ impl MemoryStore {
     pub fn index(&self, key: &str, content: &str) {
         let conn = self.conn.lock().unwrap();
         // Delete existing entry first (upsert pattern for FTS5).
-        let _ = conn.execute(
+        if let Err(e) = conn.execute(
             "DELETE FROM memory_fts WHERE key = ?1",
             rusqlite::params![key],
-        );
-        let _ = conn.execute(
+        ) {
+            tracing::warn!(key = key, error = %e, "memory store failed to delete before index");
+        }
+        if let Err(e) = conn.execute(
             "INSERT INTO memory_fts (key, content) VALUES (?1, ?2)",
             rusqlite::params![key, content],
-        );
+        ) {
+            tracing::warn!(key = key, error = %e, "memory store failed to insert");
+            return;
+        }
+        tracing::info!(key = key, "memory store indexed");
     }
 
     /// Search the FTS5 index.  Returns matching files with snippet highlights.
@@ -101,27 +109,38 @@ impl MemoryStore {
              ORDER BY rank LIMIT 20",
         ) {
             Ok(s) => s,
-            Err(_) => return vec![],
+            Err(e) => {
+                tracing::warn!(query = query, error = %e, "memory store search query failed");
+                return vec![];
+            }
         };
 
-        stmt.query_map(rusqlite::params![safe_query], |row| {
-            Ok(SearchResult {
-                key: row.get(0)?,
-                snippet: row.get(1)?,
+        let results: Vec<SearchResult> = stmt
+            .query_map(rusqlite::params![safe_query], |row| {
+                Ok(SearchResult {
+                    key: row.get(0)?,
+                    snippet: row.get(1)?,
+                })
             })
-        })
-        .ok()
-        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+
+        tracing::info!(query = query, results = results.len(), "memory store search");
+        results
     }
 
     /// Remove a file from the FTS5 index.
     pub fn remove(&self, key: &str) {
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
+        if let Err(e) = conn.execute(
             "DELETE FROM memory_fts WHERE key = ?1",
             rusqlite::params![key],
-        );
+        ) {
+            tracing::warn!(key = key, error = %e, "memory store failed to remove");
+            return;
+        }
+        tracing::info!(key = key, "memory store entry removed");
     }
 }
 
