@@ -551,9 +551,10 @@ pub async fn execute_command(
             .trim()
             .parse()
             .unwrap_or(20);
-        return match read_log_tail(n) {
-            Ok(lines) => CommandResult::Logs(lines),
-            Err(e) => CommandResult::LogsError(e),
+        return match tokio::task::spawn_blocking(move || read_log_tail(n)).await {
+            Ok(Ok(lines)) => CommandResult::Logs(lines),
+            Ok(Err(e)) => CommandResult::LogsError(e),
+            Err(e) => CommandResult::LogsError(format!("task failed: {e}")),
         };
     }
 

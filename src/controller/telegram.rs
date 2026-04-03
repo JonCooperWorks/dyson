@@ -464,9 +464,15 @@ impl super::Controller for TelegramController {
                         .trim()
                         .parse()
                         .unwrap_or(20);
-                    match super::read_log_tail(n) {
-                        Ok(lines) => {
+                    let result = tokio::task::spawn_blocking(move || super::read_log_tail(n)).await;
+                    match result {
+                        Ok(Ok(lines)) => {
                             let _ = bot.send_message(chat_id, lines).await;
+                        }
+                        Ok(Err(e)) => {
+                            let _ = bot
+                                .send_message(chat_id, format!("Logs error: {e}"))
+                                .await;
                         }
                         Err(e) => {
                             let _ = bot
