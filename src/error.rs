@@ -123,7 +123,7 @@ pub fn classify_llm_error(err: &str) -> LlmErrorKind {
         LlmErrorKind::NoToolUse
     } else if err.contains("image input")
         || err.contains("vision")
-        || err.contains("No endpoints found")
+        || err.contains("No endpoints found that support image")
         || err.contains("image(s) may be provided")
     {
         LlmErrorKind::NoVision
@@ -208,10 +208,21 @@ mod tests {
     fn classify_llm_error_detects_no_vision() {
         assert_eq!(classify_llm_error("does not support image input"), LlmErrorKind::NoVision);
         assert_eq!(classify_llm_error("vision not supported"), LlmErrorKind::NoVision);
-        assert_eq!(classify_llm_error("No endpoints found"), LlmErrorKind::NoVision);
+        assert_eq!(classify_llm_error("No endpoints found that support image input"), LlmErrorKind::NoVision);
         assert_eq!(
             classify_llm_error("At most 0 image(s) may be provided in one prompt."),
             LlmErrorKind::NoVision
+        );
+    }
+
+    #[test]
+    fn classify_llm_error_generic_no_endpoints_is_other() {
+        // "No endpoints found" without image/vision context should NOT be
+        // classified as NoVision — it usually means the model is unavailable.
+        assert_eq!(classify_llm_error("No endpoints found"), LlmErrorKind::Other);
+        assert_eq!(
+            classify_llm_error("No endpoints found for this model"),
+            LlmErrorKind::Other,
         );
     }
 
