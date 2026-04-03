@@ -254,18 +254,16 @@ impl super::Agent {
         let (assistant_msg, _tool_calls, _output_tokens) =
             stream_handler::process_stream(response.stream, output).await?;
 
-        Ok(assistant_msg
-            .content
-            .iter()
-            .filter_map(|block| {
-                if let ContentBlock::Text { text } = block {
-                    Some(text.as_str())
-                } else {
-                    None
+        let mut result = String::new();
+        for block in &assistant_msg.content {
+            if let ContentBlock::Text { text } = block {
+                if !result.is_empty() {
+                    result.push('\n');
                 }
-            })
-            .collect::<Vec<_>>()
-            .join("\n"))
+                result.push_str(text);
+            }
+        }
+        Ok(result)
     }
 
     /// Build the system prompt for the summarisation LLM call.

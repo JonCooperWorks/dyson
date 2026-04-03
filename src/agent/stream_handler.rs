@@ -174,14 +174,19 @@ pub async fn process_stream(
             StreamEvent::ToolUseInputDelta(_) => {}
 
             StreamEvent::ToolUseComplete { id, name, input } => {
-                let input_str = input.to_string();
-                let input_preview = &input_str[..input_str.len().min(500)];
-                tracing::info!(
-                    tool = name,
-                    id = id,
-                    input = input_preview,
-                    "tool call complete (from stream)"
-                );
+                if tracing::enabled!(tracing::Level::INFO) {
+                    let input_str = input.to_string();
+                    let input_preview = &input_str[..input_str.len().min(500)];
+                    tracing::info!(
+                        tool = name,
+                        id = id,
+                        input = input_preview,
+                        "tool call complete (from stream)"
+                    );
+                }
+                // Store in content_blocks (for the Message) and tool_calls
+                // (for execution).  Clone into content_blocks, move into
+                // tool_calls to avoid a second deep-copy of the input Value.
                 content_blocks.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),

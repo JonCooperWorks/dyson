@@ -198,10 +198,12 @@ impl Tool for BashTool {
 
                 // Combine stdout and stderr.  If both are non-empty, label
                 // the stderr section so the LLM can distinguish them.
+                // Use into_owned() only when needed to avoid cloning
+                // valid-UTF8 Cow::Borrowed values.
                 let combined = if stderr.is_empty() {
-                    stdout.to_string()
+                    stdout.into_owned()
                 } else if stdout.is_empty() {
-                    stderr.to_string()
+                    stderr.into_owned()
                 } else {
                     format!("{stdout}\n--- stderr ---\n{stderr}")
                 };
@@ -227,7 +229,7 @@ impl Tool for BashTool {
                 );
 
                 Ok(ToolOutput {
-                    content: truncated,
+                    content: truncated.into_owned(),
                     is_error,
                     metadata: Some(serde_json::json!({
                         "exit_code": output.status.code(),
@@ -260,9 +262,8 @@ impl Tool for BashTool {
 /// the LLM from reading API keys, tokens, and passwords via `env` or
 /// `printenv`.  Allows standard system variables through.
 fn is_safe_env_var(name: &str) -> bool {
-    let upper = name.to_ascii_uppercase();
-
-    // Block common secret patterns.
+    // Block common secret patterns using case-insensitive comparison
+    // to avoid allocating an uppercase copy of the name on every call.
     const SECRET_SUFFIXES: &[&str] = &[
         "_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIALS", "_CREDENTIAL",
     ];
@@ -276,13 +277,19 @@ fn is_safe_env_var(name: &str) -> bool {
         "ANTHROPIC_API_KEY",
     ];
 
-    if SECRET_EXACT.iter().any(|&s| upper == s) {
+    if SECRET_EXACT.iter().any(|&s| name.eq_ignore_ascii_case(s)) {
         return false;
     }
-    if SECRET_SUFFIXES.iter().any(|&s| upper.ends_with(s)) {
+    if SECRET_SUFFIXES
+        .iter()
+        .any(|&s| name.len() >= s.len() && name[name.len() - s.len()..].eq_ignore_ascii_case(s))
+    {
         return false;
     }
-    if SECRET_PREFIXES.iter().any(|&s| upper.starts_with(s)) {
+    if SECRET_PREFIXES
+        .iter()
+        .any(|&s| name.len() >= s.len() && name[..s.len()].eq_ignore_ascii_case(s))
+    {
         return false;
     }
 

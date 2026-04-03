@@ -89,17 +89,16 @@ impl Tool for ListFilesTool {
             }
             match entry {
                 Ok(path) => {
-                    // Make path relative to working dir.
-                    let rel = if let Ok(canon) = path.canonicalize() {
-                        canon
-                            .strip_prefix(&working_dir_canon)
-                            .map(|p| p.to_path_buf())
-                            .unwrap_or_else(|_| path.clone())
-                    } else {
-                        path.strip_prefix(&ctx.working_dir)
-                            .map(|p| p.to_path_buf())
-                            .unwrap_or(path)
-                    };
+                    // Make path relative to working dir without a per-file
+                    // canonicalize() syscall.
+                    let rel = path
+                        .strip_prefix(&working_dir_canon)
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|_| {
+                            path.strip_prefix(&ctx.working_dir)
+                                .map(|p| p.to_path_buf())
+                                .unwrap_or(path)
+                        });
                     results.push(rel.to_string_lossy().to_string());
                 }
                 Err(e) => {

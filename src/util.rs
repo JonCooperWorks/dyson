@@ -11,12 +11,16 @@ pub(crate) const MAX_OUTPUT_BYTES: usize = 100 * 1024;
 
 /// Truncate output to [`MAX_OUTPUT_BYTES`], appending a notice if truncated.
 ///
+/// Returns a `Cow::Borrowed` when no truncation is needed (the common case),
+/// avoiding a heap allocation.  Only allocates when the output exceeds the
+/// limit and needs the truncation notice appended.
+///
 /// We truncate on a UTF-8 char boundary to avoid producing invalid strings.
 /// The notice tells the LLM how much was cut so it can request specific
 /// portions if needed.
-pub(crate) fn truncate_output(output: &str) -> String {
+pub(crate) fn truncate_output(output: &str) -> std::borrow::Cow<'_, str> {
     if output.len() <= MAX_OUTPUT_BYTES {
-        return output.to_string();
+        return std::borrow::Cow::Borrowed(output);
     }
 
     // Find the last valid char boundary at or before MAX_OUTPUT_BYTES.
@@ -27,11 +31,11 @@ pub(crate) fn truncate_output(output: &str) -> String {
 
     let truncated = &output[..end];
     let remaining = output.len() - end;
-    format!(
+    std::borrow::Cow::Owned(format!(
         "{truncated}\n\n... (output truncated — {remaining} bytes omitted, \
          total was {} bytes)",
         output.len()
-    )
+    ))
 }
 
 /// Convert a Unix timestamp (seconds since epoch) to a (year, month, day) tuple.
@@ -96,6 +100,6 @@ mod tests {
     #[test]
     fn no_truncation_for_short_output() {
         let short = "hello world";
-        assert_eq!(truncate_output(short), short);
+        assert_eq!(&*truncate_output(short), short);
     }
 }

@@ -112,7 +112,9 @@ impl HotReloader {
     /// Returns `Ok((true, Some(settings)))` if the config file changed.
     /// Returns `Ok((true, None))` if only workspace files changed.
     /// Returns `Ok((false, None))` if nothing changed.
-    pub fn check(&mut self) -> Result<(bool, Option<Settings>)> {
+    ///
+    /// Uses `tokio::time::sleep` to avoid blocking the async runtime.
+    pub async fn check(&mut self) -> Result<(bool, Option<Settings>)> {
         let result = self.check_nonblocking()?;
         if result.0 {
             return Ok(result);
@@ -122,7 +124,7 @@ impl HotReloader {
         if let Some(ref pending) = self.pending_change {
             let elapsed = pending.detected_at.elapsed();
             if elapsed < DEBOUNCE_DURATION {
-                std::thread::sleep(DEBOUNCE_DURATION - elapsed);
+                tokio::time::sleep(DEBOUNCE_DURATION - elapsed).await;
             }
             return self.check_nonblocking();
         }
@@ -136,11 +138,12 @@ impl HotReloader {
     /// Returns `Ok((true, None))` if only workspace files changed.
     /// Returns `Ok((false, None))` if nothing changed or debounce pending.
     fn check_nonblocking(&mut self) -> Result<(bool, Option<Settings>)> {
-        // Snapshot current mtimes.
+        // Snapshot current mtimes.  Re-use the watched keys to avoid
+        // cloning every PathBuf on each check.
         let current_mtimes: HashMap<PathBuf, Option<SystemTime>> = self
             .watched
-            .keys()
-            .map(|p| (p.clone(), Self::get_mtime(p)))
+            .iter()
+            .map(|(p, _)| (p.clone(), Self::get_mtime(p)))
             .collect();
 
         // Check if anything differs from our last-committed state.
@@ -321,14 +324,14 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn no_change_returns_false() {
+    #[tokio::test]
+    async fn no_change_returns_false() {
         let dir = temp_dir("no-change");
         let config = dir.join("dyson.json");
         std::fs::write(&config, r#"{"agent":{}}"#).unwrap();
 
         let mut reloader = HotReloader::new(Some(&config), None);
-        let (changed, _) = reloader.check().unwrap();
+        let (changed, _) = reloader.check().await.unwrap();
         assert!(!changed, "should not report change on first check");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -363,8 +366,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn blocking_check_waits_for_debounce() {
+    #[tokio::test]
+    async fn blocking_check_waits_for_debounce() {
         let dir = temp_dir("blocking");
         let config = dir.join("dyson.json");
         std::fs::write(&config, r#"{"agent":{}}"#).unwrap();
@@ -372,15 +375,15 @@ mod tests {
         let mut reloader = HotReloader::new(Some(&config), None);
 
         // Modify the file.
-        std::thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
         std::fs::write(&config, r#"{"agent":{"model":"test"}}"#).unwrap();
 
-        // Blocking check should wait for debounce and report the change
+        // Async check should wait for debounce and report the change
         // in a single call.
-        let (changed, _) = reloader.check().unwrap();
+        let (changed, _) = reloader.check().await.unwrap();
         assert!(
             changed,
-            "blocking check should wait for debounce and report change"
+            "async check should wait for debounce and report change"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

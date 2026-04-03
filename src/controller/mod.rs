@@ -347,7 +347,7 @@ pub async fn check_and_reload_agent(
     current_model: &mut String,
     controller_prompt: Option<&str>,
 ) -> ReloadOutcome {
-    let (changed, new_settings) = match reloader.check() {
+    let (changed, new_settings) = match reloader.check().await {
         Ok(result) => result,
         Err(e) => return ReloadOutcome::Error(format!("config reload check failed: {e}")),
     };

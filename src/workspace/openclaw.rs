@@ -30,7 +30,7 @@
 //   files.  If you don't, Dyson creates sensible defaults.
 // ===========================================================================
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use regex::RegexBuilder;
@@ -54,6 +54,9 @@ pub struct OpenClawWorkspace {
 
     /// Loaded file contents, keyed by filename (e.g., "SOUL.md").
     files: HashMap<String, String>,
+
+    /// Files that have been modified since the last save.
+    dirty: std::sync::Mutex<HashSet<String>>,
 
     /// Memory tier configuration (character limits, nudge interval).
     memory_config: MemoryConfig,
@@ -141,6 +144,7 @@ impl OpenClawWorkspace {
         let mut workspace = Self {
             path: path.to_path_buf(),
             files,
+            dirty: std::sync::Mutex::new(HashSet::new()),
             memory_config,
             memory_store,
         };
@@ -304,6 +308,7 @@ impl Workspace for OpenClawWorkspace {
 
     fn set(&mut self, name: &str, content: &str) {
         self.files.insert(name.to_string(), content.to_string());
+        self.dirty.lock().unwrap().insert(name.to_string());
         if name.starts_with("memory/") {
             self.memory_store.index(name, content);
         }
@@ -315,24 +320,38 @@ impl Workspace for OpenClawWorkspace {
             entry.push('\n');
         }
         entry.push_str(content);
+        self.dirty.lock().unwrap().insert(name.to_string());
         if name.starts_with("memory/") {
             self.memory_store.index(name, entry);
         }
     }
 
     fn save(&self) -> Result<()> {
-        for (name, content) in &self.files {
-            let file_path = self.path.join(name);
+        let mut dirty = self.dirty.lock().unwrap();
 
-            // Ensure parent directory exists (for memory/ files).
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-
-            std::fs::write(&file_path, content)?;
+        // Only write files that have been modified since the last save.
+        if dirty.is_empty() {
+            tracing::debug!("workspace save: nothing dirty, skipping");
+            return Ok(());
         }
 
-        tracing::debug!(files = self.files.len(), "workspace saved");
+        for name in dirty.iter() {
+            if let Some(content) = self.files.get(name) {
+                let file_path = self.path.join(name);
+
+                // Ensure parent directory exists (for memory/ files).
+                if let Some(parent) = file_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+
+                std::fs::write(&file_path, content)?;
+            }
+        }
+
+        let dirty_count = dirty.len();
+        dirty.clear();
+
+        tracing::debug!(dirty_files = dirty_count, "workspace saved");
 
         Ok(())
     }

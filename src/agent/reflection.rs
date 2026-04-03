@@ -493,6 +493,7 @@ impl super::Agent {
 
         let mut tool_call_count = 0;
         let mut tool_error_count = 0;
+        let mut tools_used_set: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut tools_used: Vec<String> = Vec::new();
 
         for msg in messages {
@@ -514,7 +515,7 @@ impl super::Agent {
                     }
                     ContentBlock::ToolUse { name, .. } => {
                         tool_call_count += 1;
-                        if !tools_used.contains(name) {
+                        if tools_used_set.insert(name.clone()) {
                             tools_used.push(name.clone());
                         }
                         summary.push_str(&format!("[Tool call: {name}]\n"));
@@ -608,15 +609,15 @@ pub(super) async fn synthesize_to_workspace(
         stream_handler::process_stream(response.stream, &mut silent).await?;
 
     // Extract the text from the response.
-    let new_memory: String = assistant_msg
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut new_memory = String::new();
+    for block in &assistant_msg.content {
+        if let ContentBlock::Text { text } = block {
+            if !new_memory.is_empty() {
+                new_memory.push('\n');
+            }
+            new_memory.push_str(text);
+        }
+    }
 
     if new_memory.trim().is_empty() {
         tracing::info!("learning synthesis produced empty output — skipping write");

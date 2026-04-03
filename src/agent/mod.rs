@@ -577,29 +577,33 @@ impl Agent {
             );
 
             // Log the messages being sent to the LLM for debugging.
-            for (i, msg) in self.messages.iter().enumerate() {
-                let role = match msg.role {
-                    crate::message::Role::User => "user",
-                    crate::message::Role::Assistant => "assistant",
-                };
-                let block_summary: Vec<String> = msg.content.iter().map(|b| match b {
-                    crate::message::ContentBlock::Text { text } => {
-                        format!("text({})", text.len())
-                    }
-                    crate::message::ContentBlock::ToolUse { name, .. } => {
-                        format!("tool_use({name})")
-                    }
-                    crate::message::ContentBlock::ToolResult { tool_use_id, is_error, .. } => {
-                        format!("tool_result({tool_use_id}, error={is_error})")
-                    }
-                    crate::message::ContentBlock::Image { .. } => "image".to_string(),
-                }).collect();
-                tracing::debug!(
-                    msg_index = i,
-                    role = role,
-                    blocks = ?block_summary,
-                    "message in context"
-                );
+            // Guard the entire loop so we don't allocate block summaries
+            // when debug logging is disabled (the common case).
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                for (i, msg) in self.messages.iter().enumerate() {
+                    let role = match msg.role {
+                        crate::message::Role::User => "user",
+                        crate::message::Role::Assistant => "assistant",
+                    };
+                    let block_summary: Vec<String> = msg.content.iter().map(|b| match b {
+                        crate::message::ContentBlock::Text { text } => {
+                            format!("text({})", text.len())
+                        }
+                        crate::message::ContentBlock::ToolUse { name, .. } => {
+                            format!("tool_use({name})")
+                        }
+                        crate::message::ContentBlock::ToolResult { tool_use_id, is_error, .. } => {
+                            format!("tool_result({tool_use_id}, error={is_error})")
+                        }
+                        crate::message::ContentBlock::Image { .. } => "image".to_string(),
+                    }).collect();
+                    tracing::debug!(
+                        msg_index = i,
+                        role = role,
+                        blocks = ?block_summary,
+                        "message in context"
+                    );
+                }
             }
 
             // Show a typing indicator while waiting for the LLM to respond.
@@ -939,14 +943,16 @@ impl Agent {
     /// (which is `&mut` and can't be shared across futures).  The caller
     /// handles output rendering after all futures resolve.
     async fn execute_tool_call_timed(&self, call: &ToolCall) -> Result<ToolOutput> {
-        let input_str = call.input.to_string();
-        let input_preview = &input_str[..input_str.len().min(500)];
-        tracing::info!(
-            tool = call.name,
-            id = call.id,
-            input = input_preview,
-            "executing tool call"
-        );
+        if tracing::enabled!(tracing::Level::INFO) {
+            let input_str = call.input.to_string();
+            let input_preview = &input_str[..input_str.len().min(500)];
+            tracing::info!(
+                tool = call.name,
+                id = call.id,
+                input = input_preview,
+                "executing tool call"
+            );
+        }
         let tool_start = std::time::Instant::now();
         let result = self.execute_tool_call(call).await;
         let tool_ms = tool_start.elapsed().as_millis();

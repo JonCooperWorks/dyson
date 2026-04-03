@@ -255,7 +255,7 @@ impl super::Controller for TelegramController {
 
         loop {
             // Check for config/workspace changes each poll cycle.
-            if let Ok((true, new_settings)) = reloader.check() {
+            if let Ok((true, new_settings)) = reloader.check().await {
                 if let Some(s) = new_settings {
                     current_settings = s;
                     current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
@@ -1313,10 +1313,20 @@ fn markdown_to_telegram_html(input: &str) -> String {
 }
 
 /// Escape `&`, `<`, and `>` for Telegram HTML.
+///
+/// Single-pass scan to avoid three intermediate `String` allocations
+/// from chained `.replace()` calls.
 fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Strip markdown heading prefix (`# `, `## `, etc.) and return the rest.
