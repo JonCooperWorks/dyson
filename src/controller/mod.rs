@@ -51,6 +51,7 @@
 //   controller creates an Output instance and passes it to the agent.
 // ===========================================================================
 
+pub mod recording;
 pub mod telegram;
 pub mod terminal;
 

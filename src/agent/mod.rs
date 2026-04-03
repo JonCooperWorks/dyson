@@ -1060,49 +1060,7 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Mock output
-    // -----------------------------------------------------------------------
-
-    struct MockOutput {
-        text: String,
-        sent_files: Vec<std::path::PathBuf>,
-    }
-
-    impl MockOutput {
-        fn new() -> Self {
-            Self {
-                text: String::new(),
-                sent_files: Vec::new(),
-            }
-        }
-    }
-
-    impl Output for MockOutput {
-        fn text_delta(&mut self, text: &str) -> Result<()> {
-            self.text.push_str(text);
-            Ok(())
-        }
-        fn tool_use_start(&mut self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-        fn tool_use_complete(&mut self) -> Result<()> {
-            Ok(())
-        }
-        fn tool_result(&mut self, _: &ToolOutput) -> Result<()> {
-            Ok(())
-        }
-        fn send_file(&mut self, path: &std::path::Path) -> Result<()> {
-            self.sent_files.push(path.to_path_buf());
-            Ok(())
-        }
-        fn error(&mut self, _: &DysonError) -> Result<()> {
-            Ok(())
-        }
-        fn flush(&mut self) -> Result<()> {
-            Ok(())
-        }
-    }
+    use crate::controller::recording::RecordingOutput;
 
     // -----------------------------------------------------------------------
     // Tests
@@ -1126,11 +1084,11 @@ mod tests {
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
-        let mut output = MockOutput::new();
+        let mut output = RecordingOutput::new();
 
         let result = agent.run("hi", &mut output).await.unwrap();
         assert_eq!(result, "Hello!");
-        assert_eq!(output.text, "Hello!");
+        assert_eq!(output.text(), "Hello!");
     }
 
     #[tokio::test]
@@ -1172,7 +1130,7 @@ mod tests {
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
-        let mut output = MockOutput::new();
+        let mut output = RecordingOutput::new();
 
         let result = agent
             .run("run echo test_output", &mut output)
@@ -1215,7 +1173,7 @@ mod tests {
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
-        let mut output = MockOutput::new();
+        let mut output = RecordingOutput::new();
 
         let result = agent.run("list files", &mut output).await.unwrap();
 
@@ -1464,7 +1422,7 @@ mod tests {
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         agent.token_budget.max_output_tokens = Some(150);
-        let mut output = MockOutput::new();
+        let mut output = RecordingOutput::new();
 
         // Agent should stop due to budget, not error out.
         let _result = agent.run("run both", &mut output).await.unwrap();
@@ -1594,21 +1552,16 @@ mod tests {
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(MockFileSkill::new())];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
-        let mut output = MockOutput::new();
+        let mut output = RecordingOutput::new();
 
         let result = agent.run("send me a file", &mut output).await.unwrap();
         assert_eq!(result, "Files sent.");
 
         // Verify that send_file was called for both attached files.
-        assert_eq!(output.sent_files.len(), 2);
-        assert_eq!(
-            output.sent_files[0],
-            std::path::PathBuf::from("/tmp/test_report.pdf")
-        );
-        assert_eq!(
-            output.sent_files[1],
-            std::path::PathBuf::from("/tmp/data.csv")
-        );
+        let sent = output.sent_files();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0], std::path::Path::new("/tmp/test_report.pdf"));
+        assert_eq!(sent[1], std::path::Path::new("/tmp/data.csv"));
     }
 
     #[tokio::test]
@@ -1647,12 +1600,12 @@ mod tests {
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
-        let mut output = MockOutput::new();
+        let mut output = RecordingOutput::new();
 
         agent.run("echo hello", &mut output).await.unwrap();
 
         // No files should have been sent.
-        assert!(output.sent_files.is_empty());
+        assert!(output.sent_files().is_empty());
     }
 
     #[test]
@@ -1709,7 +1662,7 @@ mod tests {
         messages: Vec<Message>,
         llm_responses: Vec<Vec<StreamEvent>>,
         compaction: Option<CompactionConfig>,
-    ) -> (Agent, MockOutput) {
+    ) -> (Agent, RecordingOutput) {
         let llm = MockLlm::new(llm_responses);
         let settings = AgentSettings {
             api_key: "test".into(),
@@ -1720,7 +1673,7 @@ mod tests {
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
         agent.messages = messages;
-        (agent, MockOutput::new())
+        (agent, RecordingOutput::new())
     }
 
     // -----------------------------------------------------------------------
@@ -2285,7 +2238,7 @@ mod tests {
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
-        let mut output = MockOutput::new();
+        let mut output = RecordingOutput::new();
 
         // First turn.
         agent.run("first message", &mut output).await.unwrap();

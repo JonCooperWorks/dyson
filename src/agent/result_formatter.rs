@@ -17,8 +17,6 @@ use crate::tool::ToolOutput;
 /// Outputs longer than this are marked as truncated.
 const TRUNCATION_THRESHOLD: usize = 30_000;
 
-/// Maximum number of key lines to extract from output.
-const MAX_KEY_LINES: usize = 20;
 
 // ---------------------------------------------------------------------------
 // FormattedResult
@@ -34,17 +32,8 @@ pub struct FormattedResult {
     /// the LLM can see *metadata* about the result but not the result itself.
     pub output: String,
 
-    /// Important lines extracted from the output (errors, compilation messages, etc.).
-    pub key_lines: Vec<String>,
-
-    /// Inferred exit code for bash-like tools (0 = success, 127 = not found, etc.).
-    pub exit_code: Option<i32>,
-
     /// Whether the output was too long and was truncated.
     pub truncated: bool,
-
-    /// Whether the full (un-truncated) output is available for retrieval.
-    pub full_output_available: bool,
 }
 
 impl FormattedResult {
@@ -98,17 +87,12 @@ impl ResultFormatter {
         duration: Duration,
     ) -> FormattedResult {
         let truncated = output.content.len() > self.truncation_threshold;
-        let full_output_available = truncated;
 
         match call.name.as_str() {
-            "bash" => self.format_bash(call, output, duration, truncated, full_output_available),
-            "file_read" => {
-                self.format_file_read(call, output, duration, truncated, full_output_available)
-            }
-            "file_write" => {
-                self.format_file_write(call, output, duration, truncated, full_output_available)
-            }
-            _ => self.format_generic(call, output, duration, truncated, full_output_available),
+            "bash" => self.format_bash(call, output, duration, truncated),
+            "file_read" => self.format_file_read(call, output, duration, truncated),
+            "file_write" => self.format_file_write(call, output, duration, truncated),
+            _ => self.format_generic(call, output, duration, truncated),
         }
     }
 
@@ -118,7 +102,6 @@ impl ResultFormatter {
         output: &ToolOutput,
         duration: Duration,
         truncated: bool,
-        full_output_available: bool,
     ) -> FormattedResult {
         let ms = duration.as_millis();
         let command = call
@@ -130,12 +113,12 @@ impl ResultFormatter {
         let exit_code = if output.is_error {
             if output.content.contains("command not found") || output.content.contains("not found")
             {
-                Some(127)
+                127
             } else {
-                Some(1)
+                1
             }
         } else {
-            Some(0)
+            0
         };
 
         let status = if output.is_error {
@@ -148,19 +131,13 @@ impl ResultFormatter {
             truncate_str(command, 80),
             status,
             ms,
-            exit_code.unwrap_or(-1),
+            exit_code,
         );
-
-        // Extract key lines: compilation messages, errors, warnings.
-        let key_lines = extract_key_lines(&output.content);
 
         FormattedResult {
             summary,
             output: output.content.clone(),
-            key_lines,
-            exit_code,
             truncated,
-            full_output_available,
         }
     }
 
@@ -170,7 +147,6 @@ impl ResultFormatter {
         output: &ToolOutput,
         duration: Duration,
         truncated: bool,
-        full_output_available: bool,
     ) -> FormattedResult {
         let path = call
             .input
@@ -185,10 +161,7 @@ impl ResultFormatter {
         FormattedResult {
             summary,
             output: output.content.clone(),
-            key_lines: Vec::new(),
-            exit_code: None,
             truncated,
-            full_output_available,
         }
     }
 
@@ -198,7 +171,6 @@ impl ResultFormatter {
         output: &ToolOutput,
         duration: Duration,
         truncated: bool,
-        full_output_available: bool,
     ) -> FormattedResult {
         let path = call
             .input
@@ -212,10 +184,7 @@ impl ResultFormatter {
         FormattedResult {
             summary,
             output: output.content.clone(),
-            key_lines: Vec::new(),
-            exit_code: None,
             truncated,
-            full_output_available,
         }
     }
 
@@ -225,22 +194,16 @@ impl ResultFormatter {
         output: &ToolOutput,
         duration: Duration,
         truncated: bool,
-        full_output_available: bool,
     ) -> FormattedResult {
         let ms = duration.as_millis();
         let status = if output.is_error { "error" } else { "ok" };
 
         let summary = format!("{}: {} ({}ms)", call.name, status, ms,);
 
-        let key_lines = extract_key_lines(&output.content);
-
         FormattedResult {
             summary,
             output: output.content.clone(),
-            key_lines,
-            exit_code: None,
             truncated,
-            full_output_available,
         }
     }
 }
@@ -256,30 +219,6 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &s[..max_len])
     }
-}
-
-/// Extract key lines from output: lines containing compilation messages,
-/// errors, warnings, or other important markers.
-fn extract_key_lines(content: &str) -> Vec<String> {
-    let markers = [
-        "Compiling",
-        "Finished",
-        "error",
-        "warning",
-        "Error",
-        "Warning",
-        "FAILED",
-        "PASSED",
-        "panic",
-        "thread '",
-    ];
-
-    content
-        .lines()
-        .filter(|line| markers.iter().any(|m| line.contains(m)))
-        .take(MAX_KEY_LINES)
-        .map(|l| l.to_string())
-        .collect()
 }
 
 // ===========================================================================
@@ -300,9 +239,8 @@ mod test_result_formatter {
             &output,
             Duration::from_millis(342),
         );
-        assert_eq!(fmt.exit_code, Some(0));
+        assert!(fmt.summary.contains("exit 0"));
         assert!(fmt.summary.contains("342ms"));
-        assert!(fmt.key_lines.iter().any(|l| l.contains("Compiling")));
     }
 
     #[test]
@@ -314,7 +252,7 @@ mod test_result_formatter {
             &output,
             Duration::from_millis(10),
         );
-        assert_eq!(fmt.exit_code, Some(127));
+        assert!(fmt.summary.contains("exit 127"));
         assert!(fmt.summary.contains("failed"));
     }
 
@@ -329,7 +267,6 @@ mod test_result_formatter {
         );
         assert!(fmt.summary.contains("main.rs"));
         assert!(fmt.summary.contains("1000"));
-        assert!(!fmt.key_lines.iter().any(|l| l.contains("xxxx")));
     }
 
     #[test]
@@ -342,7 +279,6 @@ mod test_result_formatter {
             Duration::from_millis(50),
         );
         assert!(fmt.truncated);
-        assert!(fmt.full_output_available);
     }
 
     #[test]

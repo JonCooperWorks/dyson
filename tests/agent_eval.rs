@@ -21,15 +21,15 @@ use async_trait::async_trait;
 
 use dyson::agent::Agent;
 use dyson::config::AgentSettings;
-use dyson::controller::Output;
-use dyson::error::{DysonError, Result};
+use dyson::controller::recording::RecordingOutput;
+use dyson::error::Result;
 use dyson::llm::stream::{StopReason, StreamEvent};
 use dyson::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use dyson::message::Message;
 use dyson::sandbox::{Sandbox, SandboxDecision};
 use dyson::skill::Skill;
 use dyson::skill::builtin::BuiltinSkill;
-use dyson::tool::{ToolContext, ToolOutput};
+use dyson::tool::ToolContext;
 
 // ===========================================================================
 // Mock infrastructure
@@ -167,64 +167,7 @@ impl Sandbox for SelectiveDenySandbox {
 }
 
 // ---------------------------------------------------------------------------
-// MockOutput — captures all output events.
 // ---------------------------------------------------------------------------
-
-struct MockOutput {
-    text: String,
-    tool_starts: Vec<(String, String)>,
-    tool_completes: usize,
-    tool_results: Vec<(String, bool)>,
-    errors: Vec<String>,
-}
-
-impl MockOutput {
-    fn new() -> Self {
-        Self {
-            text: String::new(),
-            tool_starts: Vec::new(),
-            tool_completes: 0,
-            tool_results: Vec::new(),
-            errors: Vec::new(),
-        }
-    }
-}
-
-impl Output for MockOutput {
-    fn text_delta(&mut self, text: &str) -> Result<()> {
-        self.text.push_str(text);
-        Ok(())
-    }
-
-    fn tool_use_start(&mut self, id: &str, name: &str) -> Result<()> {
-        self.tool_starts.push((id.into(), name.into()));
-        Ok(())
-    }
-
-    fn tool_use_complete(&mut self) -> Result<()> {
-        self.tool_completes += 1;
-        Ok(())
-    }
-
-    fn tool_result(&mut self, output: &ToolOutput) -> Result<()> {
-        self.tool_results
-            .push((output.content.clone(), output.is_error));
-        Ok(())
-    }
-
-    fn send_file(&mut self, _: &std::path::Path) -> Result<()> {
-        Ok(())
-    }
-
-    fn error(&mut self, e: &DysonError) -> Result<()> {
-        self.errors.push(e.to_string());
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -293,14 +236,14 @@ async fn sandbox_deny_returns_error_to_llm() {
         0,
     )
     .unwrap();
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     let result = agent.run("delete everything", &mut output).await.unwrap();
     assert_eq!(result, "I can't do that.");
 
     // The denied tool result should have been reported to the output.
     assert!(
-        output.tool_results.iter().any(|(content, is_error)| {
+        output.tool_results().iter().any(|(content, is_error)| {
             *is_error && content.contains("dangerous command blocked")
         })
     );
@@ -333,13 +276,13 @@ async fn sandbox_redirect_routes_to_different_tool() {
         0,
     )
     .unwrap();
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     let result = agent.run("read soul file", &mut output).await.unwrap();
     assert_eq!(result, "Redirected successfully.");
 
     // The tool result should exist (the redirected tool was called).
-    assert!(!output.tool_results.is_empty());
+    assert!(!output.tool_results().is_empty());
 }
 
 // ===========================================================================
@@ -369,7 +312,7 @@ async fn agent_stops_at_max_iterations() {
 
     let mut agent =
         Agent::new(Box::new(llm), sandbox, builtin_skills(), &settings, None, 0).unwrap();
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     let result = agent.run("loop forever", &mut output).await.unwrap();
 
@@ -404,10 +347,10 @@ async fn conversation_persists_across_runs() {
     )
     .unwrap();
 
-    let mut output1 = MockOutput::new();
+    let mut output1 = RecordingOutput::new();
     agent.run("first question", &mut output1).await.unwrap();
 
-    let mut output2 = MockOutput::new();
+    let mut output2 = RecordingOutput::new();
     agent.run("second question", &mut output2).await.unwrap();
 
     // Should have 4 messages: user1, assistant1, user2, assistant2.
@@ -462,13 +405,13 @@ async fn multiple_tool_calls_in_one_turn() {
         0,
     )
     .unwrap();
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     let result = agent.run("run both", &mut output).await.unwrap();
     assert_eq!(result, "Both commands ran.");
 
     // Both tool calls should have produced results.
-    assert_eq!(output.tool_results.len(), 2, "should have 2 tool results");
+    assert_eq!(output.tool_results().len(), 2, "should have 2 tool results");
 
     // Conversation: user, assistant(2 tools), tool_result_1, tool_result_2, assistant(text).
     assert_eq!(agent.messages().len(), 5);
@@ -501,7 +444,7 @@ async fn unknown_tool_returns_error() {
         0,
     )
     .unwrap();
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     let result = agent
         .run("use nonexistent tool", &mut output)
@@ -558,10 +501,10 @@ async fn multi_turn_builds_correct_history() {
     )
     .unwrap();
 
-    let mut out1 = MockOutput::new();
+    let mut out1 = RecordingOutput::new();
     agent.run("hello", &mut out1).await.unwrap();
 
-    let mut out2 = MockOutput::new();
+    let mut out2 = RecordingOutput::new();
     let result = agent.run("list files", &mut out2).await.unwrap();
     assert_eq!(result, "Here are the files.");
 
@@ -592,14 +535,14 @@ async fn clear_resets_conversation_history() {
     )
     .unwrap();
 
-    let mut out1 = MockOutput::new();
+    let mut out1 = RecordingOutput::new();
     agent.run("hello", &mut out1).await.unwrap();
     assert_eq!(agent.messages().len(), 2);
 
     agent.clear();
     assert_eq!(agent.messages().len(), 0, "clear should empty all messages");
 
-    let mut out2 = MockOutput::new();
+    let mut out2 = RecordingOutput::new();
     agent.run("fresh start", &mut out2).await.unwrap();
     assert_eq!(
         agent.messages().len(),
@@ -634,14 +577,14 @@ async fn tool_error_is_reported_back() {
         0,
     )
     .unwrap();
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     let result = agent.run("run bad command", &mut output).await.unwrap();
     assert_eq!(result, "Command failed.");
 
     // The tool result should be an error.
     assert!(
-        output.tool_results.iter().any(|(_, is_error)| *is_error),
+        output.tool_results().iter().any(|(_, is_error)| *is_error),
         "failed command should produce an error tool result"
     );
 }
@@ -671,18 +614,19 @@ async fn selective_sandbox_denies_specific_tools() {
         0,
     )
     .unwrap();
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     let result = agent.run("list things", &mut output).await.unwrap();
     assert_eq!(result, "Bash was denied, I'll answer directly.");
 
     // The tool result should be an error (bash denied).
-    assert_eq!(output.tool_results.len(), 1);
-    assert!(output.tool_results[0].1, "bash should be denied");
+    let results = output.tool_results();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].1, "bash should be denied");
     assert!(
-        output.tool_results[0].0.contains("not allowed"),
+        results[0].0.contains("not allowed"),
         "denial message should explain why: {}",
-        output.tool_results[0].0
+        results[0].0
     );
 }
 
@@ -704,13 +648,13 @@ async fn simple_text_response_no_tools() {
         0,
     )
     .unwrap();
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     let result = agent.run("hi", &mut output).await.unwrap();
     assert_eq!(result, "Hello, world!");
-    assert_eq!(output.text, "Hello, world!");
-    assert!(output.tool_starts.is_empty());
-    assert!(output.tool_results.is_empty());
+    assert_eq!(output.text(), "Hello, world!");
+    assert!(output.tool_calls().is_empty());
+    assert!(output.tool_results().is_empty());
     assert_eq!(agent.messages().len(), 2);
 }
 
@@ -743,7 +687,7 @@ async fn set_messages_restores_conversation() {
     agent.set_messages(history);
     assert_eq!(agent.messages().len(), 2);
 
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
     agent.run("follow up", &mut output).await.unwrap();
 
     // Should have: prev_user, prev_assistant, new_user, new_assistant = 4.
@@ -772,7 +716,7 @@ async fn redirect_to_unknown_tool_is_handled_gracefully() {
         0,
     )
     .unwrap();
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     // The agent catches the unknown-tool error and sends it back to the LLM
     // as a tool_result error.  The run() itself succeeds.
@@ -825,11 +769,11 @@ async fn streaming_text_accumulates_correctly() {
         0,
     )
     .unwrap();
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     let result = agent.run("say hello world", &mut output).await.unwrap();
     assert_eq!(result, "Hello, world!");
-    assert_eq!(output.text, "Hello, world!");
+    assert_eq!(output.text(), "Hello, world!");
 }
 
 // ===========================================================================
@@ -887,14 +831,14 @@ async fn concurrent_tool_calls_produce_all_results() {
         0,
     )
     .unwrap();
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     let result = agent.run("run three", &mut output).await.unwrap();
     assert_eq!(result, "All three done.");
 
     // All 3 tool calls should have produced results.
     assert_eq!(
-        output.tool_results.len(),
+        output.tool_results().len(),
         3,
         "all 3 concurrent tools should produce results"
     );
@@ -948,7 +892,7 @@ async fn token_budget_halts_agent_after_limit() {
     )
     .unwrap();
     agent.token_budget.max_output_tokens = Some(50);
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     // Should complete (budget exceeded mid-loop triggers break, not hard error).
     let _result = agent.run("test budget", &mut output).await.unwrap();
@@ -960,8 +904,8 @@ async fn token_budget_halts_agent_after_limit() {
 
     // An error about exceeding budget should have been surfaced.
     assert!(
-        output.errors.iter().any(|e| e.contains("token budget")),
+        output.errors().iter().any(|e| e.contains("token budget")),
         "should surface token budget error, got: {:?}",
-        output.errors
+        output.errors()
     );
 }

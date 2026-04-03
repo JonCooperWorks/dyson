@@ -16,14 +16,14 @@ use async_trait::async_trait;
 
 use dyson::agent::Agent;
 use dyson::config::AgentSettings;
-use dyson::controller::Output;
-use dyson::error::{DysonError, Result};
+use dyson::controller::recording::RecordingOutput;
+use dyson::error::Result;
 use dyson::llm::stream::{StopReason, StreamEvent};
 use dyson::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use dyson::message::Message;
 use dyson::sandbox::{Sandbox, SandboxDecision};
 use dyson::skill::Skill;
-use dyson::tool::{ToolContext, ToolOutput};
+use dyson::tool::ToolContext;
 
 // ===========================================================================
 // Mock infrastructure
@@ -59,42 +59,7 @@ impl LlmClient for MockLlm {
     }
 }
 
-struct MockOutput {
-    text: String,
-}
-
-impl MockOutput {
-    fn new() -> Self {
-        Self {
-            text: String::new(),
-        }
-    }
-}
-
-impl Output for MockOutput {
-    fn text_delta(&mut self, text: &str) -> Result<()> {
-        self.text.push_str(text);
-        Ok(())
-    }
-    fn tool_use_start(&mut self, _: &str, _: &str) -> Result<()> {
-        Ok(())
-    }
-    fn tool_use_complete(&mut self) -> Result<()> {
-        Ok(())
-    }
-    fn tool_result(&mut self, _: &ToolOutput) -> Result<()> {
-        Ok(())
-    }
-    fn send_file(&mut self, _: &std::path::Path) -> Result<()> {
-        Ok(())
-    }
-    fn error(&mut self, _: &DysonError) -> Result<()> {
-        Ok(())
-    }
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
+// MockOutput replaced by RecordingOutput from dyson::controller::recording.
 
 /// A recording sandbox that logs every tool call it sees.
 struct RecordingSandbox {
@@ -237,7 +202,7 @@ async fn subagent_shares_sandbox_with_parent() {
     )
     .unwrap();
 
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
     parent.run("run echo parent", &mut output).await.unwrap();
 
     // The sandbox should have recorded the "bash" call from the parent.
@@ -270,7 +235,7 @@ async fn subagent_shares_sandbox_with_parent() {
     .unwrap();
     child.set_depth(1);
 
-    let mut child_output = MockOutput::new();
+    let mut child_output = RecordingOutput::new();
     child
         .run("run echo child", &mut child_output)
         .await
@@ -316,7 +281,7 @@ async fn subagent_conversation_isolated_from_parent() {
         0,
     )
     .unwrap();
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
 
     parent.run("hello", &mut output).await.unwrap();
     parent.run("world", &mut output).await.unwrap();
@@ -366,7 +331,7 @@ async fn depth_propagates_to_child_tool_context() {
     let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
     agent.set_depth(2);
 
-    let mut output = MockOutput::new();
+    let mut output = RecordingOutput::new();
     let result = agent.run("test", &mut output).await.unwrap();
     assert_eq!(result, "OK.");
     // Agent ran fine at depth 2 — only SubagentTool checks depth limits.

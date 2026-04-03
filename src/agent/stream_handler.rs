@@ -234,55 +234,9 @@ fn flush_text(current_text: &mut String, content_blocks: &mut Vec<ContentBlock>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controller::recording::RecordingOutput;
     use crate::error::DysonError;
     use crate::llm::stream::StopReason;
-
-    // -----------------------------------------------------------------------
-    // Mock output that records events for assertion.
-    // -----------------------------------------------------------------------
-
-    struct MockOutput {
-        text: String,
-        tool_starts: Vec<(String, String)>,
-        tool_completes: usize,
-    }
-
-    impl MockOutput {
-        fn new() -> Self {
-            Self {
-                text: String::new(),
-                tool_starts: Vec::new(),
-                tool_completes: 0,
-            }
-        }
-    }
-
-    impl Output for MockOutput {
-        fn text_delta(&mut self, text: &str) -> Result<()> {
-            self.text.push_str(text);
-            Ok(())
-        }
-        fn tool_use_start(&mut self, id: &str, name: &str) -> Result<()> {
-            self.tool_starts.push((id.into(), name.into()));
-            Ok(())
-        }
-        fn tool_use_complete(&mut self) -> Result<()> {
-            self.tool_completes += 1;
-            Ok(())
-        }
-        fn tool_result(&mut self, _: &crate::tool::ToolOutput) -> Result<()> {
-            Ok(())
-        }
-        fn send_file(&mut self, _: &std::path::Path) -> Result<()> {
-            Ok(())
-        }
-        fn error(&mut self, _: &DysonError) -> Result<()> {
-            Ok(())
-        }
-        fn flush(&mut self) -> Result<()> {
-            Ok(())
-        }
-    }
 
     // -----------------------------------------------------------------------
     // Helper: create a stream from a vec of events.
@@ -309,10 +263,10 @@ mod tests {
             },
         ]);
 
-        let mut output = MockOutput::new();
+        let mut output = RecordingOutput::new();
         let (message, tool_calls, _tokens) = process_stream(stream, &mut output).await.unwrap();
 
-        assert_eq!(output.text, "Hello world");
+        assert_eq!(output.text(), "Hello world");
         assert!(tool_calls.is_empty());
         assert_eq!(message.content.len(), 1);
         match &message.content[0] {
@@ -340,10 +294,10 @@ mod tests {
             },
         ]);
 
-        let mut output = MockOutput::new();
+        let mut output = RecordingOutput::new();
         let (message, tool_calls, _tokens) = process_stream(stream, &mut output).await.unwrap();
 
-        assert_eq!(output.text, "Checking.");
+        assert_eq!(output.text(), "Checking.");
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "bash");
         assert_eq!(tool_calls[0].input["command"], "ls");
@@ -359,7 +313,7 @@ mod tests {
             StreamEvent::Error(DysonError::Llm("overloaded".into())),
         ]);
 
-        let mut output = MockOutput::new();
+        let mut output = RecordingOutput::new();
         let result = process_stream(stream, &mut output).await;
         assert!(result.is_err());
     }
@@ -378,11 +332,11 @@ mod tests {
             },
         ]);
 
-        let mut output = MockOutput::new();
+        let mut output = RecordingOutput::new();
         let (message, tool_calls, _tokens) = process_stream(stream, &mut output).await.unwrap();
 
         // Only the TextDelta should appear in output — thinking is suppressed.
-        assert_eq!(output.text, "The answer is 42.");
+        assert_eq!(output.text(), "The answer is 42.");
         assert!(tool_calls.is_empty());
         // Message should have one text block (not thinking).
         assert_eq!(message.content.len(), 1);
