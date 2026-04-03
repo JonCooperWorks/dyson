@@ -456,7 +456,7 @@ impl Agent {
     ///
     /// Like [`run()`], but accepts arbitrary content blocks instead of
     /// plain text.  Used by controllers that handle multimodal input
-    /// (e.g. Telegram photos, voice notes).
+    /// (e.g. photos, voice notes).
     pub async fn run_with_blocks(
         &mut self,
         blocks: Vec<crate::message::ContentBlock>,

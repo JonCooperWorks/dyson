@@ -22,7 +22,7 @@
 //     "agent": { "provider": "claude-code", "model": "sonnet" },
 //     "controllers": [
 //       { "type": "terminal" },
-//       { "type": "telegram", "bot_token": "literal-token" }
+//       { "type": "my_bot", "api_key": "literal-key" }
 //     ]
 //   }
 //   ```
@@ -72,7 +72,7 @@ pub struct Settings {
     /// Controllers — how Dyson interacts with the outside world.
     ///
     /// Each entry in the `"controllers"` JSON array becomes one of these.
-    /// Multiple controllers can run concurrently (e.g., terminal + Telegram).
+    /// Multiple controllers can run concurrently (e.g., terminal + a chat bot).
     /// If empty, defaults to a single terminal controller.
     pub controllers: Vec<ControllerConfig>,
 
@@ -157,24 +157,24 @@ pub struct SandboxConfig {
 ///
 /// ```json
 /// {
-///   "type": "telegram",
-///   "bot_token": { "resolver": "insecure_env", "name": "TELEGRAM_API_KEY" },
-///   "allowed_chat_ids": [123456789]
+///   "type": "my_controller",
+///   "api_key": { "resolver": "insecure_env", "name": "MY_API_KEY" },
+///   "channel_ids": [123456789]
 /// }
 /// ```
 ///
-/// The controller reads its fields from `config` using serde:
+/// Each controller reads its own fields from `config` using serde:
 /// ```ignore
 /// #[derive(Deserialize)]
-/// struct TelegramControllerConfig {
-///     bot_token: SecretValue,
-///     allowed_chat_ids: Option<Vec<i64>>,
+/// struct MyControllerConfig {
+///     api_key: SecretValue,
+///     channel_ids: Option<Vec<i64>>,
 /// }
-/// let tg: TelegramControllerConfig = serde_json::from_value(config.config.clone())?;
+/// let cfg: MyControllerConfig = serde_json::from_value(config.config.clone())?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct ControllerConfig {
-    /// Controller type: "terminal", "telegram", etc.
+    /// Controller type identifier (e.g. "terminal").
     pub controller_type: String,
 
     /// Controller-specific configuration as a raw JSON value.
@@ -226,8 +226,7 @@ pub struct AgentSettings {
     /// Rate limiting configuration.
     ///
     /// Limits the number of user messages processed per time window.
-    /// Applied per agent instance (which means per-chat for Telegram,
-    /// per-session for terminal).  `None` = no rate limit (default).
+    /// Applied per agent instance.  `None` = no rate limit (default).
     pub rate_limit: Option<RateLimitConfig>,
 }
 

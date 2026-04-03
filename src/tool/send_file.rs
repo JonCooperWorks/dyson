@@ -3,8 +3,7 @@
 //
 // This tool is controller-agnostic: it attaches the file path to the
 // ToolOutput, and the controller's Output::send_file() implementation
-// handles delivery (Telegram sends a document, terminal prints the path,
-// etc.).
+// handles delivery (e.g. sending a document message, printing the path).
 // ===========================================================================
 
 use async_trait::async_trait;
@@ -22,8 +21,8 @@ impl Tool for SendFileTool {
 
     fn description(&self) -> &str {
         "Send a file to the user. The file will be delivered through the \
-         current controller (e.g., as a Telegram document, a terminal file \
-         path, etc.). Use this when the user asks you to send, share, or \
+         current controller (e.g., as a document message, a file path, \
+         etc.). Use this when the user asks you to send, share, or \
          deliver a file."
     }
 

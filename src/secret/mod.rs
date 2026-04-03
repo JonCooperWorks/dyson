@@ -35,8 +35,8 @@
 //     },
 //     "controllers": [
 //       {
-//         "type": "telegram",
-//         "bot_token": { "resolver": "insecure_env", "name": "TELEGRAM_API_KEY" }
+//         "type": "my_bot",
+//         "api_key": { "resolver": "insecure_env", "name": "BOT_API_KEY" }
 //       }
 //     ]
 //   }

@@ -86,7 +86,7 @@
 //   Claude Code has a full agent loop with Bash, Read, Write, Edit, etc.
 //   — already sandboxed, already working.  Instead of duplicating that
 //   in Dyson, we let Claude Code be the full agent and Dyson becomes the
-//   transport layer (terminal, Telegram, etc.).  Claude Code handles
+//   transport layer (terminal, chat bots, etc.).  Claude Code handles
 //   tool calls internally — Dyson streams the text output and tool
 //   activity events to the user.
 //

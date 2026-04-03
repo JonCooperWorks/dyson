@@ -267,8 +267,8 @@ pub struct ToolOutput {
     /// Files to send to the user via the controller.
     ///
     /// Tools can attach file paths here and the controller's `Output`
-    /// implementation will deliver them (e.g., Telegram sends them as
-    /// documents, the terminal prints the path).  The files are sent
+    /// implementation will deliver them (e.g., sent as documents,
+    /// printed as file paths).  The files are sent
     /// *after* the text content — they are not included in the LLM's
     /// conversation history.
     pub files: Vec<PathBuf>,

@@ -29,7 +29,7 @@ pub async fn transcribe(data: &[u8], mime_type: &str) -> crate::Result<String> {
         "audio/wav" | "audio/x-wav" => "wav",
         "audio/webm" => "webm",
         "audio/flac" => "flac",
-        _ => "ogg", // Telegram voice notes are OGG/Opus by default.
+        _ => "ogg", // OGG is a common default for voice messages.
     };
 
     // Check if whisper is available.

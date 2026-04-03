@@ -10,20 +10,20 @@
 //   output.  Multiple controllers can run concurrently.
 //
 // Module layout:
-//   mod.rs      — Controller trait, Output trait (this file)
+//   mod.rs      — Controller trait, Output trait, shared helpers (this file)
 //   terminal.rs — Interactive terminal REPL
 //   telegram.rs — Telegram bot
 //
 // Why "Controller" instead of "UI"?
 //   "UI" implies visual rendering.  But a controller does more than render:
-//   - It sources input (stdin, Telegram messages, HTTP requests, cron)
+//   - It sources input (stdin, messages, HTTP requests, cron)
 //   - It manages the agent lifecycle (create, run, conversation state)
-//   - It delivers output (terminal, Telegram edits, webhooks)
-//   - It enforces access control (Telegram allowed_chat_ids)
+//   - It delivers output (text streams, message edits, webhooks)
+//   - It enforces access control (allowed users, API keys, etc.)
 //
-//   A Telegram bot isn't a "UI" — it's a controller that bridges Telegram's
-//   message protocol to Dyson's agent loop.  A future Slack controller,
-//   Discord controller, or HTTP API controller would do the same.
+//   A chat bot isn't a "UI" — it's a controller that bridges a messaging
+//   protocol to Dyson's agent loop.  The same applies to a terminal REPL,
+//   a mobile app backend, or an HTTP API server.
 //
 // How controllers fit in the architecture:
 //
@@ -33,30 +33,14 @@
 //   main.rs reads config, creates Controller instances
 //     │
 //     ├── TerminalController::run()   ← interactive REPL
-//     ├── TelegramController::run()   ← Telegram bot polling
-//     └── (future) HttpController     ← REST API server
+//     ├── (other controllers)         ← chat bots, HTTP APIs, etc.
 //           │
 //           ▼
 //         Each controller creates its own Agent and Output
 //         per session/message/request
 //
 // Multiple controllers:
-//   Dyson supports running multiple controllers simultaneously.  For
-//   example, you could run both a terminal REPL and a Telegram bot:
-//
-//   ```json
-//   {
-//     "controllers": [
-//       { "type": "terminal" },
-//       {
-//         "type": "telegram",
-//         "bot_token": "$TELEGRAM_API_KEY",
-//         "allowed_chat_ids": [123456789]
-//       }
-//     ]
-//   }
-//   ```
-//
+//   Dyson supports running multiple controllers simultaneously.
 //   Each controller runs as a concurrent tokio task.  They share the
 //   same agent settings but maintain independent conversation state.
 //
@@ -84,7 +68,7 @@ use crate::tool::ToolOutput;
 ///
 /// Controllers own the full loop: receive input → run agent → deliver output.
 /// Each controller type represents a different interaction channel
-/// (terminal, Telegram, HTTP, etc.).
+/// (terminal, chat bots, HTTP APIs, mobile backends, etc.).
 ///
 /// ## Lifecycle
 ///
@@ -92,9 +76,6 @@ use crate::tool::ToolOutput;
 /// main.rs creates controllers from config
 ///   → controller.run(settings).await
 ///     → (blocks until the controller shuts down)
-///     → terminal: REPL loop reading stdin
-///     → telegram: bot polling loop
-///     → http: axum server (future)
 /// ```
 ///
 /// ## Concurrency
@@ -103,7 +84,7 @@ use crate::tool::ToolOutput;
 /// separate agent instances, separate conversation state, separate I/O.
 #[async_trait::async_trait]
 pub trait Controller: Send {
-    /// Human-readable name for logging (e.g., "terminal", "telegram").
+    /// Human-readable name for logging (e.g., "terminal").
     fn name(&self) -> &str;
 
     /// Run the controller.  Blocks until shutdown (Ctrl-C, bot disconnect, etc.).
@@ -118,9 +99,8 @@ pub trait Controller: Send {
     /// Optional system prompt fragment contributed by this controller.
     ///
     /// Appended to the agent's system prompt so the LLM knows about
-    /// controller-specific constraints.  For example, the Telegram
-    /// controller tells the LLM not to use markdown because Telegram's
-    /// MarkdownV2 parsing is fragile.
+    /// controller-specific constraints (e.g. message length limits,
+    /// formatting restrictions).
     fn system_prompt(&self) -> Option<&str> {
         None
     }
@@ -295,30 +275,6 @@ pub fn active_provider_name(settings: &Settings) -> Option<String> {
     })
 }
 
-/// Format the provider list for display, marking the active model with `*`.
-pub fn format_provider_list(
-    settings: &Settings,
-    current_provider: &str,
-    current_model: &str,
-) -> String {
-    let mut providers: Vec<_> = settings.providers.iter().collect();
-    providers.sort_by_key(|(name, _)| name.as_str());
-
-    let mut out = String::from("Available providers:\n");
-    for (name, pc) in &providers {
-        out.push_str(&format!("  {} — {:?}\n", name, pc.provider_type));
-        for model in &pc.models {
-            let marker = if *name == current_provider && model == current_model {
-                " *"
-            } else {
-                ""
-            };
-            out.push_str(&format!("    {model}{marker}\n"));
-        }
-    }
-    out
-}
-
 /// List all configured providers, sorted by name.
 pub fn list_providers(settings: &Settings) -> Vec<(&str, &crate::config::ProviderConfig)> {
     let mut providers: Vec<_> = settings
@@ -337,9 +293,8 @@ pub fn list_providers(settings: &Settings) -> Vec<(&str, &crate::config::Provide
 /// Rendering interface for agent events.
 ///
 /// The agent loop calls these methods as events occur.  Each controller
-/// creates an appropriate Output implementation:
-/// - `TerminalController` → `TerminalOutput` (writes to stdout)
-/// - `TelegramController` → `TelegramOutput` (edits Telegram messages)
+/// creates an appropriate Output implementation (e.g. writing to stdout,
+/// editing chat messages, streaming over HTTP).
 ///
 /// ## Why separate from Controller?
 ///
@@ -379,9 +334,8 @@ pub trait Output: Send {
     /// The file is delivered as a side-channel to the user — it does not
     /// appear in the LLM's conversation history.
     ///
-    /// Controllers implement this differently:
-    /// - Terminal: prints the file path
-    /// - Telegram: sends the file as a document via `sendDocument`
+    /// Each controller delivers files differently (e.g. printing the path,
+    /// sending a document message).
     fn send_file(&mut self, path: &Path) -> std::result::Result<(), DysonError>;
 
     /// An error occurred.

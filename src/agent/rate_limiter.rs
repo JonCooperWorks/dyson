@@ -3,7 +3,7 @@
 //
 // Enforces a maximum number of messages within a sliding time window.
 // Each Agent instance has its own RateLimiter, so per-agent limiting
-// is automatically per-chat for Telegram and per-session for terminal.
+// is automatically per-session (or per-chat when a controller creates per-chat agents).
 //
 // Controllers never interact with this directly — it's checked inside
 // Agent::run() and is completely invisible to the controller layer.

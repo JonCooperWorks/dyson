@@ -25,7 +25,7 @@
 //
 // Why a Controller and not just code in main.rs?
 //   By extracting the REPL into a Controller, it can coexist with other
-//   controllers.  You could run both a terminal REPL and a Telegram bot
+//   controllers.  You could run both a terminal REPL and a chat bot
 //   simultaneously — each as a concurrent task.
 // ===========================================================================
 
@@ -36,6 +36,30 @@ use crate::config::Settings;
 use crate::controller::Output;
 use crate::error::DysonError;
 use crate::tool::ToolOutput;
+
+/// Format the provider list for terminal display, marking the active model with `*`.
+fn format_provider_list(
+    settings: &Settings,
+    current_provider: &str,
+    current_model: &str,
+) -> String {
+    let mut providers: Vec<_> = settings.providers.iter().collect();
+    providers.sort_by_key(|(name, _)| name.as_str());
+
+    let mut out = String::from("Available providers:\n");
+    for (name, pc) in &providers {
+        out.push_str(&format!("  {} — {:?}\n", name, pc.provider_type));
+        for model in &pc.models {
+            let marker = if *name == current_provider && model == current_model {
+                " *"
+            } else {
+                ""
+            };
+            out.push_str(&format!("    {model}{marker}\n"));
+        }
+    }
+    out
+}
 
 // ---------------------------------------------------------------------------
 // TerminalController
@@ -148,7 +172,7 @@ impl super::Controller for TerminalController {
                 } else {
                     eprint!(
                         "{}",
-                        super::format_provider_list(
+                        format_provider_list(
                             &current_settings,
                             &current_provider,
                             &current_model,

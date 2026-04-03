@@ -217,7 +217,7 @@ impl Message {
 
     /// Create a user message from multiple content blocks (text + images).
     ///
-    /// Used by the Telegram controller when a message contains media.
+    /// Used by controllers that handle multimodal input (images, audio, etc.).
     /// ```ignore
     /// let msg = Message::user_multimodal(vec![
     ///     ContentBlock::Text { text: "What's in this image?".into() },

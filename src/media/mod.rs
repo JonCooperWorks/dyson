@@ -2,7 +2,7 @@
 // Media resolver — converts raw media bytes into ContentBlocks.
 //
 // This module is the ingestion pipeline for non-text input.  Controllers
-// (e.g. Telegram) download media files and pass them here.  The resolver
+// download media files and pass them here.  The resolver
 // converts them to ContentBlocks that LLM providers can consume:
 //
 //   - Images  →  resize + base64  →  ContentBlock::Image
@@ -23,7 +23,7 @@ use crate::message::ContentBlock;
 pub enum MediaInput {
     /// A raw image (JPEG, PNG, WebP, GIF).
     Image { data: Vec<u8>, mime_type: String },
-    /// A raw audio file (OGG/Opus from Telegram voice notes, etc.).
+    /// A raw audio file (OGG/Opus voice messages, MP3, WAV, etc.).
     Audio { data: Vec<u8>, mime_type: String },
 }
 
