@@ -55,7 +55,7 @@ pub mod recording;
 pub mod telegram;
 pub mod terminal;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::Settings;
 use crate::error::DysonError;
@@ -285,6 +285,262 @@ pub fn list_providers(settings: &Settings) -> Vec<(&str, &crate::config::Provide
         .collect();
     providers.sort_by_key(|(name, _)| *name);
     providers
+}
+
+// ---------------------------------------------------------------------------
+// Hot-reload setup — shared across all controllers.
+// ---------------------------------------------------------------------------
+
+/// Resolve the config file path and create a hot reloader.
+///
+/// Both terminal and Telegram controllers need to watch for config and
+/// workspace changes.  This extracts the shared setup:
+/// 1. Parse `--config` / `-c` from CLI args, or fall back to `dyson.json`
+/// 2. Resolve the workspace path
+/// 3. Create a `HotReloader` watching both
+pub fn create_hot_reloader(
+    settings: &Settings,
+) -> (Option<PathBuf>, crate::config::hot_reload::HotReloader) {
+    let config_path = std::env::args()
+        .skip_while(|a| a != "--config" && a != "-c")
+        .nth(1)
+        .map(PathBuf::from)
+        .or_else(|| {
+            let p = PathBuf::from("dyson.json");
+            if p.exists() { Some(p) } else { None }
+        });
+    let workspace_path = crate::workspace::OpenClawWorkspace::resolve_path(Some(
+        settings.workspace.connection_string.expose(),
+    ));
+    let reloader = crate::config::hot_reload::HotReloader::new(
+        config_path.as_deref(),
+        workspace_path.as_deref(),
+    );
+    (config_path, reloader)
+}
+
+// ---------------------------------------------------------------------------
+// Single-agent reload — used by terminal controller.
+// ---------------------------------------------------------------------------
+
+/// Outcome of a hot-reload check.
+pub enum ReloadOutcome {
+    /// Nothing changed.
+    NoChange,
+    /// Agent was rebuilt (config or workspace changed).
+    Reloaded,
+    /// Reload check or rebuild failed.
+    Error(String),
+}
+
+/// Check for config/workspace changes and rebuild the agent if needed.
+///
+/// Preserves the user's provider/model selection across reloads.  Falls
+/// back to defaults only if the selected provider/model was removed from
+/// the new config.
+pub async fn check_and_reload_agent(
+    reloader: &mut crate::config::hot_reload::HotReloader,
+    current_settings: &mut Settings,
+    original_dangerous_no_sandbox: bool,
+    agent: &mut crate::agent::Agent,
+    current_provider: &mut String,
+    current_model: &mut String,
+    controller_prompt: Option<&str>,
+) -> ReloadOutcome {
+    let (changed, new_settings) = match reloader.check() {
+        Ok(result) => result,
+        Err(e) => return ReloadOutcome::Error(format!("config reload check failed: {e}")),
+    };
+
+    if !changed {
+        return ReloadOutcome::NoChange;
+    }
+
+    if let Some(s) = new_settings {
+        *current_settings = s;
+        current_settings.dangerous_no_sandbox = original_dangerous_no_sandbox;
+    }
+
+    let messages = agent.messages().to_vec();
+    match build_agent_with_provider(
+        current_settings,
+        current_provider,
+        Some(current_model),
+        controller_prompt,
+        messages,
+    )
+    .await
+    {
+        Ok(a) => {
+            *agent = a;
+        }
+        Err(_) => {
+            // Provider/model removed from config — fall back to defaults.
+            match build_agent(current_settings, controller_prompt).await {
+                Ok(a) => {
+                    *agent = a;
+                    *current_provider =
+                        active_provider_name(current_settings).unwrap_or_default();
+                    *current_model = current_settings.agent.model.clone();
+                }
+                Err(e) => return ReloadOutcome::Error(format!("reload error: {e}")),
+            }
+        }
+    }
+
+    ReloadOutcome::Reloaded
+}
+
+// ---------------------------------------------------------------------------
+// Shared command dispatch
+// ---------------------------------------------------------------------------
+
+/// A provider and its models, ready for rendering by controllers.
+pub struct ProviderInfo {
+    pub name: String,
+    pub provider_type: String,
+    pub models: Vec<ModelInfo>,
+}
+
+/// A single model within a provider.
+pub struct ModelInfo {
+    pub name: String,
+    pub active: bool,
+}
+
+/// Result of executing a shared command.
+///
+/// Controllers match on this to render output and add controller-specific
+/// side effects (e.g. Telegram persists chat history after compaction).
+pub enum CommandResult {
+    /// `/clear` succeeded — agent context was cleared.
+    Cleared,
+    /// `/compact` succeeded — conversation was compacted.
+    Compacted,
+    /// `/compact` failed.
+    CompactError(String),
+    /// `/models` — list of providers and their models.
+    ModelList { providers: Vec<ProviderInfo> },
+    /// `/model` succeeded — switched to a new provider/model.
+    ModelSwitched {
+        provider_name: String,
+        provider_type: String,
+        model: String,
+    },
+    /// `/model` failed — could not switch.
+    ModelSwitchError(String),
+    /// `/model` with bad arguments.
+    ModelParseError(String),
+    /// `/model` with no arguments — show usage.
+    ModelUsage,
+    /// Input was not a shared command — controller should handle it.
+    NotHandled,
+}
+
+/// Execute a shared command, returning a result for the controller to render.
+///
+/// Handles: `/clear`, `/compact`, `/models`, `/model`.
+/// Returns `NotHandled` for everything else, so controllers can check
+/// their own commands before or after calling this.
+pub async fn execute_command(
+    input: &str,
+    agent: &mut crate::agent::Agent,
+    output: &mut dyn Output,
+    settings: &Settings,
+    current_provider: &mut String,
+    current_model: &mut String,
+    config_path: Option<&Path>,
+    controller_prompt: Option<&str>,
+) -> CommandResult {
+    if input == "/clear" {
+        agent.clear();
+        return CommandResult::Cleared;
+    }
+
+    if input == "/compact" {
+        return match agent.compact(output).await {
+            Ok(()) => CommandResult::Compacted,
+            Err(e) => CommandResult::CompactError(e.to_string()),
+        };
+    }
+
+    if input == "/models" {
+        if settings.providers.is_empty() {
+            return CommandResult::ModelList {
+                providers: Vec::new(),
+            };
+        }
+        let providers = list_providers(settings)
+            .into_iter()
+            .map(|(name, pc)| ProviderInfo {
+                name: name.to_string(),
+                provider_type: format!("{:?}", pc.provider_type),
+                models: pc
+                    .models
+                    .iter()
+                    .map(|m| ModelInfo {
+                        name: m.clone(),
+                        active: name == current_provider.as_str() && m == current_model,
+                    })
+                    .collect(),
+            })
+            .collect();
+        return CommandResult::ModelList { providers };
+    }
+
+    if input == "/model" {
+        return CommandResult::ModelUsage;
+    }
+
+    if let Some(args) = input.strip_prefix("/model ").map(str::trim) {
+        if args.is_empty() {
+            return CommandResult::ModelUsage;
+        }
+        let (target_provider, target_model) = match parse_model_command(
+            args,
+            &settings.providers,
+            current_provider,
+        ) {
+            Ok(parsed) => parsed,
+            Err(e) => return CommandResult::ModelParseError(e),
+        };
+        let messages = agent.messages().to_vec();
+        match build_agent_with_provider(
+            settings,
+            &target_provider,
+            target_model.as_deref(),
+            controller_prompt,
+            messages,
+        )
+        .await
+        {
+            Ok(new_agent) => {
+                *agent = new_agent;
+                let pc = &settings.providers[&target_provider];
+                let resolved = target_model
+                    .as_deref()
+                    .unwrap_or_else(|| pc.default_model())
+                    .to_string();
+                *current_model = resolved.clone();
+                *current_provider = target_provider.clone();
+                if let Some(cp) = config_path {
+                    crate::config::loader::persist_model_selection(
+                        cp,
+                        &target_provider,
+                        &resolved,
+                    );
+                }
+                return CommandResult::ModelSwitched {
+                    provider_name: target_provider,
+                    provider_type: format!("{:?}", pc.provider_type),
+                    model: resolved,
+                };
+            }
+            Err(e) => return CommandResult::ModelSwitchError(e.to_string()),
+        }
+    }
+
+    CommandResult::NotHandled
 }
 
 // ---------------------------------------------------------------------------

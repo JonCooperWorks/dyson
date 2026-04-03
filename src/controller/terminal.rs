@@ -33,29 +33,18 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::config::Settings;
-use crate::controller::Output;
+use crate::controller::{CommandResult, Output, ProviderInfo, ReloadOutcome};
 use crate::error::DysonError;
 use crate::tool::ToolOutput;
 
-/// Format the provider list for terminal display, marking the active model with `*`.
-fn format_provider_list(
-    settings: &Settings,
-    current_provider: &str,
-    current_model: &str,
-) -> String {
-    let mut providers: Vec<_> = settings.providers.iter().collect();
-    providers.sort_by_key(|(name, _)| name.as_str());
-
+/// Format a `ProviderInfo` list for terminal display, marking the active model with `*`.
+fn format_provider_list(providers: &[ProviderInfo]) -> String {
     let mut out = String::from("Available providers:\n");
-    for (name, pc) in &providers {
-        out.push_str(&format!("  {} — {:?}\n", name, pc.provider_type));
-        for model in &pc.models {
-            let marker = if *name == current_provider && model == current_model {
-                " *"
-            } else {
-                ""
-            };
-            out.push_str(&format!("    {model}{marker}\n"));
+    for provider in providers {
+        out.push_str(&format!("  {} — {}\n", provider.name, provider.provider_type));
+        for model in &provider.models {
+            let marker = if model.active { " *" } else { "" };
+            out.push_str(&format!("    {}{marker}\n", model.name));
         }
     }
     out
@@ -82,75 +71,31 @@ impl super::Controller for TerminalController {
         let mut agent = super::build_agent(&current_settings, None).await?;
         let mut output = TerminalOutput::new();
 
-        // Track the active provider and model for within-provider switching.
         let mut current_provider =
             super::active_provider_name(&current_settings).unwrap_or_default();
         let mut current_model = current_settings.agent.model.clone();
 
-        // Hot reload: watch config file + workspace files.
-        let config_path = std::env::args()
-            .skip_while(|a| a != "--config" && a != "-c")
-            .nth(1)
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                let p = std::path::PathBuf::from("dyson.json");
-                if p.exists() { Some(p) } else { None }
-            });
-
-        let workspace_path = crate::workspace::OpenClawWorkspace::resolve_path(Some(
-            settings.workspace.connection_string.expose(),
-        ));
-
-        let mut reloader = crate::config::hot_reload::HotReloader::new(
-            config_path.as_deref(),
-            workspace_path.as_deref(),
-        );
+        let (config_path, mut reloader) = super::create_hot_reloader(settings);
 
         eprintln!("Dyson v{} — type /exit to quit", env!("CARGO_PKG_VERSION"));
         eprintln!();
 
         loop {
             // Check for config/workspace changes before each turn.
-            match reloader.check() {
-                Ok((true, new_settings)) => {
-                    if let Some(s) = new_settings {
-                        current_settings = s;
-                        current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
-                    }
-                    eprintln!("[reloaded]");
-                    // Preserve the user's model/provider selection across
-                    // reloads (e.g. workspace changes from /clear's background
-                    // learning task should not reset the model).
-                    let messages = agent.messages().to_vec();
-                    match super::build_agent_with_provider(
-                        &current_settings,
-                        &current_provider,
-                        Some(&current_model),
-                        None,
-                        messages,
-                    )
-                    .await
-                    {
-                        Ok(a) => {
-                            agent = a;
-                        }
-                        Err(_) => {
-                            // Provider/model removed from config — fall back to defaults.
-                            match super::build_agent(&current_settings, None).await {
-                                Ok(a) => {
-                                    agent = a;
-                                    current_provider =
-                                        super::active_provider_name(&current_settings)
-                                            .unwrap_or_default();
-                                    current_model = current_settings.agent.model.clone();
-                                }
-                                Err(e) => eprintln!("[reload error: {e}]"),
-                            }
-                        }
-                    }
-                }
-                Ok((false, _)) => {}
-                Err(e) => eprintln!("[config reload check failed: {e}]"),
+            match super::check_and_reload_agent(
+                &mut reloader,
+                &mut current_settings,
+                settings.dangerous_no_sandbox,
+                &mut agent,
+                &mut current_provider,
+                &mut current_model,
+                None,
+            )
+            .await
+            {
+                ReloadOutcome::NoChange => {}
+                ReloadOutcome::Reloaded => eprintln!("[reloaded]"),
+                ReloadOutcome::Error(e) => eprintln!("[{e}]"),
             }
 
             eprint!("> ");
@@ -168,87 +113,66 @@ impl super::Controller for TerminalController {
             if input.is_empty() {
                 continue;
             }
+
+            // Terminal-specific commands.
             if input == "/exit" || input == "/quit" {
                 break;
             }
 
-            if input == "/clear" {
-                agent.clear();
-                eprintln!("[context cleared]");
-                continue;
-            }
-
-            if input == "/compact" {
-                eprintln!("[compacting context...]");
-                match agent.compact(&mut output).await {
-                    Ok(()) => eprintln!("[context compacted]"),
-                    Err(e) => eprintln!("[compaction failed: {e}]"),
+            // Shared commands.
+            match super::execute_command(
+                input,
+                &mut agent,
+                &mut output,
+                &current_settings,
+                &mut current_provider,
+                &mut current_model,
+                config_path.as_deref(),
+                None,
+            )
+            .await
+            {
+                CommandResult::NotHandled => {}
+                CommandResult::Cleared => {
+                    eprintln!("[context cleared]");
+                    continue;
                 }
-                continue;
-            }
-
-            if input == "/models" {
-                if current_settings.providers.is_empty() {
-                    eprintln!("No providers configured.");
-                } else {
-                    eprint!(
-                        "{}",
-                        format_provider_list(
-                            &current_settings,
-                            &current_provider,
-                            &current_model,
-                        )
-                    );
+                CommandResult::Compacted => {
+                    eprintln!("[context compacted]");
+                    continue;
                 }
-                continue;
-            }
-
-            if let Some(args) = input.strip_prefix("/model ").map(str::trim) {
-                if args.is_empty() {
+                CommandResult::CompactError(e) => {
+                    eprintln!("[compaction failed: {e}]");
+                    continue;
+                }
+                CommandResult::ModelList { providers } => {
+                    if providers.is_empty() {
+                        eprintln!("No providers configured.");
+                    } else {
+                        eprint!("{}", format_provider_list(&providers));
+                    }
+                    continue;
+                }
+                CommandResult::ModelSwitched {
+                    provider_name,
+                    provider_type,
+                    model,
+                } => {
+                    eprintln!("[switched to '{provider_name}' — {provider_type} ({model})]");
+                    continue;
+                }
+                CommandResult::ModelSwitchError(e) => {
+                    eprintln!("[switch error: {e}]");
+                    continue;
+                }
+                CommandResult::ModelParseError(e) => {
+                    eprintln!("[{e}]");
+                    continue;
+                }
+                CommandResult::ModelUsage => {
                     eprintln!("Usage: /model <provider> [model]  or  /model <model>");
                     continue;
                 }
-                let (target_provider, target_model) = match super::parse_model_command(
-                    args,
-                    &current_settings.providers,
-                    &current_provider,
-                ) {
-                    Ok(parsed) => parsed,
-                    Err(e) => {
-                        eprintln!("[{e}]");
-                        continue;
-                    }
-                };
-                let messages = agent.messages().to_vec();
-                match super::build_agent_with_provider(
-                    &current_settings,
-                    &target_provider,
-                    target_model.as_deref(),
-                    None,
-                    messages,
-                )
-                .await
-                {
-                    Ok(new_agent) => {
-                        agent = new_agent;
-                        let pc = &current_settings.providers[&target_provider];
-                        let resolved = target_model
-                            .as_deref()
-                            .unwrap_or_else(|| pc.default_model());
-                        eprintln!(
-                            "[switched to '{}' — {:?} ({})]",
-                            target_provider, pc.provider_type, resolved,
-                        );
-                        current_model = resolved.to_string();
-                        current_provider = target_provider;
-                    }
-                    Err(e) => eprintln!("[switch error: {e}]"),
-                }
-                continue;
-            }
-            if input == "/model" {
-                eprintln!("Usage: /model <provider> [model]  or  /model <model>");
-                continue;
             }
 
             match agent.run(input, &mut output).await {

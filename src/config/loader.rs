@@ -443,6 +443,56 @@ fn write_back_config(path: &Path, value: &serde_json::Value) {
     }
 }
 
+/// Persist the user's model selection by moving the chosen model to the
+/// front of the provider's `models` array in the config file.
+///
+/// This makes the selected model the default on next startup (since
+/// `default_model()` returns `models[0]`).
+///
+/// Best-effort: logs a warning on failure but never crashes.
+pub fn persist_model_selection(config_path: &Path, provider_name: &str, model: &str) {
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read config for model persistence");
+            return;
+        }
+    };
+
+    let mut root: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not parse config for model persistence");
+            return;
+        }
+    };
+
+    // Navigate to providers.<name>.models and move the selected model to front.
+    let moved = root
+        .get_mut("providers")
+        .and_then(|p| p.get_mut(provider_name))
+        .and_then(|p| p.get_mut("models"))
+        .and_then(|m| m.as_array_mut())
+        .map(|models| {
+            if let Some(pos) = models.iter().position(|v| v.as_str() == Some(model)) {
+                if pos > 0 {
+                    let val = models.remove(pos);
+                    models.insert(0, val);
+                    true
+                } else {
+                    false // already first
+                }
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+
+    if moved {
+        write_back_config(config_path, &root);
+    }
+}
+
 /// Convert JSON into runtime Settings.
 fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Settings {
     let mut settings = Settings::default();

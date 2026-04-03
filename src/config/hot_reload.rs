@@ -215,6 +215,11 @@ impl HotReloader {
         &mut self,
         current_mtimes: &HashMap<PathBuf, Option<SystemTime>>,
     ) -> Result<(bool, Option<Settings>)> {
+        // Check if the config file specifically changed (not just workspace files).
+        let config_changed = self.config_path.as_ref().map_or(false, |p| {
+            current_mtimes.get(p) != self.watched.get(p)
+        });
+
         // Log which files changed.
         for (path, last_mtime) in &self.watched {
             if current_mtimes.get(path) != Some(last_mtime) {
@@ -231,15 +236,15 @@ impl HotReloader {
 
         self.pending_change = None;
 
-        // If the config file specifically changed, reload settings.
+        // Only reload settings when the config file itself changed.
         let mut new_settings = None;
-        if let Some(ref config_path) = self.config_path
-            && config_path.exists()
-        {
-            match crate::config::loader::load_settings(Some(config_path)) {
-                Ok(s) => new_settings = Some(s),
-                Err(e) => {
-                    tracing::warn!(error = %e, "config reload failed — keeping old");
+        if config_changed {
+            if let Some(ref config_path) = self.config_path {
+                match crate::config::loader::load_settings(Some(config_path)) {
+                    Ok(s) => new_settings = Some(s),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "config reload failed — keeping old");
+                    }
                 }
             }
         }

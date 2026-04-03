@@ -231,21 +231,7 @@ impl super::Controller for TelegramController {
         let controller_prompt = self.system_prompt().map(|s| s.to_string());
 
         // Hot reload: watch config + workspace files.
-        let config_path = std::env::args()
-            .skip_while(|a| a != "--config" && a != "-c")
-            .nth(1)
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                let p = std::path::PathBuf::from("dyson.json");
-                if p.exists() { Some(p) } else { None }
-            });
-        let workspace_path = crate::workspace::OpenClawWorkspace::resolve_path(Some(
-            settings.workspace.connection_string.expose(),
-        ));
-        let mut reloader = crate::config::hot_reload::HotReloader::new(
-            config_path.as_deref(),
-            workspace_path.as_deref(),
-        );
+        let (config_path, mut reloader) = super::create_hot_reloader(settings);
 
         // Per-chat agents — persistent conversation context.
         // Each chat gets its own agent that remembers previous messages.
@@ -389,6 +375,11 @@ impl super::Controller for TelegramController {
                                             model: model.to_string(),
                                         },
                                     );
+                                    if let Some(ref cp) = config_path {
+                                        crate::config::loader::persist_model_selection(
+                                            cp, provider, model,
+                                        );
+                                    }
                                     let _ = bot.send_message(chat_id, reply).await;
                                 }
                                 Err(e) => {
@@ -446,52 +437,12 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                // /clear — rotate conversation history and start fresh.
-                // Agent::clear() spawns a background task to synthesise
-                // learnings into workspace memory before dropping messages.
-                if text == "/clear" {
-                    {
-                        let mut agents_map = agents.lock().await;
-                        if let Some(ca) = agents_map.get_mut(&chat_id.0) {
-                            ca.agent.clear();
-                        }
-                    }
-                    let _ = chat_store.rotate(&chat_id.0.to_string());
-                    let _ = bot.send_message(chat_id, "Context cleared.").await;
-                    tracing::info!(chat_id = chat_id.0, "conversation rotated and cleared");
+                // -- Telegram-specific commands --
+
+                if text == "/memory" {
+                    let _ = bot.send_message(chat_id, "Usage: /memory <note>").await;
                     continue;
                 }
-
-                // /compact — summarise the conversation and replace the
-                // history with the summary.  Keeps the agent alive (unlike
-                // /clear) so the model retains a condensed version of context.
-                if text == "/compact" {
-                    let mut agents_map = agents.lock().await;
-                    if let Some(ca) = agents_map.get_mut(&chat_id.0) {
-                        let mut output = TelegramOutput::new(bot.clone(), chat_id, true);
-                        match ca.agent.compact(&mut output).await {
-                            Ok(()) => {
-                                let chat_key = chat_id.0.to_string();
-                                let _ = chat_store.save(&chat_key, ca.agent.messages());
-                                let _ = bot.send_message(chat_id, "Context compacted.").await;
-                                tracing::info!(chat_id = chat_id.0, "conversation compacted");
-                            }
-                            Err(e) => {
-                                let _ = bot
-                                    .send_message(chat_id, format!("Compaction failed: {e}"))
-                                    .await;
-                                tracing::error!(error = %e, "compaction failed");
-                            }
-                        }
-                    } else {
-                        let _ = bot
-                            .send_message(chat_id, "No active conversation to compact.")
-                            .await;
-                    }
-                    continue;
-                }
-
-                // /memory — save a note to the workspace memory.
                 if let Some(note) = text.strip_prefix("/memory ") {
                     let note = note.trim();
                     if note.is_empty() {
@@ -510,120 +461,140 @@ impl super::Controller for TelegramController {
                     }
                     continue;
                 }
-                if text == "/memory" {
-                    let _ = bot.send_message(chat_id, "Usage: /memory <note>").await;
-                    continue;
-                }
 
-                // /models — list available providers and models as clickable buttons.
-                if text == "/models" {
-                    if current_settings.providers.is_empty() {
-                        let _ = bot.send_message(chat_id, "No providers configured.").await;
-                    } else {
-                        let (cp, cm) = {
-                            let agents_map = agents.lock().await;
-                            match agents_map.get(&chat_id.0) {
-                                Some(ca) => (ca.provider_name.clone(), ca.model.clone()),
-                                None => {
-                                    let pn = super::active_provider_name(&current_settings)
-                                        .unwrap_or_default();
-                                    let m = current_settings.agent.model.clone();
-                                    (pn, m)
-                                }
-                            }
-                        };
-                        let keyboard = build_model_keyboard(&current_settings, &cp, &cm);
-                        let _ = bot
-                            .send_message(chat_id, "Select a model:")
-                            .reply_markup(keyboard)
-                            .await;
-                    }
-                    continue;
-                }
+                // -- Shared commands --
+                //
+                // Lock the per-chat agent (or create one), dispatch through
+                // the shared command layer, then render + add Telegram-specific
+                // side effects in the match arms.
+                {
+                    let mut agents_map = agents.lock().await;
 
-                // /model <provider> [model] — switch provider and/or model.
-                if let Some(args) = text.strip_prefix("/model ").map(str::trim) {
-                    if args.is_empty() {
-                        let _ = bot
-                            .send_message(
-                                chat_id,
-                                "Usage: /model <provider> [model]  or  /model <model>",
-                            )
-                            .await;
-                        continue;
-                    }
-                    let current_prov = {
-                        let agents_map = agents.lock().await;
-                        agents_map
-                            .get(&chat_id.0)
-                            .map(|ca| ca.provider_name.clone())
-                            .unwrap_or_else(|| {
-                                super::active_provider_name(&current_settings).unwrap_or_default()
-                            })
-                    };
-                    let (target_provider, target_model) = match super::parse_model_command(
-                        args,
-                        &current_settings.providers,
-                        &current_prov,
-                    ) {
-                        Ok(parsed) => parsed,
-                        Err(e) => {
-                            let _ = bot.send_message(chat_id, e).await;
-                            continue;
-                        }
-                    };
-                    let existing_messages = {
-                        let agents_map = agents.lock().await;
-                        agents_map
-                            .get(&chat_id.0)
-                            .map(|ca| ca.agent.messages().to_vec())
-                            .unwrap_or_default()
-                    };
-                    match super::build_agent_with_provider(
-                        &current_settings,
-                        &target_provider,
-                        target_model.as_deref(),
-                        controller_prompt.as_deref(),
-                        existing_messages,
-                    )
-                    .await
+                    // Ensure agent exists for this chat before dispatching.
+                    if !agents_map.contains_key(&chat_id.0)
+                        && (text == "/clear"
+                            || text == "/compact"
+                            || text == "/models"
+                            || text == "/model"
+                            || text.starts_with("/model "))
                     {
-                        Ok(new_agent) => {
-                            let pc = &current_settings.providers[&target_provider];
-                            let resolved = target_model
-                                .as_deref()
-                                .unwrap_or_else(|| pc.default_model())
-                                .to_string();
-                            let reply = format!(
-                                "Switched to '{}' — {:?} ({})",
-                                target_provider, pc.provider_type, resolved,
-                            );
-                            agents.lock().await.insert(
-                                chat_id.0,
-                                ChatAgent {
-                                    agent: new_agent,
-                                    provider_name: target_provider,
-                                    model: resolved,
-                                },
-                            );
-                            let _ = bot.send_message(chat_id, reply).await;
-                        }
-                        Err(e) => {
-                            let _ = bot
-                                .send_message(chat_id, format!("Switch error: {e}"))
-                                .await;
+                        let provider_name =
+                            super::active_provider_name(&current_settings).unwrap_or_default();
+                        let model = current_settings.agent.model.clone();
+                        match crate::controller::build_agent(
+                            &current_settings,
+                            controller_prompt.as_deref(),
+                        )
+                        .await
+                        {
+                            Ok(agent) => {
+                                agents_map.insert(
+                                    chat_id.0,
+                                    ChatAgent {
+                                        agent,
+                                        provider_name,
+                                        model,
+                                    },
+                                );
+                            }
+                            Err(e) => {
+                                let _ = bot
+                                    .send_message(chat_id, format!("Error: {e}"))
+                                    .await;
+                                continue;
+                            }
                         }
                     }
-                    continue;
-                }
-                if text == "/model" {
-                    let _ = bot
-                        .send_message(
-                            chat_id,
-                            "Usage: /model <provider> [model]  or  /model <model>",
+
+                    if let Some(ca) = agents_map.get_mut(&chat_id.0) {
+                        let mut output = TelegramOutput::new(bot.clone(), chat_id, true);
+                        let result = super::execute_command(
+                            &text,
+                            &mut ca.agent,
+                            &mut output,
+                            &current_settings,
+                            &mut ca.provider_name,
+                            &mut ca.model,
+                            config_path.as_deref(),
+                            controller_prompt.as_deref(),
                         )
                         .await;
-                    continue;
+
+                        match result {
+                            super::CommandResult::NotHandled => {
+                                // Fall through to agent run below.
+                            }
+                            super::CommandResult::Cleared => {
+                                let _ = chat_store.rotate(&chat_id.0.to_string());
+                                let _ = bot.send_message(chat_id, "Context cleared.").await;
+                                tracing::info!(
+                                    chat_id = chat_id.0,
+                                    "conversation rotated and cleared"
+                                );
+                                continue;
+                            }
+                            super::CommandResult::Compacted => {
+                                let chat_key = chat_id.0.to_string();
+                                let _ = chat_store.save(&chat_key, ca.agent.messages());
+                                let _ = bot.send_message(chat_id, "Context compacted.").await;
+                                tracing::info!(chat_id = chat_id.0, "conversation compacted");
+                                continue;
+                            }
+                            super::CommandResult::CompactError(e) => {
+                                let _ = bot
+                                    .send_message(chat_id, format!("Compaction failed: {e}"))
+                                    .await;
+                                continue;
+                            }
+                            super::CommandResult::ModelList { providers } => {
+                                if providers.is_empty() {
+                                    let _ = bot
+                                        .send_message(chat_id, "No providers configured.")
+                                        .await;
+                                } else {
+                                    let keyboard = build_model_keyboard(&providers);
+                                    let _ = bot
+                                        .send_message(chat_id, "Select a model:")
+                                        .reply_markup(keyboard)
+                                        .await;
+                                }
+                                continue;
+                            }
+                            super::CommandResult::ModelSwitched {
+                                provider_name,
+                                provider_type,
+                                model,
+                            } => {
+                                let _ = bot
+                                    .send_message(
+                                        chat_id,
+                                        format!(
+                                            "Switched to '{provider_name}' — {provider_type} ({model})"
+                                        ),
+                                    )
+                                    .await;
+                                continue;
+                            }
+                            super::CommandResult::ModelSwitchError(e) => {
+                                let _ =
+                                    bot.send_message(chat_id, format!("Switch error: {e}")).await;
+                                continue;
+                            }
+                            super::CommandResult::ModelParseError(e) => {
+                                let _ = bot.send_message(chat_id, e).await;
+                                continue;
+                            }
+                            super::CommandResult::ModelUsage => {
+                                let _ = bot
+                                    .send_message(
+                                        chat_id,
+                                        "Usage: /model <provider> [model]  or  /model <model>",
+                                    )
+                                    .await;
+                                continue;
+                            }
+                        }
+                    }
                 }
 
                 tracing::info!(chat_id = chat_id.0, "telegram message received");
@@ -736,29 +707,20 @@ impl super::Controller for TelegramController {
 /// Each button shows the model name (with a check mark for the active one).
 /// The callback data encodes `model:{provider}:{model}` so the handler
 /// can switch to the selected model.
-fn build_model_keyboard(
-    settings: &Settings,
-    current_provider: &str,
-    current_model: &str,
-) -> InlineKeyboardMarkup {
-    let mut providers: Vec<_> = settings.providers.iter().collect();
-    providers.sort_by_key(|(name, _)| name.as_str());
-
+fn build_model_keyboard(providers: &[super::ProviderInfo]) -> InlineKeyboardMarkup {
     let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
-    for (name, pc) in &providers {
+    for provider in providers {
         // Provider header row (non-clickable label).
-        let label = format!("{} — {:?}", name, pc.provider_type);
-        // Use a callback with empty payload so tapping the header is a no-op.
+        let label = format!("{} — {}", provider.name, provider.provider_type);
         rows.push(vec![InlineKeyboardButton::callback(label, "noop")]);
 
-        for model in &pc.models {
-            let active = *name == current_provider && model == current_model;
-            let display = if active {
-                format!("✓ {model}")
+        for model in &provider.models {
+            let display = if model.active {
+                format!("✓ {}", model.name)
             } else {
-                model.clone()
+                model.name.clone()
             };
-            let data = format!("model:{name}:{model}");
+            let data = format!("model:{}:{}", provider.name, model.name);
             rows.push(vec![InlineKeyboardButton::callback(display, data)]);
         }
     }
