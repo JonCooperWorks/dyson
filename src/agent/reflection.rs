@@ -97,6 +97,7 @@ impl super::Agent {
         for _iteration in 0..5u8 {
             let response = match self
                 .client
+                .access()?
                 .stream(&messages, &memory_system, &memory_tools, &self.config)
                 .await
             {
@@ -264,6 +265,7 @@ impl super::Agent {
 
             let response = match self
                 .client
+                .access()?
                 .stream(
                     &messages,
                     &reflection_system,

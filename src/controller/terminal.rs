@@ -118,14 +118,35 @@ impl super::Controller for TerminalController {
                         current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
                     }
                     eprintln!("[reloaded]");
-                    match super::build_agent(&current_settings, None).await {
+                    // Preserve the user's model/provider selection across
+                    // reloads (e.g. workspace changes from /clear's background
+                    // learning task should not reset the model).
+                    let messages = agent.messages().to_vec();
+                    match super::build_agent_with_provider(
+                        &current_settings,
+                        &current_provider,
+                        Some(&current_model),
+                        None,
+                        messages,
+                    )
+                    .await
+                    {
                         Ok(a) => {
                             agent = a;
-                            current_provider =
-                                super::active_provider_name(&current_settings).unwrap_or_default();
-                            current_model = current_settings.agent.model.clone();
                         }
-                        Err(e) => eprintln!("[reload error: {e}]"),
+                        Err(_) => {
+                            // Provider/model removed from config — fall back to defaults.
+                            match super::build_agent(&current_settings, None).await {
+                                Ok(a) => {
+                                    agent = a;
+                                    current_provider =
+                                        super::active_provider_name(&current_settings)
+                                            .unwrap_or_default();
+                                    current_model = current_settings.agent.model.clone();
+                                }
+                                Err(e) => eprintln!("[reload error: {e}]"),
+                            }
+                        }
                     }
                 }
                 Ok((false, _)) => {}

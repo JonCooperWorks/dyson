@@ -247,6 +247,7 @@ impl super::Agent {
         let empty_tools: &[ToolDefinition] = &[];
         let response = self
             .client
+            .access()?
             .stream(messages, &compaction_system, empty_tools, &self.config)
             .await?;
 

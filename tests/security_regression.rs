@@ -576,41 +576,41 @@ async fn api_key_auth_uses_constant_time_comparison() {
 
 #[test]
 fn rate_limiter_allows_within_limit() {
-    use dyson::agent::rate_limiter::RateLimiter;
+    use dyson::agent::rate_limiter::RateLimited;
 
-    let limiter = RateLimiter::new(5, std::time::Duration::from_secs(60));
+    let limiter = RateLimited::new(0u8, 5, std::time::Duration::from_secs(60));
     for _ in 0..5 {
-        assert!(limiter.check().is_ok(), "should allow up to the limit");
+        assert!(limiter.access().is_ok(), "should allow up to the limit");
     }
 }
 
 #[test]
 fn rate_limiter_rejects_over_limit() {
-    use dyson::agent::rate_limiter::RateLimiter;
+    use dyson::agent::rate_limiter::RateLimited;
 
-    let limiter = RateLimiter::new(3, std::time::Duration::from_secs(60));
+    let limiter = RateLimited::new(0u8, 3, std::time::Duration::from_secs(60));
     for _ in 0..3 {
-        limiter.check().unwrap();
+        limiter.access().unwrap();
     }
     assert!(
-        limiter.check().is_err(),
+        limiter.access().is_err(),
         "should reject once limit is exceeded"
     );
 }
 
 #[test]
 fn rate_limiter_resets_after_window() {
-    use dyson::agent::rate_limiter::RateLimiter;
+    use dyson::agent::rate_limiter::RateLimited;
 
-    let limiter = RateLimiter::new(2, std::time::Duration::from_millis(50));
-    limiter.check().unwrap();
-    limiter.check().unwrap();
-    assert!(limiter.check().is_err());
+    let limiter = RateLimited::new(0u8, 2, std::time::Duration::from_millis(50));
+    limiter.access().unwrap();
+    limiter.access().unwrap();
+    assert!(limiter.access().is_err());
 
     // Wait for the window to expire.
     std::thread::sleep(std::time::Duration::from_millis(60));
     assert!(
-        limiter.check().is_ok(),
+        limiter.access().is_ok(),
         "should allow again after window expires"
     );
 }

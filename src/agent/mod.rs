@@ -50,7 +50,7 @@
 //
 //   Agent owns:
 //     ┌──────────────────────────────────────────────────┐
-//     │  client:  Box<dyn LlmClient>                     │
+//     │  client:  RateLimited<Box<dyn LlmClient>>         │
 //     │  sandbox: Arc<dyn Sandbox>     ← gates all calls │
 //     │  skills:  Vec<Box<dyn Skill>>                    │
 //     │  tools:   HashMap<name, Arc<dyn Tool>>           │
@@ -112,8 +112,8 @@ use self::token_budget::TokenBudget;
 /// Conversation history (`messages`) persists across calls for multi-turn
 /// conversations.
 pub struct Agent {
-    /// LLM client for streaming completions.
-    client: Box<dyn LlmClient>,
+    /// LLM client for streaming completions, gated by rate limiting.
+    client: rate_limiter::RateLimited<Box<dyn LlmClient>>,
 
     /// Sandbox that gates all tool execution.
     ///
@@ -190,9 +190,6 @@ pub struct Agent {
     /// client without sharing the agent's.
     agent_settings: crate::config::AgentSettings,
 
-    /// Per-agent message rate limiter.
-    /// Checked at the start of every `run()` call.  Invisible to controllers.
-    message_rate_limiter: Option<rate_limiter::RateLimiter>,
 }
 
 impl Agent {
@@ -311,6 +308,15 @@ impl Agent {
         };
         tool_context.workspace = workspace;
 
+        let client = match settings.rate_limit.as_ref() {
+            Some(rl) => rate_limiter::RateLimited::new(
+                client,
+                rl.max_messages,
+                std::time::Duration::from_secs(rl.window_secs),
+            ),
+            None => rate_limiter::RateLimited::unlimited(client),
+        };
+
         Ok(Self {
             client,
             sandbox,
@@ -333,12 +339,6 @@ impl Agent {
             cached_tool_tokens,
             agent_settings: settings.clone(),
             tools_disabled: false,
-            message_rate_limiter: settings.rate_limit.as_ref().map(|rl| {
-                rate_limiter::RateLimiter::new(
-                    rl.max_messages,
-                    std::time::Duration::from_secs(rl.window_secs),
-                )
-            }),
         })
     }
 
@@ -471,11 +471,6 @@ impl Agent {
     /// Assumes the caller has already pushed the user message to
     /// `self.messages`.
     async fn run_inner(&mut self, output: &mut dyn Output) -> Result<String> {
-        // Check per-agent rate limit before processing.
-        if let Some(ref limiter) = self.message_rate_limiter {
-            limiter.check()?;
-        }
-
         self.turn_count += 1;
 
         // Run memory maintenance as a side-channel LLM call every N turns.
@@ -591,6 +586,7 @@ impl Agent {
 
                     match self
                         .client
+                        .access()?
                         .stream(
                             &self.messages,
                             &turn_system_prompt,
@@ -775,6 +771,7 @@ impl Agent {
             let empty_tools: &[crate::llm::ToolDefinition] = &[];
             match self
                 .client
+                .access()?
                 .stream(
                     &self.messages,
                     &turn_system_prompt,
