@@ -447,6 +447,11 @@ impl Agent {
     /// assistant message without tool calls), or an error if something
     /// went wrong.
     pub async fn run(&mut self, user_input: &str, output: &mut dyn Output) -> Result<String> {
+        tracing::info!(
+            input_len = user_input.len(),
+            input_preview = &user_input[..user_input.len().min(200)],
+            "user message received"
+        );
         // Append the user's message to history.
         self.messages.push(Message::user(user_input));
         self.run_inner(output).await
@@ -462,6 +467,10 @@ impl Agent {
         blocks: Vec<crate::message::ContentBlock>,
         output: &mut dyn Output,
     ) -> Result<String> {
+        tracing::info!(
+            block_count = blocks.len(),
+            "user multimodal message received"
+        );
         self.messages.push(Message::user_multimodal(blocks));
         self.run_inner(output).await
     }
@@ -562,8 +571,36 @@ impl Agent {
                 iteration = iteration,
                 model = self.config.model,
                 messages = self.messages.len(),
+                tools_enabled = !self.tools_disabled,
+                tool_count = self.tool_definitions.len(),
                 "starting LLM call"
             );
+
+            // Log the messages being sent to the LLM for debugging.
+            for (i, msg) in self.messages.iter().enumerate() {
+                let role = match msg.role {
+                    crate::message::Role::User => "user",
+                    crate::message::Role::Assistant => "assistant",
+                };
+                let block_summary: Vec<String> = msg.content.iter().map(|b| match b {
+                    crate::message::ContentBlock::Text { text } => {
+                        format!("text({})", text.len())
+                    }
+                    crate::message::ContentBlock::ToolUse { name, .. } => {
+                        format!("tool_use({name})")
+                    }
+                    crate::message::ContentBlock::ToolResult { tool_use_id, is_error, .. } => {
+                        format!("tool_result({tool_use_id}, error={is_error})")
+                    }
+                    crate::message::ContentBlock::Image { .. } => "image".to_string(),
+                }).collect();
+                tracing::debug!(
+                    msg_index = i,
+                    role = role,
+                    blocks = ?block_summary,
+                    "message in context"
+                );
+            }
 
             // Show a typing indicator while waiting for the LLM to respond.
             output.typing_indicator(true)?;
@@ -664,7 +701,11 @@ impl Agent {
                 self.token_budget.record_input(input_tokens);
             }
 
-            tracing::info!("streaming response");
+            tracing::info!(
+                tool_mode = ?tool_mode,
+                input_tokens = ?response.input_tokens,
+                "streaming response"
+            );
 
             // -- Process the stream into a message + tool calls --
             let (assistant_msg, tool_calls, output_tokens) =
@@ -679,6 +720,22 @@ impl Agent {
                 );
                 output.error(&e)?;
                 break;
+            }
+
+            // Log assistant response summary.
+            if let Some(text) = assistant_msg.last_text() {
+                let preview = &text[..text.len().min(500)];
+                tracing::info!(
+                    response_len = text.len(),
+                    response_preview = preview,
+                    tool_calls = tool_calls.len(),
+                    "assistant response"
+                );
+            } else {
+                tracing::info!(
+                    tool_calls = tool_calls.len(),
+                    "assistant response (no text)"
+                );
             }
 
             // -- If no tool calls, the LLM is done --
@@ -882,17 +939,29 @@ impl Agent {
     /// (which is `&mut` and can't be shared across futures).  The caller
     /// handles output rendering after all futures resolve.
     async fn execute_tool_call_timed(&self, call: &ToolCall) -> Result<ToolOutput> {
-        tracing::info!(tool = call.name, id = call.id, "executing tool call");
+        let input_str = call.input.to_string();
+        let input_preview = &input_str[..input_str.len().min(500)];
+        tracing::info!(
+            tool = call.name,
+            id = call.id,
+            input = input_preview,
+            "executing tool call"
+        );
         let tool_start = std::time::Instant::now();
         let result = self.execute_tool_call(call).await;
         let tool_ms = tool_start.elapsed().as_millis();
         match &result {
-            Ok(out) => tracing::info!(
-                tool = call.name,
-                duration_ms = tool_ms,
-                is_error = out.is_error,
-                "tool call finished"
-            ),
+            Ok(out) => {
+                let output_preview = &out.content[..out.content.len().min(500)];
+                tracing::info!(
+                    tool = call.name,
+                    duration_ms = tool_ms,
+                    is_error = out.is_error,
+                    output_len = out.content.len(),
+                    output_preview = output_preview,
+                    "tool call finished"
+                );
+            }
             Err(e) => tracing::error!(
                 tool = call.name,
                 duration_ms = tool_ms,

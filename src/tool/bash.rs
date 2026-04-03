@@ -123,7 +123,7 @@ impl Tool for BashTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("bash", "missing or invalid 'command' field"))?;
 
-        tracing::debug!(command = command, "executing bash command");
+        tracing::info!(command = command, working_dir = %ctx.working_dir.display(), "executing bash command");
 
         // -- Spawn the child process --
         //
@@ -209,11 +209,21 @@ impl Tool for BashTool {
                 let truncated = truncate_output(&combined);
                 let is_error = !output.status.success();
 
-                tracing::debug!(
+                tracing::info!(
                     exit_code = output.status.code(),
+                    stdout_bytes = output.stdout.len(),
+                    stderr_bytes = output.stderr.len(),
                     output_len = truncated.len(),
                     truncated = truncated.len() < combined.len(),
+                    is_error = is_error,
                     "bash command completed"
+                );
+
+                // Log the first portion of the output for debugging.
+                let output_preview = &truncated[..truncated.len().min(300)];
+                tracing::debug!(
+                    output_preview = output_preview,
+                    "bash output preview"
                 );
 
                 Ok(ToolOutput {
