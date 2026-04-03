@@ -565,12 +565,16 @@ pub async fn execute_command(
 /// `tracing_appender::rolling::daily` creates files like `dyson.log.2026-04-03`.
 /// We pick the most recent one by sorting the matching filenames.
 pub fn read_log_tail(n: usize) -> Result<String, String> {
-    use std::io::{Read as _, Seek, SeekFrom};
-
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
     let log_dir = PathBuf::from(home).join(".dyson");
+    read_log_tail_from_dir(&log_dir, n)
+}
 
-    let mut log_files: Vec<PathBuf> = std::fs::read_dir(&log_dir)
+/// Read the last `n` lines from the most recent `dyson.log*` file in `log_dir`.
+fn read_log_tail_from_dir(log_dir: &std::path::Path, n: usize) -> Result<String, String> {
+    use std::io::{Read as _, Seek, SeekFrom};
+
+    let mut log_files: Vec<PathBuf> = std::fs::read_dir(log_dir)
         .map_err(|e| format!("cannot read {}: {e}", log_dir.display()))?
         .filter_map(|entry| {
             let entry = entry.ok()?;
@@ -607,7 +611,14 @@ pub fn read_log_tail(n: usize) -> Result<String, String> {
     }
 
     const CHUNK: u64 = 8192;
-    let mut newlines_found = 0usize;
+    // If the file does not end with '\n', the content after the last newline
+    // is already one line, so start the count at 1.
+    let mut newlines_found = {
+        file.seek(SeekFrom::End(-1)).map_err(|e| e.to_string())?;
+        let mut last = [0u8; 1];
+        file.read_exact(&mut last).map_err(|e| e.to_string())?;
+        if last[0] == b'\n' { 0usize } else { 1usize }
+    };
     let mut tail_start = 0u64; // byte offset where the tail begins
     let mut offset = file_len;
 
@@ -732,4 +743,93 @@ pub trait Output: Send {
 
     /// Flush any buffered output.
     fn flush(&mut self) -> std::result::Result<(), DysonError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn make_log_dir(content: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("dyson.log.2026-04-03");
+        let mut f = std::fs::File::create(log_path).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        dir
+    }
+
+    #[test]
+    fn tail_basic() {
+        let dir = make_log_dir("line1\nline2\nline3\nline4\nline5\n");
+        let result = read_log_tail_from_dir(dir.path(), 3).unwrap();
+        assert_eq!(result, "line3\nline4\nline5");
+    }
+
+    #[test]
+    fn tail_more_than_available() {
+        let dir = make_log_dir("line1\nline2\n");
+        let result = read_log_tail_from_dir(dir.path(), 10).unwrap();
+        assert_eq!(result, "line1\nline2");
+    }
+
+    #[test]
+    fn tail_exact_count() {
+        let dir = make_log_dir("line1\nline2\nline3\n");
+        let result = read_log_tail_from_dir(dir.path(), 3).unwrap();
+        assert_eq!(result, "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn tail_single_line() {
+        let dir = make_log_dir("only\n");
+        let result = read_log_tail_from_dir(dir.path(), 1).unwrap();
+        assert_eq!(result, "only");
+    }
+
+    #[test]
+    fn tail_no_trailing_newline() {
+        let dir = make_log_dir("line1\nline2\nline3");
+        let result = read_log_tail_from_dir(dir.path(), 2).unwrap();
+        assert_eq!(result, "line2\nline3");
+    }
+
+    #[test]
+    fn tail_empty_file() {
+        let dir = make_log_dir("");
+        let result = read_log_tail_from_dir(dir.path(), 5).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn tail_picks_most_recent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Older file
+        std::fs::write(dir.path().join("dyson.log.2026-04-01"), "old\n").unwrap();
+        // Newer file
+        std::fs::write(dir.path().join("dyson.log.2026-04-03"), "new\n").unwrap();
+        let result = read_log_tail_from_dir(dir.path(), 1).unwrap();
+        assert_eq!(result, "new");
+    }
+
+    #[test]
+    fn tail_no_log_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = read_log_tail_from_dir(dir.path(), 5);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn tail_large_file_spanning_chunks() {
+        // Create a file larger than the 8192-byte chunk size.
+        let mut content = String::new();
+        for i in 0..500 {
+            content.push_str(&format!("log line number {i:04}\n"));
+        }
+        let dir = make_log_dir(&content);
+        let result = read_log_tail_from_dir(dir.path(), 5).unwrap();
+        let lines: Vec<&str> = result.split('\n').collect();
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0], "log line number 0495");
+        assert_eq!(lines[4], "log line number 0499");
+    }
 }
