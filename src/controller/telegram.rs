@@ -593,6 +593,16 @@ impl super::Controller for TelegramController {
                                     .await;
                                 continue;
                             }
+                            super::CommandResult::Logs(lines) => {
+                                let _ = bot.send_message(chat_id, lines).await;
+                                continue;
+                            }
+                            super::CommandResult::LogsError(e) => {
+                                let _ = bot
+                                    .send_message(chat_id, format!("Logs error: {e}"))
+                                    .await;
+                                continue;
+                            }
                         }
                     }
                 }

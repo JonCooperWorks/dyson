@@ -144,13 +144,39 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> dyson::error::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .init();
+    // Set up log file at ~/.dyson/dyson.log (best-effort; fall back to stderr-only).
+    let log_dir = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".dyson"));
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    if let Some(ref dir) = log_dir {
+        let _ = std::fs::create_dir_all(dir);
+        let file_appender = tracing_appender::rolling::daily(dir, "dyson.log");
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(false)
+                    .with_writer(std::io::stderr),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(false)
+                    .with_ansi(false)
+                    .with_writer(file_appender),
+            )
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_target(false)
+            .init();
+    }
 
     let cli = Cli::parse();
 

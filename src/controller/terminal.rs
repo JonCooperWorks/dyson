@@ -173,6 +173,14 @@ impl super::Controller for TerminalController {
                     eprintln!("Usage: /model <provider> [model]  or  /model <model>");
                     continue;
                 }
+                CommandResult::Logs(lines) => {
+                    println!("{lines}");
+                    continue;
+                }
+                CommandResult::LogsError(e) => {
+                    eprintln!("[logs error: {e}]");
+                    continue;
+                }
             }
 
             match agent.run(input, &mut output).await {
