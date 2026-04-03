@@ -250,6 +250,8 @@ impl super::Controller for TelegramController {
         // Manual polling loop instead of teloxide::repl.
         // teloxide::repl swallows SIGINT and can't be Ctrl-C'd.
         let mut offset: i64 = 0;
+        let mut consecutive_failures: u64 = 0;
+        let mut backoff_secs: u64 = 1;
 
         loop {
             // Check for config/workspace changes each poll cycle.
@@ -310,10 +312,33 @@ impl super::Controller for TelegramController {
             let updates = tokio::select! {
                 result = bot.get_updates().offset(offset as i32).timeout(30).send() => {
                     match result {
-                        Ok(updates) => updates,
+                        Ok(updates) => {
+                            if consecutive_failures > 0 {
+                                tracing::info!(
+                                    consecutive_failures,
+                                    "getUpdates recovered after network errors",
+                                );
+                            }
+                            consecutive_failures = 0;
+                            backoff_secs = 1;
+                            updates
+                        }
                         Err(e) => {
-                            tracing::warn!(error = %e, "getUpdates failed — retrying");
-                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            consecutive_failures += 1;
+                            // Network blips are expected — log at debug, escalate
+                            // to warn only after sustained failures (30+).
+                            if consecutive_failures % 30 == 0 {
+                                tracing::warn!(
+                                    error = %e,
+                                    consecutive_failures,
+                                    "getUpdates has been failing for a while",
+                                );
+                            } else {
+                                tracing::debug!(error = %e, consecutive_failures, "getUpdates failed — retrying");
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                            // Exponential backoff capped at 60s.
+                            backoff_secs = (backoff_secs * 2).min(60);
                             continue;
                         }
                     }
