@@ -325,17 +325,16 @@ impl super::Controller for TelegramController {
                         }
                         Err(e) => {
                             consecutive_failures += 1;
-                            // Log the first failure, then only every 30th to avoid spam.
-                            if consecutive_failures == 1 {
-                                tracing::warn!(error = %e, "getUpdates failed — retrying with backoff");
-                            } else if consecutive_failures % 30 == 0 {
+                            // Network blips are expected — log at debug, escalate
+                            // to warn only after sustained failures (30+).
+                            if consecutive_failures % 30 == 0 {
                                 tracing::warn!(
                                     error = %e,
                                     consecutive_failures,
-                                    "getUpdates still failing",
+                                    "getUpdates has been failing for a while",
                                 );
                             } else {
-                                tracing::debug!(error = %e, consecutive_failures, "getUpdates failed");
+                                tracing::debug!(error = %e, consecutive_failures, "getUpdates failed — retrying");
                             }
                             tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                             // Exponential backoff capped at 60s.
