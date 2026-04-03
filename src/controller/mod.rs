@@ -560,16 +560,45 @@ pub async fn execute_command(
     CommandResult::NotHandled
 }
 
-/// Read the last `n` lines from `~/.dyson/dyson.log`.
+/// Read the last `n` lines from the most recent `~/.dyson/dyson.log.*` file.
+///
+/// `tracing_appender::rolling::daily` creates files like `dyson.log.2026-04-03`.
+/// We pick the most recent one by sorting the matching filenames.
 fn read_log_tail(n: usize) -> Result<String, String> {
     use std::io::{BufRead, BufReader};
 
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let path = PathBuf::from(home).join(".dyson").join("dyson.log");
+    let log_dir = PathBuf::from(home).join(".dyson");
+
+    let mut log_files: Vec<PathBuf> = std::fs::read_dir(&log_dir)
+        .map_err(|e| format!("cannot read {}: {e}", log_dir.display()))?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("dyson.log") {
+                Some(entry.path())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if log_files.is_empty() {
+        return Err("no log files found".to_string());
+    }
+
+    // Sort descending so the most recent date-suffixed file comes first.
+    log_files.sort();
+    log_files.reverse();
+
+    let path = &log_files[0];
     let file =
-        std::fs::File::open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+        std::fs::File::open(path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     let reader = BufReader::new(file);
-    let all_lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>().map_err(|e| e.to_string())?;
+    let all_lines: Vec<String> = reader
+        .lines()
+        .collect::<std::io::Result<_>>()
+        .map_err(|e| e.to_string())?;
     let start = all_lines.len().saturating_sub(n);
     Ok(all_lines[start..].join("\n"))
 }

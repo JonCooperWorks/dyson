@@ -154,7 +154,7 @@ async fn main() -> dyson::error::Result<()> {
 
     if let Some(ref dir) = log_dir {
         let _ = std::fs::create_dir_all(dir);
-        let file_appender = tracing_appender::rolling::never(dir, "dyson.log");
+        let file_appender = tracing_appender::rolling::daily(dir, "dyson.log");
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
         tracing_subscriber::registry()
