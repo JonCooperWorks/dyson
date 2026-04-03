@@ -433,6 +433,10 @@ pub enum CommandResult {
     ModelParseError(String),
     /// `/model` with no arguments — show usage.
     ModelUsage,
+    /// `/logs` — recent log lines.
+    Logs(String),
+    /// `/logs` failed — could not read log file.
+    LogsError(String),
     /// Input was not a shared command — controller should handle it.
     NotHandled,
 }
@@ -540,7 +544,34 @@ pub async fn execute_command(
         }
     }
 
+    if input == "/logs" || input.starts_with("/logs ") {
+        let n: usize = input
+            .strip_prefix("/logs")
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap_or(20);
+        return match read_log_tail(n) {
+            Ok(lines) => CommandResult::Logs(lines),
+            Err(e) => CommandResult::LogsError(e),
+        };
+    }
+
     CommandResult::NotHandled
+}
+
+/// Read the last `n` lines from `~/.dyson/dyson.log`.
+fn read_log_tail(n: usize) -> Result<String, String> {
+    use std::io::{BufRead, BufReader};
+
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let path = PathBuf::from(home).join(".dyson").join("dyson.log");
+    let file =
+        std::fs::File::open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    let reader = BufReader::new(file);
+    let all_lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>().map_err(|e| e.to_string())?;
+    let start = all_lines.len().saturating_sub(n);
+    Ok(all_lines[start..].join("\n"))
 }
 
 // ---------------------------------------------------------------------------
