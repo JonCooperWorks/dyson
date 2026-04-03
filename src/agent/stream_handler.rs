@@ -174,7 +174,14 @@ pub async fn process_stream(
             StreamEvent::ToolUseInputDelta(_) => {}
 
             StreamEvent::ToolUseComplete { id, name, input } => {
-                tracing::info!(tool = name, id = id, "tool call complete");
+                let input_str = input.to_string();
+                let input_preview = &input_str[..input_str.len().min(500)];
+                tracing::info!(
+                    tool = name,
+                    id = id,
+                    input = input_preview,
+                    "tool call complete (from stream)"
+                );
                 content_blocks.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
