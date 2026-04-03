@@ -272,9 +272,53 @@ impl super::Controller for TelegramController {
                     current_settings = s;
                     current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
                 }
-                // Clear all agents so they pick up new config.
-                agents.lock().await.clear();
-                tracing::info!("config/workspace reloaded — agents reset");
+                // Rebuild agents so they pick up new config, preserving each
+                // chat's provider/model selection and conversation history.
+                let mut agents_map = agents.lock().await;
+                let old_agents: Vec<(i64, String, String, Vec<crate::message::Message>)> =
+                    agents_map
+                        .drain()
+                        .map(|(id, ca)| {
+                            let msgs = ca.agent.messages().to_vec();
+                            (id, ca.provider_name, ca.model, msgs)
+                        })
+                        .collect();
+                for (chat_id, provider_name, model, messages) in old_agents {
+                    match super::build_agent_with_provider(
+                        &current_settings,
+                        &provider_name,
+                        Some(&model),
+                        controller_prompt.as_deref(),
+                        messages,
+                    )
+                    .await
+                    {
+                        Ok(new_agent) => {
+                            agents_map.insert(
+                                chat_id,
+                                ChatAgent {
+                                    agent: new_agent,
+                                    provider_name,
+                                    model,
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            // Provider/model may have been removed from the
+                            // new config — drop this agent; it will be
+                            // recreated with defaults on the next message.
+                            tracing::warn!(
+                                chat_id,
+                                provider = provider_name,
+                                model,
+                                error = %e,
+                                "could not rebuild agent after reload — dropping",
+                            );
+                        }
+                    }
+                }
+                drop(agents_map);
+                tracing::info!("config/workspace reloaded — agents rebuilt");
             }
             // Poll for updates with a timeout, racing against Ctrl-C.
             let updates = tokio::select! {
