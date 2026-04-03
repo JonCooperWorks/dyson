@@ -256,6 +256,19 @@ impl Output for TerminalOutput {
         Ok(())
     }
 
+    fn typing_indicator(&mut self, visible: bool) -> Result<(), DysonError> {
+        if visible {
+            write!(self.stdout, "Typing...")?;
+            self.stdout.flush()?;
+        } else {
+            // Clear the "Typing..." text by overwriting with spaces and
+            // returning the cursor to the start of the line.
+            write!(self.stdout, "\r          \r")?;
+            self.stdout.flush()?;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<(), DysonError> {
         self.stdout.flush()?;
         Ok(())
