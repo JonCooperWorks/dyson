@@ -431,6 +431,27 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
+                // /logs [n] — tail the log file, no agent needed.
+                if text == "/logs" || text.starts_with("/logs ") {
+                    let n: usize = text
+                        .strip_prefix("/logs")
+                        .unwrap()
+                        .trim()
+                        .parse()
+                        .unwrap_or(20);
+                    match super::read_log_tail(n) {
+                        Ok(lines) => {
+                            let _ = bot.send_message(chat_id, lines).await;
+                        }
+                        Err(e) => {
+                            let _ = bot
+                                .send_message(chat_id, format!("Logs error: {e}"))
+                                .await;
+                        }
+                    }
+                    continue;
+                }
+
                 // Access control.
                 if !allowed_ids.is_empty() && !allowed_ids.contains(&chat_id.0) {
                     tracing::warn!(chat_id = chat_id.0, "unauthorized chat — ignoring");
@@ -593,14 +614,9 @@ impl super::Controller for TelegramController {
                                     .await;
                                 continue;
                             }
-                            super::CommandResult::Logs(lines) => {
-                                let _ = bot.send_message(chat_id, lines).await;
-                                continue;
-                            }
-                            super::CommandResult::LogsError(e) => {
-                                let _ = bot
-                                    .send_message(chat_id, format!("Logs error: {e}"))
-                                    .await;
+                            super::CommandResult::Logs(_)
+                            | super::CommandResult::LogsError(_) => {
+                                // Handled before agent lock — should not reach here.
                                 continue;
                             }
                         }
