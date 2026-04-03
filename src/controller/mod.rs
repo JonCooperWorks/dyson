@@ -564,7 +564,7 @@ pub async fn execute_command(
 ///
 /// `tracing_appender::rolling::daily` creates files like `dyson.log.2026-04-03`.
 /// We pick the most recent one by sorting the matching filenames.
-fn read_log_tail(n: usize) -> Result<String, String> {
+pub fn read_log_tail(n: usize) -> Result<String, String> {
     use std::io::{BufRead, BufReader};
 
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
