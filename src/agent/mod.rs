@@ -999,18 +999,33 @@ impl Agent {
     /// 4. On Redirect: look up redirected tool → run it → `sandbox.after()`
     async fn execute_tool_call(&self, call: &ToolCall) -> Result<ToolOutput> {
         // -- Ask the sandbox --
-        let decision = self
+        //
+        // Sandbox and tool-lookup errors are converted to error ToolOutputs
+        // so they flow back to the LLM as tool_result messages instead of
+        // crashing the agent loop.  A sandbox failure is not a fatal error —
+        // the LLM should learn the tool was rejected and try something else.
+        let decision = match self
             .sandbox
             .check(&call.name, &call.input, &self.tool_context)
-            .await?;
+            .await
+        {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(tool = call.name, error = %e, "sandbox check failed");
+                return Ok(ToolOutput::error(format!("Sandbox error: {e}")));
+            }
+        };
 
         match decision {
             SandboxDecision::Allow { input } => {
                 // Look up the tool.
-                let tool = self
-                    .tools
-                    .get(&call.name)
-                    .ok_or_else(|| DysonError::tool(&call.name, "unknown tool"))?;
+                let Some(tool) = self.tools.get(&call.name) else {
+                    tracing::warn!(tool = call.name, "unknown tool");
+                    return Ok(ToolOutput::error(format!(
+                        "Unknown tool '{}'",
+                        call.name
+                    )));
+                };
 
                 // Execute the tool.
                 let mut tool_output = match tool.run(&input, &self.tool_context).await {
@@ -1019,9 +1034,13 @@ impl Agent {
                 };
 
                 // Post-process through the sandbox.
-                self.sandbox
+                if let Err(e) = self
+                    .sandbox
                     .after(&call.name, &input, &mut tool_output)
-                    .await?;
+                    .await
+                {
+                    tracing::warn!(tool = call.name, error = %e, "sandbox after-hook failed");
+                }
 
                 // Notify the owning skill.
                 self.notify_after_tool(&call.name, &tool_output).await;
@@ -1047,12 +1066,12 @@ impl Agent {
                 );
 
                 // Look up the redirected tool.
-                let tool = self.tools.get(&tool_name).ok_or_else(|| {
-                    DysonError::tool(
-                        &tool_name,
-                        format!("sandbox redirected to unknown tool '{tool_name}'"),
-                    )
-                })?;
+                let Some(tool) = self.tools.get(&tool_name) else {
+                    tracing::warn!(tool = tool_name, "sandbox redirected to unknown tool");
+                    return Ok(ToolOutput::error(format!(
+                        "Sandbox redirected to unknown tool '{tool_name}'"
+                    )));
+                };
 
                 // Execute the redirected tool.
                 let mut tool_output = match tool.run(&input, &self.tool_context).await {
@@ -1061,9 +1080,13 @@ impl Agent {
                 };
 
                 // Post-process.
-                self.sandbox
+                if let Err(e) = self
+                    .sandbox
                     .after(&tool_name, &input, &mut tool_output)
-                    .await?;
+                    .await
+                {
+                    tracing::warn!(tool = tool_name, error = %e, "sandbox after-hook failed");
+                }
 
                 // Notify the owning skill (using the redirected tool name).
                 self.notify_after_tool(&tool_name, &tool_output).await;
