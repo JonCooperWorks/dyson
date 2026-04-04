@@ -324,6 +324,7 @@ impl LlmClient for ClaudeCodeClient {
         &self,
         messages: &[Message],
         system: &str,
+        system_suffix: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
@@ -378,7 +379,14 @@ impl LlmClient for ClaudeCodeClient {
         }
 
         // -- Build the command --
-        let args = self.build_args(&config.model, system, mcp_config_json.as_deref());
+        // Concatenate stable system prompt and ephemeral suffix (Claude Code
+        // CLI takes a single --append-system-prompt string, no caching split).
+        let full_system = if system_suffix.is_empty() {
+            system.to_string()
+        } else {
+            format!("{system}\n\n{system_suffix}")
+        };
+        let args = self.build_args(&config.model, &full_system, mcp_config_json.as_deref());
 
         let mut cmd = tokio::process::Command::new(&self.claude_path);
         for arg in &args {

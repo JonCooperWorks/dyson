@@ -227,6 +227,7 @@ impl LlmClient for AnthropicClient {
         &self,
         messages: &[Message],
         system: &str,
+        system_suffix: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
@@ -238,10 +239,14 @@ impl LlmClient for AnthropicClient {
         //      system prompt (identity files, tool descriptions, etc.) is
         //      cached across turns within a session.
         //
-        //   2. Last tool definition — tools are stable within a session, so
+        //   2. System suffix block — ephemeral per-turn context (timestamps,
+        //      skill fragments) that changes every turn.  NOT cached, so it
+        //      doesn't bust the KV cache for the stable prefix above.
+        //
+        //   3. Last tool definition — tools are stable within a session, so
         //      caching the full tool array avoids re-processing on every turn.
         //
-        //   3. Penultimate user message — the conversation history grows
+        //   4. Penultimate user message — the conversation history grows
         //      monotonically.  Caching up to a recent message means only the
         //      latest turn needs processing.  We pick the second-to-last
         //      user-role message so the cache covers the stable prefix.
@@ -249,13 +254,24 @@ impl LlmClient for AnthropicClient {
         // The API requires `"system"` as an array of content blocks (not a
         // plain string) when using `cache_control`.
 
-        let system_blocks = serde_json::json!([
-            {
+        let mut system_blocks_vec = vec![
+            serde_json::json!({
                 "type": "text",
                 "text": system,
                 "cache_control": { "type": "ephemeral" }
-            }
-        ]);
+            }),
+        ];
+
+        // Append the ephemeral suffix as a separate block (no cache_control)
+        // so the stable prefix remains cacheable across turns.
+        if !system_suffix.is_empty() {
+            system_blocks_vec.push(serde_json::json!({
+                "type": "text",
+                "text": system_suffix,
+            }));
+        }
+
+        let system_blocks = serde_json::Value::Array(system_blocks_vec);
 
         let mut messages_json: Vec<serde_json::Value> =
             messages.iter().map(message_to_anthropic).collect();

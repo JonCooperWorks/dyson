@@ -118,6 +118,7 @@ impl LlmClient for OpenAiClient {
         &self,
         messages: &[Message],
         system: &str,
+        system_suffix: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
@@ -129,10 +130,16 @@ impl LlmClient for OpenAiClient {
         // putting them in user messages).
         let mut messages_json: Vec<serde_json::Value> = Vec::new();
 
-        // System message first.
+        // System message first.  Concatenate stable prefix and ephemeral suffix
+        // (OpenAI doesn't support prompt caching breakpoints, so one block is fine).
+        let full_system = if system_suffix.is_empty() {
+            system.to_string()
+        } else {
+            format!("{system}\n\n{system_suffix}")
+        };
         messages_json.push(serde_json::json!({
             "role": "system",
-            "content": system,
+            "content": full_system,
         }));
 
         // Convert our internal messages to OpenAI format.

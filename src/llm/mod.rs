@@ -224,6 +224,12 @@ pub trait LlmClient: Send + Sync {
     /// - `messages`: The conversation history (user messages, assistant
     ///   responses, tool results).
     /// - `system`: The system prompt (passed separately, not as a message).
+    ///   This is the **stable** prefix that doesn't change between turns
+    ///   within a session — ideal for KV cache / prompt caching.
+    /// - `system_suffix`: Ephemeral context appended after the stable system
+    ///   prompt (e.g. current timestamp, per-turn skill fragments).  Changes
+    ///   every turn, so providers should NOT cache this part.  Pass `""` when
+    ///   there is nothing to append.
     /// - `tools`: Available tool definitions (the LLM decides which to use).
     /// - `config`: Model, max_tokens, temperature.
     ///
@@ -235,6 +241,7 @@ pub trait LlmClient: Send + Sync {
         &self,
         messages: &[Message],
         system: &str,
+        system_suffix: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<StreamResponse>;

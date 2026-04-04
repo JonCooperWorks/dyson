@@ -831,6 +831,7 @@ mod tests {
             &self,
             _messages: &[crate::message::Message],
             _system: &str,
+            _system_suffix: &str,
             _tools: &[crate::llm::ToolDefinition],
             _config: &crate::llm::CompletionConfig,
         ) -> Result<crate::llm::StreamResponse> {

@@ -336,7 +336,7 @@ pub(super) async fn synthesize_to_workspace(
     let empty_tools: Vec<ToolDefinition> = Vec::new();
 
     let response = client
-        .stream(&messages, system, &empty_tools, config)
+        .stream(&messages, system, "", &empty_tools, config)
         .await?;
 
     let mut silent = SilentOutput;
@@ -423,7 +423,7 @@ async fn run_maintain_memory(
     let mut actions_taken = 0usize;
 
     for _iteration in 0..5u8 {
-        let response = match client.stream(&messages, &memory_system, &memory_tools, config).await {
+        let response = match client.stream(&messages, &memory_system, "", &memory_tools, config).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "background memory maintenance LLM call failed");
@@ -538,7 +538,7 @@ async fn run_self_improve(
         tracing::info!(iteration, "background self-improvement LLM call");
 
         let response = match client
-            .stream(&messages, &reflection_system, &reflection_tools, config)
+            .stream(&messages, &reflection_system, "", &reflection_tools, config)
             .await
         {
             Ok(r) => r,
