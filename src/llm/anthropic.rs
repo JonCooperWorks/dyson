@@ -145,7 +145,10 @@ fn message_to_anthropic(msg: &Message) -> serde_json::Value {
 /// Anthropic API version header.  Pinned to a specific version to avoid
 /// unexpected behaviour if the API evolves.  Bump this when adopting new
 /// API features.
-const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+///
+/// 2024-11-05 is required for prompt caching (GA) — allows `cache_control`
+/// on system prompt blocks, tool definitions, and message content blocks.
+const ANTHROPIC_API_VERSION: &str = "2024-11-05";
 
 // ---------------------------------------------------------------------------
 // AnthropicClient
@@ -228,10 +231,48 @@ impl LlmClient for AnthropicClient {
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
         // -- Build the request body --
-        let messages_json: Vec<serde_json::Value> =
+        //
+        // Prompt caching strategy (up to 4 breakpoints allowed):
+        //
+        //   1. System prompt block — marked with cache_control so the large
+        //      system prompt (identity files, tool descriptions, etc.) is
+        //      cached across turns within a session.
+        //
+        //   2. Last tool definition — tools are stable within a session, so
+        //      caching the full tool array avoids re-processing on every turn.
+        //
+        //   3. Penultimate user message — the conversation history grows
+        //      monotonically.  Caching up to a recent message means only the
+        //      latest turn needs processing.  We pick the second-to-last
+        //      user-role message so the cache covers the stable prefix.
+        //
+        // The API requires `"system"` as an array of content blocks (not a
+        // plain string) when using `cache_control`.
+
+        let system_blocks = serde_json::json!([
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": { "type": "ephemeral" }
+            }
+        ]);
+
+        let mut messages_json: Vec<serde_json::Value> =
             messages.iter().map(message_to_anthropic).collect();
 
-        let tools_json: Vec<serde_json::Value> = tools
+        // Add cache breakpoint on the second-to-last message's last content
+        // block.  This caches the stable conversation prefix so only the
+        // newest turn needs re-processing.
+        if messages_json.len() >= 2 {
+            let cache_idx = messages_json.len() - 2;
+            if let Some(content) = messages_json[cache_idx]["content"].as_array_mut() {
+                if let Some(last_block) = content.last_mut() {
+                    last_block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                }
+            }
+        }
+
+        let mut tools_json: Vec<serde_json::Value> = tools
             .iter()
             .map(|t| {
                 serde_json::json!({
@@ -242,10 +283,15 @@ impl LlmClient for AnthropicClient {
             })
             .collect();
 
+        // Mark the last tool with cache_control so the entire tool set is cached.
+        if let Some(last_tool) = tools_json.last_mut() {
+            last_tool["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+        }
+
         let mut body = serde_json::json!({
             "model": config.model,
             "max_tokens": config.max_tokens,
-            "system": system,
+            "system": system_blocks,
             "messages": messages_json,
             "stream": true,
         });
