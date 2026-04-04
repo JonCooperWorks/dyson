@@ -54,109 +54,39 @@ impl super::Agent {
         });
     }
 
-    /// Run memory maintenance as a side-channel LLM call.
+    /// Spawn memory maintenance as a background task.
     ///
-    /// Makes a separate LLM call with workspace tools (view, update, search,
-    /// memory_search) and a focused system prompt.  The LLM reviews the
-    /// conversation and decides what to persist to MEMORY.md, USER.md, or
-    /// memory/notes/.
-    ///
-    /// This runs in a separate message context — nothing from this call
-    /// enters the main conversation history.
-    pub(super) async fn maintain_memory(&mut self, output: &mut dyn Output) -> Result<()> {
-        tracing::info!(turn_count = self.turn_count, "running memory maintenance");
-
-        tracing::info!("\n\n[Memory maintenance: reviewing conversation...]\n");
-
-        // Build the system prompt with current usage stats.
-        let memory_system = Self::build_memory_system_prompt(&self.tool_context).await;
-
-        // Expose only workspace tools for memory operations.
-        let memory_tool_names = [
-            "workspace_view",
-            "workspace_update",
-            "workspace_search",
-            "memory_search",
-        ];
-        let memory_tools: Vec<ToolDefinition> = self
-            .tool_definitions
-            .iter()
-            .filter(|t| memory_tool_names.contains(&t.name.as_str()))
-            .cloned()
-            .collect();
-
-        if memory_tools.is_empty() {
-            return Ok(());
+    /// Like [`spawn_save_learnings`], this fires off a `tokio::spawn` so the
+    /// main agent loop is never blocked.  Uses its own LLM client and
+    /// `SilentOutput`.
+    pub(super) fn spawn_maintain_memory(&self) {
+        if self.tool_context.workspace.is_none() || self.messages.is_empty() {
+            return;
         }
 
-        // Build a condensed view of the conversation for the memory call.
+        let settings = self.agent_settings.clone();
+        let config = self.config.clone();
+        let tool_context = ToolContext {
+            working_dir: self.tool_context.working_dir.clone(),
+            env: self.tool_context.env.clone(),
+            cancellation: self.tool_context.cancellation.clone(),
+            workspace: self.tool_context.workspace.as_ref().map(Arc::clone),
+            depth: self.tool_context.depth,
+        };
         let summary = Self::summarize_for_reflection(&self.messages);
-        let mut messages = vec![Message::user(&summary)];
-        let mut actions_taken = 0usize;
+        let turn_count = self.turn_count;
 
-        for _iteration in 0..5u8 {
-            let response = match self
-                .client
-                .access()?
-                .stream(&messages, &memory_system, &memory_tools, &self.config)
-                .await
+        tokio::spawn(async move {
+            tracing::info!(turn_count, "background: memory maintenance starting");
+
+            if let Err(e) =
+                run_maintain_memory(&settings, &config, &tool_context, &summary).await
             {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "memory maintenance LLM call failed");
-                    tracing::info!("[Memory maintenance: LLM call failed, skipping]\n");
-                    return Ok(());
-                }
-            };
-
-            let mut silent_output = SilentOutput;
-            let (assistant_msg, tool_calls, _tokens) =
-                stream_handler::process_stream(response.stream, &mut silent_output).await?;
-
-            messages.push(assistant_msg);
-
-            if tool_calls.is_empty() {
-                break;
+                tracing::warn!(error = %e, "background memory maintenance failed");
             }
 
-            // Execute through the normal tool dispatch (these tools ARE in
-            // self.tools, they're just not exposed to the main conversation
-            // for this purpose).
-            for call in &tool_calls {
-                let result = self.execute_tool_call_timed(call).await;
-                let tool_result_msg = match result {
-                    Ok(ref tool_output) => {
-                        actions_taken += 1;
-                        let _ = output.tool_use_start(&call.name, &call.id);
-                        let _ = output.tool_result(tool_output);
-                        let _ = output.tool_use_complete();
-                        Message::tool_result(&call.id, &tool_output.content, tool_output.is_error)
-                    }
-                    Err(ref e) => {
-                        tracing::warn!(
-                            tool = call.name.as_str(),
-                            error = %e,
-                            "memory maintenance tool call failed"
-                        );
-                        Message::tool_result(&call.id, &e.to_string(), true)
-                    }
-                };
-                messages.push(tool_result_msg);
-            }
-        }
-
-        if actions_taken == 0 {
-            tracing::info!("[Memory maintenance: no updates needed]\n");
-        } else {
-            tracing::info!(
-                "{}",
-                format!("[Memory maintenance: {actions_taken} update(s)]\n")
-            );
-        }
-        let _ = output.flush();
-
-        tracing::info!(actions_taken = actions_taken, "memory maintenance complete");
-        Ok(())
+            tracing::info!(turn_count, "background: memory maintenance complete");
+        });
     }
 
     /// Build the system prompt for the memory maintenance call.
@@ -634,6 +564,121 @@ pub(super) async fn synthesize_to_workspace(
     tracing::info!(
         new_len = new_memory.len(),
         "MEMORY.md updated by background learning synthesis"
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Background memory maintenance
+// ---------------------------------------------------------------------------
+
+/// Run memory maintenance entirely in a background task.
+///
+/// This is the workhorse behind `spawn_maintain_memory`.  It creates its own
+/// LLM client, builds the memory tools from scratch (they're stateless unit
+/// structs), and runs the same tool-loop that `maintain_memory` uses — but
+/// without touching the main agent or its output.
+async fn run_maintain_memory(
+    settings: &crate::config::AgentSettings,
+    config: &CompletionConfig,
+    tool_context: &ToolContext,
+    summary: &str,
+) -> Result<()> {
+    // Build system prompt (reads workspace stats).
+    let memory_system = super::Agent::build_memory_system_prompt(tool_context).await;
+
+    // Create the four memory tools as standalone instances.
+    let memory_tool_instances: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(crate::tool::workspace_view::WorkspaceViewTool),
+        Arc::new(crate::tool::workspace_update::WorkspaceUpdateTool),
+        Arc::new(crate::tool::workspace_search::WorkspaceSearchTool),
+        Arc::new(crate::tool::memory_search::MemorySearchTool),
+    ];
+
+    let memory_tools: Vec<ToolDefinition> = memory_tool_instances
+        .iter()
+        .map(|t| ToolDefinition {
+            name: t.name().to_string(),
+            description: t.description().to_string(),
+            input_schema: t.input_schema(),
+            agent_only: false,
+        })
+        .collect();
+
+    let tool_map: HashMap<String, Arc<dyn Tool>> = memory_tool_instances
+        .into_iter()
+        .map(|t| (t.name().to_string(), t))
+        .collect();
+
+    // Fresh LLM client — doesn't share rate-limiting state with the main agent.
+    let client = crate::llm::create_client(settings, None, false);
+
+    let mut messages = vec![Message::user(summary)];
+    let mut actions_taken = 0usize;
+
+    for _iteration in 0..5u8 {
+        let response = match client.stream(&messages, &memory_system, &memory_tools, config).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "background memory maintenance LLM call failed");
+                return Ok(());
+            }
+        };
+
+        let mut silent = SilentOutput;
+        let (assistant_msg, tool_calls, _tokens) =
+            stream_handler::process_stream(response.stream, &mut silent).await?;
+
+        messages.push(assistant_msg);
+
+        if tool_calls.is_empty() {
+            break;
+        }
+
+        for call in &tool_calls {
+            let tool = match tool_map.get(&call.name) {
+                Some(t) => Arc::clone(t),
+                None => {
+                    tracing::warn!(
+                        tool = call.name.as_str(),
+                        "background memory maintenance: unknown tool"
+                    );
+                    messages.push(Message::tool_result(
+                        &call.id,
+                        &format!("unknown tool '{}'", call.name),
+                        true,
+                    ));
+                    continue;
+                }
+            };
+
+            let result = tool.run(&call.input, tool_context).await;
+            let tool_result_msg = match result {
+                Ok(ref output) => {
+                    actions_taken += 1;
+                    tracing::info!(
+                        tool = call.name.as_str(),
+                        "background memory maintenance: tool ok"
+                    );
+                    Message::tool_result(&call.id, &output.content, output.is_error)
+                }
+                Err(ref e) => {
+                    tracing::warn!(
+                        tool = call.name.as_str(),
+                        error = %e,
+                        "background memory maintenance: tool failed"
+                    );
+                    Message::tool_result(&call.id, &e.to_string(), true)
+                }
+            };
+            messages.push(tool_result_msg);
+        }
+    }
+
+    tracing::info!(
+        actions_taken,
+        "background memory maintenance complete"
     );
 
     Ok(())

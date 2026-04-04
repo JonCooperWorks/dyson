@@ -490,12 +490,8 @@ impl Agent {
         if self.nudge_interval > 0
             && self.turn_count.is_multiple_of(self.nudge_interval)
             && self.tool_context.workspace.is_some()
-            && let Err(e) = self.maintain_memory(output).await
         {
-            tracing::warn!(
-                error = %e,
-                "memory maintenance failed — continuing normally"
-            );
+            self.spawn_maintain_memory();
         }
 
         let mut final_text = String::new();
