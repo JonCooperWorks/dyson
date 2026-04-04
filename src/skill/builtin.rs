@@ -148,6 +148,29 @@ impl Skill for BuiltinSkill {
     fn system_prompt(&self) -> Option<&str> {
         Some(&self.system_prompt)
     }
+
+    /// Inject ephemeral context before each LLM turn.
+    ///
+    /// Currently injects:
+    /// - Current date and time in UTC (models have no clock otherwise)
+    ///
+    /// This runs on every turn, so keep it lightweight — no I/O, no blocking.
+    async fn before_turn(&self) -> crate::Result<Option<String>> {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let (y, m, d) = crate::util::unix_to_ymd(secs);
+        let day_secs = secs % 86400;
+        let hour = day_secs / 3600;
+        let minute = (day_secs % 3600) / 60;
+
+        let fragment = format!(
+            "[Current time: {y:04}-{m:02}-{d:02} {hour:02}:{minute:02} UTC]",
+        );
+        Ok(Some(fragment))
+    }
 }
 
 // ===========================================================================
@@ -189,5 +212,17 @@ mod tests {
     fn skill_name() {
         let skill = BuiltinSkill::new(None);
         assert_eq!(skill.name(), "builtin");
+    }
+
+    #[tokio::test]
+    async fn before_turn_injects_datetime() {
+        let skill = BuiltinSkill::new(None);
+        let fragment = skill.before_turn().await.unwrap();
+        assert!(fragment.is_some(), "before_turn should return Some");
+        let text = fragment.unwrap();
+        assert!(text.starts_with("[Current time: "), "got: {text}");
+        assert!(text.ends_with(" UTC]"), "got: {text}");
+        // Should contain a date-like pattern: YYYY-MM-DD HH:MM
+        assert!(text.len() > 25, "too short: {text}");
     }
 }
