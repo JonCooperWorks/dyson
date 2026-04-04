@@ -520,10 +520,16 @@ impl Agent {
             }
         }
 
-        // Build the full turn system prompt.  The common case (no skill
-        // fragments) just clones the Arc — an atomic refcount bump, no
-        // heap allocation.  Only when skills inject per-turn fragments do
-        // we allocate a new String.
+        // The system prompt is split into two parts for KV cache efficiency:
+        //
+        // 1. `self.system_prompt` — stable prefix (identity, tools, skills).
+        //    Cached by providers that support prompt caching (Anthropic).
+        //
+        // 2. `skill_fragments` — ephemeral per-turn context (timestamps,
+        //    refreshed tokens).  Sent as a separate block so it doesn't
+        //    invalidate the cached prefix.
+        //
+        // For context-size estimation we still need the combined length.
         let turn_system_prompt: Arc<str> = if skill_fragments.is_empty() {
             Arc::clone(&self.system_prompt)
         } else {
@@ -631,7 +637,8 @@ impl Agent {
                         .access()?
                         .stream(
                             &self.messages,
-                            &turn_system_prompt,
+                            &self.system_prompt,
+                            &skill_fragments,
                             tools_for_llm,
                             &self.config,
                         )
@@ -836,7 +843,8 @@ impl Agent {
                 .access()?
                 .stream(
                     &self.messages,
-                    &turn_system_prompt,
+                    &self.system_prompt,
+                    &skill_fragments,
                     empty_tools,
                     &self.config,
                 )
@@ -1143,6 +1151,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _system: &str,
+            _system_suffix: &str,
             _tools: &[ToolDefinition],
             _config: &CompletionConfig,
         ) -> Result<crate::llm::StreamResponse> {

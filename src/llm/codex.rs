@@ -207,6 +207,7 @@ impl LlmClient for CodexClient {
         &self,
         messages: &[Message],
         system: &str,
+        system_suffix: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
@@ -237,7 +238,12 @@ impl LlmClient for CodexClient {
         }
 
         // -- Build the command --
-        let args = self.build_args(&config.model, system, &prompt, mcp_url.as_deref());
+        let full_system = if system_suffix.is_empty() {
+            system.to_string()
+        } else {
+            format!("{system}\n\n{system_suffix}")
+        };
+        let args = self.build_args(&config.model, &full_system, &prompt, mcp_url.as_deref());
 
         let mut cmd = tokio::process::Command::new(&self.codex_path);
         for arg in &args {

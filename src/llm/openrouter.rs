@@ -71,6 +71,7 @@ impl LlmClient for OpenRouterClient {
         &self,
         messages: &[Message],
         system: &str,
+        system_suffix: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<StreamResponse> {
@@ -88,7 +89,7 @@ impl LlmClient for OpenRouterClient {
 
             let mut response = self
                 .inner
-                .stream(messages, &augmented_system, &[], config)
+                .stream(messages, &augmented_system, system_suffix, &[], config)
                 .await?;
 
             // Wrap the stream to extract text-based tool calls.
@@ -96,7 +97,7 @@ impl LlmClient for OpenRouterClient {
             return Ok(response);
         }
 
-        self.inner.stream(messages, system, tools, config).await
+        self.inner.stream(messages, system, system_suffix, tools, config).await
     }
 }
 
