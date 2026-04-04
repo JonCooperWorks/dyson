@@ -187,10 +187,6 @@ pub struct Agent {
     /// once in `new()` and reused in `estimate_context_tokens()`.
     cached_tool_tokens: usize,
 
-    /// Retained so background dreams can build their own LLM clients
-    /// without sharing the agent's.
-    agent_settings: crate::config::AgentSettings,
-
     /// Dream runner — fires background cognitive tasks (memory maintenance,
     /// learning synthesis, self-improvement) on trigger events without
     /// blocking the controller loop.  See `dream.rs` and `docs/dreaming.md`.
@@ -368,7 +364,6 @@ impl Agent {
             limiter: ToolLimiter::for_agent(),
             formatter: ResultFormatter::default(),
             cached_tool_tokens,
-            agent_settings: settings.clone(),
             tools_disabled: false,
             dream_runner,
         })
@@ -398,7 +393,7 @@ impl Agent {
             return;
         }
 
-        let settings = self.agent_settings.clone();
+        let client_handle = self.client.handle(rate_limiter::Priority::Background);
         let config = self.config.clone();
         let tool_context = ToolContext {
             working_dir: self.tool_context.working_dir.clone(),
@@ -411,7 +406,7 @@ impl Agent {
         let turn_count = self.turn_count;
 
         self.dream_runner.fire(&event, || DreamContext {
-            settings: settings.clone(),
+            client: client_handle.clone(),
             config: config.clone(),
             tool_context: ToolContext {
                 working_dir: tool_context.working_dir.clone(),

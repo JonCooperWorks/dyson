@@ -12,8 +12,9 @@ that happens alongside (or between) waking interactions.
 This is the single inviolable rule.  Everything else follows from it:
 
 1. Dreams are **spawned** via `tokio::spawn` — fire-and-forget.
-2. Dreams build their **own LLM client** so they don't contend with the
-   main agent's rate limiter.
+2. Dreams access the LLM through a **rate-limited handle** at `Background`
+   priority — they share the provider's rate limit with the main loop but
+   can never starve it.
 3. Dreams use `SilentOutput` — their stream events are consumed but never
    shown to the user.
 4. Dreams communicate only through the **shared workspace**
@@ -25,6 +26,7 @@ This is the single inviolable rule.  Everything else follows from it:
 ```
 ┌─────────────────────────────────────┐
 │         Agent (waking loop)         │
+│  client.access() at UserFacing      │
 │  run_inner() → LLM → tools → ...   │
 │         │                           │
 │    DreamRunner.fire(event)          │
@@ -34,10 +36,42 @@ This is the single inviolable rule.  Everything else follows from it:
           ▼
 ┌─────────────────────────────────────┐
 │         Dream (background)          │
-│  own LLM client, SilentOutput       │
+│  client.access() at Background      │
+│  same rate counter, lower priority  │
 │  reads/writes workspace via Arc     │
 │  never blocks the agent loop        │
 └─────────────────────────────────────┘
+```
+
+## Rate Limiting and Priority
+
+Dreams share the same rate limiter as the main agent loop.  The rate
+limiter uses a sliding-window algorithm with three priority levels:
+
+| Priority      | Effective capacity | Use case                               |
+|---------------|--------------------|----------------------------------------|
+| `UserFacing`  | 100% of max_calls  | Interactive agent loop (user waiting)  |
+| `Background`  | 66% of max_calls   | Dreams (memory, learning, improvement) |
+| `Scheduled`   | 33% of max_calls   | Future: heartbeat/cron, batch tasks    |
+
+Lower-priority callers voluntarily cap themselves so higher-priority
+callers always have headroom.  A dream that hits the rate limit simply
+stops early — it doesn't retry or block.
+
+**There is no way to reach the LLM without going through the rate limiter.**
+Dreams receive a `RateLimitedHandle<Box<dyn LlmClient>>` — a cloneable,
+priority-locked handle to the same `Arc<LlmClient>` that the agent uses.
+The handle's `access()` method checks the shared rate counter before
+returning a guard that dereferences to the client.
+
+```
+RateLimited<Box<dyn LlmClient>>     (agent owns this)
+    │
+    ├── access()                     → UserFacing priority (100%)
+    │
+    └��─ handle(Background)           → RateLimitedHandle (dreams get this)
+            │
+            └── access()             → Background priority (66%)
 ```
 
 ## Core Types
@@ -69,7 +103,7 @@ Events emitted by the agent loop:
 Everything a dream needs to run autonomously — built by the agent and
 moved into the spawned task:
 
-- `settings: AgentSettings` — to build a fresh LLM client
+- `client: RateLimitedHandle<Box<dyn LlmClient>>` — rate-limited LLM access
 - `config: CompletionConfig` — model, max_tokens, temperature
 - `tool_context: ToolContext` — workspace, working dir, cancellation
 - `conversation_summary: String` — condensed conversation (not full history)
@@ -161,10 +195,12 @@ impl Dream for MyDream {
     async fn run(&self, ctx: DreamContext) -> Result<DreamOutcome> {
         let start = std::time::Instant::now();
 
-        // Build your own LLM client — never share the agent's.
-        let client = crate::llm::create_client(&ctx.settings, None, false);
+        // Access the LLM through the rate-limited handle.
+        // This checks the shared rate counter at Background priority.
+        let client = ctx.client.access()?;
 
-        // Do your work...
+        // Make your LLM call...
+        // client.stream(&messages, system, "", &tools, &ctx.config).await?
 
         Ok(DreamOutcome {
             dream_name: self.name().to_string(),
@@ -189,13 +225,17 @@ The non-blocking guarantee is enforced at multiple levels:
 1. **`DreamRunner.fire()`** — spawns tasks and returns immediately.
 2. **Owned context** — `DreamContext` is fully cloned/owned.  No borrows
    from the agent survive into the spawned task.
-3. **Separate LLM client** — each dream builds its own via
-   `create_client()`, so there's no rate-limiter contention.
-4. **`Arc<RwLock<Workspace>>`** — the only shared state.  Workspace
+3. **Shared LLM client via `Arc`** — dreams access the same client through
+   a `RateLimitedHandle`, which holds `Arc<Box<dyn LlmClient>>`.  No
+   separate connections, no rate-limiter bypass.
+4. **Priority-aware rate limiting** — dreams operate at `Background`
+   priority (66% capacity).  If the window is full, they stop early
+   rather than competing with the user-facing loop.
+5. **`Arc<RwLock<Workspace>>`** — the only other shared state.  Workspace
    reads/writes are fast (file I/O, SQLite FTS5) and non-blocking in
    practice.  Even if a dream holds the write lock briefly, the agent
    loop only takes the read lock for workspace system prompt injection.
-5. **`SilentOutput`** — dreams never write to the user's output stream.
+6. **`SilentOutput`** — dreams never write to the user's output stream.
 
 If a dream panics, the `tokio::spawn` task unwinds independently — the
 agent loop is unaffected.
@@ -206,6 +246,7 @@ agent loop is unaffected.
 |-------------------------------|---------------------------------------------|
 | `src/agent/dream.rs`         | `Dream` trait, `DreamRunner`, trigger types  |
 | `src/agent/reflection.rs`    | Built-in dream implementations               |
+| `src/agent/rate_limiter.rs`  | `Priority`, `RateLimited`, `RateLimitedHandle` |
 | `src/agent/silent_output.rs` | `SilentOutput` — no-op output for dreams     |
 | `src/agent/mod.rs`           | `fire_dreams()` helper, `DreamRunner` field  |
 | `docs/dreaming.md`           | This document                                |

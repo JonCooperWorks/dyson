@@ -41,10 +41,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::config::AgentSettings;
 use crate::error::Result;
-use crate::llm::CompletionConfig;
+use crate::llm::{CompletionConfig, LlmClient};
 use crate::tool::ToolContext;
+
+use super::rate_limiter::RateLimitedHandle;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -86,8 +87,13 @@ pub enum DreamEvent {
 /// owned or `Arc`-wrapped so there's zero borrowing from the agent —
 /// the dream is fully independent once spawned.
 pub struct DreamContext {
-    /// Agent settings — used to build a fresh LLM client.
-    pub settings: AgentSettings,
+    /// Rate-limited handle to the LLM client, locked to a background priority.
+    ///
+    /// This is the *only* way to reach the LLM from a dream.  The handle
+    /// shares the same rate counter as the main agent loop, so dreams
+    /// cannot bypass the provider's rate limits.  Background priority
+    /// ensures interactive requests always get priority.
+    pub client: RateLimitedHandle<Box<dyn LlmClient>>,
 
     /// LLM configuration (model, max_tokens, temperature).
     pub config: CompletionConfig,

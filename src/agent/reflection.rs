@@ -38,6 +38,19 @@ use super::stream_handler;
 // Conversation summariser — shared by all dreams
 // ---------------------------------------------------------------------------
 
+/// Truncate a string to at most `max_bytes`, snapping to a char boundary.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    // Walk backwards from max_bytes to find a char boundary.
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Summarize a conversation for dream consumption.
 ///
 /// Instead of sending the full message history (which could be huge),
@@ -62,7 +75,7 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
                         crate::message::Role::Assistant => "Assistant",
                     };
                     let truncated = if text.len() > 500 {
-                        format!("{}...[truncated]", &text[..500])
+                        format!("{}...[truncated]", truncate_str(text, 500))
                     } else {
                         text.clone()
                     };
@@ -82,11 +95,11 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
                         tool_error_count += 1;
                         summary.push_str(&format!(
                             "[Tool error: {}]\n",
-                            &content[..content.len().min(200)]
+                            truncate_str(content, 200)
                         ));
                     } else {
                         let truncated = if content.len() > 200 {
-                            format!("{}...", &content[..200])
+                            format!("{}...", truncate_str(content, 200))
                         } else {
                             content.clone()
                         };
@@ -145,9 +158,13 @@ impl Dream for LearningSynthesisDream {
         };
 
         let start = std::time::Instant::now();
-        let client = crate::llm::create_client(&ctx.settings, None, false);
 
-        synthesize_to_workspace(&*client, &ctx.config, &ctx.conversation_summary, &workspace)
+        // Access the LLM client through the rate-limited handle.
+        // This checks the shared rate limiter at Background priority —
+        // if the window is too full, the dream yields to user-facing calls.
+        let client = ctx.client.access()?;
+
+        synthesize_to_workspace(&**client, &ctx.config, &ctx.conversation_summary, &workspace)
             .await?;
 
         let new_len = {
@@ -224,13 +241,20 @@ impl Dream for MemoryMaintenanceDream {
             .map(|t| (t.name().to_string(), t))
             .collect();
 
-        // Fresh LLM client — doesn't share rate-limiting state with the main agent.
-        let client = crate::llm::create_client(&ctx.settings, None, false);
-
         let mut messages = vec![Message::user(&ctx.conversation_summary)];
         let mut actions_taken = 0usize;
 
         for _iteration in 0..5u8 {
+            // Access the LLM client through the rate-limited handle.
+            // If the window is too full for Background priority, stop early.
+            let client = match ctx.client.access() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    tracing::info!(error = %e, "memory maintenance: rate limited, stopping early");
+                    break;
+                }
+            };
+
             let response = match client
                 .stream(&messages, &memory_system, "", &memory_tools, &ctx.config)
                 .await
@@ -492,14 +516,21 @@ impl Dream for SelfImprovementDream {
             })
             .collect();
 
-        let client = crate::llm::create_client(&ctx.settings, None, false);
-
         let mut messages = vec![Message::user(&ctx.conversation_summary)];
         let mut actions_taken = 0usize;
         let mut artifacts = Vec::new();
 
         for iteration in 0..3u8 {
             tracing::info!(iteration, "self-improvement LLM call");
+
+            // Access the LLM client through the rate-limited handle.
+            let client = match ctx.client.access() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    tracing::info!(error = %e, "self-improvement: rate limited, stopping early");
+                    break;
+                }
+            };
 
             let response = match client
                 .stream(
