@@ -8,24 +8,15 @@ A streaming AI agent loop in Rust, built to understand how these things actually
 
 AI agents run tools in a loop. They read your files, execute commands, make network requests. If you're going to trust one with access to your system, you should understand exactly what's happening inside that loop.
 
-As someone who works in application security, I found myself reviewing agent deployments without a clear mental model of what was actually going on under the hood. The best way to understand something is to build it from scratch — so that's what Dyson is. A from-scratch implementation of the core agent pattern: **LLM streams a response → detects tool calls → executes them → feeds results back → repeats**. Every component is a trait, every decision point is a hook, and every file is heavily annotated explaining *why* it works the way it does.
-
-The goal isn't to replace Claude Code or Cursor — it's to demystify how agent loops work, where the security boundaries are, and what controls are possible.
-
-## Inspired by
-
-- **[OpenClaw](https://github.com/openclaw/openclaw)** — Multi-channel AI assistant. Dyson's controller architecture and workspace format come from OpenClaw.
-- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — Self-improving agent from [Nous Research](https://nousresearch.com/). Dyson's memory system is modeled after Hermes.
-
-For a production agent, start with one of those. For understanding the loop and securing it, that's Dyson.
+Dyson is a from-scratch implementation of the core agent pattern: **LLM streams a response → detects tool calls → executes them → feeds results back → repeats**. Every component is a trait, every decision point is a hook, and every file is annotated explaining *why* it works the way it does. The goal isn't to replace Claude Code or Cursor — it's to make the loop legible and the security boundaries obvious.
 
 ## What you learn by reading this codebase
 
-- **How streaming works** — SSE parsing, partial JSON accumulation, token-by-token delivery
-- **How tool calling works** — the LLM emits structured `tool_use` blocks, the agent executes them, results go back as `tool_result` messages
-- **Where the security boundaries are** — every tool call passes through a `Sandbox` trait that can allow, deny, or redirect. This is where you'd enforce policies
-- **How MCP fits in** — MCP servers are just another skill implementation. The agent loop doesn't know they exist
-- **How providers differ** — Anthropic and OpenAI have different SSE formats, different message schemas, different tool calling conventions. The `LlmClient` trait abstracts all of it
+- **Streaming** — SSE parsing, partial JSON accumulation, token-by-token delivery
+- **Tool calling** — `tool_use` blocks, execution, `tool_result` messages back to the LLM
+- **Security boundaries** — every tool call passes through a `Sandbox` that can allow, deny, or redirect
+- **MCP** — MCP servers are just another skill implementation; the agent loop doesn't know they exist
+- **Provider differences** — Anthropic and OpenAI have different SSE formats, message schemas, and tool calling conventions
 
 ## The sandbox is the point
 
@@ -87,24 +78,18 @@ Adding a new provider is a 3-step process — see [Adding a Provider](docs/addin
 ## Quick start
 
 ```bash
-# With Anthropic API key
+# Anthropic (default provider)
 export ANTHROPIC_API_KEY="sk-ant-..."
 cargo run -- --dangerous-no-sandbox "what files are in this directory?"
 
-# Interactive mode
-cargo run -- --dangerous-no-sandbox
-
-# With Claude Code (no API key needed)
+# Claude Code (no API key needed)
 cargo run -- --dangerous-no-sandbox --provider claude-code "hello"
 
-# With a config file
-cargo run -- --dangerous-no-sandbox --config examples/claude-code-telegram.json
-
-# With a local model (Ollama, vLLM, rLLM, etc.)
+# Local model (Ollama, vLLM, rLLM, etc.)
 cargo run -- --dangerous-no-sandbox --provider openai --base-url http://localhost:9000 --model llama-3.2-3b-instruct "hello"
 ```
 
-The `--dangerous-no-sandbox` flag is required — it's an explicit acknowledgment that tool calls are unrestricted.
+`--dangerous-no-sandbox` is required — an explicit acknowledgment that tool calls are unrestricted. Run without arguments for interactive mode. Use `--config` for config files (see [`examples/`](examples/)).
 
 ## Configuration
 
@@ -142,28 +127,19 @@ src/
   error.rs             DysonError — unified error type
   message.rs           Message, Role, ContentBlock
   config/              Settings, JSON loader
-  tool/                Tool trait + bash, file ops (read/write/edit), search, memory, web search, skills, export
+  tool/                Tool trait + bash, file ops, search, memory, knowledge base, web search, skills, export
   skill/               Skill trait, BuiltinSkill, MCP skill, LocalSkill, SubagentSkill
   sandbox/             Sandbox trait, OsSandbox, DangerousNoSandbox
   secret/              SecretResolver trait, InsecureEnvironmentVariable
   llm/                 LlmClient trait + provider registry + Anthropic, OpenAI, OpenRouter, Claude Code, Codex
-  agent/
-    mod.rs             The streaming agent loop
-    stream_handler.rs  Stream event → Message + ToolCall conversion
-    compaction.rs      Five-phase context window summarization
-    dependency_analyzer.rs  Tool call batching (parallel vs sequential)
-    result_formatter.rs     Structured, LLM-optimized output formatting
-    token_budget.rs    Cumulative token usage tracking
-    tool_limiter.rs    Per-turn tool call rate limiting
-    rate_limiter.rs    Per-agent message rate limiting
-    reflection.rs      Agent state introspection
-    silent_output.rs   Null output sink for internal LLM calls
+  agent/               Streaming loop, compaction, dependency analysis, rate limiting, token tracking
   controller/          Controller trait + terminal, Telegram
+  workspace/           Workspace trait, memory store, knowledge base, migrations
 examples/              Example dyson.json configs
 docs/                  Component documentation
 ```
 
-Every file has extensive annotations in the style of [rLLM](https://github.com/joncooperworks/rllm) — learning overviews, architecture diagrams, design decision explanations, and inline commentary on non-obvious code.
+Every file has extensive annotations in the style of [rLLM](https://github.com/joncooperworks/rllm) — learning overviews, architecture diagrams, and inline commentary on non-obvious code.
 
 ## Docs
 
@@ -179,6 +155,7 @@ Every file has extensive annotations in the style of [rLLM](https://github.com/j
 | [Configuration](docs/configuration.md) | dyson.json format, provider selection |
 | [Adding a Provider](docs/adding-a-provider.md) | 3-step process to add a new LLM provider |
 | [Memory](docs/memory.md) | Tiered memory system, FTS5 search, journals |
+| [Knowledge Base](docs/knowledge-base.md) | Document storage, FTS5 search, kb/raw + kb/wiki, INDEX.md |
 | [Chat Persistence](docs/chat-persistence.md) | ChatHistory trait, per-chat agents |
 | [Tool Forwarding over MCP](docs/tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth |
 | [Subagents](docs/subagents.md) | Child agents with different models, tool inheritance, delegation |
@@ -189,4 +166,9 @@ Every file has extensive annotations in the style of [rLLM](https://github.com/j
 cargo test
 ```
 
-500+ tests covering SSE parsing, message serialization, config loading, bash execution, stream handling, sandbox decisions, secret resolution, provider registry, workspace persistence, web search, and the agent loop with mock LLM clients.
+500+ tests covering the full stack — SSE parsing, sandbox decisions, config loading, workspace persistence, and the agent loop with mock LLM clients.
+
+## Inspired by
+
+- **[OpenClaw](https://github.com/openclaw/openclaw)** — Multi-channel AI assistant. Dyson's controller architecture and workspace format come from OpenClaw.
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — Self-improving agent from [Nous Research](https://nousresearch.com/). Dyson's memory system is modeled after Hermes.
