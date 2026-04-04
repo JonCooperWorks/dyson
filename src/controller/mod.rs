@@ -446,6 +446,7 @@ pub enum CommandResult {
 /// Handles: `/clear`, `/compact`, `/models`, `/model`.
 /// Returns `NotHandled` for everything else, so controllers can check
 /// their own commands before or after calling this.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_command(
     input: &str,
     agent: &mut crate::agent::Agent,

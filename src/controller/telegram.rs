@@ -327,7 +327,7 @@ impl super::Controller for TelegramController {
                             consecutive_failures += 1;
                             // Network blips are expected — log at debug, escalate
                             // to warn only after sustained failures (30+).
-                            if consecutive_failures % 30 == 0 {
+                            if consecutive_failures.is_multiple_of(30) {
                                 tracing::warn!(
                                     error = %e,
                                     consecutive_failures,

@@ -84,7 +84,7 @@ impl Tool for ReadFileTool {
         let mut output = String::new();
         for (i, line) in iter.enumerate() {
             let line_num = start + i + 1;
-            let _ = write!(output, "{line_num:>6}\t{line}\n");
+            let _ = writeln!(output, "{line_num:>6}\t{line}");
         }
 
         // Truncate if too large.

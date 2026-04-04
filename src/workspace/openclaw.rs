@@ -532,10 +532,11 @@ fn read_dir_recursive(dir: &Path, prefix: &str, files: &mut HashMap<String, Stri
 
         if path.is_dir() {
             read_dir_recursive(&path, &format!("{prefix}/{name}"), files);
-        } else if path.is_file() && name.ends_with(".md") {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                files.insert(format!("{prefix}/{name}"), content);
-            }
+        } else if path.is_file()
+            && name.ends_with(".md")
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            files.insert(format!("{prefix}/{name}"), content);
         }
     }
 }

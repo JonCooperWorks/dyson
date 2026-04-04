@@ -207,9 +207,9 @@ fn check_bash(
             "bash command wrapped in OS sandbox (Linux bwrap, policy-based)"
         );
 
-        return Ok(SandboxDecision::Allow {
+        Ok(SandboxDecision::Allow {
             input: serde_json::json!({ "command": sandboxed }),
-        });
+        })
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]

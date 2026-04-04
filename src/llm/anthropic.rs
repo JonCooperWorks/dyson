@@ -63,7 +63,6 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use tokio_stream::StreamExt;
 
 use crate::auth::Auth;
 use crate::error::{DysonError, Result};
@@ -281,10 +280,10 @@ impl LlmClient for AnthropicClient {
         // newest turn needs re-processing.
         if messages_json.len() >= 2 {
             let cache_idx = messages_json.len() - 2;
-            if let Some(content) = messages_json[cache_idx]["content"].as_array_mut() {
-                if let Some(last_block) = content.last_mut() {
-                    last_block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
-                }
+            if let Some(content) = messages_json[cache_idx]["content"].as_array_mut()
+                && let Some(last_block) = content.last_mut()
+            {
+                last_block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
             }
         }
 
@@ -367,37 +366,10 @@ impl LlmClient for AnthropicClient {
         }
 
         // -- Transform the SSE byte stream into StreamEvents --
-        //
-        // `response.bytes_stream()` gives us a Stream<Result<Bytes>>.
-        // We wrap it in an async_stream that buffers bytes, splits on
-        // newlines, and parses SSE events into StreamEvents.
-        let byte_stream = response.bytes_stream();
-
-        let event_stream = async_stream::stream! {
-            let mut parser = SseParser::new();
-
-            tokio::pin!(byte_stream);
-
-            while let Some(chunk_result) = byte_stream.next().await {
-                match chunk_result {
-                    Ok(bytes) => {
-                        // Feed raw bytes into the SSE parser.
-                        // It handles line splitting, JSON parsing, and
-                        // tool_use accumulation internally.
-                        let events = parser.feed(&bytes);
-                        for event in events {
-                            yield event;
-                        }
-                    }
-                    Err(e) => {
-                        yield Err(DysonError::Http(e));
-                    }
-                }
-            }
-        };
+        let event_stream = crate::llm::sse_event_stream(response, SseParser::new());
 
         Ok(crate::llm::StreamResponse {
-            stream: Box::pin(event_stream),
+            stream: event_stream,
             tool_mode: crate::llm::ToolMode::Execute,
             input_tokens: None,
         })
@@ -447,12 +419,9 @@ impl SseParser {
             thinking_blocks: std::collections::HashSet::new(),
         }
     }
+}
 
-    /// Feed raw bytes into the parser.
-    ///
-    /// Returns zero or more `StreamEvent`s.  Bytes are buffered internally
-    /// until complete lines are available, so it's safe to call this with
-    /// arbitrary chunk sizes (even mid-character for UTF-8).
+impl crate::llm::SseStreamParser for SseParser {
     fn feed(&mut self, bytes: &[u8]) -> Vec<Result<StreamEvent>> {
         let mut events = Vec::new();
 
@@ -487,7 +456,9 @@ impl SseParser {
 
         events
     }
+}
 
+impl SseParser {
     /// Parse a single SSE JSON payload into a StreamEvent.
     ///
     /// ## Anthropic event types
@@ -665,6 +636,7 @@ impl SseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::SseStreamParser;
 
     /// Helper: feed SSE lines through the parser and collect events.
     fn parse_sse(lines: &str) -> Vec<Result<StreamEvent>> {
