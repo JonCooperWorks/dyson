@@ -395,26 +395,14 @@ impl Agent {
 
         let client_handle = self.client.handle(rate_limiter::Priority::Background);
         let config = self.config.clone();
-        let tool_context = ToolContext {
-            working_dir: self.tool_context.working_dir.clone(),
-            env: self.tool_context.env.clone(),
-            cancellation: self.tool_context.cancellation.clone(),
-            workspace: self.tool_context.workspace.as_ref().map(Arc::clone),
-            depth: self.tool_context.depth,
-        };
+        let tool_context = self.tool_context.clone();
         let summary = reflection::summarize_for_reflection(&self.messages);
         let turn_count = self.turn_count;
 
         self.dream_runner.fire(&event, || DreamContext {
             client: client_handle.clone(),
             config: config.clone(),
-            tool_context: ToolContext {
-                working_dir: tool_context.working_dir.clone(),
-                env: tool_context.env.clone(),
-                cancellation: tool_context.cancellation.clone(),
-                workspace: tool_context.workspace.as_ref().map(Arc::clone),
-                depth: tool_context.depth,
-            },
+            tool_context: tool_context.clone(),
             conversation_summary: summary.clone(),
             turn_count,
         });

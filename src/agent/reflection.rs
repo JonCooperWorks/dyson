@@ -35,6 +35,103 @@ use super::silent_output::SilentOutput;
 use super::stream_handler;
 
 // ---------------------------------------------------------------------------
+// Shared mini agent loop — used by MemoryMaintenance and SelfImprovement
+// ---------------------------------------------------------------------------
+
+/// Run a mini agent loop: LLM calls tools in a loop until it stops or hits
+/// `max_iterations`.  Returns `(actions_taken, per-tool artifacts)`.
+async fn run_mini_loop(
+    ctx: &DreamContext,
+    system_prompt: &str,
+    tools: Vec<Arc<dyn Tool>>,
+    initial_message: &str,
+    max_iterations: u8,
+    dream_label: &str,
+) -> Result<(usize, Vec<String>)> {
+    let tool_defs: Vec<ToolDefinition> = tools
+        .iter()
+        .map(|t| ToolDefinition {
+            name: t.name().to_string(),
+            description: t.description().to_string(),
+            input_schema: t.input_schema(),
+            agent_only: false,
+        })
+        .collect();
+
+    let tool_map: HashMap<String, Arc<dyn Tool>> = tools
+        .into_iter()
+        .map(|t| (t.name().to_string(), t))
+        .collect();
+
+    let mut messages = vec![Message::user(initial_message)];
+    let mut actions_taken = 0usize;
+    let mut artifacts = Vec::new();
+
+    for _iteration in 0..max_iterations {
+        let client = match ctx.client.access() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::info!(error = %e, "{dream_label}: rate limited, stopping early");
+                break;
+            }
+        };
+
+        let response = match client
+            .stream(&messages, system_prompt, "", &tool_defs, &ctx.config)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "{dream_label} LLM call failed");
+                break;
+            }
+        };
+
+        let mut silent = SilentOutput;
+        let (assistant_msg, tool_calls, _tokens) =
+            stream_handler::process_stream(response.stream, &mut silent).await?;
+
+        messages.push(assistant_msg);
+
+        if tool_calls.is_empty() {
+            break;
+        }
+
+        for call in &tool_calls {
+            let tool = match tool_map.get(&call.name) {
+                Some(t) => Arc::clone(t),
+                None => {
+                    tracing::warn!(tool = call.name.as_str(), "{dream_label}: unknown tool");
+                    messages.push(Message::tool_result(
+                        &call.id,
+                        &format!("unknown tool '{}'", call.name),
+                        true,
+                    ));
+                    continue;
+                }
+            };
+
+            let result = tool.run(&call.input, &ctx.tool_context).await;
+            let tool_result_msg = match result {
+                Ok(ref output) => {
+                    actions_taken += 1;
+                    tracing::info!(tool = call.name.as_str(), "{dream_label}: tool ok");
+                    Message::tool_result(&call.id, &output.content, output.is_error)
+                }
+                Err(ref e) => {
+                    tracing::warn!(tool = call.name.as_str(), error = %e, "{dream_label}: tool failed");
+                    Message::tool_result(&call.id, &e.to_string(), true)
+                }
+            };
+            artifacts.push(call.name.clone());
+            messages.push(tool_result_msg);
+        }
+    }
+
+    Ok((actions_taken, artifacts))
+}
+
+// ---------------------------------------------------------------------------
 // Conversation summariser — shared by all dreams
 // ---------------------------------------------------------------------------
 
@@ -43,7 +140,6 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }
-    // Walk backwards from max_bytes to find a char boundary.
     let mut end = max_bytes;
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
@@ -61,9 +157,8 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
          or export training data.  Here is what happened:\n\n",
     );
 
-    let mut tool_call_count = 0;
-    let mut tool_error_count = 0;
-    let mut tools_used_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut tool_call_count = 0usize;
+    let mut tool_error_count = 0usize;
     let mut tools_used: Vec<String> = Vec::new();
 
     for msg in messages {
@@ -74,16 +169,12 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
                         crate::message::Role::User => "User",
                         crate::message::Role::Assistant => "Assistant",
                     };
-                    let truncated = if text.len() > 500 {
-                        format!("{}...[truncated]", truncate_str(text, 500))
-                    } else {
-                        text.clone()
-                    };
+                    let truncated = truncate_str(text, 500);
                     summary.push_str(&format!("{role}: {truncated}\n\n"));
                 }
                 ContentBlock::ToolUse { name, .. } => {
                     tool_call_count += 1;
-                    if tools_used_set.insert(name.clone()) {
+                    if !tools_used.contains(name) {
                         tools_used.push(name.clone());
                     }
                     summary.push_str(&format!("[Tool call: {name}]\n"));
@@ -93,18 +184,12 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
                 } => {
                     if *is_error {
                         tool_error_count += 1;
-                        summary.push_str(&format!(
-                            "[Tool error: {}]\n",
-                            truncate_str(content, 200)
-                        ));
-                    } else {
-                        let truncated = if content.len() > 200 {
-                            format!("{}...", truncate_str(content, 200))
-                        } else {
-                            content.clone()
-                        };
-                        summary.push_str(&format!("[Tool result: {truncated}]\n"));
                     }
+                    summary.push_str(&format!(
+                        "[Tool {}: {}]\n",
+                        if *is_error { "error" } else { "result" },
+                        truncate_str(content, 200)
+                    ));
                 }
                 ContentBlock::Image { media_type, .. } => {
                     summary.push_str(&format!("[Image: {media_type}]\n"));
@@ -158,10 +243,6 @@ impl Dream for LearningSynthesisDream {
         };
 
         let start = std::time::Instant::now();
-
-        // Access the LLM client through the rate-limited handle.
-        // This checks the shared rate limiter at Background priority —
-        // if the window is too full, the dream yields to user-facing calls.
         let client = ctx.client.access()?;
 
         synthesize_to_workspace(&**client, &ctx.config, &ctx.conversation_summary, &workspace)
@@ -214,101 +295,24 @@ impl Dream for MemoryMaintenanceDream {
 
     async fn run(&self, ctx: DreamContext) -> Result<DreamOutcome> {
         let start = std::time::Instant::now();
-
-        // Build system prompt (reads workspace stats).
         let memory_system = build_memory_system_prompt(&ctx.tool_context).await;
 
-        // Create the four memory tools as standalone instances.
-        let memory_tool_instances: Vec<Arc<dyn Tool>> = vec![
+        let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(crate::tool::workspace_view::WorkspaceViewTool),
             Arc::new(crate::tool::workspace_update::WorkspaceUpdateTool),
             Arc::new(crate::tool::workspace_search::WorkspaceSearchTool),
             Arc::new(crate::tool::memory_search::MemorySearchTool),
         ];
 
-        let memory_tools: Vec<ToolDefinition> = memory_tool_instances
-            .iter()
-            .map(|t| ToolDefinition {
-                name: t.name().to_string(),
-                description: t.description().to_string(),
-                input_schema: t.input_schema(),
-                agent_only: false,
-            })
-            .collect();
-
-        let tool_map: HashMap<String, Arc<dyn Tool>> = memory_tool_instances
-            .into_iter()
-            .map(|t| (t.name().to_string(), t))
-            .collect();
-
-        let mut messages = vec![Message::user(&ctx.conversation_summary)];
-        let mut actions_taken = 0usize;
-
-        for _iteration in 0..5u8 {
-            // Access the LLM client through the rate-limited handle.
-            // If the window is too full for Background priority, stop early.
-            let client = match ctx.client.access() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    tracing::info!(error = %e, "memory maintenance: rate limited, stopping early");
-                    break;
-                }
-            };
-
-            let response = match client
-                .stream(&messages, &memory_system, "", &memory_tools, &ctx.config)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "memory maintenance LLM call failed");
-                    break;
-                }
-            };
-
-            let mut silent = SilentOutput;
-            let (assistant_msg, tool_calls, _tokens) =
-                stream_handler::process_stream(response.stream, &mut silent).await?;
-
-            messages.push(assistant_msg);
-
-            if tool_calls.is_empty() {
-                break;
-            }
-
-            for call in &tool_calls {
-                let tool = match tool_map.get(&call.name) {
-                    Some(t) => Arc::clone(t),
-                    None => {
-                        tracing::warn!(tool = call.name.as_str(), "memory maintenance: unknown tool");
-                        messages.push(Message::tool_result(
-                            &call.id,
-                            &format!("unknown tool '{}'", call.name),
-                            true,
-                        ));
-                        continue;
-                    }
-                };
-
-                let result = tool.run(&call.input, &ctx.tool_context).await;
-                let tool_result_msg = match result {
-                    Ok(ref output) => {
-                        actions_taken += 1;
-                        tracing::info!(tool = call.name.as_str(), "memory maintenance: tool ok");
-                        Message::tool_result(&call.id, &output.content, output.is_error)
-                    }
-                    Err(ref e) => {
-                        tracing::warn!(
-                            tool = call.name.as_str(),
-                            error = %e,
-                            "memory maintenance: tool failed"
-                        );
-                        Message::tool_result(&call.id, &e.to_string(), true)
-                    }
-                };
-                messages.push(tool_result_msg);
-            }
-        }
+        let (actions_taken, _) = run_mini_loop(
+            &ctx,
+            &memory_system,
+            tools,
+            &ctx.conversation_summary,
+            5,
+            "memory maintenance",
+        )
+        .await?;
 
         Ok(DreamOutcome {
             dream_name: self.name().to_string(),
@@ -378,14 +382,21 @@ pub(super) async fn synthesize_to_workspace(
         }
     }
 
-    if new_memory.trim().is_empty() {
+    let trimmed = new_memory.trim();
+    if trimmed.is_empty() {
         tracing::info!("learning synthesis produced empty output — skipping write");
+        return Ok(());
+    }
+
+    // Skip the write if content hasn't changed.
+    if current_memory.trim() == trimmed {
+        tracing::info!("learning synthesis produced no changes — skipping write");
         return Ok(());
     }
 
     {
         let mut ws = workspace.write().await;
-        ws.set("MEMORY.md", new_memory.trim());
+        ws.set("MEMORY.md", trimmed);
         ws.save()?;
     }
 
@@ -489,135 +500,27 @@ impl Dream for SelfImprovementDream {
         }
 
         let start = std::time::Instant::now();
-
         let reflection_system = build_reflection_system_prompt(&ctx.tool_context).await;
 
-        // Build the two reflection tools as standalone instances.
-        let skill_create_tool: Arc<dyn Tool> =
-            Arc::new(crate::tool::skill_create::SkillCreateTool);
-        let export_tool: Arc<dyn Tool> =
-            Arc::new(crate::tool::export_conversation::ExportConversationTool);
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(crate::tool::skill_create::SkillCreateTool),
+            Arc::new(crate::tool::export_conversation::ExportConversationTool),
+        ];
 
-        let tool_map: HashMap<String, Arc<dyn Tool>> = HashMap::from([
-            (
-                skill_create_tool.name().to_string(),
-                Arc::clone(&skill_create_tool),
-            ),
-            (export_tool.name().to_string(), Arc::clone(&export_tool)),
-        ]);
+        let (actions_taken, artifacts) = run_mini_loop(
+            &ctx,
+            &reflection_system,
+            tools,
+            &ctx.conversation_summary,
+            3,
+            "self-improvement",
+        )
+        .await?;
 
-        let reflection_tools: Vec<ToolDefinition> = [&skill_create_tool, &export_tool]
-            .iter()
-            .map(|t| ToolDefinition {
-                name: t.name().to_string(),
-                description: t.description().to_string(),
-                input_schema: t.input_schema(),
-                agent_only: false,
-            })
-            .collect();
-
-        let mut messages = vec![Message::user(&ctx.conversation_summary)];
-        let mut actions_taken = 0usize;
-        let mut artifacts = Vec::new();
-
-        for iteration in 0..3u8 {
-            tracing::info!(iteration, "self-improvement LLM call");
-
-            // Access the LLM client through the rate-limited handle.
-            let client = match ctx.client.access() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    tracing::info!(error = %e, "self-improvement: rate limited, stopping early");
-                    break;
-                }
-            };
-
-            let response = match client
-                .stream(
-                    &messages,
-                    &reflection_system,
-                    "",
-                    &reflection_tools,
-                    &ctx.config,
-                )
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "self-improvement LLM call failed");
-                    break;
-                }
-            };
-
-            let mut silent = SilentOutput;
-            let (assistant_msg, tool_calls, _tokens) =
-                stream_handler::process_stream(response.stream, &mut silent).await?;
-
-            for block in &assistant_msg.content {
-                if let ContentBlock::Text { text } = block
-                    && !text.trim().is_empty()
-                {
-                    tracing::info!(reasoning = text.as_str(), "self-improvement reasoning");
-                }
-            }
-
-            messages.push(assistant_msg);
-
-            if tool_calls.is_empty() {
-                tracing::info!("self-improvement: model decided no action needed");
-                break;
-            }
-
-            for call in &tool_calls {
-                tracing::info!(tool = call.name.as_str(), "self-improvement executing tool");
-
-                let tool = match tool_map.get(&call.name) {
-                    Some(t) => Arc::clone(t),
-                    None => {
-                        tracing::warn!(tool = call.name.as_str(), "self-improvement: unknown tool");
-                        messages.push(Message::tool_result(
-                            &call.id,
-                            &format!("unknown tool '{}'", call.name),
-                            true,
-                        ));
-                        continue;
-                    }
-                };
-
-                let tool_start = std::time::Instant::now();
-                let result = tool.run(&call.input, &ctx.tool_context).await;
-                let tool_ms = tool_start.elapsed().as_millis();
-
-                let tool_result_msg = match result {
-                    Ok(ref output) => {
-                        actions_taken += 1;
-                        artifacts.push(format!("{}(ok, {}ms)", call.name, tool_ms));
-                        tracing::info!(
-                            tool = call.name.as_str(),
-                            duration_ms = tool_ms,
-                            "self-improvement tool ok"
-                        );
-                        Message::tool_result(&call.id, &output.content, output.is_error)
-                    }
-                    Err(ref e) => {
-                        tracing::warn!(
-                            tool = call.name.as_str(),
-                            duration_ms = tool_ms,
-                            error = %e,
-                            "self-improvement tool failed"
-                        );
-                        Message::tool_result(&call.id, &e.to_string(), true)
-                    }
-                };
-                messages.push(tool_result_msg);
-            }
-        }
-
-        // Save reflection log to workspace.
         save_reflection_log(
             &ctx.tool_context,
             &reflection_system,
-            &messages,
+            &[Message::user(&ctx.conversation_summary)],
             actions_taken,
             ctx.turn_count,
         )

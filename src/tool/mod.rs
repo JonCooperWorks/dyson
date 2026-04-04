@@ -220,6 +220,18 @@ pub struct ToolContext {
     pub depth: u8,
 }
 
+impl Clone for ToolContext {
+    fn clone(&self) -> Self {
+        Self {
+            working_dir: self.working_dir.clone(),
+            env: self.env.clone(),
+            cancellation: self.cancellation.clone(),
+            workspace: self.workspace.as_ref().map(Arc::clone),
+            depth: self.depth,
+        }
+    }
+}
+
 impl ToolContext {
     /// Create a context with the current working directory and no extra env.
     ///
