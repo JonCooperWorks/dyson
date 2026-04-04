@@ -253,6 +253,37 @@ fn telegram_accepts_config_with_chat_ids() {
 }
 
 // =========================================================================
+// 5b. Telegram command auth: only /whoami is public
+// =========================================================================
+//
+// The `is_public_command` function is the single gate that decides which
+// Telegram commands bypass the `allowed_chat_ids` access-control check.
+// Only `/whoami` should return true — everything else requires auth.
+
+#[test]
+fn telegram_only_whoami_is_public() {
+    use dyson::controller::telegram::is_public_command;
+
+    // The sole public command.
+    assert!(is_public_command("/whoami"), "/whoami must be public");
+
+    // Everything else must require auth.
+    let protected = [
+        "/logs",
+        "/logs 50",
+        "/memory",
+        "/memory some note",
+        "/clear",
+        "/compact",
+        "/model provider",
+        "/models",
+    ];
+    for cmd in protected {
+        assert!(!is_public_command(cmd), "{cmd} must require auth");
+    }
+}
+
+// =========================================================================
 // 6. Zeroize on drop (Credential zeroes secret memory)
 // =========================================================================
 //

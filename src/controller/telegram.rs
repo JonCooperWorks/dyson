@@ -1514,7 +1514,7 @@ fn convert_pattern(s: &str, marker: &str, open: &str, close: &str) -> String {
 /// Returns `true` for commands that may be executed without passing the
 /// `allowed_chat_ids` access-control check.  Every other command requires
 /// the caller to be in the allow-list.
-fn is_public_command(text: &str) -> bool {
+pub fn is_public_command(text: &str) -> bool {
     text == "/whoami"
 }
 
@@ -1740,25 +1740,4 @@ mod tests {
         assert!(matches!(classify_llm_error("context length exceeded"), LlmErrorKind::Other));
     }
 
-    // -- is_public_command tests --
-
-    #[test]
-    fn whoami_is_public() {
-        assert!(is_public_command("/whoami"));
-    }
-
-    #[test]
-    fn logs_requires_auth() {
-        assert!(!is_public_command("/logs"));
-        assert!(!is_public_command("/logs 50"));
-    }
-
-    #[test]
-    fn other_commands_require_auth() {
-        assert!(!is_public_command("/memory note"));
-        assert!(!is_public_command("/clear"));
-        assert!(!is_public_command("/compact"));
-        assert!(!is_public_command("/model provider"));
-        assert!(!is_public_command("/models"));
-    }
 }
