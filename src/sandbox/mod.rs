@@ -12,7 +12,7 @@
 // Module layout:
 //   mod.rs         — Sandbox trait, SandboxDecision (this file)
 //   no_sandbox.rs  — DangerousNoSandbox (passthrough, no restrictions)
-//   os.rs          — OsSandbox (macOS Seatbelt / Linux bubblewrap)
+//   os.rs          — OS command builders (Linux bwrap / macOS Apple Containers)
 //   composite.rs   — CompositeSandbox (chain multiple sandboxes)
 //
 // Why a trait and not middleware?
@@ -198,9 +198,9 @@ pub fn create_sandbox(
 
     // Policy sandbox — per-tool capability enforcement.
     //
-    // This subsumes OsSandbox: it handles both application-level checks
-    // (for Rust-native tools like read_file, web_search) AND OS-level
-    // sandboxing (for bash via bwrap/seatbelt).
+    // Handles both application-level checks (for Rust-native tools like
+    // read_file, web_search) AND OS-level sandboxing (for bash via bwrap
+    // on Linux or Apple Containers on macOS).
     //
     // Each tool gets a SandboxPolicy expressing what it can do (network,
     // file_read, file_write, process_exec).  The enforcement translates

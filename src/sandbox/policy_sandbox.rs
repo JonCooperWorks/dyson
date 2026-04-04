@@ -30,7 +30,8 @@
 //   4. For bash: generate bwrap/seatbelt wrapper command
 //   5. For workspace/memory tools: always allow (internal tools)
 //
-// The after() method preserves OsSandbox's output truncation behavior.
+// The after() method truncates oversized tool output to protect the
+// context window.
 // ===========================================================================
 
 use std::collections::HashMap;
@@ -42,7 +43,7 @@ use crate::error::Result;
 #[cfg(target_os = "linux")]
 use crate::sandbox::os::build_bwrap_command_from_policy;
 #[cfg(target_os = "macos")]
-use crate::sandbox::os::build_seatbelt_command_from_policy;
+use crate::sandbox::os::build_container_command_from_policy;
 use crate::sandbox::policy::{Access, PathAccess, PolicyTable, SandboxPolicy, ToolPolicyConfig};
 use crate::sandbox::{Sandbox, SandboxDecision};
 use crate::tool::{ToolContext, ToolOutput};
@@ -56,8 +57,8 @@ use super::MAX_OUTPUT_CHARS;
 /// Sandbox that enforces per-tool capability policies.
 ///
 /// Combines application-level checks (for Rust-native tools) with
-/// OS-level sandboxing (for bash).  Subsumes `OsSandbox` — when active,
-/// `OsSandbox` is not needed in the composite pipeline.
+/// OS-level sandboxing (for bash via bwrap on Linux or Apple Containers
+/// on macOS).
 pub struct PolicySandbox {
     /// Resolved policy table (exact + glob + defaults).
     policies: PolicyTable,
@@ -92,17 +93,18 @@ impl Sandbox for PolicySandbox {
 
             // ----- File read tools -----
             "read_file" | "list_files" | "search_files" | "send_file" => {
-                check_file_read(tool_name, input, &policy, &self.working_dir)
+                check_file_access(tool_name, input, &policy, &self.working_dir, true, false)
             }
 
             // ----- File write tools -----
-            "write_file" => check_file_write(tool_name, input, &policy, &self.working_dir),
+            "write_file" => {
+                check_file_access(tool_name, input, &policy, &self.working_dir, false, true)
+            }
 
             // ----- File read + write tools -----
-            "edit_file" => check_file_read_write(tool_name, input, &policy, &self.working_dir),
-
-            // ----- Network tools -----
-            "web_search" => check_network(tool_name, input, &policy),
+            "edit_file" => {
+                check_file_access(tool_name, input, &policy, &self.working_dir, true, true)
+            }
 
             // ----- Internal tools — always allowed -----
             "workspace_view" | "workspace_search" | "workspace_update" | "memory_search" => {
@@ -111,8 +113,23 @@ impl Sandbox for PolicySandbox {
                 })
             }
 
-            // ----- Unknown tools (including MCP) -----
-            _ => check_unknown(tool_name, input, &policy),
+            // ----- Network tools + unknown tools (including MCP) -----
+            _ => {
+                if policy.network == Access::Deny {
+                    tracing::debug!(
+                        tool = tool_name,
+                        "sandbox policy denies network access"
+                    );
+                    return Ok(SandboxDecision::Deny {
+                        reason: format!(
+                            "sandbox policy denies network access for tool '{tool_name}'"
+                        ),
+                    });
+                }
+                Ok(SandboxDecision::Allow {
+                    input: input.clone(),
+                })
+            }
         }
     }
 
@@ -122,7 +139,7 @@ impl Sandbox for PolicySandbox {
         _input: &serde_json::Value,
         output: &mut ToolOutput,
     ) -> Result<()> {
-        // Truncate oversized output (same behavior as OsSandbox).
+        // Truncate oversized output to protect the LLM context window.
         if output.content.len() > MAX_OUTPUT_CHARS {
             let original_len = output.content.len();
             let truncate_at = output.content[..MAX_OUTPUT_CHARS]
@@ -168,11 +185,11 @@ fn check_bash(
     #[cfg(target_os = "macos")]
     {
         let sandboxed =
-            build_seatbelt_command_from_policy(command, policy, &working_dir.to_string_lossy());
+            build_container_command_from_policy(command, policy, &working_dir.to_string_lossy());
 
         tracing::debug!(
             original = command,
-            "bash command wrapped in OS sandbox (macOS seatbelt, policy-based)"
+            "bash command wrapped in Apple Container"
         );
 
         Ok(SandboxDecision::Allow {
@@ -204,142 +221,45 @@ fn check_bash(
     }
 }
 
-/// Check a tool that reads files — validate path against file_read policy.
-fn check_file_read(
+/// Check a tool that accesses files — validate path against read/write policies.
+///
+/// `check_read` and `check_write` control which capabilities are validated.
+/// This consolidates the formerly separate read, write, and read+write checks.
+fn check_file_access(
     tool_name: &str,
     input: &serde_json::Value,
     policy: &SandboxPolicy,
     working_dir: &Path,
+    check_read: bool,
+    check_write: bool,
 ) -> Result<SandboxDecision> {
-    // Extract the file path from the input.
     let path_key = match tool_name {
-        "list_files" => "path",
-        "search_files" => "path",
+        "list_files" | "search_files" => "path",
         _ => "file_path",
     };
 
-    match input[path_key].as_str() {
-        Some(file_path) => {
-            if !check_path_access(&policy.file_read, file_path, working_dir) {
-                return Ok(SandboxDecision::Deny {
-                    reason: format!(
-                        "sandbox policy denies file read for '{file_path}' by tool '{tool_name}'"
-                    ),
-                });
-            }
-        }
+    let file_path = match input[path_key].as_str() {
+        Some(p) => p,
         None => {
             return Ok(SandboxDecision::Deny {
                 reason: format!("missing '{path_key}' field in {tool_name} input"),
             });
         }
-    }
+    };
 
-    Ok(SandboxDecision::Allow {
-        input: input.clone(),
-    })
-}
-
-/// Check a tool that writes files — validate path against file_write policy.
-fn check_file_write(
-    tool_name: &str,
-    input: &serde_json::Value,
-    policy: &SandboxPolicy,
-    working_dir: &Path,
-) -> Result<SandboxDecision> {
-    match input["file_path"].as_str() {
-        Some(file_path) => {
-            if !check_path_access(&policy.file_write, file_path, working_dir) {
-                return Ok(SandboxDecision::Deny {
-                    reason: format!(
-                        "sandbox policy denies file write for '{file_path}' by tool '{tool_name}'"
-                    ),
-                });
-            }
-        }
-        None => {
-            return Ok(SandboxDecision::Deny {
-                reason: format!("missing 'file_path' field in {tool_name} input"),
-            });
-        }
-    }
-
-    Ok(SandboxDecision::Allow {
-        input: input.clone(),
-    })
-}
-
-/// Check a tool that reads AND writes files.
-fn check_file_read_write(
-    tool_name: &str,
-    input: &serde_json::Value,
-    policy: &SandboxPolicy,
-    working_dir: &Path,
-) -> Result<SandboxDecision> {
-    match input["file_path"].as_str() {
-        Some(file_path) => {
-            if !check_path_access(&policy.file_read, file_path, working_dir) {
-                return Ok(SandboxDecision::Deny {
-                    reason: format!(
-                        "sandbox policy denies file read for '{file_path}' by tool '{tool_name}'"
-                    ),
-                });
-            }
-            if !check_path_access(&policy.file_write, file_path, working_dir) {
-                return Ok(SandboxDecision::Deny {
-                    reason: format!(
-                        "sandbox policy denies file write for '{file_path}' by tool '{tool_name}'"
-                    ),
-                });
-            }
-        }
-        None => {
-            return Ok(SandboxDecision::Deny {
-                reason: format!("missing 'file_path' field in {tool_name} input"),
-            });
-        }
-    }
-
-    Ok(SandboxDecision::Allow {
-        input: input.clone(),
-    })
-}
-
-/// Check a tool that needs network access.
-fn check_network(
-    tool_name: &str,
-    input: &serde_json::Value,
-    policy: &SandboxPolicy,
-) -> Result<SandboxDecision> {
-    if policy.network == Access::Deny {
+    if check_read && !check_path_access(&policy.file_read, file_path, working_dir) {
         return Ok(SandboxDecision::Deny {
-            reason: format!("sandbox policy denies network access for tool '{tool_name}'"),
+            reason: format!(
+                "sandbox policy denies file read for '{file_path}' by tool '{tool_name}'"
+            ),
         });
     }
 
-    Ok(SandboxDecision::Allow {
-        input: input.clone(),
-    })
-}
-
-/// Check an unknown tool (including MCP tools).
-///
-/// MCP tools typically need network access.  We check network policy.
-/// File access is denied by default for unknown tools (application-level),
-/// but MCP tools run in their own process so file access enforcement
-/// would need OS-level sandboxing of the MCP server process itself.
-fn check_unknown(
-    tool_name: &str,
-    input: &serde_json::Value,
-    policy: &SandboxPolicy,
-) -> Result<SandboxDecision> {
-    if policy.network == Access::Deny {
-        tracing::debug!(
-            tool = tool_name,
-            "sandbox policy denies network for unknown tool"
-        );
+    if check_write && !check_path_access(&policy.file_write, file_path, working_dir) {
         return Ok(SandboxDecision::Deny {
-            reason: format!("sandbox policy denies network access for tool '{tool_name}'"),
+            reason: format!(
+                "sandbox policy denies file write for '{file_path}' by tool '{tool_name}'"
+            ),
         });
     }
 

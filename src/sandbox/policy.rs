@@ -12,7 +12,7 @@
 //
 //     Intent:        network: Deny
 //     Linux (bwrap): --unshare-net
-//     macOS (Seatbelt): (deny network*)
+//     macOS (Apple Container): --network none
 //     Application:   reject tool call before execution
 //
 //   This separation means the same policy config works on any platform.
@@ -63,7 +63,7 @@ use std::path::{Path, PathBuf};
 /// Binary access control for a capability.
 ///
 /// Enforcement depends on the layer:
-/// - Network: kernel-enforced via `--unshare-net` (bwrap) or `(deny network*)` (Seatbelt)
+/// - Network: kernel-enforced via `--unshare-net` (bwrap) or `--network none` (Apple Container)
 /// - Process exec: kernel-enforced via `--unshare-pid` (partial)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Access {
@@ -102,14 +102,14 @@ pub struct SandboxPolicy {
     /// Can the tool make outbound network connections?
     ///
     /// Enforced at the OS level: `--unshare-net` (bwrap) or
-    /// `(deny network*)` (Seatbelt).
+    /// `--network none` (Apple Container).
     pub network: Access,
 
     /// Can the tool read files?
     ///
     /// For Rust-native tools: enforced in `PolicySandbox::check()` by
     /// validating file paths in the input JSON.
-    /// For bash: enforced via bwrap `--ro-bind` / Seatbelt `(deny file-read*)`.
+    /// For bash: enforced via bwrap `--ro-bind` / Apple Container `-v path:path:ro`.
     pub file_read: PathAccess,
 
     /// Can the tool write files?
