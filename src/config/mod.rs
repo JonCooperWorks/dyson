@@ -358,7 +358,75 @@ pub enum McpTransportConfig {
     Http {
         url: String,
         headers: std::collections::HashMap<String, String>,
+        /// Optional OAuth 2.0 configuration for servers that require
+        /// interactive authorization (e.g., GitHub Copilot MCP).
+        /// When set, Dyson runs the OAuth Authorization Code + PKCE flow
+        /// and attaches Bearer tokens automatically.
+        auth: Option<McpAuthConfig>,
     },
+}
+
+// ---------------------------------------------------------------------------
+// MCP OAuth configuration
+// ---------------------------------------------------------------------------
+
+/// OAuth 2.0 configuration for an MCP HTTP server.
+///
+/// When present on an `McpTransportConfig::Http`, Dyson runs the OAuth
+/// Authorization Code + PKCE flow instead of using static headers.
+///
+/// ## Minimal config (auto-discovery + DCR)
+///
+/// ```json
+/// {
+///   "url": "https://mcp.example.com/mcp",
+///   "auth": { "type": "oauth", "scopes": ["read"] }
+/// }
+/// ```
+///
+/// ## Full config (pre-registered client, no discovery)
+///
+/// ```json
+/// {
+///   "url": "https://mcp.example.com/mcp",
+///   "auth": {
+///     "type": "oauth",
+///     "client_id": "my-client-id",
+///     "client_secret": { "resolver": "insecure_env", "name": "CLIENT_SECRET" },
+///     "scopes": ["read", "write"],
+///     "authorization_url": "https://auth.example.com/authorize",
+///     "token_url": "https://auth.example.com/token"
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct McpAuthConfig {
+    /// OAuth client ID.  If `None`, Dyson uses Dynamic Client Registration
+    /// (DCR) to obtain one automatically.
+    pub client_id: Option<String>,
+
+    /// OAuth client secret.  Only needed for confidential clients.
+    /// Resolved from `SecretValue` by the config loader (supports env vars,
+    /// vault references, etc.).
+    pub client_secret: Option<String>,
+
+    /// Requested OAuth scopes (e.g., `["read", "write"]`).
+    pub scopes: Vec<String>,
+
+    /// Custom redirect URI.  If `None`, Dyson uses
+    /// `http://127.0.0.1:<random-port>/callback` with an OS-assigned port.
+    pub redirect_uri: Option<String>,
+
+    /// Override: authorization endpoint URL.  If `None`, discovered via
+    /// `/.well-known/oauth-authorization-server`.
+    pub authorization_url: Option<String>,
+
+    /// Override: token endpoint URL.  If `None`, discovered via well-known.
+    pub token_url: Option<String>,
+
+    /// Override: DCR registration endpoint URL.  If `None`, discovered via
+    /// well-known.  Only used when `client_id` is `None`.
+    pub registration_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]

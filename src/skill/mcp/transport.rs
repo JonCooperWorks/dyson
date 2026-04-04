@@ -358,6 +358,81 @@ impl McpTransport for HttpTransport {
             *session = Some(sid_str.to_string());
         }
 
+        // 401 Unauthorized — attempt to refresh credentials and retry once.
+        //
+        // This handles the case where an OAuth access token was rejected by
+        // the server (clock skew, server-side revocation, etc.) even though
+        // it hadn't expired locally.  The Auth trait's `on_unauthorized()`
+        // gives the auth implementation (e.g., OAuthAuth) a chance to refresh
+        // credentials before we rebuild and resend the request.
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            tracing::debug!(server = %self.url, "received 401 — attempting credential refresh");
+
+            if self.auth.on_unauthorized().await.is_ok() {
+                // Rebuild the request with refreshed credentials.
+                let mut retry_req = self.build_request(&json).await?;
+                {
+                    let session = self.session_id.lock().await;
+                    if let Some(ref sid) = *session {
+                        retry_req = retry_req.header("Mcp-Session-Id", sid.as_str());
+                    }
+                }
+
+                let retry_response = retry_req.send().await.map_err(|e| DysonError::Mcp {
+                    server: self.url.clone(),
+                    message: format!("HTTP request failed on retry: {e}"),
+                })?;
+
+                if retry_response.status().is_success() {
+                    // Retry succeeded — continue with the retry response.
+                    let body = retry_response.text().await.map_err(|e| DysonError::Mcp {
+                        server: self.url.clone(),
+                        message: format!("failed to read retry response: {e}"),
+                    })?;
+
+                    let rpc_response: JsonRpcResponse =
+                        serde_json::from_str(&body).map_err(|e| DysonError::Mcp {
+                            server: self.url.clone(),
+                            message: format!("failed to parse retry response: {e}"),
+                        })?;
+
+                    if let Some(err) = rpc_response.error {
+                        return Err(DysonError::Mcp {
+                            server: self.url.clone(),
+                            message: format!("RPC error {}: {}", err.code, err.message),
+                        });
+                    }
+
+                    return rpc_response.result.ok_or_else(|| DysonError::Mcp {
+                        server: self.url.clone(),
+                        message: "response has neither result nor error".into(),
+                    });
+                }
+
+                // Retry also failed — fall through to the normal error handling
+                // below, but use the retry response.
+                let status = retry_response.status();
+                let body = retry_response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "failed to read body".into());
+                return Err(DysonError::Mcp {
+                    server: self.url.clone(),
+                    message: format!("HTTP {status}: {body} (after credential refresh retry)"),
+                });
+            }
+
+            // Refresh failed or not supported — report the original 401.
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "failed to read body".into());
+            return Err(DysonError::Mcp {
+                server: self.url.clone(),
+                message: format!("HTTP 401 Unauthorized: {body}"),
+            });
+        }
+
         if !response.status().is_success() {
             let status = response.status();
             let body = response

@@ -55,9 +55,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::config::{
-    BuiltinSkillConfig, CompactionConfig, ControllerConfig, LocalSkillConfig, McpConfig,
-    McpTransportConfig, ProviderConfig, SandboxConfig, Settings, SkillConfig, SubagentAgentConfig,
-    SubagentSkillConfig,
+    BuiltinSkillConfig, CompactionConfig, ControllerConfig, LocalSkillConfig, McpAuthConfig,
+    McpConfig, McpTransportConfig, ProviderConfig, SandboxConfig, Settings, SkillConfig,
+    SubagentAgentConfig, SubagentSkillConfig,
 };
 use crate::error::{DysonError, Result};
 use crate::secret::{SecretRegistry, SecretValue};
@@ -743,9 +743,41 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                         })
                         .unwrap_or_default();
 
+                    // Parse optional OAuth auth config.
+                    let auth = if server_json["auth"]["type"].as_str() == Some("oauth") {
+                        let auth_json = &server_json["auth"];
+                        Some(McpAuthConfig {
+                            client_id: auth_json["client_id"].as_str().map(|s| s.to_string()),
+                            client_secret: auth_json["client_secret"]
+                                .as_str()
+                                .map(|s| s.to_string()),
+                            scopes: auth_json["scopes"]
+                                .as_array()
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            redirect_uri: auth_json["redirect_uri"]
+                                .as_str()
+                                .map(|s| s.to_string()),
+                            authorization_url: auth_json["authorization_url"]
+                                .as_str()
+                                .map(|s| s.to_string()),
+                            token_url: auth_json["token_url"].as_str().map(|s| s.to_string()),
+                            registration_url: auth_json["registration_url"]
+                                .as_str()
+                                .map(|s| s.to_string()),
+                        })
+                    } else {
+                        None
+                    };
+
                     McpTransportConfig::Http {
                         url: url.to_string(),
                         headers,
+                        auth,
                     }
                 } else {
                     tracing::warn!(
