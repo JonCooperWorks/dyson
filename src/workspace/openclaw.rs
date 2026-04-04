@@ -82,6 +82,10 @@ impl OpenClawWorkspace {
             .map_err(|e| DysonError::Config(format!("cannot create memory dir: {e}")))?;
         std::fs::create_dir_all(path.join("skills"))
             .map_err(|e| DysonError::Config(format!("cannot create skills dir: {e}")))?;
+        std::fs::create_dir_all(path.join("kb/raw"))
+            .map_err(|e| DysonError::Config(format!("cannot create kb/raw dir: {e}")))?;
+        std::fs::create_dir_all(path.join("kb/wiki"))
+            .map_err(|e| DysonError::Config(format!("cannot create kb/wiki dir: {e}")))?;
 
         // Run workspace migrations before reading files.
         let migrated = crate::workspace::migrate::migrate(path)?;
@@ -116,6 +120,12 @@ impl OpenClawWorkspace {
             }
         }
 
+        // Read kb/ files recursively (raw sources, wiki articles, INDEX.md).
+        let kb_dir = path.join("kb");
+        if kb_dir.exists() {
+            read_dir_recursive(&kb_dir, "kb", &mut files);
+        }
+
         // Read skills/*/SKILL.md files so load_skill can find them via ws.get().
         let skills_dir = path.join("skills");
         if skills_dir.exists() {
@@ -133,9 +143,9 @@ impl OpenClawWorkspace {
         // Open (or create) the FTS5 memory store.
         let memory_store = MemoryStore::open(&path.join("memory.db"))?;
 
-        // Index all existing memory/ files into FTS5.
+        // Index all existing memory/ and kb/ files into FTS5.
         for (name, content) in &files {
-            if name.starts_with("memory/") {
+            if name.starts_with("memory/") || name.starts_with("kb/") {
                 memory_store.index(name, content);
             }
         }
@@ -335,7 +345,7 @@ impl Workspace for OpenClawWorkspace {
     fn set(&mut self, name: &str, content: &str) {
         self.files.insert(name.to_string(), content.to_string());
         self.dirty.lock().unwrap().insert(name.to_string());
-        if name.starts_with("memory/") {
+        if name.starts_with("memory/") || name.starts_with("kb/") {
             self.memory_store.index(name, content);
         }
     }
@@ -347,7 +357,7 @@ impl Workspace for OpenClawWorkspace {
         }
         entry.push_str(content);
         self.dirty.lock().unwrap().insert(name.to_string());
-        if name.starts_with("memory/") {
+        if name.starts_with("memory/") || name.starts_with("kb/") {
             self.memory_store.index(name, entry);
         }
     }
@@ -440,6 +450,13 @@ impl Workspace for OpenClawWorkspace {
             }
         }
 
+        // Knowledge base index (if present).
+        if let Some(content) = self.files.get("kb/INDEX.md")
+            && !content.trim().is_empty()
+        {
+            parts.push(format!("## KNOWLEDGE BASE\n\n{content}"));
+        }
+
         // Yesterday's journal (for continuity across sessions).
         let yesterday = Self::yesterday_journal();
         if let Some(content) = self.files.get(&yesterday)
@@ -518,6 +535,36 @@ impl Workspace for OpenClawWorkspace {
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
+
+/// Recursively read all `.md` files under `dir`, inserting them into `files`
+/// with keys prefixed by `prefix` (e.g., `kb/raw/article.md`).
+///
+/// Skips symlinks to avoid cycles.  Silently ignores unreadable entries.
+fn read_dir_recursive(dir: &Path, prefix: &str, files: &mut HashMap<String, String>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        // Skip symlinks.
+        if path.is_symlink() {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        if path.is_dir() {
+            read_dir_recursive(&path, &format!("{prefix}/{name}"), files);
+        } else if path.is_file() && name.ends_with(".md") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                files.insert(format!("{prefix}/{name}"), content);
+            }
+        }
+    }
+}
 
 /// Resolve ~ to $HOME in a path string.
 pub(crate) fn resolve_tilde(path: &str) -> PathBuf {
@@ -868,6 +915,119 @@ mod tests {
         );
         assert!(content.unwrap().contains("Step 1: Check logs."));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------------------
+    // Knowledge base tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn creates_kb_directories() {
+        let (dir, _ws) = temp_workspace();
+        assert!(dir.join("kb").is_dir());
+        assert!(dir.join("kb/raw").is_dir());
+        assert!(dir.join("kb/wiki").is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kb_files_loaded_recursively_from_disk() {
+        let (dir, _ws) = temp_workspace();
+
+        // Create nested KB files on disk.
+        std::fs::write(
+            dir.join("kb/raw/article.md"),
+            "# Raw Article\n\nSome source material.",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("kb/wiki/rust")).unwrap();
+        std::fs::write(
+            dir.join("kb/wiki/rust/ownership.md"),
+            "# Ownership\n\nRust ownership explained.",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("kb/INDEX.md"),
+            "# KB Index\n\n- ownership: Rust ownership",
+        )
+        .unwrap();
+
+        // Reload workspace — KB files should be in the HashMap.
+        let ws = OpenClawWorkspace::load(&dir, MemoryConfig::default()).unwrap();
+
+        assert!(ws.get("kb/raw/article.md").is_some());
+        assert!(ws.get("kb/wiki/rust/ownership.md").is_some());
+        assert!(ws.get("kb/INDEX.md").is_some());
+
+        let content = ws.get("kb/wiki/rust/ownership.md").unwrap();
+        assert!(content.contains("Rust ownership explained"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kb_files_indexed_in_fts5() {
+        let (dir, mut ws) = temp_workspace();
+        ws.set(
+            "kb/raw/transformers.md",
+            "Transformers use self-attention mechanisms for sequence modeling.",
+        );
+        ws.save().unwrap();
+
+        let results = ws.memory_search("self-attention transformers");
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, "kb/raw/transformers.md");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kb_files_indexed_on_reload() {
+        let (dir, mut ws) = temp_workspace();
+
+        // Write a KB file via workspace (indexes it).
+        ws.set(
+            "kb/wiki/diffusion.md",
+            "Diffusion models learn to denoise data.",
+        );
+        ws.save().unwrap();
+        drop(ws);
+
+        // Reload — the file should be re-indexed from disk.
+        let ws = OpenClawWorkspace::load(&dir, MemoryConfig::default()).unwrap();
+        let results = ws.memory_search("diffusion denoise");
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, "kb/wiki/diffusion.md");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kb_index_in_system_prompt() {
+        let (dir, mut ws) = temp_workspace();
+        ws.set(
+            "kb/INDEX.md",
+            "# Knowledge Base\n\n- transformers: Attention-based models\n- diffusion: Denoising models",
+        );
+
+        let prompt = ws.system_prompt();
+        assert!(
+            prompt.contains("KNOWLEDGE BASE"),
+            "system prompt should include KB index"
+        );
+        assert!(prompt.contains("transformers"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kb_index_absent_not_in_system_prompt() {
+        let (dir, ws) = temp_workspace();
+        let prompt = ws.system_prompt();
+        assert!(
+            !prompt.contains("KNOWLEDGE BASE"),
+            "system prompt should not include KB section when INDEX.md is absent"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

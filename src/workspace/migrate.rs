@@ -41,7 +41,7 @@ use std::path::Path;
 use crate::error::{DysonError, Result};
 
 /// Current workspace version.  Bump this when adding a new migration.
-pub const CURRENT_WORKSPACE_VERSION: u64 = 2;
+pub const CURRENT_WORKSPACE_VERSION: u64 = 3;
 
 /// Version file name.
 const VERSION_FILE: &str = ".workspace_version";
@@ -131,6 +131,19 @@ fn migrations() -> &'static [Migration] {
                 ext: "md",
                 target: "SKILL.md",
             }],
+        },
+        // v2 → v3: Create knowledge base directory structure.
+        //
+        // kb/raw/  — source material (articles, papers, notes)
+        // kb/wiki/ — compiled articles (agent-maintained on request)
+        Migration {
+            from_version: 2,
+            description: "Create kb/ directory structure for knowledge base",
+            steps: &[
+                Step::CreateDir("kb"),
+                Step::CreateDir("kb/raw"),
+                Step::CreateDir("kb/wiki"),
+            ],
         },
     ]
 }
@@ -593,8 +606,40 @@ mod tests {
     }
 
     #[test]
-    fn v0_to_v2_full_chain() {
-        let dir = temp_dir("v0-to-v2");
+    fn v2_to_v3_creates_kb_dirs() {
+        let dir = temp_dir("v2-to-v3");
+        write_version(&dir, 2).unwrap();
+
+        let applied = migrate(&dir).unwrap();
+        assert!(applied);
+
+        assert!(dir.join("kb").is_dir());
+        assert!(dir.join("kb/raw").is_dir());
+        assert!(dir.join("kb/wiki").is_dir());
+
+        assert_eq!(read_version(&dir), CURRENT_WORKSPACE_VERSION);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v2_to_v3_idempotent_when_kb_exists() {
+        let dir = temp_dir("v2-to-v3-exists");
+        write_version(&dir, 2).unwrap();
+        std::fs::create_dir_all(dir.join("kb/raw")).unwrap();
+        std::fs::create_dir_all(dir.join("kb/wiki")).unwrap();
+
+        let applied = migrate(&dir).unwrap();
+        assert!(applied);
+        assert!(dir.join("kb/raw").is_dir());
+        assert!(dir.join("kb/wiki").is_dir());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v0_to_v3_full_chain() {
+        let dir = temp_dir("v0-to-v3");
         std::fs::create_dir_all(dir.join("memory")).unwrap();
         std::fs::create_dir_all(dir.join("skills")).unwrap();
         std::fs::write(
@@ -611,6 +656,11 @@ mod tests {
 
         // v1→v2: skill promoted.
         assert!(dir.join("skills/test/SKILL.md").is_file());
+
+        // v2→v3: kb/ created.
+        assert!(dir.join("kb").is_dir());
+        assert!(dir.join("kb/raw").is_dir());
+        assert!(dir.join("kb/wiki").is_dir());
 
         assert_eq!(read_version(&dir), CURRENT_WORKSPACE_VERSION);
 

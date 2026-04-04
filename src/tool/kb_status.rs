@@ -1,0 +1,117 @@
+// ===========================================================================
+// KbStatusTool — knowledge base statistics and health overview.
+//
+// Reports file counts, sizes, and topic coverage for the kb/ directory.
+// Lightweight — no LLM calls, just workspace enumeration.
+// ===========================================================================
+
+use async_trait::async_trait;
+use serde_json::json;
+
+use crate::error::DysonError;
+use crate::tool::{Tool, ToolContext, ToolOutput};
+
+pub struct KbStatusTool;
+
+#[async_trait]
+impl Tool for KbStatusTool {
+    fn name(&self) -> &str {
+        "kb_status"
+    }
+
+    fn description(&self) -> &str {
+        "Show knowledge base statistics: file counts, sizes, and topic overview. \
+         Use this to understand what's in the KB before searching or adding content."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {},
+            "required": []
+        })
+    }
+
+    async fn run(&self, _input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+        let ws = ctx
+            .workspace
+            .as_ref()
+            .ok_or_else(|| DysonError::tool("kb_status", "no workspace configured"))?;
+
+        let ws = ws.read().await;
+        let files = ws.list_files();
+
+        let mut raw_count = 0u32;
+        let mut raw_bytes = 0usize;
+        let mut wiki_count = 0u32;
+        let mut wiki_bytes = 0usize;
+        let mut raw_files: Vec<String> = Vec::new();
+        let mut wiki_files: Vec<String> = Vec::new();
+
+        for name in &files {
+            if let Some(content) = ws.get(name) {
+                if name.starts_with("kb/raw/") {
+                    raw_count += 1;
+                    raw_bytes += content.len();
+                    raw_files.push(name.clone());
+                } else if name.starts_with("kb/wiki/") {
+                    wiki_count += 1;
+                    wiki_bytes += content.len();
+                    wiki_files.push(name.clone());
+                }
+            }
+        }
+
+        let has_index = ws.get("kb/INDEX.md").is_some();
+
+        let mut output = String::from("## Knowledge Base Status\n\n");
+
+        output.push_str(&format!(
+            "- **Raw sources:** {} file(s), {}\n",
+            raw_count,
+            format_bytes(raw_bytes)
+        ));
+        output.push_str(&format!(
+            "- **Wiki articles:** {} file(s), {}\n",
+            wiki_count,
+            format_bytes(wiki_bytes)
+        ));
+        output.push_str(&format!(
+            "- **INDEX.md:** {}\n",
+            if has_index { "present" } else { "not yet created" }
+        ));
+
+        if !raw_files.is_empty() {
+            output.push_str("\n### Raw Sources\n");
+            for f in &raw_files {
+                output.push_str(&format!("- {f}\n"));
+            }
+        }
+
+        if !wiki_files.is_empty() {
+            output.push_str("\n### Wiki Articles\n");
+            for f in &wiki_files {
+                output.push_str(&format!("- {f}\n"));
+            }
+        }
+
+        if raw_count == 0 && wiki_count == 0 {
+            output.push_str(
+                "\nThe knowledge base is empty. Use `workspace_update` to add files \
+                 under `kb/raw/` (source material) or `kb/wiki/` (articles).",
+            );
+        }
+
+        Ok(ToolOutput::success(output))
+    }
+}
+
+fn format_bytes(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
