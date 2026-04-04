@@ -833,4 +833,37 @@ mod tests {
         assert_eq!(lines[0], "log line number 0495");
         assert_eq!(lines[4], "log line number 0499");
     }
+
+    // -----------------------------------------------------------------------
+    // /logs N integration: parsing + read_log_tail end-to-end
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn logs_command_with_line_count() {
+        let dir = make_log_dir("line1\nline2\nline3\nline4\nline5\n");
+
+        let input = "/logs 3";
+        let n: usize = input
+            .strip_prefix("/logs")
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap_or(20);
+        assert_eq!(n, 3);
+
+        let result = read_log_tail_from_dir(dir.path(), n).unwrap();
+        assert_eq!(result, "line3\nline4\nline5");
+    }
+
+    #[test]
+    fn logs_command_default_count() {
+        let input = "/logs";
+        let n: usize = input
+            .strip_prefix("/logs")
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap_or(20);
+        assert_eq!(n, 20);
+    }
 }

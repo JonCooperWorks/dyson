@@ -446,7 +446,8 @@ impl super::Controller for TelegramController {
                 }
 
                 // Unwrap text for command parsing (empty string if media-only).
-                let text = text.unwrap_or_default();
+                // Strip @botname suffix that Telegram may append to commands.
+                let text = strip_bot_mention(&text.unwrap_or_default());
 
                 let chat_id = msg.chat.id;
 
@@ -473,12 +474,10 @@ impl super::Controller for TelegramController {
                     let result = tokio::task::spawn_blocking(move || super::read_log_tail(n)).await;
                     match result {
                         Ok(Ok(lines)) => {
-                            // Split long log output to respect Telegram's 4096-char
-                            // message limit.  Without this, the API rejects the
-                            // message and teloxide retries with backoff, causing
-                            // multi-minute delays.
-                            for part in split_for_telegram(&lines) {
-                                let _ = bot.send_message(chat_id, part).await;
+                            for part in format_logs_for_telegram(&lines) {
+                                let _ = bot.send_message(chat_id, part)
+                                    .parse_mode(ParseMode::Html)
+                                    .await;
                             }
                         }
                         Ok(Err(e)) => {
@@ -1231,7 +1230,11 @@ impl Drop for TelegramOutput {
 // ---------------------------------------------------------------------------
 
 fn split_for_telegram(text: &str) -> Vec<String> {
-    if text.len() <= MAX_MESSAGE_LEN {
+    split_for_telegram_at(text, MAX_MESSAGE_LEN)
+}
+
+fn split_for_telegram_at(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
         return vec![text.to_string()];
     }
 
@@ -1239,13 +1242,13 @@ fn split_for_telegram(text: &str) -> Vec<String> {
     let mut remaining = text;
 
     while !remaining.is_empty() {
-        if remaining.len() <= MAX_MESSAGE_LEN {
+        if remaining.len() <= max_len {
             parts.push(remaining.to_string());
             break;
         }
 
-        // Find a split point at MAX_MESSAGE_LEN, respecting UTF-8 boundaries.
-        let mut end = MAX_MESSAGE_LEN;
+        // Find a split point at max_len, respecting UTF-8 boundaries.
+        let mut end = max_len;
         while !remaining.is_char_boundary(end) && end > 0 {
             end -= 1;
         }
@@ -1540,6 +1543,39 @@ fn convert_pattern(s: &str, marker: &str, open: &str, close: &str) -> String {
 /// Returns `true` for commands that may be executed without passing the
 /// `allowed_chat_ids` access-control check.  Every other command requires
 /// the caller to be in the allow-list.
+/// Format log output for Telegram: HTML-escape, wrap in `<pre>` tags, and
+/// split to respect the message length limit.  Returns `["No log output."]`
+/// for empty input.
+fn format_logs_for_telegram(logs: &str) -> Vec<String> {
+    if logs.is_empty() {
+        return vec!["No log output.".to_string()];
+    }
+    // Reserve room for <pre></pre> wrapper (11 chars) in each part.
+    let max_content = MAX_MESSAGE_LEN - 11; // "<pre>".len() + "</pre>".len()
+    let escaped = escape_html(logs);
+    // Split the escaped content, then wrap each part.
+    let parts = split_for_telegram_at(&escaped, max_content);
+    parts
+        .into_iter()
+        .map(|p| format!("<pre>{p}</pre>"))
+        .collect()
+}
+
+/// Strip the `@botname` suffix that Telegram appends to commands in groups
+/// (and sometimes in DMs).  E.g. `/logs@dysonbot 10` → `/logs 10`.
+fn strip_bot_mention(text: &str) -> String {
+    if let Some(at) = text.find('@') {
+        // Only strip when the text starts with a command (slash).
+        if text.starts_with('/') {
+            let after = text[at..].find(' ')
+                .map(|sp| &text[at + sp..])
+                .unwrap_or("");
+            return format!("{}{}", &text[..at], after);
+        }
+    }
+    text.to_string()
+}
+
 pub fn is_public_command(text: &str) -> bool {
     text == "/whoami"
 }
@@ -1766,4 +1802,80 @@ mod tests {
         assert!(matches!(classify_llm_error("context length exceeded"), LlmErrorKind::Other));
     }
 
+    // -----------------------------------------------------------------------
+    // strip_bot_mention
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn strip_bot_mention_plain_command() {
+        assert_eq!(strip_bot_mention("/logs"), "/logs");
+    }
+
+    #[test]
+    fn strip_bot_mention_with_botname() {
+        assert_eq!(strip_bot_mention("/logs@dysonbot"), "/logs");
+    }
+
+    #[test]
+    fn strip_bot_mention_with_botname_and_args() {
+        assert_eq!(strip_bot_mention("/logs@dysonbot 10"), "/logs 10");
+    }
+
+    #[test]
+    fn strip_bot_mention_plain_with_args() {
+        assert_eq!(strip_bot_mention("/logs 10"), "/logs 10");
+    }
+
+    #[test]
+    fn strip_bot_mention_whoami() {
+        assert_eq!(strip_bot_mention("/whoami@mybot"), "/whoami");
+    }
+
+    #[test]
+    fn logs_command_with_botname_parses_line_count() {
+        // Telegram sends "/logs@botname 10" — after stripping, parse n=10.
+        let input = "/logs@mybot 3";
+        let normalized = strip_bot_mention(input);
+        assert_eq!(normalized, "/logs 3");
+        let n: usize = normalized
+            .strip_prefix("/logs")
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap_or(20);
+        assert_eq!(n, 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // format_logs_for_telegram
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_logs_html_escapes_and_wraps_pre() {
+        let logs = "2026-04-04 INFO something <weird> & good";
+        let parts = format_logs_for_telegram(logs);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].starts_with("<pre>"));
+        assert!(parts[0].ends_with("</pre>"));
+        assert!(parts[0].contains("&lt;weird&gt;"));
+        assert!(parts[0].contains("&amp;"));
+    }
+
+    #[test]
+    fn format_logs_empty_returns_fallback() {
+        let parts = format_logs_for_telegram("");
+        assert_eq!(parts, vec!["No log output."]);
+    }
+
+    #[test]
+    fn format_logs_long_output_splits_with_pre_tags() {
+        let long_line = "x".repeat(3990);
+        let logs = format!("{}\n{}", long_line, long_line);
+        let parts = format_logs_for_telegram(&logs);
+        assert!(parts.len() > 1);
+        for part in &parts {
+            assert!(part.starts_with("<pre>"), "part should start with <pre>");
+            assert!(part.ends_with("</pre>"), "part should end with </pre>");
+        }
+    }
 }
