@@ -138,6 +138,21 @@ McpSkill::on_load()
 No user interaction needed.  If the access token has expired, `OAuthAuth`
 refreshes it automatically on the first request.
 
+### Hot Reload
+
+When `dyson.json` changes, the hot reloader rebuilds all skills, which calls
+`McpSkill::on_load()` again.  Behavior:
+
+- **Tokens exist on disk:** Loaded instantly, no user interaction.  The agent
+  remains responsive.
+- **New OAuth server added (no tokens):** `on_load()` blocks for up to 120
+  seconds while the user authorizes.  The agent is unresponsive during this
+  time.  Once tokens are persisted, all future reloads are instant.
+- **OAuth config changed (e.g., new scopes):** Persisted tokens are loaded.
+  If the server rejects them, the 401 retry refreshes the token.  If refresh
+  fails (scope mismatch), delete `~/.dyson/tokens/<server>.json` and restart.
+- **OAuth server removed from config:** Old skill is dropped cleanly.
+
 ### Token Refresh (Automatic)
 
 ```
