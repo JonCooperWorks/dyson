@@ -107,24 +107,24 @@ McpSkill::on_load()
   ├── Generate PKCE pair (code_verifier + S256 code_challenge)
   ├── Start callback server on 127.0.0.1:<random-port>
   ├── Build authorization URL
-  ├── Store pending auth state
-  └── Set system_prompt = "Please visit this URL to authorize: ..."
-
-Agent sees system prompt → tells user to click the URL
-
-User clicks URL → browser → OAuth server → grants access → redirect
-
-Callback server receives GET /callback?code=...&state=...
-  ├── Validates state (CSRF protection)
-  ├── Returns "Authorization Complete" HTML page
-  └── Sends code via oneshot channel
-
-McpSkill::before_turn() (next agent turn)
-  ├── Checks oneshot channel (non-blocking)
-  ├── Exchanges code for tokens (POST to token endpoint with PKCE verifier)
-  ├── Persists tokens to ~/.dyson/tokens/github-copilot.json
-  └── Returns prompt indicating auth is complete
+  ├── Log auth URL via tracing::warn! (visible in terminal)
+  ├── BLOCK waiting for callback (120s timeout)
+  │
+  │   User clicks URL → browser → OAuth server → grants access → redirect
+  │   Callback server receives GET /callback?code=...&state=...
+  │     ├── Validates state (CSRF protection)
+  │     ├── Returns "Authorization Complete" HTML page
+  │     └── Sends code via oneshot channel
+  │
+  ├── Exchange code for tokens (POST to token endpoint with PKCE verifier)
+  ├── Persist tokens to ~/.dyson/tokens/github-copilot.json
+  ├── Create OAuthAuth with fresh tokens
+  └── Run MCP handshake (initialize, tools/list) → tools available immediately
 ```
+
+The flow blocks `on_load()` until authorization completes.  This means the
+MCP skill either loads fully (with tools) or fails with a clear timeout error.
+There is no partial/pending state.
 
 ### Subsequent Uses (Persisted Tokens)
 
@@ -261,14 +261,16 @@ Stateless, side-effect-free (except HTTP calls), fully unit-testable:
 
 ### `src/skill/mcp/mod.rs` — Flow Orchestration
 
-- `McpSkill::create_oauth_transport()` — Full OAuth setup
-- `McpSkill::before_turn()` — Poll for callback completion
-- `OAuthPendingAuth` — State for in-progress OAuth flow
+- `McpSkill::create_oauth_auth()` — Load persisted tokens or run interactive flow
+- `McpSkill::run_oauth_flow()` — Full blocking OAuth flow (discover → DCR → PKCE → callback → exchange)
+- `McpSkill::on_load()` — Branches on auth config, blocks on OAuth if needed
 
 ### `src/skill/mcp/transport.rs` — 401 Retry
 
+- `HttpTransport::send_http()` — Shared HTTP send logic (build request, apply session ID, send)
+- `HttpTransport::parse_rpc_response()` — Shared response parsing (status check, JSON-RPC parse)
 - `HttpTransport::send_request()` — On 401, calls `auth.on_unauthorized()`,
-  rebuilds request, retries once
+  retries once using the shared helpers
 
 ---
 
