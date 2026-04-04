@@ -57,6 +57,7 @@ impl LlmClient for MockLlm {
         &self,
         _messages: &[Message],
         _system: &str,
+        _system_suffix: &str,
         _tools: &[ToolDefinition],
         _config: &CompletionConfig,
     ) -> Result<dyson::llm::StreamResponse> {
