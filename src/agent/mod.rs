@@ -1405,6 +1405,50 @@ mod tests {
         assert!(summary.contains("4 messages total"));
     }
 
+    #[test]
+    fn summarize_for_reflection_handles_multibyte_utf8() {
+        // Regression: slicing at byte 200 or 500 can land inside a
+        // multi-byte character (e.g. smart quotes '\u{2019}' is 3 bytes).
+        // Build a string where byte 200 is mid-character.
+        let mut text = "a".repeat(199);
+        text.push('\u{2019}'); // RIGHT SINGLE QUOTATION MARK — 3 bytes (bytes 199..202)
+        text.push_str("end");
+        assert_eq!(text.len(), 205); // 199 + 3 + 3
+
+        let messages = vec![Message::user(&text)];
+
+        // Should not panic.
+        let summary = reflection::summarize_for_reflection(&messages);
+        assert!(summary.contains(&"a".repeat(199)));
+
+        // Same for tool error content (truncated at 200 bytes).
+        let error_content = text.clone();
+        let messages_with_error = vec![
+            Message::assistant(vec![crate::message::ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            }]),
+            Message::tool_result("t1", &error_content, true),
+        ];
+
+        let summary = reflection::summarize_for_reflection(&messages_with_error);
+        assert!(summary.contains("[Tool error:"));
+
+        // And for non-error tool results (also truncated at 200).
+        let messages_with_result = vec![
+            Message::assistant(vec![crate::message::ContentBlock::ToolUse {
+                id: "t2".into(),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            }]),
+            Message::tool_result("t2", &error_content, false),
+        ];
+
+        let summary = reflection::summarize_for_reflection(&messages_with_result);
+        assert!(summary.contains("[Tool result:"));
+    }
+
     // -----------------------------------------------------------------------
     // Background learning synthesis tests
     // -----------------------------------------------------------------------
