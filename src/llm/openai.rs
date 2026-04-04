@@ -53,7 +53,6 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use tokio_stream::StreamExt;
 
 use crate::auth::Auth;
 use crate::error::{DysonError, Result};
@@ -209,30 +208,10 @@ impl LlmClient for OpenAiClient {
         }
 
         // -- Parse SSE stream --
-        let byte_stream = response.bytes_stream();
-
-        let event_stream = async_stream::stream! {
-            let mut parser = OpenAiSseParser::new();
-
-            tokio::pin!(byte_stream);
-
-            while let Some(chunk_result) = byte_stream.next().await {
-                match chunk_result {
-                    Ok(bytes) => {
-                        let events = parser.feed(&bytes);
-                        for event in events {
-                            yield event;
-                        }
-                    }
-                    Err(e) => {
-                        yield Err(DysonError::Http(e));
-                    }
-                }
-            }
-        };
+        let event_stream = crate::llm::sse_event_stream(response, OpenAiSseParser::new());
 
         Ok(crate::llm::StreamResponse {
-            stream: Box::pin(event_stream),
+            stream: event_stream,
             tool_mode: crate::llm::ToolMode::Execute,
             input_tokens: None,
         })
@@ -403,7 +382,9 @@ impl OpenAiSseParser {
             completed: false,
         }
     }
+}
 
+impl crate::llm::SseStreamParser for OpenAiSseParser {
     fn feed(&mut self, bytes: &[u8]) -> Vec<Result<StreamEvent>> {
         let mut events = Vec::new();
 
@@ -441,7 +422,9 @@ impl OpenAiSseParser {
 
         events
     }
+}
 
+impl OpenAiSseParser {
     /// Parse a single OpenAI SSE chunk.
     ///
     /// OpenAI chunks have this structure:
@@ -595,6 +578,7 @@ impl OpenAiSseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::SseStreamParser;
 
     fn parse_sse(lines: &str) -> Vec<Result<StreamEvent>> {
         let mut parser = OpenAiSseParser::new();

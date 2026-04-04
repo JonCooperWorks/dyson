@@ -38,42 +38,42 @@ impl Tool for KbStatusTool {
             .as_ref()
             .ok_or_else(|| DysonError::tool("kb_status", "no workspace configured"))?;
 
-        let ws = ws.read().await;
-        let files = ws.list_files();
+        // Collect data under the lock, then format outside it.
+        let (raw_files, raw_bytes, wiki_files, wiki_bytes, has_index) = {
+            let ws = ws.read().await;
+            let files = ws.list_files();
 
-        let mut raw_count = 0u32;
-        let mut raw_bytes = 0usize;
-        let mut wiki_count = 0u32;
-        let mut wiki_bytes = 0usize;
-        let mut raw_files: Vec<String> = Vec::new();
-        let mut wiki_files: Vec<String> = Vec::new();
+            let mut raw_bytes = 0usize;
+            let mut wiki_bytes = 0usize;
+            let mut raw_files: Vec<String> = Vec::new();
+            let mut wiki_files: Vec<String> = Vec::new();
 
-        for name in &files {
-            if let Some(content) = ws.get(name) {
-                if name.starts_with("kb/raw/") {
-                    raw_count += 1;
-                    raw_bytes += content.len();
-                    raw_files.push(name.clone());
-                } else if name.starts_with("kb/wiki/") {
-                    wiki_count += 1;
-                    wiki_bytes += content.len();
-                    wiki_files.push(name.clone());
+            for name in &files {
+                if let Some(content) = ws.get(name) {
+                    if name.starts_with("kb/raw/") {
+                        raw_bytes += content.len();
+                        raw_files.push(name.clone());
+                    } else if name.starts_with("kb/wiki/") {
+                        wiki_bytes += content.len();
+                        wiki_files.push(name.clone());
+                    }
                 }
             }
-        }
 
-        let has_index = ws.get("kb/INDEX.md").is_some();
+            let has_index = ws.get("kb/INDEX.md").is_some();
+            (raw_files, raw_bytes, wiki_files, wiki_bytes, has_index)
+        };
 
         let mut output = String::from("## Knowledge Base Status\n\n");
 
         output.push_str(&format!(
             "- **Raw sources:** {} file(s), {}\n",
-            raw_count,
+            raw_files.len(),
             format_bytes(raw_bytes)
         ));
         output.push_str(&format!(
             "- **Wiki articles:** {} file(s), {}\n",
-            wiki_count,
+            wiki_files.len(),
             format_bytes(wiki_bytes)
         ));
         output.push_str(&format!(
@@ -95,7 +95,7 @@ impl Tool for KbStatusTool {
             }
         }
 
-        if raw_count == 0 && wiki_count == 0 {
+        if raw_files.is_empty() && wiki_files.is_empty() {
             output.push_str(
                 "\nThe knowledge base is empty. Use `workspace_update` to add files \
                  under `kb/raw/` (source material) or `kb/wiki/` (articles).",

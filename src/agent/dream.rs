@@ -162,6 +162,7 @@ pub trait Dream: Send + Sync {
 /// The runner never awaits dream completion — it spawns and moves on.
 /// This is the enforcement point for the "never block the controller loop"
 /// contract.
+#[derive(Default)]
 pub struct DreamRunner {
     dreams: Vec<Arc<dyn Dream>>,
 }
@@ -169,9 +170,7 @@ pub struct DreamRunner {
 impl DreamRunner {
     /// Create a runner with no dreams registered.
     pub fn new() -> Self {
-        Self {
-            dreams: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Register a dream.

@@ -67,6 +67,7 @@ pub struct RecordedEvent {
 
 /// A structured, reusable `Output` implementation that captures every event
 /// into a timestamped log.
+#[derive(Default)]
 pub struct RecordingOutput {
     events: Vec<RecordedEvent>,
 }
@@ -74,7 +75,7 @@ pub struct RecordingOutput {
 impl RecordingOutput {
     /// Create a new, empty recording.
     pub fn new() -> Self {
-        Self { events: Vec::new() }
+        Self::default()
     }
 
     /// Borrow the full event log.

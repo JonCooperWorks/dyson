@@ -10,10 +10,11 @@
 //   tool runs, the sandbox can inspect and mutate the output.
 //
 // Module layout:
-//   mod.rs         — Sandbox trait, SandboxDecision (this file)
-//   no_sandbox.rs  — DangerousNoSandbox (passthrough, no restrictions)
-//   os.rs          — OsSandbox (macOS Seatbelt / Linux bubblewrap)
-//   composite.rs   — CompositeSandbox (chain multiple sandboxes)
+//   mod.rs            — Sandbox trait, SandboxDecision (this file)
+//   no_sandbox.rs     — DangerousNoSandbox (passthrough, no restrictions)
+//   os.rs             — OS command builders (Linux bwrap / macOS Apple Containers)
+//   policy.rs         — SandboxPolicy types and PolicyTable
+//   policy_sandbox.rs — PolicySandbox (the main sandbox implementation)
 //
 // Why a trait and not middleware?
 //   The sandbox needs to make *semantic* decisions about tool calls.  It's
@@ -33,22 +34,11 @@
 //     ├── Deny { reason }     → ToolOutput::error(reason) back to LLM
 //     └── Redirect { name, input } → different_tool.run(...) → sandbox.after(...)
 //
-// Future sandbox implementations:
-//
-//   BlacklistSandbox   — denies specific tools or command patterns
-//   S3Sandbox          — redirects file read/write to S3 paths instead
-//                         of the host filesystem
-//   AuditSandbox       — allows everything but logs all calls to a file
-//   CompositeSandbox   — chains multiple sandboxes; first Deny wins,
-//                         Redirects compose, Allow is the default
-//
-// The Redirect variant is the key innovation.  It doesn't just block
-// things — it can transparently reroute tool calls to different
-// implementations.  The LLM says "read_file" thinking it's local, but
-// the sandbox quietly sends it to S3.  The LLM doesn't know or care.
+// The Redirect variant enables transparent rerouting — the LLM says
+// "read_file" thinking it's local, but the sandbox quietly sends it
+// to S3.  The LLM doesn't know or care.
 // ===========================================================================
 
-pub mod composite;
 pub mod no_sandbox;
 pub mod os;
 pub mod policy;
@@ -170,20 +160,14 @@ pub trait Sandbox: Send + Sync {
 // Sandbox factory — build from config + CLI flags.
 // ---------------------------------------------------------------------------
 
-/// Build the sandbox from config.
-///
-/// If `dangerous_no_sandbox` is true (from CLI flag), returns
-/// `DangerousNoSandbox` regardless of config.  This is the only way to
-/// disable all sandboxes — it cannot be done from config.
-///
-/// Otherwise, builds a `CompositeSandbox` with all non-disabled sandboxes.
-/// If the composite has no sandboxes (all disabled via config), it still
-/// functions — it just allows everything (like an empty pipeline).
 /// Build the sandbox from config, returning an `Arc` for shared ownership.
 ///
+/// If `dangerous_no_sandbox` is true (from CLI flag), returns
+/// `DangerousNoSandbox` regardless of config.  Otherwise returns a
+/// `PolicySandbox` that enforces per-tool capability policies.
+///
 /// The `Arc` wrapper enables subagents to share the parent's sandbox without
-/// cloning the entire sandbox tree.  This ensures child agents inherit the
-/// same security policy as their parent.
+/// cloning the entire sandbox tree.
 pub fn create_sandbox(
     config: &crate::config::SandboxConfig,
     dangerous_no_sandbox: bool,
@@ -193,39 +177,21 @@ pub fn create_sandbox(
         return std::sync::Arc::new(no_sandbox::DangerousNoSandbox);
     }
 
-    let disabled = &config.disabled;
-    let mut sandboxes: Vec<Box<dyn Sandbox>> = Vec::new();
-
-    // Policy sandbox — per-tool capability enforcement.
-    //
-    // This subsumes OsSandbox: it handles both application-level checks
-    // (for Rust-native tools like read_file, web_search) AND OS-level
-    // sandboxing (for bash via bwrap/seatbelt).
-    //
-    // Each tool gets a SandboxPolicy expressing what it can do (network,
-    // file_read, file_write, process_exec).  The enforcement translates
-    // intent into platform-specific mechanisms.
-    if !disabled.iter().any(|s| s == "os") {
-        let working_dir =
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-
-        tracing::info!(
-            tool_policies = config.tool_policies.len(),
-            "policy sandbox enabled"
-        );
-        sandboxes.push(Box::new(policy_sandbox::PolicySandbox::new(
-            &config.tool_policies,
-            &working_dir,
-        )));
-    } else {
-        tracing::info!("OS sandbox disabled via config");
+    if config.disabled.iter().any(|s| s == "os") {
+        tracing::info!("sandbox disabled via config");
+        return std::sync::Arc::new(no_sandbox::DangerousNoSandbox);
     }
 
-    // Future sandboxes go here:
-    // if !disabled.contains("audit") { ... }
-    // if !disabled.contains("ratelimit") { ... }
+    let working_dir =
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
 
-    tracing::info!(count = sandboxes.len(), "sandbox pipeline built");
+    tracing::info!(
+        tool_policies = config.tool_policies.len(),
+        "policy sandbox enabled"
+    );
 
-    std::sync::Arc::new(composite::CompositeSandbox::new(sandboxes))
+    std::sync::Arc::new(policy_sandbox::PolicySandbox::new(
+        &config.tool_policies,
+        &working_dir,
+    ))
 }

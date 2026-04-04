@@ -48,7 +48,7 @@ use futures::Stream;
 
 use std::fmt::Write as _;
 
-use crate::error::Result;
+use crate::error::{DysonError, Result};
 use crate::llm::stream::StreamEvent;
 use crate::message::{ContentBlock, Message, Role};
 
@@ -427,11 +427,10 @@ impl SseLineBuffer {
                 });
 
             // Skip empty lines, comments, and event: lines.
-            if !(line.is_empty() || line.starts_with(':') || line.starts_with("event:")) {
-                if let Some(data) = line.strip_prefix("data:") {
-                    let data = data.trim();
-                    payloads.push(data.to_string());
-                }
+            if !(line.is_empty() || line.starts_with(':') || line.starts_with("event:"))
+                && let Some(data) = line.strip_prefix("data:")
+            {
+                payloads.push(data.trim().to_string());
             }
 
             // Drain the line including the newline byte.
@@ -440,6 +439,47 @@ impl SseLineBuffer {
 
         Ok(payloads)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared SSE stream creation — deduplicates streaming logic across providers.
+// ---------------------------------------------------------------------------
+
+/// Trait for SSE parsers that can consume raw bytes and produce stream events.
+///
+/// Both `SseParser` (Anthropic) and `OpenAiSseParser` implement this,
+/// enabling shared stream creation via [`sse_event_stream`].
+pub(crate) trait SseStreamParser {
+    fn feed(&mut self, bytes: &[u8]) -> Vec<Result<StreamEvent>>;
+}
+
+/// Create a stream of `StreamEvent`s from an HTTP byte stream and an SSE parser.
+///
+/// This is the shared streaming core for all SSE-based LLM providers.
+/// Each provider creates its own parser type, but the streaming boilerplate
+/// (byte buffering, error mapping, event yielding) is identical.
+pub(crate) fn sse_event_stream<P: SseStreamParser + Send + 'static>(
+    response: reqwest::Response,
+    mut parser: P,
+) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
+    Box::pin(async_stream::stream! {
+        use tokio_stream::StreamExt as _;
+        let byte_stream = response.bytes_stream();
+        tokio::pin!(byte_stream);
+
+        while let Some(chunk_result) = byte_stream.next().await {
+            match chunk_result {
+                Ok(bytes) => {
+                    for event in parser.feed(&bytes) {
+                        yield event;
+                    }
+                }
+                Err(e) => {
+                    yield Err(DysonError::Http(e));
+                }
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------

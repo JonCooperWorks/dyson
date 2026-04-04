@@ -71,32 +71,32 @@ pub fn format_tools_for_prompt(tools: &[ToolDefinition]) -> String {
         prompt.push_str(&format!("\n## {}\n", tool.name));
         prompt.push_str(&format!("{}\n", tool.description));
 
-        if let Some(props) = tool.input_schema.get("properties") {
-            if let Some(obj) = props.as_object() {
-                let required: Vec<&str> = tool
-                    .input_schema
-                    .get("required")
-                    .and_then(|r| r.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-                    .unwrap_or_default();
+        if let Some(props) = tool.input_schema.get("properties")
+            && let Some(obj) = props.as_object()
+        {
+            let required: Vec<&str> = tool
+                .input_schema
+                .get("required")
+                .and_then(|r| r.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
 
-                prompt.push_str("Parameters:\n");
-                for (name, schema) in obj {
-                    let typ = schema
-                        .get("type")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("string");
-                    let desc = schema
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("");
-                    let req = if required.contains(&name.as_str()) {
-                        " (required)"
-                    } else {
-                        " (optional)"
-                    };
-                    prompt.push_str(&format!("  - {name}: {typ}{req} — {desc}\n"));
-                }
+            prompt.push_str("Parameters:\n");
+            for (name, schema) in obj {
+                let typ = schema
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("string");
+                let desc = schema
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
+                let req = if required.contains(&name.as_str()) {
+                    " (required)"
+                } else {
+                    " (optional)"
+                };
+                prompt.push_str(&format!("  - {name}: {typ}{req} — {desc}\n"));
             }
         }
     }
@@ -166,10 +166,10 @@ pub fn extract_gemma_tool_calls(text: &str) -> Option<(String, Vec<ExtractedTool
 ///   - FunctionGemma `<escape>value<escape>` wrapper
 fn parse_gemma_params(s: &str) -> serde_json::Value {
     // Try parsing as JSON directly — some Gemma variants emit JSON.
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&format!("{{{s}}}")) {
-        if v.is_object() {
-            return v;
-        }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&format!("{{{s}}}"))
+        && v.is_object()
+    {
+        return v;
     }
 
     let mut map = serde_json::Map::new();
@@ -210,30 +210,30 @@ fn extract_value(s: &str) -> (String, &str) {
     let s = s.trim_start();
 
     // FunctionGemma <escape> wrappers.
-    if let Some(inner) = s.strip_prefix("<escape>") {
-        if let Some(end) = inner.find("<escape>") {
-            let value = inner[..end].to_string();
-            let rest = &inner[end + "<escape>".len()..];
-            return (value, rest);
-        }
+    if let Some(inner) = s.strip_prefix("<escape>")
+        && let Some(end) = inner.find("<escape>")
+    {
+        let value = inner[..end].to_string();
+        let rest = &inner[end + "<escape>".len()..];
+        return (value, rest);
     }
 
     // Single-quoted.
-    if s.starts_with('\'') {
-        if let Some(end) = s[1..].find('\'') {
-            let value = s[1..1 + end].to_string();
-            let rest = &s[2 + end..];
-            return (value, rest);
-        }
+    if let Some(inner) = s.strip_prefix('\'')
+        && let Some(end) = inner.find('\'')
+    {
+        let value = inner[..end].to_string();
+        let rest = &inner[1 + end..];
+        return (value, rest);
     }
 
     // Double-quoted.
-    if s.starts_with('"') {
-        if let Some(end) = s[1..].find('"') {
-            let value = s[1..1 + end].to_string();
-            let rest = &s[2 + end..];
-            return (value, rest);
-        }
+    if let Some(inner) = s.strip_prefix('"')
+        && let Some(end) = inner.find('"')
+    {
+        let value = inner[..end].to_string();
+        let rest = &inner[1 + end..];
+        return (value, rest);
     }
 
     // Bare value — terminated by comma or end of string.

@@ -142,8 +142,8 @@ impl HotReloader {
         // cloning every PathBuf on each check.
         let current_mtimes: HashMap<PathBuf, Option<SystemTime>> = self
             .watched
-            .iter()
-            .map(|(p, _)| (p.clone(), Self::get_mtime(p)))
+            .keys()
+            .map(|p| (p.clone(), Self::get_mtime(p)))
             .collect();
 
         // Check if anything differs from our last-committed state.
@@ -219,9 +219,10 @@ impl HotReloader {
         current_mtimes: &HashMap<PathBuf, Option<SystemTime>>,
     ) -> Result<(bool, Option<Settings>)> {
         // Check if the config file specifically changed (not just workspace files).
-        let config_changed = self.config_path.as_ref().map_or(false, |p| {
-            current_mtimes.get(p) != self.watched.get(p)
-        });
+        let config_changed = self
+            .config_path
+            .as_ref()
+            .is_some_and(|p| current_mtimes.get(p) != self.watched.get(p));
 
         // Log which files changed.
         for (path, last_mtime) in &self.watched {
@@ -241,13 +242,13 @@ impl HotReloader {
 
         // Only reload settings when the config file itself changed.
         let mut new_settings = None;
-        if config_changed {
-            if let Some(ref config_path) = self.config_path {
-                match crate::config::loader::load_settings(Some(config_path)) {
-                    Ok(s) => new_settings = Some(s),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "config reload failed — keeping old");
-                    }
+        if config_changed
+            && let Some(ref config_path) = self.config_path
+        {
+            match crate::config::loader::load_settings(Some(config_path)) {
+                Ok(s) => new_settings = Some(s),
+                Err(e) => {
+                    tracing::warn!(error = %e, "config reload failed — keeping old");
                 }
             }
         }
