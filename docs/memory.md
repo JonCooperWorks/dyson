@@ -55,6 +55,10 @@ included in the system prompt for session continuity.
 │   ├── 2026-03-19.md    yesterday's journal       (Tier 3)
 │   └── notes/           overflow storage           (Tier 2)
 │       └── *.md
+├── kb/
+│   ├── INDEX.md         navigation index         (in system prompt)
+│   ├── raw/             source material           (FTS5 indexed)
+│   └── wiki/            curated articles           (FTS5 indexed)
 ├── skills/              local skill files (auto-discovered)
 │   └── *.md             SKILL.md format with frontmatter
 └── memory.db            SQLite FTS5 index
@@ -72,6 +76,7 @@ Workspaces are versioned via `.workspace_version` (missing = version 0). Migrati
 | Version | Description |
 |---------|-------------|
 | 0 → 1 | Create `memory/notes/` directory for Tier 2 overflow |
+| 2 → 3 | Create `kb/` directory structure for knowledge base |
 
 To add a migration: bump `CURRENT_WORKSPACE_VERSION` in `src/workspace/migrate.rs` and add a `Migration` to `migrations()`.
 
@@ -193,6 +198,8 @@ reassembly, and orphaned tool pair repair.  See
 | MemoryConfig | `src/config/mod.rs` |
 | Nudge injection | `src/agent/mod.rs` |
 | memory_search tool | `src/tool/memory_search.rs` |
+| KbSearchTool | `src/tool/kb_search.rs` |
+| KbStatusTool | `src/tool/kb_status.rs` |
 | workspace_update tool | `src/tool/workspace_update.rs` |
 
 ---
@@ -207,5 +214,6 @@ is also compatible with the OpenClaw/TARS format used by Hermes.
 
 ---
 
-See also: [Architecture Overview](architecture-overview.md) ·
+See also: [Knowledge Base](knowledge-base.md) ·
+[Architecture Overview](architecture-overview.md) ·
 [Tools & Skills](tools-and-skills.md) · [Configuration](configuration.md)

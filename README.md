@@ -179,6 +179,7 @@ Every file has extensive annotations in the style of [rLLM](https://github.com/j
 | [Configuration](docs/configuration.md) | dyson.json format, provider selection |
 | [Adding a Provider](docs/adding-a-provider.md) | 3-step process to add a new LLM provider |
 | [Memory](docs/memory.md) | Tiered memory system, FTS5 search, journals |
+| [Knowledge Base](docs/knowledge-base.md) | Document storage, FTS5 search, kb/raw + kb/wiki, INDEX.md |
 | [Chat Persistence](docs/chat-persistence.md) | ChatHistory trait, per-chat agents |
 | [Tool Forwarding over MCP](docs/tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth |
 | [Subagents](docs/subagents.md) | Child agents with different models, tool inheritance, delegation |

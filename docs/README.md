@@ -12,6 +12,7 @@ overview, then dive into the component that interests you.
 | [Tool Execution Pipeline](tool-execution-pipeline.md) | Rate limiting, dependency analysis, result formatting, lifecycle hooks |
 | [Sandbox](sandbox.md) | OS sandbox (Seatbelt/bubblewrap), Allow/Deny/Redirect, composition, MCP result sandboxing |
 | [Memory](memory.md) | Tiered memory (always-in-context, FTS5 search, journals), nudges, character limits |
+| [Knowledge Base](knowledge-base.md) | Document storage + FTS5 search: kb/raw (source material), kb/wiki (articles), INDEX.md (system prompt index) |
 | [Chat Persistence](chat-persistence.md) | ChatHistory trait, per-chat agents, `/clear` and `/memory` commands |
 | [Configuration](configuration.md) | dyson.json format, provider selection, skill config, env var resolution |
 | [Secrets](secrets.md) | Per-secret scheme routing, InsecureEnvironmentVariable, zeroize, adding resolvers |
@@ -44,6 +45,8 @@ src/
     workspace_search.rs   Search workspace files by pattern
     workspace_update.rs   Write/append workspace files
     memory_search.rs      FTS5 memory search
+    kb_search.rs          FTS5 knowledge base search (scope: all/raw/wiki)
+    kb_status.rs          Knowledge base statistics and file listing
     web_search.rs         Web search (Brave, SearXNG)
     load_skill.rs         On-demand skill loading
     skill_create.rs       Create/update/improve skills
