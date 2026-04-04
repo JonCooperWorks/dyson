@@ -747,7 +747,10 @@ impl super::Controller for TelegramController {
 
                     if let Err(e) = result {
                         tracing::error!(error = %e, "agent run failed");
-                        // Error already rendered to user via on_llm_error hook.
+                        // Try to notify the user.  on_llm_error only fires for
+                        // LLM-level errors; tool execution / sandbox / output
+                        // errors propagate here without any user-visible message.
+                        let _ = output.error(&e);
                     }
 
                     // Persist conversation history to disk after each turn.
