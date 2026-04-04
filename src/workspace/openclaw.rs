@@ -72,20 +72,14 @@ impl OpenClawWorkspace {
     /// Reads all .md files in the root and the memory/ subdirectory.
     pub fn load(path: &Path, memory_config: MemoryConfig) -> Result<Self> {
         // Create the directory structure if it doesn't exist.
-        std::fs::create_dir_all(path).map_err(|e| {
-            DysonError::Config(format!(
-                "cannot create workspace dir {}: {e}",
-                path.display()
-            ))
-        })?;
-        std::fs::create_dir_all(path.join("memory"))
-            .map_err(|e| DysonError::Config(format!("cannot create memory dir: {e}")))?;
-        std::fs::create_dir_all(path.join("skills"))
-            .map_err(|e| DysonError::Config(format!("cannot create skills dir: {e}")))?;
-        std::fs::create_dir_all(path.join("kb/raw"))
-            .map_err(|e| DysonError::Config(format!("cannot create kb/raw dir: {e}")))?;
-        std::fs::create_dir_all(path.join("kb/wiki"))
-            .map_err(|e| DysonError::Config(format!("cannot create kb/wiki dir: {e}")))?;
+        for subdir in ["", "memory", "skills", "kb/raw", "kb/wiki"] {
+            std::fs::create_dir_all(path.join(subdir)).map_err(|e| {
+                DysonError::Config(format!(
+                    "cannot create {}: {e}",
+                    path.join(subdir).display()
+                ))
+            })?;
+        }
 
         // Run workspace migrations before reading files.
         let migrated = crate::workspace::migrate::migrate(path)?;
@@ -220,8 +214,8 @@ impl OpenClawWorkspace {
 
     /// Create default files if they don't exist.
     fn ensure_defaults(&mut self) -> Result<()> {
-        if !self.files.contains_key("SOUL.md") {
-            let default = "\
+        let defaults: &[(&str, &str)] = &[
+            ("SOUL.md", "\
 # SOUL.md — Who You Are
 
 Be genuinely helpful, not performatively helpful. Skip the filler words — just help.
@@ -255,13 +249,8 @@ You operate in a security-conscious environment. When examining systems:
 - Default to least privilege — don't suggest disabling security controls.
 
 Update this file as you learn who you are.
-";
-            self.files.insert("SOUL.md".into(), default.into());
-            std::fs::write(self.path.join("SOUL.md"), default)?;
-        }
-
-        if !self.files.contains_key("IDENTITY.md") {
-            let default = "\
+"),
+            ("IDENTITY.md", "\
 # IDENTITY.md — Who Am I?
 
 - **Name:** Dyson
@@ -269,13 +258,8 @@ Update this file as you learn who you are.
 - **Powered by:** Dyson agent framework
 
 Update this file with your specific identity, capabilities, and context.
-";
-            self.files.insert("IDENTITY.md".into(), default.into());
-            std::fs::write(self.path.join("IDENTITY.md"), default)?;
-        }
-
-        if !self.files.contains_key("AGENTS.md") {
-            let default = "\
+"),
+            ("AGENTS.md", "\
 # AGENTS.md — Operating Procedures
 
 ## Every Session
@@ -293,40 +277,30 @@ You wake up fresh each session. These files are your continuity:
 - **Long-term:** MEMORY.md — curated memories
 
 Capture what matters. Decisions, context, things to remember.
-";
-            self.files.insert("AGENTS.md".into(), default.into());
-            std::fs::write(self.path.join("AGENTS.md"), default)?;
-        }
-
-        if !self.files.contains_key("MEMORY.md") {
-            let default = "\
+"),
+            ("MEMORY.md", "\
 # MEMORY.md — Long-Term Memory
 
 *Nothing here yet. Update this file as you learn things worth remembering.*
-";
-            self.files.insert("MEMORY.md".into(), default.into());
-            std::fs::write(self.path.join("MEMORY.md"), default)?;
-        }
-
-        if !self.files.contains_key("USER.md") {
-            let default = "\
+"),
+            ("USER.md", "\
 # USER.md — User Profile
 
 *Nothing here yet. Update this file as you learn about the user.*
-";
-            self.files.insert("USER.md".into(), default.into());
-            std::fs::write(self.path.join("USER.md"), default)?;
-        }
-
-        if !self.files.contains_key("HEARTBEAT.md") {
-            let default = "\
+"),
+            ("HEARTBEAT.md", "\
 # HEARTBEAT.md
 
 # Keep this file empty to skip heartbeat tasks.
 # Add tasks below when you want the agent to check something periodically.
-";
-            self.files.insert("HEARTBEAT.md".into(), default.into());
-            std::fs::write(self.path.join("HEARTBEAT.md"), default)?;
+"),
+        ];
+
+        for (name, content) in defaults {
+            if !self.files.contains_key(*name) {
+                self.files.insert((*name).into(), (*content).into());
+                std::fs::write(self.path.join(name), content)?;
+            }
         }
 
         Ok(())

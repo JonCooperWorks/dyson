@@ -9,28 +9,33 @@
 /// for the conversation history and system prompt.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 100 * 1024;
 
+/// Truncate a string to at most `max_bytes`, snapping to a UTF-8 char boundary.
+///
+/// Returns the longest prefix of `s` that is at most `max_bytes` and ends on
+/// a valid char boundary.  Returns `s` unchanged if it's already short enough.
+pub(crate) fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Truncate output to [`MAX_OUTPUT_BYTES`], appending a notice if truncated.
 ///
 /// Returns a `Cow::Borrowed` when no truncation is needed (the common case),
 /// avoiding a heap allocation.  Only allocates when the output exceeds the
 /// limit and needs the truncation notice appended.
-///
-/// We truncate on a UTF-8 char boundary to avoid producing invalid strings.
-/// The notice tells the LLM how much was cut so it can request specific
-/// portions if needed.
 pub(crate) fn truncate_output(output: &str) -> std::borrow::Cow<'_, str> {
     if output.len() <= MAX_OUTPUT_BYTES {
         return std::borrow::Cow::Borrowed(output);
     }
 
-    // Find the last valid char boundary at or before MAX_OUTPUT_BYTES.
-    let mut end = MAX_OUTPUT_BYTES;
-    while !output.is_char_boundary(end) && end > 0 {
-        end -= 1;
-    }
-
-    let truncated = &output[..end];
-    let remaining = output.len() - end;
+    let truncated = truncate_to_char_boundary(output, MAX_OUTPUT_BYTES);
+    let remaining = output.len() - truncated.len();
     std::borrow::Cow::Owned(format!(
         "{truncated}\n\n... (output truncated — {remaining} bytes omitted, \
          total was {} bytes)",

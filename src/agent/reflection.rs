@@ -135,17 +135,7 @@ async fn run_mini_loop(
 // Conversation summariser — shared by all dreams
 // ---------------------------------------------------------------------------
 
-/// Truncate a string to at most `max_bytes`, snapping to a char boundary.
-fn truncate_str(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
+use crate::util::truncate_to_char_boundary as truncate_str;
 
 /// Summarize a conversation for dream consumption.
 ///
