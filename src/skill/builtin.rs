@@ -71,12 +71,19 @@ pub struct BuiltinSkill {
 }
 
 impl BuiltinSkill {
-    /// Create a new BuiltinSkill with all default tools.
+    /// Create a new BuiltinSkill with all default tools, optionally
+    /// filtered to only the named tools.
+    ///
+    /// When `filter` is non-empty, only tools whose names appear in the
+    /// list are included.  When empty, all tools are included.
     ///
     /// When `web_search_config` is `Some`, the `web_search` tool is
     /// registered with the configured search provider.  When `None`,
     /// the tool is simply absent.
-    pub fn new(web_search_config: Option<&crate::config::WebSearchConfig>) -> Self {
+    pub fn new_filtered(
+        web_search_config: Option<&crate::config::WebSearchConfig>,
+        filter: &[String],
+    ) -> Self {
         let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(BashTool::default()),
             Arc::new(ReadFileTool),
@@ -108,6 +115,11 @@ impl BuiltinSkill {
             }
         }
 
+        // Apply tool filter if specified.
+        if !filter.is_empty() {
+            tools.retain(|t| filter.iter().any(|name| name == t.name()));
+        }
+
         // Build the system prompt dynamically from the loaded tools.
         let tool_list: Vec<String> = tools
             .iter()
@@ -126,6 +138,13 @@ impl BuiltinSkill {
             tools,
             system_prompt,
         }
+    }
+}
+
+impl BuiltinSkill {
+    /// Create a new BuiltinSkill with all default tools (no filter).
+    pub fn new(web_search_config: Option<&crate::config::WebSearchConfig>) -> Self {
+        Self::new_filtered(web_search_config, &[])
     }
 }
 
@@ -204,6 +223,23 @@ mod tests {
         assert_eq!(tools[11].name(), "load_skill");
         assert_eq!(tools[12].name(), "kb_search");
         assert_eq!(tools[13].name(), "kb_status");
+    }
+
+    #[test]
+    fn filter_restricts_tools() {
+        let skill = BuiltinSkill::new_filtered(
+            None,
+            &["bash".to_string(), "read_file".to_string()],
+        );
+        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
+        assert_eq!(names, vec!["bash", "read_file"]);
+    }
+
+    #[test]
+    fn empty_filter_includes_all() {
+        let all = BuiltinSkill::new(None);
+        let filtered = BuiltinSkill::new_filtered(None, &[]);
+        assert_eq!(all.tools().len(), filtered.tools().len());
     }
 
     #[test]
