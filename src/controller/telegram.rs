@@ -451,8 +451,14 @@ impl super::Controller for TelegramController {
                 let chat_id = msg.chat.id;
 
                 // /whoami — respond immediately, no LLM needed.
-                if text == "/whoami" {
+                if is_public_command(&text) {
                     let _ = bot.send_message(chat_id, chat_id.0.to_string()).await;
+                    continue;
+                }
+
+                // Access control — only public commands bypass this.
+                if !allowed_ids.is_empty() && !allowed_ids.contains(&chat_id.0) {
+                    tracing::warn!(chat_id = chat_id.0, "unauthorized chat — ignoring");
                     continue;
                 }
 
@@ -486,12 +492,6 @@ impl super::Controller for TelegramController {
                                 .await;
                         }
                     }
-                    continue;
-                }
-
-                // Access control.
-                if !allowed_ids.is_empty() && !allowed_ids.contains(&chat_id.0) {
-                    tracing::warn!(chat_id = chat_id.0, "unauthorized chat — ignoring");
                     continue;
                 }
 
@@ -1511,6 +1511,13 @@ fn convert_pattern(s: &str, marker: &str, open: &str, close: &str) -> String {
     out
 }
 
+/// Returns `true` for commands that may be executed without passing the
+/// `allowed_chat_ids` access-control check.  Every other command requires
+/// the caller to be in the allow-list.
+fn is_public_command(text: &str) -> bool {
+    text == "/whoami"
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1731,5 +1738,27 @@ mod tests {
         assert!(matches!(classify_llm_error("rate limit exceeded"), LlmErrorKind::Other));
         assert!(matches!(classify_llm_error("invalid API key"), LlmErrorKind::Other));
         assert!(matches!(classify_llm_error("context length exceeded"), LlmErrorKind::Other));
+    }
+
+    // -- is_public_command tests --
+
+    #[test]
+    fn whoami_is_public() {
+        assert!(is_public_command("/whoami"));
+    }
+
+    #[test]
+    fn logs_requires_auth() {
+        assert!(!is_public_command("/logs"));
+        assert!(!is_public_command("/logs 50"));
+    }
+
+    #[test]
+    fn other_commands_require_auth() {
+        assert!(!is_public_command("/memory note"));
+        assert!(!is_public_command("/clear"));
+        assert!(!is_public_command("/compact"));
+        assert!(!is_public_command("/model provider"));
+        assert!(!is_public_command("/models"));
     }
 }
