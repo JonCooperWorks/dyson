@@ -870,12 +870,8 @@ impl Agent {
             && self.turn_count > self.nudge_interval
             && self.turn_count.is_multiple_of(self.nudge_interval * 2)
             && self.tool_context.workspace.is_some()
-            && let Err(e) = self.self_improve(output).await
         {
-            tracing::warn!(
-                error = %e,
-                "self-improvement reflection failed — continuing normally"
-            );
+            self.spawn_self_improve();
         }
 
         output.flush()?;

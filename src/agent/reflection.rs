@@ -12,7 +12,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::controller::Output;
 use crate::error::Result;
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use crate::message::{ContentBlock, Message};
@@ -133,232 +132,38 @@ impl super::Agent {
         )
     }
 
-    /// Run a side-channel self-improvement reflection.
+    /// Spawn self-improvement reflection as a background task.
     ///
-    /// Makes a separate LLM call with a focused system prompt and only
-    /// the `skill_create` and `export_conversation` tools.  The LLM
-    /// reviews the conversation and decides whether to:
-    ///
-    /// - Create a new skill from a complex task it just solved
-    /// - Improve an existing skill based on what it learned
-    /// - Export the conversation as training data
-    /// - Do nothing (if the conversation was trivial)
-    pub(super) async fn self_improve(&mut self, output: &mut dyn Output) -> Result<()> {
-        tracing::info!(
-            turn_count = self.turn_count,
-            messages = self.messages.len(),
-            "running self-improvement reflection"
-        );
-
-        // Log to the user that reflection is happening.
-        tracing::info!("\n\n[Self-improvement: reflecting on conversation...]\n");
-
-        // Build a condensed view of the conversation for the reflection.
-        let reflection_system = Self::build_reflection_system_prompt(&self.tool_context).await;
-
-        // Self-improvement tools are NOT part of the agent's normal tool set.
-        let skill_create_tool: Arc<dyn Tool> = Arc::new(crate::tool::skill_create::SkillCreateTool);
-        let export_tool: Arc<dyn Tool> =
-            Arc::new(crate::tool::export_conversation::ExportConversationTool);
-
-        let reflection_tool_map: HashMap<String, Arc<dyn Tool>> = HashMap::from([
-            (
-                skill_create_tool.name().to_string(),
-                Arc::clone(&skill_create_tool),
-            ),
-            (export_tool.name().to_string(), Arc::clone(&export_tool)),
-        ]);
-
-        let reflection_tools: Vec<ToolDefinition> = [&skill_create_tool, &export_tool]
-            .iter()
-            .map(|t| ToolDefinition {
-                name: t.name().to_string(),
-                description: t.description().to_string(),
-                input_schema: t.input_schema(),
-                agent_only: false,
-            })
-            .collect();
-
-        // Build the reflection messages: a condensed summary of what happened.
-        let summary = Self::summarize_for_reflection(&self.messages);
-        tracing::debug!(summary_len = summary.len(), "built reflection summary");
-
-        let reflection_messages = vec![Message::user(&summary)];
-
-        // LLM call with tool loop — if it wants to use tools, run them.
-        // Cap at 3 iterations to prevent runaway loops.
-        let mut messages = reflection_messages;
-        let mut actions_taken = 0usize;
-
-        for iteration in 0..3u8 {
-            tracing::info!(iteration = iteration, "self-improvement LLM call");
-
-            let response = match self
-                .client
-                .access()?
-                .stream(
-                    &messages,
-                    &reflection_system,
-                    &reflection_tools,
-                    &self.config,
-                )
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(error = %e, "self-improvement LLM call failed");
-                    return Ok(()); // non-fatal
-                }
-            };
-
-            // Process stream silently — we only care about tool calls.
-            let mut silent_output = SilentOutput;
-            let (assistant_msg, tool_calls, _tokens) =
-                stream_handler::process_stream(response.stream, &mut silent_output).await?;
-
-            // Log what the model said (for debugging), even though we don't
-            // show it to the user.
-            for block in &assistant_msg.content {
-                if let ContentBlock::Text { text } = block
-                    && !text.trim().is_empty()
-                {
-                    tracing::info!(reasoning = text.as_str(), "self-improvement reasoning");
-                }
-            }
-
-            messages.push(assistant_msg);
-
-            if tool_calls.is_empty() {
-                tracing::info!("self-improvement: model decided no action needed");
-                break;
-            }
-
-            // Execute the tool calls directly against the reflection-only tools.
-            for call in &tool_calls {
-                tracing::info!(tool = call.name.as_str(), "self-improvement executing tool");
-
-                let tool = match reflection_tool_map.get(&call.name) {
-                    Some(t) => Arc::clone(t),
-                    None => {
-                        tracing::warn!(
-                            tool = call.name.as_str(),
-                            "self-improvement: LLM called unknown tool"
-                        );
-                        messages.push(Message::tool_result(
-                            &call.id,
-                            &format!("unknown tool '{}'", call.name),
-                            true,
-                        ));
-                        continue;
-                    }
-                };
-
-                let tool_start = std::time::Instant::now();
-                let result = tool.run(&call.input, &self.tool_context).await;
-                let tool_ms = tool_start.elapsed().as_millis();
-
-                let tool_result_msg = match result {
-                    Ok(ref tool_output) => {
-                        actions_taken += 1;
-
-                        // Show tool activity to the user so they see what was
-                        // auto-created (skill files, exports).
-                        let _ = output.tool_use_start(&call.name, &call.id);
-                        let _ = output.tool_result(tool_output);
-                        let _ = output.tool_use_complete();
-
-                        tracing::info!(
-                            tool = call.name.as_str(),
-                            duration_ms = tool_ms,
-                            is_error = tool_output.is_error,
-                            result = tool_output.content.as_str(),
-                            "self-improvement tool result"
-                        );
-
-                        Message::tool_result(&call.id, &tool_output.content, tool_output.is_error)
-                    }
-                    Err(ref e) => {
-                        tracing::warn!(
-                            tool = call.name.as_str(),
-                            duration_ms = tool_ms,
-                            error = %e,
-                            "self-improvement tool call failed"
-                        );
-                        tracing::info!(
-                            "{}",
-                            format!("[Self-improvement: {} failed: {}]\n", call.name, e)
-                        );
-                        Message::tool_result(&call.id, &e.to_string(), true)
-                    }
-                };
-                messages.push(tool_result_msg);
-            }
-        }
-
-        if actions_taken == 0 {
-            tracing::info!("[Self-improvement: no action needed]\n");
-        } else {
-            tracing::info!(
-                "{}",
-                format!("[Self-improvement: {actions_taken} action(s) taken]\n")
-            );
-        }
-        let _ = output.flush();
-
-        // Persist the full reflection exchange to the workspace's
-        // improvement/ directory so the user can inspect it later.
-        self.save_reflection_log(&reflection_system, &messages, actions_taken)
-            .await;
-
-        tracing::info!(
-            actions_taken = actions_taken,
-            "self-improvement reflection complete"
-        );
-        Ok(())
-    }
-
-    /// Save a reflection exchange to the workspace for later inspection.
-    async fn save_reflection_log(
-        &self,
-        system_prompt: &str,
-        messages: &[Message],
-        actions_taken: usize,
-    ) {
-        let Some(ref ws) = self.tool_context.workspace else {
+    /// Like [`spawn_maintain_memory`], this fires off a `tokio::spawn` so the
+    /// main agent loop is never blocked.
+    pub(super) fn spawn_self_improve(&self) {
+        if self.tool_context.workspace.is_none() || self.messages.is_empty() {
             return;
-        };
-
-        let epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let log = serde_json::json!({
-            "timestamp": epoch,
-            "turn_count": self.turn_count,
-            "actions_taken": actions_taken,
-            "system_prompt": system_prompt,
-            "messages": messages,
-        });
-
-        let content = serde_json::to_string_pretty(&log).unwrap_or_default();
-        let file_key = format!("improvement/{epoch}.json");
-
-        let mut ws = ws.write().await;
-        ws.set(&file_key, &content);
-        if let Err(e) = ws.save() {
-            tracing::warn!(
-                error = %e,
-                file = file_key.as_str(),
-                "failed to save reflection log"
-            );
-        } else {
-            tracing::info!(
-                file = file_key.as_str(),
-                actions_taken = actions_taken,
-                "saved reflection log"
-            );
         }
+
+        let settings = self.agent_settings.clone();
+        let config = self.config.clone();
+        let tool_context = ToolContext {
+            working_dir: self.tool_context.working_dir.clone(),
+            env: self.tool_context.env.clone(),
+            cancellation: self.tool_context.cancellation.clone(),
+            workspace: self.tool_context.workspace.as_ref().map(Arc::clone),
+            depth: self.tool_context.depth,
+        };
+        let summary = Self::summarize_for_reflection(&self.messages);
+        let turn_count = self.turn_count;
+
+        tokio::spawn(async move {
+            tracing::info!(turn_count, "background: self-improvement starting");
+
+            if let Err(e) =
+                run_self_improve(&settings, &config, &tool_context, &summary, turn_count).await
+            {
+                tracing::warn!(error = %e, "background self-improvement failed");
+            }
+
+            tracing::info!(turn_count, "background: self-improvement complete");
+        });
     }
 
     /// Build the system prompt for the self-improvement reflection call.
@@ -682,4 +487,183 @@ async fn run_maintain_memory(
     );
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Background self-improvement
+// ---------------------------------------------------------------------------
+
+/// Run self-improvement reflection entirely in a background task.
+///
+/// Creates its own LLM client, builds the reflection tools (skill_create,
+/// export_conversation) from scratch, and runs the tool loop — then saves
+/// a reflection log to the workspace.
+async fn run_self_improve(
+    settings: &crate::config::AgentSettings,
+    config: &CompletionConfig,
+    tool_context: &ToolContext,
+    summary: &str,
+    turn_count: usize,
+) -> Result<()> {
+    let reflection_system =
+        super::Agent::build_reflection_system_prompt(tool_context).await;
+
+    // Build the two reflection tools as standalone instances.
+    let skill_create_tool: Arc<dyn Tool> =
+        Arc::new(crate::tool::skill_create::SkillCreateTool);
+    let export_tool: Arc<dyn Tool> =
+        Arc::new(crate::tool::export_conversation::ExportConversationTool);
+
+    let tool_map: HashMap<String, Arc<dyn Tool>> = HashMap::from([
+        (skill_create_tool.name().to_string(), Arc::clone(&skill_create_tool)),
+        (export_tool.name().to_string(), Arc::clone(&export_tool)),
+    ]);
+
+    let reflection_tools: Vec<ToolDefinition> = [&skill_create_tool, &export_tool]
+        .iter()
+        .map(|t| ToolDefinition {
+            name: t.name().to_string(),
+            description: t.description().to_string(),
+            input_schema: t.input_schema(),
+            agent_only: false,
+        })
+        .collect();
+
+    let client = crate::llm::create_client(settings, None, false);
+
+    let mut messages = vec![Message::user(summary)];
+    let mut actions_taken = 0usize;
+
+    for iteration in 0..3u8 {
+        tracing::info!(iteration, "background self-improvement LLM call");
+
+        let response = match client
+            .stream(&messages, &reflection_system, &reflection_tools, config)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "background self-improvement LLM call failed");
+                return Ok(());
+            }
+        };
+
+        let mut silent = SilentOutput;
+        let (assistant_msg, tool_calls, _tokens) =
+            stream_handler::process_stream(response.stream, &mut silent).await?;
+
+        for block in &assistant_msg.content {
+            if let ContentBlock::Text { text } = block
+                && !text.trim().is_empty()
+            {
+                tracing::info!(reasoning = text.as_str(), "self-improvement reasoning");
+            }
+        }
+
+        messages.push(assistant_msg);
+
+        if tool_calls.is_empty() {
+            tracing::info!("self-improvement: model decided no action needed");
+            break;
+        }
+
+        for call in &tool_calls {
+            tracing::info!(tool = call.name.as_str(), "self-improvement executing tool");
+
+            let tool = match tool_map.get(&call.name) {
+                Some(t) => Arc::clone(t),
+                None => {
+                    tracing::warn!(
+                        tool = call.name.as_str(),
+                        "self-improvement: unknown tool"
+                    );
+                    messages.push(Message::tool_result(
+                        &call.id,
+                        &format!("unknown tool '{}'", call.name),
+                        true,
+                    ));
+                    continue;
+                }
+            };
+
+            let tool_start = std::time::Instant::now();
+            let result = tool.run(&call.input, tool_context).await;
+            let tool_ms = tool_start.elapsed().as_millis();
+
+            let tool_result_msg = match result {
+                Ok(ref output) => {
+                    actions_taken += 1;
+                    tracing::info!(
+                        tool = call.name.as_str(),
+                        duration_ms = tool_ms,
+                        "self-improvement tool ok"
+                    );
+                    Message::tool_result(&call.id, &output.content, output.is_error)
+                }
+                Err(ref e) => {
+                    tracing::warn!(
+                        tool = call.name.as_str(),
+                        duration_ms = tool_ms,
+                        error = %e,
+                        "self-improvement tool failed"
+                    );
+                    Message::tool_result(&call.id, &e.to_string(), true)
+                }
+            };
+            messages.push(tool_result_msg);
+        }
+    }
+
+    tracing::info!(actions_taken, "background self-improvement complete");
+
+    // Save reflection log to workspace.
+    save_reflection_log(tool_context, &reflection_system, &messages, actions_taken, turn_count)
+        .await;
+
+    Ok(())
+}
+
+/// Save a reflection exchange to the workspace for later inspection.
+async fn save_reflection_log(
+    tool_context: &ToolContext,
+    system_prompt: &str,
+    messages: &[Message],
+    actions_taken: usize,
+    turn_count: usize,
+) {
+    let Some(ref ws) = tool_context.workspace else {
+        return;
+    };
+
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let log = serde_json::json!({
+        "timestamp": epoch,
+        "turn_count": turn_count,
+        "actions_taken": actions_taken,
+        "system_prompt": system_prompt,
+        "messages": messages,
+    });
+
+    let content = serde_json::to_string_pretty(&log).unwrap_or_default();
+    let file_key = format!("improvement/{epoch}.json");
+
+    let mut ws = ws.write().await;
+    ws.set(&file_key, &content);
+    if let Err(e) = ws.save() {
+        tracing::warn!(
+            error = %e,
+            file = file_key.as_str(),
+            "failed to save reflection log"
+        );
+    } else {
+        tracing::info!(
+            file = file_key.as_str(),
+            actions_taken,
+            "saved reflection log"
+        );
+    }
 }
