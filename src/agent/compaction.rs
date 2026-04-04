@@ -48,10 +48,10 @@ impl super::Agent {
             return Ok(());
         }
 
-        // Save learnings in the background before compaction condenses
-        // the conversation.  This doesn't block — compaction proceeds
-        // immediately while the LLM synthesises in parallel.
-        self.spawn_save_learnings("compact");
+        // Fire compaction-triggered dreams (learning synthesis) in the
+        // background.  This doesn't block — compaction proceeds immediately
+        // while dreams run in parallel.
+        self.fire_dreams(super::dream::DreamEvent::Compaction);
 
         tracing::info!(
             messages = self.messages.len(),

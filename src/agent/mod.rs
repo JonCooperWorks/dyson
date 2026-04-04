@@ -11,6 +11,8 @@
 //
 // Module layout:
 //   mod.rs             — Agent struct and the loop (this file)
+//   dream.rs           — Dream trait, DreamRunner, trigger/event types
+//   reflection.rs      — Built-in Dream implementations (memory, learning, self-improvement)
 //   stream_handler.rs  — Processes StreamEvents into Messages and ToolCalls
 //
 // The loop in pseudocode:
@@ -72,6 +74,7 @@
 
 mod compaction;
 mod dependency_analyzer;
+pub mod dream;
 pub mod rate_limiter;
 mod reflection;
 mod result_formatter;
@@ -95,6 +98,7 @@ use crate::skill::Skill;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 use self::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
+use self::dream::{DreamContext, DreamEvent, DreamRunner};
 use self::result_formatter::ResultFormatter;
 use self::tool_limiter::ToolLimiter;
 
@@ -161,11 +165,8 @@ pub struct Agent {
     /// Shared tool context (working dir, env, cancellation).
     tool_context: ToolContext,
 
-    /// Number of user turns processed (for nudge timing).
+    /// Number of user turns processed (for dream trigger timing).
     turn_count: usize,
-
-    /// Inject a memory maintenance nudge every N turns.  0 = disabled.
-    nudge_interval: usize,
 
     /// Token usage tracking and optional budget enforcement.
     pub token_budget: TokenBudget,
@@ -186,10 +187,14 @@ pub struct Agent {
     /// once in `new()` and reused in `estimate_context_tokens()`.
     cached_tool_tokens: usize,
 
-    /// Retained so the background learning task can build its own LLM
-    /// client without sharing the agent's.
+    /// Retained so background dreams can build their own LLM clients
+    /// without sharing the agent's.
     agent_settings: crate::config::AgentSettings,
 
+    /// Dream runner — fires background cognitive tasks (memory maintenance,
+    /// learning synthesis, self-improvement) on trigger events without
+    /// blocking the controller loop.  See `dream.rs` and `docs/dreaming.md`.
+    dream_runner: DreamRunner,
 }
 
 impl Agent {
@@ -317,6 +322,33 @@ impl Agent {
             None => rate_limiter::RateLimited::unlimited(client),
         };
 
+        // -- Build the dream runner with default dreams --
+        //
+        // Dreams are autonomous background tasks (memory consolidation,
+        // self-improvement) that fire on trigger events without blocking
+        // the controller loop.  See dream.rs and docs/dreaming.md.
+        let mut dream_runner = DreamRunner::new();
+
+        if tool_context.workspace.is_some() {
+            // Learning synthesis: merge conversation learnings into MEMORY.md
+            // after context compaction.
+            dream_runner.add(Arc::new(
+                reflection::LearningSynthesisDream,
+            ));
+
+            if nudge_interval > 0 {
+                // Memory maintenance: update MEMORY.md / USER.md every N turns.
+                dream_runner.add(Arc::new(
+                    reflection::MemoryMaintenanceDream::new(nudge_interval),
+                ));
+
+                // Self-improvement: create skills / export data every 2N turns.
+                dream_runner.add(Arc::new(
+                    reflection::SelfImprovementDream::new(nudge_interval),
+                ));
+            }
+        }
+
         Ok(Self {
             client,
             sandbox,
@@ -331,7 +363,6 @@ impl Agent {
             messages: Vec::new(),
             tool_context,
             turn_count: 0,
-            nudge_interval,
             token_budget: TokenBudget::default(),
             compaction_config: settings.compaction,
             limiter: ToolLimiter::for_agent(),
@@ -339,6 +370,7 @@ impl Agent {
             cached_tool_tokens,
             agent_settings: settings.clone(),
             tools_disabled: false,
+            dream_runner,
         })
     }
 
@@ -358,13 +390,47 @@ impl Agent {
         self.tool_context.depth = depth;
     }
 
-    /// Clear conversation history, saving learnings in the background.
+    /// Fire all dreams whose triggers match the given event.
     ///
-    /// Messages are cleared immediately so the caller can continue.  A
-    /// background task summarises the conversation via the LLM and writes
-    /// the result to the workspace — no tools, no blocking.
+    /// This never blocks — dreams are spawned as background tasks.
+    fn fire_dreams(&self, event: DreamEvent) {
+        if self.messages.is_empty() || self.tool_context.workspace.is_none() {
+            return;
+        }
+
+        let settings = self.agent_settings.clone();
+        let config = self.config.clone();
+        let tool_context = ToolContext {
+            working_dir: self.tool_context.working_dir.clone(),
+            env: self.tool_context.env.clone(),
+            cancellation: self.tool_context.cancellation.clone(),
+            workspace: self.tool_context.workspace.as_ref().map(Arc::clone),
+            depth: self.tool_context.depth,
+        };
+        let summary = reflection::summarize_for_reflection(&self.messages);
+        let turn_count = self.turn_count;
+
+        self.dream_runner.fire(&event, || DreamContext {
+            settings: settings.clone(),
+            config: config.clone(),
+            tool_context: ToolContext {
+                working_dir: tool_context.working_dir.clone(),
+                env: tool_context.env.clone(),
+                cancellation: tool_context.cancellation.clone(),
+                workspace: tool_context.workspace.as_ref().map(Arc::clone),
+                depth: tool_context.depth,
+            },
+            conversation_summary: summary.clone(),
+            turn_count,
+        });
+    }
+
+    /// Clear conversation history, firing session-end dreams in the background.
+    ///
+    /// Messages are cleared immediately so the caller can continue.  Dreams
+    /// run in the background with no way to block the caller.
     pub fn clear(&mut self) {
-        self.spawn_save_learnings("clear");
+        self.fire_dreams(DreamEvent::SessionEnd);
         self.messages.clear();
     }
 
@@ -482,17 +548,12 @@ impl Agent {
     async fn run_inner(&mut self, output: &mut dyn Output) -> Result<String> {
         self.turn_count += 1;
 
-        // Run memory maintenance as a side-channel LLM call every N turns.
-        // Unlike the old nudge approach (injecting a user message into the
-        // conversation and hoping the model acts on it), this makes a real
-        // LLM call with workspace tools and lets the model directly update
-        // memory files.  Nothing from this call enters the main conversation.
-        if self.nudge_interval > 0
-            && self.turn_count.is_multiple_of(self.nudge_interval)
-            && self.tool_context.workspace.is_some()
-        {
-            self.spawn_maintain_memory();
-        }
+        // Fire turn-triggered dreams (memory maintenance, self-improvement).
+        // Dreams run as fire-and-forget background tasks — they never block
+        // the controller loop.  See dream.rs and docs/dreaming.md.
+        self.fire_dreams(DreamEvent::TurnComplete {
+            turn_count: self.turn_count,
+        });
 
         let mut final_text = String::new();
         let mut hit_max_iterations = false;
@@ -868,19 +929,10 @@ impl Agent {
             }
         }
 
-        // -- Self-improvement reflection --
-        //
-        // Every 2N turns, fire a side-channel LLM call that reviews the
-        // conversation and decides whether to create/improve skills or
-        // export training data.  This is a separate call with its own
-        // system prompt — it doesn't pollute the main conversation history.
-        if self.nudge_interval > 0
-            && self.turn_count > self.nudge_interval
-            && self.turn_count.is_multiple_of(self.nudge_interval * 2)
-            && self.tool_context.workspace.is_some()
-        {
-            self.spawn_self_improve();
-        }
+        // NOTE: Self-improvement and memory maintenance dreams are now
+        // fired at the *start* of run_inner via fire_dreams(TurnComplete).
+        // The DreamRunner checks each dream's trigger against the turn count
+        // and spawns matching dreams as background tasks.
 
         output.flush()?;
         Ok(final_text)
@@ -1304,7 +1356,7 @@ mod tests {
             depth: 0,
         };
 
-        let prompt = Agent::build_memory_system_prompt(&ctx).await;
+        let prompt = reflection::build_memory_system_prompt(&ctx).await;
         assert!(prompt.contains("MEMORY.md"));
         assert!(prompt.contains("/2200 chars"));
         assert!(prompt.contains("USER.md"));
@@ -1322,7 +1374,7 @@ mod tests {
             workspace: None,
             depth: 0,
         };
-        let prompt = Agent::build_reflection_system_prompt(&ctx).await;
+        let prompt = reflection::build_reflection_system_prompt(&ctx).await;
         assert!(prompt.contains("skill_create"));
         assert!(prompt.contains("export_conversation"));
         assert!(prompt.contains("When to create a skill"));
@@ -1349,7 +1401,7 @@ mod tests {
             }]),
         ];
 
-        let summary = Agent::summarize_for_reflection(&messages);
+        let summary = reflection::summarize_for_reflection(&messages);
         assert!(summary.contains("Deploy my app"));
         assert!(summary.contains("[Tool call: bash]"));
         assert!(summary.contains("Deployed successfully"));
