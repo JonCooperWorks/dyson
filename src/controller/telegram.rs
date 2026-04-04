@@ -999,6 +999,8 @@ pub struct TelegramOutput {
     /// Whether the current user message contains text (used by
     /// [`on_llm_error`] to decide if a vision-less retry is worthwhile).
     has_text: bool,
+    /// Background task that periodically re-sends `ChatAction::Typing`.
+    typing_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TelegramOutput {
@@ -1011,6 +1013,7 @@ impl TelegramOutput {
             has_text,
             last_edit: Instant::now(),
             rt: tokio::runtime::Handle::current(),
+            typing_handle: None,
         }
     }
 
@@ -1126,13 +1129,6 @@ impl Output for TelegramOutput {
     }
 
     fn tool_use_start(&mut self, _id: &str, _name: &str) -> Result<(), DysonError> {
-        // Send "typing..." indicator so the user knows the agent is working.
-        let bot = self.bot.clone();
-        let chat_id = self.chat_id;
-        let _ = self.block_on(async {
-            bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
-                .await
-        });
         Ok(())
     }
 
@@ -1194,9 +1190,39 @@ impl Output for TelegramOutput {
         }
     }
 
+    fn typing_indicator(&mut self, visible: bool) -> Result<(), DysonError> {
+        if visible {
+            // Already running — nothing to do.
+            if self.typing_handle.is_some() {
+                return Ok(());
+            }
+            let bot = self.bot.clone();
+            let chat_id = self.chat_id;
+            self.typing_handle = Some(tokio::spawn(async move {
+                loop {
+                    let _ = bot
+                        .send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
+                        .await;
+                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                }
+            }));
+        } else if let Some(handle) = self.typing_handle.take() {
+            handle.abort();
+        }
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<(), DysonError> {
         self.force_flush_text()?;
         Ok(())
+    }
+}
+
+impl Drop for TelegramOutput {
+    fn drop(&mut self) {
+        if let Some(handle) = self.typing_handle.take() {
+            handle.abort();
+        }
     }
 }
 
