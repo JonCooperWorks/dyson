@@ -371,6 +371,33 @@ impl PolicyTable {
         }
     }
 
+    /// Pre-canonicalize all `RestrictTo` paths in the table.
+    ///
+    /// This resolves symlinks and normalizes paths once at construction
+    /// time so that per-call `check_path_access` only needs to
+    /// canonicalize the input path, not the (static) allowed prefixes.
+    pub fn pre_canonicalize_paths(&mut self) {
+        fn canonicalize_policy(policy: &mut SandboxPolicy) {
+            canonicalize_path_access(&mut policy.file_read);
+            canonicalize_path_access(&mut policy.file_write);
+        }
+
+        fn canonicalize_path_access(access: &mut PathAccess) {
+            if let PathAccess::RestrictTo(paths) = access {
+                for path in paths.iter_mut() {
+                    *path = super::policy_sandbox::resolve_canonical(path);
+                }
+            }
+        }
+
+        for policy in self.exact.values_mut() {
+            canonicalize_policy(policy);
+        }
+        for (_, policy) in &mut self.globs {
+            canonicalize_policy(policy);
+        }
+    }
+
     /// Look up the policy for a tool.
     ///
     /// Priority: exact match → longest glob match → default for tool name.

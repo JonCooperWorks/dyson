@@ -68,8 +68,13 @@ pub struct PolicySandbox {
 
 impl PolicySandbox {
     /// Create from parsed config.
+    ///
+    /// Pre-canonicalizes all `RestrictTo` paths in the policy table so that
+    /// `check_path_access` only needs to canonicalize the input path on each
+    /// call, not the (static) allowed prefixes.
     pub fn new(tool_policies: &HashMap<String, ToolPolicyConfig>, working_dir: &Path) -> Self {
-        let policies = PolicyTable::from_config(tool_policies, working_dir);
+        let mut policies = PolicyTable::from_config(tool_policies, working_dir);
+        policies.pre_canonicalize_paths();
         Self {
             policies,
             working_dir: working_dir.to_path_buf(),
@@ -294,14 +299,9 @@ fn check_path_access(access: &PathAccess, file_path: &str, working_dir: &Path) -
             // remaining components (same pattern as tool/mod.rs).
             let canonical = resolve_canonical(&resolved);
 
-            // Cache canonical forms of allowed prefixes to avoid
-            // calling resolve_canonical() on static paths every check.
-            // TODO: Pre-canonicalize at PolicyTable construction time for
-            // even better performance.
-            allowed.iter().any(|prefix| {
-                let canon_prefix = resolve_canonical(prefix);
-                canonical.starts_with(&canon_prefix)
-            })
+            // Allowed prefixes are pre-canonicalized at PolicySandbox
+            // construction time, so we only need a simple starts_with check.
+            allowed.iter().any(|prefix| canonical.starts_with(prefix))
         }
     }
 }
@@ -314,7 +314,7 @@ fn check_path_access(access: &PathAccess, file_path: &str, working_dir: &Path) -
 /// 3. If the path doesn't exist: walk up to the nearest existing ancestor,
 ///    canonicalize that, then re-append the remaining components.
 /// 4. If no ancestor exists: return the lexically normalized path.
-fn resolve_canonical(path: &Path) -> PathBuf {
+pub(crate) fn resolve_canonical(path: &Path) -> PathBuf {
     // Always normalize first to resolve .. and . components.
     let normalized = normalize_path(path);
 

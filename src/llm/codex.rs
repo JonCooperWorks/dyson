@@ -161,6 +161,7 @@ impl CodexClient {
         system: &str,
         prompt: &str,
         mcp_url: Option<&str>,
+        mcp_bearer_token: Option<&str>,
     ) -> Vec<String> {
         let mut args = vec![
             "exec".to_string(),
@@ -189,6 +190,13 @@ impl CodexClient {
         if let Some(url) = mcp_url {
             args.push("-c".to_string());
             args.push(format!("mcp_servers.dyson-workspace.url={url}"));
+
+            if let Some(token) = mcp_bearer_token {
+                args.push("-c".to_string());
+                args.push(format!(
+                    "mcp_servers.dyson-workspace.headers.Authorization=Bearer {token}"
+                ));
+            }
         }
 
         args.push(prompt.to_string());
@@ -228,12 +236,13 @@ impl LlmClient for CodexClient {
         // -- Start MCP server if workspace is available --
         let mut _mcp_server_handle: Option<tokio::task::JoinHandle<()>> = None;
         let mut mcp_url: Option<String> = None;
+        let mut mcp_token: Option<String> = None;
 
         if let Some(ref workspace) = self.workspace {
             let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox).await?;
             tracing::info!(port = info.port, "MCP server started for Codex");
-            // TODO: pass bearer token to Codex when it supports MCP auth headers
             mcp_url = Some(info.url);
+            mcp_token = Some(info.token);
             _mcp_server_handle = Some(info.handle);
         }
 
@@ -243,7 +252,13 @@ impl LlmClient for CodexClient {
         } else {
             format!("{system}\n\n{system_suffix}")
         };
-        let args = self.build_args(&config.model, &full_system, &prompt, mcp_url.as_deref());
+        let args = self.build_args(
+            &config.model,
+            &full_system,
+            &prompt,
+            mcp_url.as_deref(),
+            mcp_token.as_deref(),
+        );
 
         let mut cmd = tokio::process::Command::new(&self.codex_path);
         for arg in &args {
@@ -712,7 +727,7 @@ mod tests {
     #[test]
     fn build_args_uses_full_auto_by_default() {
         let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o3", "", "hello", None);
+        let args = client.build_args("o3", "", "hello", None, None);
         assert!(
             args.contains(&"--full-auto".to_string()),
             "should use --full-auto when sandbox is enabled"
@@ -726,7 +741,7 @@ mod tests {
     #[test]
     fn build_args_bypasses_sandbox_when_flag_set() {
         let client = CodexClient::new(Some("codex"), None, true);
-        let args = client.build_args("o3", "", "hello", None);
+        let args = client.build_args("o3", "", "hello", None, None);
         assert!(
             args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
             "should bypass sandbox when --dangerous-no-sandbox is set"
@@ -740,21 +755,21 @@ mod tests {
     #[test]
     fn build_args_includes_model() {
         let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o4-mini", "", "test", None);
+        let args = client.build_args("o4-mini", "", "test", None, None);
         assert!(args.contains(&"o4-mini".to_string()));
     }
 
     #[test]
     fn build_args_includes_system_prompt() {
         let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o3", "You are Dyson", "test", None);
+        let args = client.build_args("o3", "You are Dyson", "test", None, None);
         assert!(args.contains(&"developer_instructions=You are Dyson".to_string()));
     }
 
     #[test]
     fn build_args_skips_empty_system_prompt() {
         let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o3", "", "test", None);
+        let args = client.build_args("o3", "", "test", None, None);
         assert!(
             !args
                 .iter()
@@ -766,16 +781,42 @@ mod tests {
     #[test]
     fn build_args_includes_mcp_url() {
         let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o3", "", "test", Some("http://127.0.0.1:9999/mcp"));
+        let args = client.build_args("o3", "", "test", Some("http://127.0.0.1:9999/mcp"), None);
         assert!(
             args.contains(&"mcp_servers.dyson-workspace.url=http://127.0.0.1:9999/mcp".to_string())
         );
     }
 
     #[test]
+    fn build_args_includes_mcp_bearer_token() {
+        let client = CodexClient::new(Some("codex"), None, false);
+        let args = client.build_args(
+            "o3",
+            "",
+            "test",
+            Some("http://127.0.0.1:9999/mcp"),
+            Some("secret-token-123"),
+        );
+        assert!(args.contains(
+            &"mcp_servers.dyson-workspace.headers.Authorization=Bearer secret-token-123"
+                .to_string()
+        ));
+    }
+
+    #[test]
+    fn build_args_skips_bearer_token_without_mcp_url() {
+        let client = CodexClient::new(Some("codex"), None, false);
+        let args = client.build_args("o3", "", "test", None, Some("secret-token-123"));
+        assert!(
+            !args.iter().any(|a| a.contains("Authorization")),
+            "should not include Authorization header when no MCP URL"
+        );
+    }
+
+    #[test]
     fn build_args_prompt_is_last() {
         let client = CodexClient::new(Some("codex"), None, false);
-        let args = client.build_args("o3", "sys", "my prompt", None);
+        let args = client.build_args("o3", "sys", "my prompt", None, None);
         assert_eq!(args.last().unwrap(), "my prompt");
     }
 }

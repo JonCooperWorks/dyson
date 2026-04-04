@@ -188,10 +188,9 @@ pub async fn create_skills(
     for config in &settings.skills {
         match config {
             crate::config::SkillConfig::Builtin(cfg) => {
-                // TODO: respect cfg.tools filter
-                let _ = cfg;
-                skills.push(Box::new(builtin::BuiltinSkill::new(
+                skills.push(Box::new(builtin::BuiltinSkill::new_filtered(
                     settings.web_search.as_ref(),
+                    &cfg.tools,
                 )));
             }
             crate::config::SkillConfig::Mcp(cfg) => {
