@@ -177,7 +177,7 @@ impl DreamRunner {
 
     /// Register a dream.
     pub fn add(&mut self, dream: Arc<dyn Dream>) {
-        tracing::info!(dream = dream.name(), "registered dream");
+        tracing::debug!(dream = dream.name(), "registered dream");
         self.dreams.push(dream);
     }
 
