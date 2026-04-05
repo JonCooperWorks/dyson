@@ -1,46 +1,24 @@
 # MCP OAuth 2.0 Authorization
 
-Dyson supports OAuth 2.0 Authorization Code with PKCE for MCP servers that
-require interactive authorization (e.g., GitHub Copilot MCP).
+OAuth 2.0 Authorization Code + PKCE for MCP servers that require
+interactive authorization (e.g., GitHub Copilot MCP).
 
 **Key files:**
-- `src/auth/oauth.rs` — Pure OAuth functions (discovery, DCR, PKCE, exchange, refresh)
-- `src/auth/oauth_credential.rs` — `OAuthAuth` (Auth trait impl) + token persistence
-- `src/auth/oauth_callback.rs` — Temporary HTTP callback server
-- `src/skill/mcp/mod.rs` — OAuth flow orchestration in `McpSkill`
-- `src/config/mod.rs` — `McpAuthConfig` configuration types
+- `src/auth/oauth.rs` — All OAuth logic (PKCE, exchange, refresh, Auth impl, callback server, persistence)
+- `src/skill/mcp/mod.rs` — Flow orchestration in `McpSkill::on_load()`
+- `src/config/mod.rs` — `McpAuthConfig` type
 
----
+## Architecture
 
-## Architecture: Controller-Agnostic Design
+The OAuth flow is entirely controller-agnostic. It lives in the MCP skill
+layer. Controllers never know OAuth exists.
 
-The OAuth flow lives entirely in the MCP skill layer.  Controllers (Terminal,
-Telegram, etc.) never know OAuth exists.
-
-```
-Any Controller ←→ Agent ←→ McpSkill ←→ HttpTransport + OAuthAuth
-                    ↑                         ↑
-           sees auth URL              auto-refreshes tokens
-           in system prompt           transparently
-```
-
-The auth URL is surfaced through the agent's system prompt.  The agent relays
-it to the user through whatever controller is active.  The callback server
-runs on the Dyson host independently as a background task.
-
-The OAuth flow **never blocks the agent**.  If no persisted tokens exist,
-`on_load()` starts the callback server in the background, sets the auth URL
-in the system prompt, and returns immediately with zero tools.  The agent
-remains fully responsive for other tasks.  After the user authorizes, the
-background task persists tokens.  The next hot reload or restart loads them.
-
----
+The flow **never blocks the agent**. If no persisted tokens exist,
+`on_load()` starts a background callback server, sets the auth URL in the
+system prompt, and returns immediately with zero tools. After the user
+authorizes, tokens are persisted. The next hot reload loads them.
 
 ## Configuration
-
-Add an `auth` object to any HTTP MCP server in `dyson.json`:
-
-### Minimal (auto-discovery + Dynamic Client Registration)
 
 ```json
 {
@@ -56,254 +34,46 @@ Add an `auth` object to any HTTP MCP server in `dyson.json`:
 }
 ```
 
-Dyson will:
-1. Discover the authorization server via `/.well-known/oauth-authorization-server`
-2. Register a client via Dynamic Client Registration (DCR)
-3. Run the PKCE flow
+All fields except `type` are optional:
 
-### Full (pre-registered client, explicit endpoints)
+| Field | Default | Description |
+|-------|---------|-------------|
+| `type` | — | Must be `"oauth"` |
+| `scopes` | `[]` | OAuth scopes to request |
+| `client_id` | (DCR) | Pre-registered client ID |
+| `client_secret` | `None` | Supports `SecretValue` resolution |
+| `redirect_uri` | `http://127.0.0.1:<random>/callback` | Override redirect URI |
+| `authorization_url` | (discovered) | Override authorization endpoint |
+| `token_url` | (discovered) | Override token endpoint |
+| `registration_url` | (discovered) | Override DCR endpoint |
 
-```json
-{
-  "mcp_servers": {
-    "my-server": {
-      "url": "https://mcp.example.com/mcp",
-      "auth": {
-        "type": "oauth",
-        "client_id": "my-registered-client-id",
-        "client_secret": { "resolver": "insecure_env", "name": "MY_CLIENT_SECRET" },
-        "scopes": ["read", "write"],
-        "authorization_url": "https://auth.example.com/authorize",
-        "token_url": "https://auth.example.com/token"
-      }
-    }
-  }
-}
-```
+## Flow
 
-### Config Fields
+**First use (no tokens):**
 
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| `type` | Yes | — | Must be `"oauth"` |
-| `scopes` | No | `[]` | OAuth scopes to request |
-| `client_id` | No | (DCR) | Pre-registered client ID; if absent, uses DCR |
-| `client_secret` | No | `None` | Client secret (supports `SecretValue` resolution) |
-| `redirect_uri` | No | `http://127.0.0.1:<random>/callback` | Override redirect URI |
-| `authorization_url` | No | (discovered) | Override authorization endpoint |
-| `token_url` | No | (discovered) | Override token endpoint |
-| `registration_url` | No | (discovered) | Override DCR endpoint |
+1. `on_load()` discovers metadata, registers client (DCR), generates PKCE
+2. Starts callback server on `127.0.0.1:<random-port>` in background
+3. Sets system prompt with auth URL, returns immediately (zero tools)
+4. User clicks URL → authorizes → callback fires → background task exchanges
+   code and persists tokens to `~/.dyson/tokens/<server>.json`
+5. Next hot reload → `on_load()` loads tokens → MCP handshake → tools available
 
----
+**Subsequent uses:** `on_load()` loads persisted tokens instantly. No interaction.
 
-## Flow Walkthrough
+**Token refresh:** `OAuthAuth::apply_to_request()` auto-refreshes when expired.
 
-### First Use (No Persisted Tokens)
-
-```
-McpSkill::on_load()
-  ├── Check ~/.dyson/tokens/github-copilot.json → not found
-  ├── Discover metadata from /.well-known/oauth-authorization-server
-  ├── (Optional) Register client via DCR
-  ├── Generate PKCE pair (code_verifier + S256 code_challenge)
-  ├── Start callback server on 127.0.0.1:<random-port>
-  ├── Build authorization URL
-  ├── Spawn background task (waits for callback, exchanges code, persists tokens)
-  ├── Set system_prompt = "authorize here: <url>"
-  └── Return Ok(()) immediately — zero tools, agent is NOT blocked
-
-Background task (runs independently):
-  ├── Wait for callback (up to 5 minutes)
-  │   User clicks URL → browser → OAuth server → grants access → redirect
-  │   Callback server receives GET /callback?code=...&state=...
-  │     ├── Validates state (CSRF protection)
-  │     ├── Returns "Authorization Complete" HTML page
-  │     └── Sends code via oneshot channel
-  ├── Exchange code for tokens (POST to token endpoint with PKCE verifier)
-  ├── Persist tokens to ~/.dyson/tokens/github-copilot.json
-  └── Log "tokens persisted — reload config to connect"
-
-User triggers hot reload (or restarts):
-  └── McpSkill::on_load() finds persisted tokens → tools available
-```
-
-The flow never blocks the agent.  The skill loads with zero tools and a
-system prompt telling the user to authorize.  The background task handles
-everything autonomously.  After authorization, the next hot reload picks up
-the persisted tokens.
-
-### Subsequent Uses (Persisted Tokens)
-
-```
-McpSkill::on_load()
-  ├── Load ~/.dyson/tokens/github-copilot.json → found
-  ├── Has refresh token? → create OAuthAuth
-  └── Run MCP handshake (initialize, tools/list) immediately
-```
-
-No user interaction needed.  If the access token has expired, `OAuthAuth`
-refreshes it automatically on the first request.
-
-### Hot Reload
-
-When `dyson.json` changes, the hot reloader rebuilds all skills, which calls
-`McpSkill::on_load()` again.  Behavior:
-
-- **Tokens exist on disk:** Loaded instantly, no user interaction.  The agent
-  remains responsive.
-- **New OAuth server added (no tokens):** Background OAuth flow starts.  The
-  agent remains responsive with a system prompt telling the user to authorize.
-  After authorization, the next hot reload loads the persisted tokens.
-- **OAuth config changed (e.g., new scopes):** Persisted tokens are loaded.
-  If the server rejects them, the 401 retry refreshes the token.  If refresh
-  fails (scope mismatch), delete `~/.dyson/tokens/<server>.json` and restart.
-- **OAuth server removed from config:** Old skill is dropped cleanly.
-
-### Token Refresh (Automatic)
-
-```
-HttpTransport::send_request()
-  └── auth.apply_to_request(req)
-      └── OAuthAuth checks expires_at
-          ├── Not expired → add Authorization: Bearer <token>
-          └── Expired → refresh_token() → update credential → add header
-```
-
-### 401 Retry (Server-Side Rejection)
-
-```
-HttpTransport::send_request()
-  ├── Send request with current token
-  ├── Receive 401 Unauthorized
-  ├── auth.on_unauthorized() → force token refresh
-  ├── Rebuild request with new token
-  └── Retry once
-```
-
-This handles clock skew and server-side token revocation.
-
----
+**401 retry:** `HttpTransport` calls `on_unauthorized()` → force refresh → retry once.
 
 ## Token Persistence
 
-Tokens are stored at `~/.dyson/tokens/<server-name>.json`.
+Stored at `~/.dyson/tokens/<server-name>.json` with `0o600` permissions.
+Server names are sanitized to prevent path traversal. All in-memory token
+values use `Credential` (zeroize-on-drop).
 
-### File Format
+## Hot Reload
 
-```json
-{
-  "access_token": "gho_xxxxxxxxxxxx",
-  "refresh_token": "ghr_xxxxxxxxxxxx",
-  "expires_at_epoch": 1700000000,
-  "token_url": "https://auth.example.com/token",
-  "client_id": "my-client-id",
-  "client_secret": null
-}
-```
-
-### Security
-
-- Directory created with `0o700` (owner only) on Unix
-- Files created with `0o600` (owner read/write only) on Unix
-- Server names are sanitized to prevent path traversal
-- All in-memory token values use `Credential` (zeroize-on-drop)
-
----
-
-## PKCE (Proof Key for Code Exchange)
-
-Dyson uses PKCE (RFC 7636) with the S256 method:
-
-1. Generate 32 random bytes → base64url encode → `code_verifier` (43 chars)
-2. SHA-256 hash the verifier → base64url encode → `code_challenge` (43 chars)
-3. Send `code_challenge` in the authorization request
-4. Send `code_verifier` in the token exchange request
-
-The server verifies that `SHA-256(code_verifier) == code_challenge`, proving
-the same client that initiated the flow is exchanging the code.
-
-This prevents authorization code interception attacks and is required for
-public clients (no client_secret).
-
----
-
-## Callback Server
-
-The callback server is a temporary HTTP server that receives the OAuth
-redirect after the user authorizes in their browser.
-
-- Binds to `127.0.0.1:0` (random port, loopback only)
-- Listens for `GET /callback?code=...&state=...`
-- Validates the `state` parameter (CSRF protection)
-- Returns an HTML success page to the browser
-- Sends the authorization code via a oneshot channel
-- Auto-shuts down after 5 minutes or after receiving a callback
-
-### When the Callback Server Isn't Reachable
-
-If Dyson runs behind NAT or in a container where `127.0.0.1` on the host
-isn't reachable from the user's browser:
-
-1. Set a custom `redirect_uri` in the config pointing to a reachable address
-2. Set up a reverse proxy to forward the callback to Dyson's callback server
-3. Or use a publicly accessible `redirect_uri` and configure port forwarding
-
-Future enhancement: manual paste fallback where the user copies the redirect
-URL from their browser and pastes it into the chat.
-
----
-
-## Module Architecture
-
-### `src/auth/oauth.rs` — Pure Functions
-
-Stateless, side-effect-free (except HTTP calls), fully unit-testable:
-
-- `discover_metadata()` — Fetch OAuth server metadata from well-known URL
-- `register_client()` — Dynamic Client Registration (RFC 7591)
-- `generate_pkce()` — PKCE code_verifier + S256 code_challenge
-- `build_auth_url()` — Construct authorization URL with query params
-- `exchange_code()` — Exchange authorization code for tokens
-- `refresh_token()` — Refresh expired access tokens
-- `generate_state()` — Random state parameter for CSRF protection
-
-### `src/auth/oauth_credential.rs` — Auth Trait Implementation
-
-- `OAuthCredential` — Mutable token state (access_token, refresh_token, expires_at)
-- `OAuthAuth` — `Auth` trait impl with `Arc<RwLock<OAuthCredential>>`
-  - `apply_to_request()` — Auto-refresh on expiry, add Bearer header
-  - `on_unauthorized()` — Force-refresh for 401 recovery
-- `persist_tokens()` / `load_tokens()` — File I/O for token persistence
-
-### `src/auth/oauth_callback.rs` — Callback Server
-
-- `start_callback_server()` — Start temporary hyper HTTP server
-- Returns `(port, JoinHandle, oneshot::Receiver<CallbackResult>)`
-
-### `src/skill/mcp/mod.rs` — Flow Orchestration
-
-- `McpSkill::load_oauth_auth()` — Load persisted tokens (returns None if absent)
-- `McpSkill::start_oauth_background()` — Discover, DCR, PKCE, spawn background callback task
-- `McpSkill::on_load()` — Branches on auth config; never blocks on OAuth
-
-### `src/skill/mcp/transport.rs` — 401 Retry
-
-- `HttpTransport::send_http()` — Shared HTTP send logic (build request, apply session ID, send)
-- `HttpTransport::parse_rpc_response()` — Shared response parsing (status check, JSON-RPC parse)
-- `HttpTransport::send_request()` — On 401, calls `auth.on_unauthorized()`,
-  retries once using the shared helpers
-
----
-
-## Error Handling
-
-OAuth errors use the `DysonError::OAuth { server, message }` variant.
-This is separate from `DysonError::Mcp` to distinguish auth failures from
-MCP protocol errors.
-
-Common error scenarios:
-- Discovery failure (server doesn't have well-known endpoint)
-- DCR rejection (server doesn't support dynamic registration)
-- Token exchange failure (invalid code, expired code, wrong verifier)
-- Refresh failure (refresh token revoked or expired)
-- Callback timeout (user didn't complete authorization within 5 minutes)
+- **Tokens on disk:** Loaded instantly, no interaction.
+- **New OAuth server (no tokens):** Background flow starts, agent stays responsive.
+- **Config changed:** Persisted tokens loaded; 401 retry handles scope changes.
+  Delete the token file and restart for a full re-auth.
+- **Server removed:** Old skill dropped cleanly.

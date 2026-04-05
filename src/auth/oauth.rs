@@ -299,27 +299,6 @@ impl OAuthAuth {
         }
     }
 
-    pub fn from_token_response(
-        response: &TokenResponse,
-        token_url: String,
-        client_id: String,
-        client_secret: Option<String>,
-    ) -> Self {
-        let expires_at = response
-            .expires_in
-            .map(|secs| SystemTime::now() + Duration::from_secs(secs))
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-
-        Self::new(OAuthCredential {
-            access_token: Credential::new(response.access_token.clone()),
-            refresh_token: response.refresh_token.as_ref().map(|t| Credential::new(t.clone())),
-            expires_at,
-            token_url,
-            client_id,
-            client_secret: client_secret.map(Credential::new),
-        })
-    }
-
     async fn do_refresh(
         cred: &RwLock<OAuthCredential>,
         client: &reqwest::Client,
