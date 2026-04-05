@@ -129,6 +129,7 @@ pub fn classify_llm_error(err: &str) -> LlmErrorKind {
         || err.contains("vision")
         || err.contains("No endpoints found that support image")
         || err.contains("image(s) may be provided")
+        || err.contains("unsupported content type 'image_url'")
     {
         LlmErrorKind::NoVision
     } else {
@@ -223,6 +224,10 @@ mod tests {
         assert_eq!(classify_llm_error("No endpoints found that support image input"), LlmErrorKind::NoVision);
         assert_eq!(
             classify_llm_error("At most 0 image(s) may be provided in one prompt."),
+            LlmErrorKind::NoVision
+        );
+        assert_eq!(
+            classify_llm_error("unsupported content type 'image_url'"),
             LlmErrorKind::NoVision
         );
     }
