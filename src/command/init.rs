@@ -85,6 +85,12 @@ pub fn run(
 
         let json = serde_json::to_string_pretty(&default_config)?;
         std::fs::write(&config_path, format!("{json}\n"))?;
+        // Restrict permissions — config may contain secrets.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
+        }
         eprintln!("  created {}", config_path.display());
     } else {
         eprintln!("  {} already exists — skipping", config_path.display());

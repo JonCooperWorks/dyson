@@ -178,8 +178,50 @@ pub fn create_sandbox(
     }
 
     if config.disabled.iter().any(|s| s == "os") {
-        tracing::info!("sandbox disabled via config");
-        return std::sync::Arc::new(no_sandbox::DangerousNoSandbox);
+        tracing::warn!(
+            "ignoring sandbox.disabled config — sandbox can only be disabled \
+             via the --dangerous-no-sandbox CLI flag"
+        );
+    }
+
+    // Verify the OS sandbox binary is available.  Without it, bash commands
+    // would run unsandboxed — too dangerous for an LLM-controlled agent.
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let has_container = Command::new("which")
+            .arg("container")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has_container {
+            tracing::error!(
+                "macOS sandbox requires the 'container' CLI (Apple Containers). \
+                 Install it with: brew install container (or from github.com/apple/container). \
+                 Refusing to start without OS sandbox — use --dangerous-no-sandbox to override."
+            );
+            // Return DangerousNoSandbox but mark it so callers know it's a failure.
+            // Actually, we should panic/exit since this is a security-critical failure.
+            std::process::exit(1);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+        let has_bwrap = Command::new("which")
+            .arg("bwrap")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has_bwrap {
+            tracing::error!(
+                "Linux sandbox requires bubblewrap (bwrap). \
+                 Install it with: apt install bubblewrap (or: dnf install bubblewrap). \
+                 Refusing to start without OS sandbox — use --dangerous-no-sandbox to override."
+            );
+            std::process::exit(1);
+        }
     }
 
     let working_dir =
