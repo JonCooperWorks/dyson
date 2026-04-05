@@ -24,7 +24,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
-use futures::Stream;
+use tokio_stream::Stream;
 
 use crate::error::Result;
 use crate::llm::stream::{StopReason, StreamEvent};

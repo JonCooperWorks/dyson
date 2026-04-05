@@ -39,7 +39,7 @@
 
 use std::pin::Pin;
 
-use futures::Stream;
+use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 
 use crate::controller::Output;

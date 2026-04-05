@@ -18,8 +18,8 @@
 //
 //   TelegramController::run()
 //     │
-//     ├── create teloxide Bot from bot_token
-//     ├── teloxide polling loop:
+//     ├── create BotApi from bot_token
+//     ├── polling loop (getUpdates):
 //     │     ├── receive Message from Telegram
 //     │     ├── check allowed_chat_ids (access control)
 //     │     ├── lock-free commands (/models, /logs) → respond instantly
@@ -40,32 +40,29 @@
 //   - When a chat's agent is busy, new messages get quick responses
 //     (single LLM call, no tools) instead of blocking.
 //
-// The block_on problem:
-//   The `Output` trait is sync (for terminal compatibility), but teloxide
-//   is async.  We can't use `Handle::block_on()` because we're already
-//   inside a tokio runtime.  Instead, we use `tokio::task::block_in_place`
-//   with `Handle::block_on()` — this moves the blocking call off the
-//   async worker thread onto a blocking thread, then executes the async
-//   teloxide call there.  This is the correct bridge pattern.
+// Async bridging:
+//   The `Output` trait is sync (for terminal compatibility).  TelegramOutput
+//   uses a channel-based design: sync methods send events through an mpsc
+//   channel, and a background task consumes them with async API calls.
+//   This avoids block_in_place and works with current_thread tokio.
 // ===========================================================================
 
+mod api;
 mod formatting;
 pub mod output;
+pub mod types;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use teloxide::prelude::*;
-use teloxide::types::{
-    ChatId, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode,
-};
+use self::api::BotApi;
+use self::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup};
 use tokio::sync::Mutex;
 
 use serde::Deserialize;
 
 use crate::config::{ControllerConfig, Settings};
 use crate::controller::Output;
-use crate::error::DysonError;
 use crate::media;
 use crate::message::ContentBlock;
 
@@ -263,7 +260,7 @@ impl super::Controller for TelegramController {
             env!("CARGO_PKG_VERSION")
         );
 
-        let bot = teloxide::Bot::new(self.bot_token.expose());
+        let bot = BotApi::new(self.bot_token.expose());
         let allowed_ids = self.allowed_chat_ids.clone();
         let mut current_settings = settings.clone();
         let controller_prompt = self.system_prompt().map(|s| s.to_string());
@@ -298,7 +295,7 @@ impl super::Controller for TelegramController {
 
             // Poll for updates with a timeout, racing against Ctrl-C.
             let updates = tokio::select! {
-                result = bot.get_updates().offset(offset as i32).timeout(30).send() => {
+                result = bot.get_updates(offset, 30) => {
                     match result {
                         Ok(updates) => {
                             if consecutive_failures > 0 {
@@ -335,12 +332,12 @@ impl super::Controller for TelegramController {
             };
 
             for update in &updates {
-                offset = i64::from(update.id.0) + 1;
+                offset = update.update_id + 1;
 
-                if let teloxide::types::UpdateKind::CallbackQuery(cb) = &update.kind {
-                    let cb_chat_id = cb.message.as_ref().map(|m| m.chat().id);
+                if let Some(cb) = &update.callback_query {
+                    let cb_chat_id = cb.message.as_ref().map(|m| ChatId(m.chat.id));
                     let cb_data = cb.data.clone().unwrap_or_default();
-                    let _ = bot.answer_callback_query(cb.id.clone()).await;
+                    let _ = bot.answer_callback_query(&cb.id).await;
 
                     if let Some(chat_id) = cb_chat_id {
                         if !allowed_ids.is_empty() && !allowed_ids.contains(&chat_id.0) {
@@ -360,23 +357,24 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                let msg = match &update.kind {
-                    teloxide::types::UpdateKind::Message(m) => m.clone(),
-                    _ => continue,
+                let msg = match &update.message {
+                    Some(m) => m.clone(),
+                    None => continue,
                 };
 
                 let text = msg
-                    .text()
-                    .or(msg.caption())
+                    .text
+                    .as_deref()
+                    .or(msg.caption.as_deref())
                     .filter(|t| !t.is_empty())
                     .map(|t| t.to_string());
 
-                let has_media = msg.photo().is_some()
-                    || msg.voice().is_some()
-                    || msg.document().is_some_and(|d| {
+                let has_media = msg.photo.is_some()
+                    || msg.voice.is_some()
+                    || msg.document.as_ref().is_some_and(|d| {
                         d.mime_type
                             .as_ref()
-                            .is_some_and(|m| m.as_ref().starts_with("image/"))
+                            .is_some_and(|m| m.starts_with("image/"))
                     });
 
                 if text.is_none() && !has_media {
@@ -384,10 +382,10 @@ impl super::Controller for TelegramController {
                 }
 
                 let text = strip_bot_mention(&text.unwrap_or_default());
-                let chat_id = msg.chat.id;
+                let chat_id = ChatId(msg.chat.id);
 
                 if is_public_command(&text) {
-                    let _ = bot.send_message(chat_id, chat_id.0.to_string()).await;
+                    let _ = bot.send_message(chat_id, &chat_id.0.to_string()).await;
                     continue;
                 }
 
@@ -414,7 +412,7 @@ impl super::Controller for TelegramController {
                     {
                         Ok(e) => e,
                         Err(e) => {
-                            let _ = bot.send_message(chat_id, format!("Error: {e}")).await;
+                            let _ = bot.send_message(chat_id, &format!("Error: {e}")).await;
                             continue;
                         }
                     };
@@ -445,7 +443,7 @@ impl super::Controller for TelegramController {
                 {
                     Ok(e) => e,
                     Err(e) => {
-                        let _ = bot.send_message(chat_id, format!("Error: {e}")).await;
+                        let _ = bot.send_message(chat_id, &format!("Error: {e}")).await;
                         continue;
                     }
                 };
@@ -528,7 +526,7 @@ async fn rebuild_agents_on_reload(
 
 /// Handle a callback query (inline keyboard button press) for model switching.
 async fn handle_callback_query(
-    bot: &Bot,
+    bot: &BotApi,
     cb_data: &str,
     chat_id: ChatId,
     agents: &Arc<tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>>,
@@ -586,19 +584,17 @@ async fn handle_callback_query(
             if let Some(cp) = config_path {
                 crate::config::loader::persist_model_selection(cp, provider, model);
             }
-            let _ = bot.send_message(chat_id, reply).await;
+            let _ = bot.send_message(chat_id, &reply).await;
         }
         Err(e) => {
-            let _ = bot
-                .send_message(chat_id, format!("Switch error: {e}"))
-                .await;
+            let _ = bot.send_message(chat_id, &format!("Switch error: {e}")).await;
         }
     }
 }
 
 /// Handle per-chat commands (/clear, /compact, /model) that need the agent lock.
 async fn handle_per_chat_command(
-    bot: &Bot,
+    bot: &BotApi,
     text: &str,
     chat_id: ChatId,
     entry: &Arc<ChatEntry>,
@@ -642,9 +638,7 @@ async fn handle_per_chat_command(
             tracing::info!(chat_id = chat_id.0, "conversation compacted");
         }
         super::CommandResult::CompactError(e) => {
-            let _ = bot
-                .send_message(chat_id, format!("Compaction failed: {e}"))
-                .await;
+            let _ = bot.send_message(chat_id, &format!("Compaction failed: {e}")).await;
         }
         super::CommandResult::ModelSwitched {
             provider_name,
@@ -657,15 +651,15 @@ async fn handle_per_chat_command(
             let _ = bot
                 .send_message(
                     chat_id,
-                    format!("Switched to '{provider_name}' — {provider_type} ({model})"),
+                    &format!("Switched to '{provider_name}' — {provider_type} ({model})"),
                 )
                 .await;
         }
         super::CommandResult::ModelSwitchError(e) => {
-            let _ = bot.send_message(chat_id, format!("Switch error: {e}")).await;
+            let _ = bot.send_message(chat_id, &format!("Switch error: {e}")).await;
         }
         super::CommandResult::ModelParseError(e) => {
-            let _ = bot.send_message(chat_id, e).await;
+            let _ = bot.send_message(chat_id, &e).await;
         }
         super::CommandResult::ModelUsage => {
             let _ = bot
@@ -681,9 +675,9 @@ async fn handle_per_chat_command(
 
 /// Run the agent for a message in a background task, with quick-response fallback.
 async fn run_agent_for_message(
-    bot: Bot,
+    bot: BotApi,
     chat_id: ChatId,
-    msg: teloxide::types::Message,
+    msg: types::Message,
     text: String,
     entry: Arc<ChatEntry>,
     settings: Settings,
@@ -695,7 +689,7 @@ async fn run_agent_for_message(
         Ok(blocks) => blocks,
         Err(e) => {
             tracing::error!(error = %e, "failed to extract media content");
-            let _ = bot.send_message(chat_id, format!("Media error: {e}")).await;
+            let _ = bot.send_message(chat_id, &format!("Media error: {e}")).await;
             return;
         }
     };
@@ -742,7 +736,7 @@ async fn run_agent_for_message(
 
 /// Send a quick response (no tools, fast) when the agent is busy.
 async fn send_quick_response(
-    bot: &Bot,
+    bot: &BotApi,
     chat_id: ChatId,
     text: &str,
     entry: &ChatEntry,
@@ -782,7 +776,7 @@ async fn send_quick_response(
 /// `Some(false)` if recognized but not fully handled, and `None` if the text
 /// is not an instant command.
 async fn handle_instant_command(
-    bot: &Bot,
+    bot: &BotApi,
     text: &str,
     chat_id: ChatId,
     settings: &Settings,
@@ -801,10 +795,7 @@ async fn handle_instant_command(
             Err(e) => vec![format!("Logs error: {e}")],
         };
         for part in reply {
-            let _ = bot
-                .send_message(chat_id, part)
-                .parse_mode(ParseMode::Html)
-                .await;
+            let _ = bot.send_message_html(chat_id, &part).await;
         }
         return Some(true);
     }
@@ -825,7 +816,7 @@ async fn handle_instant_command(
                 tracing::info!(chat_id = chat_id.0, "memory note saved");
             }
             Err(e) => {
-                let _ = bot.send_message(chat_id, format!("Error: {e}")).await;
+                let _ = bot.send_message(chat_id, &format!("Error: {e}")).await;
                 tracing::error!(error = %e, "failed to save memory note");
             }
         }
@@ -851,7 +842,7 @@ async fn handle_instant_command(
 }
 
 /// Handle the /models command — show an inline keyboard with all providers/models.
-async fn handle_models_command(bot: &Bot, chat_id: ChatId, settings: &Settings) {
+async fn handle_models_command(bot: &BotApi, chat_id: ChatId, settings: &Settings) {
     if settings.providers.is_empty() {
         let _ = bot.send_message(chat_id, "No providers configured.").await;
         return;
@@ -876,10 +867,7 @@ async fn handle_models_command(bot: &Bot, chat_id: ChatId, settings: &Settings) 
         })
         .collect();
     let keyboard = build_model_keyboard(&providers);
-    let _ = bot
-        .send_message(chat_id, "Select a model:")
-        .reply_markup(keyboard)
-        .await;
+    let _ = bot.send_message_with_keyboard(chat_id, "Select a model:", &keyboard).await;
 }
 
 /// Get or create a per-chat entry, restoring persisted history if available.
@@ -997,8 +985,8 @@ fn save_memory_note(settings: &Settings, note: &str) -> crate::Result<()> {
 /// about model capabilities.  If a model rejects the resulting blocks,
 /// the caller handles cleanup.
 async fn extract_content(
-    bot: &Bot,
-    msg: &teloxide::types::Message,
+    bot: &BotApi,
+    msg: &types::Message,
     text: &str,
 ) -> crate::Result<Vec<ContentBlock>> {
     let mut blocks = Vec::new();
@@ -1010,16 +998,16 @@ async fn extract_content(
     }
 
     // Photos: pick the largest resolution (last in the array).
-    if let Some(photos) = msg.photo()
+    if let Some(photos) = &msg.photo
         && let Some(photo) = photos.last()
     {
         tracing::info!(
-            file_id = photo.file.id.0.as_str(),
+            file_id = photo.file_id.as_str(),
             width = photo.width,
             height = photo.height,
             "downloading photo from Telegram"
         );
-        match download_telegram_file(bot, &photo.file.id.0).await {
+        match bot.download_file(&photo.file_id).await {
             Ok(data) => match media::resolve(media::MediaInput::Image {
                 data,
                 mime_type: "image/jpeg".to_string(),
@@ -1047,18 +1035,18 @@ async fn extract_content(
     }
 
     // Voice notes: transcribe via Whisper.
-    if let Some(voice) = msg.voice() {
+    if let Some(voice) = &msg.voice {
         tracing::info!(
-            file_id = voice.file.id.0.as_str(),
+            file_id = voice.file_id.as_str(),
             "downloading voice note from Telegram"
         );
         let mime = voice
             .mime_type
-            .as_ref()
-            .map(|m| m.to_string())
-            .unwrap_or_else(|| "audio/ogg".to_string());
+            .as_deref()
+            .unwrap_or("audio/ogg")
+            .to_string();
 
-        match download_telegram_file(bot, &voice.file.id.0).await {
+        match bot.download_file(&voice.file_id).await {
             Ok(data) => match media::resolve(media::MediaInput::Audio {
                 data,
                 mime_type: mime,
@@ -1088,24 +1076,24 @@ async fn extract_content(
     }
 
     // Documents with image MIME types (e.g. uncompressed photos).
-    if let Some(doc) = msg.document() {
+    if let Some(doc) = &msg.document {
         let is_image = doc
             .mime_type
             .as_ref()
-            .is_some_and(|m| m.as_ref().starts_with("image/"));
+            .is_some_and(|m| m.starts_with("image/"));
         if is_image {
             tracing::info!(
-                file_id = doc.file.id.0.as_str(),
+                file_id = doc.file_id.as_str(),
                 file_name = doc.file_name.as_deref().unwrap_or("unknown"),
                 "downloading image document from Telegram"
             );
             let mime = doc
                 .mime_type
-                .as_ref()
-                .map(|m| m.to_string())
-                .unwrap_or_else(|| "image/jpeg".to_string());
+                .as_deref()
+                .unwrap_or("image/jpeg")
+                .to_string();
 
-            match download_telegram_file(bot, &doc.file.id.0).await {
+            match bot.download_file(&doc.file_id).await {
                 Ok(data) => match media::resolve(media::MediaInput::Image {
                     data,
                     mime_type: mime,
@@ -1140,26 +1128,6 @@ async fn extract_content(
     }
 
     Ok(blocks)
-}
-
-/// Download a file from Telegram by file_id.
-///
-/// Uses the Bot API to get the file path, then downloads from the
-/// Telegram file server.
-async fn download_telegram_file(bot: &Bot, file_id: &str) -> crate::Result<Vec<u8>> {
-    let file = bot
-        .get_file(teloxide::types::FileId(file_id.to_string()))
-        .await
-        .map_err(|e| DysonError::Llm(format!("Telegram get_file failed: {e}")))?;
-
-    let token = bot.token();
-    let url = format!("https://api.telegram.org/file/bot{}/{}", token, file.path);
-
-    let response = reqwest::get(&url).await.map_err(DysonError::Http)?;
-
-    let bytes = response.bytes().await.map_err(DysonError::Http)?;
-
-    Ok(bytes.to_vec())
 }
 
 // TelegramOutput and formatting helpers are in submodules:

@@ -493,7 +493,7 @@ mod tests {
             expires_at: SystemTime::now() + Duration::from_secs(3600),
             token_url: String::new(), client_id: String::new(), client_secret: None,
         });
-        let req = auth.apply_to_request(reqwest::Client::new().post("http://localhost/test")).await.unwrap();
+        let req = auth.apply_to_request(crate::http::client().post("http://localhost/test")).await.unwrap();
         assert_eq!(req.build().unwrap().headers()["authorization"].to_str().unwrap(), "Bearer test-token");
     }
 
@@ -512,7 +512,7 @@ mod tests {
     #[tokio::test]
     async fn callback_server_receives_code() {
         let (port, handle, rx) = start_callback_server("my-state", Duration::from_secs(5)).await.unwrap();
-        let resp = reqwest::Client::new()
+        let resp = crate::http::client()
             .get(format!("http://127.0.0.1:{port}/callback?code=abc&state=my-state"))
             .send().await.unwrap();
         assert_eq!(resp.status(), 200);
@@ -523,7 +523,7 @@ mod tests {
     #[tokio::test]
     async fn callback_server_rejects_wrong_state() {
         let (port, handle, _) = start_callback_server("correct", Duration::from_secs(5)).await.unwrap();
-        let resp = reqwest::Client::new()
+        let resp = crate::http::client()
             .get(format!("http://127.0.0.1:{port}/callback?code=c&state=wrong"))
             .send().await.unwrap();
         assert_eq!(resp.status(), 400);
@@ -533,7 +533,7 @@ mod tests {
     #[tokio::test]
     async fn callback_server_404_on_wrong_path() {
         let (port, handle, _) = start_callback_server("s", Duration::from_secs(5)).await.unwrap();
-        let resp = reqwest::Client::new()
+        let resp = crate::http::client()
             .get(format!("http://127.0.0.1:{port}/wrong")).send().await.unwrap();
         assert_eq!(resp.status(), 404);
         handle.abort();

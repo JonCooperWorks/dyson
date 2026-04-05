@@ -37,12 +37,24 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// generations.  The connect timeout above catches unreachable hosts fast.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Ensure the rustls crypto provider is installed (idempotent).
+///
+/// Called automatically when the HTTP client is first used.  Also called
+/// from `main()` for early failure.  Safe to call multiple times — the
+/// second call is a no-op.
+pub fn ensure_crypto_provider() {
+    // install_default returns Err if already installed — that's fine.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Process-wide HTTP client singleton.
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    ensure_crypto_provider();
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
+        .pool_idle_timeout(Duration::from_secs(30))
         .build()
         .expect("failed to build HTTP client")
 });

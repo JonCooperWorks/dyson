@@ -390,7 +390,7 @@ async fn mcp_server_binds_to_loopback_only() {
     );
 
     // Verify the server is actually listening on loopback by making a request.
-    let client = reqwest::Client::new();
+    let client = dyson::http::client();
     let resp = client
         .post(format!("http://127.0.0.1:{port}/mcp"))
         .header("Authorization", format!("Bearer {token}"))
@@ -435,7 +435,7 @@ async fn mcp_server_rejects_unauthorized_request() {
     let (port, handle, _token) = server.start().await.unwrap();
 
     // Send a request with no Authorization header.
-    let client = reqwest::Client::new();
+    let client = dyson::http::client();
     let resp = client
         .post(format!("http://127.0.0.1:{port}/mcp"))
         .json(&serde_json::json!({
@@ -474,7 +474,7 @@ async fn mcp_server_rejects_wrong_bearer_token() {
     let (port, handle, _token) = server.start().await.unwrap();
 
     // Send a request with a wrong bearer token.
-    let client = reqwest::Client::new();
+    let client = dyson::http::client();
     let resp = client
         .post(format!("http://127.0.0.1:{port}/mcp"))
         .header("Authorization", "Bearer wrong-token-value")

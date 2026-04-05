@@ -40,6 +40,10 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -142,8 +146,11 @@ enum Commands {
 // Entry point
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
+#[tokio::main(worker_threads = 1)]
 async fn main() -> dyson::error::Result<()> {
+    // Install ring as the rustls crypto provider (instead of the heavier aws-lc-rs default).
+    dyson::http::ensure_crypto_provider();
+
     // Set up log file at ~/.dyson/dyson.log (best-effort; fall back to stderr-only).
     let log_dir = std::env::var("HOME")
         .ok()

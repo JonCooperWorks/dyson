@@ -50,7 +50,7 @@ pub use dialects::{ExtractedToolCall, TextToolHandler, text_tool_handler_for_mod
 use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::Stream;
+use tokio_stream::Stream;
 
 use std::fmt::Write as _;
 

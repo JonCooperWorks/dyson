@@ -897,7 +897,7 @@ impl Agent {
                         .iter()
                         .map(|&idx| self.execute_tool_call_timed(allowed_calls[idx]))
                         .collect();
-                    let results = futures::future::join_all(futs).await;
+                    let results = futures_util::future::join_all(futs).await;
                     for (&idx, result) in indices.iter().zip(results) {
                         self.handle_tool_result(allowed_calls[idx], result, output)?;
                     }
