@@ -246,6 +246,21 @@ impl ToolContext {
             depth: 0,
         })
     }
+
+    /// Create a context rooted at the given directory with no env or workspace.
+    ///
+    /// Designed for unit tests — avoids repeating the same struct literal
+    /// in every tool's test module.
+    #[cfg(test)]
+    pub fn for_test(dir: &std::path::Path) -> Self {
+        Self {
+            working_dir: dir.to_path_buf(),
+            env: HashMap::new(),
+            cancellation: CancellationToken::new(),
+            workspace: None,
+            depth: 0,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

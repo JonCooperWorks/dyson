@@ -73,7 +73,7 @@ fires first wins; the other becomes a no-op.
 
 **Subsequent uses:** `on_load()` loads persisted tokens instantly. No interaction.
 
-**Token refresh:** `OAuthAuth::apply_to_request()` auto-refreshes when expired.
+**Token refresh:** `OAuth::apply_to_request()` auto-refreshes when expired.
 
 **401 retry:** `HttpTransport` calls `on_unauthorized()` → force refresh → retry once.
 

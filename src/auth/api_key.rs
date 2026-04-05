@@ -48,17 +48,10 @@ impl Auth for ApiKeyAuth {
     }
 
     async fn validate_request(&self, headers: &hyper::HeaderMap) -> Result<AuthInfo> {
-        use subtle::ConstantTimeEq;
-
         let valid = headers
             .get(&self.header_name)
             .and_then(|v| v.to_str().ok())
-            .map(|v| {
-                let expected = self.key.expose().as_bytes();
-                let provided = v.as_bytes();
-                provided.len() == expected.len()
-                    && bool::from(provided.ct_eq(expected))
-            })
+            .map(|v| super::constant_time_eq(self.key.expose().as_bytes(), v.as_bytes()))
             .unwrap_or(false);
 
         if valid {

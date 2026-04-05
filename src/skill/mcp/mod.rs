@@ -197,7 +197,7 @@ impl McpSkill {
         Ok((auth_url, tool))
     }
 
-    async fn load_oauth_auth(server_name: &str) -> Result<Option<Box<dyn crate::auth::Auth>>> {
+    async fn load_oauth_credential(server_name: &str) -> Result<Option<Box<dyn crate::auth::Auth>>> {
         if let Some(cred) = oauth::load_tokens(server_name).await? {
             if cred.refresh_token.is_some() || !cred.is_expired() {
                 tracing::info!(server = server_name, "using persisted OAuth tokens");
@@ -265,7 +265,7 @@ impl Skill for McpSkill {
                 Some(Arc::new(HttpTransport::new(&url, Box::new(crate::auth::StaticHeadersAuth::new(headers)))))
             }
             crate::config::McpTransportConfig::Http { url, auth: Some(oauth_config), .. } => {
-                match Self::load_oauth_auth(&server_name).await? {
+                match Self::load_oauth_credential(&server_name).await? {
                     Some(auth) => Some(Arc::new(HttpTransport::new(&url, auth))),
                     None => {
                         let (auth_url, submit_tool) = Self::start_oauth_flow(&server_name, &url, &oauth_config).await?;

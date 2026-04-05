@@ -85,16 +85,6 @@ mod tests {
     use super::*;
     use crate::tool::ToolContext;
 
-    fn test_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            working_dir: dir.to_path_buf(),
-            env: std::collections::HashMap::new(),
-            cancellation: tokio_util::sync::CancellationToken::new(),
-            workspace: None,
-            depth: 0,
-        }
-    }
-
     #[tokio::test]
     async fn write_new_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -103,7 +93,7 @@ mod tests {
             "file_path": "hello.txt",
             "content": "hello world"
         });
-        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
         assert!(!output.is_error);
 
         let content = std::fs::read_to_string(tmp.path().join("hello.txt")).unwrap();
@@ -118,7 +108,7 @@ mod tests {
             "file_path": "a/b/c.txt",
             "content": "nested"
         });
-        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
         assert!(!output.is_error);
 
         let content = std::fs::read_to_string(tmp.path().join("a/b/c.txt")).unwrap();
@@ -135,7 +125,7 @@ mod tests {
             "file_path": "existing.txt",
             "content": "new"
         });
-        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
         assert!(!output.is_error);
 
         let content = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();

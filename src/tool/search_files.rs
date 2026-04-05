@@ -174,16 +174,6 @@ mod tests {
     use super::*;
     use crate::tool::ToolContext;
 
-    fn test_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            working_dir: dir.to_path_buf(),
-            env: std::collections::HashMap::new(),
-            cancellation: tokio_util::sync::CancellationToken::new(),
-            workspace: None,
-            depth: 0,
-        }
-    }
-
     #[tokio::test]
     async fn search_finds_matches() {
         let tmp = tempfile::tempdir().unwrap();
@@ -192,7 +182,7 @@ mod tests {
 
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "fn \\w+"});
-        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("fn hello"));
         assert!(output.content.contains("fn world"));
@@ -205,7 +195,7 @@ mod tests {
 
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "zzzzz"});
-        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("No matches"));
     }
@@ -215,7 +205,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "[invalid"});
-        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
         assert!(output.is_error);
     }
 

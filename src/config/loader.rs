@@ -743,7 +743,7 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
                         })
                         .unwrap_or_default();
 
-                    // Parse optional OAuth auth config.
+                    // Parse optional OAuth config.
                     let auth = if server_json["auth"]["type"].as_str() == Some("oauth") {
                         let auth_json = &server_json["auth"];
                         Some(McpAuthConfig {
