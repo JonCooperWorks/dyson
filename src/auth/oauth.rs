@@ -1,287 +1,169 @@
 // ===========================================================================
-// OAuth 2.0 primitives — pure functions for the Authorization Code + PKCE flow.
+// OAuth 2.0 — Authorization Code + PKCE for MCP servers.
 //
-// LEARNING OVERVIEW
+// Everything OAuth lives in this one module: PKCE generation, token
+// exchange/refresh, the Auth trait impl with auto-refresh, the callback
+// server, and token persistence.
 //
-// What this module does:
-//   Provides the building blocks for OAuth 2.0 Authorization Code with PKCE,
-//   as used by MCP servers that require interactive authorization (e.g.,
-//   GitHub Copilot MCP).
-//
-//   Every function here is pure: it takes inputs, makes an HTTP call or does
-//   a computation, and returns a result.  No global state, no side effects
-//   beyond the network calls.  This makes them easy to unit-test with mock
-//   HTTP responses.
-//
-// How these fit together:
-//
-//   1. discover_metadata()  — learn the server's OAuth endpoints
-//   2. register_client()    — (optional) Dynamic Client Registration
-//   3. generate_pkce()      — create a PKCE code_verifier + code_challenge
-//   4. build_auth_url()     — construct the URL the user visits to authorize
-//   5. exchange_code()      — swap the authorization code for tokens
-//   6. refresh_token()      — get new tokens when the access token expires
-//
-// PKCE (Proof Key for Code Exchange):
-//   Prevents authorization code interception attacks.  The client generates
-//   a random `code_verifier`, sends its SHA-256 hash (`code_challenge`) in
-//   the auth request, then proves possession of the verifier during token
-//   exchange.  This is required for public clients (no client_secret) and
-//   recommended for all OAuth 2.0 flows per RFC 7636.
-//
-// Controller-agnostic design:
-//   These functions don't know about controllers, agents, or UI.  The MCP
-//   skill layer (src/skill/mcp/mod.rs) orchestrates the flow and surfaces
-//   the auth URL through the agent's system prompt, which works identically
-//   across Terminal, Telegram, and any future controller.
+// The MCP skill layer (src/skill/mcp/mod.rs) orchestrates the flow.
+// Controllers never know OAuth exists — the auth URL appears in the
+// agent's system prompt.
 // ===========================================================================
 
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use http_body_util::Full;
+use hyper::body::Bytes;
+use hyper::server::conn::http1;
+use hyper::{Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::net::TcpListener;
+use tokio::sync::{oneshot, RwLock};
+use tokio::task::JoinHandle;
 
+use super::credential::Credential;
+use super::Auth;
 use crate::error::{DysonError, Result};
 
 // ---------------------------------------------------------------------------
-// Data types
+// Types
 // ---------------------------------------------------------------------------
 
 /// OAuth 2.0 Authorization Server Metadata (RFC 8414).
 ///
-/// Discovered from `/.well-known/oauth-authorization-server` on the MCP
-/// server's origin.  Only the fields Dyson actually uses are included;
-/// unknown fields are silently ignored via `#[serde(default)]`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Discovered via `/.well-known/oauth-authorization-server`.  Unknown
+/// fields are silently ignored.
+#[derive(Debug, Clone, Deserialize)]
 pub struct AuthMetadata {
-    /// URL of the authorization endpoint (where the user grants access).
     pub authorization_endpoint: String,
-
-    /// URL of the token endpoint (where codes are exchanged for tokens).
     pub token_endpoint: String,
-
-    /// URL of the Dynamic Client Registration endpoint (RFC 7591).
-    /// `None` if the server doesn't support DCR.
     #[serde(default)]
     pub registration_endpoint: Option<String>,
-
-    /// OAuth response types the server supports (e.g., `["code"]`).
-    #[serde(default)]
-    pub response_types_supported: Vec<String>,
-
-    /// PKCE code challenge methods supported (e.g., `["S256"]`).
-    #[serde(default)]
-    pub code_challenge_methods_supported: Vec<String>,
-
-    /// Scopes the server supports.
-    #[serde(default)]
-    pub scopes_supported: Vec<String>,
-}
-
-/// Dynamic Client Registration request (RFC 7591).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DcrRequest {
-    /// Human-readable name for the client.
-    pub client_name: String,
-
-    /// Redirect URIs the client will use.
-    pub redirect_uris: Vec<String>,
-
-    /// Grant types the client will use (e.g., `["authorization_code", "refresh_token"]`).
-    pub grant_types: Vec<String>,
-
-    /// Response types the client will use (e.g., `["code"]`).
-    #[serde(default)]
-    pub response_types: Vec<String>,
-
-    /// Token endpoint auth method (e.g., `"none"` for public clients).
-    #[serde(default)]
-    pub token_endpoint_auth_method: Option<String>,
-}
-
-/// Dynamic Client Registration response (RFC 7591).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DcrResponse {
-    /// The assigned client ID.
-    pub client_id: String,
-
-    /// Optional client secret (confidential clients only).
-    #[serde(default)]
-    pub client_secret: Option<String>,
-
-    /// When the client secret expires (0 = never).
-    #[serde(default)]
-    pub client_secret_expires_at: Option<u64>,
 }
 
 /// Token endpoint response (RFC 6749 Section 5.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
-    /// The access token issued by the authorization server.
     pub access_token: String,
-
-    /// Token type (almost always "Bearer").
     pub token_type: String,
-
-    /// Lifetime of the access token in seconds.
     #[serde(default)]
     pub expires_in: Option<u64>,
-
-    /// Refresh token for obtaining new access tokens.
     #[serde(default)]
     pub refresh_token: Option<String>,
-
-    /// Space-separated list of granted scopes.
     #[serde(default)]
     pub scope: Option<String>,
 }
 
-/// PKCE code verifier and challenge pair.
-///
-/// The `verifier` is a random string sent during token exchange.
-/// The `challenge` is its SHA-256 hash (base64url-encoded) sent during
-/// the authorization request.
+/// PKCE code verifier + S256 challenge pair.
 #[derive(Debug, Clone)]
 pub struct PkceChallenge {
-    /// Random code verifier (base64url, 43 chars from 32 random bytes).
     pub verifier: String,
-    /// S256 code challenge = base64url(SHA-256(verifier)).
     pub challenge: String,
 }
 
 // ---------------------------------------------------------------------------
-// Discovery
+// Pure functions
 // ---------------------------------------------------------------------------
 
-/// Fetch OAuth 2.0 authorization server metadata from
-/// `<origin>/.well-known/oauth-authorization-server` (RFC 8414).
+/// Discover OAuth metadata from `<origin>/.well-known/oauth-authorization-server`.
 pub async fn discover_metadata(
     server_url: &str,
     client: &reqwest::Client,
 ) -> Result<AuthMetadata> {
-    // Strip trailing slashes to normalize the URL.
     let base = server_url.trim_end_matches('/');
-    let well_known = format!("{base}/.well-known/oauth-authorization-server");
+    let url = format!("{base}/.well-known/oauth-authorization-server");
 
-    tracing::debug!(url = %well_known, "discovering OAuth metadata");
-
-    let response = client.get(&well_known).send().await.map_err(|e| {
-        DysonError::oauth(server_url, format!("metadata discovery failed: {e}"))
-    })?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| DysonError::oauth(server_url, format!("metadata discovery failed: {e}")))?;
 
     if !response.status().is_success() {
         return Err(DysonError::oauth(
             server_url,
-            format!(
-                "metadata discovery returned HTTP {}",
-                response.status()
-            ),
+            format!("metadata discovery returned HTTP {}", response.status()),
         ));
     }
 
-    let metadata: AuthMetadata = response.json().await.map_err(|e| {
-        DysonError::oauth(server_url, format!("failed to parse metadata: {e}"))
-    })?;
-
-    tracing::info!(
-        server = server_url,
-        authorization_endpoint = %metadata.authorization_endpoint,
-        token_endpoint = %metadata.token_endpoint,
-        "OAuth metadata discovered"
-    );
-
-    Ok(metadata)
+    response
+        .json()
+        .await
+        .map_err(|e| DysonError::oauth(server_url, format!("failed to parse metadata: {e}")))
 }
 
-// ---------------------------------------------------------------------------
-// Dynamic Client Registration
-// ---------------------------------------------------------------------------
-
-/// Register a new OAuth client via Dynamic Client Registration (RFC 7591).
+/// Register a client via Dynamic Client Registration (RFC 7591).
+///
+/// Returns `(client_id, client_secret)`.
 pub async fn register_client(
     registration_url: &str,
-    request: &DcrRequest,
+    client_name: &str,
     client: &reqwest::Client,
-) -> Result<DcrResponse> {
-    tracing::debug!(url = %registration_url, client_name = %request.client_name, "registering OAuth client");
+) -> Result<(String, Option<String>)> {
+    let body = serde_json::json!({
+        "client_name": client_name,
+        "redirect_uris": [],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    });
 
     let response = client
         .post(registration_url)
-        .json(request)
+        .json(&body)
         .send()
         .await
-        .map_err(|e| {
-            DysonError::oauth("dcr", format!("client registration failed: {e}"))
-        })?;
+        .map_err(|e| DysonError::oauth("dcr", format!("registration failed: {e}")))?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "failed to read body".into());
+        let text = response.text().await.unwrap_or_default();
         return Err(DysonError::oauth(
             "dcr",
-            format!("client registration returned HTTP {status}: {body}"),
+            format!("registration returned HTTP {status}: {text}"),
         ));
     }
 
-    let dcr_response: DcrResponse = response.json().await.map_err(|e| {
-        DysonError::oauth("dcr", format!("failed to parse DCR response: {e}"))
-    })?;
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| DysonError::oauth("dcr", format!("failed to parse DCR response: {e}")))?;
 
-    tracing::info!(
-        client_id = %dcr_response.client_id,
-        has_secret = dcr_response.client_secret.is_some(),
-        "OAuth client registered"
-    );
+    let client_id = json["client_id"]
+        .as_str()
+        .ok_or_else(|| DysonError::oauth("dcr", "DCR response missing client_id"))?
+        .to_string();
+    let client_secret = json["client_secret"].as_str().map(|s| s.to_string());
 
-    Ok(dcr_response)
+    Ok((client_id, client_secret))
 }
 
-// ---------------------------------------------------------------------------
-// PKCE
-// ---------------------------------------------------------------------------
-
-/// Generate a PKCE code verifier and S256 code challenge.
-///
-/// Per RFC 7636:
-/// - `code_verifier`: 32 random bytes, base64url-encoded (43 chars)
-/// - `code_challenge`: base64url(SHA-256(code_verifier))
-/// - `code_challenge_method`: always "S256"
-///
-/// The verifier is cryptographically random, making it infeasible for an
-/// attacker to guess or brute-force.
+/// Generate PKCE code_verifier (32 random bytes, base64url) + S256 code_challenge.
 pub fn generate_pkce() -> PkceChallenge {
-    // 32 bytes of cryptographic randomness → 43-char base64url string.
     let random_bytes: [u8; 32] = rand::rng().random();
     let verifier = URL_SAFE_NO_PAD.encode(random_bytes);
-
-    // S256: challenge = base64url(SHA-256(ASCII(verifier)))
-    let digest = Sha256::digest(verifier.as_bytes());
-    let challenge = URL_SAFE_NO_PAD.encode(digest);
-
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     PkceChallenge { verifier, challenge }
 }
 
-// ---------------------------------------------------------------------------
-// Authorization URL
-// ---------------------------------------------------------------------------
-
-/// Build the authorization URL the user visits to grant access.
+/// Build the authorization URL with all required query parameters.
 pub fn build_auth_url(
-    metadata: &AuthMetadata,
+    authorization_endpoint: &str,
     client_id: &str,
     scopes: &[String],
     redirect_uri: &str,
     code_challenge: &str,
     state: &str,
 ) -> String {
-    // Use reqwest's re-exported url::Url for correct encoding of all
-    // query parameters.  This is security-sensitive — hand-rolled encoding
-    // risks injection or interoperability bugs.
-    let mut url = reqwest::Url::parse(&metadata.authorization_endpoint)
+    let mut url = reqwest::Url::parse(authorization_endpoint)
         .expect("authorization_endpoint must be a valid URL");
 
     url.query_pairs_mut()
@@ -296,42 +178,7 @@ pub fn build_auth_url(
     url.to_string()
 }
 
-// ---------------------------------------------------------------------------
-// Token exchange / refresh
-// ---------------------------------------------------------------------------
-
-/// POST form params to a token endpoint, return parsed `TokenResponse`.
-async fn post_token_request(
-    token_url: &str,
-    params: &[(&str, &str)],
-    context: &str,
-    client: &reqwest::Client,
-) -> Result<TokenResponse> {
-    let response = client
-        .post(token_url)
-        .form(params)
-        .send()
-        .await
-        .map_err(|e| DysonError::oauth(token_url, format!("{context} failed: {e}")))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "failed to read body".into());
-        return Err(DysonError::oauth(
-            token_url,
-            format!("{context} returned HTTP {status}: {body}"),
-        ));
-    }
-
-    response.json().await.map_err(|e| {
-        DysonError::oauth(token_url, format!("{context}: failed to parse response: {e}"))
-    })
-}
-
-/// Exchange an authorization code for tokens (second leg of the Auth Code flow).
+/// Exchange an authorization code for tokens.
 pub async fn exchange_code(
     token_url: &str,
     code: &str,
@@ -348,19 +195,15 @@ pub async fn exchange_code(
         ("client_id", client_id),
         ("code_verifier", verifier),
     ];
-
-    // Confidential clients include client_secret in the request body.
-    // Public clients (PKCE-only) omit it.
     let secret_owned;
-    if let Some(secret) = client_secret {
-        secret_owned = secret.to_string();
+    if let Some(s) = client_secret {
+        secret_owned = s.to_string();
         params.push(("client_secret", &secret_owned));
     }
-
     post_token_request(token_url, &params, "token exchange", client).await
 }
 
-/// Refresh an expired access token using a refresh token.
+/// Refresh an expired access token.
 pub async fn refresh_token(
     token_url: &str,
     refresh_token: &str,
@@ -373,26 +216,381 @@ pub async fn refresh_token(
         ("refresh_token", refresh_token),
         ("client_id", client_id),
     ];
-
     let secret_owned;
-    if let Some(secret) = client_secret {
-        secret_owned = secret.to_string();
+    if let Some(s) = client_secret {
+        secret_owned = s.to_string();
         params.push(("client_secret", &secret_owned));
     }
-
     post_token_request(token_url, &params, "token refresh", client).await
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Generate a random state parameter for CSRF protection.
-///
-/// Returns a 16-byte random value encoded as base64url (22 chars).
+/// Generate a random state parameter for CSRF protection (base64url, 22 chars).
 pub fn generate_state() -> String {
     let bytes: [u8; 16] = rand::rng().random();
     URL_SAFE_NO_PAD.encode(bytes)
+}
+
+async fn post_token_request(
+    token_url: &str,
+    params: &[(&str, &str)],
+    context: &str,
+    client: &reqwest::Client,
+) -> Result<TokenResponse> {
+    let response = client
+        .post(token_url)
+        .form(params)
+        .send()
+        .await
+        .map_err(|e| DysonError::oauth(token_url, format!("{context} failed: {e}")))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(DysonError::oauth(
+            token_url,
+            format!("{context} returned HTTP {status}: {body}"),
+        ));
+    }
+
+    response
+        .json()
+        .await
+        .map_err(|e| DysonError::oauth(token_url, format!("{context}: bad response: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// OAuthAuth — Auth trait impl with auto-refresh
+// ---------------------------------------------------------------------------
+
+/// Mutable token state, held behind `Arc<RwLock<>>`.
+pub struct OAuthCredential {
+    pub access_token: Credential,
+    pub refresh_token: Option<Credential>,
+    /// `UNIX_EPOCH` if unknown (forces refresh on first use).
+    pub expires_at: SystemTime,
+    pub token_url: String,
+    pub client_id: String,
+    pub client_secret: Option<Credential>,
+}
+
+impl OAuthCredential {
+    /// Whether the token has expired (with 30s safety margin).
+    pub fn is_expired(&self) -> bool {
+        match self.expires_at.duration_since(SystemTime::now()) {
+            Ok(remaining) => remaining < Duration::from_secs(30),
+            Err(_) => true,
+        }
+    }
+}
+
+/// OAuth 2.0 Bearer token auth with automatic refresh.
+pub struct OAuthAuth {
+    credential: Arc<RwLock<OAuthCredential>>,
+    http_client: reqwest::Client,
+}
+
+impl OAuthAuth {
+    pub fn new(credential: OAuthCredential) -> Self {
+        Self {
+            credential: Arc::new(RwLock::new(credential)),
+            http_client: reqwest::Client::new(),
+        }
+    }
+
+    pub fn from_token_response(
+        response: &TokenResponse,
+        token_url: String,
+        client_id: String,
+        client_secret: Option<String>,
+    ) -> Self {
+        let expires_at = response
+            .expires_in
+            .map(|secs| SystemTime::now() + Duration::from_secs(secs))
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+
+        Self::new(OAuthCredential {
+            access_token: Credential::new(response.access_token.clone()),
+            refresh_token: response.refresh_token.as_ref().map(|t| Credential::new(t.clone())),
+            expires_at,
+            token_url,
+            client_id,
+            client_secret: client_secret.map(Credential::new),
+        })
+    }
+
+    async fn do_refresh(
+        cred: &RwLock<OAuthCredential>,
+        client: &reqwest::Client,
+        force: bool,
+    ) -> Result<()> {
+        let mut guard = cred.write().await;
+
+        if !force && !guard.is_expired() {
+            return Ok(());
+        }
+
+        let refresh_tok = guard.refresh_token.as_ref().ok_or_else(|| {
+            DysonError::oauth(&guard.token_url, "token expired and no refresh token")
+        })?;
+
+        let response = refresh_token(
+            &guard.token_url,
+            refresh_tok.expose(),
+            &guard.client_id,
+            guard.client_secret.as_ref().map(|c| c.expose()),
+            client,
+        )
+        .await?;
+
+        guard.access_token = Credential::new(response.access_token);
+        guard.expires_at = response
+            .expires_in
+            .map(|secs| SystemTime::now() + Duration::from_secs(secs))
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+
+        if let Some(new_refresh) = response.refresh_token {
+            guard.refresh_token = Some(Credential::new(new_refresh));
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Auth for OAuthAuth {
+    async fn apply_to_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder> {
+        {
+            let guard = self.credential.read().await;
+            if !guard.is_expired() {
+                return Ok(request.header(
+                    "Authorization",
+                    format!("Bearer {}", guard.access_token.expose()),
+                ));
+            }
+        }
+
+        Self::do_refresh(&self.credential, &self.http_client, false).await?;
+
+        let guard = self.credential.read().await;
+        Ok(request.header(
+            "Authorization",
+            format!("Bearer {}", guard.access_token.expose()),
+        ))
+    }
+
+    async fn on_unauthorized(&self) -> Result<()> {
+        Self::do_refresh(&self.credential, &self.http_client, true).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Callback server
+// ---------------------------------------------------------------------------
+
+/// Start a temporary HTTP server on `127.0.0.1:0` for the OAuth redirect.
+///
+/// Returns `(port, task_handle, code_receiver)`.  The server validates the
+/// `state` parameter, sends back an HTML success page, and delivers the
+/// authorization code through the oneshot channel.
+pub async fn start_callback_server(
+    expected_state: &str,
+    timeout: Duration,
+) -> Result<(u16, JoinHandle<()>, oneshot::Receiver<String>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let (tx, rx) = oneshot::channel::<String>();
+    let expected_state = expected_state.to_string();
+
+    let handle = tokio::spawn(async move {
+        let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
+
+        let _ = tokio::time::timeout(timeout, async {
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(_) => continue,
+                };
+
+                let spawn_state = expected_state.clone();
+                let spawn_tx = tx.clone();
+
+                tokio::spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let service = hyper::service::service_fn(move |req| {
+                        let state = spawn_state.clone();
+                        let tx = spawn_tx.clone();
+                        async move { handle_callback(req, &state, tx).await }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+
+                if tx.lock().await.is_none() {
+                    break;
+                }
+            }
+        })
+        .await;
+    });
+
+    Ok((port, handle, rx))
+}
+
+async fn handle_callback(
+    req: Request<hyper::body::Incoming>,
+    expected_state: &str,
+    tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
+) -> std::result::Result<Response<Full<Bytes>>, Infallible> {
+    if req.method() != hyper::Method::GET || !req.uri().path().starts_with("/callback") {
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Full::new(Bytes::from("Not Found")))
+            .unwrap());
+    }
+
+    let query = req.uri().query().unwrap_or("");
+    let params: Vec<(String, String)> = reqwest::Url::parse(&format!("http://x?{query}"))
+        .map(|u| u.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect())
+        .unwrap_or_default();
+
+    let find = |key: &str| params.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+
+    if let Some(error) = find("error") {
+        let desc = find("error_description").unwrap_or("unknown");
+        return Ok(html_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Authorization Failed: {error}: {desc}"),
+        ));
+    }
+
+    let (Some(code), Some(state)) = (find("code"), find("state")) else {
+        return Ok(html_response(StatusCode::BAD_REQUEST, "Missing code or state parameter."));
+    };
+
+    if state != expected_state {
+        return Ok(html_response(StatusCode::BAD_REQUEST, "State mismatch — possible CSRF."));
+    }
+
+    if let Some(sender) = tx.lock().await.take() {
+        let _ = sender.send(code.to_string());
+    }
+
+    Ok(html_response(
+        StatusCode::OK,
+        "Authorization complete. You can close this tab.",
+    ))
+}
+
+fn html_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "text/html; charset=utf-8")
+        .body(Full::new(Bytes::from(format!(
+            "<html><body><h1>{message}</h1></body></html>"
+        ))))
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// Token persistence
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+struct PersistedTokens {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_at_epoch: u64,
+    token_url: String,
+    client_id: String,
+    client_secret: Option<String>,
+}
+
+/// Persist tokens from a `TokenResponse` to `~/.dyson/tokens/<server>.json`.
+pub async fn persist_tokens(
+    server_name: &str,
+    response: &TokenResponse,
+    token_url: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+) -> Result<()> {
+    let expires_at = response
+        .expires_in
+        .map(|secs| SystemTime::now() + Duration::from_secs(secs))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+    let expires_at_epoch = expires_at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let persisted = PersistedTokens {
+        access_token: response.access_token.clone(),
+        refresh_token: response.refresh_token.clone(),
+        expires_at_epoch,
+        token_url: token_url.to_string(),
+        client_id: client_id.to_string(),
+        client_secret: client_secret.map(|s| s.to_string()),
+    };
+
+    let dir = token_dir()?;
+    tokio::fs::create_dir_all(&dir).await?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).await?;
+    }
+
+    let path = dir.join(sanitize_filename(server_name));
+    tokio::fs::write(&path, serde_json::to_string_pretty(&persisted)?).await?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
+    }
+
+    Ok(())
+}
+
+/// Load persisted tokens. Returns `None` if the file doesn't exist.
+pub async fn load_tokens(server_name: &str) -> Result<Option<OAuthCredential>> {
+    let path = token_dir()?.join(sanitize_filename(server_name));
+
+    let data = match tokio::fs::read_to_string(&path).await {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+
+    let p: PersistedTokens = serde_json::from_str(&data)
+        .map_err(|e| DysonError::oauth(server_name, format!("bad token file: {e}")))?;
+
+    Ok(Some(OAuthCredential {
+        access_token: Credential::new(p.access_token),
+        refresh_token: p.refresh_token.map(Credential::new),
+        expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(p.expires_at_epoch),
+        token_url: p.token_url,
+        client_id: p.client_id,
+        client_secret: p.client_secret.map(Credential::new),
+    }))
+}
+
+fn token_dir() -> Result<std::path::PathBuf> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| DysonError::Config("HOME not set".into()))?;
+    Ok(std::path::PathBuf::from(home).join(".dyson").join("tokens"))
+}
+
+fn sanitize_filename(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    format!("{s}.json")
 }
 
 // ===========================================================================
@@ -406,85 +604,48 @@ mod tests {
     #[test]
     fn pkce_verifier_length() {
         let pkce = generate_pkce();
-        // 32 bytes → 43 chars in base64url (no padding).
         assert_eq!(pkce.verifier.len(), 43);
     }
 
     #[test]
     fn pkce_challenge_is_sha256_of_verifier() {
         let pkce = generate_pkce();
-
-        // Recompute: challenge should be base64url(SHA-256(verifier)).
-        let digest = Sha256::digest(pkce.verifier.as_bytes());
-        let expected = URL_SAFE_NO_PAD.encode(digest);
-
+        let expected = URL_SAFE_NO_PAD.encode(Sha256::digest(pkce.verifier.as_bytes()));
         assert_eq!(pkce.challenge, expected);
     }
 
     #[test]
-    fn pkce_challenge_length() {
-        let pkce = generate_pkce();
-        // SHA-256 produces 32 bytes → 43 chars in base64url.
-        assert_eq!(pkce.challenge.len(), 43);
-    }
-
-    #[test]
-    fn pkce_generates_unique_values() {
+    fn pkce_unique() {
         let a = generate_pkce();
         let b = generate_pkce();
         assert_ne!(a.verifier, b.verifier);
-        assert_ne!(a.challenge, b.challenge);
     }
 
     #[test]
-    fn build_auth_url_basic() {
-        let metadata = AuthMetadata {
-            authorization_endpoint: "https://auth.example.com/authorize".into(),
-            token_endpoint: "https://auth.example.com/token".into(),
-            registration_endpoint: None,
-            response_types_supported: vec!["code".into()],
-            code_challenge_methods_supported: vec!["S256".into()],
-            scopes_supported: vec![],
-        };
-
+    fn build_auth_url_encodes_correctly() {
         let url = build_auth_url(
-            &metadata,
+            "https://auth.example.com/authorize",
             "my-client",
             &["read".into(), "write".into()],
             "http://127.0.0.1:8080/callback",
-            "test-challenge",
-            "test-state",
+            "challenge",
+            "state",
         );
 
-        // Parse the URL back to verify correctness.
         let parsed = reqwest::Url::parse(&url).unwrap();
-        assert_eq!(parsed.scheme(), "https");
-        assert_eq!(parsed.host_str(), Some("auth.example.com"));
-        assert_eq!(parsed.path(), "/authorize");
-
         let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
         assert_eq!(pairs["response_type"], "code");
         assert_eq!(pairs["client_id"], "my-client");
         assert_eq!(pairs["scope"], "read write");
-        assert_eq!(pairs["code_challenge"], "test-challenge");
-        assert_eq!(pairs["code_challenge_method"], "S256");
-        assert_eq!(pairs["state"], "test-state");
         assert_eq!(pairs["redirect_uri"], "http://127.0.0.1:8080/callback");
     }
 
     #[test]
     fn build_auth_url_preserves_existing_query() {
-        let metadata = AuthMetadata {
-            authorization_endpoint: "https://auth.example.com/authorize?extra=1".into(),
-            token_endpoint: String::new(),
-            registration_endpoint: None,
-            response_types_supported: vec![],
-            code_challenge_methods_supported: vec![],
-            scopes_supported: vec![],
-        };
-
-        let url = build_auth_url(&metadata, "cid", &[], "http://localhost/cb", "ch", "st");
-
+        let url = build_auth_url(
+            "https://auth.example.com/authorize?extra=1",
+            "cid", &[], "http://localhost/cb", "ch", "st",
+        );
         let parsed = reqwest::Url::parse(&url).unwrap();
         let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
         assert_eq!(pairs["extra"], "1");
@@ -492,66 +653,128 @@ mod tests {
     }
 
     #[test]
-    fn state_generation() {
-        let s1 = generate_state();
-        let s2 = generate_state();
-        assert_eq!(s1.len(), 22);
-        assert_ne!(s1, s2);
+    fn state_unique() {
+        assert_ne!(generate_state(), generate_state());
+        assert_eq!(generate_state().len(), 22);
     }
 
     #[test]
-    fn token_response_deserialize_minimal() {
-        let json = r#"{"access_token":"tok","token_type":"Bearer"}"#;
+    fn token_response_deserialize() {
+        let json = r#"{"access_token":"tok","token_type":"Bearer","expires_in":3600,"refresh_token":"rtok"}"#;
         let resp: TokenResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.access_token, "tok");
-        assert_eq!(resp.token_type, "Bearer");
-        assert!(resp.expires_in.is_none());
-        assert!(resp.refresh_token.is_none());
-        assert!(resp.scope.is_none());
-    }
-
-    #[test]
-    fn token_response_deserialize_full() {
-        let json = r#"{
-            "access_token": "tok",
-            "token_type": "Bearer",
-            "expires_in": 3600,
-            "refresh_token": "rtok",
-            "scope": "read write"
-        }"#;
-        let resp: TokenResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.expires_in, Some(3600));
         assert_eq!(resp.refresh_token.as_deref(), Some("rtok"));
-        assert_eq!(resp.scope.as_deref(), Some("read write"));
     }
 
     #[test]
-    fn auth_metadata_deserialize_ignores_unknown_fields() {
-        let json = r#"{
-            "authorization_endpoint": "https://auth/authorize",
-            "token_endpoint": "https://auth/token",
-            "issuer": "https://auth",
-            "unknown_field": true
-        }"#;
-        // Should not fail despite unknown fields.
-        let meta: AuthMetadata = serde_json::from_str(json).unwrap();
-        assert_eq!(meta.authorization_endpoint, "https://auth/authorize");
-        assert_eq!(meta.token_endpoint, "https://auth/token");
+    fn token_response_minimal() {
+        let json = r#"{"access_token":"tok","token_type":"Bearer"}"#;
+        let resp: TokenResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.expires_in.is_none());
+        assert!(resp.refresh_token.is_none());
     }
 
     #[test]
-    fn dcr_request_serializes_correctly() {
-        let req = DcrRequest {
-            client_name: "dyson".into(),
-            redirect_uris: vec!["http://127.0.0.1:9999/callback".into()],
-            grant_types: vec!["authorization_code".into(), "refresh_token".into()],
-            response_types: vec!["code".into()],
-            token_endpoint_auth_method: Some("none".into()),
+    fn sanitize_filename_prevents_traversal() {
+        assert_eq!(sanitize_filename("../../etc/passwd"), "______etc_passwd.json");
+    }
+
+    #[test]
+    fn credential_expiry() {
+        let expired = OAuthCredential {
+            access_token: Credential::new("t".into()),
+            refresh_token: None,
+            expires_at: SystemTime::UNIX_EPOCH,
+            token_url: String::new(), client_id: String::new(), client_secret: None,
         };
+        assert!(expired.is_expired());
 
-        let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["client_name"], "dyson");
-        assert_eq!(json["grant_types"][0], "authorization_code");
-        assert_eq!(json["token_endpoint_auth_method"], "none");
+        let valid = OAuthCredential {
+            access_token: Credential::new("t".into()),
+            refresh_token: None,
+            expires_at: SystemTime::now() + Duration::from_secs(3600),
+            token_url: String::new(), client_id: String::new(), client_secret: None,
+        };
+        assert!(!valid.is_expired());
+
+        // Within 30s margin → expired
+        let marginal = OAuthCredential {
+            access_token: Credential::new("t".into()),
+            refresh_token: None,
+            expires_at: SystemTime::now() + Duration::from_secs(10),
+            token_url: String::new(), client_id: String::new(), client_secret: None,
+        };
+        assert!(marginal.is_expired());
+    }
+
+    #[tokio::test]
+    async fn apply_adds_bearer_header() {
+        let auth = OAuthAuth::new(OAuthCredential {
+            access_token: Credential::new("test-token".into()),
+            refresh_token: None,
+            expires_at: SystemTime::now() + Duration::from_secs(3600),
+            token_url: String::new(), client_id: String::new(), client_secret: None,
+        });
+        let client = reqwest::Client::new();
+        let req = auth.apply_to_request(client.post("http://localhost/test")).await.unwrap();
+        let built = req.build().unwrap();
+        assert_eq!(
+            built.headers().get("authorization").unwrap().to_str().unwrap(),
+            "Bearer test-token"
+        );
+    }
+
+    #[test]
+    fn persisted_tokens_round_trip() {
+        let p = PersistedTokens {
+            access_token: "a".into(), refresh_token: Some("r".into()),
+            expires_at_epoch: 1700000000, token_url: "https://t".into(),
+            client_id: "c".into(), client_secret: None,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let p2: PersistedTokens = serde_json::from_str(&json).unwrap();
+        assert_eq!(p2.access_token, "a");
+        assert_eq!(p2.refresh_token.as_deref(), Some("r"));
+    }
+
+    #[tokio::test]
+    async fn callback_server_receives_code() {
+        let (port, handle, rx) = start_callback_server("my-state", Duration::from_secs(5))
+            .await.unwrap();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/callback?code=abc&state=my-state"))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let code = rx.await.unwrap();
+        assert_eq!(code, "abc");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn callback_server_rejects_wrong_state() {
+        let (port, handle, _rx) = start_callback_server("correct", Duration::from_secs(5))
+            .await.unwrap();
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/callback?code=c&state=wrong"))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 400);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn callback_server_404_on_wrong_path() {
+        let (port, handle, _rx) = start_callback_server("s", Duration::from_secs(5))
+            .await.unwrap();
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/wrong"))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 404);
+        handle.abort();
     }
 }

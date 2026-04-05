@@ -49,8 +49,6 @@ pub mod composite;
 pub mod credential;
 pub mod no_auth;
 pub mod oauth;
-pub mod oauth_callback;
-pub mod oauth_credential;
 pub mod static_headers;
 pub mod tracing_auth;
 
@@ -59,7 +57,7 @@ pub use bearer::BearerTokenAuth;
 pub use composite::CompositeAuth;
 pub use credential::Credential;
 pub use no_auth::NoAuth;
-pub use oauth_credential::OAuthAuth;
+pub use oauth::OAuthAuth;
 pub use static_headers::StaticHeadersAuth;
 pub use tracing_auth::TracingAuth;
 
