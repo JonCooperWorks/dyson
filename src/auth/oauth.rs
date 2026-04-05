@@ -278,52 +278,22 @@ pub fn build_auth_url(
     code_challenge: &str,
     state: &str,
 ) -> String {
-    // Build query parameters manually to avoid adding a `url` crate dependency.
-    // All values are percent-encoded where necessary.
-    let scope_str = scopes.join(" ");
-    let params = [
-        ("response_type", "code"),
-        ("client_id", client_id),
-        ("redirect_uri", redirect_uri),
-        ("scope", &scope_str),
-        ("code_challenge", code_challenge),
-        ("code_challenge_method", "S256"),
-        ("state", state),
-    ];
+    // Use reqwest's re-exported url::Url for correct encoding of all
+    // query parameters.  This is security-sensitive — hand-rolled encoding
+    // risks injection or interoperability bugs.
+    let mut url = reqwest::Url::parse(&metadata.authorization_endpoint)
+        .expect("authorization_endpoint must be a valid URL");
 
-    let query: String = params
-        .iter()
-        .map(|(k, v)| format!("{k}={}", percent_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&");
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("scope", &scopes.join(" "))
+        .append_pair("code_challenge", code_challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", state);
 
-    let sep = if metadata.authorization_endpoint.contains('?') {
-        "&"
-    } else {
-        "?"
-    };
-
-    format!("{}{sep}{query}", metadata.authorization_endpoint)
-}
-
-/// Minimal percent-encoding for URL query parameter values.
-///
-/// Encodes characters that are not unreserved per RFC 3986:
-/// unreserved = ALPHA / DIGIT / "-" / "." / "_" / "~"
-fn percent_encode(input: &str) -> String {
-    use std::fmt::Write;
-    let mut encoded = String::with_capacity(input.len());
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(byte as char);
-            }
-            _ => {
-                write!(encoded, "%{byte:02X}").unwrap();
-            }
-        }
-    }
-    encoded
+    url.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -486,14 +456,20 @@ mod tests {
             "test-state",
         );
 
-        assert!(url.starts_with("https://auth.example.com/authorize?"));
-        assert!(url.contains("response_type=code"));
-        assert!(url.contains("client_id=my-client"));
-        assert!(url.contains("scope=read%20write"));
-        assert!(url.contains("code_challenge=test-challenge"));
-        assert!(url.contains("code_challenge_method=S256"));
-        assert!(url.contains("state=test-state"));
-        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A8080%2Fcallback"));
+        // Parse the URL back to verify correctness.
+        let parsed = reqwest::Url::parse(&url).unwrap();
+        assert_eq!(parsed.scheme(), "https");
+        assert_eq!(parsed.host_str(), Some("auth.example.com"));
+        assert_eq!(parsed.path(), "/authorize");
+
+        let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
+        assert_eq!(pairs["response_type"], "code");
+        assert_eq!(pairs["client_id"], "my-client");
+        assert_eq!(pairs["scope"], "read write");
+        assert_eq!(pairs["code_challenge"], "test-challenge");
+        assert_eq!(pairs["code_challenge_method"], "S256");
+        assert_eq!(pairs["state"], "test-state");
+        assert_eq!(pairs["redirect_uri"], "http://127.0.0.1:8080/callback");
     }
 
     #[test]
@@ -509,29 +485,18 @@ mod tests {
 
         let url = build_auth_url(&metadata, "cid", &[], "http://localhost/cb", "ch", "st");
 
-        // Should use & instead of ? since the endpoint already has a query string.
-        assert!(url.starts_with("https://auth.example.com/authorize?extra=1&"));
+        let parsed = reqwest::Url::parse(&url).unwrap();
+        let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
+        assert_eq!(pairs["extra"], "1");
+        assert_eq!(pairs["response_type"], "code");
     }
 
     #[test]
     fn state_generation() {
         let s1 = generate_state();
         let s2 = generate_state();
-        // 16 bytes → 22 chars in base64url.
         assert_eq!(s1.len(), 22);
         assert_ne!(s1, s2);
-    }
-
-    #[test]
-    fn percent_encode_preserves_unreserved() {
-        assert_eq!(percent_encode("hello-world_123.test~"), "hello-world_123.test~");
-    }
-
-    #[test]
-    fn percent_encode_encodes_special_chars() {
-        assert_eq!(percent_encode("a b"), "a%20b");
-        assert_eq!(percent_encode("foo@bar"), "foo%40bar");
-        assert_eq!(percent_encode("http://x"), "http%3A%2F%2Fx");
     }
 
     #[test]

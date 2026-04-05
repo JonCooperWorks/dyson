@@ -147,17 +147,16 @@ async fn handle_callback(
             .unwrap());
     }
 
-    // Parse query parameters.
+    // Parse query parameters using reqwest::Url for correct percent-decoding.
     let query = req.uri().query().unwrap_or("");
-    let params: Vec<(String, String)> = query
-        .split('&')
-        .filter_map(|pair| {
-            let mut parts = pair.splitn(2, '=');
-            let key = parts.next()?.to_string();
-            let value = parts.next().unwrap_or("").to_string();
-            Some((key, percent_decode(&value)))
+    let dummy_url = format!("http://localhost/callback?{query}");
+    let params: Vec<(String, String)> = reqwest::Url::parse(&dummy_url)
+        .map(|url| {
+            url.query_pairs()
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
 
     let code = params.iter().find(|(k, _)| k == "code").map(|(_, v)| v.as_str());
     let state = params.iter().find(|(k, _)| k == "state").map(|(_, v)| v.as_str());
@@ -240,36 +239,6 @@ async fn handle_callback(
         .unwrap())
 }
 
-/// Minimal percent-decoding for URL query parameter values.
-fn percent_decode(input: &str) -> String {
-    let mut decoded = String::with_capacity(input.len());
-    let mut chars = input.bytes();
-
-    while let Some(b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next();
-            let lo = chars.next();
-            if let (Some(hi), Some(lo)) = (hi, lo) {
-                let hex = [hi, lo];
-                if let Ok(s) = std::str::from_utf8(&hex) {
-                    if let Ok(val) = u8::from_str_radix(s, 16) {
-                        decoded.push(val as char);
-                        continue;
-                    }
-                }
-            }
-            // Malformed — pass through.
-            decoded.push('%');
-        } else if b == b'+' {
-            decoded.push(' ');
-        } else {
-            decoded.push(b as char);
-        }
-    }
-
-    decoded
-}
-
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -277,18 +246,6 @@ fn percent_decode(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn percent_decode_basic() {
-        assert_eq!(percent_decode("hello%20world"), "hello world");
-        assert_eq!(percent_decode("foo+bar"), "foo bar");
-        assert_eq!(percent_decode("a%3Db"), "a=b");
-    }
-
-    #[test]
-    fn percent_decode_passthrough() {
-        assert_eq!(percent_decode("plain"), "plain");
-    }
 
     #[tokio::test]
     async fn callback_server_starts_and_binds() {
