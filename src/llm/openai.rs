@@ -4,9 +4,10 @@
 // LEARNING OVERVIEW
 //
 // What this file does:
-//   Implements `LlmClient` for the OpenAI Chat Completions API.  This
-//   covers OpenAI proper (GPT-4o, o3, etc.), and any OpenAI-compatible
-//   endpoint (local models via Ollama, vLLM, Together, Groq, etc.).
+//   Implements the OpenAI Chat Completions API protocol (SSE streaming,
+//   message serialization, tool call accumulation).  Used directly for
+//   OpenAI proper, and wrapped by `OpenAiCompatClient` for other
+//   OpenAI-compatible endpoints that may need dialect support.
 //
 // How OpenAI streaming differs from Anthropic:
 //

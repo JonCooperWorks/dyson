@@ -170,7 +170,7 @@ pub struct ClientConfig<'a> {
 /// One entry per `LlmProvider` variant.  The unit test
 /// `registry_covers_all_variants` ensures nothing is missing.
 pub fn registry() -> &'static [ProviderEntry] {
-    use super::{anthropic, claude_code, codex, openai, openrouter};
+    use super::{anthropic, claude_code, codex, openai, openai_compat, openrouter};
 
     static ENTRIES: std::sync::LazyLock<Vec<ProviderEntry>> = std::sync::LazyLock::new(|| {
         vec![
@@ -190,7 +190,14 @@ pub fn registry() -> &'static [ProviderEntry] {
                 default_model: "gpt-4o",
                 env_var: Some("OPENAI_API_KEY"),
                 requires_api_key: true,
-                create_client: |c| Box::new(openai::OpenAiClient::new(c.api_key, c.base_url)),
+                create_client: |c| {
+                    match c.base_url {
+                        Some(url) if !url.starts_with("https://api.openai.com") => {
+                            Box::new(openai_compat::OpenAiCompatClient::new(c.api_key, Some(url)))
+                        }
+                        _ => Box::new(openai::OpenAiClient::new(c.api_key, c.base_url)),
+                    }
+                },
             },
             ProviderEntry {
                 provider: LlmProvider::OpenRouter,

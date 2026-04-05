@@ -18,7 +18,8 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-use super::{ExtractedToolCall, TextToolHandler, ToolDefinition};
+use super::{ExtractedToolCall, TextToolHandler};
+use crate::llm::ToolDefinition;
 
 // ---------------------------------------------------------------------------
 // Model detection

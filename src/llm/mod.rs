@@ -10,13 +10,15 @@
 //   Anthropic, OpenAI, or a local model.
 //
 // Module layout:
-//   mod.rs         — LlmClient trait, CompletionConfig, ToolDefinition,
-//                    shared utilities (format_prompt, resolve_binary_path)
-//   stream.rs      — StreamEvent and StopReason enums
-//   anthropic.rs   — Anthropic Messages API implementation
-//   openai.rs      — OpenAI Chat Completions API (GPT, Ollama, etc.)
-//   claude_code.rs — Claude Code CLI subprocess (no API key needed)
-//   codex.rs       — Codex CLI subprocess (no API key needed)
+//   mod.rs          — LlmClient trait, CompletionConfig, ToolDefinition,
+//                     shared utilities (format_prompt, resolve_binary_path)
+//   stream.rs       — StreamEvent and StopReason enums
+//   anthropic.rs    — Anthropic Messages API implementation
+//   openai.rs       — OpenAI Chat Completions API (pure protocol)
+//   openai_compat.rs — OpenAI-compatible wrapper with dialect support
+//   dialects/       — Model-specific adaptations (e.g., Gemma text tool calls)
+//   claude_code.rs  — Claude Code CLI subprocess (no API key needed)
+//   codex.rs        — Codex CLI subprocess (no API key needed)
 //
 // Why a trait?
 //   Dyson is designed to support multiple LLM providers.  The trait boundary
@@ -35,11 +37,14 @@
 pub mod anthropic;
 pub mod claude_code;
 pub mod codex;
-pub mod gemma;
+pub mod dialects;
 pub mod openai;
+pub mod openai_compat;
 pub mod openrouter;
 pub mod registry;
 pub mod stream;
+
+pub use dialects::{ExtractedToolCall, TextToolHandler, text_tool_handler_for_model};
 
 use std::pin::Pin;
 
@@ -102,56 +107,6 @@ pub struct ToolDefinition {
     pub agent_only: bool,
 }
 
-// ---------------------------------------------------------------------------
-// TextToolHandler — trait for models that emit tool calls as text.
-// ---------------------------------------------------------------------------
-
-/// A tool call extracted from model text output.
-///
-/// Used by [`TextToolHandler`] implementations to return parsed tool calls.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ExtractedToolCall {
-    pub name: String,
-    pub input: serde_json::Value,
-}
-
-/// Trait for models that don't support the standard `tools` array and instead
-/// emit tool calls as plain text (e.g., Gemma's `call:name{params}` syntax).
-///
-/// Implementations handle two concerns:
-/// - **Advertising**: injecting tool definitions into the system prompt so the
-///   model knows what tools are available and how to call them.
-/// - **Parsing**: extracting tool calls from the model's text output so the
-///   agent loop can execute them.
-///
-/// To add support for a new model family, implement this trait and register
-/// it in [`text_tool_handler_for_model`].
-pub trait TextToolHandler: Send + Sync {
-    /// Build a system prompt suffix describing the available tools.
-    ///
-    /// The returned string is appended to the system prompt.  It should
-    /// instruct the model on the exact syntax to use for tool calls.
-    fn format_tools_for_prompt(&self, tools: &[ToolDefinition]) -> String;
-
-    /// Extract tool calls from model text output.
-    ///
-    /// Returns `None` if the text contains no tool calls.  Otherwise
-    /// returns the cleaned text (tool call portions removed) and the
-    /// extracted calls.
-    fn extract_tool_calls(&self, text: &str) -> Option<(String, Vec<ExtractedToolCall>)>;
-}
-
-/// Return the appropriate [`TextToolHandler`] for a model, or `None` if the
-/// model supports standard structured tool calls.
-///
-/// This is the single registration point — add new model families here.
-pub fn text_tool_handler_for_model(model: &str) -> Option<Box<dyn TextToolHandler>> {
-    if gemma::is_gemma_model(model) {
-        Some(Box::new(gemma::GemmaToolHandler))
-    } else {
-        None
-    }
-}
 
 // ---------------------------------------------------------------------------
 // ToolMode — how the agent loop should handle tool calls from this stream.
