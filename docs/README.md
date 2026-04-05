@@ -19,6 +19,7 @@ overview, then dive into the component that interests you.
 | [Tool Forwarding over MCP](tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth, bidirectional MCP |
 | [Subagents](subagents.md) | Child agents with different models, tool inheritance, delegation patterns |
 | [Adding a Provider](adding-a-provider.md) | How to add a new LLM provider (3-step process via the registry) |
+| [Prompt Caching](prompt-caching.md) | Why the prompt is split into stable/ephemeral parts, the 4-breakpoint Anthropic strategy, how KV prefix caching works |
 | [Comparison: Hermes Agent](comparison-hermes-agent.md) | Side-by-side with Hermes Agent (Nous Research) |
 
 **Key source files:**
