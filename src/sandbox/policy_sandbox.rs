@@ -448,7 +448,10 @@ mod tests {
 
     #[test]
     fn path_access_restrict_multiple_prefixes() {
-        let access = PathAccess::RestrictTo(vec![wd(), PathBuf::from("/tmp")]);
+        // Canonicalize /tmp to match what PolicySandbox::new() does in production.
+        // On macOS, /tmp is a symlink to /private/tmp.
+        let tmp_canonical = std::fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
+        let access = PathAccess::RestrictTo(vec![wd(), tmp_canonical]);
         assert!(check_path_access(&access, "file.txt", &wd()));
         assert!(check_path_access(&access, "/tmp/scratch", &wd()));
         assert!(!check_path_access(&access, "/etc/passwd", &wd()));
@@ -517,7 +520,7 @@ mod tests {
                 #[cfg(target_os = "linux")]
                 assert!(cmd.contains("bwrap"));
                 #[cfg(target_os = "macos")]
-                assert!(cmd.contains("sandbox-exec"));
+                assert!(cmd.contains("container run"));
             }
             other => panic!("expected Allow, got: {other:?}"),
         }
