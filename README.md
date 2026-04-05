@@ -2,13 +2,13 @@
 
 A streaming AI agent loop in Rust, built to understand how these things actually work — and how to secure them.
 
-> **This is an educational project.** I'm an AppSec engineer building this to demystify AI agents — how they work, how to secure them, and how to deploy them responsibly. If you need a production agent, see [the projects that inspired this](#inspired-by). If you want to understand what's happening inside the loop, read on.
+> **Educational project.** I'm an AppSec engineer building this to demystify AI agents — how they work, how to secure them, and how to deploy them responsibly. If you need a production agent, see [the projects that inspired this](#inspired-by). If you want to understand what's happening inside the loop, read on.
 
 ## Why
 
-AI agents run tools in a loop. They read your files, execute commands, make network requests. If you're going to trust one with access to your system, you should understand exactly what's happening inside that loop.
+AI agents run tools in a loop — reading files, executing commands, making network requests. If you're going to trust one with access to your system, you should understand exactly what's happening inside that loop.
 
-Dyson is a from-scratch implementation of the core agent pattern: **LLM streams a response → detects tool calls → executes them → feeds results back → repeats**. Every component is a trait, every decision point is a hook, and every file is annotated explaining *why* it works the way it does. The goal isn't to replace Claude Code or Cursor — it's to make the loop legible and the security boundaries obvious.
+Dyson is a from-scratch implementation of the core agent pattern: **LLM streams a response → detects tool calls → executes them → feeds results back → repeats**. Every component is a trait, every decision point is a hook, and every file is annotated. The goal isn't to replace Claude Code or Cursor — it's to make the loop legible and the security boundaries obvious.
 
 ## What you learn by reading this codebase
 
@@ -34,8 +34,14 @@ LLM says: tool_use("bash", {"command": "rm -rf /"})
 
 Sandbox implementations:
 
-- **OsSandbox** — wraps bash commands in the OS's native sandbox (macOS Seatbelt / Linux bubblewrap). Also truncates oversized tool outputs (including MCP results)
+- **PolicySandbox** — wraps bash commands in the OS's native sandbox (macOS [Apple Containers](https://github.com/apple/container) / Linux [bubblewrap](https://github.com/containers/bubblewrap)). Enforces per-tool capability policies at both the application level and OS level. Truncates oversized tool outputs.
 - **DangerousNoSandbox** — passthrough, no restrictions (development only)
+
+Sandbox prerequisites:
+- **macOS (Apple Silicon):** `brew install container`
+- **Linux:** `apt install bubblewrap`
+
+Dyson refuses to start without the OS sandbox binary unless `--dangerous-no-sandbox` is passed.
 
 ## Architecture
 
@@ -94,7 +100,7 @@ cargo run -- --dangerous-no-sandbox --provider ollama-cloud --model llama3.3 "he
 cargo run -- --dangerous-no-sandbox --provider openai --base-url http://localhost:9000 --model llama-3.2-3b-instruct "hello"
 ```
 
-`--dangerous-no-sandbox` is required — an explicit acknowledgment that tool calls are unrestricted. Run without arguments for interactive mode. Use `--config` for config files (see [`examples/`](examples/)).
+`--dangerous-no-sandbox` disables all sandboxes — an explicit acknowledgment that tool calls are unrestricted. Run without arguments for interactive mode. Use `--config` for config files (see [`examples/`](examples/)).
 
 ## Configuration
 
@@ -103,14 +109,24 @@ Dyson uses JSON config files (`dyson.json`). See [`examples/`](examples/) for re
 Minimal:
 
 ```json
-{ "agent": { "provider": "anthropic", "model": "claude-sonnet-4-20250514" } }
+{
+  "config_version": 2,
+  "providers": {
+    "default": { "type": "anthropic", "models": ["claude-sonnet-4-20250514"] }
+  },
+  "agent": { "provider": "default" }
+}
 ```
 
 With web search, MCP, and Telegram:
 
 ```json
 {
-  "agent": { "provider": "claude-code", "model": "sonnet" },
+  "config_version": 2,
+  "providers": {
+    "claude": { "type": "claude-code", "models": ["sonnet"] }
+  },
+  "agent": { "provider": "claude" },
   "web_search": { "provider": "searxng", "base_url": "https://searx.be" },
   "mcp_servers": {
     "context7": { "url": "https://mcp.context7.com/mcp" }
@@ -131,10 +147,10 @@ src/
   lib.rs               Module tree
   error.rs             DysonError — unified error type
   message.rs           Message, Role, ContentBlock
-  config/              Settings, JSON loader
+  config/              Settings, JSON loader, migrations
   tool/                Tool trait + bash, file ops, search, memory, knowledge base, web search, skills, export
   skill/               Skill trait, BuiltinSkill, MCP skill, LocalSkill, SubagentSkill
-  sandbox/             Sandbox trait, OsSandbox, DangerousNoSandbox
+  sandbox/             Sandbox trait, PolicySandbox, DangerousNoSandbox
   secret/              SecretResolver trait, InsecureEnvironmentVariable
   llm/                 LlmClient trait + provider registry + Anthropic, OpenAI, OpenRouter, Ollama Cloud, Claude Code, Codex
   agent/               Streaming loop, compaction, dependency analysis, rate limiting, token tracking
@@ -144,8 +160,6 @@ examples/              Example dyson.json configs
 docs/                  Component documentation
 ```
 
-Every file has extensive annotations in the style of [rLLM](https://github.com/joncooperworks/rllm) — learning overviews, architecture diagrams, and inline commentary on non-obvious code.
-
 ## Docs
 
 | Document | Covers |
@@ -154,7 +168,7 @@ Every file has extensive annotations in the style of [rLLM](https://github.com/j
 | [Agent Loop](docs/agent-loop.md) | The streaming loop, tool execution, error recovery |
 | [LLM Clients](docs/llm-clients.md) | Anthropic vs OpenAI vs Claude Code, SSE parsing |
 | [Tools & Skills](docs/tools-and-skills.md) | Tool trait, Skill trait, MCP skill, adding new tools |
-| [Sandbox](docs/sandbox.md) | Allow/Deny/Redirect, OsSandbox, future designs |
+| [Sandbox](docs/sandbox.md) | Allow/Deny/Redirect, PolicySandbox, Apple Containers, bubblewrap |
 | [Secrets](docs/secrets.md) | Per-secret resolver routing, InsecureEnvironmentVariable |
 | [Tool Execution Pipeline](docs/tool-execution-pipeline.md) | Rate limiting, dependency analysis, result formatting, lifecycle hooks |
 | [Configuration](docs/configuration.md) | dyson.json format, provider selection |

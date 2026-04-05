@@ -1,7 +1,13 @@
 {
+  "config_version": 2,
+  "providers": {
+    "default": {
+      "type": "claude-code",
+      "models": ["sonnet"]
+    }
+  },
   "agent": {
-    "provider": "claude-code",
-    "model": "sonnet",
+    "provider": "default",
     "max_iterations": 20,
     "max_tokens": 8192
   },

