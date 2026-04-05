@@ -482,6 +482,16 @@ impl Agent {
         }
     }
 
+    /// Get the system prompt (for quick response context).
+    pub fn system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+
+    /// Get the completion config (for quick response context).
+    pub fn config(&self) -> &CompletionConfig {
+        &self.config
+    }
+
     /// Run the agent loop for a single user message.
     ///
     /// Appends the user message to the conversation history, then loops:
@@ -1138,6 +1148,69 @@ impl Agent {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Quick response — lightweight no-tools LLM call for when the agent is busy.
+// ---------------------------------------------------------------------------
+
+/// Make a single LLM call with no tools for a fast response.
+///
+/// Used when a user sends a message while the agent is already processing
+/// another request.  Instead of blocking, the controller calls this with
+/// a snapshot of the conversation history.  The LLM sees the context and
+/// answers immediately without entering the tool-use loop.
+///
+/// This is intentionally decoupled from `Agent` — the agent's mutex is
+/// held during `run()`, so we can't call methods on it.  Instead, the
+/// caller provides a snapshot of the relevant state.
+pub async fn quick_response(
+    client: &dyn LlmClient,
+    messages: &[Message],
+    system_prompt: &str,
+    user_input: &str,
+    config: &CompletionConfig,
+    output: &mut dyn Output,
+) -> Result<String> {
+    tracing::info!(
+        input_len = user_input.len(),
+        messages = messages.len(),
+        "quick response — no tools"
+    );
+
+    // Build a temporary message list: existing history + the new user message.
+    let mut msgs: Vec<Message> = messages.to_vec();
+    msgs.push(Message::user(user_input));
+
+    // Use a lower max_tokens for speed — quick responses should be concise.
+    let quick_config = CompletionConfig {
+        model: config.model.clone(),
+        max_tokens: config.max_tokens.min(1024),
+        temperature: config.temperature,
+    };
+
+    // Augment the system prompt to signal brevity.
+    let quick_suffix = "\n\nIMPORTANT: You are answering a quick question while \
+        your main processing is busy on a previous request. Be concise and direct. \
+        You have no tools available right now.";
+
+    let response = client
+        .stream(&msgs, system_prompt, quick_suffix, &[], &quick_config)
+        .await?;
+
+    // Process the stream — reuse the standard handler.
+    let (assistant_msg, _tool_calls, _output_tokens) =
+        stream_handler::process_stream(response.stream, output).await?;
+
+    output.flush()?;
+
+    // Extract the final text.
+    let final_text = assistant_msg
+        .last_text()
+        .unwrap_or_default()
+        .to_string();
+
+    Ok(final_text)
 }
 
 // ===========================================================================
@@ -2470,6 +2543,152 @@ mod tests {
             }
             other => panic!("expected Text, got: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Quick response tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn quick_response_returns_text_without_tools() {
+        let llm = MockLlm::new(vec![vec![
+            StreamEvent::TextDelta("Quick answer.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ]]);
+
+        let history = vec![
+            Message::user("What is 2+2?"),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "4".into(),
+            }]),
+        ];
+
+        let config = CompletionConfig {
+            model: "test-model".into(),
+            max_tokens: 4096,
+            temperature: None,
+        };
+
+        let mut output = RecordingOutput::new();
+        let result = quick_response(
+            &llm,
+            &history,
+            "You are a helpful assistant.",
+            "What about 3+3?",
+            &config,
+            &mut output,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, "Quick answer.");
+        assert_eq!(output.text(), "Quick answer.");
+    }
+
+    #[tokio::test]
+    async fn quick_response_caps_max_tokens() {
+        // Verify that quick_response uses min(config.max_tokens, 1024).
+        use std::sync::Mutex as StdMutex;
+
+        struct CapturingLlm {
+            captured_max_tokens: StdMutex<Option<u32>>,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmClient for CapturingLlm {
+            async fn stream(
+                &self,
+                _messages: &[Message],
+                _system: &str,
+                _system_suffix: &str,
+                _tools: &[ToolDefinition],
+                config: &CompletionConfig,
+            ) -> Result<crate::llm::StreamResponse> {
+                *self.captured_max_tokens.lock().unwrap() = Some(config.max_tokens);
+                let events = vec![
+                    StreamEvent::TextDelta("ok".into()),
+                    StreamEvent::MessageComplete {
+                        stop_reason: StopReason::EndTurn,
+                        output_tokens: None,
+                    },
+                ];
+                Ok(crate::llm::StreamResponse {
+                    stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
+                    tool_mode: crate::llm::ToolMode::Execute,
+                    input_tokens: None,
+                })
+            }
+        }
+
+        let llm = CapturingLlm {
+            captured_max_tokens: StdMutex::new(None),
+        };
+        let config = CompletionConfig {
+            model: "test".into(),
+            max_tokens: 8192,
+            temperature: None,
+        };
+        let mut output = RecordingOutput::new();
+
+        quick_response(&llm, &[], "sys", "hi", &config, &mut output)
+            .await
+            .unwrap();
+
+        assert_eq!(*llm.captured_max_tokens.lock().unwrap(), Some(1024));
+    }
+
+    #[tokio::test]
+    async fn quick_response_sends_no_tools() {
+        use std::sync::Mutex as StdMutex;
+
+        struct ToolCapturingLlm {
+            captured_tools: StdMutex<Option<usize>>,
+        }
+
+        #[async_trait::async_trait]
+        impl LlmClient for ToolCapturingLlm {
+            async fn stream(
+                &self,
+                _messages: &[Message],
+                _system: &str,
+                _system_suffix: &str,
+                tools: &[ToolDefinition],
+                _config: &CompletionConfig,
+            ) -> Result<crate::llm::StreamResponse> {
+                *self.captured_tools.lock().unwrap() = Some(tools.len());
+                let events = vec![
+                    StreamEvent::TextDelta("ok".into()),
+                    StreamEvent::MessageComplete {
+                        stop_reason: StopReason::EndTurn,
+                        output_tokens: None,
+                    },
+                ];
+                Ok(crate::llm::StreamResponse {
+                    stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
+                    tool_mode: crate::llm::ToolMode::Execute,
+                    input_tokens: None,
+                })
+            }
+        }
+
+        let llm = ToolCapturingLlm {
+            captured_tools: StdMutex::new(None),
+        };
+        let config = CompletionConfig {
+            model: "test".into(),
+            max_tokens: 1024,
+            temperature: None,
+        };
+        let mut output = RecordingOutput::new();
+
+        quick_response(&llm, &[], "sys", "hi", &config, &mut output)
+            .await
+            .unwrap();
+
+        assert_eq!(*llm.captured_tools.lock().unwrap(), Some(0));
     }
 
     // -----------------------------------------------------------------------
