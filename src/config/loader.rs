@@ -502,402 +502,461 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
         None => return settings,
     };
 
-    // -- Providers --
-    //
-    // Parse all named providers first so the agent section can reference them.
-    if let Some(providers) = root.providers {
-        for (name, jp) in providers {
-            let provider_type = match crate::llm::registry::from_str_loose(&jp.provider_type) {
-                Some(p) => p,
-                None => {
-                    tracing::warn!(
-                        provider = name.as_str(),
-                        r#type = jp.provider_type.as_str(),
-                        "unknown provider type — skipping"
-                    );
-                    continue;
-                }
-            };
+    parse_providers(root.providers, secrets, &mut settings);
+    parse_agent_settings(root.agent, &mut settings);
+    parse_skills(root.skills, &mut settings);
+    parse_mcp_servers(root.mcp_servers, secrets, &mut settings);
+    parse_sandbox(root.sandbox, &mut settings);
+    parse_workspace(root.workspace, secrets, &mut settings);
+    parse_chat_history(root.chat_history, secrets, &mut settings);
+    parse_web_search(root.web_search, secrets, &mut settings);
+    parse_controllers(root.controllers, secrets, &mut settings);
 
-            let api_key: crate::auth::Credential = match jp.api_key.as_ref() {
-                Some(k) => match secrets.resolve(k) {
-                    Ok(resolved) => resolved,
-                    Err(e) => {
-                        tracing::error!(
-                            provider = name.as_str(),
-                            error = %e,
-                            "failed to resolve API key — skipping provider"
-                        );
-                        continue;
-                    }
-                },
-                None => crate::auth::Credential::new(String::new()),
-            };
+    settings
+}
 
-            let models = if jp.models.is_empty() {
-                vec![
-                    crate::llm::registry::lookup(&provider_type)
-                        .default_model
-                        .into(),
-                ]
-            } else {
-                jp.models
-            };
+/// Parse named provider configurations into settings.
+fn parse_providers(
+    providers: Option<std::collections::HashMap<String, JsonProviderConfig>>,
+    secrets: &SecretRegistry,
+    settings: &mut Settings,
+) {
+    let providers = match providers {
+        Some(p) => p,
+        None => return,
+    };
 
-            settings.providers.insert(
-                name,
-                ProviderConfig {
-                    provider_type,
-                    models,
-                    api_key,
-                    base_url: jp.base_url,
-                },
-            );
-        }
-    }
-
-    // -- Agent settings --
-    if let Some(agent) = root.agent {
-        // Apply the named provider's fields to agent settings.
-        if let Some(ref provider_name) = agent.provider {
-            if let Some(pc) = settings.providers.get(provider_name) {
-                settings.agent.provider = pc.provider_type.clone();
-                settings.agent.model = pc.default_model().to_string();
-                settings.agent.api_key = pc.api_key.clone();
-                settings.agent.base_url = pc.base_url.clone();
-            } else {
+    for (name, jp) in providers {
+        let provider_type = match crate::llm::registry::from_str_loose(&jp.provider_type) {
+            Some(p) => p,
+            None => {
                 tracing::warn!(
-                    provider = provider_name.as_str(),
-                    "agent references unknown provider name"
+                    provider = name.as_str(),
+                    r#type = jp.provider_type.as_str(),
+                    "unknown provider type — skipping"
                 );
+                continue;
             }
-        }
-
-        // Agent-level overrides (model can override the provider's model).
-        if let Some(model) = agent.model {
-            settings.agent.model = model;
-        }
-        if let Some(max_iter) = agent.max_iterations {
-            settings.agent.max_iterations = max_iter;
-        }
-        if let Some(max_tok) = agent.max_tokens {
-            settings.agent.max_tokens = max_tok;
-        }
-        if let Some(prompt) = agent.system_prompt {
-            settings.agent.system_prompt = prompt;
-        }
-        if let Some(compaction) = agent.compaction {
-            let config = match compaction {
-                JsonCompaction::Window(window) => CompactionConfig {
-                    context_window: window,
-                    ..Default::default()
-                },
-                JsonCompaction::Full {
-                    context_window,
-                    threshold_ratio,
-                    protect_head,
-                    protect_tail_tokens,
-                    summary_min_tokens,
-                    summary_max_tokens,
-                    summary_target_ratio,
-                } => {
-                    let mut c = CompactionConfig::default();
-                    if let Some(v) = context_window {
-                        c.context_window = v;
-                    }
-                    if let Some(v) = threshold_ratio {
-                        c.threshold_ratio = v;
-                    }
-                    if let Some(v) = protect_head {
-                        c.protect_head = v;
-                    }
-                    if let Some(v) = protect_tail_tokens {
-                        c.protect_tail_tokens = v;
-                    }
-                    if let Some(v) = summary_min_tokens {
-                        c.summary_min_tokens = v;
-                    }
-                    if let Some(v) = summary_max_tokens {
-                        c.summary_max_tokens = v;
-                    }
-                    if let Some(v) = summary_target_ratio {
-                        c.summary_target_ratio = v;
-                    }
-                    c
-                }
-            };
-            settings.agent.compaction = Some(config);
-        }
-
-        if let Some(rl) = agent.rate_limit {
-            settings.agent.rate_limit = Some(crate::config::RateLimitConfig {
-                max_messages: rl.max_messages,
-                window_secs: rl.window_secs,
-            });
-        }
-    }
-
-    // -- Skills --
-    if let Some(skills) = root.skills {
-        let mut skill_configs: Vec<SkillConfig> = Vec::new();
-
-        if let Some(builtin) = skills.builtin {
-            // If "tools" key is present, use exactly what's listed.
-            // If "tools" key is absent, include all builtins.
-            // This means `"tools": []` = no tools, `"tools": ["bash"]` = just bash,
-            // and no "builtin" key at all = all tools.
-            match builtin.tools {
-                Some(tools) if !tools.is_empty() => {
-                    skill_configs.push(SkillConfig::Builtin(BuiltinSkillConfig { tools }));
-                }
-                Some(_) => {
-                    // Explicit empty array — no builtin tools.
-                }
-                None => {
-                    // No "tools" key — all builtins.
-                    skill_configs.push(SkillConfig::Builtin(BuiltinSkillConfig { tools: vec![] }));
-                }
-            }
-        } else {
-            // No "builtin" section — include all builtins by default.
-            skill_configs.push(SkillConfig::Builtin(BuiltinSkillConfig { tools: vec![] }));
-        }
-
-        // -- Local skills --
-        if let Some(locals) = skills.local {
-            for local in locals {
-                skill_configs.push(SkillConfig::Local(LocalSkillConfig {
-                    name: local.name,
-                    path: local.path,
-                }));
-            }
-        }
-
-        // -- Subagents --
-        if let Some(subagents) = skills.subagents {
-            let agents: Vec<SubagentAgentConfig> = subagents
-                .into_iter()
-                .map(|sa| SubagentAgentConfig {
-                    name: sa.name,
-                    description: sa.description,
-                    system_prompt: sa.system_prompt,
-                    provider: sa.provider,
-                    model: sa.model,
-                    max_iterations: sa.max_iterations,
-                    max_tokens: sa.max_tokens,
-                    tools: sa.tools,
-                })
-                .collect();
-
-            if !agents.is_empty() {
-                skill_configs.push(SkillConfig::Subagent(SubagentSkillConfig { agents }));
-            }
-        }
-
-        settings.skills = skill_configs;
-    }
-
-    // -- MCP servers --
-    //
-    // Each key in "mcp_servers" is a server name.  The value is an object
-    // with "command" + "args" + "env" (stdio) or "url" + "headers" (HTTP).
-    // Each becomes a SkillConfig::Mcp that gets loaded as an McpSkill.
-    if let Some(mut mcp_val) = root.mcp_servers {
-        // Resolve secrets in the entire mcp_servers block (API keys in
-        // headers, env vars, etc.).
-        resolve_secrets_in_value(&mut mcp_val, secrets);
-
-        if let Some(servers) = mcp_val.as_object() {
-            for (name, server_json) in servers {
-                let transport = if let Some(command) = server_json["command"].as_str() {
-                    let args: Vec<String> = server_json["args"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-
-                    let env: std::collections::HashMap<String, String> = server_json["env"]
-                        .as_object()
-                        .map(|obj| {
-                            obj.iter()
-                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-
-                    McpTransportConfig::Stdio {
-                        command: command.to_string(),
-                        args,
-                        env,
-                    }
-                } else if let Some(url) = server_json["url"].as_str() {
-                    let headers: std::collections::HashMap<String, String> = server_json["headers"]
-                        .as_object()
-                        .map(|obj| {
-                            obj.iter()
-                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-
-                    // Parse optional OAuth config.
-                    let auth = if server_json["auth"]["type"].as_str() == Some("oauth") {
-                        let auth_json = &server_json["auth"];
-                        Some(McpAuthConfig {
-                            client_id: auth_json["client_id"].as_str().map(|s| s.to_string()),
-                            client_secret: auth_json["client_secret"]
-                                .as_str()
-                                .map(|s| s.to_string()),
-                            scopes: auth_json["scopes"]
-                                .as_array()
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
-                            redirect_uri: auth_json["redirect_uri"]
-                                .as_str()
-                                .map(|s| s.to_string()),
-                            authorization_url: auth_json["authorization_url"]
-                                .as_str()
-                                .map(|s| s.to_string()),
-                            token_url: auth_json["token_url"].as_str().map(|s| s.to_string()),
-                            registration_url: auth_json["registration_url"]
-                                .as_str()
-                                .map(|s| s.to_string()),
-                        })
-                    } else {
-                        None
-                    };
-
-                    McpTransportConfig::Http {
-                        url: url.to_string(),
-                        headers,
-                        auth,
-                    }
-                } else {
-                    tracing::warn!(
-                        server = name.as_str(),
-                        "MCP server has neither 'command' nor 'url' — skipping"
-                    );
-                    continue;
-                };
-
-                settings.skills.push(SkillConfig::Mcp(McpConfig {
-                    name: name.clone(),
-                    transport,
-                }));
-            }
-        }
-    }
-
-    // -- Sandbox --
-    if let Some(sb) = root.sandbox {
-        let tool_policies = sb
-            .tool_policies
-            .into_iter()
-            .map(|(name, jp)| {
-                let config = parse_tool_policy(jp);
-                (name, config)
-            })
-            .collect();
-
-        settings.sandbox = SandboxConfig {
-            disabled: sb.disabled,
-            os_profile: sb.os_profile,
-            tool_policies,
         };
-    }
 
-    // -- Workspace --
-    if let Some(ws) = root.workspace {
-        if let Some(backend) = ws.backend {
-            settings.workspace.backend = backend;
-        }
-        // connection_string takes priority, then fall back to legacy path.
-        if let Some(ref cs) = ws.connection_string {
-            if let Ok(resolved) = secrets.resolve(cs) {
-                settings.workspace.connection_string = resolved;
-            }
-        } else if let Some(path) = ws.path {
-            settings.workspace.connection_string = crate::auth::Credential::new(path);
-        }
-        // Memory config: merge user overrides on top of defaults.
-        if let Some(mem) = ws.memory {
-            if let Some(limits) = mem.limits {
-                for (file, limit) in limits {
-                    settings.workspace.memory.limits.insert(file, limit);
-                }
-            }
-            if let Some(interval) = mem.nudge_interval {
-                settings.workspace.memory.nudge_interval = interval;
-            }
-        }
-    }
-
-    // -- Chat history --
-    if let Some(ch) = root.chat_history {
-        if let Some(backend) = ch.backend {
-            settings.chat_history.backend = backend;
-        }
-        if let Some(ref cs) = ch.connection_string
-            && let Ok(resolved) = secrets.resolve(cs)
-        {
-            settings.chat_history.connection_string = resolved;
-        }
-    }
-
-    // -- Web search --
-    if let Some(ws) = root.web_search {
-        // Only create the config if there's something useful (api_key or base_url).
-        let api_key = match ws.api_key {
-            Some(ref sv) => match secrets.resolve(sv) {
+        let api_key: crate::auth::Credential = match jp.api_key.as_ref() {
+            Some(k) => match secrets.resolve(k) {
                 Ok(resolved) => resolved,
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to resolve web_search api_key — skipping");
-                    crate::auth::Credential::new(String::new())
+                    tracing::error!(
+                        provider = name.as_str(),
+                        error = %e,
+                        "failed to resolve API key — skipping provider"
+                    );
+                    continue;
                 }
             },
             None => crate::auth::Credential::new(String::new()),
         };
 
-        if !api_key.is_empty() || ws.base_url.is_some() {
-            settings.web_search = Some(crate::config::WebSearchConfig {
-                provider: ws.provider.unwrap_or_else(|| "brave".into()),
+        let models = if jp.models.is_empty() {
+            vec![
+                crate::llm::registry::lookup(&provider_type)
+                    .default_model
+                    .into(),
+            ]
+        } else {
+            jp.models
+        };
+
+        settings.providers.insert(
+            name,
+            ProviderConfig {
+                provider_type,
+                models,
                 api_key,
-                base_url: ws.base_url,
-            });
+                base_url: jp.base_url,
+            },
+        );
+    }
+}
+
+/// Parse agent-level settings, applying provider defaults and overrides.
+fn parse_agent_settings(agent: Option<JsonAgent>, settings: &mut Settings) {
+    let agent = match agent {
+        Some(a) => a,
+        None => return,
+    };
+
+    // Apply the named provider's fields to agent settings.
+    if let Some(ref provider_name) = agent.provider {
+        if let Some(pc) = settings.providers.get(provider_name) {
+            settings.agent.provider = pc.provider_type.clone();
+            settings.agent.model = pc.default_model().to_string();
+            settings.agent.api_key = pc.api_key.clone();
+            settings.agent.base_url = pc.base_url.clone();
+        } else {
+            tracing::warn!(
+                provider = provider_name.as_str(),
+                "agent references unknown provider name"
+            );
         }
     }
 
-    // -- Controllers --
-    //
-    // Each controller is a JSON object with a "type" field.  We extract
-    // the type and pass the entire object as a raw Value for the
-    // controller implementation to parse.
-    //
-    // Secret values inside the controller config (like bot_token) are
-    // resolved HERE before the controller sees them.  We walk the JSON
-    // object and resolve any { "resolver": ..., "name": ... } values.
-    if let Some(controllers) = root.controllers {
-        for mut ctrl_json in controllers {
-            let ctrl_type = ctrl_json["type"].as_str().unwrap_or("unknown").to_string();
+    // Agent-level overrides (model can override the provider's model).
+    if let Some(model) = agent.model {
+        settings.agent.model = model;
+    }
+    if let Some(max_iter) = agent.max_iterations {
+        settings.agent.max_iterations = max_iter;
+    }
+    if let Some(max_tok) = agent.max_tokens {
+        settings.agent.max_tokens = max_tok;
+    }
+    if let Some(prompt) = agent.system_prompt {
+        settings.agent.system_prompt = prompt;
+    }
+    if let Some(compaction) = agent.compaction {
+        settings.agent.compaction = Some(parse_compaction(compaction));
+    }
+    if let Some(rl) = agent.rate_limit {
+        settings.agent.rate_limit = Some(crate::config::RateLimitConfig {
+            max_messages: rl.max_messages,
+            window_secs: rl.window_secs,
+        });
+    }
+}
 
-            // Resolve secrets in the controller config.
-            resolve_secrets_in_value(&mut ctrl_json, secrets);
+/// Convert a JSON compaction value into a `CompactionConfig`.
+fn parse_compaction(compaction: JsonCompaction) -> CompactionConfig {
+    match compaction {
+        JsonCompaction::Window(window) => CompactionConfig {
+            context_window: window,
+            ..Default::default()
+        },
+        JsonCompaction::Full {
+            context_window,
+            threshold_ratio,
+            protect_head,
+            protect_tail_tokens,
+            summary_min_tokens,
+            summary_max_tokens,
+            summary_target_ratio,
+        } => {
+            let mut c = CompactionConfig::default();
+            if let Some(v) = context_window {
+                c.context_window = v;
+            }
+            if let Some(v) = threshold_ratio {
+                c.threshold_ratio = v;
+            }
+            if let Some(v) = protect_head {
+                c.protect_head = v;
+            }
+            if let Some(v) = protect_tail_tokens {
+                c.protect_tail_tokens = v;
+            }
+            if let Some(v) = summary_min_tokens {
+                c.summary_min_tokens = v;
+            }
+            if let Some(v) = summary_max_tokens {
+                c.summary_max_tokens = v;
+            }
+            if let Some(v) = summary_target_ratio {
+                c.summary_target_ratio = v;
+            }
+            c
+        }
+    }
+}
 
-            settings.controllers.push(ControllerConfig {
-                controller_type: ctrl_type,
-                config: ctrl_json,
-            });
+/// Parse skill configurations (builtin, local, subagents).
+fn parse_skills(skills: Option<JsonSkills>, settings: &mut Settings) {
+    let skills = match skills {
+        Some(s) => s,
+        None => return,
+    };
+
+    let mut skill_configs: Vec<SkillConfig> = Vec::new();
+
+    if let Some(builtin) = skills.builtin {
+        // If "tools" key is present, use exactly what's listed.
+        // If "tools" key is absent, include all builtins.
+        match builtin.tools {
+            Some(tools) if !tools.is_empty() => {
+                skill_configs.push(SkillConfig::Builtin(BuiltinSkillConfig { tools }));
+            }
+            Some(_) => {
+                // Explicit empty array — no builtin tools.
+            }
+            None => {
+                // No "tools" key — all builtins.
+                skill_configs.push(SkillConfig::Builtin(BuiltinSkillConfig { tools: vec![] }));
+            }
+        }
+    } else {
+        // No "builtin" section — include all builtins by default.
+        skill_configs.push(SkillConfig::Builtin(BuiltinSkillConfig { tools: vec![] }));
+    }
+
+    if let Some(locals) = skills.local {
+        for local in locals {
+            skill_configs.push(SkillConfig::Local(LocalSkillConfig {
+                name: local.name,
+                path: local.path,
+            }));
         }
     }
 
-    settings
+    if let Some(subagents) = skills.subagents {
+        let agents: Vec<SubagentAgentConfig> = subagents
+            .into_iter()
+            .map(|sa| SubagentAgentConfig {
+                name: sa.name,
+                description: sa.description,
+                system_prompt: sa.system_prompt,
+                provider: sa.provider,
+                model: sa.model,
+                max_iterations: sa.max_iterations,
+                max_tokens: sa.max_tokens,
+                tools: sa.tools,
+            })
+            .collect();
+
+        if !agents.is_empty() {
+            skill_configs.push(SkillConfig::Subagent(SubagentSkillConfig { agents }));
+        }
+    }
+
+    settings.skills = skill_configs;
+}
+
+/// Parse MCP server configurations into skill configs.
+fn parse_mcp_servers(
+    mcp_servers: Option<serde_json::Value>,
+    secrets: &SecretRegistry,
+    settings: &mut Settings,
+) {
+    let mut mcp_val = match mcp_servers {
+        Some(v) => v,
+        None => return,
+    };
+
+    resolve_secrets_in_value(&mut mcp_val, secrets);
+
+    let servers = match mcp_val.as_object() {
+        Some(s) => s,
+        None => return,
+    };
+
+    for (name, server_json) in servers {
+        let transport = if let Some(command) = server_json["command"].as_str() {
+            let args: Vec<String> = server_json["args"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let env: std::collections::HashMap<String, String> = server_json["env"]
+                .as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            McpTransportConfig::Stdio {
+                command: command.to_string(),
+                args,
+                env,
+            }
+        } else if let Some(url) = server_json["url"].as_str() {
+            let headers: std::collections::HashMap<String, String> = server_json["headers"]
+                .as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let auth = parse_mcp_oauth(&server_json["auth"]);
+
+            McpTransportConfig::Http {
+                url: url.to_string(),
+                headers,
+                auth,
+            }
+        } else {
+            tracing::warn!(
+                server = name.as_str(),
+                "MCP server has neither 'command' nor 'url' — skipping"
+            );
+            continue;
+        };
+
+        settings.skills.push(SkillConfig::Mcp(McpConfig {
+            name: name.clone(),
+            transport,
+        }));
+    }
+}
+
+/// Parse optional OAuth config from an MCP server's "auth" field.
+fn parse_mcp_oauth(auth_json: &serde_json::Value) -> Option<McpAuthConfig> {
+    if auth_json["type"].as_str() != Some("oauth") {
+        return None;
+    }
+    Some(McpAuthConfig {
+        client_id: auth_json["client_id"].as_str().map(|s| s.to_string()),
+        client_secret: auth_json["client_secret"].as_str().map(|s| s.to_string()),
+        scopes: auth_json["scopes"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        redirect_uri: auth_json["redirect_uri"].as_str().map(|s| s.to_string()),
+        authorization_url: auth_json["authorization_url"]
+            .as_str()
+            .map(|s| s.to_string()),
+        token_url: auth_json["token_url"].as_str().map(|s| s.to_string()),
+        registration_url: auth_json["registration_url"]
+            .as_str()
+            .map(|s| s.to_string()),
+    })
+}
+
+/// Parse sandbox configuration.
+fn parse_sandbox(sandbox: Option<JsonSandbox>, settings: &mut Settings) {
+    let sb = match sandbox {
+        Some(s) => s,
+        None => return,
+    };
+
+    let tool_policies = sb
+        .tool_policies
+        .into_iter()
+        .map(|(name, jp)| {
+            let config = parse_tool_policy(jp);
+            (name, config)
+        })
+        .collect();
+
+    settings.sandbox = SandboxConfig {
+        disabled: sb.disabled,
+        os_profile: sb.os_profile,
+        tool_policies,
+    };
+}
+
+/// Parse workspace configuration.
+fn parse_workspace(
+    workspace: Option<JsonWorkspace>,
+    secrets: &SecretRegistry,
+    settings: &mut Settings,
+) {
+    let ws = match workspace {
+        Some(w) => w,
+        None => return,
+    };
+
+    if let Some(backend) = ws.backend {
+        settings.workspace.backend = backend;
+    }
+    // connection_string takes priority, then fall back to legacy path.
+    if let Some(ref cs) = ws.connection_string {
+        if let Ok(resolved) = secrets.resolve(cs) {
+            settings.workspace.connection_string = resolved;
+        }
+    } else if let Some(path) = ws.path {
+        settings.workspace.connection_string = crate::auth::Credential::new(path);
+    }
+    // Memory config: merge user overrides on top of defaults.
+    if let Some(mem) = ws.memory {
+        if let Some(limits) = mem.limits {
+            for (file, limit) in limits {
+                settings.workspace.memory.limits.insert(file, limit);
+            }
+        }
+        if let Some(interval) = mem.nudge_interval {
+            settings.workspace.memory.nudge_interval = interval;
+        }
+    }
+}
+
+/// Parse chat history configuration.
+fn parse_chat_history(
+    chat_history: Option<JsonChatHistory>,
+    secrets: &SecretRegistry,
+    settings: &mut Settings,
+) {
+    let ch = match chat_history {
+        Some(c) => c,
+        None => return,
+    };
+
+    if let Some(backend) = ch.backend {
+        settings.chat_history.backend = backend;
+    }
+    if let Some(ref cs) = ch.connection_string
+        && let Ok(resolved) = secrets.resolve(cs)
+    {
+        settings.chat_history.connection_string = resolved;
+    }
+}
+
+/// Parse web search configuration.
+fn parse_web_search(
+    web_search: Option<JsonWebSearch>,
+    secrets: &SecretRegistry,
+    settings: &mut Settings,
+) {
+    let ws = match web_search {
+        Some(w) => w,
+        None => return,
+    };
+
+    let api_key = match ws.api_key {
+        Some(ref sv) => match secrets.resolve(sv) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to resolve web_search api_key — skipping");
+                crate::auth::Credential::new(String::new())
+            }
+        },
+        None => crate::auth::Credential::new(String::new()),
+    };
+
+    if !api_key.is_empty() || ws.base_url.is_some() {
+        settings.web_search = Some(crate::config::WebSearchConfig {
+            provider: ws.provider.unwrap_or_else(|| "brave".into()),
+            api_key,
+            base_url: ws.base_url,
+        });
+    }
+}
+
+/// Parse controller configurations, resolving secrets in each.
+fn parse_controllers(
+    controllers: Option<Vec<serde_json::Value>>,
+    secrets: &SecretRegistry,
+    settings: &mut Settings,
+) {
+    let controllers = match controllers {
+        Some(c) => c,
+        None => return,
+    };
+
+    for mut ctrl_json in controllers {
+        let ctrl_type = ctrl_json["type"].as_str().unwrap_or("unknown").to_string();
+        resolve_secrets_in_value(&mut ctrl_json, secrets);
+        settings.controllers.push(ControllerConfig {
+            controller_type: ctrl_type,
+            config: ctrl_json,
+        });
+    }
 }
 
 /// Walk a JSON value and resolve any secret references in-place.
