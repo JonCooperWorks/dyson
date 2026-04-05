@@ -143,6 +143,7 @@ mod tests {
             cancellation: tokio_util::sync::CancellationToken::new(),
             workspace: Some(Arc::new(RwLock::new(workspace))),
             depth: 0,
+            dangerous_no_sandbox: false,
         }
     }
 

@@ -60,6 +60,10 @@ impl Sandbox for DangerousNoSandbox {
         })
     }
 
+    fn skip_path_validation(&self) -> bool {
+        true
+    }
+
     // `after()` uses the default no-op from the trait.
 }
 

@@ -379,6 +379,7 @@ mod tests {
             cancellation: tokio_util::sync::CancellationToken::new(),
             workspace: None,
             depth: 0,
+            dangerous_no_sandbox: false,
         }
     }
 

@@ -48,9 +48,24 @@ impl Tool for SendFileTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("send_file", "missing or invalid 'file_path'"))?;
 
-        let path = match resolve_and_validate_path(&ctx.working_dir, file_path) {
-            Ok(p) => p,
-            Err(e) => return Ok(ToolOutput::error(e)),
+        let path = if ctx.dangerous_no_sandbox {
+            // No sandbox — resolve the path without boundary checks.
+            let candidate = if std::path::Path::new(file_path).is_absolute() {
+                std::path::PathBuf::from(file_path)
+            } else {
+                ctx.working_dir.join(file_path)
+            };
+            match candidate.canonicalize() {
+                Ok(p) => p,
+                Err(e) => return Ok(ToolOutput::error(format!(
+                    "cannot resolve path '{}': {e}", candidate.display()
+                ))),
+            }
+        } else {
+            match resolve_and_validate_path(&ctx.working_dir, file_path) {
+                Ok(p) => p,
+                Err(e) => return Ok(ToolOutput::error(e)),
+            }
         };
 
         if !path.exists() {

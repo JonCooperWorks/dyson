@@ -735,6 +735,7 @@ impl McpHttpServer {
             cancellation: CancellationToken::new(),
             workspace: Some(Arc::clone(&self.workspace)),
             depth: 0,
+            dangerous_no_sandbox: false,
         };
 
         // -- Sandbox hook (future) --
