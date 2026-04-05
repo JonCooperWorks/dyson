@@ -62,22 +62,18 @@ mod tests {
 
     #[tokio::test]
     async fn applies_all_headers() {
-        let mut headers = HashMap::new();
-        headers.insert("X-Api-Key".into(), "key-123".into());
-        headers.insert("X-Custom".into(), "custom-val".into());
+        let mut h = HashMap::new();
+        h.insert("X-Api-Key".into(), "key-123".into());
+        h.insert("X-Custom".into(), "custom-val".into());
 
-        let auth = StaticHeadersAuth::new(headers);
-        let client = reqwest::Client::new();
-        let req = client.post("http://localhost/test");
-        let req = auth.apply_to_request(req).await.unwrap();
-
-        let built = req.build().unwrap();
+        let auth = StaticHeadersAuth::new(h);
+        let headers = super::super::test_apply(&auth).await;
         assert_eq!(
-            built.headers().get("x-api-key").unwrap().to_str().unwrap(),
+            headers.get("x-api-key").unwrap().to_str().unwrap(),
             "key-123"
         );
         assert_eq!(
-            built.headers().get("x-custom").unwrap().to_str().unwrap(),
+            headers.get("x-custom").unwrap().to_str().unwrap(),
             "custom-val"
         );
     }
@@ -85,12 +81,8 @@ mod tests {
     #[tokio::test]
     async fn empty_headers_is_noop() {
         let auth = StaticHeadersAuth::new(HashMap::new());
-        let client = reqwest::Client::new();
-        let req = client.post("http://localhost/test");
-        let req = auth.apply_to_request(req).await.unwrap();
-
-        let built = req.build().unwrap();
+        let headers = super::super::test_apply(&auth).await;
         // Only default headers (if any), no custom ones.
-        assert!(!built.headers().contains_key("x-api-key"));
+        assert!(!headers.contains_key("x-api-key"));
     }
 }

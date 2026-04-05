@@ -94,19 +94,9 @@ mod tests {
     #[tokio::test]
     async fn delegates_apply() {
         let auth = TracingAuth::new(Box::new(BearerTokenAuth::new("test-token".into())), "test");
-
-        let client = reqwest::Client::new();
-        let req = client.post("http://localhost/test");
-        let req = auth.apply_to_request(req).await.unwrap();
-
-        let built = req.build().unwrap();
+        let headers = super::super::test_apply(&auth).await;
         assert_eq!(
-            built
-                .headers()
-                .get("authorization")
-                .unwrap()
-                .to_str()
-                .unwrap(),
+            headers.get("authorization").unwrap().to_str().unwrap(),
             "Bearer test-token"
         );
     }

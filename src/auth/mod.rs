@@ -182,6 +182,18 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 // Tests
 // ===========================================================================
 
+/// Test helper: apply auth to a dummy request and return the resulting headers.
+///
+/// Avoids repeating `Client::new() → post → apply → build → headers` in every
+/// auth test.
+#[cfg(test)]
+pub(crate) async fn test_apply(auth: &dyn Auth) -> reqwest::header::HeaderMap {
+    let client = reqwest::Client::new();
+    let req = client.post("http://localhost/test");
+    let req = auth.apply_to_request(req).await.unwrap();
+    req.build().unwrap().headers().clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

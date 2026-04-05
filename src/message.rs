@@ -191,7 +191,7 @@ impl ContentBlock {
 /// Walks the JSON tree and sums approximate token counts.  Much cheaper
 /// than `value.to_string().split_whitespace().count()` because it avoids
 /// allocating the serialized string entirely.
-fn estimate_json_tokens(value: &serde_json::Value) -> usize {
+pub(crate) fn estimate_json_tokens(value: &serde_json::Value) -> usize {
     match value {
         serde_json::Value::Null | serde_json::Value::Bool(_) => 1,
         serde_json::Value::Number(_) => 1,

@@ -248,7 +248,7 @@ impl Agent {
             .map(|t| {
                 t.name.split_whitespace().count()
                     + t.description.split_whitespace().count()
-                    + t.input_schema.to_string().split_whitespace().count()
+                    + crate::message::estimate_json_tokens(&t.input_schema)
                     + 10 // per-tool JSON framing overhead
             })
             .sum();
