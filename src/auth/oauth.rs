@@ -154,15 +154,8 @@ pub struct PkceChallenge {
 // Discovery
 // ---------------------------------------------------------------------------
 
-/// Discover OAuth 2.0 authorization server metadata.
-///
-/// Fetches `<origin>/.well-known/oauth-authorization-server` as per RFC 8414.
-/// If that fails, returns an error — callers should check whether the MCP
-/// server actually requires OAuth before calling this.
-///
-/// # Arguments
-/// * `server_url` — The MCP server's base URL (e.g., `https://mcp.example.com`)
-/// * `client` — A reqwest HTTP client for making the discovery request
+/// Fetch OAuth 2.0 authorization server metadata from
+/// `<origin>/.well-known/oauth-authorization-server` (RFC 8414).
 pub async fn discover_metadata(
     server_url: &str,
     client: &reqwest::Client,
@@ -206,11 +199,6 @@ pub async fn discover_metadata(
 // ---------------------------------------------------------------------------
 
 /// Register a new OAuth client via Dynamic Client Registration (RFC 7591).
-///
-/// # Arguments
-/// * `registration_url` — The DCR endpoint from `AuthMetadata.registration_endpoint`
-/// * `request` — Client metadata to register
-/// * `client` — A reqwest HTTP client
 pub async fn register_client(
     registration_url: &str,
     request: &DcrRequest,
@@ -282,18 +270,6 @@ pub fn generate_pkce() -> PkceChallenge {
 // ---------------------------------------------------------------------------
 
 /// Build the authorization URL the user visits to grant access.
-///
-/// This URL is sent to the user (via the agent's system prompt) and opened
-/// in their browser.  After granting access, the authorization server
-/// redirects to `redirect_uri` with an authorization code.
-///
-/// # Arguments
-/// * `metadata` — Discovered server metadata (provides `authorization_endpoint`)
-/// * `client_id` — The OAuth client ID (from config or DCR)
-/// * `scopes` — Requested scopes (space-separated in the URL)
-/// * `redirect_uri` — Where the auth server should redirect after authorization
-/// * `code_challenge` — PKCE S256 challenge (from `generate_pkce()`)
-/// * `state` — Random state parameter for CSRF protection
 pub fn build_auth_url(
     metadata: &AuthMetadata,
     client_id: &str,
@@ -335,6 +311,7 @@ pub fn build_auth_url(
 /// Encodes characters that are not unreserved per RFC 3986:
 /// unreserved = ALPHA / DIGIT / "-" / "." / "_" / "~"
 fn percent_encode(input: &str) -> String {
+    use std::fmt::Write;
     let mut encoded = String::with_capacity(input.len());
     for byte in input.bytes() {
         match byte {
@@ -342,7 +319,7 @@ fn percent_encode(input: &str) -> String {
                 encoded.push(byte as char);
             }
             _ => {
-                encoded.push_str(&format!("%{byte:02X}"));
+                write!(encoded, "%{byte:02X}").unwrap();
             }
         }
     }
@@ -353,20 +330,10 @@ fn percent_encode(input: &str) -> String {
 // Token exchange
 // ---------------------------------------------------------------------------
 
-/// Exchange an authorization code for tokens.
+/// Exchange an authorization code for tokens (second leg of the Auth Code flow).
 ///
-/// This is the second leg of the Authorization Code flow: after the user
-/// authorizes and the callback receives the code, we POST it to the token
-/// endpoint along with the PKCE verifier to prove we initiated the flow.
-///
-/// # Arguments
-/// * `token_url` — Token endpoint from `AuthMetadata.token_endpoint`
-/// * `code` — Authorization code from the callback
-/// * `verifier` — PKCE code verifier (proves we started the flow)
-/// * `client_id` — OAuth client ID
-/// * `client_secret` — Optional client secret (confidential clients)
-/// * `redirect_uri` — Must match the URI used in the authorization request
-/// * `client` — A reqwest HTTP client
+/// The PKCE `verifier` proves we initiated the flow.  `redirect_uri` must
+/// match the one used in the authorization request.
 pub async fn exchange_code(
     token_url: &str,
     code: &str,
@@ -434,17 +401,6 @@ pub async fn exchange_code(
 // ---------------------------------------------------------------------------
 
 /// Refresh an expired access token using a refresh token.
-///
-/// Called automatically by `OAuthAuth::apply_to_request()` when the access
-/// token has expired.  The refresh token is long-lived and stored on disk
-/// at `~/.dyson/tokens/<server>.json`.
-///
-/// # Arguments
-/// * `token_url` — Token endpoint from the original metadata
-/// * `refresh_token` — The refresh token from a previous token response
-/// * `client_id` — OAuth client ID
-/// * `client_secret` — Optional client secret (confidential clients)
-/// * `client` — A reqwest HTTP client
 pub async fn refresh_token(
     token_url: &str,
     refresh_token: &str,

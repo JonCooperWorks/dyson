@@ -401,31 +401,14 @@ pub enum McpTransportConfig {
 /// ```
 #[derive(Debug, Clone)]
 pub struct McpAuthConfig {
-    /// OAuth client ID.  If `None`, Dyson uses Dynamic Client Registration
-    /// (DCR) to obtain one automatically.
+    /// `None` = use Dynamic Client Registration.
     pub client_id: Option<String>,
-
-    /// OAuth client secret.  Only needed for confidential clients.
-    /// Resolved from `SecretValue` by the config loader (supports env vars,
-    /// vault references, etc.).
     pub client_secret: Option<String>,
-
-    /// Requested OAuth scopes (e.g., `["read", "write"]`).
     pub scopes: Vec<String>,
-
-    /// Custom redirect URI.  If `None`, Dyson uses
-    /// `http://127.0.0.1:<random-port>/callback` with an OS-assigned port.
     pub redirect_uri: Option<String>,
-
-    /// Override: authorization endpoint URL.  If `None`, discovered via
-    /// `/.well-known/oauth-authorization-server`.
+    /// Overrides (skip well-known discovery when set).
     pub authorization_url: Option<String>,
-
-    /// Override: token endpoint URL.  If `None`, discovered via well-known.
     pub token_url: Option<String>,
-
-    /// Override: DCR registration endpoint URL.  If `None`, discovered via
-    /// well-known.  Only used when `client_id` is `None`.
     pub registration_url: Option<String>,
 }
 

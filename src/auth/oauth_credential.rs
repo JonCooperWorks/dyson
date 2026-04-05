@@ -48,29 +48,14 @@ use crate::error::{DysonError, Result};
 // OAuthCredential — the mutable token state behind the RwLock.
 // ---------------------------------------------------------------------------
 
-/// Mutable OAuth token state.
-///
-/// Held behind `Arc<RwLock<>>` inside `OAuthAuth`.  All secret values use
-/// `Credential` for zeroize-on-drop memory safety.
+/// Mutable OAuth token state, held behind `Arc<RwLock<>>` inside `OAuthAuth`.
 pub struct OAuthCredential {
-    /// The current access token (sent as `Authorization: Bearer <token>`).
     pub access_token: Credential,
-
-    /// Refresh token for obtaining new access tokens.  `None` if the server
-    /// didn't issue one (rare but possible).
     pub refresh_token: Option<Credential>,
-
-    /// When the access token expires.  Set to `SystemTime::UNIX_EPOCH` if
-    /// unknown (forces refresh on first use).
+    /// `UNIX_EPOCH` if unknown (forces refresh on first use).
     pub expires_at: SystemTime,
-
-    /// Token endpoint URL for refresh requests.
     pub token_url: String,
-
-    /// OAuth client ID.
     pub client_id: String,
-
-    /// Optional client secret (confidential clients only).
     pub client_secret: Option<Credential>,
 }
 
@@ -81,15 +66,10 @@ impl OAuthCredential {
     /// the request reaches the server, it might already be invalid.
     pub fn is_expired(&self) -> bool {
         let margin = Duration::from_secs(30);
-        SystemTime::now()
-            .duration_since(self.expires_at)
-            .map(|elapsed| elapsed > Duration::ZERO)
-            .unwrap_or(false)
-            || self
-                .expires_at
-                .duration_since(SystemTime::now())
-                .map(|remaining| remaining < margin)
-                .unwrap_or(true)
+        match self.expires_at.duration_since(SystemTime::now()) {
+            Ok(remaining) => remaining < margin,
+            Err(_) => true, // now is past expires_at
+        }
     }
 }
 
@@ -97,26 +77,12 @@ impl OAuthCredential {
 // OAuthAuth — the Auth trait implementation.
 // ---------------------------------------------------------------------------
 
-/// OAuth 2.0 Bearer token authentication with automatic refresh.
+/// OAuth 2.0 Bearer token auth with automatic refresh.
 ///
-/// Wraps `OAuthCredential` behind `Arc<RwLock<>>` so multiple concurrent
-/// requests share one token set.  When the token expires, the first request
-/// to notice acquires a write lock and refreshes; subsequent requests wait
-/// for the refresh to complete and then use the new token.
-///
-/// ## Usage
-///
-/// ```ignore
-/// let auth = OAuthAuth::new(credential);
-/// let transport = HttpTransport::new(url, Box::new(auth));
-/// // transport.send_request() now automatically includes OAuth Bearer token
-/// // and refreshes it when expired.
-/// ```
+/// Concurrent requests share one token set via `Arc<RwLock<>>`.  The first
+/// request to detect expiry acquires a write lock and refreshes; others wait.
 pub struct OAuthAuth {
-    /// Shared mutable token state.
     credential: Arc<RwLock<OAuthCredential>>,
-
-    /// HTTP client for refresh requests.
     http_client: reqwest::Client,
 }
 
@@ -166,12 +132,16 @@ impl OAuthAuth {
     /// Called when:
     /// - `apply_to_request` detects the token has expired
     /// - `on_unauthorized` is called after a 401 response
-    async fn do_refresh(cred: &RwLock<OAuthCredential>, client: &reqwest::Client) -> Result<()> {
+    async fn do_refresh(
+        cred: &RwLock<OAuthCredential>,
+        client: &reqwest::Client,
+        force: bool,
+    ) -> Result<()> {
         let mut guard = cred.write().await;
 
         // Double-check: another request may have already refreshed while we
-        // were waiting for the write lock.
-        if !guard.is_expired() {
+        // were waiting for the write lock.  Skipped when force=true (401 retry).
+        if !force && !guard.is_expired() {
             return Ok(());
         }
 
@@ -209,12 +179,6 @@ impl OAuthAuth {
 
 #[async_trait]
 impl Auth for OAuthAuth {
-    /// Apply OAuth Bearer token to an outgoing request.
-    ///
-    /// If the token has expired, refreshes it first (blocking other requests
-    /// on the write lock until refresh completes).  This is transparent to
-    /// the caller — `HttpTransport` just calls `apply_to_request()` and gets
-    /// back a request with a valid `Authorization: Bearer <token>` header.
     async fn apply_to_request(
         &self,
         request: reqwest::RequestBuilder,
@@ -233,7 +197,7 @@ impl Auth for OAuthAuth {
         // avoid deadlock.
 
         // Slow path: refresh, then apply.
-        Self::do_refresh(&self.credential, &self.http_client).await?;
+        Self::do_refresh(&self.credential, &self.http_client, false).await?;
 
         let guard = self.credential.read().await;
         Ok(request.header(
@@ -242,18 +206,8 @@ impl Auth for OAuthAuth {
         ))
     }
 
-    /// Handle a 401 Unauthorized response by forcing a token refresh.
-    ///
-    /// Called by `HttpTransport` when the server rejects a request despite
-    /// the token not appearing expired (clock skew, server-side revocation,
-    /// etc.).  Forces a refresh regardless of `expires_at`.
     async fn on_unauthorized(&self) -> Result<()> {
-        // Force expiry so do_refresh actually refreshes.
-        {
-            let mut guard = self.credential.write().await;
-            guard.expires_at = SystemTime::UNIX_EPOCH;
-        }
-        Self::do_refresh(&self.credential, &self.http_client).await
+        Self::do_refresh(&self.credential, &self.http_client, true).await
     }
 }
 
@@ -277,14 +231,7 @@ struct PersistedTokens {
     client_secret: Option<String>,
 }
 
-/// Persist OAuth tokens to disk for the given server.
-///
-/// Writes to `~/.dyson/tokens/<server_name>.json` with restrictive
-/// permissions (0o600 on Unix).  Creates the directory if it doesn't exist.
-///
-/// Called after:
-/// - Initial token exchange (authorization code → tokens)
-/// - Token refresh (to persist the new access token / rotated refresh token)
+/// Write tokens to `~/.dyson/tokens/<server_name>.json` (0o600 on Unix).
 pub async fn persist_tokens(server_name: &str, credential: &OAuthCredential) -> Result<()> {
     let dir = token_dir()?;
     tokio::fs::create_dir_all(&dir).await?;
@@ -329,11 +276,8 @@ pub async fn persist_tokens(server_name: &str, credential: &OAuthCredential) -> 
     Ok(())
 }
 
-/// Load persisted OAuth tokens for the given server.
-///
-/// Returns `Ok(None)` if no token file exists.  Returns `Ok(Some(...))`
-/// with the loaded credential if tokens are found (even if expired — the
-/// refresh token may still be valid).
+/// Load tokens from `~/.dyson/tokens/<server_name>.json`.
+/// Returns `None` if the file doesn't exist.
 pub async fn load_tokens(server_name: &str) -> Result<Option<OAuthCredential>> {
     let path = token_dir()?.join(sanitize_filename(server_name));
 

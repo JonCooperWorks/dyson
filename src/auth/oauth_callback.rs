@@ -60,40 +60,10 @@ pub struct CallbackResult {
 // Callback server
 // ---------------------------------------------------------------------------
 
-/// Start a temporary HTTP server to receive an OAuth authorization callback.
+/// Start a temporary HTTP server on `127.0.0.1:0` that waits for an OAuth callback.
 ///
-/// Binds to `127.0.0.1:0` (OS-assigned port) and listens for a single
-/// GET request to `/callback` with `code` and `state` query parameters.
-///
-/// ## Returns
-///
-/// `(port, task_handle, receiver)` where:
-/// - `port`: The OS-assigned port.  Use this to construct the `redirect_uri`
-///   (e.g., `http://127.0.0.1:{port}/callback`).
-/// - `task_handle`: Owns the server task.  Aborting this stops the server.
-/// - `receiver`: Receives the `CallbackResult` when the OAuth redirect arrives.
-///   Returns `Err` if the server times out or is aborted before receiving a callback.
-///
-/// ## Timeout
-///
-/// The server automatically shuts down after `timeout` (default 5 minutes).
-/// The oneshot channel is dropped, causing `receiver.await` to return `Err`.
-///
-/// ## Example
-///
-/// ```ignore
-/// let (port, handle, rx) = start_callback_server(
-///     "expected-state-param",
-///     Duration::from_secs(300),
-/// ).await?;
-///
-/// let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-/// // ... build auth URL with this redirect_uri, present to user ...
-///
-/// let result = rx.await.map_err(|_| DysonError::oauth("server", "timeout"))?;
-/// // result.code contains the authorization code
-/// handle.abort(); // clean up
-/// ```
+/// Returns `(port, task_handle, receiver)`.  The receiver yields the authorization
+/// code when the callback fires.  The server auto-shuts down after `timeout`.
 pub async fn start_callback_server(
     expected_state: &str,
     timeout: Duration,
@@ -124,18 +94,15 @@ pub async fn start_callback_server(
                     }
                 };
 
-                let expected_state = expected_state.clone();
+                let spawn_state = expected_state.clone();
                 let spawn_tx = tx.clone();
 
                 tokio::spawn(async move {
                     let io = TokioIo::new(stream);
 
-                    let expected_state = expected_state.clone();
-                    let tx = spawn_tx.clone();
-
                     let service = hyper::service::service_fn(move |req| {
-                        let expected_state = expected_state.clone();
-                        let tx = tx.clone();
+                        let expected_state = spawn_state.clone();
+                        let tx = spawn_tx.clone();
                         async move {
                             handle_callback(req, &expected_state, tx).await
                         }
@@ -166,10 +133,7 @@ pub async fn start_callback_server(
     Ok((port, handle, rx))
 }
 
-/// Handle an incoming HTTP request to the callback server.
-///
-/// Expects: `GET /callback?code=<code>&state=<state>`
-/// Returns: HTML success page on valid callback, error page otherwise.
+/// Handle `GET /callback?code=<code>&state=<state>`.
 async fn handle_callback(
     req: Request<hyper::body::Incoming>,
     expected_state: &str,
