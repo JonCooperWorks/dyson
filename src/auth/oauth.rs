@@ -372,8 +372,13 @@ pub async fn load_tokens(server_name: &str) -> Result<Option<OAuthCredential>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    let p: PersistedTokens = serde_json::from_str(&data)
-        .map_err(|e| DysonError::oauth(server_name, format!("bad token file: {e}")))?;
+    let p: PersistedTokens = match serde_json::from_str(&data) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(server = server_name, error = %e, "corrupt token file — will re-auth");
+            return Ok(None);
+        }
+    };
     Ok(Some(OAuthCredential {
         access_token: Credential::new(p.access_token),
         refresh_token: p.refresh_token.map(Credential::new),

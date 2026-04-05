@@ -190,7 +190,13 @@ impl McpSkill {
                 )
                 .await?;
 
-                tracing::info!(server = %server_name, "OAuth tokens persisted — reload config to connect");
+                // Touch the config file so the hot reloader picks up the
+                // new tokens on its next poll cycle.  This triggers a full
+                // skill rebuild, which calls on_load() again — this time
+                // load_oauth_auth() finds the persisted tokens and connects.
+                touch_config().await;
+
+                tracing::info!(server = %server_name, "OAuth tokens persisted — triggering reload");
                 Ok::<(), DysonError>(())
             }
             .await;
@@ -397,9 +403,28 @@ impl Skill for McpSkill {
     }
 }
 
-// ---------------------------------------------------------------------------
-// McpRemoteTool — a Tool backed by a tools/call RPC to an MCP server.
-// ---------------------------------------------------------------------------
+/// Bump the config file's mtime so the hot reloader triggers a rebuild.
+///
+/// Resolves the config path the same way controllers do (--config arg or
+/// dyson.json in cwd).  Uses spawn_blocking to avoid blocking the tokio
+/// runtime.  If the file can't be touched, logs a warning.
+async fn touch_config() {
+    let path = std::env::args()
+        .skip_while(|a| a != "--config" && a != "-c")
+        .nth(1)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("dyson.json"));
+
+    let _ = tokio::task::spawn_blocking(move || {
+        match std::fs::File::options().write(true).open(&path) {
+            Ok(f) => { let _ = f.set_modified(std::time::SystemTime::now()); }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e,
+                    "could not touch config — reload manually to connect OAuth server");
+            }
+        }
+    }).await;
+}
 
 /// A single tool from an MCP server, discovered via `tools/list`.
 ///
