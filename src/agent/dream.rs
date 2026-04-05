@@ -295,14 +295,25 @@ impl DreamHandle {
                 }
 
                 while let Ok(req) = rx.recv() {
-                    let summary = reflection::summarize_for_reflection(&req.messages);
-                    runner.fire(&req.event, || DreamContext {
-                        client: req.client.clone(),
-                        config: req.config.clone(),
-                        tool_context: req.tool_context.clone(),
-                        conversation_summary: summary.clone(),
-                        turn_count: req.turn_count,
-                    });
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let summary = reflection::summarize_for_reflection(&req.messages);
+                        runner.fire(&req.event, || DreamContext {
+                            client: req.client.clone(),
+                            config: req.config.clone(),
+                            tool_context: req.tool_context.clone(),
+                            conversation_summary: summary.clone(),
+                            turn_count: req.turn_count,
+                        });
+                    }));
+
+                    if let Err(panic) = result {
+                        let msg = panic
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| panic.downcast_ref::<String>().map(|s| s.as_str()))
+                            .unwrap_or("unknown panic");
+                        tracing::error!(reason = msg, "dream thread caught panic, continuing");
+                    }
                 }
 
                 tracing::debug!("dream thread shutting down");

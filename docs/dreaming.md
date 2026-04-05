@@ -174,8 +174,9 @@ Enforced at every level:
 6. **`SilentOutput`** — dreams never write to the user's output stream.
 
 If a dream panics, its `tokio::spawn` task unwinds independently.  If the
-dream thread panics, the channel disconnects and `fire()` logs a warning —
-the agent continues without dreams.
+dream thread itself panics while processing a request, `catch_unwind`
+catches it, logs the panic, and continues processing the next request —
+no single bad dream can kill the thread.
 
 ## File Map
 
