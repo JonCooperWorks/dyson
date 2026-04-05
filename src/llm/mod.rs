@@ -59,34 +59,6 @@ use crate::llm::stream::StreamEvent;
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
-// Shared HTTP client
-// ---------------------------------------------------------------------------
-
-/// User-Agent header value for all HTTP-based providers.
-const USER_AGENT: &str = concat!(
-    "Dyson/",
-    env!("CARGO_PKG_VERSION"),
-    " (+https://github.com/joncooperworks/dyson)"
-);
-
-/// Single shared `reqwest::Client` for all HTTP-based LLM providers.
-///
-/// `reqwest::Client` is designed to be shared — it pools connections and
-/// reuses TLS sessions internally.  One instance serves Anthropic, OpenAI,
-/// OpenRouter, Ollama Cloud, and any future HTTP-based provider.
-static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
-    reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .build()
-        .expect("failed to build HTTP client")
-});
-
-/// Returns the shared HTTP client for all LLM providers.
-pub fn http_client() -> &'static reqwest::Client {
-    &HTTP_CLIENT
-}
-
-// ---------------------------------------------------------------------------
 // CompletionConfig
 // ---------------------------------------------------------------------------
 

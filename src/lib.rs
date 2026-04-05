@@ -47,6 +47,7 @@ pub mod config;
 pub mod controller;
 pub mod error;
 pub mod export;
+pub mod http;
 pub mod llm;
 pub mod media;
 pub mod message;
