@@ -992,7 +992,7 @@ mod tests {
         assert!(port > 0);
 
         // Send a real HTTP request to the server.
-        let client = reqwest::Client::new();
+        let client = crate::http::client();
         let resp = client
             .post(format!("http://127.0.0.1:{port}/mcp"))
             .header("Authorization", format!("Bearer {token}"))
