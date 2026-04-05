@@ -76,8 +76,23 @@ impl LocalSkill {
             return None;
         }
         let after_open = &trimmed[3..].trim_start_matches(['\r', '\n']);
-        let close_pos = after_open.find("\n---")?;
-        let body = after_open[close_pos + 4..].trim();
+        let body = if let Some(close_pos) = after_open.find("\n---") {
+            after_open[close_pos + 4..].trim()
+        } else {
+            // Fallback: infer frontmatter end from key: value lines.
+            let mut fm_end = 0;
+            for line in after_open.lines() {
+                let t = line.trim();
+                if t.is_empty() || !t.contains(':') {
+                    break;
+                }
+                fm_end += line.len() + 1;
+            }
+            if fm_end == 0 {
+                return None;
+            }
+            after_open[fm_end..].trim()
+        };
         if body.is_empty() {
             None
         } else {
@@ -102,14 +117,46 @@ impl LocalSkill {
 
         // Find the closing ---
         let after_open = &trimmed[3..].trim_start_matches(['\r', '\n']);
-        let close_pos = after_open.find("\n---").ok_or_else(|| {
-            DysonError::Config(format!(
-                "skill file {display}: missing closing --- in frontmatter"
-            ))
-        })?;
+        let (frontmatter, body) = if let Some(close_pos) = after_open.find("\n---") {
+            let fm = &after_open[..close_pos];
+            let b = after_open[close_pos + 4..].trim();
+            (fm.to_string(), b.to_string())
+        } else {
+            // Auto-repair: infer frontmatter boundary by finding the first
+            // line that isn't a `key: value` pair (empty line or body text).
+            let mut fm_end = 0;
+            for line in after_open.lines() {
+                let t = line.trim();
+                if t.is_empty() || !t.contains(':') {
+                    break;
+                }
+                fm_end += line.len() + 1; // +1 for newline
+            }
+            if fm_end == 0 {
+                return Err(DysonError::Config(format!(
+                    "skill file {display}: missing closing --- in frontmatter"
+                )));
+            }
+            let fm = after_open[..fm_end].trim_end().to_string();
+            let b = after_open[fm_end..].trim().to_string();
 
-        let frontmatter = &after_open[..close_pos];
-        let body = after_open[close_pos + 4..].trim();
+            // Write the repaired file back to disk (best-effort).
+            let repaired = format!("---\n{fm}\n---\n\n{b}\n");
+            if let Err(e) = std::fs::write(path, &repaired) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to write auto-repaired skill file",
+                );
+            } else {
+                tracing::warn!(
+                    path = %path.display(),
+                    "auto-repaired malformed frontmatter (missing closing ---)",
+                );
+            }
+
+            (fm, b)
+        };
 
         // Parse frontmatter key-value pairs.
         let mut name: Option<String> = None;
@@ -265,13 +312,57 @@ Analyze code quality and security.
     }
 
     #[test]
-    fn parse_missing_closing_delimiter() {
+    fn parse_missing_closing_delimiter_no_body() {
+        // Only frontmatter, no body at all — still an error after repair.
         let content = "\
 ---
 name: broken
 ";
         let err = LocalSkill::parse(content, &test_path()).unwrap_err();
-        assert!(err.to_string().contains("missing closing ---"));
+        assert!(
+            err.to_string().contains("body (system prompt) must not be empty")
+                || err.to_string().contains("missing closing ---")
+        );
+    }
+
+    #[test]
+    fn parse_auto_repairs_missing_closing_delimiter() {
+        // Frontmatter without closing ---, followed by body text.
+        let dir = std::env::temp_dir().join(format!("dyson-repair-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let skill_path = dir.join("SKILL.md");
+        let content = "\
+---
+name: repaired
+description: should auto-repair
+
+Do the thing.
+";
+        std::fs::write(&skill_path, content).unwrap();
+
+        let skill = LocalSkill::parse(content, &skill_path).unwrap();
+        assert_eq!(skill.name, "repaired");
+        assert_eq!(skill.description, "should auto-repair");
+        assert_eq!(skill.body, "Do the thing.");
+
+        // Verify the file was repaired on disk.
+        let repaired = std::fs::read_to_string(&skill_path).unwrap();
+        assert!(repaired.contains("\n---\n"), "repaired file should have closing ---");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_body_handles_missing_closing_delimiter() {
+        let content = "\
+---
+name: no-close
+description: test
+
+Body text here.
+";
+        let body = LocalSkill::parse_body(content);
+        assert_eq!(body, Some("Body text here.".to_string()));
     }
 
     #[test]

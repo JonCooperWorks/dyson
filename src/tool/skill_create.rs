@@ -254,8 +254,42 @@ fn append_improvements(existing: &str, new_description: &str, new_instructions: 
 
         format!("---\n{new_frontmatter}---\n\n{body}\n\n## Improvements\n\n{new_instructions}\n")
     } else {
-        // Malformed — just append.
-        format!("{existing}\n\n## Improvements\n\n{new_instructions}\n")
+        // Malformed — infer frontmatter boundary and reconstruct properly.
+        let mut fm_end = 0;
+        for line in after_open.lines() {
+            let t = line.trim();
+            if t.is_empty() || !t.contains(':') {
+                break;
+            }
+            fm_end += line.len() + 1;
+        }
+        if fm_end > 0 {
+            let mut new_frontmatter = String::new();
+            let mut found_desc = false;
+            for line in after_open[..fm_end].trim_end().lines() {
+                let line_trimmed = line.trim();
+                if line_trimmed.starts_with("description:") {
+                    new_frontmatter.push_str(&format!("description: {new_description}\n"));
+                    found_desc = true;
+                } else {
+                    new_frontmatter.push_str(line);
+                    new_frontmatter.push('\n');
+                }
+            }
+            if !found_desc {
+                new_frontmatter.push_str(&format!("description: {new_description}\n"));
+            }
+            let body = after_open[fm_end..].trim();
+            format!(
+                "---\n{new_frontmatter}---\n\n{body}\n\n## Improvements\n\n{new_instructions}\n"
+            )
+        } else {
+            // Completely unrecoverable — wrap with new frontmatter.
+            format!(
+                "---\nname: unknown\ndescription: {new_description}\n---\n\n{existing}\n\n\
+                 ## Improvements\n\n{new_instructions}\n"
+            )
+        }
     }
 }
 
@@ -334,6 +368,25 @@ mod tests {
         assert!(improved.contains("Original instructions."));
         assert!(improved.contains("## Improvements"));
         assert!(improved.contains("New step."));
+    }
+
+    #[test]
+    fn append_improvements_repairs_malformed_frontmatter() {
+        // Missing closing --- — should infer boundary and produce valid output.
+        let existing = "---\nname: deploy\ndescription: Old desc\n\nOriginal instructions.\n";
+        let improved = append_improvements(existing, "New desc", "New step.");
+
+        assert!(improved.starts_with("---\n"));
+        assert!(improved.contains("name: deploy"));
+        assert!(improved.contains("description: New desc"));
+        assert!(improved.contains("\n---\n")); // proper closing delimiter
+        assert!(improved.contains("Original instructions."));
+        assert!(improved.contains("## Improvements"));
+        assert!(improved.contains("New step."));
+
+        // Verify it parses as a valid skill body.
+        let body = crate::skill::local::LocalSkill::parse_body(&improved);
+        assert!(body.is_some(), "repaired output should parse as valid skill");
     }
 
     #[tokio::test]
