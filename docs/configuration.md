@@ -40,6 +40,7 @@ pub enum LlmProvider {
     OpenAi,
     ClaudeCode,
     Codex,
+    OllamaCloud,
 }
 ```
 
@@ -197,7 +198,7 @@ Each provider entry has:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | Yes | Provider backend: `"anthropic"`, `"openai"`, `"claude-code"`, `"codex"` |
+| `type` | Yes | Provider backend: `"anthropic"`, `"openai"`, `"ollama-cloud"`, `"claude-code"`, `"codex"` |
 | `model` | No | Model identifier (defaults per provider type) |
 | `api_key` | No | API key — literal string or secret resolver reference |
 | `base_url` | No | Override the default API endpoint |
@@ -212,8 +213,9 @@ The `provider` field determines which `LlmClient` implementation is used:
 | `"openai"` or `"gpt"` | OpenAI Chat Completions | `https://api.openai.com` | `OPENAI_API_KEY` |
 | `"claude-code"` or `"cc"` | Claude Code CLI | (subprocess) | None needed |
 | `"codex"` or `"codex-cli"` | Codex CLI | (subprocess) | None needed |
+| `"ollama-cloud"` or `"ollama"` | Ollama Cloud | `https://ollama.com` | `OLLAMA_API_KEY` |
 
-Use `base_url` to point to alternative endpoints (Ollama, vLLM, Together,
+Use `base_url` to point to alternative endpoints (vLLM, Together,
 etc.) when using the OpenAI provider.
 
 ---

@@ -8,7 +8,8 @@ accumulation internally — the agent loop sees only a stream of `StreamEvent`s.
 - `src/llm/mod.rs` — `LlmClient` trait, `CompletionConfig`, `ToolDefinition`, shared utilities
 - `src/llm/stream.rs` — `StreamEvent`, `StopReason`
 - `src/llm/anthropic.rs` — Anthropic Messages API (Claude models)
-- `src/llm/openai.rs` — OpenAI Chat Completions API (GPT, Ollama, etc.)
+- `src/llm/openai.rs` — OpenAI Chat Completions API (GPT, etc.)
+- `src/llm/ollama_cloud.rs` — Ollama Cloud API (cloud-hosted models on ollama.com)
 - `src/llm/claude_code.rs` — Claude Code CLI subprocess (no API key needed)
 - `src/llm/codex.rs` — Codex CLI subprocess (no API key needed)
 
@@ -48,16 +49,16 @@ Returns a `Stream` of `StreamEvent`s.  The stream ends with
 
 ## Provider Comparison
 
-All four providers implement the same `LlmClient` trait.  Anthropic and OpenAI
-are API-based; Claude Code and Codex are CLI-subprocess-based.
+All providers implement the same `LlmClient` trait.  Anthropic, OpenAI, and
+Ollama Cloud are API-based; Claude Code and Codex are CLI-subprocess-based.
 
-| Aspect | Anthropic | OpenAI | Claude Code | Codex |
-|--------|-----------|--------|-------------|-------|
-| Transport | HTTP API | HTTP API | CLI subprocess | CLI subprocess |
-| Auth | `x-api-key` header | `Bearer` token | CLI's stored auth | CLI's stored auth |
-| API key needed? | Yes | Yes | No | No |
-| Tool execution | Dyson | Dyson | Internal | Internal |
-| `handles_tools_internally` | `false` | `false` | `true` | `true` |
+| Aspect | Anthropic | OpenAI | Ollama Cloud | Claude Code | Codex |
+|--------|-----------|--------|--------------|-------------|-------|
+| Transport | HTTP API | HTTP API | HTTP API | CLI subprocess | CLI subprocess |
+| Auth | `x-api-key` header | `Bearer` token | `Bearer` token | CLI's stored auth | CLI's stored auth |
+| API key needed? | Yes | Yes | Yes | No | No |
+| Tool execution | Dyson | Dyson | Dyson | Internal | Internal |
+| `handles_tools_internally` | `false` | `false` | `false` | `true` | `true` |
 
 ### API Clients (Anthropic vs OpenAI)
 
@@ -105,9 +106,9 @@ The SSE parser handles line buffering (reqwest can split mid-UTF8), `data:` extr
 
 Works with any OpenAI-compatible endpoint:
 - **OpenAI** — `https://api.openai.com` (default)
-- **Ollama** — `http://localhost:11434`
 - **Together** — `https://api.together.xyz`
 - **vLLM** — `http://localhost:8000`
+- **Local Ollama** — `http://localhost:11434`
 
 ### SSE Flow
 
@@ -139,6 +140,14 @@ A full agent, not a raw API. Dyson spawns `claude -p --output-format stream-json
 
 ---
 
+## Ollama Cloud Client
+
+`OllamaCloudClient` in `src/llm/ollama_cloud.rs`.
+
+Thin wrapper around `OpenAiCompatClient` for [Ollama Cloud](https://ollama.com) — cloud-hosted models accessible via an OpenAI-compatible API at `https://ollama.com`. Uses `Bearer` token auth with an `OLLAMA_API_KEY`. Supports dialect-based tool call handling for models that need it (e.g., Gemma).
+
+---
+
 ## Codex Client
 
 `CodexClient` in `src/llm/codex.rs`.
@@ -155,7 +164,7 @@ Some models emit reasoning tokens (Anthropic's extended thinking, OpenAI's o-ser
 
 ## Provider Selection
 
-Select via `--provider` CLI flag or `agent.provider` in `dyson.json`. API keys resolve from env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`); CLI providers need none.
+Select via `--provider` CLI flag or `agent.provider` in `dyson.json`. API keys resolve from env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OLLAMA_API_KEY`); CLI providers need none.
 
 See [Adding a Provider](adding-a-provider.md) for the 3-step process.
 

@@ -170,7 +170,7 @@ pub struct ClientConfig<'a> {
 /// One entry per `LlmProvider` variant.  The unit test
 /// `registry_covers_all_variants` ensures nothing is missing.
 pub fn registry() -> &'static [ProviderEntry] {
-    use super::{anthropic, claude_code, codex, openai, openai_compat, openrouter};
+    use super::{anthropic, claude_code, codex, ollama_cloud, openai, openai_compat, openrouter};
 
     static ENTRIES: std::sync::LazyLock<Vec<ProviderEntry>> = std::sync::LazyLock::new(|| {
         vec![
@@ -241,6 +241,17 @@ pub fn registry() -> &'static [ProviderEntry] {
                     ))
                 },
             },
+            ProviderEntry {
+                provider: LlmProvider::OllamaCloud,
+                canonical_name: "ollama-cloud",
+                aliases: &["ollama-cloud", "ollama_cloud", "ollama"],
+                default_model: "llama3.3",
+                env_var: Some("OLLAMA_API_KEY"),
+                requires_api_key: true,
+                create_client: |c| {
+                    Box::new(ollama_cloud::OllamaCloudClient::new(c.api_key, c.base_url))
+                },
+            },
         ]
     });
 
@@ -297,6 +308,7 @@ mod tests {
             LlmProvider::OpenRouter,
             LlmProvider::ClaudeCode,
             LlmProvider::Codex,
+            LlmProvider::OllamaCloud,
         ];
         assert_eq!(
             registry().len(),
@@ -332,6 +344,8 @@ mod tests {
         assert_eq!(from_str_loose("open-router"), Some(LlmProvider::OpenRouter));
         assert_eq!(from_str_loose("cc"), Some(LlmProvider::ClaudeCode));
         assert_eq!(from_str_loose("codex-cli"), Some(LlmProvider::Codex));
+        assert_eq!(from_str_loose("ollama-cloud"), Some(LlmProvider::OllamaCloud));
+        assert_eq!(from_str_loose("ollama"), Some(LlmProvider::OllamaCloud));
         assert_eq!(from_str_loose("unknown"), None);
     }
 
@@ -343,6 +357,7 @@ mod tests {
         assert!(names.contains(&"openrouter"));
         assert!(names.contains(&"claude-code"));
         assert!(names.contains(&"codex"));
+        assert!(names.contains(&"ollama-cloud"));
     }
 
     #[test]

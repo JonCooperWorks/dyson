@@ -54,7 +54,7 @@ Six core traits:
 
 | Trait | What it does |
 |-------|-------------|
-| `LlmClient` | Stream completions from any provider (Anthropic, OpenAI, OpenRouter, Claude Code, Codex) |
+| `LlmClient` | Stream completions from any provider (Anthropic, OpenAI, OpenRouter, Ollama Cloud, Claude Code, Codex) |
 | `Tool` | A single callable capability (bash, web search, MCP remote tool) |
 | `Skill` | A bundle of tools with lifecycle hooks and prompt fragments |
 | `Sandbox` | Gate every tool call — allow, deny, redirect, audit |
@@ -63,13 +63,14 @@ Six core traits:
 
 ## Providers
 
-Five LLM backends, selectable via `--provider` or config:
+Six LLM backends, selectable via `--provider` or config:
 
 | Provider | Config value | API key | Notes |
 |----------|-------------|---------|-------|
 | Anthropic | `"anthropic"` | `ANTHROPIC_API_KEY` | Default. Full streaming + structured tool calling |
-| OpenAI | `"openai"` | `OPENAI_API_KEY` | Also works with Ollama, vLLM, Together, rLLM, etc. via `base_url` |
+| OpenAI | `"openai"` | `OPENAI_API_KEY` | Also works with vLLM, Together, rLLM, etc. via `base_url` |
 | OpenRouter | `"openrouter"` | `OPENROUTER_API_KEY` | 200+ models via OpenAI-compatible API |
+| Ollama Cloud | `"ollama-cloud"` | `OLLAMA_API_KEY` | Cloud-hosted models on ollama.com |
 | Claude Code | `"claude-code"` | None (uses stored creds) | Spawns the `claude` CLI. Zero config. Claude Code handles tools |
 | Codex | `"codex"` | None (uses stored creds) | Spawns the `codex` CLI. OpenAI Codex agent loop |
 
@@ -85,7 +86,11 @@ cargo run -- --dangerous-no-sandbox "what files are in this directory?"
 # Claude Code (no API key needed)
 cargo run -- --dangerous-no-sandbox --provider claude-code "hello"
 
-# Local model (Ollama, vLLM, rLLM, etc.)
+# Ollama Cloud
+export OLLAMA_API_KEY="..."
+cargo run -- --dangerous-no-sandbox --provider ollama-cloud --model llama3.3 "hello"
+
+# Local model (vLLM, rLLM, local Ollama, etc.)
 cargo run -- --dangerous-no-sandbox --provider openai --base-url http://localhost:9000 --model llama-3.2-3b-instruct "hello"
 ```
 
@@ -131,7 +136,7 @@ src/
   skill/               Skill trait, BuiltinSkill, MCP skill, LocalSkill, SubagentSkill
   sandbox/             Sandbox trait, OsSandbox, DangerousNoSandbox
   secret/              SecretResolver trait, InsecureEnvironmentVariable
-  llm/                 LlmClient trait + provider registry + Anthropic, OpenAI, OpenRouter, Claude Code, Codex
+  llm/                 LlmClient trait + provider registry + Anthropic, OpenAI, OpenRouter, Ollama Cloud, Claude Code, Codex
   agent/               Streaming loop, compaction, dependency analysis, rate limiting, token tracking
   controller/          Controller trait + terminal, Telegram
   workspace/           Workspace trait, memory store, knowledge base, migrations

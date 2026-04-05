@@ -274,6 +274,8 @@ pub enum LlmProvider {
     ClaudeCode,
     /// Locally installed `codex` CLI (OpenAI Codex, no API key needed).
     Codex,
+    /// Ollama Cloud API (cloud-hosted models via ollama.com).
+    OllamaCloud,
 }
 
 // ---------------------------------------------------------------------------
