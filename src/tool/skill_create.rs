@@ -346,17 +346,13 @@ mod tests {
         assert!(content.contains("Do the thing."));
 
         // Verify it parses as a valid LocalSkill.
-        let skill = crate::skill::local::LocalSkill::from_dir(
-            // Write to temp dir for parsing.
-            &{
-                let dir = std::env::temp_dir().join("dyson-test-skill-dir");
-                std::fs::create_dir_all(&dir).unwrap();
-                std::fs::write(dir.join("SKILL.md"), &content).unwrap();
-                dir
-            },
-        )
-        .unwrap();
+        let dir = std::env::temp_dir().join("test");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), &content).unwrap();
+        let skill = crate::skill::local::LocalSkill::from_dir(&dir).unwrap();
+        // Name comes from the directory name ("test"), not from frontmatter.
         assert_eq!(skill.name(), "test");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

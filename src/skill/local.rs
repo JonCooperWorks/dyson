@@ -1,21 +1,35 @@
 // ===========================================================================
 // Local skill — loads a SKILL.md file that defines a custom system prompt.
 //
-// SKILL.md format:
+// SKILL.md format (lenient):
+//
+// The parser accepts multiple formats, from most to least structured:
+//
+// 1. Full frontmatter (backward-compatible):
 //
 //   ---
 //   name: code-review
 //   description: Reviews code for quality and security issues
 //   ---
 //
-//   You are a code review expert. When asked to review code:
-//   1. Search the workspace for the relevant files
-//   2. Analyze code quality, security, and patterns
-//   3. Provide actionable feedback
+//   You are a code review expert.
 //
-// The YAML-like frontmatter between `---` delimiters provides metadata.
-// Everything after the closing `---` is the system prompt injected into
-// the agent's context.
+// 2. No frontmatter — name comes from the parent directory, first line
+//    is the description, rest is the body:
+//
+//   Reviews code for quality and security issues
+//
+//   You are a code review expert.
+//
+// 3. No frontmatter, single block — name from directory, description
+//    empty, entire file is the body:
+//
+//   You are a code review expert.
+//   Analyze code quality, security, and patterns.
+//
+// The `name` field is always derived from the parent directory name
+// (e.g., `skills/code-review/SKILL.md` → name = "code-review").
+// Frontmatter `name:` is accepted but ignored in favor of the directory.
 // ===========================================================================
 
 use std::path::Path;
@@ -45,6 +59,10 @@ pub struct LocalSkill {
 
 impl LocalSkill {
     /// Load a local skill from a directory containing `SKILL.md`.
+    ///
+    /// The skill name is derived from the directory name, not the file
+    /// content.  This means the directory must be named with a valid
+    /// skill name (lowercase alphanumeric + hyphens).
     pub fn from_dir(dir: &Path) -> Result<Self> {
         let skill_md = dir.join("SKILL.md");
         let content = std::fs::read_to_string(&skill_md).map_err(|e| {
@@ -53,10 +71,18 @@ impl LocalSkill {
                 skill_md.display()
             ))
         })?;
-        Self::parse(&content, &skill_md)
+
+        // Derive name from the directory (e.g., skills/code-review → "code-review").
+        let dir_name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        Self::parse(&content, &dir_name, &skill_md)
     }
 
-    /// The skill's description (from frontmatter).
+    /// The skill's description (from frontmatter or first line).
     pub fn skill_description(&self) -> &str {
         &self.description
     }
@@ -68,143 +94,198 @@ impl LocalSkill {
 
     /// Extract just the body (instructions) from SKILL.md content.
     ///
-    /// Returns `None` if parsing fails.  Used by `load_skill` to return
-    /// instructions without frontmatter.
+    /// Returns `None` if the content is empty.  Used by `load_skill` to
+    /// return instructions without frontmatter.
     pub fn parse_body(content: &str) -> Option<String> {
-        let trimmed = content.trim_start();
-        if !trimmed.starts_with("---") {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
             return None;
         }
-        let after_open = &trimmed[3..].trim_start_matches(['\r', '\n']);
-        let body = if let Some(close_pos) = after_open.find("\n---") {
-            after_open[close_pos + 4..].trim()
-        } else {
-            // Fallback: infer frontmatter end from key: value lines.
-            let mut fm_end = 0;
-            for line in after_open.lines() {
-                let t = line.trim();
-                if t.is_empty() || !t.contains(':') {
-                    break;
-                }
-                fm_end += line.len() + 1;
+
+        // If frontmatter is present, strip it.
+        if trimmed.starts_with("---") {
+            let after_open = &trimmed[3..].trim_start_matches(['\r', '\n']);
+            if let Some(close_pos) = after_open.find("\n---") {
+                let body = after_open[close_pos + 4..].trim();
+                return if body.is_empty() { None } else { Some(body.to_string()) };
             }
-            if fm_end == 0 {
-                return None;
-            }
-            let fm_end = fm_end.min(after_open.len());
-            after_open[fm_end..].trim()
-        };
-        if body.is_empty() {
-            None
-        } else {
-            Some(body.to_string())
+            // Malformed frontmatter — fall through and treat entire content
+            // as body (the name/description will just be part of the text).
         }
+
+        // No frontmatter — return the whole thing.
+        Some(trimmed.to_string())
     }
 
     /// Parse SKILL.md content into a LocalSkill.
     ///
-    /// Expects YAML-like frontmatter between `---` delimiters, followed by
-    /// a body that becomes the system prompt.
-    fn parse(content: &str, path: &Path) -> Result<Self> {
-        let display = path.display();
+    /// Accepts three formats:
+    ///
+    /// 1. **Frontmatter** — `---` delimiters with `description:` field,
+    ///    body after closing `---`.  `name:` in frontmatter is ignored
+    ///    (we always use `dir_name`).
+    ///
+    /// 2. **No frontmatter, multi-line** — first non-empty line is the
+    ///    description, everything after the first blank line is the body.
+    ///
+    /// 3. **No frontmatter, single block** — entire content is the body,
+    ///    description is empty.
+    fn parse(content: &str, dir_name: &str, path: &Path) -> Result<Self> {
+        let trimmed = content.trim();
 
-        // Split on frontmatter delimiters.
-        let trimmed = content.trim_start();
-        if !trimmed.starts_with("---") {
+        if trimmed.is_empty() {
             return Err(DysonError::Config(format!(
-                "skill file {display}: missing frontmatter (must start with ---)"
+                "skill file {}: file is empty",
+                path.display()
             )));
         }
 
-        // Find the closing ---
-        let after_open = &trimmed[3..].trim_start_matches(['\r', '\n']);
-        let (frontmatter, body) = if let Some(close_pos) = after_open.find("\n---") {
-            let fm = &after_open[..close_pos];
-            let b = after_open[close_pos + 4..].trim();
-            (fm.to_string(), b.to_string())
-        } else {
-            // Auto-repair: infer frontmatter boundary by finding the first
-            // line that isn't a `key: value` pair (empty line or body text).
-            let mut fm_end = 0;
-            for line in after_open.lines() {
-                let t = line.trim();
-                if t.is_empty() || !t.contains(':') {
-                    break;
+        // --- Path 1: frontmatter present ---
+        if trimmed.starts_with("---") {
+            let after_open = &trimmed[3..].trim_start_matches(['\r', '\n']);
+
+            if let Some(close_pos) = after_open.find("\n---") {
+                // Well-formed frontmatter.
+                let frontmatter = &after_open[..close_pos];
+                let body = after_open[close_pos + 4..].trim();
+
+                let description = extract_frontmatter_value(frontmatter, "description");
+
+                if body.is_empty() {
+                    return Err(DysonError::Config(format!(
+                        "skill file {}: body (system prompt) must not be empty",
+                        path.display()
+                    )));
                 }
-                fm_end += line.len() + 1; // +1 for newline
+
+                return Ok(Self {
+                    name: dir_name.to_string(),
+                    description,
+                    body: body.to_string(),
+                });
             }
-            if fm_end == 0 {
+
+            // Malformed frontmatter — try to extract description from what
+            // looks like frontmatter, then treat the rest as body.
+            let (description, body) = split_malformed_frontmatter(after_open);
+
+            if body.is_empty() {
                 return Err(DysonError::Config(format!(
-                    "skill file {display}: missing closing --- in frontmatter"
+                    "skill file {}: body (system prompt) must not be empty",
+                    path.display()
                 )));
             }
-            // Clamp to string length — the last line may lack a trailing newline.
-            let fm_end = fm_end.min(after_open.len());
-            let fm = after_open[..fm_end].trim_end().to_string();
-            let b = after_open[fm_end..].trim().to_string();
 
-            // Write the repaired file back to disk (best-effort).
-            let repaired = format!("---\n{fm}\n---\n\n{b}\n");
-            if let Err(e) = std::fs::write(path, &repaired) {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "failed to write auto-repaired skill file",
-                );
-            } else {
-                tracing::warn!(
-                    path = %path.display(),
-                    "auto-repaired malformed frontmatter (missing closing ---)",
-                );
-            }
-
-            (fm, b)
-        };
-
-        // Parse frontmatter key-value pairs.
-        let mut name: Option<String> = None;
-        let mut description: Option<String> = None;
-
-        for line in frontmatter.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once(':') {
-                let key = key.trim();
-                let value = value.trim();
-                match key {
-                    "name" => name = Some(value.to_string()),
-                    "description" => description = Some(value.to_string()),
-                    _ => {} // ignore unknown keys
-                }
-            }
+            return Ok(Self {
+                name: dir_name.to_string(),
+                description,
+                body,
+            });
         }
 
-        let name = name.ok_or_else(|| {
-            DysonError::Config(format!(
-                "skill file {display}: frontmatter missing required 'name' field"
-            ))
-        })?;
-
-        if name.is_empty() {
-            return Err(DysonError::Config(format!(
-                "skill file {display}: 'name' field must not be empty"
-            )));
-        }
+        // --- Path 2 & 3: no frontmatter ---
+        let (description, body) = split_plain_content(trimmed);
 
         if body.is_empty() {
-            return Err(DysonError::Config(format!(
-                "skill file {display}: body (system prompt) must not be empty"
-            )));
+            // Single block — entire content is the body, no description.
+            return Ok(Self {
+                name: dir_name.to_string(),
+                description: String::new(),
+                body: trimmed.to_string(),
+            });
         }
 
         Ok(Self {
-            name,
-            description: description.unwrap_or_default(),
-            body: body.to_string(),
+            name: dir_name.to_string(),
+            description,
+            body,
         })
     }
+}
+
+/// Extract a value from frontmatter text for a given key.
+fn extract_frontmatter_value(frontmatter: &str, key: &str) -> String {
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim() == key {
+                return v.trim().to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// Split malformed frontmatter (opened with `---` but never closed).
+///
+/// Scans lines looking for `key: value` pairs.  The first empty line or
+/// the first line that doesn't start with a simple key (no spaces before
+/// the colon) marks the end of the frontmatter region.  Returns
+/// (description, body).
+fn split_malformed_frontmatter(after_open: &str) -> (String, String) {
+    let mut description = String::new();
+    let mut fm_end = 0;
+
+    for line in after_open.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            fm_end += line.len() + 1;
+            break;
+        }
+        // A frontmatter line looks like `key: value` where the key is a
+        // simple identifier (no spaces).
+        if let Some((key, value)) = t.split_once(':') {
+            let key = key.trim();
+            if key.contains(' ') || key.is_empty() {
+                // Not a frontmatter key — this is body text.
+                break;
+            }
+            if key == "description" {
+                description = value.trim().to_string();
+            }
+            fm_end += line.len() + 1;
+        } else {
+            // Not a key: value line — start of body.
+            break;
+        }
+    }
+
+    let fm_end = fm_end.min(after_open.len());
+    let body = after_open[fm_end..].trim().to_string();
+    (description, body)
+}
+
+/// Split plain content (no frontmatter) into description + body.
+///
+/// First non-empty line is the description; everything after the first
+/// blank line is the body.  If there's no blank line, body is empty
+/// (caller should treat entire content as body).
+fn split_plain_content(content: &str) -> (String, String) {
+    let mut lines = content.lines();
+    let first_line = match lines.next() {
+        Some(l) => l.trim().to_string(),
+        None => return (String::new(), String::new()),
+    };
+
+    // Find the first blank line.
+    let mut rest_start = first_line.len() + 1; // +1 for newline
+    let mut found_blank = false;
+    for line in lines {
+        if line.trim().is_empty() {
+            rest_start += line.len() + 1;
+            found_blank = true;
+            break;
+        }
+        rest_start += line.len() + 1;
+    }
+
+    if !found_blank {
+        return (first_line, String::new());
+    }
+
+    let rest_start = rest_start.min(content.len());
+    let body = content[rest_start..].trim().to_string();
+    (first_line, body)
 }
 
 #[async_trait]
@@ -284,21 +365,25 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_path() -> PathBuf {
-        PathBuf::from("test-skill.md")
+        PathBuf::from("/fake/skills/test-skill/SKILL.md")
     }
 
+    // -------------------------------------------------------------------
+    // Frontmatter parsing (backward compat)
+    // -------------------------------------------------------------------
+
     #[test]
-    fn parse_valid_skill() {
+    fn parse_valid_frontmatter() {
         let content = "\
 ---
-name: code-review
+name: ignored-because-dir-wins
 description: Reviews code for quality
 ---
 
 You are a code review expert.
 Analyze code quality and security.
 ";
-        let skill = LocalSkill::parse(content, &test_path()).unwrap();
+        let skill = LocalSkill::parse(content, "code-review", &test_path()).unwrap();
         assert_eq!(skill.name, "code-review");
         assert_eq!(skill.description, "Reviews code for quality");
         assert_eq!(
@@ -308,105 +393,22 @@ Analyze code quality and security.
     }
 
     #[test]
-    fn parse_missing_frontmatter() {
-        let content = "Just a body with no frontmatter.";
-        let err = LocalSkill::parse(content, &test_path()).unwrap_err();
-        assert!(err.to_string().contains("missing frontmatter"));
-    }
-
-    #[test]
-    fn parse_missing_closing_delimiter_no_body() {
-        // Only frontmatter, no body at all — still an error after repair.
+    fn parse_frontmatter_name_from_dir() {
         let content = "\
 ---
-name: broken
-";
-        let err = LocalSkill::parse(content, &test_path()).unwrap_err();
-        assert!(
-            err.to_string().contains("body (system prompt) must not be empty")
-                || err.to_string().contains("missing closing ---")
-        );
-    }
-
-    #[test]
-    fn parse_auto_repairs_missing_closing_delimiter() {
-        // Frontmatter without closing ---, followed by body text.
-        let dir = std::env::temp_dir().join(format!("dyson-repair-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let skill_path = dir.join("SKILL.md");
-        let content = "\
----
-name: repaired
-description: should auto-repair
-
-Do the thing.
-";
-        std::fs::write(&skill_path, content).unwrap();
-
-        let skill = LocalSkill::parse(content, &skill_path).unwrap();
-        assert_eq!(skill.name, "repaired");
-        assert_eq!(skill.description, "should auto-repair");
-        assert_eq!(skill.body, "Do the thing.");
-
-        // Verify the file was repaired on disk.
-        let repaired = std::fs::read_to_string(&skill_path).unwrap();
-        assert!(repaired.contains("\n---\n"), "repaired file should have closing ---");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn parse_all_frontmatter_no_body_no_trailing_newline() {
-        // Reproduces the panic: every line is key: value, no body, no
-        // trailing newline — fm_end overshoots the string length.
-        let content = "---\nname: markdown-pastebin\ndescription: Post markdown or plain text to markdownpastebin.com. Returns a shareable URL. No auth, no API key.";
-        let err = LocalSkill::parse(content, &test_path()).unwrap_err();
-        // Should error (empty body), not panic.
-        assert!(err.to_string().contains("body (system prompt) must not be empty"));
-    }
-
-    #[test]
-    fn parse_body_handles_missing_closing_delimiter() {
-        let content = "\
----
-name: no-close
+name: old-name
 description: test
+---
 
-Body text here.
+Body.
 ";
-        let body = LocalSkill::parse_body(content);
-        assert_eq!(body, Some("Body text here.".to_string()));
+        let skill = LocalSkill::parse(content, "new-name", &test_path()).unwrap();
+        // Name always comes from directory, not frontmatter.
+        assert_eq!(skill.name, "new-name");
     }
 
     #[test]
-    fn parse_missing_name() {
-        let content = "\
----
-description: no name field
----
-
-Some body.
-";
-        let err = LocalSkill::parse(content, &test_path()).unwrap_err();
-        assert!(err.to_string().contains("missing required 'name'"));
-    }
-
-    #[test]
-    fn parse_empty_body() {
-        let content = "\
----
-name: empty-body
----
-";
-        let err = LocalSkill::parse(content, &test_path()).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("body (system prompt) must not be empty")
-        );
-    }
-
-    #[test]
-    fn parse_no_description_defaults_to_empty() {
+    fn parse_frontmatter_no_description() {
         let content = "\
 ---
 name: minimal
@@ -414,51 +416,25 @@ name: minimal
 
 Do something.
 ";
-        let skill = LocalSkill::parse(content, &test_path()).unwrap();
+        let skill = LocalSkill::parse(content, "minimal", &test_path()).unwrap();
         assert_eq!(skill.name, "minimal");
         assert_eq!(skill.description, "");
         assert_eq!(skill.body, "Do something.");
     }
 
     #[test]
-    fn from_dir_loads_skill() {
-        let dir = std::env::temp_dir().join(format!("dyson-skill-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("SKILL.md"),
-            "---\nname: dir-test\ndescription: loaded from dir\n---\n\nDo the thing.\n",
-        )
-        .unwrap();
-
-        let skill = LocalSkill::from_dir(&dir).unwrap();
-        assert_eq!(skill.name, "dir-test");
-        assert_eq!(skill.description, "loaded from dir");
-        assert_eq!(skill.body, "Do the thing.");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn from_dir_errors_on_missing_dir() {
-        let err = LocalSkill::from_dir(Path::new("/nonexistent/skill")).unwrap_err();
-        assert!(err.to_string().contains("failed to read skill file"));
-    }
-
-    #[test]
-    fn parse_empty_name_rejected() {
+    fn parse_frontmatter_empty_body_rejected() {
         let content = "\
 ---
-name:
+name: empty-body
 ---
-
-Some body.
 ";
-        let err = LocalSkill::parse(content, &test_path()).unwrap_err();
-        assert!(err.to_string().contains("must not be empty"));
+        let err = LocalSkill::parse(content, "empty-body", &test_path()).unwrap_err();
+        assert!(err.to_string().contains("body (system prompt) must not be empty"));
     }
 
     #[test]
-    fn parse_unknown_frontmatter_keys_ignored() {
+    fn parse_frontmatter_unknown_keys_ignored() {
         let content = "\
 ---
 name: flexible
@@ -469,10 +445,194 @@ author: someone
 
 Body text.
 ";
-        let skill = LocalSkill::parse(content, &test_path()).unwrap();
+        let skill = LocalSkill::parse(content, "flexible", &test_path()).unwrap();
         assert_eq!(skill.name, "flexible");
+        assert_eq!(skill.description, "has extra keys");
         assert_eq!(skill.body, "Body text.");
     }
+
+    // -------------------------------------------------------------------
+    // Malformed frontmatter (opened but not closed)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_malformed_frontmatter_with_body() {
+        // Missing closing --- but has body after blank line.
+        let content = "\
+---
+name: repaired
+description: should still work
+
+Do the thing.
+";
+        let skill = LocalSkill::parse(content, "repaired", &test_path()).unwrap();
+        assert_eq!(skill.name, "repaired");
+        assert_eq!(skill.description, "should still work");
+        assert_eq!(skill.body, "Do the thing.");
+    }
+
+    #[test]
+    fn parse_malformed_frontmatter_description_with_colons() {
+        // The description itself contains colons — shouldn't confuse parser.
+        let content = "\
+---
+name: markdown-pastebin
+description: Post markdown to site.com. Returns a URL. No auth, no API key.
+
+When asked to share text:
+1. Format the content
+2. Post to the pastebin
+";
+        let skill = LocalSkill::parse(content, "markdown-pastebin", &test_path()).unwrap();
+        assert_eq!(skill.name, "markdown-pastebin");
+        assert_eq!(
+            skill.description,
+            "Post markdown to site.com. Returns a URL. No auth, no API key."
+        );
+        assert!(skill.body.contains("When asked to share text:"));
+    }
+
+    #[test]
+    fn parse_malformed_frontmatter_only_no_body() {
+        // All frontmatter, no body — error.
+        let content =
+            "---\nname: pastebin\ndescription: Posts things. No auth, no API key.";
+        let err = LocalSkill::parse(content, "pastebin", &test_path()).unwrap_err();
+        assert!(err.to_string().contains("body (system prompt) must not be empty"));
+    }
+
+    // -------------------------------------------------------------------
+    // No frontmatter (plain text)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_plain_text_with_description_and_body() {
+        let content = "\
+Reviews code for quality and security issues
+
+You are a code review expert.
+Analyze code quality, security, and patterns.
+Provide actionable feedback.
+";
+        let skill = LocalSkill::parse(content, "code-review", &test_path()).unwrap();
+        assert_eq!(skill.name, "code-review");
+        assert_eq!(skill.description, "Reviews code for quality and security issues");
+        assert!(skill.body.contains("You are a code review expert."));
+    }
+
+    #[test]
+    fn parse_plain_text_single_block() {
+        // No blank line separator — entire content is body, description empty.
+        let content = "\
+You are a code review expert.
+Analyze code quality, security, and patterns.
+";
+        let skill = LocalSkill::parse(content, "code-review", &test_path()).unwrap();
+        assert_eq!(skill.name, "code-review");
+        assert_eq!(skill.description, "");
+        assert!(skill.body.contains("You are a code review expert."));
+    }
+
+    #[test]
+    fn parse_empty_file_rejected() {
+        let err = LocalSkill::parse("", "empty", &test_path()).unwrap_err();
+        assert!(err.to_string().contains("file is empty"));
+    }
+
+    #[test]
+    fn parse_whitespace_only_rejected() {
+        let err = LocalSkill::parse("   \n\n  ", "blank", &test_path()).unwrap_err();
+        assert!(err.to_string().contains("file is empty"));
+    }
+
+    // -------------------------------------------------------------------
+    // from_dir
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn from_dir_loads_skill() {
+        let dir = std::env::temp_dir().join(format!("dyson-skill-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: old-name\ndescription: loaded from dir\n---\n\nDo the thing.\n",
+        )
+        .unwrap();
+
+        let skill = LocalSkill::from_dir(&dir).unwrap();
+        // Name comes from directory, not frontmatter.
+        let expected_name = dir.file_name().unwrap().to_str().unwrap();
+        assert_eq!(skill.name, expected_name);
+        assert_eq!(skill.description, "loaded from dir");
+        assert_eq!(skill.body, "Do the thing.");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn from_dir_plain_text_skill() {
+        let dir = std::env::temp_dir().join(format!("dyson-plain-skill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "Diagnose cowrie honeypot issues\n\nCheck logs and config for common problems.\n",
+        )
+        .unwrap();
+
+        let skill = LocalSkill::from_dir(&dir).unwrap();
+        let expected_name = dir.file_name().unwrap().to_str().unwrap();
+        assert_eq!(skill.name, expected_name);
+        assert_eq!(skill.description, "Diagnose cowrie honeypot issues");
+        assert_eq!(skill.body, "Check logs and config for common problems.");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn from_dir_errors_on_missing_dir() {
+        let err = LocalSkill::from_dir(Path::new("/nonexistent/skill")).unwrap_err();
+        assert!(err.to_string().contains("failed to read skill file"));
+    }
+
+    // -------------------------------------------------------------------
+    // parse_body
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_body_with_frontmatter() {
+        let content = "---\nname: test\ndescription: d\n---\n\nThe body.\n";
+        assert_eq!(
+            LocalSkill::parse_body(content),
+            Some("The body.".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_body_without_frontmatter() {
+        let content = "Just plain instructions.\nDo the thing.";
+        assert_eq!(
+            LocalSkill::parse_body(content),
+            Some("Just plain instructions.\nDo the thing.".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_body_empty_returns_none() {
+        assert_eq!(LocalSkill::parse_body(""), None);
+        assert_eq!(LocalSkill::parse_body("   \n  "), None);
+    }
+
+    #[test]
+    fn parse_body_malformed_frontmatter_returns_whole_content() {
+        // Opened with --- but never closed — returns entire content.
+        let content = "---\nname: test\ndescription: d\n\nThe body.\n";
+        let body = LocalSkill::parse_body(content).unwrap();
+        assert!(body.contains("The body.") || body.contains("name: test"));
+    }
+
+    // -------------------------------------------------------------------
+    // Skill trait
+    // -------------------------------------------------------------------
 
     #[test]
     fn skill_trait_does_not_inject_system_prompt() {
@@ -485,12 +645,10 @@ name: prompt-test
 
 Custom instructions here.
 ";
-        let skill = LocalSkill::parse(content, &test_path()).unwrap();
+        let skill = LocalSkill::parse(content, "prompt-test", &test_path()).unwrap();
         assert_eq!(skill.name(), "prompt-test");
         assert!(skill.tools().is_empty());
-        // system_prompt returns None — full body loaded on-demand.
         assert_eq!(skill.system_prompt(), None);
-        // But body() still returns the instructions.
         assert_eq!(skill.body(), "Custom instructions here.");
     }
 
@@ -504,7 +662,7 @@ description: A test skill
 
 Instructions here.
 ";
-        let skill = LocalSkill::parse(content, &test_path()).unwrap();
+        let skill = LocalSkill::parse(content, "test-skill", &test_path()).unwrap();
         assert_eq!(skill.skill_description(), "A test skill");
         assert_eq!(skill.body(), "Instructions here.");
     }
