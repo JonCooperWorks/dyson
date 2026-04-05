@@ -25,15 +25,7 @@ pub async fn run(
     base_url: Option<String>,
     workspace: Option<String>,
 ) -> dyson::error::Result<()> {
-    let config_path = config.or_else(|| {
-        let home_config = super::dirs_config_path();
-        if home_config.exists() {
-            Some(home_config)
-        } else {
-            let cwd = PathBuf::from("dyson.json");
-            if cwd.exists() { Some(cwd) } else { None }
-        }
-    });
+    let config_path = super::resolve_config_path(config);
 
     let mut settings = dyson::config::loader::load_settings(config_path.as_deref())?;
     super::apply_overrides(

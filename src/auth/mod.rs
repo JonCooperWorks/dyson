@@ -169,6 +169,15 @@ pub trait Auth: Send + Sync {
     }
 }
 
+/// Constant-time byte comparison that also checks length.
+///
+/// Uses `subtle::ConstantTimeEq` to prevent timing side-channels when
+/// comparing secrets (API keys, bearer tokens).
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    a.len() == b.len() && bool::from(a.ct_eq(b))
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================

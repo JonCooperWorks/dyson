@@ -41,6 +41,19 @@ pub fn dirs_config_path() -> PathBuf {
     PathBuf::from(home).join(".dyson").join("dyson.json")
 }
 
+/// Resolve config path: explicit flag > ~/.dyson/dyson.json > ./dyson.json > None.
+pub fn resolve_config_path(explicit: Option<PathBuf>) -> Option<PathBuf> {
+    explicit.or_else(|| {
+        let home_config = dirs_config_path();
+        if home_config.exists() {
+            Some(home_config)
+        } else {
+            let cwd = PathBuf::from("dyson.json");
+            if cwd.exists() { Some(cwd) } else { None }
+        }
+    })
+}
+
 /// Apply CLI overrides to loaded settings.
 ///
 /// `--provider` selects a named provider from `settings.providers`.

@@ -46,7 +46,8 @@
 //   - Lines starting with "event:" set the event type (we mostly ignore this)
 //   - Lines starting with "data:" contain the JSON payload
 //   - Empty lines delimit events
-//   - "data: [DONE]" signals stream end (Anthropic uses message_stop instead)
+//   - Some providers send "data: [DONE]" to signal stream end; Anthropic
+//     uses a `message_stop` event instead, so we don't rely on [DONE]
 //
 //   The tricky part: the byte stream from reqwest can split ANYWHERE — in the
 //   middle of a line, in the middle of a UTF-8 character, or across event

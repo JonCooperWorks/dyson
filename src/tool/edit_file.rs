@@ -128,16 +128,6 @@ mod tests {
     use super::*;
     use crate::tool::ToolContext;
 
-    fn test_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            working_dir: dir.to_path_buf(),
-            env: std::collections::HashMap::new(),
-            cancellation: tokio_util::sync::CancellationToken::new(),
-            workspace: None,
-            depth: 0,
-        }
-    }
-
     #[tokio::test]
     async fn edit_replaces_string() {
         let tmp = tempfile::tempdir().unwrap();
@@ -153,7 +143,7 @@ mod tests {
             "old_string": "println!(\"hello\")",
             "new_string": "println!(\"world\")"
         });
-        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
         assert!(!output.is_error);
 
         let content = std::fs::read_to_string(tmp.path().join("test.rs")).unwrap();
@@ -172,7 +162,7 @@ mod tests {
             "old_string": "aaa",
             "new_string": "ccc"
         });
-        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("2 times"));
     }
@@ -188,7 +178,7 @@ mod tests {
             "old_string": "xyz",
             "new_string": "abc"
         });
-        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("not found"));
     }

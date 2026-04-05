@@ -125,16 +125,6 @@ mod tests {
     use super::*;
     use crate::tool::ToolContext;
 
-    fn test_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            working_dir: dir.to_path_buf(),
-            env: std::collections::HashMap::new(),
-            cancellation: tokio_util::sync::CancellationToken::new(),
-            workspace: None,
-            depth: 0,
-        }
-    }
-
     #[tokio::test]
     async fn list_files_glob() {
         let tmp = tempfile::tempdir().unwrap();
@@ -144,7 +134,7 @@ mod tests {
 
         let tool = ListFilesTool;
         let input = serde_json::json!({"pattern": "*.rs"});
-        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("a.rs"));
         assert!(output.content.contains("b.rs"));
@@ -156,7 +146,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = ListFilesTool;
         let input = serde_json::json!({"pattern": "[invalid"});
-        let output = tool.run(&input, &test_ctx(tmp.path())).await.unwrap();
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
         assert!(output.is_error);
     }
 

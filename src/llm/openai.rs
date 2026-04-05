@@ -222,6 +222,18 @@ impl LlmClient for OpenAiClient {
 // Message serialization — internal format → OpenAI format.
 // ---------------------------------------------------------------------------
 
+/// Collect all `Text` blocks into a single string.
+fn extract_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// Convert an internal Message to OpenAI's JSON format.
 ///
 /// ## Key differences from Anthropic:
@@ -259,15 +271,7 @@ fn message_to_openai(msg: &Message) -> serde_json::Value {
 
     if has_tool_uses {
         // Extract text content (if any) and tool calls separately.
-        let text: String = msg
-            .content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("");
+        let text = extract_text(&msg.content);
 
         let tool_calls: Vec<serde_json::Value> = msg
             .content
@@ -331,15 +335,7 @@ fn message_to_openai(msg: &Message) -> serde_json::Value {
     }
 
     // Simple text message.
-    let text: String = msg
-        .content
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("");
+    let text = extract_text(&msg.content);
 
     serde_json::json!({
         "role": role_str,
