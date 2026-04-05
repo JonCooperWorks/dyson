@@ -36,7 +36,7 @@ impl OpenRouterClient {
         let mut headers = std::collections::HashMap::new();
         headers.insert(
             "HTTP-Referer".to_string(),
-            "https://github.com/dyson".to_string(),
+            "https://github.com/joncooperworks/dyson".to_string(),
         );
         headers.insert("X-Title".to_string(), "Dyson".to_string());
 
