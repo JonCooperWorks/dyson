@@ -29,48 +29,19 @@
 //      workspace without Dyson needing to intercept tool calls.
 //      See serve.rs for the full architecture documentation.
 //
-// How it works:
-//
-//   dyson.json:
-//     "mcp_servers": {
-//       "github": { "command": "npx", "args": [...], "env": {...} }
-//     }
-//
-//   McpSkill::on_load():
-//     1. Spawn the process via StdioTransport
-//     2. Send "initialize" → get server capabilities
-//     3. Send "initialized" notification
-//     4. Send "tools/list" → get tool definitions
-//     5. Wrap each tool as McpRemoteTool (implements Tool trait)
-//
-//   Agent uses the tools:
-//     agent.run("search github for X")
-//       → LLM calls tool "github_search_repos"
-//       → agent looks up tool in HashMap
-//       → McpRemoteTool.run(input)
-//         → StdioTransport.send_request("tools/call", {name, arguments})
-//         → MCP server executes, returns result
-//         → McpRemoteTool returns ToolOutput
-//
-// Why MCP is "not special":
-//   The agent loop calls tool.run() — it doesn't know whether that tool
-//   is a BashTool (local), McpRemoteTool (remote), or anything else.
-//   MCP is just another Skill implementation.  No special-casing anywhere.
-//
-// OAuth flow:
+// OAuth flow (non-blocking):
 //   When an HTTP MCP server has `auth: { "type": "oauth", ... }` in config,
-//   on_load() runs the full OAuth 2.0 Authorization Code + PKCE flow:
+//   on_load() checks for persisted tokens:
 //
-//   1. Check ~/.dyson/tokens/<server>.json for persisted tokens
-//   2. If valid → create OAuthAuth, proceed normally
-//   3. If no tokens → discover metadata, optionally DCR, generate PKCE,
-//      start callback server, log the auth URL, block until callback or
-//      timeout (120s), exchange code, persist tokens, proceed with handshake
+//   1. Tokens exist → create OAuthAuth, proceed with MCP handshake immediately
+//   2. No tokens → start callback server as background task, return Ok(())
+//      with zero tools and a system prompt containing the auth URL.
+//      The background task waits for the callback, exchanges the code,
+//      persists tokens, and shuts down.  The next hot reload or restart
+//      picks up the persisted tokens and loads tools normally.
 //
-//   This is controller-agnostic: the auth URL is logged via tracing::warn!
-//   which the terminal controller displays directly.  For Telegram, the
-//   user runs the first auth from a terminal session; subsequent runs use
-//   persisted tokens with no interaction needed.
+//   This never blocks the agent.  The user authorizes on their own time,
+//   and tools appear after the next config reload or restart.
 // ===========================================================================
 
 pub mod protocol;
@@ -134,19 +105,22 @@ impl McpSkill {
         }
     }
 
-    /// Run the full OAuth flow: discover → DCR → PKCE → callback → exchange.
+    /// Start a background task that runs the OAuth flow and persists tokens.
     ///
-    /// Blocks until the user completes authorization or the timeout expires.
-    /// Returns an `OAuthAuth` ready for use with `HttpTransport`.
+    /// Returns the auth URL for the system prompt.  The background task:
+    /// 1. Waits for the OAuth callback (up to 5 minutes)
+    /// 2. Exchanges the authorization code for tokens
+    /// 3. Persists tokens to ~/.dyson/tokens/<server>.json
+    /// 4. Logs success
     ///
-    /// The auth URL is logged via `tracing::warn!` so it appears in the
-    /// terminal.  This is controller-agnostic — the user clicks the URL
-    /// from whatever environment they're in.
-    async fn run_oauth_flow(
+    /// The skill loads with zero tools.  After the user authorizes and the
+    /// background task persists tokens, the next hot reload or restart will
+    /// pick up the tokens and load tools normally.
+    async fn start_oauth_background(
         server_name: &str,
         url: &str,
         config: &McpAuthConfig,
-    ) -> Result<Box<dyn crate::auth::Auth>> {
+    ) -> Result<String> {
         let http_client = reqwest::Client::new();
 
         // 1. Discover metadata (or use overrides from config).
@@ -204,7 +178,7 @@ impl McpSkill {
             .clone()
             .unwrap_or_else(|| format!("http://127.0.0.1:{port}/callback"));
 
-        // 5. Build auth URL and show it to the user.
+        // 5. Build auth URL.
         let auth_url = oauth::build_auth_url(
             &metadata,
             &client_id,
@@ -214,74 +188,75 @@ impl McpSkill {
             &state,
         );
 
-        tracing::warn!(
-            server = server_name,
-            "\n\n  OAuth authorization required.\n  Open this URL in your browser:\n\n  {}\n",
-            auth_url,
-        );
-
-        // 6. Block until the callback fires or timeout (120s).
+        // 6. Spawn background task to wait for callback and persist tokens.
         //
-        // The callback server has a 300s timeout, but we use a shorter one
-        // here so on_load() doesn't block forever.  If the user needs more
-        // time, they can restart and the flow runs again.
-        let callback_result = tokio::time::timeout(Duration::from_secs(120), callback_rx)
-            .await
-            .map_err(|_| {
-                callback_handle.abort();
-                DysonError::oauth(
-                    server_name,
-                    "OAuth authorization timed out after 120 seconds — \
-                     restart to try again",
+        // This runs independently of the agent.  When the user clicks the
+        // auth URL and authorizes, the callback fires, the task exchanges
+        // the code for tokens, persists them, and exits.  The agent doesn't
+        // need to know — the next on_load() will find the persisted tokens.
+        let server_name_owned = server_name.to_string();
+        let token_endpoint = metadata.token_endpoint.clone();
+        tokio::spawn(async move {
+            let result = async {
+                // Wait for the callback (up to 5 minutes).
+                let callback_result = callback_rx.await.map_err(|_| {
+                    DysonError::oauth(&server_name_owned, "callback channel closed")
+                })?;
+
+                // Exchange code for tokens.
+                let http_client = reqwest::Client::new();
+                let token_response = oauth::exchange_code(
+                    &token_endpoint,
+                    &callback_result.code,
+                    &pkce.verifier,
+                    &client_id,
+                    client_secret.as_deref(),
+                    &redirect_uri,
+                    &http_client,
                 )
-            })?
-            .map_err(|_| {
-                callback_handle.abort();
-                DysonError::oauth(server_name, "OAuth callback server shut down unexpectedly")
-            })?;
+                .await?;
 
-        callback_handle.abort();
+                // Persist tokens.
+                let oauth_auth = OAuthAuth::from_token_response(
+                    &token_response,
+                    token_endpoint,
+                    client_id,
+                    client_secret,
+                );
 
-        // 7. Exchange code for tokens.
-        let token_response = oauth::exchange_code(
-            &metadata.token_endpoint,
-            &callback_result.code,
-            &pkce.verifier,
-            &client_id,
-            client_secret.as_deref(),
-            &redirect_uri,
-            &http_client,
-        )
-        .await?;
+                let guard = oauth_auth.credential().read().await;
+                oauth_credential::persist_tokens(&server_name_owned, &guard).await?;
 
-        // 8. Build OAuthAuth and persist tokens.
-        let oauth_auth = OAuthAuth::from_token_response(
-            &token_response,
-            metadata.token_endpoint.clone(),
-            client_id,
-            client_secret,
-        );
+                tracing::info!(
+                    server = %server_name_owned,
+                    "OAuth tokens persisted — reload config to connect"
+                );
 
-        {
-            let guard = oauth_auth.credential().read().await;
-            oauth_credential::persist_tokens(server_name, &guard).await?;
-        }
+                Ok::<(), DysonError>(())
+            }
+            .await;
 
-        tracing::info!(server = server_name, "OAuth authorization complete — tokens persisted");
+            callback_handle.abort();
 
-        Ok(Box::new(oauth_auth))
+            if let Err(e) = result {
+                tracing::warn!(
+                    server = %server_name_owned,
+                    error = %e,
+                    "OAuth background flow failed"
+                );
+            }
+        });
+
+        Ok(auth_url)
     }
 
     /// Create the appropriate Auth impl for an OAuth-configured HTTP transport.
     ///
-    /// Tries persisted tokens first.  If none exist (or expired without a
-    /// refresh token), runs the interactive OAuth flow (blocks until complete).
-    async fn create_oauth_auth(
+    /// Returns `Ok(Some(auth))` if persisted tokens were found.
+    /// Returns `Ok(None)` if no tokens exist (caller should start background flow).
+    async fn load_oauth_auth(
         server_name: &str,
-        url: &str,
-        config: &McpAuthConfig,
-    ) -> Result<Box<dyn crate::auth::Auth>> {
-        // Try loading persisted tokens.
+    ) -> Result<Option<Box<dyn crate::auth::Auth>>> {
         if let Some(credential) = oauth_credential::load_tokens(server_name).await? {
             if credential.refresh_token.is_some() {
                 tracing::info!(
@@ -289,21 +264,21 @@ impl McpSkill {
                     expired = credential.is_expired(),
                     "using persisted OAuth tokens"
                 );
-                return Ok(Box::new(OAuthAuth::new(credential)));
+                return Ok(Some(Box::new(OAuthAuth::new(credential))));
             }
 
             if !credential.is_expired() {
                 tracing::info!(server = server_name, "using persisted OAuth access token");
-                return Ok(Box::new(OAuthAuth::new(credential)));
+                return Ok(Some(Box::new(OAuthAuth::new(credential))));
             }
 
             tracing::warn!(
                 server = server_name,
-                "persisted tokens expired with no refresh token — starting new OAuth flow"
+                "persisted tokens expired with no refresh token"
             );
         }
 
-        Self::run_oauth_flow(server_name, url, config).await
+        Ok(None)
     }
 
     /// Perform the MCP initialization handshake and discover tools.
@@ -405,17 +380,23 @@ impl Skill for McpSkill {
     ///
     /// For stdio transports: spawns the process and runs the MCP handshake.
     /// For HTTP transports without OAuth: uses static headers.
-    /// For HTTP transports with OAuth: loads persisted tokens or blocks on
-    /// the interactive OAuth flow, then runs the MCP handshake.
+    /// For HTTP transports with OAuth:
+    ///   - If persisted tokens exist → loads them, runs handshake, tools available
+    ///   - If no tokens → starts background OAuth flow, returns immediately
+    ///     with zero tools and a system prompt containing the auth URL.
+    ///     The agent tells the user to authorize.  After authorization, the
+    ///     background task persists tokens.  Next hot reload loads them.
+    ///
+    /// Never blocks the agent.
     async fn on_load(&mut self) -> Result<()> {
         let server_name = self.config.name.clone();
 
         tracing::info!(server = %server_name, "connecting to MCP server");
 
         // Clone transport config to avoid borrow conflicts with &mut self.
-        let transport: Arc<dyn McpTransport> = match self.config.transport.clone() {
+        let transport: Option<Arc<dyn McpTransport>> = match self.config.transport.clone() {
             crate::config::McpTransportConfig::Stdio { command, args, env } => {
-                Arc::new(StdioTransport::spawn(&command, &args, &env).await?)
+                Some(Arc::new(StdioTransport::spawn(&command, &args, &env).await?))
             }
             crate::config::McpTransportConfig::Http {
                 url,
@@ -423,28 +404,55 @@ impl Skill for McpSkill {
                 auth: None,
             } => {
                 let auth = Box::new(crate::auth::StaticHeadersAuth::new(headers));
-                Arc::new(HttpTransport::new(&url, auth))
+                Some(Arc::new(HttpTransport::new(&url, auth)))
             }
             crate::config::McpTransportConfig::Http {
                 url,
                 auth: Some(oauth_config),
                 ..
             } => {
-                // OAuth: load persisted tokens or run interactive flow (blocks).
-                let auth = Self::create_oauth_auth(&server_name, &url, &oauth_config).await?;
-                Arc::new(HttpTransport::new(&url, auth))
+                // Try persisted tokens first.
+                match Self::load_oauth_auth(&server_name).await? {
+                    Some(auth) => Some(Arc::new(HttpTransport::new(&url, auth))),
+                    None => {
+                        // No tokens — start background OAuth flow.
+                        // The skill loads with zero tools; the agent will
+                        // tell the user to authorize via the system prompt.
+                        let auth_url = Self::start_oauth_background(
+                            &server_name,
+                            &url,
+                            &oauth_config,
+                        )
+                        .await?;
+
+                        self.system_prompt = Some(format!(
+                            "**MCP server '{server_name}' requires OAuth authorization.**\n\n\
+                             The user must open this URL in their browser to authorize:\n\
+                             {auth_url}\n\n\
+                             After authorizing, ask the user to reload the configuration \
+                             so the server's tools become available.",
+                        ));
+
+                        tracing::warn!(
+                            server = %server_name,
+                            "OAuth authorization required — see system prompt for URL"
+                        );
+
+                        // Return Ok with zero tools — don't block, don't error.
+                        return Ok(());
+                    }
+                }
             }
         };
 
-        self.do_mcp_handshake(&server_name, &transport).await?;
-        self.transport = Some(transport);
+        if let Some(ref t) = transport {
+            self.do_mcp_handshake(&server_name, t).await?;
+        }
+        self.transport = transport;
         Ok(())
     }
 
     async fn on_unload(&mut self) -> Result<()> {
-        // Drop the transport — this drops the Arc, and when the last
-        // McpRemoteTool is also dropped, the child process's stdin
-        // closes, causing it to exit.
         self.transport = None;
         self.tools.clear();
         tracing::info!(server = self.config.name, "MCP server disconnected");

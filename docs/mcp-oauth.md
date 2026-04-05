@@ -26,12 +26,13 @@ Any Controller ←→ Agent ←→ McpSkill ←→ HttpTransport + OAuthAuth
 
 The auth URL is surfaced through the agent's system prompt.  The agent relays
 it to the user through whatever controller is active.  The callback server
-runs on the Dyson host independently.
+runs on the Dyson host independently as a background task.
 
-This means:
-- Terminal users see the URL in their terminal and click it
-- Telegram users receive the URL as a message and tap it
-- Any future controller works the same way without any OAuth code
+The OAuth flow **never blocks the agent**.  If no persisted tokens exist,
+`on_load()` starts the callback server in the background, sets the auth URL
+in the system prompt, and returns immediately with zero tools.  The agent
+remains fully responsive for other tasks.  After the user authorizes, the
+background task persists tokens.  The next hot reload or restart loads them.
 
 ---
 
@@ -107,24 +108,29 @@ McpSkill::on_load()
   ├── Generate PKCE pair (code_verifier + S256 code_challenge)
   ├── Start callback server on 127.0.0.1:<random-port>
   ├── Build authorization URL
-  ├── Log auth URL via tracing::warn! (visible in terminal)
-  ├── BLOCK waiting for callback (120s timeout)
-  │
+  ├── Spawn background task (waits for callback, exchanges code, persists tokens)
+  ├── Set system_prompt = "authorize here: <url>"
+  └── Return Ok(()) immediately — zero tools, agent is NOT blocked
+
+Background task (runs independently):
+  ├── Wait for callback (up to 5 minutes)
   │   User clicks URL → browser → OAuth server → grants access → redirect
   │   Callback server receives GET /callback?code=...&state=...
   │     ├── Validates state (CSRF protection)
   │     ├── Returns "Authorization Complete" HTML page
   │     └── Sends code via oneshot channel
-  │
   ├── Exchange code for tokens (POST to token endpoint with PKCE verifier)
   ├── Persist tokens to ~/.dyson/tokens/github-copilot.json
-  ├── Create OAuthAuth with fresh tokens
-  └── Run MCP handshake (initialize, tools/list) → tools available immediately
+  └── Log "tokens persisted — reload config to connect"
+
+User triggers hot reload (or restarts):
+  └── McpSkill::on_load() finds persisted tokens → tools available
 ```
 
-The flow blocks `on_load()` until authorization completes.  This means the
-MCP skill either loads fully (with tools) or fails with a clear timeout error.
-There is no partial/pending state.
+The flow never blocks the agent.  The skill loads with zero tools and a
+system prompt telling the user to authorize.  The background task handles
+everything autonomously.  After authorization, the next hot reload picks up
+the persisted tokens.
 
 ### Subsequent Uses (Persisted Tokens)
 
@@ -145,9 +151,9 @@ When `dyson.json` changes, the hot reloader rebuilds all skills, which calls
 
 - **Tokens exist on disk:** Loaded instantly, no user interaction.  The agent
   remains responsive.
-- **New OAuth server added (no tokens):** `on_load()` blocks for up to 120
-  seconds while the user authorizes.  The agent is unresponsive during this
-  time.  Once tokens are persisted, all future reloads are instant.
+- **New OAuth server added (no tokens):** Background OAuth flow starts.  The
+  agent remains responsive with a system prompt telling the user to authorize.
+  After authorization, the next hot reload loads the persisted tokens.
 - **OAuth config changed (e.g., new scopes):** Persisted tokens are loaded.
   If the server rejects them, the 401 retry refreshes the token.  If refresh
   fails (scope mismatch), delete `~/.dyson/tokens/<server>.json` and restart.
@@ -276,9 +282,9 @@ Stateless, side-effect-free (except HTTP calls), fully unit-testable:
 
 ### `src/skill/mcp/mod.rs` — Flow Orchestration
 
-- `McpSkill::create_oauth_auth()` — Load persisted tokens or run interactive flow
-- `McpSkill::run_oauth_flow()` — Full blocking OAuth flow (discover → DCR → PKCE → callback → exchange)
-- `McpSkill::on_load()` — Branches on auth config, blocks on OAuth if needed
+- `McpSkill::load_oauth_auth()` — Load persisted tokens (returns None if absent)
+- `McpSkill::start_oauth_background()` — Discover, DCR, PKCE, spawn background callback task
+- `McpSkill::on_load()` — Branches on auth config; never blocks on OAuth
 
 ### `src/skill/mcp/transport.rs` — 401 Retry
 
