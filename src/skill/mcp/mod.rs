@@ -1,47 +1,19 @@
 // ===========================================================================
 // MCP skill — connect to MCP servers and expose their tools to the agent.
 //
-// LEARNING OVERVIEW
-//
-// What this file does:
-//   Implements the `Skill` trait for MCP (Model Context Protocol) servers.
-//   An McpSkill connects to an MCP server, discovers its tools via
-//   `tools/list`, and wraps each as a `Tool` impl.  The agent loop never
-//   knows MCP exists — it just sees tools.
-//
 // Module layout:
 //   mod.rs        — McpSkill (Skill impl) + McpRemoteTool (Tool impl)
-//   protocol.rs   — JSON-RPC message types (requests, responses, tool defs)
-//   transport.rs  — Stdio transport (spawn process, read/write JSON-RPC)
+//   protocol.rs   — JSON-RPC message types
+//   transport.rs  — Stdio + HTTP transports
 //   serve.rs      — HTTP MCP server (Dyson serves tools TO Claude Code)
 //
-// Two directions of MCP:
-//
-//   1. Dyson as MCP CLIENT (this file + transport.rs):
-//      Dyson connects to external MCP servers (GitHub, filesystem, etc.),
-//      discovers their tools, and wraps them as `Arc<dyn Tool>` for the
-//      agent loop.  Configured via `mcp_servers` in dyson.json.
-//
-//   2. Dyson as MCP SERVER (serve.rs):
-//      When using Claude Code as the LLM backend, Dyson starts an HTTP
-//      MCP server that exposes workspace tools (view, search, update)
-//      to Claude Code.  This lets Claude Code's agent loop access the
-//      workspace without Dyson needing to intercept tool calls.
-//      See serve.rs for the full architecture documentation.
-//
 // OAuth flow (non-blocking):
-//   When an HTTP MCP server has `auth: { "type": "oauth", ... }` in config,
-//   on_load() checks for persisted tokens:
-//
-//   1. Tokens exist → create OAuth, proceed with MCP handshake immediately
-//   2. No tokens → start callback server as background task, return Ok(())
-//      with zero tools and a system prompt containing the auth URL.
-//      The background task waits for the callback, exchanges the code,
-//      persists tokens, and shuts down.  The next hot reload or restart
-//      picks up the persisted tokens and loads tools normally.
-//
-//   This never blocks the agent.  The user authorizes on their own time,
-//   and tools appear after the next config reload or restart.
+//   No tokens → start callback server in background, register a temporary
+//   oauth_submit tool, show auth URL in system prompt.  The user either:
+//   (a) clicks the URL and the callback server receives the code, or
+//   (b) pastes the redirect URL into the chat and the agent calls oauth_submit.
+//   Either way, tokens are persisted and the config is auto-touched to
+//   trigger a hot reload.
 // ===========================================================================
 
 pub mod protocol;
@@ -62,59 +34,143 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 use self::protocol::{McpContent, McpToolDef, McpToolResult};
 use self::transport::{HttpTransport, McpTransport, StdioTransport};
 
-// ---------------------------------------------------------------------------
-// McpSkill — a Skill backed by an MCP server connection.
-// ---------------------------------------------------------------------------
+/// Shared state for an in-progress OAuth flow.  Both the background callback
+/// task and the `oauth_submit` tool hold a reference.  Whichever receives
+/// the code first completes the exchange; the `completed` flag prevents
+/// double-exchange.
+struct OAuthPending {
+    server_name: String,
+    pkce_verifier: String,
+    redirect_uri: String,
+    token_endpoint: String,
+    client_id: String,
+    client_secret: Option<String>,
+    completed: tokio::sync::Mutex<bool>,
+}
 
-/// Connects to an MCP server and exposes its tools to the agent.
-///
-/// Created from an `McpConfig` (parsed from dyson.json).  The actual
-/// connection and tool discovery happen in `on_load()`.  Before that,
-/// `tools()` returns an empty slice.
+impl OAuthPending {
+    /// Exchange an authorization code for tokens, persist, and trigger reload.
+    /// Returns Ok(true) if we did the exchange, Ok(false) if already completed.
+    async fn complete(&self, code: &str) -> Result<bool> {
+        let mut done = self.completed.lock().await;
+        if *done { return Ok(false); }
+
+        let http_client = reqwest::Client::new();
+        let tokens = oauth::exchange_code(
+            &self.token_endpoint, code, &self.pkce_verifier,
+            &self.client_id, self.client_secret.as_deref(),
+            &self.redirect_uri, &http_client,
+        ).await?;
+
+        oauth::persist_tokens(
+            &self.server_name, &tokens, &self.token_endpoint,
+            &self.client_id, self.client_secret.as_deref(),
+        ).await?;
+
+        touch_config().await;
+        tracing::info!(server = %self.server_name, "OAuth tokens persisted — triggering reload");
+
+        *done = true;
+        Ok(true)
+    }
+}
+
+/// Temporary tool registered when an OAuth flow is pending.  Accepts
+/// either a full redirect URL or a raw authorization code.  Lets users
+/// behind NAT paste the redirect URL from their browser.
+struct OAuthSubmitTool {
+    pending: Arc<OAuthPending>,
+    tool_name: String,
+}
+
+#[async_trait]
+impl Tool for OAuthSubmitTool {
+    fn name(&self) -> &str { &self.tool_name }
+
+    fn description(&self) -> &str {
+        "Submit an OAuth authorization code or redirect URL to complete authentication. \
+         Call this when the user pastes a URL containing ?code=... or provides a raw code."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "code_or_url": {
+                    "type": "string",
+                    "description": "The authorization code, or the full redirect URL containing ?code=..."
+                }
+            },
+            "required": ["code_or_url"]
+        })
+    }
+
+    async fn run(&self, input: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+        let input_str = input["code_or_url"].as_str().unwrap_or("");
+
+        // Extract code from a URL or use as raw code.
+        let code = if input_str.contains("code=") {
+            reqwest::Url::parse(input_str)
+                .ok()
+                .and_then(|u| {
+                    u.query_pairs()
+                        .find(|(k, _)| k == "code")
+                        .map(|(_, v)| v.into_owned())
+                })
+                .unwrap_or_else(|| input_str.to_string())
+        } else {
+            input_str.to_string()
+        };
+
+        if code.is_empty() {
+            return Ok(ToolOutput {
+                content: "No authorization code found. Please provide the code or the full redirect URL.".into(),
+                is_error: true, metadata: None, files: vec![],
+            });
+        }
+
+        match self.pending.complete(&code).await {
+            Ok(true) => Ok(ToolOutput {
+                content: format!(
+                    "OAuth authorization complete for '{}'. The server will reconnect automatically.",
+                    self.pending.server_name
+                ),
+                is_error: false, metadata: None, files: vec![],
+            }),
+            Ok(false) => Ok(ToolOutput {
+                content: "Authorization was already completed.".into(),
+                is_error: false, metadata: None, files: vec![],
+            }),
+            Err(e) => Ok(ToolOutput {
+                content: format!("OAuth token exchange failed: {e}"),
+                is_error: true, metadata: None, files: vec![],
+            }),
+        }
+    }
+}
+
 pub struct McpSkill {
-    /// Config from dyson.json (name, transport details).
     config: McpConfig,
-
-    /// The transport to the MCP server (stdio or HTTP).
-    ///
-    /// `None` until `on_load()` is called.  Shared (via Arc) with all
-    /// `McpRemoteTool` instances so they can send `tools/call` requests.
     transport: Option<Arc<dyn McpTransport>>,
-
-    /// Tools discovered from the server via `tools/list`.
-    ///
-    /// Populated during `on_load()`.  Each is an `McpRemoteTool` that
-    /// forwards calls to the MCP server.
     tools: Vec<Arc<dyn Tool>>,
-
-    /// System prompt fragment listing the available tools.
     system_prompt: Option<String>,
 }
 
 impl McpSkill {
-    /// Create a new McpSkill from config.  Does NOT connect yet —
-    /// call `on_load()` to establish the connection.
     pub fn new(config: McpConfig) -> Self {
-        Self {
-            config,
-            transport: None,
-            tools: Vec::new(),
-            system_prompt: None,
-        }
+        Self { config, transport: None, tools: Vec::new(), system_prompt: None }
     }
 
-    /// Start background OAuth flow, return auth URL for system prompt.
+    /// Start background OAuth flow.  Returns `(auth_url, submit_tool)`.
     ///
-    /// The background task waits for the callback, exchanges the code,
-    /// and persists tokens.  Next hot reload picks them up.
-    async fn start_oauth_background(
-        server_name: &str,
-        url: &str,
-        config: &McpAuthConfig,
-    ) -> Result<String> {
+    /// The background task waits for the callback server; the submit tool
+    /// lets users paste the redirect URL manually.  Both share `OAuthPending`
+    /// so whichever gets the code first wins.
+    async fn start_oauth_flow(
+        server_name: &str, url: &str, config: &McpAuthConfig,
+    ) -> Result<(String, Arc<dyn Tool>)> {
         let http_client = reqwest::Client::new();
 
-        // Discover or use config overrides.
         let meta = if let (Some(a), Some(t)) = (&config.authorization_url, &config.token_url) {
             oauth::AuthMetadata {
                 authorization_endpoint: a.clone(),
@@ -125,29 +181,19 @@ impl McpSkill {
             oauth::discover_metadata(url, &http_client).await?
         };
 
-        // Get or register client ID.
         let (client_id, client_secret) = if let Some(ref cid) = config.client_id {
             (cid.clone(), config.client_secret.clone())
         } else {
-            let reg_url = config
-                .registration_url
-                .as_deref()
+            let reg_url = config.registration_url.as_deref()
                 .or(meta.registration_endpoint.as_deref())
-                .ok_or_else(|| {
-                    DysonError::oauth(server_name, "no client_id and no registration endpoint")
-                })?;
-            let dcr = oauth::register_client(
-                reg_url,
-                &oauth::DcrRequest {
-                    client_name: format!("dyson-{server_name}"),
-                    redirect_uris: vec![],
-                    grant_types: vec!["authorization_code".into(), "refresh_token".into()],
-                    response_types: vec!["code".into()],
-                    token_endpoint_auth_method: Some("none".into()),
-                },
-                &http_client,
-            )
-            .await?;
+                .ok_or_else(|| DysonError::oauth(server_name, "no client_id and no registration endpoint"))?;
+            let dcr = oauth::register_client(reg_url, &oauth::DcrRequest {
+                client_name: format!("dyson-{server_name}"),
+                redirect_uris: vec![],
+                grant_types: vec!["authorization_code".into(), "refresh_token".into()],
+                response_types: vec!["code".into()],
+                token_endpoint_auth_method: Some("none".into()),
+            }, &http_client).await?;
             (dcr.client_id, dcr.client_secret)
         };
 
@@ -157,9 +203,7 @@ impl McpSkill {
         let (port, callback_handle, callback_rx) =
             oauth::start_callback_server(&state, Duration::from_secs(300)).await?;
 
-        let redirect_uri = config
-            .redirect_uri
-            .clone()
+        let redirect_uri = config.redirect_uri.clone()
             .unwrap_or_else(|| format!("http://127.0.0.1:{port}/callback"));
 
         let auth_url = oauth::build_auth_url(
@@ -167,53 +211,42 @@ impl McpSkill {
             &redirect_uri, &pkce.challenge, &state,
         );
 
-        // Background task: wait for callback → exchange → persist.
-        let server_name = server_name.to_string();
-        let token_endpoint = meta.token_endpoint.clone();
+        let pending = Arc::new(OAuthPending {
+            server_name: server_name.to_string(),
+            pkce_verifier: pkce.verifier,
+            redirect_uri,
+            token_endpoint: meta.token_endpoint,
+            client_id,
+            client_secret,
+            completed: tokio::sync::Mutex::new(false),
+        });
+
+        // Background task: wait for callback server to receive the code.
+        let bg_pending = Arc::clone(&pending);
         tokio::spawn(async move {
             let result = async {
                 let code = callback_rx.await.map_err(|_| {
-                    DysonError::oauth(&server_name, "callback channel closed")
+                    DysonError::oauth(&bg_pending.server_name, "callback channel closed")
                 })?;
-
-                let http_client = reqwest::Client::new();
-                let tokens = oauth::exchange_code(
-                    &token_endpoint, &code, &pkce.verifier,
-                    &client_id, client_secret.as_deref(),
-                    &redirect_uri, &http_client,
-                )
-                .await?;
-
-                oauth::persist_tokens(
-                    &server_name, &tokens, &token_endpoint,
-                    &client_id, client_secret.as_deref(),
-                )
-                .await?;
-
-                // Touch the config file so the hot reloader picks up the
-                // new tokens on its next poll cycle.  This triggers a full
-                // skill rebuild, which calls on_load() again — this time
-                // load_oauth_auth() finds the persisted tokens and connects.
-                touch_config().await;
-
-                tracing::info!(server = %server_name, "OAuth tokens persisted — triggering reload");
+                bg_pending.complete(&code).await?;
                 Ok::<(), DysonError>(())
-            }
-            .await;
+            }.await;
 
             callback_handle.abort();
             if let Err(e) = result {
-                tracing::warn!(server = %server_name, error = %e, "OAuth background flow failed");
+                tracing::warn!(server = %bg_pending.server_name, error = %e, "OAuth background flow failed");
             }
         });
 
-        Ok(auth_url)
+        let tool: Arc<dyn Tool> = Arc::new(OAuthSubmitTool {
+            tool_name: format!("{}_oauth_submit", server_name),
+            pending,
+        });
+
+        Ok((auth_url, tool))
     }
 
-    /// Load persisted OAuth tokens. Returns `None` if absent or unusable.
-    async fn load_oauth_auth(
-        server_name: &str,
-    ) -> Result<Option<Box<dyn crate::auth::Auth>>> {
+    async fn load_oauth_auth(server_name: &str) -> Result<Option<Box<dyn crate::auth::Auth>>> {
         if let Some(cred) = oauth::load_tokens(server_name).await? {
             if cred.refresh_token.is_some() || !cred.is_expired() {
                 tracing::info!(server = server_name, "using persisted OAuth tokens");
@@ -224,164 +257,83 @@ impl McpSkill {
         Ok(None)
     }
 
-    /// Perform the MCP initialization handshake and discover tools.
-    async fn do_mcp_handshake(
-        &mut self,
-        server_name: &str,
-        transport: &Arc<dyn McpTransport>,
-    ) -> Result<()> {
+    async fn do_mcp_handshake(&mut self, server_name: &str, transport: &Arc<dyn McpTransport>) -> Result<()> {
         let init_params = serde_json::json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {
-                "name": "dyson",
-                "version": env!("CARGO_PKG_VERSION")
-            }
+            "clientInfo": { "name": "dyson", "version": env!("CARGO_PKG_VERSION") }
         });
 
-        let init_result = transport
-            .send_request("initialize", Some(init_params))
-            .await?;
+        let init_result = transport.send_request("initialize", Some(init_params)).await?;
+        tracing::debug!(server = server_name, result = %init_result, "MCP initialize response");
 
-        tracing::debug!(
-            server = server_name,
-            result = %init_result,
-            "MCP initialize response"
-        );
+        transport.send_notification("notifications/initialized", None).await?;
 
-        transport
-            .send_notification("notifications/initialized", None)
-            .await?;
-
-        let tools_result = transport
-            .send_request("tools/list", Some(serde_json::json!({})))
-            .await?;
-
+        let tools_result = transport.send_request("tools/list", Some(serde_json::json!({}))).await?;
         let tool_defs: Vec<McpToolDef> = match tools_result.get("tools") {
-            Some(tools_json) => {
-                serde_json::from_value(tools_json.clone()).map_err(|e| DysonError::Mcp {
-                    server: server_name.to_string(),
-                    message: format!("failed to parse tools/list: {e}"),
-                })?
-            }
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| DysonError::Mcp {
+                server: server_name.to_string(), message: format!("failed to parse tools/list: {e}"),
+            })?,
             None => vec![],
         };
 
-        tracing::info!(
-            server = server_name,
-            tool_count = tool_defs.len(),
-            "MCP tools discovered"
-        );
+        tracing::info!(server = server_name, tool_count = tool_defs.len(), "MCP tools discovered");
 
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-        let mut tool_descs: Vec<String> = Vec::new();
+        let mut descs: Vec<String> = Vec::new();
 
         for def in tool_defs {
             let desc = def.description.clone().unwrap_or_default();
-            tool_descs.push(format!("- **{}**: {}", def.name, desc));
-
+            descs.push(format!("- **{}**: {}", def.name, desc));
             tools.push(Arc::new(McpRemoteTool {
-                tool_name: def.name,
-                description: desc,
-                input_schema: def
-                    .input_schema
-                    .unwrap_or(serde_json::json!({"type": "object"})),
-                transport: Arc::clone(transport),
-                server_name: server_name.to_string(),
+                tool_name: def.name, description: desc,
+                input_schema: def.input_schema.unwrap_or(serde_json::json!({"type": "object"})),
+                transport: Arc::clone(transport), server_name: server_name.to_string(),
             }));
         }
 
         self.tools = tools;
-
-        if !tool_descs.is_empty() {
-            self.system_prompt = Some(format!(
-                "MCP server '{}' provides these tools:\n{}",
-                server_name,
-                tool_descs.join("\n")
-            ));
+        if !descs.is_empty() {
+            self.system_prompt = Some(format!("MCP server '{}' provides these tools:\n{}", server_name, descs.join("\n")));
         }
-
         Ok(())
     }
 }
 
 #[async_trait]
 impl Skill for McpSkill {
-    fn name(&self) -> &str {
-        &self.config.name
-    }
+    fn name(&self) -> &str { &self.config.name }
+    fn tools(&self) -> &[Arc<dyn Tool>] { &self.tools }
+    fn system_prompt(&self) -> Option<&str> { self.system_prompt.as_deref() }
 
-    fn tools(&self) -> &[Arc<dyn Tool>] {
-        &self.tools
-    }
-
-    fn system_prompt(&self) -> Option<&str> {
-        self.system_prompt.as_deref()
-    }
-
-    /// Connect to the MCP server and discover its tools.
-    ///
-    /// For stdio transports: spawns the process and runs the MCP handshake.
-    /// For HTTP transports without OAuth: uses static headers.
-    /// For HTTP transports with OAuth:
-    ///   - If persisted tokens exist → loads them, runs handshake, tools available
-    ///   - If no tokens → starts background OAuth flow, returns immediately
-    ///     with zero tools and a system prompt containing the auth URL.
-    ///     The agent tells the user to authorize.  After authorization, the
-    ///     background task persists tokens.  Next hot reload loads them.
-    ///
-    /// Never blocks the agent.
     async fn on_load(&mut self) -> Result<()> {
         let server_name = self.config.name.clone();
-
         tracing::info!(server = %server_name, "connecting to MCP server");
 
-        // Clone transport config to avoid borrow conflicts with &mut self.
         let transport: Option<Arc<dyn McpTransport>> = match self.config.transport.clone() {
             crate::config::McpTransportConfig::Stdio { command, args, env } => {
                 Some(Arc::new(StdioTransport::spawn(&command, &args, &env).await?))
             }
-            crate::config::McpTransportConfig::Http {
-                url,
-                headers,
-                auth: None,
-            } => {
-                let auth = Box::new(crate::auth::StaticHeadersAuth::new(headers));
-                Some(Arc::new(HttpTransport::new(&url, auth)))
+            crate::config::McpTransportConfig::Http { url, headers, auth: None } => {
+                Some(Arc::new(HttpTransport::new(&url, Box::new(crate::auth::StaticHeadersAuth::new(headers)))))
             }
-            crate::config::McpTransportConfig::Http {
-                url,
-                auth: Some(oauth_config),
-                ..
-            } => {
-                // Try persisted tokens first.
+            crate::config::McpTransportConfig::Http { url, auth: Some(oauth_config), .. } => {
                 match Self::load_oauth_auth(&server_name).await? {
                     Some(auth) => Some(Arc::new(HttpTransport::new(&url, auth))),
                     None => {
-                        // No tokens — start background OAuth flow.
-                        // The skill loads with zero tools; the agent will
-                        // tell the user to authorize via the system prompt.
-                        let auth_url = Self::start_oauth_background(
-                            &server_name,
-                            &url,
-                            &oauth_config,
-                        )
-                        .await?;
+                        let (auth_url, submit_tool) = Self::start_oauth_flow(
+                            &server_name, &url, &oauth_config,
+                        ).await?;
 
+                        self.tools = vec![submit_tool];
                         self.system_prompt = Some(format!(
                             "**MCP server '{server_name}' requires OAuth authorization.**\n\n\
-                             The user must open this URL in their browser to authorize:\n\
-                             {auth_url}\n\n\
-                             After authorizing, ask the user to reload the configuration \
-                             so the server's tools become available.",
+                             Tell the user to open this URL:\n{auth_url}\n\n\
+                             If the callback works automatically, the server will reconnect.\n\
+                             If not (e.g. user is remote), ask them to paste the redirect URL \
+                             they were sent to after authorizing, then call {server_name}_oauth_submit \
+                             with it.",
                         ));
-
-                        tracing::warn!(
-                            server = %server_name,
-                            "OAuth authorization required — see system prompt for URL"
-                        );
-
-                        // Return Ok with zero tools — don't block, don't error.
                         return Ok(());
                     }
                 }
@@ -403,11 +355,6 @@ impl Skill for McpSkill {
     }
 }
 
-/// Bump the config file's mtime so the hot reloader triggers a rebuild.
-///
-/// Resolves the config path the same way controllers do (--config arg or
-/// dyson.json in cwd).  Uses spawn_blocking to avoid blocking the tokio
-/// runtime.  If the file can't be touched, logs a warning.
 async fn touch_config() {
     let path = std::env::args()
         .skip_while(|a| a != "--config" && a != "-c")
@@ -426,57 +373,24 @@ async fn touch_config() {
     }).await;
 }
 
-/// A single tool from an MCP server, discovered via `tools/list`.
-///
-/// When the agent calls `run()`, this sends a `tools/call` JSON-RPC
-/// request to the MCP server and returns the result.  The agent doesn't
-/// know this tool is remote — it's just another `Arc<dyn Tool>`.
 struct McpRemoteTool {
-    /// Tool name as reported by the MCP server.
     tool_name: String,
-
-    /// Tool description.
     description: String,
-
-    /// JSON Schema for the tool's input.
     input_schema: serde_json::Value,
-
-    /// Shared transport to the MCP server (stdio or HTTP).
     transport: Arc<dyn McpTransport>,
-
-    /// Server name (for error messages).
     server_name: String,
 }
 
 #[async_trait]
 impl Tool for McpRemoteTool {
-    fn name(&self) -> &str {
-        &self.tool_name
-    }
+    fn name(&self) -> &str { &self.tool_name }
+    fn description(&self) -> &str { &self.description }
+    fn input_schema(&self) -> serde_json::Value { self.input_schema.clone() }
 
-    fn description(&self) -> &str {
-        &self.description
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        self.input_schema.clone()
-    }
-
-    /// Execute the tool by sending `tools/call` to the MCP server.
     async fn run(&self, input: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
-        tracing::debug!(
-            server = self.server_name,
-            tool = self.tool_name,
-            "calling MCP tool"
-        );
+        let params = serde_json::json!({ "name": self.tool_name, "arguments": input });
 
-        let params = serde_json::json!({
-            "name": self.tool_name,
-            "arguments": input
-        });
-
-        let result_json = self
-            .transport
+        let result_json = self.transport
             .send_request("tools/call", Some(params))
             .await
             .map_err(|e| DysonError::Mcp {
@@ -484,32 +398,17 @@ impl Tool for McpRemoteTool {
                 message: format!("tools/call failed for '{}': {e}", self.tool_name),
             })?;
 
-        let tool_result: McpToolResult =
-            serde_json::from_value(result_json).map_err(|e| DysonError::Mcp {
+        let tool_result: McpToolResult = serde_json::from_value(result_json)
+            .map_err(|e| DysonError::Mcp {
                 server: self.server_name.clone(),
                 message: format!("failed to parse tools/call result: {e}"),
             })?;
 
-        let content: String = tool_result
-            .content
-            .iter()
-            .filter_map(|c| match c {
-                McpContent::Text { text } => Some(text.as_str()),
-                McpContent::Unknown => None,
-            })
-            .fold(String::new(), |mut acc, s| {
-                if !acc.is_empty() {
-                    acc.push('\n');
-                }
-                acc.push_str(s);
-                acc
-            });
+        let content: String = tool_result.content.iter()
+            .filter_map(|c| match c { McpContent::Text { text } => Some(text.as_str()), _ => None })
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        Ok(ToolOutput {
-            content,
-            is_error: tool_result.is_error,
-            metadata: None,
-            files: Vec::new(),
-        })
+        Ok(ToolOutput { content, is_error: tool_result.is_error, metadata: None, files: vec![] })
     }
 }

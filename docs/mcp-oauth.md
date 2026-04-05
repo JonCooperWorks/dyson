@@ -53,10 +53,23 @@ All fields except `type` are optional:
 
 1. `on_load()` discovers metadata, registers client (DCR), generates PKCE
 2. Starts callback server on `127.0.0.1:<random-port>` in background
-3. Sets system prompt with auth URL, returns immediately (zero tools)
-4. User clicks URL → authorizes → callback fires → background task exchanges
-   code and persists tokens to `~/.dyson/tokens/<server>.json`
-5. Next hot reload → `on_load()` loads tokens → MCP handshake → tools available
+3. Registers a temporary `<server>_oauth_submit` tool
+4. Sets system prompt with auth URL and instructions
+5. Returns immediately — agent not blocked
+
+**Two ways to complete authorization:**
+
+- **Automatic (callback reachable):** User clicks URL, authorizes, browser
+  redirects to callback server.  Background task exchanges code, persists
+  tokens, touches config → hot reload → tools available.
+- **Manual (user behind NAT):** User clicks URL, authorizes, browser tries
+  to redirect but can't reach localhost.  User copies the redirect URL from
+  their browser and pastes it into the chat.  Agent calls `<server>_oauth_submit`
+  with the URL.  Tool extracts the code, exchanges, persists, touches config
+  → hot reload → tools available.
+
+Both paths use the same `OAuthPending::complete()` method.  Whichever
+fires first wins; the other becomes a no-op.
 
 **Subsequent uses:** `on_load()` loads persisted tokens instantly. No interaction.
 
