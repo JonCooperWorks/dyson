@@ -69,15 +69,21 @@ const USER_AGENT: &str = concat!(
     " (+https://github.com/joncooperworks/dyson)"
 );
 
-/// Build a shared `reqwest::Client` with a consistent User-Agent.
+/// Single shared `reqwest::Client` for all HTTP-based LLM providers.
 ///
-/// All HTTP-based providers (Anthropic, OpenAI, OpenRouter, Ollama Cloud)
-/// should use this instead of `reqwest::Client::new()`.
-pub fn http_client() -> reqwest::Client {
+/// `reqwest::Client` is designed to be shared — it pools connections and
+/// reuses TLS sessions internally.  One instance serves Anthropic, OpenAI,
+/// OpenRouter, Ollama Cloud, and any future HTTP-based provider.
+static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .build()
         .expect("failed to build HTTP client")
+});
+
+/// Returns the shared HTTP client for all LLM providers.
+pub fn http_client() -> &'static reqwest::Client {
+    &HTTP_CLIENT
 }
 
 // ---------------------------------------------------------------------------
