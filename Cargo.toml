@@ -36,9 +36,11 @@ subtle = "2"
 sha2 = "0.10"
 
 [profile.release]
-strip = true
-lto = "thin"
+opt-level = "z"
+lto = true
 codegen-units = 1
+strip = true
+panic = "abort"
 
 [dev-dependencies]
 tempfile = "3"

@@ -107,6 +107,20 @@ use self::stream_handler::ToolCall;
 use self::token_budget::TokenBudget;
 
 // ---------------------------------------------------------------------------
+// Internal types
+// ---------------------------------------------------------------------------
+
+/// Result of attempting to stream an LLM response with retry/recovery.
+enum StreamResult {
+    /// Successful response from the LLM.
+    Response(crate::llm::StreamResponse),
+    /// Controller requested recovery — caller should `continue` the loop.
+    Recovered,
+    /// Fatal error — caller should return.
+    Error(DysonError),
+}
+
+// ---------------------------------------------------------------------------
 // Agent
 // ---------------------------------------------------------------------------
 
@@ -549,9 +563,6 @@ impl Agent {
     async fn run_inner(&mut self, output: &mut dyn Output) -> Result<String> {
         self.turn_count += 1;
 
-        // Fire turn-triggered dreams (memory maintenance, self-improvement).
-        // Dreams run as fire-and-forget background tasks — they never block
-        // the controller loop.  See dream.rs and docs/dreaming.md.
         self.fire_dreams(DreamEvent::TurnComplete {
             turn_count: self.turn_count,
         });
@@ -559,39 +570,8 @@ impl Agent {
         let mut final_text = String::new();
         let mut hit_max_iterations = false;
 
-        // -- Collect ephemeral context from skills --
-        //
-        // Each skill can inject per-turn context (refreshed tokens, timestamps,
-        // etc.) via before_turn().  These fragments are appended to the system
-        // prompt for this run() call only — they don't persist.
-        let mut skill_fragments = String::new();
-        for skill in &self.skills {
-            match skill.before_turn().await {
-                Ok(Some(fragment)) => {
-                    skill_fragments.push_str("\n\n");
-                    skill_fragments.push_str(&fragment);
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        skill = skill.name(),
-                        error = %e,
-                        "skill before_turn failed — continuing without its context"
-                    );
-                }
-            }
-        }
+        let skill_fragments = self.collect_skill_context().await;
 
-        // The system prompt is split into two parts for KV cache efficiency:
-        //
-        // 1. `self.system_prompt` — stable prefix (identity, tools, skills).
-        //    Cached by providers that support prompt caching (Anthropic).
-        //
-        // 2. `skill_fragments` — ephemeral per-turn context (timestamps,
-        //    refreshed tokens).  Sent as a separate block so it doesn't
-        //    invalidate the cached prefix.
-        //
-        // For context-size estimation we still need the combined length.
         let turn_system_prompt: Arc<str> = if skill_fragments.is_empty() {
             Arc::clone(&self.system_prompt)
         } else {
@@ -606,101 +586,199 @@ impl Agent {
         let mut recovered_this_turn = false;
 
         for iteration in 0..self.max_iterations {
-            // -- Auto-compact if estimated context tokens exceed threshold --
-            //
-            // Before each LLM call, estimate the token count of the full
-            // context (messages + system prompt + tool definitions) locally.
-            // If it exceeds the threshold, compact first so we never send
-            // an oversized context to the API.
-            if let Some(ref config) = self.compaction_config
-                && self.messages.len() > config.protect_head
+            self.auto_compact_if_needed(&turn_system_prompt, output).await;
+            self.log_iteration(iteration);
+
+            output.typing_indicator(true)?;
+
+            // Stream LLM response with retry/backoff.
+            let response = match self
+                .stream_with_retry(&skill_fragments, &mut recovered_this_turn, output)
+                .await
             {
-                let threshold = config.threshold();
-                let estimated_tokens = self.estimate_context_tokens(&turn_system_prompt);
-                if estimated_tokens > threshold {
-                    tracing::info!(
-                        estimated_tokens = estimated_tokens,
-                        threshold = threshold,
-                        messages = self.messages.len(),
-                        "estimated context tokens exceed compaction threshold — compacting"
-                    );
-                    if let Err(e) = self.compact(output).await {
-                        tracing::warn!(
-                            error = %e,
-                            "auto-compaction failed — continuing with full history"
-                        );
-                    }
-                }
+                StreamResult::Response(r) => r,
+                StreamResult::Recovered => continue,
+                StreamResult::Error(e) => return Err(e),
+            };
+
+            let tool_mode = response.tool_mode;
+            if let Some(input_tokens) = response.input_tokens {
+                self.token_budget.record_input(input_tokens);
             }
 
             tracing::info!(
-                iteration = iteration,
-                model = self.config.model,
-                messages = self.messages.len(),
-                tools_enabled = !self.tools_disabled,
-                tool_count = self.tool_definitions.len(),
-                "starting LLM call"
+                tool_mode = ?tool_mode,
+                input_tokens = ?response.input_tokens,
+                "streaming response"
             );
 
-            // Log the messages being sent to the LLM for debugging.
-            // Guard the entire loop so we don't allocate block summaries
-            // when debug logging is disabled (the common case).
-            if tracing::enabled!(tracing::Level::DEBUG) {
-                for (i, msg) in self.messages.iter().enumerate() {
-                    let role = match msg.role {
-                        crate::message::Role::User => "user",
-                        crate::message::Role::Assistant => "assistant",
-                    };
-                    let block_summary: Vec<String> = msg.content.iter().map(|b| match b {
-                        crate::message::ContentBlock::Text { text } => {
-                            format!("text({})", text.len())
-                        }
-                        crate::message::ContentBlock::ToolUse { name, .. } => {
-                            format!("tool_use({name})")
-                        }
-                        crate::message::ContentBlock::ToolResult { tool_use_id, is_error, .. } => {
-                            format!("tool_result({tool_use_id}, error={is_error})")
-                        }
-                        crate::message::ContentBlock::Image { .. } => "image".to_string(),
-                    }).collect();
-                    tracing::debug!(
-                        msg_index = i,
-                        role = role,
-                        blocks = ?block_summary,
-                        "message in context"
+            let (assistant_msg, tool_calls, output_tokens) =
+                stream_handler::process_stream(response.stream, output).await?;
+
+            if let Err(e) = self.token_budget.record(output_tokens) {
+                self.messages.push(assistant_msg);
+                tracing::warn!(
+                    used = self.token_budget.output_tokens_used,
+                    "token budget exceeded — stopping agent loop"
+                );
+                output.error(&e)?;
+                break;
+            }
+
+            self.log_response(&assistant_msg, &tool_calls);
+
+            // If no tool calls or provider handles tools internally, we're done.
+            if tool_calls.is_empty() || tool_mode == crate::llm::ToolMode::Observe {
+                if let Some(text) = assistant_msg.last_text() {
+                    final_text = text.to_string();
+                }
+                self.messages.push(assistant_msg);
+                output.flush()?;
+                break;
+            }
+
+            self.messages.push(assistant_msg);
+            self.execute_tool_calls(&tool_calls, output).await?;
+            self.limiter.reset_turn();
+
+            if iteration == self.max_iterations - 1 {
+                tracing::warn!(
+                    max = self.max_iterations,
+                    "agent hit maximum iterations — requesting summary"
+                );
+                hit_max_iterations = true;
+            }
+        }
+
+        if hit_max_iterations {
+            final_text = self
+                .summarize_on_max_iterations(&skill_fragments, output)
+                .await?;
+        }
+
+        output.flush()?;
+        Ok(final_text)
+    }
+
+    /// Collect ephemeral per-turn context from all skills.
+    async fn collect_skill_context(&self) -> String {
+        let mut fragments = String::new();
+        for skill in &self.skills {
+            match skill.before_turn().await {
+                Ok(Some(fragment)) => {
+                    fragments.push_str("\n\n");
+                    fragments.push_str(&fragment);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        skill = skill.name(),
+                        error = %e,
+                        "skill before_turn failed — continuing without its context"
                     );
                 }
             }
+        }
+        fragments
+    }
 
-            // Show a typing indicator while waiting for the LLM to respond.
-            output.typing_indicator(true)?;
+    /// Auto-compact if estimated context tokens exceed the threshold.
+    async fn auto_compact_if_needed(
+        &mut self,
+        turn_system_prompt: &str,
+        output: &mut dyn Output,
+    ) {
+        if let Some(ref config) = self.compaction_config
+            && self.messages.len() > config.protect_head
+        {
+            let threshold = config.threshold();
+            let estimated_tokens = self.estimate_context_tokens(turn_system_prompt);
+            if estimated_tokens > threshold {
+                tracing::info!(
+                    estimated_tokens,
+                    threshold,
+                    messages = self.messages.len(),
+                    "estimated context tokens exceed compaction threshold — compacting"
+                );
+                if let Err(e) = self.compact(output).await {
+                    tracing::warn!(
+                        error = %e,
+                        "auto-compaction failed — continuing with full history"
+                    );
+                }
+            }
+        }
+    }
 
-            // -- Stream LLM response (with retry/backoff) --
-            //
-            // When the provider handles tools internally (e.g., Claude Code),
-            // don't send Dyson's tool definitions — the provider has its own.
-            // We discover this from `StreamResponse.tool_mode` after the call.
-            let response = {
-                let mut last_err = None;
-                let mut response_opt = None;
-                let mut recovery: Option<LlmRecovery> = None;
-                for attempt in 0..=self.max_retries {
-                    // Determine tools_for_llm inside the loop so retries
-                    // behave identically.  On the first successful response
-                    // we learn the tool_mode.
-                    let tools_for_llm = if self.tools_disabled {
-                        &[]
-                    } else {
-                        self.tool_definitions.as_slice()
-                    };
+    /// Log the start of an LLM iteration.
+    fn log_iteration(&self, iteration: usize) {
+        tracing::info!(
+            iteration,
+            model = self.config.model,
+            messages = self.messages.len(),
+            tools_enabled = !self.tools_disabled,
+            tool_count = self.tool_definitions.len(),
+            "starting LLM call"
+        );
 
-                    match self
-                        .client
-                        .access()?
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            for (i, msg) in self.messages.iter().enumerate() {
+                let role = match msg.role {
+                    crate::message::Role::User => "user",
+                    crate::message::Role::Assistant => "assistant",
+                };
+                let block_summary: Vec<String> = msg.content.iter().map(|b| match b {
+                    crate::message::ContentBlock::Text { text } => {
+                        format!("text({})", text.len())
+                    }
+                    crate::message::ContentBlock::ToolUse { name, .. } => {
+                        format!("tool_use({name})")
+                    }
+                    crate::message::ContentBlock::ToolResult { tool_use_id, is_error, .. } => {
+                        format!("tool_result({tool_use_id}, error={is_error})")
+                    }
+                    crate::message::ContentBlock::Image { .. } => "image".to_string(),
+                }).collect();
+                tracing::debug!(
+                    msg_index = i,
+                    role,
+                    blocks = ?block_summary,
+                    "message in context"
+                );
+            }
+        }
+    }
+
+    /// Stream an LLM response with retry/backoff and error recovery.
+    async fn stream_with_retry(
+        &mut self,
+        skill_fragments: &str,
+        recovered_this_turn: &mut bool,
+        output: &mut dyn Output,
+    ) -> StreamResult {
+        let mut last_err = None;
+        let mut response_opt = None;
+        let mut recovery: Option<LlmRecovery> = None;
+
+        for attempt in 0..=self.max_retries {
+            let tools_for_llm = if self.tools_disabled {
+                &[]
+            } else {
+                self.tool_definitions.as_slice()
+            };
+
+            match self
+                .client
+                .access()
+                .map_err(|e| StreamResult::Error(e))
+                .and_then(|client| Ok(client))
+            {
+                Ok(client) => {
+                    match client
                         .stream(
                             &self.messages,
                             &self.system_prompt,
-                            &skill_fragments,
+                            skill_fragments,
                             tools_for_llm,
                             &self.config,
                         )
@@ -717,7 +795,7 @@ impl Agent {
                             tracing::warn!(
                                 attempt = attempt + 1,
                                 max = self.max_retries,
-                                delay_ms = delay_ms,
+                                delay_ms,
                                 error = %e,
                                 "LLM call failed, retrying"
                             );
@@ -725,218 +803,164 @@ impl Agent {
                             last_err = Some(e);
                         }
                         Err(e) => {
-                            // Non-retryable error — ask the controller for a
-                            // recovery decision.  Only allow one recovery per
-                            // turn to prevent infinite loops.
-                            if recovered_this_turn {
-                                return Err(e);
+                            if *recovered_this_turn {
+                                return StreamResult::Error(e);
                             }
                             let action = output.on_llm_error(&e);
                             if action == LlmRecovery::GiveUp {
-                                return Err(e);
+                                return StreamResult::Error(e);
                             }
                             recovery = Some(action);
                             break;
                         }
                     }
                 }
-
-                // If the controller requested recovery, apply it and retry
-                // the turn from the top of the outer iteration loop.
-                if let Some(action) = recovery {
-                    let user_msg = self.pop_last_message();
-                    match action {
-                        LlmRecovery::RetryWithoutTools => {
-                            tracing::warn!("controller requested retry without tools");
-                            self.disable_tools();
-                            self.strip_tool_history();
-                        }
-                        LlmRecovery::RetryWithoutImages => {
-                            tracing::warn!("controller requested retry without images");
-                            self.strip_images();
-                        }
-                        LlmRecovery::GiveUp => unreachable!(),
-                    }
-                    if let Some(msg) = user_msg {
-                        self.messages.push(msg);
-                    }
-                    recovered_this_turn = true;
-                    continue;
-                }
-
-                response_opt.ok_or_else(|| last_err.unwrap())?
-            };
-
-            let tool_mode = response.tool_mode;
-            if let Some(input_tokens) = response.input_tokens {
-                self.token_budget.record_input(input_tokens);
+                Err(result) => return result,
             }
+        }
 
+        if let Some(action) = recovery {
+            let user_msg = self.pop_last_message();
+            match action {
+                LlmRecovery::RetryWithoutTools => {
+                    tracing::warn!("controller requested retry without tools");
+                    self.disable_tools();
+                    self.strip_tool_history();
+                }
+                LlmRecovery::RetryWithoutImages => {
+                    tracing::warn!("controller requested retry without images");
+                    self.strip_images();
+                }
+                LlmRecovery::GiveUp => unreachable!(),
+            }
+            if let Some(msg) = user_msg {
+                self.messages.push(msg);
+            }
+            *recovered_this_turn = true;
+            return StreamResult::Recovered;
+        }
+
+        match response_opt {
+            Some(r) => StreamResult::Response(r),
+            None => StreamResult::Error(last_err.unwrap()),
+        }
+    }
+
+    /// Log a summary of the assistant response.
+    fn log_response(&self, assistant_msg: &Message, tool_calls: &[ToolCall]) {
+        if let Some(text) = assistant_msg.last_text() {
+            let preview = &text[..text.len().min(500)];
             tracing::info!(
-                tool_mode = ?tool_mode,
-                input_tokens = ?response.input_tokens,
-                "streaming response"
+                response_len = text.len(),
+                response_preview = preview,
+                tool_calls = tool_calls.len(),
+                "assistant response"
             );
+        } else {
+            tracing::info!(
+                tool_calls = tool_calls.len(),
+                "assistant response (no text)"
+            );
+        }
+    }
 
-            // -- Process the stream into a message + tool calls --
-            let (assistant_msg, tool_calls, output_tokens) =
-                stream_handler::process_stream(response.stream, output).await?;
-
-            // -- Record token usage and check budget --
-            if let Err(e) = self.token_budget.record(output_tokens) {
-                self.messages.push(assistant_msg);
-                tracing::warn!(
-                    used = self.token_budget.output_tokens_used,
-                    "token budget exceeded — stopping agent loop"
-                );
-                output.error(&e)?;
-                break;
-            }
-
-            // Log assistant response summary.
-            if let Some(text) = assistant_msg.last_text() {
-                let preview = &text[..text.len().min(500)];
-                tracing::info!(
-                    response_len = text.len(),
-                    response_preview = preview,
-                    tool_calls = tool_calls.len(),
-                    "assistant response"
-                );
+    /// Check rate limits, analyze dependencies, and execute tool calls in phases.
+    async fn execute_tool_calls(
+        &mut self,
+        tool_calls: &[ToolCall],
+        output: &mut dyn Output,
+    ) -> Result<()> {
+        let mut limited_calls: Vec<usize> = Vec::with_capacity(tool_calls.len());
+        for (i, call) in tool_calls.iter().enumerate() {
+            if let Err(e) = self.limiter.check(&call.name) {
+                tracing::warn!(tool = call.name, error = %e, "tool call rate-limited");
+                self.messages
+                    .push(Message::tool_result(&call.id, &e.to_string(), true));
             } else {
-                tracing::info!(
-                    tool_calls = tool_calls.len(),
-                    "assistant response (no text)"
-                );
+                limited_calls.push(i);
             }
+        }
 
-            // -- If no tool calls, the LLM is done --
-            //
-            // Also break when the provider handles tools internally (e.g.,
-            // Claude Code).  In that case, ToolUse events in the stream are
-            // informational — the provider already executed them.  Without
-            // this check, Dyson would try to re-execute every tool call and
-            // loop until max_iterations, spawning a new subprocess each time.
-            if tool_calls.is_empty() || tool_mode == crate::llm::ToolMode::Observe {
-                // Extract the final text from the assistant message.
-                if let Some(text) = assistant_msg.last_text() {
-                    final_text = text.to_string();
+        let allowed_calls: Vec<&ToolCall> =
+            limited_calls.iter().map(|&i| &tool_calls[i]).collect();
+
+        if allowed_calls.is_empty() {
+            return Ok(());
+        }
+
+        let phases = DependencyAnalyzer::analyze(&allowed_calls);
+
+        for phase in phases {
+            match phase {
+                ExecutionPhase::Parallel(indices) => {
+                    let futs: Vec<_> = indices
+                        .iter()
+                        .map(|&idx| self.execute_tool_call_timed(allowed_calls[idx]))
+                        .collect();
+                    let results = futures::future::join_all(futs).await;
+                    for (&idx, result) in indices.iter().zip(results) {
+                        self.handle_tool_result(allowed_calls[idx], result, output)?;
+                    }
                 }
+                ExecutionPhase::Sequential(indices) => {
+                    for &idx in &indices {
+                        let result = self.execute_tool_call_timed(allowed_calls[idx]).await;
+                        self.handle_tool_result(allowed_calls[idx], result, output)?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Make one final tool-free LLM call to summarize progress.
+    async fn summarize_on_max_iterations(
+        &mut self,
+        skill_fragments: &str,
+        output: &mut dyn Output,
+    ) -> Result<String> {
+        self.messages.push(Message::user(
+            "You have reached the maximum number of iterations and must stop now. \
+             Please provide a brief summary of:\n\
+             1. What you have accomplished so far\n\
+             2. What still needs to be done\n\
+             3. Any relevant partial results\n\n\
+             Do NOT call any tools. Just summarize.",
+        ));
+
+        let empty_tools: &[crate::llm::ToolDefinition] = &[];
+        match self
+            .client
+            .access()?
+            .stream(
+                &self.messages,
+                &self.system_prompt,
+                skill_fragments,
+                empty_tools,
+                &self.config,
+            )
+            .await
+        {
+            Ok(response) => {
+                let (assistant_msg, _tool_calls, _output_tokens) =
+                    stream_handler::process_stream(response.stream, output).await?;
+                let text = assistant_msg
+                    .last_text()
+                    .unwrap_or_default()
+                    .to_string();
                 self.messages.push(assistant_msg);
-                output.flush()?;
-                break;
+                Ok(text)
             }
-
-            self.messages.push(assistant_msg);
-
-            // -- Check tool call limits --
-            //
-            // Each call is checked against per-turn limits and cooldown.
-            // Calls that exceed limits get an error result without execution.
-            let mut limited_calls: Vec<usize> = Vec::with_capacity(tool_calls.len());
-            for (i, call) in tool_calls.iter().enumerate() {
-                if let Err(e) = self.limiter.check(&call.name) {
-                    tracing::warn!(tool = call.name, error = %e, "tool call rate-limited");
-                    self.messages
-                        .push(Message::tool_result(&call.id, &e.to_string(), true));
-                } else {
-                    limited_calls.push(i);
-                }
-            }
-
-            // -- Analyze dependencies and execute in phases --
-            //
-            // Build a sub-slice of allowed calls, analyze their dependencies,
-            // and execute them in the correct order (parallel or sequential).
-            let allowed_calls: Vec<&ToolCall> =
-                limited_calls.iter().map(|&i| &tool_calls[i]).collect();
-
-            if !allowed_calls.is_empty() {
-                let phases = DependencyAnalyzer::analyze(&allowed_calls);
-
-                for phase in phases {
-                    match phase {
-                        ExecutionPhase::Parallel(indices) => {
-                            let futs: Vec<_> = indices
-                                .iter()
-                                .map(|&idx| self.execute_tool_call_timed(allowed_calls[idx]))
-                                .collect();
-                            let results = futures::future::join_all(futs).await;
-                            for (&idx, result) in indices.iter().zip(results) {
-                                self.handle_tool_result(allowed_calls[idx], result, output)?;
-                            }
-                        }
-                        ExecutionPhase::Sequential(indices) => {
-                            for &idx in &indices {
-                                let result = self.execute_tool_call_timed(allowed_calls[idx]).await;
-                                self.handle_tool_result(allowed_calls[idx], result, output)?;
-                            }
-                        }
-                    }
-                }
-            }
-
-            self.limiter.reset_turn();
-
-            // If we're about to hit max iterations, warn.
-            if iteration == self.max_iterations - 1 {
-                tracing::warn!(
-                    max = self.max_iterations,
-                    "agent hit maximum iterations — requesting summary"
-                );
-                hit_max_iterations = true;
+            Err(e) => {
+                tracing::warn!(error = %e, "summary LLM call failed — falling back to error");
+                output.error(&DysonError::Llm(format!(
+                    "Reached maximum iterations ({}) — stopping",
+                    self.max_iterations
+                )))?;
+                Ok(String::new())
             }
         }
-
-        // When the agent exhausts max_iterations, make one final LLM call
-        // (with no tools) so the model can summarise progress gracefully.
-        if hit_max_iterations {
-            self.messages.push(Message::user(
-                "You have reached the maximum number of iterations and must stop now. \
-                 Please provide a brief summary of:\n\
-                 1. What you have accomplished so far\n\
-                 2. What still needs to be done\n\
-                 3. Any relevant partial results\n\n\
-                 Do NOT call any tools. Just summarize.",
-            ));
-
-            let empty_tools: &[crate::llm::ToolDefinition] = &[];
-            match self
-                .client
-                .access()?
-                .stream(
-                    &self.messages,
-                    &self.system_prompt,
-                    &skill_fragments,
-                    empty_tools,
-                    &self.config,
-                )
-                .await
-            {
-                Ok(response) => {
-                    let (assistant_msg, _tool_calls, _output_tokens) =
-                        stream_handler::process_stream(response.stream, output).await?;
-                    if let Some(text) = assistant_msg.last_text() {
-                        final_text = text.to_string();
-                    }
-                    self.messages.push(assistant_msg);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "summary LLM call failed — falling back to error");
-                    output.error(&DysonError::Llm(format!(
-                        "Reached maximum iterations ({}) — stopping",
-                        self.max_iterations
-                    )))?;
-                }
-            }
-        }
-
-        // NOTE: Self-improvement and memory maintenance dreams are now
-        // fired at the *start* of run_inner via fire_dreams(TurnComplete).
-        // The DreamRunner checks each dream's trigger against the turn count
-        // and spawns matching dreams as background tasks.
-
-        output.flush()?;
-        Ok(final_text)
     }
 
     /// Check if an LLM error is retryable (rate limit, overloaded, network).
