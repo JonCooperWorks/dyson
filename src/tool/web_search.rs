@@ -60,7 +60,7 @@ pub struct BraveSearchProvider {
 impl BraveSearchProvider {
     pub fn new(api_key: crate::auth::Credential) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::client().clone(),
             api_key,
         }
     }
@@ -135,7 +135,7 @@ impl SearxngSearchProvider {
         // Strip trailing slash for consistent URL construction.
         let base_url = base_url.trim_end_matches('/').to_string();
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::client().clone(),
             base_url,
         }
     }

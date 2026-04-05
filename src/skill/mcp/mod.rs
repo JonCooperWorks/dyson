@@ -41,7 +41,7 @@ impl OAuthPending {
         let mut done = self.completed.lock().await;
         if *done { return Ok(false); }
 
-        let client = reqwest::Client::new();
+        let client = crate::http::client().clone();
         let tokens = oauth::exchange_code(
             &self.token_endpoint, code, &self.pkce_verifier,
             &self.client_id, self.client_secret.as_deref(),
@@ -132,7 +132,7 @@ impl McpSkill {
     async fn start_oauth_flow(
         server_name: &str, url: &str, config: &McpAuthConfig,
     ) -> Result<(String, Arc<dyn Tool>)> {
-        let http_client = reqwest::Client::new();
+        let http_client = crate::http::client().clone();
 
         let meta = if let (Some(a), Some(t)) = (&config.authorization_url, &config.token_url) {
             oauth::AuthMetadata {

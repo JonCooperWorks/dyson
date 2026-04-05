@@ -73,24 +73,18 @@ mod tests {
     #[tokio::test]
     async fn apply_adds_custom_header() {
         let auth = ApiKeyAuth::new("x-api-key", "sk-ant-test".into());
-        let client = reqwest::Client::new();
-        let req = client.post("http://localhost/test");
-        let req = auth.apply_to_request(req).await.unwrap();
-
-        let built = req.build().unwrap();
-        let header = built.headers().get("x-api-key").unwrap().to_str().unwrap();
-        assert_eq!(header, "sk-ant-test");
+        let headers = super::super::test_apply(&auth).await;
+        assert_eq!(
+            headers.get("x-api-key").unwrap().to_str().unwrap(),
+            "sk-ant-test"
+        );
     }
 
     #[tokio::test]
     async fn anthropic_factory() {
         let auth = ApiKeyAuth::anthropic("sk-ant-key".into());
-        let client = reqwest::Client::new();
-        let req = client.post("http://localhost/test");
-        let req = auth.apply_to_request(req).await.unwrap();
-
-        let built = req.build().unwrap();
-        assert!(built.headers().contains_key("x-api-key"));
+        let headers = super::super::test_apply(&auth).await;
+        assert!(headers.contains_key("x-api-key"));
     }
 
     #[tokio::test]

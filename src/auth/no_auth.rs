@@ -42,14 +42,10 @@ mod tests {
     #[tokio::test]
     async fn apply_passes_through() {
         let auth = NoAuth;
-        let client = reqwest::Client::new();
-        let req = client.post("http://localhost/test");
-        let req = auth.apply_to_request(req).await.unwrap();
-
-        let built = req.build().unwrap();
+        let headers = super::super::test_apply(&auth).await;
         // No auth headers added.
-        assert!(!built.headers().contains_key("authorization"));
-        assert!(!built.headers().contains_key("x-api-key"));
+        assert!(!headers.contains_key("authorization"));
+        assert!(!headers.contains_key("x-api-key"));
     }
 
     #[tokio::test]

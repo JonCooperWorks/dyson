@@ -98,7 +98,7 @@ impl OpenAiClient {
     /// Create a new OpenAI client with a custom `Auth` implementation.
     pub fn with_auth(auth: Box<dyn Auth>, base_url: Option<&str>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::client().clone(),
             auth,
             base_url: base_url
                 .unwrap_or("https://api.openai.com")

@@ -65,22 +65,13 @@ mod tests {
             Box::new(ApiKeyAuth::new("x-custom", "val".into())),
         ]);
 
-        let client = reqwest::Client::new();
-        let req = client.post("http://localhost/test");
-        let req = composite.apply_to_request(req).await.unwrap();
-
-        let built = req.build().unwrap();
+        let headers = super::super::test_apply(&composite).await;
         assert_eq!(
-            built
-                .headers()
-                .get("authorization")
-                .unwrap()
-                .to_str()
-                .unwrap(),
+            headers.get("authorization").unwrap().to_str().unwrap(),
             "Bearer my-token"
         );
         assert_eq!(
-            built.headers().get("x-custom").unwrap().to_str().unwrap(),
+            headers.get("x-custom").unwrap().to_str().unwrap(),
             "val"
         );
     }
@@ -112,10 +103,7 @@ mod tests {
     #[tokio::test]
     async fn empty_composite_apply_is_noop() {
         let composite = CompositeAuth::new(vec![]);
-        let client = reqwest::Client::new();
-        let req = client.post("http://localhost/test");
-        let req = composite.apply_to_request(req).await.unwrap();
-        let built = req.build().unwrap();
-        assert!(!built.headers().contains_key("authorization"));
+        let headers = super::super::test_apply(&composite).await;
+        assert!(!headers.contains_key("authorization"));
     }
 }

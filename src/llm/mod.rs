@@ -38,6 +38,7 @@ pub mod anthropic;
 pub mod claude_code;
 pub mod codex;
 pub mod dialects;
+pub mod ollama_cloud;
 pub mod openai;
 pub mod openai_compat;
 pub mod openrouter;
@@ -553,7 +554,7 @@ pub(crate) fn resolve_binary_path(name: &str) -> String {
 ///
 /// Tell me more about Cargo.toml
 /// ```
-pub(crate) fn format_prompt(messages: &[Message], tools: &[ToolDefinition]) -> String {
+pub(crate) fn format_prompt(messages: &[Message], tools: &[&ToolDefinition]) -> String {
     // Single user message with no history and no tools — just return the text.
     if messages.len() == 1
         && tools.is_empty()
@@ -687,13 +688,13 @@ mod tests {
     #[test]
     fn tools_appended_to_prompt() {
         let messages = vec![Message::user("help")];
-        let tools = vec![ToolDefinition {
+        let tool = ToolDefinition {
             name: "bash".into(),
             description: "Run commands".into(),
             input_schema: serde_json::json!({"type": "object"}),
             agent_only: false,
-        }];
-        let prompt = format_prompt(&messages, &tools);
+        };
+        let prompt = format_prompt(&messages, &[&tool]);
         assert!(prompt.contains("[Available tools:]"));
         assert!(prompt.contains("**bash**"));
     }

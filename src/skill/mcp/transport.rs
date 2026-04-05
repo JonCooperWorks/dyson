@@ -302,7 +302,7 @@ impl HttpTransport {
     /// `auth` applies authentication headers to every request.
     pub fn new(url: &str, auth: Box<dyn crate::auth::Auth>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::client().clone(),
             url: url.to_string(),
             auth,
             next_id: AtomicU64::new(1),

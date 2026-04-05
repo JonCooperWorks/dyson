@@ -204,7 +204,7 @@ impl OAuth {
     pub fn new(credential: OAuthCredential) -> Self {
         Self {
             credential: Arc::new(RwLock::new(credential)),
-            http_client: reqwest::Client::new(),
+            http_client: crate::http::client().clone(),
         }
     }
 

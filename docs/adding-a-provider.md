@@ -16,6 +16,7 @@ pub enum LlmProvider {
     OpenRouter,
     ClaudeCode,
     Codex,
+    OllamaCloud,
     YourProvider,  // ← add here
 }
 ```

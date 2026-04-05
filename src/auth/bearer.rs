@@ -147,17 +147,10 @@ mod tests {
     #[tokio::test]
     async fn apply_adds_bearer_header() {
         let auth = BearerTokenAuth::new("my-token".into());
-        let client = reqwest::Client::new();
-        let req = client.post("http://localhost/test");
-        let req = auth.apply_to_request(req).await.unwrap();
-
-        let built = req.build().unwrap();
-        let header = built
-            .headers()
-            .get("authorization")
-            .unwrap()
-            .to_str()
-            .unwrap();
-        assert_eq!(header, "Bearer my-token");
+        let headers = super::super::test_apply(&auth).await;
+        assert_eq!(
+            headers.get("authorization").unwrap().to_str().unwrap(),
+            "Bearer my-token"
+        );
     }
 }
