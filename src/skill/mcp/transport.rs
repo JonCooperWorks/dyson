@@ -322,22 +322,13 @@ impl HttpTransport {
         // Apply auth headers (API keys, bearer tokens, etc.).
         self.auth.apply_to_request(req).await
     }
-}
 
-#[async_trait]
-impl McpTransport for HttpTransport {
-    async fn send_request(
-        &self,
-        method: &str,
-        params: Option<serde_json::Value>,
-    ) -> Result<serde_json::Value> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let request = JsonRpcRequest::new(id, method, params);
-        let json = serde_json::to_string(&request)?;
+    /// Send an HTTP request and capture the session ID from the response.
+    ///
+    /// Shared by the normal path and the 401 retry path to avoid duplication.
+    async fn send_http(&self, json: &str) -> crate::error::Result<reqwest::Response> {
+        let mut req = self.build_request(json).await?;
 
-        let mut req = self.build_request(&json).await?;
-
-        // Include session ID if we have one.
         {
             let session = self.session_id.lock().await;
             if let Some(ref sid) = *session {
@@ -350,7 +341,6 @@ impl McpTransport for HttpTransport {
             message: format!("HTTP request failed: {e}"),
         })?;
 
-        // Capture session ID from response headers.
         if let Some(sid) = response.headers().get("mcp-session-id")
             && let Ok(sid_str) = sid.to_str()
         {
@@ -358,6 +348,17 @@ impl McpTransport for HttpTransport {
             *session = Some(sid_str.to_string());
         }
 
+        Ok(response)
+    }
+
+    /// Parse an HTTP response into a JSON-RPC result.
+    ///
+    /// Checks HTTP status, reads body, deserializes JSON-RPC, checks for
+    /// RPC-level errors.  Shared by the normal path and the 401 retry path.
+    async fn parse_rpc_response(
+        &self,
+        response: reqwest::Response,
+    ) -> crate::error::Result<serde_json::Value> {
         if !response.status().is_success() {
             let status = response.status();
             let body = response
@@ -392,6 +393,46 @@ impl McpTransport for HttpTransport {
             server: self.url.clone(),
             message: "response has neither result nor error".into(),
         })
+    }
+}
+
+#[async_trait]
+impl McpTransport for HttpTransport {
+    async fn send_request(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let request = JsonRpcRequest::new(id, method, params);
+        let json = serde_json::to_string(&request)?;
+
+        let response = self.send_http(&json).await?;
+
+        // 401 Unauthorized — refresh credentials and retry once.
+        //
+        // Handles OAuth token rejection (clock skew, server-side revocation)
+        // when the token hasn't expired locally.  on_unauthorized() gives
+        // OAuth a chance to force-refresh before we retry.
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            tracing::debug!(server = %self.url, "received 401 — attempting credential refresh");
+
+            if self.auth.on_unauthorized().await.is_ok() {
+                let retry_response = self.send_http(&json).await?;
+                return self.parse_rpc_response(retry_response).await;
+            }
+
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "failed to read body".into());
+            return Err(DysonError::Mcp {
+                server: self.url.clone(),
+                message: format!("HTTP 401 Unauthorized: {body}"),
+            });
+        }
+
+        self.parse_rpc_response(response).await
     }
 
     async fn send_notification(

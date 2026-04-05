@@ -358,7 +358,58 @@ pub enum McpTransportConfig {
     Http {
         url: String,
         headers: std::collections::HashMap<String, String>,
+        /// Optional OAuth 2.0 configuration for servers that require
+        /// interactive authorization (e.g., GitHub Copilot MCP).
+        /// When set, Dyson runs the OAuth Authorization Code + PKCE flow
+        /// and attaches Bearer tokens automatically.
+        auth: Option<McpAuthConfig>,
     },
+}
+
+// ---------------------------------------------------------------------------
+// MCP OAuth configuration
+// ---------------------------------------------------------------------------
+
+/// OAuth 2.0 configuration for an MCP HTTP server.
+///
+/// When present on an `McpTransportConfig::Http`, Dyson runs the OAuth
+/// Authorization Code + PKCE flow instead of using static headers.
+///
+/// ## Minimal config (auto-discovery + DCR)
+///
+/// ```json
+/// {
+///   "url": "https://mcp.example.com/mcp",
+///   "auth": { "type": "oauth", "scopes": ["read"] }
+/// }
+/// ```
+///
+/// ## Full config (pre-registered client, no discovery)
+///
+/// ```json
+/// {
+///   "url": "https://mcp.example.com/mcp",
+///   "auth": {
+///     "type": "oauth",
+///     "client_id": "my-client-id",
+///     "client_secret": { "resolver": "insecure_env", "name": "CLIENT_SECRET" },
+///     "scopes": ["read", "write"],
+///     "authorization_url": "https://auth.example.com/authorize",
+///     "token_url": "https://auth.example.com/token"
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct McpAuthConfig {
+    /// `None` = use Dynamic Client Registration.
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub scopes: Vec<String>,
+    pub redirect_uri: Option<String>,
+    /// Overrides (skip well-known discovery when set).
+    pub authorization_url: Option<String>,
+    pub token_url: Option<String>,
+    pub registration_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]

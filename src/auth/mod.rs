@@ -48,6 +48,7 @@ pub mod bearer;
 pub mod composite;
 pub mod credential;
 pub mod no_auth;
+pub mod oauth;
 pub mod static_headers;
 pub mod tracing_auth;
 
@@ -56,6 +57,7 @@ pub use bearer::BearerTokenAuth;
 pub use composite::CompositeAuth;
 pub use credential::Credential;
 pub use no_auth::NoAuth;
+pub use oauth::OAuth;
 pub use static_headers::StaticHeadersAuth;
 pub use tracing_auth::TracingAuth;
 
@@ -153,6 +155,17 @@ pub trait Auth: Send + Sync {
         Err(DysonError::Config(
             "auth: validate_request not implemented".into(),
         ))
+    }
+
+    /// Called when a request receives a 401 Unauthorized response.
+    ///
+    /// Gives the auth implementation a chance to refresh credentials before
+    /// the caller retries the request.  Used by `OAuth` to force-refresh
+    /// an access token that the server rejected (clock skew, revocation, etc.).
+    ///
+    /// The default is a no-op (most auth types have static credentials).
+    async fn on_unauthorized(&self) -> Result<()> {
+        Ok(())
     }
 }
 

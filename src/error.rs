@@ -63,6 +63,10 @@ pub enum DysonError {
     #[error("MCP error [{server}]: {message}")]
     Mcp { server: String, message: String },
 
+    /// An OAuth 2.0 flow failed (discovery, token exchange, refresh, etc.).
+    #[error("OAuth error [{server}]: {message}")]
+    OAuth { server: String, message: String },
+
     /// Configuration is missing, malformed, or contradictory.
     #[error("Config error: {0}")]
     Config(String),
@@ -159,6 +163,14 @@ impl DysonError {
     /// Convenience constructor for MCP errors.
     pub fn mcp(server: impl Into<String>, message: impl Into<String>) -> Self {
         DysonError::Mcp {
+            server: server.into(),
+            message: message.into(),
+        }
+    }
+
+    /// Convenience constructor for OAuth errors.
+    pub fn oauth(server: impl Into<String>, message: impl Into<String>) -> Self {
+        DysonError::OAuth {
             server: server.into(),
             message: message.into(),
         }
