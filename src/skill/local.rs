@@ -91,6 +91,7 @@ impl LocalSkill {
             if fm_end == 0 {
                 return None;
             }
+            let fm_end = fm_end.min(after_open.len());
             after_open[fm_end..].trim()
         };
         if body.is_empty() {
@@ -137,6 +138,8 @@ impl LocalSkill {
                     "skill file {display}: missing closing --- in frontmatter"
                 )));
             }
+            // Clamp to string length — the last line may lack a trailing newline.
+            let fm_end = fm_end.min(after_open.len());
             let fm = after_open[..fm_end].trim_end().to_string();
             let b = after_open[fm_end..].trim().to_string();
 
@@ -350,6 +353,16 @@ Do the thing.
         assert!(repaired.contains("\n---\n"), "repaired file should have closing ---");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_all_frontmatter_no_body_no_trailing_newline() {
+        // Reproduces the panic: every line is key: value, no body, no
+        // trailing newline — fm_end overshoots the string length.
+        let content = "---\nname: markdown-pastebin\ndescription: Post markdown or plain text to markdownpastebin.com. Returns a shareable URL. No auth, no API key.";
+        let err = LocalSkill::parse(content, &test_path()).unwrap_err();
+        // Should error (empty body), not panic.
+        assert!(err.to_string().contains("body (system prompt) must not be empty"));
     }
 
     #[test]
