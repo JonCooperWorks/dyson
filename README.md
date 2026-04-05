@@ -45,7 +45,7 @@ Dyson refuses to start without the OS sandbox binary unless `--dangerous-no-sand
 
 ## Footprint
 
-Dyson compiles to a **7.1 MB** static binary with ~30 direct dependencies. At idle it sits at **~15.8 MB RSS / ~14 MB PSS** — half of what it was before removing teloxide and reqwest. The entire dependency tree is small enough to audit by hand, which is the point: fewer crates means less surface area for supply-chain attacks, and a codebase small enough that one person can understand every line.
+**7.1 MB** binary, **~16 MB RSS** at idle, ~30 direct dependencies. The dependency tree is small enough to audit by hand — fewer crates, less supply-chain surface, and a codebase one person can read end to end.
 
 ## Architecture
 
