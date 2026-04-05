@@ -59,6 +59,28 @@ use crate::llm::stream::StreamEvent;
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
+// Shared HTTP client
+// ---------------------------------------------------------------------------
+
+/// User-Agent header value for all HTTP-based providers.
+const USER_AGENT: &str = concat!(
+    "Dyson/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/joncooperworks/dyson)"
+);
+
+/// Build a shared `reqwest::Client` with a consistent User-Agent.
+///
+/// All HTTP-based providers (Anthropic, OpenAI, OpenRouter, Ollama Cloud)
+/// should use this instead of `reqwest::Client::new()`.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .build()
+        .expect("failed to build HTTP client")
+}
+
+// ---------------------------------------------------------------------------
 // CompletionConfig
 // ---------------------------------------------------------------------------
 

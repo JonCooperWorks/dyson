@@ -196,7 +196,7 @@ impl AnthropicClient {
     /// ```
     pub fn with_auth(auth: Box<dyn Auth>, base_url: Option<&str>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::http_client(),
             auth,
             base_url: base_url.unwrap_or("https://api.anthropic.com").to_string(),
         }
