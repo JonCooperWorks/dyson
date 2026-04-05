@@ -88,6 +88,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::chat_history::ChatHistory;
 use crate::config::{AgentSettings, CompactionConfig};
 use crate::controller::Output;
 use crate::error::{DysonError, LlmRecovery, Result};
@@ -206,6 +207,18 @@ pub struct Agent {
     /// on trigger events without blocking the controller loop.
     /// See `dream.rs` and `docs/dreaming.md`.
     dream_handle: DreamHandle,
+
+    /// Optional chat history backend for rotating pre-compaction snapshots.
+    ///
+    /// When set (along with `chat_id`), compaction saves the full
+    /// pre-compaction conversation to a rotated file before summarising.
+    /// This preserves verbatim history for fine-tuning datasets.
+    chat_history: Option<Arc<dyn ChatHistory>>,
+
+    /// Chat identifier for the current conversation (e.g. Telegram chat ID).
+    ///
+    /// Used together with `chat_history` to rotate pre-compaction snapshots.
+    chat_id: Option<String>,
 }
 
 impl Agent {
@@ -385,6 +398,8 @@ impl Agent {
             cached_tool_tokens,
             tools_disabled: false,
             dream_handle,
+            chat_history: None,
+            chat_id: None,
         })
     }
 
@@ -447,6 +462,17 @@ impl Agent {
     /// Replace the conversation history (for restoring from persistence).
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
+    }
+
+    /// Attach a chat history backend so compaction can rotate pre-compaction
+    /// snapshots for fine-tuning.
+    ///
+    /// When set, every compaction will first save the current conversation
+    /// to a timestamped archive file (via `ChatHistory::rotate`) before
+    /// summarising.  This preserves the full verbatim history.
+    pub fn set_chat_history(&mut self, store: Arc<dyn ChatHistory>, chat_id: String) {
+        self.chat_history = Some(store);
+        self.chat_id = Some(chat_id);
     }
 
     /// Remove and return the last message in the conversation history.
@@ -2577,6 +2603,116 @@ mod tests {
             }
             other => panic!("expected Text, got: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Compact rotation tests — pre-compaction history preservation.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn compact_rotates_pre_compaction_history() {
+        // When a chat history backend is attached, compact() should save
+        // and rotate the pre-compaction messages before summarising.
+        let messages = vec![
+            Message::user("hello"),
+            Message::assistant(vec![ContentBlock::Text { text: "hi".into() }]),
+            Message::user("more"),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "more response".into(),
+            }]),
+            Message::user("even more"),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "even more response".into(),
+            }]),
+        ];
+
+        let summary_response = vec![
+            StreamEvent::TextDelta("Summary of conversation.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ];
+
+        let config = CompactionConfig {
+            protect_head: 2,
+            protect_tail_tokens: 100,
+            ..CompactionConfig::default()
+        };
+
+        let (mut agent, mut output) =
+            make_agent_with_history(messages.clone(), vec![summary_response], Some(config));
+
+        // Attach a disk chat history so we can verify the rotation.
+        let dir = std::env::temp_dir().join(format!(
+            "dyson_compact_rotate_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = crate::chat_history::DiskChatHistory::new(dir.clone()).unwrap();
+        let store: Arc<dyn crate::chat_history::ChatHistory> = Arc::new(store);
+
+        agent.set_chat_history(store.clone(), "test_chat".to_string());
+
+        // Run compact.
+        agent.compact(&mut output).await.unwrap();
+
+        // Current chat file should be empty (it was rotated).
+        let current = store.load("test_chat").unwrap();
+        assert!(current.is_empty(), "current chat should be empty after rotation");
+
+        // A rotated file should exist with the pre-compaction messages.
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.starts_with("test_chat.") && name.ends_with(".json")
+            })
+            .collect();
+        assert_eq!(files.len(), 1, "should have exactly one rotated file");
+
+        // The rotated file should contain the original 6 messages.
+        let rotated_content = std::fs::read_to_string(files[0].path()).unwrap();
+        let rotated_msgs: Vec<Message> = serde_json::from_str(&rotated_content).unwrap();
+        assert_eq!(rotated_msgs.len(), 6, "rotated file should have all pre-compaction messages");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn compact_without_chat_history_does_not_rotate() {
+        // When no chat history is attached, compact should work as before
+        // without any rotation side effects.
+        let messages = vec![
+            Message::user("hello"),
+            Message::assistant(vec![ContentBlock::Text { text: "hi".into() }]),
+            Message::user("more"),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "more".into(),
+            }]),
+        ];
+
+        let summary_response = vec![
+            StreamEvent::TextDelta("Summary.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ];
+
+        let (mut agent, mut output) = make_agent_with_history(
+            messages,
+            vec![summary_response],
+            None,
+        );
+
+        // No chat history attached — compact should still work.
+        assert!(agent.chat_history.is_none());
+        agent.compact(&mut output).await.unwrap();
+
+        // Legacy compaction: single summary message.
+        assert_eq!(agent.messages.len(), 1);
     }
 
     // -----------------------------------------------------------------------
