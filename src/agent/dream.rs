@@ -187,8 +187,11 @@ impl DreamRunner {
     /// after spawning — dreams run in the background with no way to block
     /// the caller.
     pub fn fire(&self, event: &DreamEvent, ctx_factory: impl Fn() -> DreamContext) {
+        let mut activated = 0usize;
+
         for dream in &self.dreams {
             if should_activate(dream.trigger(), event) {
+                activated += 1;
                 let dream = Arc::clone(dream);
                 let ctx = ctx_factory();
                 let dream_name = dream.name().to_string();
@@ -219,6 +222,10 @@ impl DreamRunner {
                 });
             }
         }
+
+        if activated == 0 {
+            tracing::debug!(?event, registered = self.dreams.len(), "no dreams matched event");
+        }
     }
 
     /// How many dreams are registered.
@@ -239,7 +246,9 @@ fn should_activate(trigger: DreamTrigger, event: &DreamEvent) -> bool {
             n > 0 && turn_count.is_multiple_of(n)
         }
         (DreamTrigger::AfterCompaction, DreamEvent::Compaction) => true,
-        (DreamTrigger::OnSessionEnd, DreamEvent::SessionEnd) => true,
+        // Session end fires ALL dreams — consolidate everything before
+        // the conversation is discarded.
+        (_, DreamEvent::SessionEnd) => true,
         _ => false,
     }
 }
@@ -295,8 +304,17 @@ impl DreamHandle {
                 }
 
                 while let Ok(req) = rx.recv() {
+                    let event_dbg = format!("{:?}", req.event);
+                    tracing::debug!(
+                        event = event_dbg,
+                        turn_count = req.turn_count,
+                        messages = req.messages.len(),
+                        "dream thread received request"
+                    );
+
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let summary = reflection::summarize_for_reflection(&req.messages);
+                        tracing::debug!(summary_len = summary.len(), "conversation summarised for dreams");
                         runner.fire(&req.event, || DreamContext {
                             client: req.client.clone(),
                             config: req.config.clone(),
@@ -374,7 +392,6 @@ mod tests {
 
         assert!(should_activate(trigger.clone(), &DreamEvent::Compaction));
         assert!(!should_activate(trigger.clone(), &DreamEvent::TurnComplete { turn_count: 5 }));
-        assert!(!should_activate(trigger.clone(), &DreamEvent::SessionEnd));
     }
 
     #[test]
@@ -384,6 +401,29 @@ mod tests {
         assert!(should_activate(trigger.clone(), &DreamEvent::SessionEnd));
         assert!(!should_activate(trigger.clone(), &DreamEvent::TurnComplete { turn_count: 1 }));
         assert!(!should_activate(trigger.clone(), &DreamEvent::Compaction));
+    }
+
+    #[test]
+    fn session_end_fires_all_triggers() {
+        // SessionEnd should activate every dream, regardless of trigger type.
+        assert!(should_activate(
+            DreamTrigger::EveryNTurns(5),
+            &DreamEvent::SessionEnd,
+        ));
+        assert!(should_activate(
+            DreamTrigger::AfterCompaction,
+            &DreamEvent::SessionEnd,
+        ));
+        assert!(should_activate(
+            DreamTrigger::OnSessionEnd,
+            &DreamEvent::SessionEnd,
+        ));
+        // Even EveryNTurns(0) fires on SessionEnd — the n>0 guard only
+        // applies to TurnComplete events.
+        assert!(should_activate(
+            DreamTrigger::EveryNTurns(0),
+            &DreamEvent::SessionEnd,
+        ));
     }
 
     #[test]

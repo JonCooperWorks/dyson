@@ -345,7 +345,9 @@ impl Agent {
             }
         }
 
+        let dream_count = dreams.len();
         let dream_handle = DreamHandle::new(dreams);
+        tracing::info!(dream_count, nudge_interval, "dream subsystem initialised");
 
         Ok(Self {
             client,
@@ -392,9 +394,16 @@ impl Agent {
     /// This never blocks — the event is sent over a channel and the dream
     /// thread handles summarisation and spawning.
     fn fire_dreams(&self, event: DreamEvent) {
-        if self.messages.is_empty() || self.tool_context.workspace.is_none() {
+        if self.messages.is_empty() {
+            tracing::debug!(?event, "fire_dreams skipped: no messages");
             return;
         }
+        if self.tool_context.workspace.is_none() {
+            tracing::debug!(?event, "fire_dreams skipped: no workspace");
+            return;
+        }
+
+        tracing::debug!(?event, turn_count = self.turn_count, "sending dream event");
 
         self.dream_handle.fire(
             event,
