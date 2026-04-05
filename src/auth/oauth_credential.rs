@@ -122,11 +122,6 @@ impl OAuthAuth {
         Self::new(credential)
     }
 
-    /// Get a reference to the shared credential for persistence.
-    pub fn credential(&self) -> &Arc<RwLock<OAuthCredential>> {
-        &self.credential
-    }
-
     /// Perform a token refresh, updating the credential in place.
     ///
     /// Called when:
@@ -229,6 +224,34 @@ struct PersistedTokens {
     token_url: String,
     client_id: String,
     client_secret: Option<String>,
+}
+
+/// Persist a `TokenResponse` directly to disk (avoids constructing `OAuthAuth`).
+///
+/// Used by the background OAuth task which only needs to save tokens,
+/// not use them for auth.
+pub async fn persist_token_response(
+    server_name: &str,
+    response: &oauth::TokenResponse,
+    token_url: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+) -> Result<()> {
+    let expires_at = response
+        .expires_in
+        .map(|secs| SystemTime::now() + Duration::from_secs(secs))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
+    let credential = OAuthCredential {
+        access_token: Credential::new(response.access_token.clone()),
+        refresh_token: response.refresh_token.as_ref().map(|t| Credential::new(t.clone())),
+        expires_at,
+        token_url: token_url.to_string(),
+        client_id: client_id.to_string(),
+        client_secret: client_secret.map(|s| Credential::new(s.to_string())),
+    };
+
+    persist_tokens(server_name, &credential).await
 }
 
 /// Write tokens to `~/.dyson/tokens/<server_name>.json` (0o600 on Unix).

@@ -327,13 +327,41 @@ fn percent_encode(input: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Token exchange
+// Token exchange / refresh
 // ---------------------------------------------------------------------------
 
+/// POST form params to a token endpoint, return parsed `TokenResponse`.
+async fn post_token_request(
+    token_url: &str,
+    params: &[(&str, &str)],
+    context: &str,
+    client: &reqwest::Client,
+) -> Result<TokenResponse> {
+    let response = client
+        .post(token_url)
+        .form(params)
+        .send()
+        .await
+        .map_err(|e| DysonError::oauth(token_url, format!("{context} failed: {e}")))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "failed to read body".into());
+        return Err(DysonError::oauth(
+            token_url,
+            format!("{context} returned HTTP {status}: {body}"),
+        ));
+    }
+
+    response.json().await.map_err(|e| {
+        DysonError::oauth(token_url, format!("{context}: failed to parse response: {e}"))
+    })
+}
+
 /// Exchange an authorization code for tokens (second leg of the Auth Code flow).
-///
-/// The PKCE `verifier` proves we initiated the flow.  `redirect_uri` must
-/// match the one used in the authorization request.
 pub async fn exchange_code(
     token_url: &str,
     code: &str,
@@ -343,8 +371,6 @@ pub async fn exchange_code(
     redirect_uri: &str,
     client: &reqwest::Client,
 ) -> Result<TokenResponse> {
-    tracing::debug!(token_url = %token_url, "exchanging authorization code for tokens");
-
     let mut params = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -361,44 +387,8 @@ pub async fn exchange_code(
         params.push(("client_secret", &secret_owned));
     }
 
-    let response = client
-        .post(token_url)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| {
-            DysonError::oauth(token_url, format!("token exchange failed: {e}"))
-        })?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "failed to read body".into());
-        return Err(DysonError::oauth(
-            token_url,
-            format!("token exchange returned HTTP {status}: {body}"),
-        ));
-    }
-
-    let token_response: TokenResponse = response.json().await.map_err(|e| {
-        DysonError::oauth(token_url, format!("failed to parse token response: {e}"))
-    })?;
-
-    tracing::info!(
-        token_type = %token_response.token_type,
-        expires_in = ?token_response.expires_in,
-        has_refresh = token_response.refresh_token.is_some(),
-        "tokens received"
-    );
-
-    Ok(token_response)
+    post_token_request(token_url, &params, "token exchange", client).await
 }
-
-// ---------------------------------------------------------------------------
-// Token refresh
-// ---------------------------------------------------------------------------
 
 /// Refresh an expired access token using a refresh token.
 pub async fn refresh_token(
@@ -408,8 +398,6 @@ pub async fn refresh_token(
     client_secret: Option<&str>,
     client: &reqwest::Client,
 ) -> Result<TokenResponse> {
-    tracing::debug!(token_url = %token_url, "refreshing access token");
-
     let mut params = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
@@ -422,38 +410,7 @@ pub async fn refresh_token(
         params.push(("client_secret", &secret_owned));
     }
 
-    let response = client
-        .post(token_url)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| {
-            DysonError::oauth(token_url, format!("token refresh failed: {e}"))
-        })?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "failed to read body".into());
-        return Err(DysonError::oauth(
-            token_url,
-            format!("token refresh returned HTTP {status}: {body}"),
-        ));
-    }
-
-    let token_response: TokenResponse = response.json().await.map_err(|e| {
-        DysonError::oauth(token_url, format!("failed to parse refresh response: {e}"))
-    })?;
-
-    tracing::info!(
-        expires_in = ?token_response.expires_in,
-        has_new_refresh = token_response.refresh_token.is_some(),
-        "access token refreshed"
-    );
-
-    Ok(token_response)
+    post_token_request(token_url, &params, "token refresh", client).await
 }
 
 // ---------------------------------------------------------------------------

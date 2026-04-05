@@ -47,13 +47,13 @@ use crate::error::Result;
 // Callback result
 // ---------------------------------------------------------------------------
 
-/// The authorization code and state received from the OAuth callback.
+/// The authorization code received from the OAuth callback.
+///
+/// The `state` parameter is validated by the callback server before
+/// sending this result — callers don't need to re-check it.
 #[derive(Debug)]
 pub struct CallbackResult {
-    /// The authorization code to exchange for tokens.
     pub code: String,
-    /// The state parameter (must match what was sent in the auth URL).
-    pub state: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +218,6 @@ async fn handle_callback(
     if let Some(sender) = guard.take() {
         let result = CallbackResult {
             code: code.to_string(),
-            state: state.to_string(),
         };
 
         if sender.send(result).is_err() {
@@ -324,7 +323,7 @@ mod tests {
         // The code should be available on the receiver.
         let result = rx.await.unwrap();
         assert_eq!(result.code, "auth-code-123");
-        assert_eq!(result.state, "my-state");
+        // state is validated by the server — not in CallbackResult
 
         handle.abort();
     }

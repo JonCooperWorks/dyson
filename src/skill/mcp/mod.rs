@@ -216,16 +216,15 @@ impl McpSkill {
                 )
                 .await?;
 
-                // Persist tokens.
-                let oauth_auth = OAuthAuth::from_token_response(
+                // Persist tokens directly — no need to construct OAuthAuth.
+                oauth_credential::persist_token_response(
+                    &server_name_owned,
                     &token_response,
-                    token_endpoint,
-                    client_id,
-                    client_secret,
-                );
-
-                let guard = oauth_auth.credential().read().await;
-                oauth_credential::persist_tokens(&server_name_owned, &guard).await?;
+                    &token_endpoint,
+                    &client_id,
+                    client_secret.as_deref(),
+                )
+                .await?;
 
                 tracing::info!(
                     server = %server_name_owned,
