@@ -11,15 +11,19 @@ that happens alongside (or between) waking interactions.
 
 This is the single inviolable rule.  Everything else follows from it:
 
-1. Dreams are **spawned** via `tokio::spawn` — fire-and-forget.
-2. Dreams access the LLM through a **rate-limited handle** at `Background`
+1. Dreams run on a **persistent background thread** (`dyson-dreams`) — the
+   main loop sends events over a channel and never blocks.
+2. Dreams are **spawned** via `tokio::spawn` from the dream thread —
+   fire-and-forget.
+3. Dreams access the LLM through a **rate-limited handle** at `Background`
    priority — they share the provider's rate limit with the main loop but
    can never starve it.
-3. Dreams use `SilentOutput` — their stream events are consumed but never
+4. Dreams use `SilentOutput` — their stream events are consumed but never
    shown to the user.
-4. Dreams communicate only through the **shared workspace**
+5. Dreams communicate only through the **shared workspace**
    (`Arc<RwLock<Workspace>>`).  Nothing enters the main conversation history.
-5. The `DreamRunner.fire()` method returns immediately after spawning.
+6. The `DreamHandle.fire()` method sends over the channel and returns
+   immediately.
 
 ## Architecture
 
@@ -29,7 +33,18 @@ This is the single inviolable rule.  Everything else follows from it:
 │  client.access() at UserFacing      │
 │  run_inner() → LLM → tools → ...   │
 │         │                           │
-│    DreamRunner.fire(event)          │
+│    dream_handle.fire(event, ...)    │
+│    (channel send — returns          │
+│     immediately)                    │
+└─────────┼───────────────────────────┘
+          │  mpsc channel
+          ▼
+┌─────────────────────────────────────┐
+│    Dream Thread (persistent)        │
+│  "dyson-dreams" std::thread         │
+│  loops on rx.recv()                 │
+│  summarize_for_reflection()         │
+│  DreamRunner.fire(event, ...)       │
 │         │                           │
 └─────────┼───────────────────────────┘
           │  tokio::spawn (fire-and-forget)
@@ -129,9 +144,23 @@ pub trait Dream: Send + Sync {
 }
 ```
 
-### `DreamRunner`
+### `DreamHandle`
 
-Holds `Vec<Arc<dyn Dream>>` and exposes a single method:
+Channel-based handle to the persistent dream thread.  The agent holds
+one of these and calls `fire()` to dispatch events:
+
+```rust
+pub fn fire(&self, event, client, config, tool_context, messages, turn_count)
+```
+
+This sends a `DreamRequest` over an `mpsc` channel and returns
+immediately — the caller is never blocked.  The dream thread receives
+the request, builds the conversation summary, and spawns matching
+dreams via the internal `DreamRunner`.
+
+### `DreamRunner` (internal)
+
+Lives inside the dream thread.  Holds `Vec<Arc<dyn Dream>>` and exposes:
 
 ```rust
 pub fn fire(&self, event: &DreamEvent, ctx_factory: impl Fn() -> DreamContext)
@@ -139,7 +168,7 @@ pub fn fire(&self, event: &DreamEvent, ctx_factory: impl Fn() -> DreamContext)
 
 For each registered dream whose trigger matches the event, it calls
 `ctx_factory()` to build a context and `tokio::spawn`s `dream.run(ctx)`.
-Returns immediately — the caller is never blocked.
+Not directly accessible from the agent — only used by the dream thread.
 
 ## Built-in Dreams
 
@@ -212,41 +241,48 @@ impl Dream for MyDream {
 }
 ```
 
-Register it in `Agent::new()`:
+Register it in `Agent::new()` by adding it to the dreams vector:
 
 ```rust
-dream_runner.add(Arc::new(MyDream));
+dreams.push(Arc::new(MyDream));
 ```
 
 ## Non-blocking Guarantee
 
 The non-blocking guarantee is enforced at multiple levels:
 
-1. **`DreamRunner.fire()`** — spawns tasks and returns immediately.
-2. **Owned context** — `DreamContext` is fully cloned/owned.  No borrows
+1. **`DreamHandle.fire()`** — sends over an `mpsc` channel and returns
+   immediately.  The only cost on the main thread is cloning the message
+   vector (memcpy + Arc bumps).
+2. **Persistent dream thread** — conversation summarisation
+   (`summarize_for_reflection`) and dream spawning happen on the dedicated
+   `dyson-dreams` thread, never on the main loop.
+3. **Owned context** — `DreamContext` is fully cloned/owned.  No borrows
    from the agent survive into the spawned task.
-3. **Shared LLM client via `Arc`** — dreams access the same client through
+4. **Shared LLM client via `Arc`** — dreams access the same client through
    a `RateLimitedHandle`, which holds `Arc<Box<dyn LlmClient>>`.  No
    separate connections, no rate-limiter bypass.
-4. **Priority-aware rate limiting** — dreams operate at `Background`
+5. **Priority-aware rate limiting** — dreams operate at `Background`
    priority (66% capacity).  If the window is full, they stop early
    rather than competing with the user-facing loop.
-5. **`Arc<RwLock<Workspace>>`** — the only other shared state.  Workspace
+6. **`Arc<RwLock<Workspace>>`** — the only other shared state.  Workspace
    reads/writes are fast (file I/O, SQLite FTS5) and non-blocking in
    practice.  Even if a dream holds the write lock briefly, the agent
    loop only takes the read lock for workspace system prompt injection.
-6. **`SilentOutput`** — dreams never write to the user's output stream.
+7. **`SilentOutput`** — dreams never write to the user's output stream.
 
 If a dream panics, the `tokio::spawn` task unwinds independently — the
-agent loop is unaffected.
+agent loop is unaffected.  If the dream thread itself panics, the
+`DreamHandle` channel disconnects and subsequent `fire()` calls log a
+warning and move on — the agent continues without dreams.
 
 ## File Map
 
 | File                          | Contents                                    |
 |-------------------------------|---------------------------------------------|
-| `src/agent/dream.rs`         | `Dream` trait, `DreamRunner`, trigger types  |
+| `src/agent/dream.rs`         | `Dream` trait, `DreamHandle`, `DreamRunner`, trigger types |
 | `src/agent/reflection.rs`    | Built-in dream implementations               |
 | `src/agent/rate_limiter.rs`  | `Priority`, `RateLimited`, `RateLimitedHandle` |
 | `src/agent/silent_output.rs` | `SilentOutput` — no-op output for dreams     |
-| `src/agent/mod.rs`           | `fire_dreams()` helper, `DreamRunner` field  |
+| `src/agent/mod.rs`           | `fire_dreams()` helper, `DreamHandle` field  |
 | `docs/dreaming.md`           | This document                                |
