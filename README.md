@@ -43,6 +43,10 @@ Sandbox prerequisites:
 
 Dyson refuses to start without the OS sandbox binary unless `--dangerous-no-sandbox` is passed.
 
+## Footprint
+
+Dyson compiles to a **7.1 MB** static binary with ~30 direct dependencies. At idle it sits at **~15.8 MB RSS / ~14 MB PSS** — half of what it was before removing teloxide and reqwest. The entire dependency tree is small enough to audit by hand, which is the point: fewer crates means less surface area for supply-chain attacks, and a codebase small enough that one person can understand every line.
+
 ## Architecture
 
 ```
@@ -185,7 +189,7 @@ docs/                  Component documentation
 cargo test
 ```
 
-500+ tests covering the full stack — SSE parsing, sandbox decisions, config loading, workspace persistence, and the agent loop with mock LLM clients.
+700+ tests covering the full stack — SSE parsing, sandbox decisions, config loading, workspace persistence, and the agent loop with mock LLM clients.
 
 ## Inspired by
 
