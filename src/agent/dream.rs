@@ -43,9 +43,11 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 use crate::llm::{CompletionConfig, LlmClient};
+use crate::message::Message;
 use crate::tool::ToolContext;
 
 use super::rate_limiter::RateLimitedHandle;
+use super::reflection;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -239,6 +241,104 @@ fn should_activate(trigger: DreamTrigger, event: &DreamEvent) -> bool {
         (DreamTrigger::AfterCompaction, DreamEvent::Compaction) => true,
         (DreamTrigger::OnSessionEnd, DreamEvent::SessionEnd) => true,
         _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DreamHandle — channel-based handle to a persistent dream thread
+// ---------------------------------------------------------------------------
+
+/// Payload sent from the main loop to the dream thread.
+struct DreamRequest {
+    event: DreamEvent,
+    client: RateLimitedHandle<Box<dyn LlmClient>>,
+    config: CompletionConfig,
+    tool_context: ToolContext,
+    messages: Vec<Message>,
+    turn_count: usize,
+}
+
+/// Channel-based handle to the persistent dream thread.
+///
+/// The main loop calls [`fire()`](Self::fire) which sends a request over
+/// the channel and returns immediately.  The dream thread does all the
+/// heavy lifting — summarising the conversation and spawning dream tasks —
+/// so the main loop never pays that cost.
+pub struct DreamHandle {
+    tx: std::sync::mpsc::Sender<DreamRequest>,
+    // Held so the thread lives as long as the handle.
+    _thread: std::thread::JoinHandle<()>,
+}
+
+impl DreamHandle {
+    /// Spawn the persistent dream thread.
+    ///
+    /// If called from within a tokio runtime the thread will use that
+    /// runtime for spawning dream tasks.  If no runtime is available
+    /// (e.g. in unit tests) the thread still starts but dreams that
+    /// need `tokio::spawn` will be silently skipped.
+    pub fn new(dreams: Vec<Arc<dyn Dream>>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<DreamRequest>();
+        let tokio_handle = tokio::runtime::Handle::try_current().ok();
+
+        let thread = std::thread::Builder::new()
+            .name("dyson-dreams".into())
+            .spawn(move || {
+                // Enter the tokio runtime so tokio::spawn works inside
+                // DreamRunner.fire().  If there's no runtime (unit tests)
+                // we still process requests — dreams just won't spawn.
+                let _guard = tokio_handle.as_ref().map(|h| h.enter());
+
+                let mut runner = DreamRunner::new();
+                for dream in dreams {
+                    runner.add(dream);
+                }
+
+                while let Ok(req) = rx.recv() {
+                    let summary = reflection::summarize_for_reflection(&req.messages);
+                    runner.fire(&req.event, || DreamContext {
+                        client: req.client.clone(),
+                        config: req.config.clone(),
+                        tool_context: req.tool_context.clone(),
+                        conversation_summary: summary.clone(),
+                        turn_count: req.turn_count,
+                    });
+                }
+
+                tracing::debug!("dream thread shutting down");
+            })
+            .expect("failed to spawn dream thread");
+
+        Self {
+            tx,
+            _thread: thread,
+        }
+    }
+
+    /// Send a dream event to the background thread.
+    ///
+    /// Returns immediately.  If the dream thread has shut down the request
+    /// is silently dropped (this can only happen during process teardown).
+    pub fn fire(
+        &self,
+        event: DreamEvent,
+        client: RateLimitedHandle<Box<dyn LlmClient>>,
+        config: CompletionConfig,
+        tool_context: ToolContext,
+        messages: Vec<Message>,
+        turn_count: usize,
+    ) {
+        let req = DreamRequest {
+            event,
+            client,
+            config,
+            tool_context,
+            messages,
+            turn_count,
+        };
+        if self.tx.send(req).is_err() {
+            tracing::warn!("dream thread disconnected, dropping request");
+        }
     }
 }
 

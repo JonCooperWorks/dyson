@@ -98,7 +98,7 @@ use crate::skill::Skill;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 use self::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
-use self::dream::{DreamContext, DreamEvent, DreamRunner};
+use self::dream::{DreamEvent, DreamHandle};
 use self::result_formatter::ResultFormatter;
 use self::tool_limiter::ToolLimiter;
 
@@ -187,10 +187,11 @@ pub struct Agent {
     /// once in `new()` and reused in `estimate_context_tokens()`.
     cached_tool_tokens: usize,
 
-    /// Dream runner — fires background cognitive tasks (memory maintenance,
-    /// learning synthesis, self-improvement) on trigger events without
-    /// blocking the controller loop.  See `dream.rs` and `docs/dreaming.md`.
-    dream_runner: DreamRunner,
+    /// Handle to the persistent dream thread — fires background cognitive
+    /// tasks (memory maintenance, learning synthesis, self-improvement)
+    /// on trigger events without blocking the controller loop.
+    /// See `dream.rs` and `docs/dreaming.md`.
+    dream_handle: DreamHandle,
 }
 
 impl Agent {
@@ -318,32 +319,33 @@ impl Agent {
             None => rate_limiter::RateLimited::unlimited(client),
         };
 
-        // -- Build the dream runner with default dreams --
+        // -- Build the persistent dream thread --
         //
         // Dreams are autonomous background tasks (memory consolidation,
-        // self-improvement) that fire on trigger events without blocking
-        // the controller loop.  See dream.rs and docs/dreaming.md.
-        let mut dream_runner = DreamRunner::new();
+        // self-improvement) that fire on trigger events.  They run on a
+        // dedicated thread so they never block the controller loop.
+        // See dream.rs and docs/dreaming.md.
+        let mut dreams: Vec<Arc<dyn dream::Dream>> = Vec::new();
 
         if tool_context.workspace.is_some() {
             // Learning synthesis: merge conversation learnings into MEMORY.md
             // after context compaction.
-            dream_runner.add(Arc::new(
-                reflection::LearningSynthesisDream,
-            ));
+            dreams.push(Arc::new(reflection::LearningSynthesisDream));
 
             if nudge_interval > 0 {
                 // Memory maintenance: update MEMORY.md / USER.md every N turns.
-                dream_runner.add(Arc::new(
+                dreams.push(Arc::new(
                     reflection::MemoryMaintenanceDream::new(nudge_interval),
                 ));
 
                 // Self-improvement: create skills / export data every 2N turns.
-                dream_runner.add(Arc::new(
+                dreams.push(Arc::new(
                     reflection::SelfImprovementDream::new(nudge_interval),
                 ));
             }
         }
+
+        let dream_handle = DreamHandle::new(dreams);
 
         Ok(Self {
             client,
@@ -365,7 +367,7 @@ impl Agent {
             formatter: ResultFormatter::default(),
             cached_tool_tokens,
             tools_disabled: false,
-            dream_runner,
+            dream_handle,
         })
     }
 
@@ -385,27 +387,23 @@ impl Agent {
         self.tool_context.depth = depth;
     }
 
-    /// Fire all dreams whose triggers match the given event.
+    /// Send a dream event to the persistent dream thread.
     ///
-    /// This never blocks — dreams are spawned as background tasks.
+    /// This never blocks — the event is sent over a channel and the dream
+    /// thread handles summarisation and spawning.
     fn fire_dreams(&self, event: DreamEvent) {
         if self.messages.is_empty() || self.tool_context.workspace.is_none() {
             return;
         }
 
-        let client_handle = self.client.handle(rate_limiter::Priority::Background);
-        let config = self.config.clone();
-        let tool_context = self.tool_context.clone();
-        let summary = reflection::summarize_for_reflection(&self.messages);
-        let turn_count = self.turn_count;
-
-        self.dream_runner.fire(&event, || DreamContext {
-            client: client_handle.clone(),
-            config: config.clone(),
-            tool_context: tool_context.clone(),
-            conversation_summary: summary.clone(),
-            turn_count,
-        });
+        self.dream_handle.fire(
+            event,
+            self.client.handle(rate_limiter::Priority::Background),
+            self.config.clone(),
+            self.tool_context.clone(),
+            self.messages.clone(),
+            self.turn_count,
+        );
     }
 
     /// Clear conversation history, firing session-end dreams in the background.

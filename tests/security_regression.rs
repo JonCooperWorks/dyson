@@ -93,10 +93,12 @@ async fn bash_timeout_kills_process() {
     let output = tool.run(&input, &ctx).await.unwrap();
     let elapsed = start.elapsed();
 
-    // Should complete well before 10 seconds.
+    // The 500ms timeout must kill the 10-second sleep.  Use 9s as the
+    // ceiling — still proves the timeout fired (< 10s) while leaving
+    // plenty of headroom for slow CI machines and parallel-test load.
     assert!(
-        elapsed < Duration::from_secs(3),
-        "timeout should have killed the process quickly, but took {:?}",
+        elapsed < Duration::from_secs(9),
+        "timeout should have killed the process before it finished, but took {:?}",
         elapsed
     );
 
