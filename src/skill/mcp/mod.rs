@@ -136,7 +136,19 @@ impl McpSkill {
                 .ok_or_else(|| {
                     DysonError::oauth(server_name, "no client_id and no registration endpoint")
                 })?;
-            oauth::register_client(reg_url, &format!("dyson-{server_name}"), &http_client).await?
+            let dcr = oauth::register_client(
+                reg_url,
+                &oauth::DcrRequest {
+                    client_name: format!("dyson-{server_name}"),
+                    redirect_uris: vec![],
+                    grant_types: vec!["authorization_code".into(), "refresh_token".into()],
+                    response_types: vec!["code".into()],
+                    token_endpoint_auth_method: Some("none".into()),
+                },
+                &http_client,
+            )
+            .await?;
+            (dcr.client_id, dcr.client_secret)
         };
 
         let pkce = oauth::generate_pkce();

@@ -49,6 +49,26 @@ pub struct AuthMetadata {
     pub registration_endpoint: Option<String>,
 }
 
+/// Dynamic Client Registration request (RFC 7591).
+#[derive(Debug, Clone, Serialize)]
+pub struct DcrRequest {
+    pub client_name: String,
+    pub redirect_uris: Vec<String>,
+    pub grant_types: Vec<String>,
+    #[serde(default)]
+    pub response_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_endpoint_auth_method: Option<String>,
+}
+
+/// Dynamic Client Registration response (RFC 7591).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DcrResponse {
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: Option<String>,
+}
+
 /// Token endpoint response (RFC 6749 Section 5.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
@@ -101,24 +121,14 @@ pub async fn discover_metadata(
 }
 
 /// Register a client via Dynamic Client Registration (RFC 7591).
-///
-/// Returns `(client_id, client_secret)`.
 pub async fn register_client(
     registration_url: &str,
-    client_name: &str,
+    request: &DcrRequest,
     client: &reqwest::Client,
-) -> Result<(String, Option<String>)> {
-    let body = serde_json::json!({
-        "client_name": client_name,
-        "redirect_uris": [],
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "token_endpoint_auth_method": "none",
-    });
-
+) -> Result<DcrResponse> {
     let response = client
         .post(registration_url)
-        .json(&body)
+        .json(request)
         .send()
         .await
         .map_err(|e| DysonError::oauth("dcr", format!("registration failed: {e}")))?;
@@ -132,18 +142,10 @@ pub async fn register_client(
         ));
     }
 
-    let json: serde_json::Value = response
+    response
         .json()
         .await
-        .map_err(|e| DysonError::oauth("dcr", format!("failed to parse DCR response: {e}")))?;
-
-    let client_id = json["client_id"]
-        .as_str()
-        .ok_or_else(|| DysonError::oauth("dcr", "DCR response missing client_id"))?
-        .to_string();
-    let client_secret = json["client_secret"].as_str().map(|s| s.to_string());
-
-    Ok((client_id, client_secret))
+        .map_err(|e| DysonError::oauth("dcr", format!("failed to parse DCR response: {e}")))
 }
 
 /// Generate PKCE code_verifier (32 random bytes, base64url) + S256 code_challenge.
