@@ -33,7 +33,7 @@
 //   When an HTTP MCP server has `auth: { "type": "oauth", ... }` in config,
 //   on_load() checks for persisted tokens:
 //
-//   1. Tokens exist → create OAuthAuth, proceed with MCP handshake immediately
+//   1. Tokens exist → create OAuth, proceed with MCP handshake immediately
 //   2. No tokens → start callback server as background task, return Ok(())
 //      with zero tools and a system prompt containing the auth URL.
 //      The background task waits for the callback, exchanges the code,
@@ -211,7 +211,7 @@ impl McpSkill {
         if let Some(cred) = oauth::load_tokens(server_name).await? {
             if cred.refresh_token.is_some() || !cred.is_expired() {
                 tracing::info!(server = server_name, "using persisted OAuth tokens");
-                return Ok(Some(Box::new(oauth::OAuthAuth::new(cred))));
+                return Ok(Some(Box::new(oauth::OAuth::new(cred))));
             }
             tracing::warn!(server = server_name, "persisted tokens expired with no refresh token");
         }

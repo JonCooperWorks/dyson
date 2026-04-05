@@ -413,7 +413,7 @@ impl McpTransport for HttpTransport {
         //
         // Handles OAuth token rejection (clock skew, server-side revocation)
         // when the token hasn't expired locally.  on_unauthorized() gives
-        // OAuthAuth a chance to force-refresh before we retry.
+        // OAuth a chance to force-refresh before we retry.
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             tracing::debug!(server = %self.url, "received 401 — attempting credential refresh");
 
