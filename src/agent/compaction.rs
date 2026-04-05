@@ -48,6 +48,21 @@ impl super::Agent {
             return Ok(());
         }
 
+        // Rotate pre-compaction snapshot for fine-tuning preservation.
+        //
+        // When a chat history backend is attached, save the current verbatim
+        // conversation to a timestamped archive before we summarise it away.
+        // This ensures the full conversation is always recoverable.
+        if let (Some(store), Some(chat_id)) = (&self.chat_history, &self.chat_id) {
+            if let Err(e) = store.save(chat_id, &self.messages) {
+                tracing::warn!(error = %e, "failed to save pre-compaction snapshot");
+            } else if let Err(e) = store.rotate(chat_id) {
+                tracing::warn!(error = %e, "failed to rotate pre-compaction snapshot");
+            } else {
+                tracing::info!(chat_id = chat_id, "pre-compaction history rotated");
+            }
+        }
+
         // Fire compaction-triggered dreams (learning synthesis) in the
         // background.  This doesn't block — compaction proceeds immediately
         // while dreams run in parallel.

@@ -289,6 +289,7 @@ impl super::Controller for TelegramController {
                     &agents,
                     &current_settings,
                     controller_prompt.as_deref(),
+                    &chat_store,
                 )
                 .await;
             }
@@ -351,6 +352,7 @@ impl super::Controller for TelegramController {
                             &current_settings,
                             controller_prompt.as_deref(),
                             config_path.as_deref(),
+                            &chat_store,
                         )
                         .await;
                     }
@@ -406,7 +408,7 @@ impl super::Controller for TelegramController {
                         chat_id.0,
                         &current_settings,
                         controller_prompt.as_deref(),
-                        &*chat_store,
+                        &chat_store,
                     )
                     .await
                     {
@@ -437,7 +439,7 @@ impl super::Controller for TelegramController {
                     chat_id.0,
                     &current_settings,
                     controller_prompt.as_deref(),
-                    &*chat_store,
+                    &chat_store,
                 )
                 .await
                 {
@@ -473,6 +475,7 @@ async fn rebuild_agents_on_reload(
     agents: &tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>,
     settings: &Settings,
     controller_prompt: Option<&str>,
+    chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
 ) {
     let mut agents_map = agents.write().await;
     let old_agents: Vec<(i64, Arc<ChatEntry>)> = agents_map.drain().collect();
@@ -492,7 +495,11 @@ async fn rebuild_agents_on_reload(
         )
         .await
         {
-            Ok(new_agent) => {
+            Ok(mut new_agent) => {
+                new_agent.set_chat_history(
+                    Arc::clone(chat_store),
+                    chat_id.to_string(),
+                );
                 let sys_prompt = new_agent.system_prompt().to_string();
                 let cfg = new_agent.config().clone();
                 agents_map.insert(
@@ -533,6 +540,7 @@ async fn handle_callback_query(
     settings: &Settings,
     controller_prompt: Option<&str>,
     config_path: Option<&std::path::Path>,
+    chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
 ) {
     let Some(rest) = cb_data.strip_prefix("model:") else {
         return;
@@ -560,7 +568,11 @@ async fn handle_callback_query(
     )
     .await
     {
-        Ok(new_agent) => {
+        Ok(mut new_agent) => {
+            new_agent.set_chat_history(
+                Arc::clone(chat_store),
+                chat_id.0.to_string(),
+            );
             let pc = &settings.providers[provider];
             let reply = format!(
                 "Switched to '{}' — {:?} ({})",
@@ -881,7 +893,7 @@ async fn get_or_create_entry(
     chat_id: i64,
     settings: &Settings,
     controller_prompt: Option<&str>,
-    chat_store: &dyn crate::chat_history::ChatHistory,
+    chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
 ) -> crate::Result<Arc<ChatEntry>> {
     // Fast path: entry already exists.
     {
@@ -896,6 +908,10 @@ async fn get_or_create_entry(
         crate::controller::build_agent(settings, controller_prompt).await?;
 
     let chat_key = chat_id.to_string();
+
+    // Attach chat history so compaction can rotate pre-compaction snapshots.
+    agent.set_chat_history(Arc::clone(chat_store), chat_key.clone());
+
     let mut restored_messages = Vec::new();
     if let Ok(messages) = chat_store.load(&chat_key)
         && !messages.is_empty()
