@@ -914,6 +914,7 @@ mod tests {
             cancellation: tokio_util::sync::CancellationToken::new(),
             workspace: None,
             depth: MAX_SUBAGENT_DEPTH,
+            dangerous_no_sandbox: false,
         };
 
         let input = serde_json::json!({"task": "should fail"});

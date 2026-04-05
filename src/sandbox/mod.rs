@@ -139,6 +139,14 @@ pub trait Sandbox: Send + Sync {
         ctx: &ToolContext,
     ) -> Result<SandboxDecision>;
 
+    /// Whether tools should skip working-directory path validation.
+    ///
+    /// Returns `true` only for `DangerousNoSandbox`.  Tools like `send_file`
+    /// use this to allow access to paths outside the working directory.
+    fn skip_path_validation(&self) -> bool {
+        false
+    }
+
     /// Post-process a tool's output after execution.
     ///
     /// Called only when the tool returned `Ok(ToolOutput)` (not on

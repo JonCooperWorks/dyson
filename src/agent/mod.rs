@@ -307,6 +307,7 @@ impl Agent {
             cancellation: CancellationToken::new(),
             workspace: None,
             depth: 0,
+            dangerous_no_sandbox: sandbox.skip_path_validation(),
         };
         tool_context.workspace = workspace;
 
@@ -1417,6 +1418,7 @@ mod tests {
             cancellation: CancellationToken::new(),
             workspace: Some(std::sync::Arc::new(tokio::sync::RwLock::new(workspace))),
             depth: 0,
+            dangerous_no_sandbox: false,
         };
 
         let prompt = reflection::build_memory_system_prompt(&ctx).await;
@@ -1436,6 +1438,7 @@ mod tests {
             cancellation: CancellationToken::new(),
             workspace: None,
             depth: 0,
+            dangerous_no_sandbox: false,
         };
         let prompt = reflection::build_reflection_system_prompt(&ctx).await;
         assert!(prompt.contains("skill_create"));

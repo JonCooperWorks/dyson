@@ -218,6 +218,12 @@ pub struct ToolContext {
     /// Flows through `ToolContext` (not `AgentSettings`) because depth is
     /// runtime state, not configuration — you don't set it in dyson.json.
     pub depth: u8,
+
+    /// When true, tools skip working-directory path validation.
+    ///
+    /// Set from `--dangerous-no-sandbox` on the CLI.  Allows tools like
+    /// `send_file` to access paths outside the working directory.
+    pub dangerous_no_sandbox: bool,
 }
 
 impl Clone for ToolContext {
@@ -228,6 +234,7 @@ impl Clone for ToolContext {
             cancellation: self.cancellation.clone(),
             workspace: self.workspace.as_ref().map(Arc::clone),
             depth: self.depth,
+            dangerous_no_sandbox: self.dangerous_no_sandbox,
         }
     }
 }
@@ -244,6 +251,7 @@ impl ToolContext {
             cancellation: CancellationToken::new(),
             workspace: None,
             depth: 0,
+            dangerous_no_sandbox: false,
         })
     }
 
@@ -259,6 +267,7 @@ impl ToolContext {
             cancellation: CancellationToken::new(),
             workspace: None,
             depth: 0,
+            dangerous_no_sandbox: false,
         }
     }
 }
