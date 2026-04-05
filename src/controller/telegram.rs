@@ -22,11 +22,23 @@
 //     ├── teloxide polling loop:
 //     │     ├── receive Message from Telegram
 //     │     ├── check allowed_chat_ids (access control)
-//     │     ├── create Agent + TelegramOutput for this message
-//     │     └── agent.run(text, &mut output)
-//     │           ├── output.text_delta("Hello") → edit message
-//     │           └── output.flush()             → final edit
+//     │     ├── lock-free commands (/models, /logs) → respond instantly
+//     │     ├── per-chat commands (/clear, /model) → per-chat lock
+//     │     └── agent messages → spawn background task:
+//     │           ├── if agent busy → quick_response (no tools, fast)
+//     │           └── if agent free → agent.run(text, &mut output)
+//     │                 ├── output.text_delta("Hello") → edit message
+//     │                 └── output.flush()             → final edit
 //     └── runs until shutdown
+//
+// Concurrency model:
+//   Each chat has its own ChatEntry with an independent Mutex.  The map
+//   of entries uses RwLock — lookups take a read lock (non-blocking),
+//   insertions take a write lock (brief).  This means:
+//   - Different chats never block each other.
+//   - Commands like /models that don't need the agent respond instantly.
+//   - When a chat's agent is busy, new messages get quick responses
+//     (single LLM call, no tools) instead of blocking.
 //
 // The block_on problem:
 //   The `Output` trait is sync (for terminal compatibility), but teloxide
@@ -67,6 +79,27 @@ struct ChatAgent {
     agent: crate::agent::Agent,
     provider_name: String,
     model: String,
+}
+
+/// Per-chat entry with its own lock and quick-response state.
+///
+/// This replaces the old global `Mutex<HashMap<i64, ChatAgent>>` design.
+/// Each chat gets its own mutex so that:
+/// 1. Different chats never block each other.
+/// 2. When a chat's agent is locked, new messages get a quick response
+///    (single LLM call, no tools) via `try_lock()` instead of blocking.
+struct ChatEntry {
+    /// The agent, behind its own mutex (locked only during agent.run()).
+    /// `try_lock()` is the gate: if it fails, the agent is busy and we
+    /// fall back to a quick response.
+    agent: Mutex<ChatAgent>,
+    /// Snapshot of conversation messages, updated before each agent run.
+    /// Quick response reads this when the agent is busy.
+    messages_snapshot: tokio::sync::RwLock<Vec<crate::message::Message>>,
+    /// System prompt for quick response context.
+    system_prompt: tokio::sync::RwLock<String>,
+    /// Completion config for quick response LLM calls.
+    config: tokio::sync::RwLock<crate::llm::CompletionConfig>,
 }
 
 /// Minimum interval between message edits (milliseconds).
@@ -237,7 +270,13 @@ impl super::Controller for TelegramController {
         // Each chat gets its own agent that remembers previous messages.
         // /clear resets a chat's agent and deletes persisted history.
         // ChatAgent tracks the active provider/model for within-provider switching.
-        let agents: Arc<Mutex<HashMap<i64, ChatAgent>>> = Arc::new(Mutex::new(HashMap::new()));
+        //
+        // Uses RwLock<HashMap<..., Arc<ChatEntry>>> so:
+        // 1. Map lookups only need a read lock (fast, non-blocking).
+        // 2. Each chat has its own mutex — different chats never block each other.
+        // 3. Quick responses can fire when a chat's agent is busy.
+        let agents: Arc<tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>> =
+            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
         // Chat store — persists conversation history via the configured
         // backend.  Uses the ChatHistory trait so the backend can be
@@ -262,33 +301,41 @@ impl super::Controller for TelegramController {
                 }
                 // Rebuild agents so they pick up new config, preserving each
                 // chat's provider/model selection and conversation history.
-                let mut agents_map = agents.lock().await;
-                let old_agents: Vec<(i64, String, String, Vec<crate::message::Message>)> =
-                    agents_map
-                        .drain()
-                        .map(|(id, ca)| {
-                            let msgs = ca.agent.messages().to_vec();
-                            (id, ca.provider_name, ca.model, msgs)
-                        })
-                        .collect();
-                for (chat_id, provider_name, model, messages) in old_agents {
+                let mut agents_map = agents.write().await;
+                let old_agents: Vec<(i64, Arc<ChatEntry>)> =
+                    agents_map.drain().collect();
+                for (chat_id, entry) in old_agents {
+                    // Lock the per-chat agent to extract its state.
+                    let ca = entry.agent.lock().await;
+                    let provider_name = ca.provider_name.clone();
+                    let model = ca.model.clone();
+                    let messages = ca.agent.messages().to_vec();
+                    drop(ca);
+
                     match super::build_agent_with_provider(
                         &current_settings,
                         &provider_name,
                         Some(&model),
                         controller_prompt.as_deref(),
-                        messages,
+                        messages.clone(),
                     )
                     .await
                     {
                         Ok(new_agent) => {
+                            let sys_prompt = new_agent.system_prompt().to_string();
+                            let cfg = new_agent.config().clone();
                             agents_map.insert(
                                 chat_id,
-                                ChatAgent {
-                                    agent: new_agent,
-                                    provider_name,
-                                    model,
-                                },
+                                Arc::new(ChatEntry {
+                                    agent: Mutex::new(ChatAgent {
+                                        agent: new_agent,
+                                        provider_name,
+                                        model,
+                                    }),
+                                    messages_snapshot: tokio::sync::RwLock::new(messages),
+                                    system_prompt: tokio::sync::RwLock::new(sys_prompt),
+                                    config: tokio::sync::RwLock::new(cfg),
+                                }),
                             );
                         }
                         Err(e) => {
@@ -371,18 +418,20 @@ impl super::Controller for TelegramController {
                             && let Some((provider, model)) = rest.split_once(':')
                         {
                             let existing_messages = {
-                                let agents_map = agents.lock().await;
-                                agents_map
-                                    .get(&chat_id.0)
-                                    .map(|ca| ca.agent.messages().to_vec())
-                                    .unwrap_or_default()
+                                let agents_map = agents.read().await;
+                                if let Some(entry) = agents_map.get(&chat_id.0) {
+                                    let ca = entry.agent.lock().await;
+                                    ca.agent.messages().to_vec()
+                                } else {
+                                    Vec::new()
+                                }
                             };
                             match super::build_agent_with_provider(
                                 &current_settings,
                                 provider,
                                 Some(model),
                                 controller_prompt.as_deref(),
-                                existing_messages,
+                                existing_messages.clone(),
                             )
                             .await
                             {
@@ -392,13 +441,20 @@ impl super::Controller for TelegramController {
                                         "Switched to '{}' — {:?} ({})",
                                         provider, pc.provider_type, model,
                                     );
-                                    agents.lock().await.insert(
+                                    let sys_prompt = new_agent.system_prompt().to_string();
+                                    let cfg = new_agent.config().clone();
+                                    agents.write().await.insert(
                                         chat_id.0,
-                                        ChatAgent {
-                                            agent: new_agent,
-                                            provider_name: provider.to_string(),
-                                            model: model.to_string(),
-                                        },
+                                        Arc::new(ChatEntry {
+                                            agent: Mutex::new(ChatAgent {
+                                                agent: new_agent,
+                                                provider_name: provider.to_string(),
+                                                model: model.to_string(),
+                                            }),
+                                            messages_snapshot: tokio::sync::RwLock::new(existing_messages),
+                                            system_prompt: tokio::sync::RwLock::new(sys_prompt),
+                                            config: tokio::sync::RwLock::new(cfg),
+                                        }),
                                     );
                                     if let Some(ref cp) = config_path {
                                         crate::config::loader::persist_model_selection(
@@ -519,144 +575,161 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                // -- Shared commands --
+                // -- Lock-free commands --
                 //
-                // Lock the per-chat agent (or create one), dispatch through
-                // the shared command layer, then render + add Telegram-specific
-                // side effects in the match arms.
-                {
-                    let mut agents_map = agents.lock().await;
-
-                    // Ensure agent exists for this chat before dispatching.
-                    if !agents_map.contains_key(&chat_id.0)
-                        && (text == "/clear"
-                            || text == "/compact"
-                            || text == "/models"
-                            || text == "/model"
-                            || text.starts_with("/model "))
-                    {
-                        let provider_name =
+                // /models only needs settings, not the agent.  Handle it
+                // directly so it responds instantly even when the agent is
+                // busy processing a message.
+                if text == "/models" {
+                    if current_settings.providers.is_empty() {
+                        let _ = bot
+                            .send_message(chat_id, "No providers configured.")
+                            .await;
+                    } else {
+                        // Build provider list from settings — no agent needed.
+                        let current_provider =
                             super::active_provider_name(&current_settings).unwrap_or_default();
-                        let model = current_settings.agent.model.clone();
-                        match crate::controller::build_agent(
-                            &current_settings,
-                            controller_prompt.as_deref(),
-                        )
-                        .await
-                        {
-                            Ok(agent) => {
-                                agents_map.insert(
-                                    chat_id.0,
-                                    ChatAgent {
-                                        agent,
-                                        provider_name,
-                                        model,
-                                    },
-                                );
-                            }
-                            Err(e) => {
-                                let _ = bot
-                                    .send_message(chat_id, format!("Error: {e}"))
-                                    .await;
-                                continue;
-                            }
-                        }
+                        let current_model = &current_settings.agent.model;
+                        let providers: Vec<super::ProviderInfo> =
+                            super::list_providers(&current_settings)
+                                .into_iter()
+                                .map(|(name, pc)| super::ProviderInfo {
+                                    name: name.to_string(),
+                                    provider_type: format!("{:?}", pc.provider_type),
+                                    models: pc
+                                        .models
+                                        .iter()
+                                        .map(|m| super::ModelInfo {
+                                            name: m.clone(),
+                                            active: name == current_provider.as_str()
+                                                && m == current_model,
+                                        })
+                                        .collect(),
+                                })
+                                .collect();
+                        let keyboard = build_model_keyboard(&providers);
+                        let _ = bot
+                            .send_message(chat_id, "Select a model:")
+                            .reply_markup(keyboard)
+                            .await;
                     }
+                    continue;
+                }
 
-                    if let Some(ca) = agents_map.get_mut(&chat_id.0) {
-                        let mut output = TelegramOutput::new(bot.clone(), chat_id, true);
-                        let result = super::execute_command(
-                            &text,
-                            &mut ca.agent,
-                            &mut output,
-                            &current_settings,
-                            &mut ca.provider_name,
-                            &mut ca.model,
-                            config_path.as_deref(),
-                            controller_prompt.as_deref(),
+                if text == "/model" {
+                    let _ = bot
+                        .send_message(
+                            chat_id,
+                            "Usage: /model <provider> [model]  or  /model <model>",
                         )
                         .await;
+                    continue;
+                }
 
-                        match result {
-                            super::CommandResult::NotHandled => {
-                                // Fall through to agent run below.
-                            }
-                            super::CommandResult::Cleared => {
-                                let _ = chat_store.rotate(&chat_id.0.to_string());
-                                let _ = bot.send_message(chat_id, "Context cleared.").await;
-                                tracing::info!(
-                                    chat_id = chat_id.0,
-                                    "conversation rotated and cleared"
-                                );
-                                continue;
-                            }
-                            super::CommandResult::Compacted => {
-                                let chat_key = chat_id.0.to_string();
-                                let _ = chat_store.save(&chat_key, ca.agent.messages());
-                                let _ = bot.send_message(chat_id, "Context compacted.").await;
-                                tracing::info!(chat_id = chat_id.0, "conversation compacted");
-                                continue;
-                            }
-                            super::CommandResult::CompactError(e) => {
-                                let _ = bot
-                                    .send_message(chat_id, format!("Compaction failed: {e}"))
-                                    .await;
-                                continue;
-                            }
-                            super::CommandResult::ModelList { providers } => {
-                                if providers.is_empty() {
-                                    let _ = bot
-                                        .send_message(chat_id, "No providers configured.")
-                                        .await;
-                                } else {
-                                    let keyboard = build_model_keyboard(&providers);
-                                    let _ = bot
-                                        .send_message(chat_id, "Select a model:")
-                                        .reply_markup(keyboard)
-                                        .await;
-                                }
-                                continue;
-                            }
-                            super::CommandResult::ModelSwitched {
-                                provider_name,
-                                provider_type,
-                                model,
-                            } => {
-                                let _ = bot
-                                    .send_message(
-                                        chat_id,
-                                        format!(
-                                            "Switched to '{provider_name}' — {provider_type} ({model})"
-                                        ),
-                                    )
-                                    .await;
-                                continue;
-                            }
-                            super::CommandResult::ModelSwitchError(e) => {
-                                let _ =
-                                    bot.send_message(chat_id, format!("Switch error: {e}")).await;
-                                continue;
-                            }
-                            super::CommandResult::ModelParseError(e) => {
-                                let _ = bot.send_message(chat_id, e).await;
-                                continue;
-                            }
-                            super::CommandResult::ModelUsage => {
-                                let _ = bot
-                                    .send_message(
-                                        chat_id,
-                                        "Usage: /model <provider> [model]  or  /model <model>",
-                                    )
-                                    .await;
-                                continue;
-                            }
-                            super::CommandResult::Logs(_)
-                            | super::CommandResult::LogsError(_) => {
-                                // Handled before agent lock — should not reach here.
-                                continue;
-                            }
+                // -- Commands that need the per-chat agent --
+                //
+                // These acquire the per-chat lock (not a global lock), so
+                // they only block if THIS chat's agent is busy.
+                if text == "/clear"
+                    || text == "/compact"
+                    || text.starts_with("/model ")
+                {
+                    let entry = get_or_create_entry(
+                        &agents,
+                        chat_id.0,
+                        &current_settings,
+                        controller_prompt.as_deref(),
+                        &*chat_store,
+                    )
+                    .await;
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(e) => {
+                            let _ = bot
+                                .send_message(chat_id, format!("Error: {e}"))
+                                .await;
+                            continue;
                         }
+                    };
+                    let mut ca = entry.agent.lock().await;
+                    let mut output = TelegramOutput::new(bot.clone(), chat_id, true);
+                    let ChatAgent {
+                        ref mut agent,
+                        ref mut provider_name,
+                        ref mut model,
+                    } = *ca;
+                    let result = super::execute_command(
+                        &text,
+                        agent,
+                        &mut output,
+                        &current_settings,
+                        provider_name,
+                        model,
+                        config_path.as_deref(),
+                        controller_prompt.as_deref(),
+                    )
+                    .await;
+
+                    match result {
+                        super::CommandResult::Cleared => {
+                            // Update snapshot.
+                            *entry.messages_snapshot.write().await = Vec::new();
+                            let _ = chat_store.rotate(&chat_id.0.to_string());
+                            let _ = bot.send_message(chat_id, "Context cleared.").await;
+                            tracing::info!(
+                                chat_id = chat_id.0,
+                                "conversation rotated and cleared"
+                            );
+                        }
+                        super::CommandResult::Compacted => {
+                            let chat_key = chat_id.0.to_string();
+                            let msgs = ca.agent.messages().to_vec();
+                            *entry.messages_snapshot.write().await = msgs.clone();
+                            let _ = chat_store.save(&chat_key, &msgs);
+                            let _ = bot.send_message(chat_id, "Context compacted.").await;
+                            tracing::info!(chat_id = chat_id.0, "conversation compacted");
+                        }
+                        super::CommandResult::CompactError(e) => {
+                            let _ = bot
+                                .send_message(chat_id, format!("Compaction failed: {e}"))
+                                .await;
+                        }
+                        super::CommandResult::ModelSwitched {
+                            provider_name,
+                            provider_type,
+                            model,
+                        } => {
+                            // Update quick-response metadata.
+                            *entry.system_prompt.write().await =
+                                ca.agent.system_prompt().to_string();
+                            *entry.config.write().await = ca.agent.config().clone();
+                            let _ = bot
+                                .send_message(
+                                    chat_id,
+                                    format!(
+                                        "Switched to '{provider_name}' — {provider_type} ({model})"
+                                    ),
+                                )
+                                .await;
+                        }
+                        super::CommandResult::ModelSwitchError(e) => {
+                            let _ =
+                                bot.send_message(chat_id, format!("Switch error: {e}")).await;
+                        }
+                        super::CommandResult::ModelParseError(e) => {
+                            let _ = bot.send_message(chat_id, e).await;
+                        }
+                        super::CommandResult::ModelUsage => {
+                            let _ = bot
+                                .send_message(
+                                    chat_id,
+                                    "Usage: /model <provider> [model]  or  /model <model>",
+                                )
+                                .await;
+                        }
+                        _ => {}
                     }
+                    continue;
                 }
 
                 tracing::info!(chat_id = chat_id.0, "telegram message received");
@@ -689,48 +762,86 @@ impl super::Controller for TelegramController {
                         return;
                     }
 
-                    // Get or create the per-chat agent.
-                    let mut agents_map = agents_clone.lock().await;
-                    if let std::collections::hash_map::Entry::Vacant(entry) =
-                        agents_map.entry(chat_id.0)
+                    // Get or create the per-chat entry.
+                    let entry = match get_or_create_entry(
+                        &agents_clone,
+                        chat_id.0,
+                        &settings_clone,
+                        prompt_clone.as_deref(),
+                        &*store_clone,
+                    )
+                    .await
                     {
-                        let provider_name =
-                            super::active_provider_name(&settings_clone).unwrap_or_default();
-                        let model = settings_clone.agent.model.clone();
-                        match crate::controller::build_agent(
-                            &settings_clone,
-                            prompt_clone.as_deref(),
-                        )
-                        .await
-                        {
-                            Ok(mut agent) => {
-                                if let Ok(messages) = store_clone.load(&chat_key)
-                                    && !messages.is_empty()
-                                {
-                                    tracing::info!(
-                                        chat_id = chat_id.0,
-                                        messages = messages.len(),
-                                        "restored chat history"
-                                    );
-                                    agent.set_messages(messages);
-                                }
-                                entry.insert(ChatAgent {
-                                    agent,
-                                    provider_name,
-                                    model,
-                                });
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "failed to create agent");
-                                let _ =
-                                    bot_clone.send_message(chat_id, format!("Error: {e}")).await;
-                                return;
-                            }
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::error!(error = %e, "failed to create agent");
+                            let _ =
+                                bot_clone.send_message(chat_id, format!("Error: {e}")).await;
+                            return;
                         }
-                    }
-                    let ca = agents_map
-                        .get_mut(&chat_id.0)
-                        .expect("agent must exist — just inserted above");
+                    };
+
+                    // -- Try to acquire the per-chat agent lock --
+                    //
+                    // try_lock() is the gate: whoever wins gets the full
+                    // agent.  If the lock is held (agent busy), fall back
+                    // to a quick response (no tools, fast).  This guarantees
+                    // at most one active agent.run() per chat.
+                    let mut ca = match entry.agent.try_lock() {
+                        Ok(guard) => guard,
+                        Err(_) => {
+                            tracing::info!(
+                                chat_id = chat_id.0,
+                                "agent busy — using quick response"
+                            );
+
+                            let messages_snap =
+                                entry.messages_snapshot.read().await.clone();
+                            let sys_prompt =
+                                entry.system_prompt.read().await.clone();
+                            let config = entry.config.read().await.clone();
+
+                            // Create a lightweight LLM client for the quick
+                            // response.  This is cheap — just config + HTTP
+                            // client, no heavy state.
+                            let client = crate::llm::create_client(
+                                &settings_clone.agent,
+                                None,
+                                settings_clone.dangerous_no_sandbox,
+                            );
+
+                            let mut output = TelegramOutput::new(
+                                bot_clone.clone(),
+                                chat_id,
+                                !text.is_empty(),
+                            );
+
+                            let result = crate::agent::quick_response(
+                                client.as_ref(),
+                                &messages_snap,
+                                &sys_prompt,
+                                &text,
+                                &config,
+                                &mut output,
+                            )
+                            .await;
+
+                            if let Err(e) = result {
+                                tracing::error!(
+                                    error = %e,
+                                    "quick response failed"
+                                );
+                                let _ = output.error(&e);
+                            }
+                            return;
+                        }
+                    };
+
+                    // Update the message snapshot before starting so quick
+                    // responses see the latest context if another message
+                    // arrives while we're processing.
+                    *entry.messages_snapshot.write().await =
+                        ca.agent.messages().to_vec();
 
                     let mut output =
                         TelegramOutput::new(bot_clone.clone(), chat_id, !text.is_empty());
@@ -753,18 +864,85 @@ impl super::Controller for TelegramController {
                         let _ = output.error(&e);
                     }
 
-                    // Persist conversation history to disk after each turn.
-                    if let Err(e) = store_clone.save(&chat_key, ca.agent.messages()) {
+                    // Update snapshot + persist after the run.
+                    let msgs = ca.agent.messages().to_vec();
+                    *entry.messages_snapshot.write().await = msgs.clone();
+                    if let Err(e) = store_clone.save(&chat_key, &msgs) {
                         tracing::error!(error = %e, "failed to save chat history");
                     }
 
-                    drop(agents_map);
+                    drop(ca);
                 });
             }
         }
 
         Ok(())
     }
+}
+
+/// Get or create a per-chat entry, restoring persisted history if available.
+///
+/// Takes a read lock on the map first (fast path).  Only upgrades to a write
+/// lock if the entry doesn't exist yet.  This means existing chats never
+/// contend on the map lock — only the first message in a new chat takes the
+/// write lock briefly.
+async fn get_or_create_entry(
+    agents: &tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>,
+    chat_id: i64,
+    settings: &Settings,
+    controller_prompt: Option<&str>,
+    chat_store: &dyn crate::chat_history::ChatHistory,
+) -> crate::Result<Arc<ChatEntry>> {
+    // Fast path: entry already exists.
+    {
+        let map = agents.read().await;
+        if let Some(entry) = map.get(&chat_id) {
+            return Ok(Arc::clone(entry));
+        }
+    }
+
+    // Slow path: create a new agent for this chat.
+    let mut agent =
+        crate::controller::build_agent(settings, controller_prompt).await?;
+
+    let chat_key = chat_id.to_string();
+    let mut restored_messages = Vec::new();
+    if let Ok(messages) = chat_store.load(&chat_key)
+        && !messages.is_empty()
+    {
+        tracing::info!(
+            chat_id,
+            messages = messages.len(),
+            "restored chat history"
+        );
+        agent.set_messages(messages.clone());
+        restored_messages = messages;
+    }
+
+    let provider_name =
+        super::active_provider_name(settings).unwrap_or_default();
+    let model = settings.agent.model.clone();
+    let sys_prompt = agent.system_prompt().to_string();
+    let config = agent.config().clone();
+
+    let entry = Arc::new(ChatEntry {
+        agent: Mutex::new(ChatAgent {
+            agent,
+            provider_name,
+            model,
+        }),
+        messages_snapshot: tokio::sync::RwLock::new(restored_messages),
+        system_prompt: tokio::sync::RwLock::new(sys_prompt),
+        config: tokio::sync::RwLock::new(config),
+    });
+
+    // Insert under write lock.  Another task may have raced us, so use
+    // entry API to avoid overwriting.
+    let mut map = agents.write().await;
+    let entry = Arc::clone(
+        map.entry(chat_id).or_insert_with(|| Arc::clone(&entry)),
+    );
+    Ok(entry)
 }
 
 /// Build an inline keyboard listing all providers and models.
