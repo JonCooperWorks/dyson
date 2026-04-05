@@ -571,7 +571,7 @@ impl Default for WorkspaceConfig {
 ///   "workspace": {
 ///     "memory": {
 ///       "limits": { "MEMORY.md": 2200, "USER.md": 1375 },
-///       "nudge_interval": 5
+///       "nudge_interval": 7
 ///     }
 ///   }
 /// }
@@ -593,7 +593,7 @@ impl Default for MemoryConfig {
         limits.insert("USER.md".into(), 1375);
         Self {
             limits,
-            nudge_interval: 5,
+            nudge_interval: 7,
         }
     }
 }

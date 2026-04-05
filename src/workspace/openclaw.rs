@@ -753,7 +753,7 @@ mod tests {
     #[test]
     fn nudge_interval_returns_default() {
         let (dir, ws) = temp_workspace();
-        assert_eq!(ws.nudge_interval(), 5);
+        assert_eq!(ws.nudge_interval(), 7);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
