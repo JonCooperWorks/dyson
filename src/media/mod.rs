@@ -6,16 +6,18 @@
 // converts them to ContentBlocks that LLM providers can consume:
 //
 //   - Images  →  resize + base64  →  ContentBlock::Image
-//   - Audio   →  Whisper transcription  →  ContentBlock::Text
+//   - Audio   →  Transcriber trait  →  ContentBlock::Text
 //
 // The pipeline is intentionally local-first: images are processed in-process
-// via the `image` crate, and audio transcription shells out to a local
-// Whisper installation.  No media leaves the machine unless a cloud LLM
-// provider is invoked downstream.
+// via the `image` crate, and audio transcription defaults to a local
+// Whisper installation.  The `Transcriber` trait allows plugging in
+// alternative backends (cloud APIs, whisper.cpp, etc.).
 // ===========================================================================
 
 pub mod audio;
 pub mod image;
+
+use std::sync::Arc;
 
 use crate::message::ContentBlock;
 
@@ -37,17 +39,19 @@ pub enum ResolvedMedia {
 
 /// Resolve raw media into ContentBlocks.
 ///
-/// Images are resized and base64-encoded.  Audio is transcribed via local
-/// Whisper.  If an external tool (Whisper) is missing, a descriptive error
-/// message is returned as text rather than failing the request.
-pub async fn resolve(input: MediaInput) -> crate::Result<ResolvedMedia> {
+/// Images are resized and base64-encoded.  Audio is transcribed via the
+/// provided `Transcriber` implementation.
+pub async fn resolve(
+    input: MediaInput,
+    transcriber: &Arc<dyn audio::Transcriber>,
+) -> crate::Result<ResolvedMedia> {
     match input {
         MediaInput::Image { data, .. } => {
             let block = image::process_image(&data)?;
             Ok(ResolvedMedia::Images(vec![block]))
         }
         MediaInput::Audio { data, mime_type } => {
-            let text = audio::transcribe(&data, &mime_type).await?;
+            let text = transcriber.transcribe(&data, &mime_type).await?;
             Ok(ResolvedMedia::Transcription(text))
         }
     }

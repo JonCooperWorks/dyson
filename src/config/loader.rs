@@ -93,8 +93,26 @@ struct JsonRoot {
     /// }
     /// ```
     mcp_servers: Option<serde_json::Value>,
+    /// Audio transcriber configuration.
+    transcriber: Option<JsonTranscriber>,
     /// Web search provider configuration.
     web_search: Option<JsonWebSearch>,
+}
+
+/// The `"transcriber"` object.
+///
+/// ```json
+/// "transcriber": {
+///   "provider": "whisper-cli",
+///   "model": "small"
+/// }
+/// ```
+#[derive(Debug, Deserialize)]
+struct JsonTranscriber {
+    /// Transcriber provider: "whisper-cli" (default).
+    provider: Option<String>,
+    /// Model name/size for the provider.
+    model: Option<String>,
 }
 
 /// The `"web_search"` object.
@@ -530,6 +548,7 @@ fn build_settings(json_root: Option<JsonRoot>, secrets: &SecretRegistry) -> Sett
     parse_sandbox(root.sandbox, &mut settings);
     parse_workspace(root.workspace, secrets, &mut settings);
     parse_chat_history(root.chat_history, secrets, &mut settings);
+    parse_transcriber(root.transcriber, &mut settings);
     parse_web_search(root.web_search, secrets, &mut settings);
     parse_controllers(root.controllers, secrets, &mut settings);
 
@@ -926,6 +945,19 @@ fn parse_chat_history(
     {
         settings.chat_history.connection_string = resolved;
     }
+}
+
+/// Parse transcriber configuration.
+fn parse_transcriber(transcriber: Option<JsonTranscriber>, settings: &mut Settings) {
+    let t = match transcriber {
+        Some(t) => t,
+        None => return,
+    };
+
+    settings.transcriber = Some(crate::config::TranscriberConfig {
+        provider: t.provider.unwrap_or_else(|| "whisper-cli".into()),
+        model: t.model,
+    });
 }
 
 /// Parse web search configuration.
