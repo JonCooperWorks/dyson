@@ -64,6 +64,7 @@ pub mod read_file;
 pub mod search_files;
 pub mod send_file;
 pub mod skill_create;
+pub mod web_fetch;
 pub mod web_search;
 pub mod workspace_search;
 pub mod workspace_update;
