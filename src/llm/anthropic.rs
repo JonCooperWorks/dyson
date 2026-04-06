@@ -166,9 +166,6 @@ pub struct AnthropicClient {
     /// Zeroize is handled by the Auth implementation.
     auth: Box<dyn Auth>,
 
-    /// Base URL for the API (default: "https://api.anthropic.com").
-    ///
-    /// Configurable for testing with mock servers or for proxied setups.
     base_url: String,
 }
 
@@ -176,25 +173,23 @@ impl AnthropicClient {
     /// Create a new Anthropic client with an API key string.
     ///
     /// Convenience constructor — wraps the key in `ApiKeyAuth::anthropic()`.
-    /// `base_url` is optional — pass `None` for the default Anthropic endpoint.
-    pub fn new(api_key: &str, base_url: Option<&str>) -> Self {
-        Self::with_auth(
-            Box::new(crate::auth::ApiKeyAuth::anthropic(api_key.to_string())),
-            base_url,
-        )
+    pub fn new(api_key: &str) -> Self {
+        Self::with_auth(Box::new(crate::auth::ApiKeyAuth::anthropic(
+            api_key.to_string(),
+        )))
     }
 
     /// Create a new Anthropic client with a custom `Auth` implementation.
     ///
     /// ```ignore
     /// let auth = ApiKeyAuth::anthropic(key);
-    /// let client = AnthropicClient::with_auth(Box::new(auth), None);
+    /// let client = AnthropicClient::with_auth(Box::new(auth));
     /// ```
-    pub fn with_auth(auth: Box<dyn Auth>, base_url: Option<&str>) -> Self {
+    pub fn with_auth(auth: Box<dyn Auth>) -> Self {
         Self {
             client: crate::http::client().clone(),
             auth,
-            base_url: base_url.unwrap_or("https://api.anthropic.com").to_string(),
+            base_url: "https://api.anthropic.com".to_string(),
         }
     }
 }

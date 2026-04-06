@@ -39,16 +39,19 @@ pub struct OpenAiCompatClient {
 
 impl OpenAiCompatClient {
     /// Create a new client with an API key string.
-    pub fn new(api_key: &str, base_url: Option<&str>) -> Self {
+    pub fn new(api_key: &str, base_url: &str) -> Self {
         Self {
-            inner: OpenAiClient::new(api_key, base_url),
+            inner: OpenAiClient::with_base_url(
+                Box::new(crate::auth::BearerTokenAuth::new(api_key.to_string())),
+                base_url,
+            ),
         }
     }
 
     /// Create a new client with a custom `Auth` implementation.
-    pub fn with_auth(auth: Box<dyn Auth>, base_url: Option<&str>) -> Self {
+    pub fn with_auth(auth: Box<dyn Auth>, base_url: &str) -> Self {
         Self {
-            inner: OpenAiClient::with_auth(auth, base_url),
+            inner: OpenAiClient::with_base_url(auth, base_url),
         }
     }
 }

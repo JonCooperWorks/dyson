@@ -70,12 +70,8 @@ use crate::message::{ContentBlock, Message, Role};
 
 /// OpenAI Chat Completions API client with SSE streaming.
 ///
-/// Works with any OpenAI-compatible endpoint — just change the base_url:
-/// - OpenAI: `https://api.openai.com` (default)
-/// - Azure OpenAI: `https://<resource>.openai.azure.com/openai/deployments/<model>`
-/// - Ollama: `http://localhost:11434`
-/// - Together: `https://api.together.xyz`
-/// - vLLM: `http://localhost:8000`
+/// Hardcoded to `https://api.openai.com`. For other OpenAI-compatible
+/// endpoints, use [`super::openai_compat::OpenAiCompatClient`].
 pub struct OpenAiClient {
     client: reqwest::Client,
     /// Authentication handler (applies `Authorization: Bearer` header).
@@ -88,22 +84,29 @@ impl OpenAiClient {
     /// Create a new OpenAI client with an API key string.
     ///
     /// Convenience constructor — wraps the key in `BearerTokenAuth`.
-    pub fn new(api_key: &str, base_url: Option<&str>) -> Self {
-        Self::with_auth(
-            Box::new(crate::auth::BearerTokenAuth::new(api_key.to_string())),
-            base_url,
-        )
+    pub fn new(api_key: &str) -> Self {
+        Self::with_auth(Box::new(crate::auth::BearerTokenAuth::new(
+            api_key.to_string(),
+        )))
     }
 
     /// Create a new OpenAI client with a custom `Auth` implementation.
-    pub fn with_auth(auth: Box<dyn Auth>, base_url: Option<&str>) -> Self {
+    pub fn with_auth(auth: Box<dyn Auth>) -> Self {
         Self {
             client: crate::http::client().clone(),
             auth,
-            base_url: base_url
-                .unwrap_or("https://api.openai.com")
-                .trim_end_matches('/')
-                .to_string(),
+            base_url: "https://api.openai.com".to_string(),
+        }
+    }
+
+    /// Create a client pointing at an arbitrary OpenAI-compatible endpoint.
+    ///
+    /// Used internally by [`super::openai_compat::OpenAiCompatClient`].
+    pub(crate) fn with_base_url(auth: Box<dyn Auth>, base_url: &str) -> Self {
+        Self {
+            client: crate::http::client().clone(),
+            auth,
+            base_url: base_url.trim_end_matches('/').to_string(),
         }
     }
 }

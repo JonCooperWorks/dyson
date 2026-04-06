@@ -37,7 +37,7 @@ impl OllamaCloudClient {
         let auth: Box<dyn Auth> = Box::new(BearerTokenAuth::new(api_key.to_string()));
 
         Self {
-            inner: OpenAiCompatClient::with_auth(auth, Some(DEFAULT_BASE_URL)),
+            inner: OpenAiCompatClient::with_auth(auth, DEFAULT_BASE_URL),
         }
     }
 }

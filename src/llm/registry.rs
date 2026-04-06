@@ -181,7 +181,7 @@ pub fn registry() -> &'static [ProviderEntry] {
                 default_model: "claude-sonnet-4-20250514",
                 env_var: Some("ANTHROPIC_API_KEY"),
                 requires_api_key: true,
-                create_client: |c| Box::new(anthropic::AnthropicClient::new(c.api_key, c.base_url)),
+                create_client: |c| Box::new(anthropic::AnthropicClient::new(c.api_key)),
             },
             ProviderEntry {
                 provider: LlmProvider::OpenAi,
@@ -193,9 +193,9 @@ pub fn registry() -> &'static [ProviderEntry] {
                 create_client: |c| {
                     match c.base_url {
                         Some(url) if !url.starts_with("https://api.openai.com") => {
-                            Box::new(openai_compat::OpenAiCompatClient::new(c.api_key, Some(url)))
+                            Box::new(openai_compat::OpenAiCompatClient::new(c.api_key, url))
                         }
-                        _ => Box::new(openai::OpenAiClient::new(c.api_key, c.base_url)),
+                        _ => Box::new(openai::OpenAiClient::new(c.api_key)),
                     }
                 },
             },

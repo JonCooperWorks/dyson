@@ -46,7 +46,7 @@ impl OpenRouterClient {
         ]));
 
         Self {
-            inner: OpenAiCompatClient::with_auth(auth, Some(DEFAULT_BASE_URL)),
+            inner: OpenAiCompatClient::with_auth(auth, DEFAULT_BASE_URL),
         }
     }
 }
