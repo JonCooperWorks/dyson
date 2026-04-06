@@ -4,7 +4,7 @@
 // Anthropic recommends images be at most 1568px on their longest side
 // and under 5MB base64.  This module enforces both limits:
 //
-//   1. Decode from any supported format (JPEG, PNG, WebP, GIF)
+//   1. Decode from any supported format (JPEG, PNG, WebP)
 //   2. Resize if either dimension exceeds MAX_DIMENSION (Lanczos3)
 //   3. Re-encode as JPEG (smaller than PNG, universally supported)
 //   4. Base64-encode
