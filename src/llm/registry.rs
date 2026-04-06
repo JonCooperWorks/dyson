@@ -207,7 +207,7 @@ pub fn registry() -> &'static [ProviderEntry] {
                 env_var: Some("OPENROUTER_API_KEY"),
                 requires_api_key: true,
                 create_client: |c| {
-                    Box::new(openrouter::OpenRouterClient::new(c.api_key, c.base_url))
+                    Box::new(openrouter::OpenRouterClient::new(c.api_key))
                 },
             },
             ProviderEntry {
@@ -249,7 +249,7 @@ pub fn registry() -> &'static [ProviderEntry] {
                 env_var: Some("OLLAMA_API_KEY"),
                 requires_api_key: true,
                 create_client: |c| {
-                    Box::new(ollama_cloud::OllamaCloudClient::new(c.api_key, c.base_url))
+                    Box::new(ollama_cloud::OllamaCloudClient::new(c.api_key))
                 },
             },
         ]

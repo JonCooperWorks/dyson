@@ -32,7 +32,7 @@ pub struct OpenRouterClient {
 }
 
 impl OpenRouterClient {
-    pub fn new(api_key: &str, base_url: Option<&str>) -> Self {
+    pub fn new(api_key: &str) -> Self {
         let mut headers = std::collections::HashMap::new();
         headers.insert(
             "HTTP-Referer".to_string(),
@@ -46,7 +46,7 @@ impl OpenRouterClient {
         ]));
 
         Self {
-            inner: OpenAiCompatClient::with_auth(auth, Some(base_url.unwrap_or(DEFAULT_BASE_URL))),
+            inner: OpenAiCompatClient::with_auth(auth, Some(DEFAULT_BASE_URL)),
         }
     }
 }
