@@ -11,7 +11,6 @@
 // Module layout:
 //   mod.rs      — ChatHistory trait + factory (this file)
 //   disk.rs     — DiskChatHistory (JSON files on disk)
-//   in_memory.rs — InMemoryChatHistory (for testing)
 //
 // How it differs from Workspace:
 //   - Workspace: agent's long-term identity and memory, shared across
@@ -32,10 +31,8 @@
 // ===========================================================================
 
 pub mod disk;
-pub mod in_memory;
 
 pub use disk::DiskChatHistory;
-pub use in_memory::InMemoryChatHistory;
 
 use crate::config::ChatHistoryConfig;
 use crate::error::{DysonError, Result};

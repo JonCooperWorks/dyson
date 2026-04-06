@@ -45,7 +45,7 @@ pub mod openrouter;
 pub mod registry;
 pub mod stream;
 
-pub use dialects::{ExtractedToolCall, TextToolHandler, text_tool_handler_for_model};
+
 
 use std::pin::Pin;
 

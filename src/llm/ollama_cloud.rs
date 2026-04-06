@@ -33,11 +33,11 @@ pub struct OllamaCloudClient {
 }
 
 impl OllamaCloudClient {
-    pub fn new(api_key: &str, base_url: Option<&str>) -> Self {
+    pub fn new(api_key: &str) -> Self {
         let auth: Box<dyn Auth> = Box::new(BearerTokenAuth::new(api_key.to_string()));
 
         Self {
-            inner: OpenAiCompatClient::with_auth(auth, Some(base_url.unwrap_or(DEFAULT_BASE_URL))),
+            inner: OpenAiCompatClient::with_auth(auth, Some(DEFAULT_BASE_URL)),
         }
     }
 }

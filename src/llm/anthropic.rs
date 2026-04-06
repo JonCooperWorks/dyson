@@ -186,12 +186,8 @@ impl AnthropicClient {
 
     /// Create a new Anthropic client with a custom `Auth` implementation.
     ///
-    /// Use this for composable auth (e.g., adding audit logging):
     /// ```ignore
-    /// let auth = TracingAuth::new(
-    ///     Box::new(ApiKeyAuth::anthropic(key)),
-    ///     "anthropic",
-    /// );
+    /// let auth = ApiKeyAuth::anthropic(key);
     /// let client = AnthropicClient::with_auth(Box::new(auth), None);
     /// ```
     pub fn with_auth(auth: Box<dyn Auth>, base_url: Option<&str>) -> Self {

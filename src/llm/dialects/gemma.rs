@@ -53,7 +53,7 @@ impl TextToolHandler for GemmaToolHandler {
 
 /// Build a system prompt suffix that describes available tools in the
 /// format Gemma expects for function calling.
-pub fn format_tools_for_prompt(tools: &[ToolDefinition]) -> String {
+fn format_tools_for_prompt(tools: &[ToolDefinition]) -> String {
     if tools.is_empty() {
         return String::new();
     }
@@ -113,7 +113,7 @@ pub fn format_tools_for_prompt(tools: &[ToolDefinition]) -> String {
 ///
 /// Returns `None` if no tool calls are found.  Otherwise returns the
 /// cleaned text (tool call portions removed) and the extracted calls.
-pub fn extract_gemma_tool_calls(text: &str) -> Option<(String, Vec<ExtractedToolCall>)> {
+fn extract_gemma_tool_calls(text: &str) -> Option<(String, Vec<ExtractedToolCall>)> {
     let mut calls = Vec::new();
     let mut cleaned = text.to_string();
 

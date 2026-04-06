@@ -59,6 +59,7 @@ impl MemoryStore {
     }
 
     /// Open an in-memory database (for testing).
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = rusqlite::Connection::open_in_memory()
             .map_err(|e| DysonError::Config(format!("cannot open in-memory store: {e}")))?;
@@ -135,6 +136,7 @@ impl MemoryStore {
     }
 
     /// Remove a file from the FTS5 index.
+    #[cfg(test)]
     pub fn remove(&self, key: &str) {
         let conn = self.conn.lock().unwrap();
         if let Err(e) = conn
