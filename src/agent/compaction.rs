@@ -44,7 +44,7 @@ impl super::Agent {
     /// - Manually: a controller can call `agent.compact()` directly
     ///   (e.g. in response to a `/compact` command).
     pub async fn compact(&mut self, output: &mut dyn Output) -> Result<()> {
-        if self.messages.is_empty() {
+        if self.conversation.messages.is_empty() {
             return Ok(());
         }
 
@@ -53,13 +53,13 @@ impl super::Agent {
         // When a chat history backend is attached, save the current verbatim
         // conversation to a timestamped archive before we summarise it away.
         // This ensures the full conversation is always recoverable.
-        if let (Some(store), Some(chat_id)) = (&self.chat_history, &self.chat_id) {
-            if let Err(e) = store.save(chat_id, &self.messages) {
+        if let Some(ref backend) = self.history_backend {
+            if let Err(e) = backend.store.save(&backend.chat_id, &self.conversation.messages) {
                 tracing::warn!(error = %e, "failed to save pre-compaction snapshot");
-            } else if let Err(e) = store.rotate(chat_id) {
+            } else if let Err(e) = backend.store.rotate(&backend.chat_id) {
                 tracing::warn!(error = %e, "failed to rotate pre-compaction snapshot");
             } else {
-                tracing::info!(chat_id = chat_id, "pre-compaction history rotated");
+                tracing::info!(chat_id = backend.chat_id, "pre-compaction history rotated");
             }
         }
 
@@ -69,7 +69,7 @@ impl super::Agent {
         self.fire_dreams(super::dream::DreamEvent::Compaction);
 
         tracing::info!(
-            messages = self.messages.len(),
+            messages = self.conversation.messages.len(),
             estimated_tokens = self.estimate_context_tokens(&self.system_prompt),
             "compacting conversation context"
         );
@@ -86,26 +86,26 @@ impl super::Agent {
     async fn compact_legacy(&mut self, output: &mut dyn Output) -> Result<()> {
         // Temporarily move messages out to avoid cloning the entire history.
         // On success we replace them with the summary; on error we restore.
-        let messages = std::mem::take(&mut self.messages);
+        let messages = std::mem::take(&mut self.conversation.messages);
         let old_count = messages.len();
 
         let summary = match self.summarise_messages(&messages, None, output).await {
             Ok(s) => s,
             Err(e) => {
-                self.messages = messages;
+                self.conversation.messages = messages;
                 return Err(e);
             }
         };
 
         if summary.is_empty() {
             tracing::warn!("compaction produced empty summary — keeping original history");
-            self.messages = messages;
+            self.conversation.messages = messages;
             return Ok(());
         }
 
-        self.messages
+        self.conversation.messages
             .push(Message::user(&format!("[Context Summary]\n\n{summary}")));
-        self.token_budget.reset();
+        self.conversation.token_budget.reset();
 
         tracing::info!(old_messages = old_count, "context compacted (legacy)");
         Ok(())
@@ -139,19 +139,19 @@ impl super::Agent {
 
         // Phase 3: summarise the middle section.
         // Temporarily take messages to avoid cloning the middle slice.
-        let messages = std::mem::take(&mut self.messages);
+        let messages = std::mem::take(&mut self.conversation.messages);
         let middle = &messages[head_end..tail_start];
         let summary = match self.summarise_messages(middle, previous_summary.as_deref(), output).await {
             Ok(s) => s,
             Err(e) => {
-                self.messages = messages;
+                self.conversation.messages = messages;
                 return Err(e);
             }
         };
 
         if summary.is_empty() {
             tracing::warn!("compaction produced empty summary — keeping original history");
-            self.messages = messages;
+            self.conversation.messages = messages;
             return Ok(());
         }
 
@@ -178,16 +178,16 @@ impl super::Agent {
         // Tail: verbatim.
         new_messages.extend_from_slice(&messages[tail_start..]);
 
-        self.messages = new_messages;
+        self.conversation.messages = new_messages;
 
         // Phase 5: fix orphaned tool_use/tool_result pairs.
         self.fix_orphaned_tool_pairs();
 
-        self.token_budget.reset();
+        self.conversation.token_budget.reset();
 
         tracing::info!(
             old_messages = old_count,
-            new_messages = self.messages.len(),
+            new_messages = self.conversation.messages.len(),
             "context compacted (hermes)"
         );
         Ok(())
@@ -197,7 +197,7 @@ impl super::Agent {
 
     /// Return the index of the first message NOT in the protected head.
     pub(super) fn head_boundary(&self, config: &CompactionConfig) -> usize {
-        config.protect_head.min(self.messages.len())
+        config.protect_head.min(self.conversation.messages.len())
     }
 
     /// Return the index of the first message in the protected tail.
@@ -208,8 +208,8 @@ impl super::Agent {
         let mut tokens = 0usize;
         let head_end = self.head_boundary(config);
 
-        for i in (head_end..self.messages.len()).rev() {
-            let msg_tokens = self.messages[i].estimate_tokens();
+        for i in (head_end..self.conversation.messages.len()).rev() {
+            let msg_tokens = self.conversation.messages[i].estimate_tokens();
             if tokens + msg_tokens > config.protect_tail_tokens {
                 return i + 1;
             }
@@ -221,7 +221,7 @@ impl super::Agent {
 
     /// Phase 1: replace `ToolResult` content in the middle with a placeholder.
     fn prune_tool_outputs(&mut self, head_end: usize, tail_start: usize) {
-        for msg in &mut self.messages[head_end..tail_start] {
+        for msg in &mut self.conversation.messages[head_end..tail_start] {
             for block in &mut msg.content {
                 if let ContentBlock::ToolResult { content, .. } = block {
                     *content = "[tool output pruned]".to_string();
@@ -232,7 +232,7 @@ impl super::Agent {
 
     /// Find an existing `[Context Summary]` in the head region.
     fn find_existing_summary(&self, head_end: usize) -> Option<String> {
-        for msg in &self.messages[..head_end] {
+        for msg in &self.conversation.messages[..head_end] {
             for block in &msg.content {
                 if let ContentBlock::Text { text } = block
                     && text.starts_with("[Context Summary]")
@@ -323,7 +323,7 @@ impl super::Agent {
         let mut tool_use_positions: HashMap<String, usize> = HashMap::new();
         let mut tool_result_ids: HashSet<String> = HashSet::new();
 
-        for (pos, msg) in self.messages.iter().enumerate() {
+        for (pos, msg) in self.conversation.messages.iter().enumerate() {
             for block in &msg.content {
                 match block {
                     ContentBlock::ToolUse { id, .. } => {
@@ -362,11 +362,11 @@ impl super::Agent {
                 "[result included in context summary]",
                 false,
             );
-            self.messages.insert(pos + 1, synthetic);
+            self.conversation.messages.insert(pos + 1, synthetic);
         }
 
         // Remove orphaned results (results whose tool_use was in the middle).
-        self.messages.retain(|msg| {
+        self.conversation.messages.retain(|msg| {
             !msg.content.iter().all(|b| {
                 matches!(b, ContentBlock::ToolResult { tool_use_id, .. }
                     if orphaned_results.contains(tool_use_id))
@@ -382,8 +382,8 @@ impl super::Agent {
     pub(super) fn estimate_context_tokens(&self, system_prompt: &str) -> usize {
         let system_tokens = system_prompt.split_whitespace().count();
 
-        let message_tokens: usize = self.messages.iter().map(|m| m.estimate_tokens()).sum();
+        let message_tokens: usize = self.conversation.messages.iter().map(|m| m.estimate_tokens()).sum();
 
-        system_tokens + message_tokens + self.cached_tool_tokens
+        system_tokens + message_tokens + self.tool_registry.cached_tokens
     }
 }

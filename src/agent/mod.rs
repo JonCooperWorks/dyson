@@ -52,22 +52,27 @@
 //
 //   Agent owns:
 //     ┌──────────────────────────────────────────────────┐
-//     │  client:  RateLimited<Box<dyn LlmClient>>         │
+//     │  client:  RateLimited<Box<dyn LlmClient>>        │
 //     │  sandbox: Arc<dyn Sandbox>     ← gates all calls │
 //     │  skills:  Vec<Box<dyn Skill>>                    │
-//     │  tools:   HashMap<name, Arc<dyn Tool>>           │
-//     │  tool_definitions: Vec<ToolDefinition>           │
-//     │  system_prompt: String                           │
+//     │  tool_registry: ToolRegistry   ← immutable tools │
+//     │  conversation: Conversation    ← mutable state   │
+//     │  system_prompt: Arc<str>                         │
 //     │  config: CompletionConfig                        │
-//     │  messages: Vec<Message>        ← conversation    │
 //     │  max_iterations: usize                           │
 //     │  limiter: ToolLimiter          ← rate limiting   │
 //     │  formatter: ResultFormatter    ← output format   │
+//     │  history_backend: Option<HistoryBackend>         │
 //     └──────────────────────────────────────────────────┘
 //
-// Why does Agent own both skills AND a flat tools map?
+//   Sub-structs group related fields:
+//     ToolRegistry  — tools, definitions, cached_tokens, disabled
+//     Conversation  — messages, turn_count, token_budget
+//     HistoryBackend — store + chat_id (always set together)
+//
+// Why does Agent own both skills AND a ToolRegistry?
 //   Skills own tools (for lifecycle management), but the agent needs O(1)
-//   lookup by tool name when dispatching calls.  The flat HashMap provides
+//   lookup by tool name when dispatching calls.  ToolRegistry provides
 //   that.  Both hold Arc<dyn Tool> to the same underlying objects — no
 //   duplication, just shared references.
 // ===========================================================================
@@ -122,14 +127,165 @@ enum StreamResult {
 }
 
 // ---------------------------------------------------------------------------
+// Sub-structs — group related Agent fields into focused types.
+// ---------------------------------------------------------------------------
+
+/// Immutable tool registry — built once at construction from all skills' tools.
+///
+/// Provides O(1) tool lookup by name, reverse mapping to owning skill,
+/// and tool definitions for LLM requests.  The `tools_disabled` flag
+/// controls whether definitions are sent to the LLM (set when the active
+/// model doesn't support tool use).
+pub(crate) struct ToolRegistry {
+    /// Flat tool lookup map: tool_name → Arc<dyn Tool>.
+    ///
+    /// Shared ownership (Arc) with the skills — no cloning of tool
+    /// implementations.
+    tools: HashMap<String, Arc<dyn Tool>>,
+
+    /// Reverse index: tool_name → skill index in `Agent::skills`.
+    ///
+    /// Used to dispatch `after_tool()` to the owning skill.
+    tool_to_skill: HashMap<String, usize>,
+
+    /// Tool definitions sent to the LLM so it knows what tools are available.
+    definitions: Vec<ToolDefinition>,
+
+    /// Cached sum of estimated tokens for all tool definitions.
+    /// Tool definitions are immutable after construction, so this is computed
+    /// once and reused in `estimate_context_tokens()`.
+    cached_tokens: usize,
+
+    /// When `true`, tool definitions are omitted from LLM requests.
+    /// Set when the active model doesn't support tool use.
+    disabled: bool,
+}
+
+impl ToolRegistry {
+    /// Build a tool registry by flattening all skills' tools.
+    ///
+    /// Duplicate tool names are handled by last-writer-wins (later skills
+    /// override earlier ones), with a warning logged.
+    fn from_skills(skills: &[Box<dyn Skill>]) -> Self {
+        let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+        let mut tool_to_skill: HashMap<String, usize> = HashMap::new();
+        let mut definitions: Vec<ToolDefinition> = Vec::new();
+
+        for (skill_idx, skill) in skills.iter().enumerate() {
+            for tool in skill.tools() {
+                let name = tool.name().to_string();
+
+                if tools.contains_key(&name) {
+                    tracing::warn!(
+                        tool = name,
+                        skill = skill.name(),
+                        "duplicate tool name — overriding previous registration"
+                    );
+                }
+
+                definitions.push(ToolDefinition {
+                    name: name.clone(),
+                    description: tool.description().to_string(),
+                    input_schema: tool.input_schema(),
+                    agent_only: tool.agent_only(),
+                });
+
+                tools.insert(name.clone(), Arc::clone(tool));
+                tool_to_skill.insert(name, skill_idx);
+            }
+        }
+
+        let cached_tokens: usize = definitions
+            .iter()
+            .map(|t| {
+                t.name.split_whitespace().count()
+                    + t.description.split_whitespace().count()
+                    + crate::message::estimate_json_tokens(&t.input_schema)
+                    + 10 // per-tool JSON framing overhead
+            })
+            .sum();
+
+        tracing::info!(
+            tool_count = tools.len(),
+            "tool registry built"
+        );
+
+        Self {
+            tools,
+            tool_to_skill,
+            definitions,
+            cached_tokens,
+            disabled: false,
+        }
+    }
+
+    /// Look up a tool by name.
+    fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
+        self.tools.get(name)
+    }
+
+    /// Get the skill index that owns the given tool.
+    fn skill_index(&self, tool_name: &str) -> Option<usize> {
+        self.tool_to_skill.get(tool_name).copied()
+    }
+
+    /// Return tool definitions for the LLM, or `&[]` when disabled.
+    fn definitions_for_llm(&self) -> &[ToolDefinition] {
+        if self.disabled {
+            &[]
+        } else {
+            &self.definitions
+        }
+    }
+
+    /// Mark tools as disabled — subsequent LLM calls will omit definitions.
+    fn disable(&mut self) {
+        self.disabled = true;
+    }
+}
+
+/// Mutable conversation state — the session-scoped data that changes during
+/// `run()` calls.
+pub(crate) struct Conversation {
+    /// Conversation history.  Persists across `run()` calls.
+    pub(crate) messages: Vec<Message>,
+
+    /// Number of user turns processed (for dream trigger timing).
+    pub(crate) turn_count: usize,
+
+    /// Token usage tracking and optional budget enforcement.
+    pub token_budget: TokenBudget,
+}
+
+impl Conversation {
+    fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+            turn_count: 0,
+            token_budget: TokenBudget::default(),
+        }
+    }
+}
+
+/// Persistence backend for rotating pre-compaction conversation snapshots.
+///
+/// When attached to the agent, compaction saves the full verbatim
+/// conversation to a timestamped archive before summarising, preserving
+/// history for fine-tuning datasets.
+pub(crate) struct HistoryBackend {
+    pub(crate) store: Arc<dyn ChatHistory>,
+    pub(crate) chat_id: String,
+}
+
+// ---------------------------------------------------------------------------
 // Agent
 // ---------------------------------------------------------------------------
 
 /// The streaming tool-use agent — Dyson's core runtime.
 ///
 /// Created once at startup, then `run()` is called for each user message.
-/// Conversation history (`messages`) persists across calls for multi-turn
-/// conversations.
+/// Conversation history (`conversation.messages`) persists across calls for
+/// multi-turn conversations.
 pub struct Agent {
     /// LLM client for streaming completions, gated by rate limiting.
     client: rate_limiter::RateLimited<Box<dyn LlmClient>>,
@@ -144,23 +300,8 @@ pub struct Agent {
     /// Loaded skills (retained for lifecycle: before_turn, after_tool, on_unload).
     skills: Vec<Box<dyn Skill>>,
 
-    /// Flat tool lookup map: tool_name → Arc<dyn Tool>.
-    ///
-    /// Built at construction by flattening all skills' tools.  Shared
-    /// ownership (Arc) with the skills — no cloning of tool implementations.
-    tools: HashMap<String, Arc<dyn Tool>>,
-
-    /// Reverse index: tool_name → skill index in `self.skills`.
-    ///
-    /// Used to dispatch `after_tool()` to the owning skill.
-    tool_to_skill: HashMap<String, usize>,
-
-    /// Tool definitions sent to the LLM so it knows what tools are available.
-    tool_definitions: Vec<ToolDefinition>,
-
-    /// When `true`, tool definitions are omitted from LLM requests.
-    /// Set when the active model doesn't support tool use.
-    tools_disabled: bool,
+    /// Immutable tool registry — tool lookup, definitions, and token cache.
+    tool_registry: ToolRegistry,
 
     /// Composed system prompt: base prompt + all skill prompt fragments.
     system_prompt: Arc<str>,
@@ -174,17 +315,11 @@ pub struct Agent {
     /// Maximum retries on transient LLM errors (HTTP 429, 529, network).
     max_retries: usize,
 
-    /// Conversation history.  Persists across `run()` calls.
-    messages: Vec<Message>,
+    /// Mutable conversation state (messages, turn count, token budget).
+    pub(crate) conversation: Conversation,
 
     /// Shared tool context (working dir, env, cancellation).
     tool_context: ToolContext,
-
-    /// Number of user turns processed (for dream trigger timing).
-    turn_count: usize,
-
-    /// Token usage tracking and optional budget enforcement.
-    pub token_budget: TokenBudget,
 
     /// Context compaction configuration.
     /// When set, the agent automatically compacts conversation history when
@@ -196,11 +331,6 @@ pub struct Agent {
 
     /// Structured result formatter for LLM-optimized tool output.
     formatter: ResultFormatter,
-
-    /// Cached sum of estimated tokens for all tool definitions.
-    /// Tool definitions are immutable after construction, so this is computed
-    /// once in `new()` and reused in `estimate_context_tokens()`.
-    cached_tool_tokens: usize,
 
     /// Pre/post tool execution hooks.
     ///
@@ -214,24 +344,18 @@ pub struct Agent {
     /// See `dream.rs` and `docs/dreaming.md`.
     dream_handle: DreamHandle,
 
-    /// Optional chat history backend for rotating pre-compaction snapshots.
-    ///
-    /// When set (along with `chat_id`), compaction saves the full
-    /// pre-compaction conversation to a rotated file before summarising.
-    /// This preserves verbatim history for fine-tuning datasets.
-    chat_history: Option<Arc<dyn ChatHistory>>,
-
-    /// Chat identifier for the current conversation (e.g. Telegram chat ID).
-    ///
-    /// Used together with `chat_history` to rotate pre-compaction snapshots.
-    chat_id: Option<String>,
+    /// Optional persistence backend for rotating pre-compaction snapshots.
+    history_backend: Option<HistoryBackend>,
 }
 
 impl Agent {
     /// Construct a new agent from its components.
     ///
-    /// This flattens all skills' tools into the agent's lookup map and
-    /// composes the system prompt from the base prompt + skill fragments.
+    /// Delegates to focused constructors:
+    /// - [`ToolRegistry::from_skills`] — flattens skills' tools into a lookup map.
+    /// - [`Self::compose_system_prompt`] — assembles base + model info + skill fragments.
+    /// - [`Self::build_dream_handle`] — configures the background dream thread.
+    /// - [`Self::build_tool_context`] — resolves working directory from workspace.
     ///
     /// ## Panics
     ///
@@ -247,85 +371,80 @@ impl Agent {
         >,
         nudge_interval: usize,
     ) -> Result<Self> {
-        // -- Flatten tools from all skills --
-        let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
-        let mut tool_to_skill: HashMap<String, usize> = HashMap::new();
-        let mut tool_definitions: Vec<ToolDefinition> = Vec::new();
+        let tool_registry = ToolRegistry::from_skills(&skills);
+        let system_prompt = Self::compose_system_prompt(settings, &skills);
+        let tool_context = Self::build_tool_context(&sandbox, workspace);
+        let dream_handle = Self::build_dream_handle(&tool_context, nudge_interval);
 
-        for (skill_idx, skill) in skills.iter().enumerate() {
-            for tool in skill.tools() {
-                let name = tool.name().to_string();
-
-                if tools.contains_key(&name) {
-                    tracing::warn!(
-                        tool = name,
-                        skill = skill.name(),
-                        "duplicate tool name — overriding previous registration"
-                    );
-                }
-
-                tool_definitions.push(ToolDefinition {
-                    name: name.clone(),
-                    description: tool.description().to_string(),
-                    input_schema: tool.input_schema(),
-                    agent_only: tool.agent_only(),
-                });
-
-                tools.insert(name.clone(), Arc::clone(tool));
-                tool_to_skill.insert(name, skill_idx);
-            }
-        }
-
-        // Pre-compute tool definition token estimate (immutable after construction).
-        let cached_tool_tokens: usize = tool_definitions
-            .iter()
-            .map(|t| {
-                t.name.split_whitespace().count()
-                    + t.description.split_whitespace().count()
-                    + crate::message::estimate_json_tokens(&t.input_schema)
-                    + 10 // per-tool JSON framing overhead
-            })
-            .sum();
-
-        tracing::info!(
-            tool_count = tools.len(),
-            skill_count = skills.len(),
-            "agent initialized"
-        );
-
-        // -- Compose system prompt --
-        //
-        // Start with the base prompt, then append each skill's fragment.
-        // Skills contribute context like "You have access to bash..." or
-        // "The following MCP tools are available...".
-        let mut system_prompt = settings.system_prompt.clone();
-
-        // Inject model/provider info so the model can answer "what model
-        // are you running?" accurately instead of guessing from its
-        // training data or workspace identity files.
-        system_prompt.push_str(&format!(
-            "\n\nYou are running on model '{}' via the {:?} provider.",
-            settings.model, settings.provider,
-        ));
-
-        for skill in &skills {
-            if let Some(fragment) = skill.system_prompt() {
-                system_prompt.push_str("\n\n");
-                system_prompt.push_str(fragment);
-            }
-        }
-
-        // -- Build completion config --
         let config = CompletionConfig {
             model: settings.model.clone(),
             max_tokens: settings.max_tokens,
             temperature: None, // use provider default
         };
 
-        // Use the workspace's programs directory as the working directory
-        // for coding tools.  This gives the agent a dedicated place to create
-        // and manage projects (e.g. ~/.dyson/programs/).  Falls back to the
-        // process CWD when no workspace is configured.
+        let client = match settings.rate_limit.as_ref() {
+            Some(rl) => rate_limiter::RateLimited::new(
+                client,
+                rl.max_messages,
+                std::time::Duration::from_secs(rl.window_secs),
+            ),
+            None => rate_limiter::RateLimited::unlimited(client),
+        };
+
+        tracing::info!(
+            skill_count = skills.len(),
+            tool_count = tool_registry.definitions.len(),
+            "agent initialized"
+        );
+
+        Ok(Self {
+            client,
+            sandbox,
+            skills,
+            tool_registry,
+            system_prompt: Arc::from(system_prompt),
+            config,
+            max_iterations: settings.max_iterations,
+            max_retries: 3,
+            conversation: Conversation::new(),
+            tool_context,
+            compaction_config: settings.compaction,
+            limiter: ToolLimiter::for_agent(),
+            formatter: ResultFormatter::default(),
+            tool_hooks: Vec::new(),
+            dream_handle,
+            history_backend: None,
+        })
+    }
+
+    /// Compose the system prompt from base + model info + skill fragments.
+    fn compose_system_prompt(settings: &AgentSettings, skills: &[Box<dyn Skill>]) -> String {
+        let mut system_prompt = settings.system_prompt.clone();
+
+        // Inject model/provider info so the model can answer "what model
+        // are you running?" accurately.
+        system_prompt.push_str(&format!(
+            "\n\nYou are running on model '{}' via the {:?} provider.",
+            settings.model, settings.provider,
+        ));
+
+        for skill in skills {
+            if let Some(fragment) = skill.system_prompt() {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(fragment);
+            }
+        }
+
+        system_prompt
+    }
+
+    /// Resolve the working directory from the workspace and build a ToolContext.
+    fn build_tool_context(
+        sandbox: &Arc<dyn Sandbox>,
+        workspace: Option<
+            std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
+        >,
+    ) -> ToolContext {
         let working_dir = workspace
             .as_ref()
             .and_then(|ws| {
@@ -343,22 +462,11 @@ impl Agent {
             dangerous_no_sandbox: sandbox.skip_path_validation(),
         };
         tool_context.workspace = workspace;
+        tool_context
+    }
 
-        let client = match settings.rate_limit.as_ref() {
-            Some(rl) => rate_limiter::RateLimited::new(
-                client,
-                rl.max_messages,
-                std::time::Duration::from_secs(rl.window_secs),
-            ),
-            None => rate_limiter::RateLimited::unlimited(client),
-        };
-
-        // -- Build the persistent dream thread --
-        //
-        // Dreams are autonomous background tasks (memory consolidation,
-        // self-improvement) that fire on trigger events.  They run on a
-        // dedicated thread so they never block the controller loop.
-        // See dream.rs and docs/dreaming.md.
+    /// Build the persistent dream thread from workspace configuration.
+    fn build_dream_handle(tool_context: &ToolContext, nudge_interval: usize) -> DreamHandle {
         let mut dreams: Vec<Arc<dyn dream::Dream>> = Vec::new();
 
         if tool_context.workspace.is_some() {
@@ -382,32 +490,7 @@ impl Agent {
         let dream_count = dreams.len();
         let dream_handle = DreamHandle::new(dreams);
         tracing::info!(dream_count, nudge_interval, "dream subsystem initialised");
-
-        Ok(Self {
-            client,
-            sandbox,
-            skills,
-            tools,
-            tool_to_skill,
-            tool_definitions,
-            system_prompt: Arc::from(system_prompt),
-            config,
-            max_iterations: settings.max_iterations,
-            max_retries: 3,
-            messages: Vec::new(),
-            tool_context,
-            turn_count: 0,
-            token_budget: TokenBudget::default(),
-            compaction_config: settings.compaction,
-            limiter: ToolLimiter::for_agent(),
-            formatter: ResultFormatter::default(),
-            cached_tool_tokens,
-            tools_disabled: false,
-            tool_hooks: Vec::new(),
-            dream_handle,
-            chat_history: None,
-            chat_id: None,
-        })
+        dream_handle
     }
 
     /// Get a shared reference to the sandbox for subagent reuse.
@@ -433,10 +516,12 @@ impl Agent {
 
     /// Send a dream event to the persistent dream thread.
     ///
-    /// This never blocks — the event is sent over a channel and the dream
-    /// thread handles summarisation and spawning.
+    /// Snapshots messages into an `Arc<[Message]>` so the dream thread owns
+    /// a shared reference — avoids cloning the entire conversation Vec on
+    /// every turn.  The snapshot is only materialised when dreams are
+    /// actually going to fire (workspace present, messages non-empty).
     fn fire_dreams(&self, event: DreamEvent) {
-        if self.messages.is_empty() {
+        if self.conversation.messages.is_empty() {
             tracing::debug!(?event, "fire_dreams skipped: no messages");
             return;
         }
@@ -445,15 +530,23 @@ impl Agent {
             return;
         }
 
-        tracing::debug!(?event, turn_count = self.turn_count, "sending dream event");
+        tracing::debug!(
+            ?event,
+            turn_count = self.conversation.turn_count,
+            "sending dream event"
+        );
+
+        // Snapshot into Arc<[Message]> — the dream thread converts to Vec
+        // only if a dream actually activates and needs to summarise.
+        let messages: Arc<[Message]> = self.conversation.messages.clone().into();
 
         self.dream_handle.fire(
             event,
             self.client.handle(rate_limiter::Priority::Background),
             self.config.clone(),
             self.tool_context.clone(),
-            self.messages.clone(),
-            self.turn_count,
+            messages,
+            self.conversation.turn_count,
         );
     }
 
@@ -463,17 +556,17 @@ impl Agent {
     /// run in the background with no way to block the caller.
     pub fn clear(&mut self) {
         self.fire_dreams(DreamEvent::SessionEnd);
-        self.messages.clear();
+        self.conversation.messages.clear();
     }
 
     /// Get the current conversation messages (for persistence).
     pub fn messages(&self) -> &[Message] {
-        &self.messages
+        &self.conversation.messages
     }
 
     /// Replace the conversation history (for restoring from persistence).
     pub fn set_messages(&mut self, messages: Vec<Message>) {
-        self.messages = messages;
+        self.conversation.messages = messages;
     }
 
     /// Attach a chat history backend so compaction can rotate pre-compaction
@@ -483,13 +576,12 @@ impl Agent {
     /// to a timestamped archive file (via `ChatHistory::rotate`) before
     /// summarising.  This preserves the full verbatim history.
     pub fn set_chat_history(&mut self, store: Arc<dyn ChatHistory>, chat_id: String) {
-        self.chat_history = Some(store);
-        self.chat_id = Some(chat_id);
+        self.history_backend = Some(HistoryBackend { store, chat_id });
     }
 
     /// Remove and return the last message in the conversation history.
     fn pop_last_message(&mut self) -> Option<Message> {
-        self.messages.pop()
+        self.conversation.messages.pop()
     }
 
     /// Replace all `ContentBlock::Image` blocks in the conversation history
@@ -497,7 +589,7 @@ impl Agent {
     /// not support vision — sanitises the entire history so subsequent
     /// turns don't replay rejected image data.
     fn strip_images(&mut self) {
-        for msg in &mut self.messages {
+        for msg in &mut self.conversation.messages {
             for block in &mut msg.content {
                 if matches!(block, ContentBlock::Image { .. }) {
                     *block = ContentBlock::Text {
@@ -511,7 +603,7 @@ impl Agent {
     /// Mark the agent as unable to use tools.  Subsequent LLM calls will
     /// omit tool definitions from the request.
     fn disable_tools(&mut self) {
-        self.tools_disabled = true;
+        self.tool_registry.disable();
     }
 
     /// Replace all `ContentBlock::ToolUse` and `ContentBlock::ToolResult`
@@ -522,7 +614,7 @@ impl Agent {
     /// `tool_calls` arrays that providers reject when no tool definitions
     /// are provided.
     fn strip_tool_history(&mut self) {
-        for msg in &mut self.messages {
+        for msg in &mut self.conversation.messages {
             for block in &mut msg.content {
                 match block {
                     ContentBlock::ToolUse { name, .. } => {
@@ -565,6 +657,16 @@ impl Agent {
     /// The final assistant text (the last text content from the last
     /// assistant message without tool calls), or an error if something
     /// went wrong.
+    /// Provide direct access to the token budget for external inspection.
+    pub fn token_budget(&self) -> &TokenBudget {
+        &self.conversation.token_budget
+    }
+
+    /// Provide mutable access to the token budget for external configuration.
+    pub fn token_budget_mut(&mut self) -> &mut TokenBudget {
+        &mut self.conversation.token_budget
+    }
+
     pub async fn run(&mut self, user_input: &str, output: &mut dyn Output) -> Result<String> {
         tracing::info!(
             input_len = user_input.len(),
@@ -572,7 +674,7 @@ impl Agent {
             "user message received"
         );
         // Append the user's message to history.
-        self.messages.push(Message::user(user_input));
+        self.conversation.messages.push(Message::user(user_input));
         self.run_inner(output).await
     }
 
@@ -590,19 +692,19 @@ impl Agent {
             block_count = blocks.len(),
             "user multimodal message received"
         );
-        self.messages.push(Message::user_multimodal(blocks));
+        self.conversation.messages.push(Message::user_multimodal(blocks));
         self.run_inner(output).await
     }
 
     /// Inner agent loop shared by [`run()`] and [`run_with_blocks()`].
     ///
     /// Assumes the caller has already pushed the user message to
-    /// `self.messages`.
+    /// `self.conversation.messages`.
     async fn run_inner(&mut self, output: &mut dyn Output) -> Result<String> {
-        self.turn_count += 1;
+        self.conversation.turn_count += 1;
 
         self.fire_dreams(DreamEvent::TurnComplete {
-            turn_count: self.turn_count,
+            turn_count: self.conversation.turn_count,
         });
 
         let mut final_text = String::new();
@@ -641,7 +743,7 @@ impl Agent {
 
             let tool_mode = response.tool_mode;
             if let Some(input_tokens) = response.input_tokens {
-                self.token_budget.record_input(input_tokens);
+                self.conversation.token_budget.record_input(input_tokens);
             }
 
             tracing::info!(
@@ -653,10 +755,10 @@ impl Agent {
             let (assistant_msg, tool_calls, output_tokens) =
                 stream_handler::process_stream(response.stream, output).await?;
 
-            if let Err(e) = self.token_budget.record(output_tokens) {
-                self.messages.push(assistant_msg);
+            if let Err(e) = self.conversation.token_budget.record(output_tokens) {
+                self.conversation.messages.push(assistant_msg);
                 tracing::warn!(
-                    used = self.token_budget.output_tokens_used,
+                    used = self.conversation.token_budget.output_tokens_used,
                     "token budget exceeded — stopping agent loop"
                 );
                 output.error(&e)?;
@@ -670,12 +772,12 @@ impl Agent {
                 if let Some(text) = assistant_msg.last_text() {
                     final_text = text.to_string();
                 }
-                self.messages.push(assistant_msg);
+                self.conversation.messages.push(assistant_msg);
                 output.flush()?;
                 break;
             }
 
-            self.messages.push(assistant_msg);
+            self.conversation.messages.push(assistant_msg);
             self.execute_tool_calls(&tool_calls, output).await?;
             self.limiter.reset_turn();
 
@@ -727,7 +829,7 @@ impl Agent {
         output: &mut dyn Output,
     ) {
         if let Some(ref config) = self.compaction_config
-            && self.messages.len() > config.protect_head
+            && self.conversation.messages.len() > config.protect_head
         {
             let threshold = config.threshold();
             let estimated_tokens = self.estimate_context_tokens(turn_system_prompt);
@@ -735,7 +837,7 @@ impl Agent {
                 tracing::info!(
                     estimated_tokens,
                     threshold,
-                    messages = self.messages.len(),
+                    messages = self.conversation.messages.len(),
                     "estimated context tokens exceed compaction threshold — compacting"
                 );
                 if let Err(e) = self.compact(output).await {
@@ -753,14 +855,14 @@ impl Agent {
         tracing::info!(
             iteration,
             model = self.config.model,
-            messages = self.messages.len(),
-            tools_enabled = !self.tools_disabled,
-            tool_count = self.tool_definitions.len(),
+            messages = self.conversation.messages.len(),
+            tools_enabled = !self.tool_registry.disabled,
+            tool_count = self.tool_registry.definitions.len(),
             "starting LLM call"
         );
 
         if tracing::enabled!(tracing::Level::DEBUG) {
-            for (i, msg) in self.messages.iter().enumerate() {
+            for (i, msg) in self.conversation.messages.iter().enumerate() {
                 let role = match msg.role {
                     crate::message::Role::User => "user",
                     crate::message::Role::Assistant => "assistant",
@@ -799,11 +901,7 @@ impl Agent {
         let mut recovery: Option<LlmRecovery> = None;
 
         for attempt in 0..=self.max_retries {
-            let tools_for_llm = if self.tools_disabled {
-                &[]
-            } else {
-                self.tool_definitions.as_slice()
-            };
+            let tools_for_llm = self.tool_registry.definitions_for_llm();
 
             match self
                 .client
@@ -814,7 +912,7 @@ impl Agent {
                 Ok(client) => {
                     match client
                         .stream(
-                            &self.messages,
+                            &self.conversation.messages,
                             &self.system_prompt,
                             skill_fragments,
                             tools_for_llm,
@@ -872,7 +970,7 @@ impl Agent {
                 LlmRecovery::GiveUp => unreachable!(),
             }
             if let Some(msg) = user_msg {
-                self.messages.push(msg);
+                self.conversation.messages.push(msg);
             }
             *recovered_this_turn = true;
             return StreamResult::Recovered;
@@ -912,7 +1010,7 @@ impl Agent {
         for (i, call) in tool_calls.iter().enumerate() {
             if let Err(e) = self.limiter.check(&call.name) {
                 tracing::warn!(tool = call.name, error = %e, "tool call rate-limited");
-                self.messages
+                self.conversation.messages
                     .push(Message::tool_result(&call.id, &e.to_string(), true));
             } else {
                 limited_calls.push(i);
@@ -958,7 +1056,7 @@ impl Agent {
         skill_fragments: &str,
         output: &mut dyn Output,
     ) -> Result<String> {
-        self.messages.push(Message::user(
+        self.conversation.messages.push(Message::user(
             "You have reached the maximum number of iterations and must stop now. \
              Please provide a brief summary of:\n\
              1. What you have accomplished so far\n\
@@ -972,7 +1070,7 @@ impl Agent {
             .client
             .access()?
             .stream(
-                &self.messages,
+                &self.conversation.messages,
                 &self.system_prompt,
                 skill_fragments,
                 empty_tools,
@@ -987,7 +1085,7 @@ impl Agent {
                     .last_text()
                     .unwrap_or_default()
                     .to_string();
-                self.messages.push(assistant_msg);
+                self.conversation.messages.push(assistant_msg);
                 Ok(text)
             }
             Err(e) => {
@@ -1050,7 +1148,7 @@ impl Agent {
             Err(ref e) => Message::tool_result(&call.id, &e.to_string(), true),
         };
 
-        self.messages.push(tool_result_msg);
+        self.conversation.messages.push(tool_result_msg);
         Ok(())
     }
 
@@ -1148,7 +1246,7 @@ impl Agent {
     /// Errors are logged but don't interrupt the agent loop — after_tool
     /// is observational, not control flow.
     async fn notify_after_tool(&self, tool_name: &str, output: &ToolOutput) {
-        if let Some(&skill_idx) = self.tool_to_skill.get(tool_name)
+        if let Some(skill_idx) = self.tool_registry.skill_index(tool_name)
             && let Err(e) = self.skills[skill_idx].after_tool(tool_name, output).await
         {
             tracing::warn!(
@@ -1190,7 +1288,7 @@ impl Agent {
         match decision {
             SandboxDecision::Allow { input } => {
                 // Look up the tool.
-                let Some(tool) = self.tools.get(&call.name) else {
+                let Some(tool) = self.tool_registry.get(&call.name) else {
                     tracing::warn!(tool = call.name, "unknown tool");
                     return Ok(ToolOutput::error(format!(
                         "Unknown tool '{}'",
@@ -1237,7 +1335,7 @@ impl Agent {
                 );
 
                 // Look up the redirected tool.
-                let Some(tool) = self.tools.get(&tool_name) else {
+                let Some(tool) = self.tool_registry.get(&tool_name) else {
                     tracing::warn!(tool = tool_name, "sandbox redirected to unknown tool");
                     return Ok(ToolOutput::error(format!(
                         "Sandbox redirected to unknown tool '{tool_name}'"
@@ -1469,7 +1567,7 @@ mod tests {
         assert_eq!(result, "Done.");
 
         // Conversation should have: user, assistant (tool_use), tool_result, assistant (text)
-        assert_eq!(agent.messages.len(), 4);
+        assert_eq!(agent.conversation.messages.len(), 4);
     }
 
     #[tokio::test]
@@ -1510,7 +1608,7 @@ mod tests {
         // Should get the final text, NOT an error from trying to execute "bash".
         assert_eq!(result, "Here are the files.");
         // Only 2 messages: user + assistant (no tool_result messages).
-        assert_eq!(agent.messages.len(), 2);
+        assert_eq!(agent.conversation.messages.len(), 2);
     }
 
     #[tokio::test]
@@ -1797,13 +1895,13 @@ mod tests {
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
-        agent.token_budget.max_output_tokens = Some(150);
+        agent.conversation.token_budget.max_output_tokens = Some(150);
         let mut output = RecordingOutput::new();
 
         // Agent should stop due to budget, not error out.
         let _result = agent.run("run both", &mut output).await.unwrap();
-        assert!(agent.token_budget.output_tokens_used >= 200);
-        assert!(!agent.token_budget.has_budget());
+        assert!(agent.conversation.token_budget.output_tokens_used >= 200);
+        assert!(!agent.conversation.token_budget.has_budget());
     }
 
     // -------------------------------------------------------------------
@@ -2048,7 +2146,7 @@ mod tests {
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
-        agent.messages = messages;
+        agent.conversation.messages = messages;
         (agent, RecordingOutput::new())
     }
 
@@ -2061,7 +2159,7 @@ mod tests {
         // No LLM responses queued — would panic if called.
         let (mut agent, mut output) = make_agent_with_history(vec![], vec![], None);
         agent.compact(&mut output).await.unwrap();
-        assert!(agent.messages.is_empty());
+        assert!(agent.conversation.messages.is_empty());
     }
 
     #[tokio::test]
@@ -2083,7 +2181,7 @@ mod tests {
 
         agent.compact(&mut output).await.unwrap();
         // All 3 messages preserved — no compaction needed.
-        assert_eq!(agent.messages.len(), 3);
+        assert_eq!(agent.conversation.messages.len(), 3);
     }
 
     #[tokio::test]
@@ -2123,30 +2221,30 @@ mod tests {
         agent.compact(&mut output).await.unwrap();
 
         // Head: first 2 messages preserved verbatim.
-        assert_eq!(agent.messages[0].role, Role::User);
-        match &agent.messages[0].content[0] {
+        assert_eq!(agent.conversation.messages[0].role, Role::User);
+        match &agent.conversation.messages[0].content[0] {
             ContentBlock::Text { text } => assert_eq!(text, "User message 0"),
             other => panic!("expected Text, got: {other:?}"),
         }
-        assert_eq!(agent.messages[1].role, Role::Assistant);
-        match &agent.messages[1].content[0] {
+        assert_eq!(agent.conversation.messages[1].role, Role::Assistant);
+        match &agent.conversation.messages[1].content[0] {
             ContentBlock::Text { text } => assert_eq!(text, "Assistant response 0"),
             other => panic!("expected Text, got: {other:?}"),
         }
 
         // Summary should be present somewhere after head.
-        let summary_idx = agent.messages.iter().position(|m| {
+        let summary_idx = agent.conversation.messages.iter().position(|m| {
             m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[Context Summary]")))
         });
         assert!(summary_idx.is_some(), "summary message should exist");
 
         // Tail: last 2 original messages preserved verbatim.
-        let last = &agent.messages[agent.messages.len() - 1];
+        let last = &agent.conversation.messages[agent.conversation.messages.len() - 1];
         match &last.content[0] {
             ContentBlock::Text { text } => assert_eq!(text, "Assistant response 4"),
             other => panic!("expected Text, got: {other:?}"),
         }
-        let second_last = &agent.messages[agent.messages.len() - 2];
+        let second_last = &agent.conversation.messages[agent.conversation.messages.len() - 2];
         match &second_last.content[0] {
             ContentBlock::Text { text } => assert_eq!(text, "User message 4"),
             other => panic!("expected Text, got: {other:?}"),
@@ -2213,7 +2311,7 @@ mod tests {
 
         // The summary should exist and tool outputs in the middle should
         // have been pruned (replaced with placeholder) before summarisation.
-        let has_summary = agent.messages.iter().any(|m| {
+        let has_summary = agent.conversation.messages.iter().any(|m| {
             m.content.iter().any(
                 |b| matches!(b, ContentBlock::Text { text } if text.contains("[Context Summary]")),
             )
@@ -2221,7 +2319,7 @@ mod tests {
         assert!(has_summary, "should contain a context summary");
 
         // Original large tool outputs should NOT be in the final messages.
-        let has_big_output = agent.messages.iter().any(|m| {
+        let has_big_output = agent.conversation.messages.iter().any(|m| {
             m.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { content, .. } if content.contains("many more lines")))
         });
         assert!(
@@ -2281,7 +2379,7 @@ mod tests {
         agent.compact(&mut output).await.unwrap();
 
         // The head still has the tool_use for "orphan_call".
-        let has_tool_use = agent.messages[1]
+        let has_tool_use = agent.conversation.messages[1]
             .content
             .iter()
             .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == "orphan_call"));
@@ -2289,7 +2387,7 @@ mod tests {
 
         // There should be a synthetic tool_result matching "orphan_call"
         // (since the real one was in the middle and got summarised away).
-        let has_matching_result = agent.messages.iter().any(|m| {
+        let has_matching_result = agent.conversation.messages.iter().any(|m| {
             m.content.iter().any(|b| {
                 matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "orphan_call")
             })
@@ -2345,7 +2443,7 @@ mod tests {
         agent.compact(&mut output).await.unwrap();
 
         // Find the summary message.
-        let summary_msg = agent.messages.iter().find(|m| {
+        let summary_msg = agent.conversation.messages.iter().find(|m| {
             m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[Context Summary]")))
         }).expect("should have a summary message");
 
@@ -2393,14 +2491,14 @@ mod tests {
         let (mut agent, mut output) =
             make_agent_with_history(messages, vec![summary_response], Some(config));
 
-        agent.token_budget.record(50).unwrap();
-        assert_eq!(agent.token_budget.output_tokens_used, 50);
+        agent.conversation.token_budget.record(50).unwrap();
+        assert_eq!(agent.conversation.token_budget.output_tokens_used, 50);
 
         agent.compact(&mut output).await.unwrap();
 
-        assert_eq!(agent.token_budget.output_tokens_used, 0);
-        assert_eq!(agent.token_budget.input_tokens_used, 0);
-        assert_eq!(agent.token_budget.llm_calls, 0);
+        assert_eq!(agent.conversation.token_budget.output_tokens_used, 0);
+        assert_eq!(agent.conversation.token_budget.input_tokens_used, 0);
+        assert_eq!(agent.conversation.token_budget.llm_calls, 0);
     }
 
     #[tokio::test]
@@ -2455,7 +2553,7 @@ mod tests {
         agent.compact(&mut output).await.unwrap();
 
         // Should have a merged summary.
-        let summary_msg = agent.messages.iter().find(|m| {
+        let summary_msg = agent.conversation.messages.iter().find(|m| {
             m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[Context Summary]")))
         }).expect("should have a summary message");
 
@@ -2470,7 +2568,7 @@ mod tests {
         }
 
         // Should NOT have two [Context Summary] messages.
-        let summary_count = agent.messages.iter().filter(|m| {
+        let summary_count = agent.conversation.messages.iter().filter(|m| {
             m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[Context Summary]")))
         }).count();
         assert_eq!(
@@ -2513,7 +2611,7 @@ mod tests {
 
         agent.compact(&mut output).await.unwrap();
         // Original history should be preserved (though tool outputs may be pruned).
-        assert_eq!(agent.messages.len(), original_len);
+        assert_eq!(agent.conversation.messages.len(), original_len);
     }
 
     #[tokio::test]
@@ -2556,7 +2654,7 @@ mod tests {
 
         // Head (2 messages) + summary (1) + tail (2 big messages) = 5.
         // The middle 2 messages got summarised.
-        let last_text = agent.messages.last().unwrap();
+        let last_text = agent.conversation.messages.last().unwrap();
         match &last_text.content[0] {
             ContentBlock::Text { text } => {
                 assert!(
@@ -2618,7 +2716,7 @@ mod tests {
 
         // First turn.
         agent.run("first message", &mut output).await.unwrap();
-        assert_eq!(agent.messages.len(), 2);
+        assert_eq!(agent.conversation.messages.len(), 2);
 
         // Second turn — triggers auto-compact.
         let result = agent.run("second message", &mut output).await.unwrap();
@@ -2655,8 +2753,8 @@ mod tests {
         agent.compact(&mut output).await.unwrap();
 
         // Legacy: everything replaced with a single summary message.
-        assert_eq!(agent.messages.len(), 1);
-        match &agent.messages[0].content[0] {
+        assert_eq!(agent.conversation.messages.len(), 1);
+        match &agent.conversation.messages[0].content[0] {
             ContentBlock::Text { text } => {
                 assert!(text.starts_with("[Context Summary]"));
                 assert!(text.contains("Full conversation summary"));
@@ -2768,11 +2866,11 @@ mod tests {
         );
 
         // No chat history attached — compact should still work.
-        assert!(agent.chat_history.is_none());
+        assert!(agent.history_backend.is_none());
         agent.compact(&mut output).await.unwrap();
 
         // Legacy compaction: single summary message.
-        assert_eq!(agent.messages.len(), 1);
+        assert_eq!(agent.conversation.messages.len(), 1);
     }
 
     // -----------------------------------------------------------------------

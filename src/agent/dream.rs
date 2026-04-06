@@ -263,7 +263,10 @@ struct DreamRequest {
     client: RateLimitedHandle<Box<dyn LlmClient>>,
     config: CompletionConfig,
     tool_context: ToolContext,
-    messages: Vec<Message>,
+    /// Shared snapshot of the conversation — avoids cloning the entire Vec
+    /// on every dream event.  The dream thread converts to a slice reference
+    /// for summarisation.
+    messages: Arc<[Message]>,
     turn_count: usize,
 }
 
@@ -354,7 +357,7 @@ impl DreamHandle {
         client: RateLimitedHandle<Box<dyn LlmClient>>,
         config: CompletionConfig,
         tool_context: ToolContext,
-        messages: Vec<Message>,
+        messages: Arc<[Message]>,
         turn_count: usize,
     ) {
         let req = DreamRequest {
