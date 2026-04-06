@@ -18,6 +18,20 @@ Dyson is a from-scratch implementation of the core agent pattern: **LLM streams 
 - **MCP** — MCP servers are just another skill implementation; the agent loop doesn't know they exist
 - **Provider differences** — Anthropic and OpenAI have different SSE formats, message schemas, and tool calling conventions
 
+## What it does
+
+Dyson is a fully functional agent — not just a learning exercise. It streams completions, calls tools, manages context, and persists state across conversations.
+
+- **Six LLM backends** — Anthropic, OpenAI, OpenRouter, Ollama Cloud, Claude Code, and Codex. Swap providers with a flag; the agent loop doesn't care which one it's talking to.
+- **Sandboxed tool execution** — Every tool call passes through a `Sandbox` that can allow, deny, or redirect it. The default `PolicySandbox` wraps bash in OS-level sandboxes (macOS Apple Containers / Linux bubblewrap) and enforces per-tool capability policies.
+- **MCP integration** — Connect to any MCP server (stdio or HTTP). MCP servers are just another skill; the agent loop doesn't know they exist.
+- **Workspace persistence** — Conversations, memory, and a knowledge base are stored in SQLite. Memory is tiered: always-in-context, FTS5 search, and journals. The knowledge base supports document ingestion with full-text search.
+- **Context compaction** — When the context window fills up, Dyson runs a five-phase summarization to compress history while preserving key information. Pre-compaction history is rotated for fine-tuning preservation.
+- **Subagents** — Spawn child agents with different models and tool sets. They inherit parent tools and report back.
+- **Multi-channel** — Terminal REPL and Telegram bot run concurrently. Add new channels by implementing the `Controller` trait.
+- **Dependency analysis** — Tool calls are grouped by resource dependencies and executed in parallel when safe, sequentially when not.
+- **MCP server mode** — Dyson can also expose itself as an MCP server over HTTP with bearer token auth, forwarding its workspace tools to other agents.
+
 ## The sandbox is the point
 
 The `Sandbox` trait is the key abstraction. Every tool call goes through it:
@@ -45,7 +59,7 @@ Dyson refuses to start without the OS sandbox binary unless `--dangerous-no-sand
 
 ## Footprint
 
-**6.3 MB** binary (Linux), **4.9 MB** on macOS, **~16 MB RSS** at idle, ~30 direct dependencies. The dependency tree is small enough to audit by hand — fewer crates, less supply-chain surface, and a codebase one person can read end to end.
+**4.9 MB** on macOS, **6.3 MB** on Linux, **~16 MB RSS** at idle, ~30 direct dependencies. The dependency tree is small enough to audit by hand — fewer crates, less supply-chain surface, and a codebase one person can read end to end.
 
 ## Architecture
 
@@ -60,16 +74,7 @@ User input
           → MessageComplete        → done, or loop if tools were called
 ```
 
-Six core traits:
-
-| Trait | What it does |
-|-------|-------------|
-| `LlmClient` | Stream completions from any provider (Anthropic, OpenAI, OpenRouter, Ollama Cloud, Claude Code, Codex) |
-| `Tool` | A single callable capability (bash, web search, MCP remote tool) |
-| `Skill` | A bundle of tools with lifecycle hooks and prompt fragments |
-| `Sandbox` | Gate every tool call — allow, deny, redirect, audit |
-| `Controller` | Own the input/output lifecycle (terminal REPL, Telegram bot) |
-| `SecretResolver` | Resolve secrets from any backend (env vars, Vault, SSM) |
+Everything is a trait: `LlmClient` (streaming from any provider), `Tool` (a single capability), `Skill` (a bundle of tools with lifecycle hooks), `Sandbox` (gate every tool call), `Controller` (own the I/O lifecycle), and `SecretResolver` (resolve secrets from any backend).
 
 ## Providers
 
@@ -142,27 +147,6 @@ With web search, MCP, and Telegram:
 ```
 
 Secrets can be literal strings or resolver references (`{ "resolver": "insecure_env", "name": "ENV_VAR" }`). See [Secrets](docs/secrets.md).
-
-## Project structure
-
-```
-src/
-  main.rs              CLI entry point
-  lib.rs               Module tree
-  error.rs             DysonError — unified error type
-  message.rs           Message, Role, ContentBlock
-  config/              Settings, JSON loader, migrations
-  tool/                Tool trait + bash, file ops, search, memory, knowledge base, web search, skills, export
-  skill/               Skill trait, BuiltinSkill, MCP skill, LocalSkill, SubagentSkill
-  sandbox/             Sandbox trait, PolicySandbox, DangerousNoSandbox
-  secret/              SecretResolver trait, InsecureEnvironmentVariable
-  llm/                 LlmClient trait + provider registry + Anthropic, OpenAI, OpenRouter, Ollama Cloud, Claude Code, Codex
-  agent/               Streaming loop, compaction, dependency analysis, rate limiting, token tracking
-  controller/          Controller trait + terminal, Telegram
-  workspace/           Workspace trait, memory store, knowledge base, migrations
-examples/              Example dyson.json configs
-docs/                  Component documentation
-```
 
 ## Docs
 
