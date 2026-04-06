@@ -20,6 +20,8 @@ overview, then dive into the component that interests you.
 | [Subagents](subagents.md) | Child agents with different models, tool inheritance, delegation patterns |
 | [Adding a Provider](adding-a-provider.md) | How to add a new LLM provider (3-step process via the registry) |
 | [Prompt Caching](prompt-caching.md) | Why the prompt is split into stable/ephemeral parts, the 4-breakpoint Anthropic strategy, how KV prefix caching works |
+| [MCP OAuth](mcp-oauth.md) | OAuth 2.0 Authorization Code + PKCE for MCP servers |
+| [Dreaming](dreaming.md) | Background cognitive tasks (memory maintenance, learning synthesis, self-improvement) |
 | [Comparison: Hermes Agent](comparison-hermes-agent.md) | Side-by-side with Hermes Agent (Nous Research) |
 
 **Key source files:**
@@ -33,6 +35,7 @@ src/
   config/
     mod.rs                Settings, AgentSettings, LlmProvider, SkillConfig
     loader.rs             JSON config loader (dyson.json)
+    migrate.rs            Config versioning and migrations (v0 → v1 → v2)
     hot_reload.rs         Config/workspace file watching
   tool/
     mod.rs                Tool trait, ToolContext, ToolOutput
@@ -91,6 +94,8 @@ src/
     tool_limiter.rs       Per-turn rate limiting and cooldown enforcement
     rate_limiter.rs       Per-agent message rate limiting
     reflection.rs         Agent state introspection
+    dream.rs              Background cognitive tasks (DreamRunner, DreamHandle)
+    reflection.rs         Built-in dreams (learning synthesis, memory maintenance, self-improvement)
     silent_output.rs      Null output sink for internal LLM calls (compaction, learning)
   workspace/
     mod.rs                Workspace trait, skill_files() discovery
