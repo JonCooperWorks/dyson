@@ -442,6 +442,7 @@ impl ToolOutput {
     }
 
     /// Attach multiple files to be sent to the user.
+    #[cfg(test)]
     pub fn with_files(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
         self.files.extend(paths.into_iter().map(Into::into));
         self

@@ -488,7 +488,7 @@ impl Agent {
     }
 
     /// Remove and return the last message in the conversation history.
-    pub fn pop_last_message(&mut self) -> Option<Message> {
+    fn pop_last_message(&mut self) -> Option<Message> {
         self.messages.pop()
     }
 
@@ -496,7 +496,7 @@ impl Agent {
     /// with `[image]` placeholder text.  Called when the active model does
     /// not support vision — sanitises the entire history so subsequent
     /// turns don't replay rejected image data.
-    pub fn strip_images(&mut self) {
+    fn strip_images(&mut self) {
         for msg in &mut self.messages {
             for block in &mut msg.content {
                 if matches!(block, ContentBlock::Image { .. }) {
@@ -510,7 +510,7 @@ impl Agent {
 
     /// Mark the agent as unable to use tools.  Subsequent LLM calls will
     /// omit tool definitions from the request.
-    pub fn disable_tools(&mut self) {
+    fn disable_tools(&mut self) {
         self.tools_disabled = true;
     }
 
@@ -521,7 +521,7 @@ impl Agent {
     /// serializer would otherwise emit `role: "tool"` messages and
     /// `tool_calls` arrays that providers reject when no tool definitions
     /// are provided.
-    pub fn strip_tool_history(&mut self) {
+    fn strip_tool_history(&mut self) {
         for msg in &mut self.messages {
             for block in &mut msg.content {
                 match block {

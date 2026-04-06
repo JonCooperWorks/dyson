@@ -233,7 +233,7 @@ pub async fn build_agent_with_provider(
 ///    A second word (if present) is the model within that provider.
 /// 2. Otherwise, check if the entire argument is a model in the current provider.
 /// 3. If neither matches, return an error.
-pub fn parse_model_command(
+fn parse_model_command(
     args: &str,
     providers: &std::collections::HashMap<String, crate::config::ProviderConfig>,
     current_provider: &str,
