@@ -45,7 +45,7 @@ Dyson refuses to start without the OS sandbox binary unless `--dangerous-no-sand
 
 ## Footprint
 
-**7.1 MB** binary, **~16 MB RSS** at idle, ~30 direct dependencies. The dependency tree is small enough to audit by hand — fewer crates, less supply-chain surface, and a codebase one person can read end to end.
+**6.3 MB** binary (Linux), **4.9 MB** on macOS, **~16 MB RSS** at idle, ~30 direct dependencies. The dependency tree is small enough to audit by hand — fewer crates, less supply-chain surface, and a codebase one person can read end to end.
 
 ## Architecture
 
