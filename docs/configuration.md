@@ -615,6 +615,63 @@ Use any public instance from https://searx.space/ or a self-hosted one.
 
 ---
 
+## Web Browsing
+
+Dyson offers two ways to fetch and read web page content.
+
+### Built-in `web_fetch` tool
+
+The `web_fetch` tool is always available — no configuration needed.  It
+fetches a URL and returns clean extracted text, stripping HTML tags, scripts,
+and styles.  This saves tokens compared to `curl` via bash, which returns raw
+HTML.
+
+Supported content types:
+- **text/html** — stripped to plain text via `nanohtml2text`
+- **text/plain** — returned as-is
+- **application/json** — pretty-printed
+
+Limits: 30 s timeout, 5 MB max response body, configurable output length
+(default 50 000 chars, max 200 000).
+
+### MCP browsing servers
+
+For full browser automation (JavaScript rendering, clicking, screenshots),
+add a browsing MCP server.  No code changes needed — Dyson discovers the
+server's tools automatically.
+
+**Fetch-only (lightweight, no browser):**
+
+```json
+{
+  "mcp_servers": {
+    "fetch": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-server-fetch"]
+    }
+  }
+}
+```
+
+**Full browser automation (Playwright):**
+
+```json
+{
+  "mcp_servers": {
+    "browser": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-server-playwright"]
+    }
+  }
+}
+```
+
+The built-in `web_fetch` tool covers the common case (read a page, get the
+text).  Use an MCP browsing server when you need JavaScript rendering,
+form interaction, or screenshots.
+
+---
+
 ## Controllers
 
 Controllers define how Dyson interacts with the outside world.  Each entry
