@@ -23,7 +23,7 @@ use crate::message::ContentBlock;
 
 /// Raw media input from a controller.
 pub enum MediaInput {
-    /// A raw image (JPEG, PNG, WebP, GIF).
+    /// A raw image (JPEG, PNG, WebP).
     Image { data: Vec<u8>, mime_type: String },
     /// A raw audio file (OGG/Opus voice messages, MP3, WAV, etc.).
     Audio { data: Vec<u8>, mime_type: String },
