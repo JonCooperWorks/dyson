@@ -32,9 +32,11 @@
 // ===========================================================================
 
 pub mod disk;
+#[cfg(test)]
 pub mod in_memory;
 
 pub use disk::DiskChatHistory;
+#[cfg(test)]
 pub use in_memory::InMemoryChatHistory;
 
 use crate::config::ChatHistoryConfig;

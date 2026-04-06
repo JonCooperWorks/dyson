@@ -55,7 +55,7 @@ pub mod sandbox;
 pub mod secret;
 pub mod skill;
 pub mod tool;
-pub mod tool_hooks;
+pub(crate) mod tool_hooks;
 pub(crate) mod util;
 pub mod workspace;
 

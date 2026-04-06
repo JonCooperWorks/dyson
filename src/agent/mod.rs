@@ -202,6 +202,12 @@ pub struct Agent {
     /// once in `new()` and reused in `estimate_context_tokens()`.
     cached_tool_tokens: usize,
 
+    /// Pre/post tool execution hooks.
+    ///
+    /// Hooks can block, modify, or observe tool calls before and after
+    /// execution.  See `tool_hooks.rs`.
+    tool_hooks: Vec<Box<dyn crate::tool_hooks::ToolHook>>,
+
     /// Handle to the persistent dream thread — fires background cognitive
     /// tasks (memory maintenance, learning synthesis, self-improvement)
     /// on trigger events without blocking the controller loop.
@@ -397,6 +403,7 @@ impl Agent {
             formatter: ResultFormatter::default(),
             cached_tool_tokens,
             tools_disabled: false,
+            tool_hooks: Vec::new(),
             dream_handle,
             chat_history: None,
             chat_id: None,
@@ -409,6 +416,11 @@ impl Agent {
     /// policy across the agent hierarchy.
     pub fn sandbox(&self) -> &Arc<dyn Sandbox> {
         &self.sandbox
+    }
+
+    /// Register tool hooks for pre/post tool execution lifecycle events.
+    pub fn set_tool_hooks(&mut self, hooks: Vec<Box<dyn crate::tool_hooks::ToolHook>>) {
+        self.tool_hooks = hooks;
     }
 
     /// Set the subagent nesting depth on this agent's tool context.
@@ -1058,9 +1070,57 @@ impl Agent {
                 "executing tool call"
             );
         }
+        // -- Pre-tool hooks --
+        let effective_call;
+        let call = if !self.tool_hooks.is_empty() {
+            use crate::tool_hooks::{ToolHookEvent, HookDecision, dispatch_hooks};
+            let decision = dispatch_hooks(
+                &self.tool_hooks,
+                &ToolHookEvent::PreToolUse { call },
+            );
+            match decision {
+                HookDecision::Block { reason } => {
+                    tracing::info!(tool = call.name, reason = reason, "tool call blocked by hook");
+                    return Ok(ToolOutput::error(format!("Blocked by hook: {reason}")));
+                }
+                HookDecision::Modify { input } => {
+                    effective_call = ToolCall::new(&call.name, input);
+                    &effective_call
+                }
+                HookDecision::Allow => call,
+            }
+        } else {
+            call
+        };
+
         let tool_start = std::time::Instant::now();
         let result = self.execute_tool_call(call).await;
-        let tool_ms = tool_start.elapsed().as_millis();
+        let duration = tool_start.elapsed();
+        let tool_ms = duration.as_millis();
+
+        // -- Post-tool hooks --
+        if !self.tool_hooks.is_empty() {
+            use crate::tool_hooks::{ToolHookEvent, dispatch_hooks};
+            match &result {
+                Ok(output) => {
+                    dispatch_hooks(
+                        &self.tool_hooks,
+                        &ToolHookEvent::PostToolUse { output, duration },
+                    );
+                }
+                Err(e) => {
+                    let err = crate::error::DysonError::Tool {
+                        tool: call.name.clone(),
+                        message: e.to_string(),
+                    };
+                    dispatch_hooks(
+                        &self.tool_hooks,
+                        &ToolHookEvent::PostToolUseFailure { error: &err },
+                    );
+                }
+            }
+        }
+
         match &result {
             Ok(out) => {
                 let output_preview = &out.content[..out.content.len().min(500)];

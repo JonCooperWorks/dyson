@@ -138,27 +138,17 @@ pub trait Workspace: Send + Sync {
 
 // ---------------------------------------------------------------------------
 // WorkspaceMigrate — trait for migrating between workspace backends.
+// Only used in tests for now; will be promoted when backend migration ships.
 // ---------------------------------------------------------------------------
 
-/// Result of a workspace migration.
+#[cfg(test)]
 pub struct MigrationResult {
-    /// Number of files migrated.
     pub files_migrated: usize,
-
-    /// Names of files that were migrated.
     pub file_names: Vec<String>,
 }
 
-/// Trait for migrating workspace contents between backends.
-///
-/// The default implementation uses `Workspace` primitives (list_files, get,
-/// set) so it works for any backend pair.  Backends can override
-/// `export_files` or `import_files` for optimized bulk operations (e.g.,
-/// a database backend might use COPY instead of row-by-row inserts).
+#[cfg(test)]
 pub trait WorkspaceMigrate: Workspace {
-    /// Export all files as (name, content) pairs.
-    ///
-    /// Default: iterates `list_files()` and `get()`.
     fn export_files(&self) -> Vec<(String, String)> {
         self.list_files()
             .into_iter()
@@ -169,9 +159,6 @@ pub trait WorkspaceMigrate: Workspace {
             .collect()
     }
 
-    /// Import files from (name, content) pairs, replacing any existing content.
-    ///
-    /// Default: iterates and calls `set()` for each file.
     fn import_files(&mut self, files: &[(String, String)]) {
         for (name, content) in files {
             self.set(name, content);
@@ -179,16 +166,10 @@ pub trait WorkspaceMigrate: Workspace {
     }
 }
 
-// Blanket impl: every Workspace automatically gets WorkspaceMigrate.
+#[cfg(test)]
 impl<T: Workspace + ?Sized> WorkspaceMigrate for T {}
 
-/// Migrate all files from one workspace to another.
-///
-/// Reads every file from `source`, writes each into `target`, then persists
-/// `target`.  Returns a summary of what was migrated.
-///
-/// This works across any backend combination — OpenClaw to InMemory, future
-/// database backends, etc. — because it operates through the trait interface.
+#[cfg(test)]
 pub fn migrate_workspace(
     source: &dyn Workspace,
     target: &mut dyn Workspace,
@@ -199,8 +180,6 @@ pub fn migrate_workspace(
 
     target.import_files(&files);
     target.save()?;
-
-    tracing::info!(files = count, "workspace migration complete");
 
     Ok(MigrationResult {
         files_migrated: count,
