@@ -179,3 +179,4 @@ cargo test
 
 - **[OpenClaw](https://github.com/openclaw/openclaw)** — Multi-channel AI assistant. Dyson's controller architecture and workspace format come from OpenClaw.
 - **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — Self-improving agent from [Nous Research](https://nousresearch.com/). Dyson's memory system is modeled after Hermes.
+- **[zeroclaw](https://github.com/zeroclaw-labs/zeroclaw)** — Minimal agent focused on resource consumption.
