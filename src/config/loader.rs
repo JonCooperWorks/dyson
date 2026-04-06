@@ -834,10 +834,10 @@ fn parse_mcp_servers(
             continue;
         };
 
-        settings.skills.push(SkillConfig::Mcp(McpConfig {
+        settings.skills.push(SkillConfig::Mcp(Box::new(McpConfig {
             name: name.clone(),
             transport,
-        }));
+        })));
     }
 }
 

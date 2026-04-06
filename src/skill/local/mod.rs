@@ -103,8 +103,8 @@ impl LocalSkill {
         }
 
         // If frontmatter is present, strip it.
-        if trimmed.starts_with("---") {
-            let after_open = &trimmed[3..].trim_start_matches(['\r', '\n']);
+        if let Some(after_prefix) = trimmed.strip_prefix("---") {
+            let after_open = &after_prefix.trim_start_matches(['\r', '\n']);
             if let Some(close_pos) = after_open.find("\n---") {
                 let body = after_open[close_pos + 4..].trim();
                 return if body.is_empty() { None } else { Some(body.to_string()) };
@@ -141,8 +141,8 @@ impl LocalSkill {
         }
 
         // --- Path 1: frontmatter present ---
-        if trimmed.starts_with("---") {
-            let after_open = &trimmed[3..].trim_start_matches(['\r', '\n']);
+        if let Some(after_prefix) = trimmed.strip_prefix("---") {
+            let after_open = &after_prefix.trim_start_matches(['\r', '\n']);
 
             if let Some(close_pos) = after_open.find("\n---") {
                 // Well-formed frontmatter.
@@ -207,10 +207,10 @@ impl LocalSkill {
 fn extract_frontmatter_value(frontmatter: &str, key: &str) -> String {
     for line in frontmatter.lines() {
         let line = line.trim();
-        if let Some((k, v)) = line.split_once(':') {
-            if k.trim() == key {
-                return v.trim().to_string();
-            }
+        if let Some((k, v)) = line.split_once(':')
+            && k.trim() == key
+        {
+            return v.trim().to_string();
         }
     }
     String::new()

@@ -309,13 +309,13 @@ pub fn format_logs_for_telegram(logs: &str) -> Vec<String> {
 
 /// Strip the `@botname` suffix that Telegram appends to commands in groups.
 pub fn strip_bot_mention(text: &str) -> String {
-    if let Some(at) = text.find('@') {
-        if text.starts_with('/') {
-            let after = text[at..].find(' ')
-                .map(|sp| &text[at + sp..])
-                .unwrap_or("");
-            return format!("{}{}", &text[..at], after);
-        }
+    if let Some(at) = text.find('@')
+        && text.starts_with('/')
+    {
+        let after = text[at..].find(' ')
+            .map(|sp| &text[at + sp..])
+            .unwrap_or("");
+        return format!("{}{}", &text[..at], after);
     }
     text.to_string()
 }

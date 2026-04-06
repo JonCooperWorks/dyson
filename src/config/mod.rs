@@ -335,7 +335,7 @@ impl ProviderConfig {
 /// Configuration for a single skill (tool bundle).
 #[derive(Debug, Clone)]
 pub enum SkillConfig {
-    Mcp(McpConfig),
+    Mcp(Box<McpConfig>),
     Local(LocalSkillConfig),
     Builtin(BuiltinSkillConfig),
     /// Subagent skill — spawns child agents as tools.
