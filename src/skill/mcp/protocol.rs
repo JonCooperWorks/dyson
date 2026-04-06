@@ -152,6 +152,42 @@ pub struct McpToolResult {
     pub is_error: bool,
 }
 
+impl JsonRpcResponse {
+    /// Build a success response with an arbitrary JSON result.
+    pub fn success(id: Option<u64>, result: serde_json::Value) -> Self {
+        Self {
+            id,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    /// Build a JSON-RPC error response (no result, just error).
+    pub fn rpc_error(id: Option<u64>, code: i64, message: impl Into<String>) -> Self {
+        Self {
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+                data: None,
+            }),
+        }
+    }
+
+    /// Build an MCP tool result (content array + isError flag).
+    pub fn tool_result(id: Option<u64>, text: impl Into<String>, is_error: bool) -> Self {
+        Self {
+            id,
+            result: Some(serde_json::json!({
+                "content": [{ "type": "text", "text": text.into() }],
+                "isError": is_error
+            })),
+            error: None,
+        }
+    }
+}
+
 /// Content block in a tool result.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]

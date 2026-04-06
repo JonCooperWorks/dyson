@@ -79,7 +79,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::Result;
+use crate::error::{DysonError, Result};
 
 // ---------------------------------------------------------------------------
 // Tool trait
@@ -270,6 +270,33 @@ impl ToolContext {
             depth: 0,
             dangerous_no_sandbox: false,
         }
+    }
+
+    /// Create a test context with a workspace attached.
+    ///
+    /// Uses `temp_dir()` as working directory. Wraps the workspace in
+    /// the `Arc<RwLock<Box<dyn Workspace>>>` that tools expect.
+    #[cfg(test)]
+    pub fn for_test_with_workspace(ws: impl crate::workspace::Workspace + 'static) -> Self {
+        let workspace: Box<dyn crate::workspace::Workspace> = Box::new(ws);
+        Self {
+            working_dir: std::env::temp_dir(),
+            env: HashMap::new(),
+            cancellation: CancellationToken::new(),
+            workspace: Some(Arc::new(RwLock::new(workspace))),
+            depth: 0,
+            dangerous_no_sandbox: false,
+        }
+    }
+
+    /// Get a reference to the workspace, or return a tool error if not configured.
+    pub fn workspace(
+        &self,
+        tool_name: &str,
+    ) -> Result<&Arc<RwLock<Box<dyn crate::workspace::Workspace>>>> {
+        self.workspace
+            .as_ref()
+            .ok_or_else(|| DysonError::tool(tool_name, "no workspace configured"))
     }
 }
 

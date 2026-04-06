@@ -8,7 +8,6 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::error::DysonError;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 pub struct KbSearchTool;
@@ -45,10 +44,7 @@ impl Tool for KbSearchTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
-        let ws = ctx
-            .workspace
-            .as_ref()
-            .ok_or_else(|| DysonError::tool("kb_search", "no workspace configured"))?;
+        let ws = ctx.workspace("kb_search")?;
 
         let query = input["query"].as_str().unwrap_or("").to_string();
         if query.is_empty() {

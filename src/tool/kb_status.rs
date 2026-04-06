@@ -8,7 +8,6 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::error::DysonError;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 pub struct KbStatusTool;
@@ -33,10 +32,7 @@ impl Tool for KbStatusTool {
     }
 
     async fn run(&self, _input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
-        let ws = ctx
-            .workspace
-            .as_ref()
-            .ok_or_else(|| DysonError::tool("kb_status", "no workspace configured"))?;
+        let ws = ctx.workspace("kb_status")?;
 
         // Collect data under the lock, then format outside it.
         let (raw_files, raw_bytes, wiki_files, wiki_bytes, has_index) = {

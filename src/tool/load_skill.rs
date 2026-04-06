@@ -15,7 +15,6 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::error::DysonError;
 use crate::skill::local::LocalSkill;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
@@ -47,10 +46,7 @@ impl Tool for LoadSkillTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
-        let ws = ctx
-            .workspace
-            .as_ref()
-            .ok_or_else(|| DysonError::tool("load_skill", "no workspace configured"))?;
+        let ws = ctx.workspace("load_skill")?;
 
         let skill_name = input["skill_name"]
             .as_str()
@@ -108,21 +104,6 @@ impl Tool for LoadSkillTool {
 mod tests {
     use super::*;
     use crate::workspace::InMemoryWorkspace;
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
-
-    fn make_ctx(ws: InMemoryWorkspace) -> ToolContext {
-        let workspace: Box<dyn crate::workspace::Workspace> = Box::new(ws);
-        ToolContext {
-            working_dir: std::env::temp_dir(),
-            env: HashMap::new(),
-            cancellation: tokio_util::sync::CancellationToken::new(),
-            workspace: Some(Arc::new(RwLock::new(workspace))),
-            depth: 0,
-            dangerous_no_sandbox: false,
-        }
-    }
 
     #[tokio::test]
     async fn loads_skill_body() {
@@ -130,7 +111,7 @@ mod tests {
             "skills/code-review/SKILL.md",
             "---\nname: code-review\ndescription: Reviews code\n---\n\nStep 1: Read the code.\nStep 2: Find issues.",
         );
-        let ctx = make_ctx(ws);
+        let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = LoadSkillTool;
 
         let result = tool
@@ -151,7 +132,7 @@ mod tests {
             "skills/deploy/SKILL.md",
             "---\nname: deploy\n---\n\nDeploy stuff.",
         );
-        let ctx = make_ctx(ws);
+        let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = LoadSkillTool;
 
         let result = tool
@@ -166,7 +147,7 @@ mod tests {
     #[tokio::test]
     async fn empty_name_rejected() {
         let ws = InMemoryWorkspace::new();
-        let ctx = make_ctx(ws);
+        let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = LoadSkillTool;
 
         let result = tool.run(&json!({"skill_name": ""}), &ctx).await.unwrap();

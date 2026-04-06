@@ -8,7 +8,6 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::error::DysonError;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 pub struct WorkspaceViewTool;
@@ -37,10 +36,7 @@ impl Tool for WorkspaceViewTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
-        let ws = ctx
-            .workspace
-            .as_ref()
-            .ok_or_else(|| DysonError::tool("workspace_view", "no workspace configured"))?;
+        let ws = ctx.workspace("workspace_view")?;
 
         let ws = ws.read().await;
 
