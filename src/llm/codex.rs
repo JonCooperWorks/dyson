@@ -78,10 +78,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::RwLock;
 
 use crate::error::{DysonError, Result};
+use crate::llm::cli_subprocess::{CliLineParser, cli_event_stream};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use crate::message::Message;
@@ -283,44 +283,16 @@ impl LlmClient for CodexClient {
             .take()
             .ok_or_else(|| DysonError::Llm("failed to open stdout for codex process".into()))?;
 
-        let reader = BufReader::new(stdout);
+        // Keep child process and MCP server alive for the stream's lifetime.
+        let mut keep_alive: Vec<Box<dyn std::any::Any + Send>> = vec![Box::new(child)];
+        if let Some(handle) = _mcp_server_handle {
+            keep_alive.push(Box::new(handle));
+        }
 
-        let event_stream = async_stream::stream! {
-            let _child = child;
-            let _mcp_handle = _mcp_server_handle;
-
-            let mut reader = reader;
-            let mut parser = StreamParserState::new();
-
-            loop {
-                let mut line = String::new();
-                let bytes_read = match reader.read_line(&mut line).await {
-                    Ok(n) => n,
-                    Err(e) => {
-                        yield Err(DysonError::Io(e));
-                        break;
-                    }
-                };
-                if bytes_read == 0 {
-                    break; // EOF
-                }
-                let line = line.trim_end();
-                if line.is_empty() {
-                    continue;
-                }
-
-                for event in parser.parse_line(line) {
-                    yield event;
-                }
-            }
-
-            for event in parser.finalize() {
-                yield event;
-            }
-        };
+        let event_stream = cli_event_stream(stdout, StreamParserState::new(), keep_alive);
 
         Ok(crate::llm::StreamResponse {
-            stream: Box::pin(event_stream),
+            stream: event_stream,
             tool_mode: crate::llm::ToolMode::Observe,
             input_tokens: None,
         })
@@ -343,8 +315,9 @@ impl StreamParserState {
     fn new() -> Self {
         Self { completed: false }
     }
+}
 
-    /// Parse one JSONL line. Returns events to yield (may be empty).
+impl CliLineParser for StreamParserState {
     fn parse_line(&mut self, line: &str) -> Vec<Result<StreamEvent>> {
         let mut events = Vec::new();
 

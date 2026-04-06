@@ -61,17 +61,13 @@
 //   their content block index.
 // ===========================================================================
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 
 use crate::auth::Auth;
 use crate::error::{DysonError, Result};
+use crate::llm::sse_parser::{BaseSseParser, SseJsonParser, ToolBufferContext};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{
-    CompletionConfig, LlmClient, MAX_ACTIVE_TOOL_BUFFERS, MAX_TOOL_JSON, SseLineBuffer,
-    ToolCallBuffer, ToolDefinition, finalize_tool_call,
-};
+use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -358,7 +354,10 @@ impl LlmClient for AnthropicClient {
         }
 
         // -- Transform the SSE byte stream into StreamEvents --
-        let event_stream = crate::llm::sse_event_stream(response, SseParser::new());
+        let event_stream = crate::llm::sse_event_stream(
+            response,
+            BaseSseParser::new(AnthropicJsonParser),
+        );
 
         Ok(crate::llm::StreamResponse {
             stream: event_stream,
@@ -372,252 +371,132 @@ impl LlmClient for AnthropicClient {
 // SSE Parser — converts raw bytes into StreamEvents.
 // ---------------------------------------------------------------------------
 
-/// Buffered parser for Anthropic's Server-Sent Events stream.
+/// Anthropic-specific SSE JSON parser.
 ///
-/// Handles three concerns:
-/// 1. **Line buffering**: bytes can split anywhere; we buffer until we have
-///    complete lines (delimited by `\n`).
-/// 2. **SSE protocol**: extracts `data:` lines, ignores `event:` and comments.
-/// 3. **Tool use accumulation**: tracks partial JSON for each tool_use content
-///    block and emits `ToolUseComplete` when the block stops.
-struct SseParser {
-    /// Shared line buffer that handles SSE framing.
-    line_buffer: SseLineBuffer,
+/// Handles Anthropic's content_block_start/delta/stop event model.
+/// Used with `BaseSseParser<AnthropicJsonParser>`.
+struct AnthropicJsonParser;
 
-    /// Active tool_use blocks being accumulated.
-    ///
-    /// Key: content block index (from the Anthropic API).
-    /// Value: (tool_use_id, tool_name, accumulated_json_string).
-    ///
-    /// When `content_block_start` arrives with type "tool_use", we insert
-    /// an entry.  Each `input_json_delta` appends to the JSON string.
-    /// On `content_block_stop`, we parse the JSON and emit ToolUseComplete.
-    tool_buffers: HashMap<usize, ToolCallBuffer>,
-
-    /// Content block indices that are "thinking" blocks.
-    ///
-    /// Anthropic's extended thinking emits thinking content as regular
-    /// content_block_delta events with type "thinking_delta".  We track
-    /// which blocks are thinking so we can emit ThinkingDelta instead of
-    /// TextDelta for their content.
-    thinking_blocks: std::collections::HashSet<usize>,
-}
-
-impl SseParser {
-    fn new() -> Self {
-        Self {
-            line_buffer: SseLineBuffer::new(),
-            tool_buffers: HashMap::new(),
-            thinking_blocks: std::collections::HashSet::new(),
-        }
-    }
-}
-
-impl crate::llm::SseStreamParser for SseParser {
-    fn feed(&mut self, bytes: &[u8]) -> Vec<Result<StreamEvent>> {
+impl SseJsonParser for AnthropicJsonParser {
+    fn parse_json(
+        &mut self,
+        json: &serde_json::Value,
+        ctx: &mut ToolBufferContext,
+    ) -> Vec<Result<StreamEvent>> {
         let mut events = Vec::new();
 
-        // Use the shared line buffer for SSE framing.
-        let payloads = match self.line_buffer.feed(bytes) {
-            Ok(p) => p,
-            Err(e) => {
-                events.push(Err(e));
-                return events;
-            }
+        let Some(event_type) = json["type"].as_str() else {
+            return events;
         };
 
-        for data in payloads {
-            // "[DONE]" is an OpenAI convention; Anthropic uses
-            // "message_stop" events instead.  Handle both for safety.
-            if data == "[DONE]" {
-                continue;
-            }
-
-            // Parse the JSON payload and convert to StreamEvent(s).
-            match serde_json::from_str::<serde_json::Value>(&data) {
-                Ok(json) => {
-                    if let Some(event) = self.parse_sse_json(&json) {
-                        events.push(Ok(event));
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(data = data, error = %e, "failed to parse SSE JSON");
-                }
-            }
-        }
-
-        events
-    }
-}
-
-impl SseParser {
-    /// Parse a single SSE JSON payload into a StreamEvent.
-    ///
-    /// ## Anthropic event types
-    ///
-    /// | API "type" field       | StreamEvent                              |
-    /// |------------------------|------------------------------------------|
-    /// | message_start          | (ignored — we don't need the message ID) |
-    /// | content_block_start    | ToolUseStart (if tool_use block)         |
-    /// | content_block_delta    | TextDelta or ToolUseInputDelta           |
-    /// | content_block_stop     | ToolUseComplete (if tool_use block)      |
-    /// | message_delta          | MessageComplete                          |
-    /// | message_stop           | (ignored — stream just ends)             |
-    /// | ping                   | (ignored)                                |
-    /// | error                  | Error                                    |
-    fn parse_sse_json(&mut self, json: &serde_json::Value) -> Option<StreamEvent> {
-        let event_type = json["type"].as_str()?;
-
         match event_type {
-            // -- content_block_start --
-            //
-            // A new content block is beginning.  For text blocks, we don't
-            // need to do anything (text arrives via deltas).  For tool_use
-            // blocks, we start accumulating the input JSON.
             "content_block_start" => {
-                let index = json["index"].as_u64()? as usize;
+                let Some(index) = json["index"].as_u64().map(|n| n as usize) else {
+                    return events;
+                };
                 let block = &json["content_block"];
-                let block_type = block["type"].as_str()?;
+                let Some(block_type) = block["type"].as_str() else {
+                    return events;
+                };
 
                 if block_type == "tool_use" {
-                    let id = block["id"].as_str()?.to_string();
-                    let name = block["name"].as_str()?.to_string();
+                    let id = block["id"].as_str().unwrap_or("").to_string();
+                    let name = block["name"].as_str().unwrap_or("").to_string();
 
-                    // Guard against unbounded growth from a malformed stream
-                    // that sends many content_block_start events without
-                    // matching content_block_stop events.
-                    if self.tool_buffers.len() >= MAX_ACTIVE_TOOL_BUFFERS {
-                        return Some(StreamEvent::Error(DysonError::Llm(format!(
-                            "too many concurrent tool calls ({MAX_ACTIVE_TOOL_BUFFERS}) — aborting stream"
-                        ))));
+                    if let Some(err_event) = ctx.start_tool(index, id.clone(), name.clone()) {
+                        events.push(Ok(err_event));
+                        return events;
                     }
 
-                    // Start accumulating JSON for this tool call.
-                    self.tool_buffers.insert(
-                        index,
-                        ToolCallBuffer {
-                            id: id.clone(),
-                            name: name.clone(),
-                            json: String::new(),
-                        },
-                    );
-
-                    return Some(StreamEvent::ToolUseStart { id, name });
+                    events.push(Ok(StreamEvent::ToolUseStart { id, name }));
+                } else if block_type == "thinking" {
+                    ctx.thinking_blocks.insert(index);
                 }
-
-                // Track thinking blocks so we can route their deltas correctly.
-                if block_type == "thinking" {
-                    self.thinking_blocks.insert(index);
-                }
-
-                None
             }
 
-            // -- content_block_delta --
-            //
-            // A fragment of content for an existing block.
-            // - "text_delta" → TextDelta event (print to terminal)
-            // - "input_json_delta" → accumulate in the tool buffer
             "content_block_delta" => {
-                let index = json["index"].as_u64()? as usize;
+                let Some(index) = json["index"].as_u64().map(|n| n as usize) else {
+                    return events;
+                };
                 let delta = &json["delta"];
-                let delta_type = delta["type"].as_str()?;
+                let Some(delta_type) = delta["type"].as_str() else {
+                    return events;
+                };
 
                 match delta_type {
                     "thinking_delta" => {
-                        let text = delta["thinking"].as_str()?.to_string();
-                        Some(StreamEvent::ThinkingDelta(text))
+                        if let Some(text) = delta["thinking"].as_str() {
+                            events.push(Ok(StreamEvent::ThinkingDelta(text.to_string())));
+                        }
                     }
                     "text_delta" => {
-                        let text = delta["text"].as_str()?.to_string();
-                        // Check if this text block is inside a thinking content block.
-                        if self.thinking_blocks.contains(&index) {
-                            Some(StreamEvent::ThinkingDelta(text))
-                        } else {
-                            Some(StreamEvent::TextDelta(text))
+                        if let Some(text) = delta["text"].as_str() {
+                            if ctx.thinking_blocks.contains(&index) {
+                                events.push(Ok(StreamEvent::ThinkingDelta(text.to_string())));
+                            } else {
+                                events.push(Ok(StreamEvent::TextDelta(text.to_string())));
+                            }
                         }
                     }
                     "input_json_delta" => {
-                        let partial = delta["partial_json"].as_str()?;
-
-                        // Append to the accumulation buffer, guarding against
-                        // unbounded growth from a runaway stream.
-                        if let Some(buf) = self.tool_buffers.get_mut(&index) {
-                            if buf.json.len() + partial.len() > MAX_TOOL_JSON {
-                                return Some(StreamEvent::TextDelta(
-                                    "[error: tool input exceeded 10 MB limit]".into(),
-                                ));
+                        if let Some(partial) = delta["partial_json"].as_str() {
+                            if let Some(err_event) = ctx.append_tool_json(index, partial) {
+                                events.push(Ok(err_event));
+                                return events;
                             }
-                            buf.json.push_str(partial);
+                            events.push(Ok(StreamEvent::ToolUseInputDelta(partial.to_string())));
                         }
-
-                        Some(StreamEvent::ToolUseInputDelta(partial.to_string()))
                     }
-                    _ => None,
+                    _ => {}
                 }
             }
 
-            // -- content_block_stop --
-            //
-            // A content block is complete.  If it was a tool_use block,
-            // parse the accumulated JSON and emit ToolUseComplete.
             "content_block_stop" => {
-                let index = json["index"].as_u64()? as usize;
-
-                if let Some(buf) = self.tool_buffers.remove(&index) {
-                    return match finalize_tool_call(buf) {
-                        Ok(event) => Some(event),
+                let Some(index) = json["index"].as_u64().map(|n| n as usize) else {
+                    return events;
+                };
+                if let Some(result) = ctx.finalize_tool(index) {
+                    match result {
+                        Ok(event) => events.push(Ok(event)),
                         Err(e) => {
                             tracing::error!(error = %e, "tool call finalization failed");
-                            None
+                        }
+                    }
+                }
+            }
+
+            "message_delta" => {
+                if let Some(stop_str) = json["delta"]["stop_reason"].as_str() {
+                    let stop_reason = match stop_str {
+                        "end_turn" => StopReason::EndTurn,
+                        "tool_use" => StopReason::ToolUse,
+                        "max_tokens" => StopReason::MaxTokens,
+                        other => {
+                            tracing::warn!(stop_reason = other, "unknown stop reason");
+                            StopReason::EndTurn
                         }
                     };
+                    let output_tokens =
+                        json["usage"]["output_tokens"].as_u64().map(|n| n as usize);
+                    events.push(Ok(StreamEvent::MessageComplete {
+                        stop_reason,
+                        output_tokens,
+                    }));
                 }
-
-                None
             }
 
-            // -- message_delta --
-            //
-            // The message-level delta carries the stop_reason and usage.
-            "message_delta" => {
-                let stop_str = json["delta"]["stop_reason"].as_str()?;
-                let stop_reason = match stop_str {
-                    "end_turn" => StopReason::EndTurn,
-                    "tool_use" => StopReason::ToolUse,
-                    "max_tokens" => StopReason::MaxTokens,
-                    other => {
-                        tracing::warn!(stop_reason = other, "unknown stop reason");
-                        StopReason::EndTurn
-                    }
-                };
-
-                let output_tokens = json["usage"]["output_tokens"].as_u64().map(|n| n as usize);
-
-                Some(StreamEvent::MessageComplete {
-                    stop_reason,
-                    output_tokens,
-                })
-            }
-
-            // -- error --
-            //
-            // The API sent an error event mid-stream (e.g., overloaded).
             "error" => {
                 let message = json["error"]["message"]
                     .as_str()
                     .unwrap_or("unknown error")
                     .to_string();
-                Some(StreamEvent::Error(DysonError::Llm(message)))
+                events.push(Ok(StreamEvent::Error(DysonError::Llm(message))));
             }
 
-            // -- message_start, message_stop, ping --
-            //
-            // message_start: we don't need the message ID or usage yet.
-            // message_stop: the stream naturally ends after this.
-            // ping: keepalive, ignore.
-            _ => None,
+            _ => {}
         }
+
+        events
     }
 }
 
@@ -628,11 +507,11 @@ impl SseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::SseStreamParser;
+    use crate::llm::{SseStreamParser, MAX_ACTIVE_TOOL_BUFFERS};
 
     /// Helper: feed SSE lines through the parser and collect events.
     fn parse_sse(lines: &str) -> Vec<Result<StreamEvent>> {
-        let mut parser = SseParser::new();
+        let mut parser = BaseSseParser::new(AnthropicJsonParser);
         parser.feed(lines.as_bytes())
     }
 
@@ -727,7 +606,7 @@ mod tests {
     #[test]
     fn handles_partial_lines() {
         // Feed bytes in two chunks that split in the middle of a line.
-        let mut parser = SseParser::new();
+        let mut parser = BaseSseParser::new(AnthropicJsonParser);
 
         // First chunk: incomplete line.
         let events1 = parser.feed(b"data: {\"type\":\"content_block_del");
@@ -838,7 +717,7 @@ mod tests {
 
     #[test]
     fn line_buffer_rejects_oversized_input() {
-        let mut parser = SseParser::new();
+        let mut parser = BaseSseParser::new(AnthropicJsonParser);
 
         // Feed just over 10 MB without any newlines — should trigger the cap.
         let chunk = vec![b'x'; 10 * 1024 * 1024 + 1];
@@ -855,7 +734,7 @@ mod tests {
 
     #[test]
     fn line_buffer_accepts_large_but_valid_input() {
-        let mut parser = SseParser::new();
+        let mut parser = BaseSseParser::new(AnthropicJsonParser);
 
         // Feed a large but valid SSE line (under the cap) with a newline.
         let text = "x".repeat(1024);
@@ -871,7 +750,7 @@ mod tests {
 
     #[test]
     fn too_many_tool_buffers_emits_error() {
-        let mut parser = SseParser::new();
+        let mut parser = BaseSseParser::new(AnthropicJsonParser);
 
         // Start MAX_ACTIVE_TOOL_BUFFERS + 1 tool_use blocks without closing any.
         for i in 0..=MAX_ACTIVE_TOOL_BUFFERS {
@@ -925,7 +804,7 @@ mod tests {
 
     #[test]
     fn tool_json_buffer_rejects_oversized_input() {
-        let mut parser = SseParser::new();
+        let mut parser = BaseSseParser::new(AnthropicJsonParser);
 
         // Start a tool_use block.
         let start = "event: content_block_start\n\

@@ -51,17 +51,13 @@
 //   and function.arguments instead of content_block with input_json_delta).
 // ===========================================================================
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 
 use crate::auth::Auth;
 use crate::error::{DysonError, Result};
+use crate::llm::sse_parser::{BaseSseParser, SseJsonParser, ToolBufferContext};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{
-    CompletionConfig, LlmClient, MAX_ACTIVE_TOOL_BUFFERS, MAX_TOOL_JSON, SseLineBuffer,
-    ToolCallBuffer, ToolDefinition, finalize_tool_call,
-};
+use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -212,7 +208,10 @@ impl LlmClient for OpenAiClient {
         }
 
         // -- Parse SSE stream --
-        let event_stream = crate::llm::sse_event_stream(response, OpenAiSseParser::new());
+        let event_stream = crate::llm::sse_event_stream(
+            response,
+            BaseSseParser::new(OpenAiJsonParser::new()),
+        );
 
         Ok(crate::llm::StreamResponse {
             stream: event_stream,
@@ -351,96 +350,29 @@ fn message_to_openai(msg: &Message) -> serde_json::Value {
 // OpenAI SSE Parser
 // ---------------------------------------------------------------------------
 
-/// Parses OpenAI's SSE stream into StreamEvents.
+/// OpenAI-specific SSE JSON parser.
 ///
-/// Similar structure to the Anthropic parser but handles OpenAI's different
-/// JSON format: choices[0].delta instead of content_block events.
-///
-/// Uses the shared `SseLineBuffer` for SSE framing (line buffering, overflow
-/// protection), and only implements the OpenAI-specific JSON → StreamEvent
-/// mapping.
-struct OpenAiSseParser {
-    /// Shared line buffer that handles SSE framing.
-    line_buffer: SseLineBuffer,
-
-    /// Active tool call accumulation.
-    /// Key: tool_calls array index.
-    /// Value: (call_id, function_name, accumulated_arguments_string).
-    tool_buffers: HashMap<usize, ToolCallBuffer>,
-
+/// Handles OpenAI's choices[0].delta event model.
+/// Used with `BaseSseParser<OpenAiJsonParser>`.
+struct OpenAiJsonParser {
     /// Whether we've already emitted a MessageComplete event.
     /// Guards against duplicate finish_reason chunks from providers
     /// like OpenRouter that may send usage data in a separate chunk.
     completed: bool,
 }
 
-impl OpenAiSseParser {
+impl OpenAiJsonParser {
     fn new() -> Self {
-        Self {
-            line_buffer: SseLineBuffer::new(),
-            tool_buffers: HashMap::new(),
-            completed: false,
-        }
+        Self { completed: false }
     }
 }
 
-impl crate::llm::SseStreamParser for OpenAiSseParser {
-    fn feed(&mut self, bytes: &[u8]) -> Vec<Result<StreamEvent>> {
-        let mut events = Vec::new();
-
-        let payloads = match self.line_buffer.feed(bytes) {
-            Ok(p) => p,
-            Err(e) => {
-                events.push(Err(e));
-                return events;
-            }
-        };
-
-        for data in payloads {
-            if data == "[DONE]" {
-                // Flush any remaining tool buffers.
-                // OpenAI emits finish_reason before [DONE], so tool
-                // buffers should already be flushed.  But just in case:
-                let remaining: Vec<ToolCallBuffer> =
-                    self.tool_buffers.drain().map(|(_, buf)| buf).collect();
-                for buf in remaining {
-                    events.push(finalize_tool_call(buf));
-                }
-                continue;
-            }
-
-            match serde_json::from_str::<serde_json::Value>(&data) {
-                Ok(json) => {
-                    let new_events = self.parse_chunk(&json);
-                    events.extend(new_events);
-                }
-                Err(e) => {
-                    tracing::warn!(data = data, error = %e, "failed to parse OpenAI SSE JSON");
-                }
-            }
-        }
-
-        events
-    }
-}
-
-impl OpenAiSseParser {
-    /// Parse a single OpenAI SSE chunk.
-    ///
-    /// OpenAI chunks have this structure:
-    /// ```json
-    /// {
-    ///   "choices": [{
-    ///     "index": 0,
-    ///     "delta": {
-    ///       "content": "Hello",           // text content
-    ///       "tool_calls": [...]            // tool calls
-    ///     },
-    ///     "finish_reason": "stop"          // or "tool_calls" or null
-    ///   }]
-    /// }
-    /// ```
-    fn parse_chunk(&mut self, json: &serde_json::Value) -> Vec<Result<StreamEvent>> {
+impl SseJsonParser for OpenAiJsonParser {
+    fn parse_json(
+        &mut self,
+        json: &serde_json::Value,
+        ctx: &mut ToolBufferContext,
+    ) -> Vec<Result<StreamEvent>> {
         let mut events = Vec::new();
 
         let Some(choices) = json["choices"].as_array() else {
@@ -451,11 +383,6 @@ impl OpenAiSseParser {
             let delta = &choice["delta"];
 
             // -- Thinking / reasoning content --
-            //
-            // Models like OpenAI o-series and DeepSeek emit reasoning tokens
-            // in a separate "reasoning_content" field before the visible
-            // response.  We capture these as ThinkingDelta events so they
-            // can be logged without being shown to the user.
             if let Some(thinking) = delta["reasoning_content"].as_str()
                 && !thinking.is_empty()
             {
@@ -474,28 +401,15 @@ impl OpenAiSseParser {
                 for tc in tool_calls {
                     let index = tc["index"].as_u64().unwrap_or(0) as usize;
 
-                    // First chunk for this tool call has id and function.name.
                     if let Some(id) = tc["id"].as_str() {
-                        // Guard against unbounded tool buffer growth.
-                        if self.tool_buffers.len() >= MAX_ACTIVE_TOOL_BUFFERS {
-                            events.push(Err(DysonError::Llm(
-                                format!(
-                                    "too many concurrent tool calls ({MAX_ACTIVE_TOOL_BUFFERS}) — aborting stream"
-                                ),
-                            )));
-                            return events;
-                        }
-
                         let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
 
-                        self.tool_buffers.insert(
-                            index,
-                            ToolCallBuffer {
-                                id: id.to_string(),
-                                name: name.clone(),
-                                json: String::new(),
-                            },
-                        );
+                        if let Some(err_event) =
+                            ctx.start_tool(index, id.to_string(), name.clone())
+                        {
+                            events.push(Err(DysonError::Llm(format!("{err_event:?}"))));
+                            return events;
+                        }
 
                         events.push(Ok(StreamEvent::ToolUseStart {
                             id: id.to_string(),
@@ -503,18 +417,13 @@ impl OpenAiSseParser {
                         }));
                     }
 
-                    // Subsequent chunks have function.arguments fragments.
                     if let Some(args) = tc["function"]["arguments"].as_str() {
-                        if let Some(buf) = self.tool_buffers.get_mut(&index) {
-                            if buf.json.len() + args.len() > MAX_TOOL_JSON {
-                                events.push(Ok(StreamEvent::TextDelta(
-                                    "[error: tool input exceeded 10 MB limit]".into(),
-                                )));
-                            } else {
-                                buf.json.push_str(args);
-                            }
+                        if let Some(err_event) = ctx.append_tool_json(index, args) {
+                            events.push(Ok(err_event));
+                        } else {
+                            events
+                                .push(Ok(StreamEvent::ToolUseInputDelta(args.to_string())));
                         }
-                        events.push(Ok(StreamEvent::ToolUseInputDelta(args.to_string())));
                     }
                 }
             }
@@ -525,8 +434,6 @@ impl OpenAiSseParser {
             {
                 self.completed = true;
 
-                // OpenAI reports usage in a top-level "usage" object on the
-                // final chunk (when stream_options.include_usage is set).
                 let output_tokens = json["usage"]["completion_tokens"]
                     .as_u64()
                     .map(|n| n as usize);
@@ -539,12 +446,7 @@ impl OpenAiSseParser {
                         }));
                     }
                     "tool_calls" => {
-                        // Flush all accumulated tool calls.
-                        let buffers: Vec<ToolCallBuffer> =
-                            self.tool_buffers.drain().map(|(_, buf)| buf).collect();
-                        for buf in buffers {
-                            events.push(finalize_tool_call(buf));
-                        }
+                        events.extend(ctx.drain_all());
                         events.push(Ok(StreamEvent::MessageComplete {
                             stop_reason: StopReason::ToolUse,
                             output_tokens,
@@ -578,10 +480,10 @@ impl OpenAiSseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::SseStreamParser;
+    use crate::llm::{SseStreamParser, MAX_ACTIVE_TOOL_BUFFERS};
 
     fn parse_sse(lines: &str) -> Vec<Result<StreamEvent>> {
-        let mut parser = OpenAiSseParser::new();
+        let mut parser = BaseSseParser::new(OpenAiJsonParser::new());
         parser.feed(lines.as_bytes())
     }
 
@@ -715,7 +617,7 @@ mod tests {
         // OpenRouter and some providers send finish_reason in one chunk,
         // then a usage-only chunk that also includes finish_reason.
         // We must only emit one MessageComplete.
-        let mut parser = OpenAiSseParser::new();
+        let mut parser = BaseSseParser::new(OpenAiJsonParser::new());
 
         // First chunk: text + finish.
         let events1 = parser.feed(
@@ -748,7 +650,7 @@ mod tests {
 
     #[test]
     fn line_buffer_rejects_oversized_input() {
-        let mut parser = OpenAiSseParser::new();
+        let mut parser = BaseSseParser::new(OpenAiJsonParser::new());
         let chunk = vec![b'x'; 10 * 1024 * 1024 + 1];
         let events = parser.feed(&chunk);
         assert_eq!(events.len(), 1);
@@ -762,7 +664,7 @@ mod tests {
 
     #[test]
     fn too_many_tool_buffers_emits_error() {
-        let mut parser = OpenAiSseParser::new();
+        let mut parser = BaseSseParser::new(OpenAiJsonParser::new());
         // Insert MAX_ACTIVE_TOOL_BUFFERS + 1 tool calls.
         for i in 0..=MAX_ACTIVE_TOOL_BUFFERS {
             let sse = format!(
@@ -778,7 +680,7 @@ mod tests {
 
     #[test]
     fn tool_json_buffer_rejects_oversized_input() {
-        let mut parser = OpenAiSseParser::new();
+        let mut parser = BaseSseParser::new(OpenAiJsonParser::new());
 
         // Start a tool call.
         let start = "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n";
