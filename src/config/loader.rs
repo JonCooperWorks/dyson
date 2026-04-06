@@ -488,7 +488,28 @@ pub fn persist_model_selection(config_path: &Path, provider_name: &str, model: &
         })
         .unwrap_or(false);
 
-    if moved {
+    // Update agent.provider and agent.model so the switched model becomes the
+    // default on next startup.
+    let agent_updated = root
+        .get_mut("agent")
+        .and_then(|a| a.as_object_mut())
+        .map(|agent| {
+            let mut changed = false;
+            let new_provider = serde_json::Value::String(provider_name.to_string());
+            if agent.get("provider") != Some(&new_provider) {
+                agent.insert("provider".to_string(), new_provider);
+                changed = true;
+            }
+            let new_model = serde_json::Value::String(model.to_string());
+            if agent.get("model") != Some(&new_model) {
+                agent.insert("model".to_string(), new_model);
+                changed = true;
+            }
+            changed
+        })
+        .unwrap_or(false);
+
+    if moved || agent_updated {
         write_back_config(config_path, &root);
     }
 }
