@@ -400,6 +400,7 @@ dependencies = [
  "hyper-util",
  "ignore",
  "image",
+ "nanohtml2text",
  "rand",
  "regex",
  "reqwest",
@@ -1120,6 +1121,12 @@ dependencies = [
  "num-traits",
  "pxfm",
 ]
+
+[[package]]
+name = "nanohtml2text"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d4bdc3645754d2da280343bd8f1eaa9acf56c4ed75b540c98c898b171a3d867"
 
 [[package]]
 name = "nu-ansi-term"
