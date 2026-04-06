@@ -7,6 +7,7 @@ extensibility layer that lets you plug arbitrary capabilities into the agent.
 **Key files:**
 - `src/tool/mod.rs` — `Tool` trait, `ToolContext`, `ToolOutput`
 - `src/tool/bash.rs` — `BashTool` (shell execution with timeout)
+- `src/tool/web_fetch.rs` — `WebFetchTool` (URL fetching with HTML-to-text extraction)
 - `src/tool/web_search.rs` — `WebSearchTool`, `SearchProvider` trait, Brave/SearXNG providers
 - `src/skill/mod.rs` — `Skill` trait, `create_skills()` factory
 - `src/skill/builtin.rs` — `BuiltinSkill` (wraps built-in tools)
@@ -111,10 +112,19 @@ The default skill wrapping Dyson's built-in tools:
 - `SkillCreateTool` — create, update, or improve skills
 - `SendFileTool` — send file to user via controller
 - `ExportConversationTool` — export chat history in ShareGPT format
+- `WebFetchTool` — fetch a URL and return clean extracted text (always available)
 - `WebSearchTool` — web search via pluggable provider (conditional — see below)
 
 The system prompt is generated dynamically from the loaded tools — each
 tool's name and description are listed so the LLM knows what's available.
+
+---
+
+## WebFetchTool
+
+Fetches a URL and returns clean extracted text. HTML pages are stripped of tags, scripts, and styles via `nanohtml2text`. Also handles `text/plain` and `application/json` (pretty-printed). Always available — no configuration needed.
+
+Input: `{ "url": "https://...", "max_length": 50000 }`. See [Configuration](configuration.md#web-browsing) for details and MCP alternatives for full browser automation.
 
 ---
 
@@ -145,7 +155,7 @@ See `src/tool/bash.rs` as a template. The agent discovers tools automatically vi
 
 | Skill | Status | Tools | Source |
 |-------|--------|-------|--------|
-| `BuiltinSkill` | Implemented | bash, read/write/edit_file, list/search_files, workspace_*, memory_search, web_search, load_skill, skill_create, send_file, export_conversation | Compiled into Dyson |
+| `BuiltinSkill` | Implemented | bash, read/write/edit_file, list/search_files, workspace_*, memory_search, web_fetch, web_search, load_skill, skill_create, send_file, export_conversation | Compiled into Dyson |
 | `McpSkill` | Implemented | Discovered via `tools/list` | MCP server (stdio/HTTP) |
 | `LocalSkill` | Implemented | None (system prompt list only) | skills/*/SKILL.md |
 | `SubagentSkill` | Implemented | Subagent tools (planner, researcher, user-defined) | Config + parent tools |
