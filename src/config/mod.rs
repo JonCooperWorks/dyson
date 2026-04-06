@@ -85,6 +85,12 @@ pub struct Settings {
     /// Chat history configuration (backend + connection string).
     pub chat_history: ChatHistoryConfig,
 
+    /// Audio transcriber configuration (provider + model).
+    ///
+    /// When present, the specified transcriber is used for audio.
+    /// When `None`, defaults to `whisper-cli` with the "base" model.
+    pub transcriber: Option<TranscriberConfig>,
+
     /// Web search configuration (provider + API key).
     ///
     /// When present, the `web_search` built-in tool is registered.
@@ -718,6 +724,33 @@ impl Default for ChatHistoryConfig {
 }
 
 // ---------------------------------------------------------------------------
+// TranscriberConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for the audio transcription backend.
+///
+/// When present in settings, the specified transcriber is used for audio.
+/// When absent, defaults to `whisper-cli` with the "base" model.
+///
+/// ```json
+/// {
+///   "transcriber": {
+///     "provider": "whisper-cli",
+///     "model": "small"
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct TranscriberConfig {
+    /// Transcriber provider: "whisper-cli" (default).
+    pub provider: String,
+
+    /// Model name/size (e.g. "tiny", "base", "small", "medium", "large").
+    /// Provider-specific — for whisper-cli this is the Whisper model size.
+    pub model: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // WebSearchConfig
 // ---------------------------------------------------------------------------
 
@@ -778,6 +811,7 @@ impl Default for Settings {
             sandbox: SandboxConfig::default(),
             workspace: WorkspaceConfig::default(),
             chat_history: ChatHistoryConfig::default(),
+            transcriber: None,
             web_search: None,
             dangerous_no_sandbox: false,
         }

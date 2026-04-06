@@ -275,6 +275,8 @@ impl super::Controller for TelegramController {
             Arc::from(store)
         };
 
+        let transcriber = media::audio::create_transcriber(settings.transcriber.as_ref());
+
         let mut offset: i64 = 0;
         let mut consecutive_failures: u64 = 0;
         let mut backoff_secs: u64 = 1;
@@ -453,6 +455,7 @@ impl super::Controller for TelegramController {
                 let bot_clone = bot.clone();
                 let settings_clone = current_settings.clone();
                 let store_clone = chat_store.clone();
+                let transcriber_clone = transcriber.clone();
                 tokio::spawn(run_agent_for_message(
                     bot_clone,
                     chat_id,
@@ -461,6 +464,7 @@ impl super::Controller for TelegramController {
                     entry,
                     settings_clone,
                     store_clone,
+                    transcriber_clone,
                 ));
             }
         }
@@ -694,10 +698,11 @@ async fn run_agent_for_message(
     entry: Arc<ChatEntry>,
     settings: Settings,
     chat_store: Arc<dyn crate::chat_history::ChatHistory>,
+    transcriber: Arc<dyn media::audio::Transcriber>,
 ) {
     let chat_key = chat_id.0.to_string();
 
-    let content_blocks = match extract_content(&bot, &msg, &text).await {
+    let content_blocks = match extract_content(&bot, &msg, &text, &transcriber).await {
         Ok(blocks) => blocks,
         Err(e) => {
             tracing::error!(error = %e, "failed to extract media content");
@@ -1004,6 +1009,7 @@ async fn extract_content(
     bot: &BotApi,
     msg: &types::Message,
     text: &str,
+    transcriber: &Arc<dyn media::audio::Transcriber>,
 ) -> crate::Result<Vec<ContentBlock>> {
     let mut blocks = Vec::new();
 
@@ -1024,10 +1030,13 @@ async fn extract_content(
             "downloading photo from Telegram"
         );
         match bot.download_file(&photo.file_id).await {
-            Ok(data) => match media::resolve(media::MediaInput::Image {
-                data,
-                mime_type: "image/jpeg".to_string(),
-            })
+            Ok(data) => match media::resolve(
+                media::MediaInput::Image {
+                    data,
+                    mime_type: "image/jpeg".to_string(),
+                },
+                transcriber,
+            )
             .await
             {
                 Ok(media::ResolvedMedia::Images(imgs)) => blocks.extend(imgs),
@@ -1063,10 +1072,13 @@ async fn extract_content(
             .to_string();
 
         match bot.download_file(&voice.file_id).await {
-            Ok(data) => match media::resolve(media::MediaInput::Audio {
-                data,
-                mime_type: mime,
-            })
+            Ok(data) => match media::resolve(
+                media::MediaInput::Audio {
+                    data,
+                    mime_type: mime,
+                },
+                transcriber,
+            )
             .await
             {
                 Ok(media::ResolvedMedia::Transcription(t)) => {
@@ -1110,10 +1122,13 @@ async fn extract_content(
                 .to_string();
 
             match bot.download_file(&doc.file_id).await {
-                Ok(data) => match media::resolve(media::MediaInput::Image {
-                    data,
-                    mime_type: mime,
-                })
+                Ok(data) => match media::resolve(
+                    media::MediaInput::Image {
+                        data,
+                        mime_type: mime,
+                    },
+                    transcriber,
+                )
                 .await
                 {
                     Ok(media::ResolvedMedia::Images(imgs)) => blocks.extend(imgs),
