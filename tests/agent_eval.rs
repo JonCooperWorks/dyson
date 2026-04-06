@@ -892,16 +892,16 @@ async fn token_budget_halts_agent_after_limit() {
         0,
     )
     .unwrap();
-    agent.token_budget.max_output_tokens = Some(50);
+    agent.token_budget_mut().max_output_tokens = Some(50);
     let mut output = RecordingOutput::new();
 
     // Should complete (budget exceeded mid-loop triggers break, not hard error).
     let _result = agent.run("test budget", &mut output).await.unwrap();
 
     // Token budget should reflect usage.
-    assert_eq!(agent.token_budget.output_tokens_used, 80);
-    assert_eq!(agent.token_budget.llm_calls, 2);
-    assert!(!agent.token_budget.has_budget());
+    assert_eq!(agent.token_budget().output_tokens_used, 80);
+    assert_eq!(agent.token_budget().llm_calls, 2);
+    assert!(!agent.token_budget().has_budget());
 
     // An error about exceeding budget should have been surfaced.
     assert!(
