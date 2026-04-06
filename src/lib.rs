@@ -11,7 +11,7 @@
 // Crate structure:
 //
 //   dyson (library crate)
-//     ├── auth          — Auth trait, Credential, BearerToken/ApiKey/Composite/Tracing auth
+//     ├── auth          — Auth trait, Credential, BearerToken/ApiKey/Composite auth
 //     ├── error         — DysonError enum, Result type alias
 //     ├── message       — Message, Role, ContentBlock
 //     ├── config        — Settings, loaders (dyson.json)
