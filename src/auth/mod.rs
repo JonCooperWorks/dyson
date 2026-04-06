@@ -15,7 +15,6 @@
 //
 //   3. Composability:
 //      - `CompositeAuth`: chain multiple auth layers
-//      - `TracingAuth`: audit wrapper that logs all auth events
 //
 // Design principle: one trait, two directions.
 //   `apply_to_request()` adds credentials to outgoing requests.
@@ -30,13 +29,10 @@
 //
 // Composability:
 //
-//   TracingAuth::new(
-//       CompositeAuth::new(vec![
-//           Box::new(BearerTokenAuth::new(key)),
-//           Box::new(StaticHeadersAuth::new(extra)),
-//       ]),
-//       "mcp-client",
-//   )
+//   CompositeAuth::new(vec![
+//       Box::new(BearerTokenAuth::new(key)),
+//       Box::new(StaticHeadersAuth::new(extra)),
+//   ])
 //
 // Memory safety:
 //   All auth types that hold secrets (BearerTokenAuth, ApiKeyAuth) implement
@@ -50,7 +46,7 @@ pub mod credential;
 pub mod no_auth;
 pub mod oauth;
 pub mod static_headers;
-pub mod tracing_auth;
+
 
 pub use api_key::ApiKeyAuth;
 pub use bearer::BearerTokenAuth;
@@ -59,7 +55,7 @@ pub use credential::Credential;
 pub use no_auth::NoAuth;
 pub use oauth::OAuth;
 pub use static_headers::StaticHeadersAuth;
-pub use tracing_auth::TracingAuth;
+
 
 use std::collections::HashMap;
 
@@ -109,7 +105,7 @@ impl AuthInfo {
 ///
 /// - **Client auth** (ApiKeyAuth, BearerTokenAuth): implements `apply_to_request`
 /// - **Server auth** (BearerTokenAuth): implements `validate_request`
-/// - **Audit wrappers** (TracingAuth): implements both, delegating to an inner auth
+/// - **Composable wrappers** (CompositeAuth): chains multiple auth layers
 ///
 /// ## Client-side example
 ///
