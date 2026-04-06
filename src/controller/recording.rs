@@ -83,11 +83,6 @@ impl RecordingOutput {
         &self.events
     }
 
-    /// Consume the recording and take ownership of the event log.
-    pub fn into_events(self) -> Vec<RecordedEvent> {
-        self.events
-    }
-
     /// Concatenate the text from all `TextDelta` events.
     ///
     /// This is the convenience method that replaces what `MockOutput.text`
