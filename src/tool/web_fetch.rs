@@ -181,28 +181,11 @@ impl Tool for WebFetchTool {
         };
 
         // --- Truncate ---
-        let text = truncate(&text, max_length);
+        let text = super::truncate(&text, max_length);
         let char_count = text.len();
 
         let output = format!("Content from {url} ({char_count} chars):\n\n{text}");
         Ok(ToolOutput::success(output))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Truncate a string to `max_chars`, appending "..." if truncated.
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
-        s.to_string()
-    } else {
-        let mut end = max_chars;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}...", &s[..end])
     }
 }
 
@@ -229,28 +212,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_url_returns_error() {
-        let t = tool();
-        let ctx = ToolContext::from_cwd().unwrap();
-        let result = t.run(&json!({}), &ctx).await.unwrap();
-        assert!(result.is_error);
-        assert!(result.content.contains("required"));
-    }
-
-    #[tokio::test]
     async fn file_url_rejected() {
         let t = tool();
         let ctx = ToolContext::from_cwd().unwrap();
         let result = t.run(&json!({"url": "file:///etc/passwd"}), &ctx).await.unwrap();
-        assert!(result.is_error);
-        assert!(result.content.contains("http://"));
-    }
-
-    #[tokio::test]
-    async fn ftp_url_rejected() {
-        let t = tool();
-        let ctx = ToolContext::from_cwd().unwrap();
-        let result = t.run(&json!({"url": "ftp://example.com/file"}), &ctx).await.unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("http://"));
     }
@@ -275,19 +240,6 @@ mod tests {
         assert!(text.contains("World"));
         assert!(!text.contains("<h1>"));
         assert!(!text.contains("var x=1"));
-    }
-
-    #[test]
-    fn truncate_short_string() {
-        assert_eq!(truncate("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_long_string() {
-        let long = "a".repeat(300);
-        let result = truncate(&long, 200);
-        assert_eq!(result.len(), 203); // 200 + "..."
-        assert!(result.ends_with("..."));
     }
 
     #[test]

@@ -100,7 +100,7 @@ impl SearchProvider for BraveSearchProvider {
                     .map(|r| {
                         let snippet = r["description"].as_str().unwrap_or("").to_string();
                         // Truncate long snippets to keep output compact.
-                        let snippet = truncate(&snippet, 200);
+                        let snippet = super::truncate(&snippet, 200);
                         SearchResult {
                             title: r["title"].as_str().unwrap_or("").to_string(),
                             url: r["url"].as_str().unwrap_or("").to_string(),
@@ -174,7 +174,7 @@ impl SearchProvider for SearxngSearchProvider {
                     .take(num_results)
                     .map(|r| {
                         let snippet = r["content"].as_str().unwrap_or("").to_string();
-                        let snippet = truncate(&snippet, 200);
+                        let snippet = super::truncate(&snippet, 200);
                         SearchResult {
                             title: r["title"].as_str().unwrap_or("").to_string(),
                             url: r["url"].as_str().unwrap_or("").to_string(),
@@ -312,24 +312,6 @@ impl Tool for WebSearchTool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Truncate a string to `max_chars`, appending "..." if truncated.
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
-        s.to_string()
-    } else {
-        // Find a char boundary near max_chars.
-        let mut end = max_chars;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}...", &s[..end])
-    }
-}
-
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -434,19 +416,6 @@ mod tests {
             .unwrap();
         assert!(result.content.contains("Found 2 result(s)"));
         assert!(!result.content.contains("### 3."));
-    }
-
-    #[test]
-    fn truncate_short_string() {
-        assert_eq!(truncate("hello", 10), "hello");
-    }
-
-    #[test]
-    fn truncate_long_string() {
-        let long = "a".repeat(300);
-        let result = truncate(&long, 200);
-        assert_eq!(result.len(), 203); // 200 + "..."
-        assert!(result.ends_with("..."));
     }
 
     #[test]

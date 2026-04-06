@@ -450,6 +450,23 @@ impl ToolOutput {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Truncate a string to `max_chars`, appending "..." if truncated.
+pub(crate) fn truncate(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars {
+        s.to_string()
+    } else {
+        let mut end = max_chars;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -504,5 +521,18 @@ mod tests {
         let output = ToolOutput::error("failed but here's a log").with_file("/tmp/debug.log");
         assert!(output.is_error);
         assert_eq!(output.files.len(), 1);
+    }
+
+    #[test]
+    fn truncate_short_string() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_long_string() {
+        let long = "a".repeat(300);
+        let result = truncate(&long, 200);
+        assert_eq!(result.len(), 203); // 200 + "..."
+        assert!(result.ends_with("..."));
     }
 }
