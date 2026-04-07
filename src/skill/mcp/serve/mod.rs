@@ -273,9 +273,7 @@ impl McpHttpServer {
         tools.insert(search.name().to_string(), search);
         tools.insert(update.name().to_string(), update);
 
-        // Merge in extra tools from the agent's tool registry.
-        // These are Dyson's non-agent-only tools (bash, web_fetch, etc.)
-        // that the CLI subprocess can call as structured MCP tools.
+        // Merge in extra (non-agent-only) tools from the agent.
         for (name, tool) in extra_tools {
             tools.insert(name, tool);
         }

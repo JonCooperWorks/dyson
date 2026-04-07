@@ -224,10 +224,7 @@ impl LlmClient for CodexClient {
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
-        // Format conversation history into a single prompt string.
-        // When the MCP server is active (workspace is Some), Dyson's tools
-        // are exposed as structured MCP tools — no need to duplicate them
-        // as text in the prompt.
+        // When MCP is active, tools are structured — skip text descriptions.
         let prompt_tools: Vec<_> = if self.workspace.is_some() {
             vec![]
         } else {
@@ -310,11 +307,9 @@ impl LlmClient for CodexClient {
     }
 
     fn set_mcp_tools(&self, tools: std::collections::HashMap<String, Arc<dyn Tool>>) {
-        let filtered: std::collections::HashMap<String, Arc<dyn Tool>> = tools
-            .into_iter()
-            .filter(|(_, t)| !t.agent_only())
-            .collect();
-        tracing::info!(tool_count = filtered.len(), "registered MCP tools for Codex");
+        let filtered: std::collections::HashMap<_, _> =
+            tools.into_iter().filter(|(_, t)| !t.agent_only()).collect();
+        tracing::info!(tool_count = filtered.len(), "MCP tools registered");
         *self.mcp_tools.lock().unwrap() = filtered;
     }
 }

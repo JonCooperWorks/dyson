@@ -393,9 +393,7 @@ impl Agent {
             None => rate_limiter::RateLimited::unlimited(client),
         };
 
-        // Register Dyson's tools with CLI-based clients (Claude Code, Codex)
-        // so they can expose them as structured MCP tools.  API-based clients
-        // ignore this (default no-op).
+        // Expose tools via MCP for CLI backends (no-op for API clients).
         client.get_ref().set_mcp_tools(tool_registry.tools.clone());
 
         tracing::info!(

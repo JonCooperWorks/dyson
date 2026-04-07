@@ -205,19 +205,8 @@ pub trait LlmClient: Send + Sync {
         config: &CompletionConfig,
     ) -> Result<StreamResponse>;
 
-    /// Register Dyson's tools for exposure via MCP to CLI-based backends.
-    ///
-    /// Called by the agent after construction to give CLI-based clients
-    /// (Claude Code, Codex) access to Dyson's tool implementations.  These
-    /// tools are then exposed as structured MCP tools alongside the workspace
-    /// tools, so the CLI subprocess can call them via `tools/call` instead of
-    /// relying on text descriptions in the prompt.
-    ///
-    /// API-based clients (Anthropic, OpenAI) ignore this — they receive tool
-    /// definitions via the `tools` parameter in `stream()` and Dyson's agent
-    /// loop executes the tools directly.
-    ///
-    /// The default implementation is a no-op.
+    /// Pass Dyson's tools to CLI-based backends for MCP exposure.
+    /// API-based clients (Anthropic, OpenAI) ignore this — no-op default.
     fn set_mcp_tools(&self, _tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>) {}
 }
 
@@ -476,17 +465,8 @@ pub(crate) struct McpServerInfo {
     pub url: String,
 }
 
-/// Start an in-process MCP HTTP server exposing workspace tools and
-/// optionally Dyson's agent tools.
-///
-/// Used by both `ClaudeCodeClient` and `CodexClient` to give CLI
-/// subprocesses access to tools via MCP.  Each `stream()` call
-/// starts a fresh server on a random port; the returned `JoinHandle`
-/// keeps it alive for the duration of the LLM turn.
-///
-/// `extra_tools` are additional Dyson tools (bash, web_fetch, etc.)
-/// to expose alongside the workspace tools.  Agent-only tools should
-/// be filtered out by the caller.
+/// Start an MCP server exposing workspace + Dyson tools to CLI subprocesses.
+/// Fresh server per `stream()` call; lives until the returned handle is dropped.
 pub(crate) async fn start_mcp_server(
     workspace: &std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
     dangerous_no_sandbox: bool,

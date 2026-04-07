@@ -27,7 +27,10 @@ impl Tool for SendFileTool {
     }
 
     fn agent_only(&self) -> bool {
-        true
+        // NOT agent_only: this delivers files to the user through the
+        // controller (Telegram document, terminal path, etc.), not a
+        // filesystem operation that CLI tools duplicate.
+        false
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -130,7 +133,9 @@ mod tests {
     }
 
     #[test]
-    fn is_agent_only() {
-        assert!(SendFileTool.agent_only());
+    fn is_not_agent_only() {
+        // send_file delivers to the user via the controller — not a
+        // filesystem op, so it should be available to all backends.
+        assert!(!SendFileTool.agent_only());
     }
 }

@@ -214,12 +214,7 @@ pub struct ClaudeCodeClient {
     ///    CLI → Settings → create_client() → ClaudeCodeClient → McpHttpServer
     dangerous_no_sandbox: bool,
 
-    /// Dyson's agent tools to expose via MCP alongside workspace tools.
-    ///
-    /// Set by the agent after construction via [`LlmClient::set_mcp_tools()`].
-    /// These are the non-agent-only tools (ones that don't duplicate Claude
-    /// Code's built-in capabilities).  Stored behind a `Mutex` for interior
-    /// mutability since `set_mcp_tools()` takes `&self`.
+    /// Dyson tools exposed via MCP (set by agent via `set_mcp_tools`).
     mcp_tools: std::sync::Mutex<HashMap<String, Arc<dyn Tool>>>,
 }
 
@@ -345,14 +340,9 @@ impl LlmClient for ClaudeCodeClient {
         // entire conversation history into a readable string so the model
         // has context from previous turns.
         //
-        // For single-turn conversations (most common), this is just the
-        // user's message.  For multi-turn, we include the full history.
-        // When the MCP server is active (workspace is Some), Dyson's tools
-        // are exposed as structured MCP tools — no need to duplicate them
-        // as text in the prompt.  When there's no MCP server, fall back to
-        // text descriptions.
+        // When MCP is active, tools are structured — skip text descriptions.
         let prompt_tools: Vec<_> = if self.workspace.is_some() {
-            vec![] // Tools will be available via MCP
+            vec![]
         } else {
             tools.iter().filter(|t| !t.agent_only).collect()
         };
@@ -463,12 +453,8 @@ impl LlmClient for ClaudeCodeClient {
     }
 
     fn set_mcp_tools(&self, tools: HashMap<String, Arc<dyn Tool>>) {
-        // Filter out agent-only tools — Claude Code has built-in equivalents.
-        let filtered: HashMap<String, Arc<dyn Tool>> = tools
-            .into_iter()
-            .filter(|(_, t)| !t.agent_only())
-            .collect();
-        tracing::info!(tool_count = filtered.len(), "registered MCP tools for Claude Code");
+        let filtered: HashMap<_, _> = tools.into_iter().filter(|(_, t)| !t.agent_only()).collect();
+        tracing::info!(tool_count = filtered.len(), "MCP tools registered");
         *self.mcp_tools.lock().unwrap() = filtered;
     }
 }
