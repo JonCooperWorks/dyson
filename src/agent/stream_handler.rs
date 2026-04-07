@@ -128,6 +128,10 @@ pub async fn process_stream(
     let mut current_thinking = String::new();
     let mut thinking_indicator_sent = false;
 
+    // Detects <think>…</think> tags in TextDelta events from OpenAI-compat
+    // servers and reclassifies them as thinking content.
+    let mut think_tag_parser = ThinkTagParser::new();
+
     // Timing and token counting.
     let stream_start = std::time::Instant::now();
     let mut first_token_time: Option<std::time::Instant> = None;
@@ -157,25 +161,42 @@ pub async fn process_stream(
             }
 
             StreamEvent::TextDelta(text) => {
-                // Flush any accumulated thinking before text starts.
-                flush_thinking(&mut current_thinking, &mut content_blocks);
-                if first_token_time.is_none() {
-                    first_token_time = Some(std::time::Instant::now());
-                    let ttft_ms = first_token_time
-                        .unwrap()
-                        .duration_since(stream_start)
-                        .as_millis();
-                    tracing::info!(ttft_ms = ttft_ms, "first token received");
+                // Run through the <think> tag parser — some OpenAI-compat
+                // servers embed reasoning in <think>…</think> tags in the
+                // content field rather than using a separate field.
+                let segments = think_tag_parser.feed(&text);
+                for (is_thinking, segment) in segments {
+                    if is_thinking {
+                        tracing::debug!(thinking = segment, "model thinking (think tag)");
+                        if !thinking_indicator_sent {
+                            if !typing_cleared {
+                                output.typing_indicator(false)?;
+                                typing_cleared = true;
+                            }
+                            output.text_delta("I'm thinking …\n")?;
+                            thinking_indicator_sent = true;
+                        }
+                        current_thinking.push_str(&segment);
+                    } else {
+                        // Flush any accumulated thinking before text starts.
+                        flush_thinking(&mut current_thinking, &mut content_blocks);
+                        if first_token_time.is_none() {
+                            first_token_time = Some(std::time::Instant::now());
+                            let ttft_ms = first_token_time
+                                .unwrap()
+                                .duration_since(stream_start)
+                                .as_millis();
+                            tracing::info!(ttft_ms = ttft_ms, "first token received");
+                        }
+                        if !typing_cleared {
+                            output.typing_indicator(false)?;
+                            typing_cleared = true;
+                        }
+                        token_count += segment.split_whitespace().count().max(1);
+                        output.text_delta(&segment)?;
+                        current_text.push_str(&segment);
+                    }
                 }
-                if !typing_cleared {
-                    output.typing_indicator(false)?;
-                    typing_cleared = true;
-                }
-                // Rough token count: split on whitespace boundaries.
-                // Not exact, but good enough for tok/s estimation.
-                token_count += text.split_whitespace().count().max(1);
-                output.text_delta(&text)?;
-                current_text.push_str(&text);
             }
 
             StreamEvent::ToolUseStart { ref id, ref name } => {
@@ -237,6 +258,14 @@ pub async fn process_stream(
                     tool_calls = tool_calls.len(),
                     "stream complete"
                 );
+                for (is_thinking, segment) in think_tag_parser.flush() {
+                    if is_thinking {
+                        current_thinking.push_str(&segment);
+                    } else {
+                        output.text_delta(&segment)?;
+                        current_text.push_str(&segment);
+                    }
+                }
                 flush_thinking(&mut current_thinking, &mut content_blocks);
                 flush_text(&mut current_text, &mut content_blocks);
             }
@@ -247,6 +276,15 @@ pub async fn process_stream(
         }
     }
 
+    // Flush any remaining content held by the think tag parser.
+    for (is_thinking, segment) in think_tag_parser.flush() {
+        if is_thinking {
+            current_thinking.push_str(&segment);
+        } else {
+            output.text_delta(&segment)?;
+            current_text.push_str(&segment);
+        }
+    }
     flush_thinking(&mut current_thinking, &mut content_blocks);
     flush_text(&mut current_text, &mut content_blocks);
 
@@ -274,6 +312,128 @@ fn flush_thinking(current_thinking: &mut String, content_blocks: &mut Vec<Conten
         content_blocks.push(ContentBlock::Thinking {
             thinking: std::mem::take(current_thinking),
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ThinkTagParser — extracts <think>…</think> from streamed text deltas.
+// ---------------------------------------------------------------------------
+
+/// Some OpenAI-compatible inference servers (vLLM, llama.cpp, Ollama, etc.)
+/// wrap model reasoning in `<think>…</think>` tags at the start of the
+/// response.  This parser detects those tags in a streaming context where
+/// the tag boundaries can be split across arbitrary delta chunks.
+///
+/// Usage: feed every `TextDelta` through [`feed()`].  It returns a list of
+/// `(is_thinking, text)` segments.
+struct ThinkTagParser {
+    state: ThinkTagState,
+    /// Bytes buffered while we're waiting to see if a partial match
+    /// completes (e.g. we've seen `<thi` and need more bytes).
+    pending: String,
+}
+
+#[derive(Debug, PartialEq)]
+enum ThinkTagState {
+    /// Haven't decided yet — looking for `<think>` at the very start.
+    Start,
+    /// Inside `<think>…</think>`, accumulating thinking text.
+    /// Watching for `</think>`.
+    InsideThink,
+    /// Past the think block (or there was none).  Pass text through.
+    PassThrough,
+}
+
+impl ThinkTagParser {
+    fn new() -> Self {
+        Self {
+            state: ThinkTagState::Start,
+            pending: String::new(),
+        }
+    }
+
+    /// Feed a text delta chunk.  Returns segments of `(is_thinking, text)`.
+    fn feed(&mut self, text: &str) -> Vec<(bool, String)> {
+        let mut out = Vec::new();
+        match self.state {
+            ThinkTagState::Start => {
+                self.pending.push_str(text);
+                const OPEN: &str = "<think>";
+                if self.pending.len() >= OPEN.len() {
+                    if self.pending.starts_with(OPEN) {
+                        // Confirmed opening tag — switch to inside.
+                        self.state = ThinkTagState::InsideThink;
+                        let rest = self.pending[OPEN.len()..].to_string();
+                        self.pending.clear();
+                        if !rest.is_empty() {
+                            out.extend(self.feed(&rest));
+                        }
+                    } else {
+                        // Not a think tag — flush everything as text.
+                        self.state = ThinkTagState::PassThrough;
+                        let flushed = std::mem::take(&mut self.pending);
+                        out.push((false, flushed));
+                    }
+                }
+                // else: still accumulating, might be a prefix of "<think>"
+                // (e.g. "<thi"), keep waiting.
+            }
+
+            ThinkTagState::InsideThink => {
+                self.pending.push_str(text);
+                const CLOSE: &str = "</think>";
+                if let Some(pos) = self.pending.find(CLOSE) {
+                    // Found closing tag.
+                    let thinking = self.pending[..pos].to_string();
+                    let after = self.pending[pos + CLOSE.len()..].to_string();
+                    self.pending.clear();
+                    self.state = ThinkTagState::PassThrough;
+                    if !thinking.is_empty() {
+                        out.push((true, thinking));
+                    }
+                    if !after.is_empty() {
+                        out.push((false, after));
+                    }
+                } else {
+                    // No closing tag yet.  Emit everything except the last
+                    // few bytes which could be a partial "</think>" match.
+                    let safe = self.pending.len().saturating_sub(CLOSE.len() - 1);
+                    if safe > 0 {
+                        let emit = self.pending[..safe].to_string();
+                        self.pending = self.pending[safe..].to_string();
+                        out.push((true, emit));
+                    }
+                }
+            }
+
+            ThinkTagState::PassThrough => {
+                out.push((false, text.to_string()));
+            }
+        }
+        out
+    }
+
+    /// Flush any remaining buffered content at end of stream.
+    fn flush(&mut self) -> Vec<(bool, String)> {
+        let mut out = Vec::new();
+        if !self.pending.is_empty() {
+            let text = std::mem::take(&mut self.pending);
+            match self.state {
+                ThinkTagState::Start => {
+                    // Never matched <think> — emit as regular text.
+                    out.push((false, text));
+                }
+                ThinkTagState::InsideThink => {
+                    // Unclosed <think> — still save as thinking.
+                    out.push((true, text));
+                }
+                ThinkTagState::PassThrough => {
+                    out.push((false, text));
+                }
+            }
+        }
+        self.state = ThinkTagState::PassThrough;
+        out
     }
 }
 
@@ -398,6 +558,156 @@ mod tests {
         }
         match &message.content[1] {
             ContentBlock::Text { text } => assert_eq!(text, "The answer is 42."),
+            other => panic!("expected Text, got: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ThinkTagParser unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn think_tag_single_chunk() {
+        let mut p = ThinkTagParser::new();
+        let segs = p.feed("<think>reasoning here</think>visible text");
+        let mut all = segs;
+        all.extend(p.flush());
+        assert_eq!(all, vec![
+            (true, "reasoning here".to_string()),
+            (false, "visible text".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn think_tag_split_across_chunks() {
+        let mut p = ThinkTagParser::new();
+        let mut all = Vec::new();
+        // Opening tag split across two chunks.
+        all.extend(p.feed("<thi"));
+        all.extend(p.feed("nk>deep thought</"));
+        all.extend(p.feed("think>hello"));
+        all.extend(p.flush());
+
+        let thinking: String = all.iter()
+            .filter(|(t, _)| *t)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        let text: String = all.iter()
+            .filter(|(t, _)| !*t)
+            .map(|(_, s)| s.as_str())
+            .collect();
+        assert_eq!(thinking, "deep thought");
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn think_tag_no_tag_passes_through() {
+        let mut p = ThinkTagParser::new();
+        let mut all = Vec::new();
+        all.extend(p.feed("Hello world"));
+        all.extend(p.flush());
+        assert_eq!(all, vec![(false, "Hello world".to_string())]);
+    }
+
+    #[test]
+    fn think_tag_short_non_matching_prefix() {
+        // Text that starts with "<" but is not "<think>".
+        let mut p = ThinkTagParser::new();
+        let mut all = Vec::new();
+        all.extend(p.feed("<b>bold</b>"));
+        all.extend(p.flush());
+        assert_eq!(all, vec![(false, "<b>bold</b>".to_string())]);
+    }
+
+    #[test]
+    fn think_tag_buffered_prefix_flushed_at_end() {
+        // Only receive a partial prefix then stream ends.
+        let mut p = ThinkTagParser::new();
+        let mut all = Vec::new();
+        all.extend(p.feed("<thi"));
+        all.extend(p.flush());
+        // Should emit as regular text since it never completed.
+        assert_eq!(all, vec![(false, "<thi".to_string())]);
+    }
+
+    // -----------------------------------------------------------------------
+    // process_stream with <think> tags (OpenAI-compat)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn think_tags_in_text_deltas_extracted_as_thinking() {
+        // Simulates an OpenAI-compat server that sends <think>…</think>
+        // in the content field.
+        let stream = events_to_stream(vec![
+            StreamEvent::TextDelta("<think>".into()),
+            StreamEvent::TextDelta("Let me reason.".into()),
+            StreamEvent::TextDelta("</think>".into()),
+            StreamEvent::TextDelta("Final answer.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ]);
+
+        let mut output = RecordingOutput::new();
+        let (message, _, _) = process_stream(stream, &mut output).await.unwrap();
+
+        // Output should show indicator + visible text only.
+        assert_eq!(output.text(), "I'm thinking …\nFinal answer.");
+
+        // Message should have Thinking + Text blocks.
+        assert_eq!(message.content.len(), 2);
+        match &message.content[0] {
+            ContentBlock::Thinking { thinking } => {
+                assert_eq!(thinking, "Let me reason.");
+            }
+            other => panic!("expected Thinking, got: {other:?}"),
+        }
+        match &message.content[1] {
+            ContentBlock::Text { text } => assert_eq!(text, "Final answer."),
+            other => panic!("expected Text, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn think_tags_all_in_one_chunk() {
+        let stream = events_to_stream(vec![
+            StreamEvent::TextDelta("<think>reasoning</think>answer".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ]);
+
+        let mut output = RecordingOutput::new();
+        let (message, _, _) = process_stream(stream, &mut output).await.unwrap();
+
+        assert_eq!(output.text(), "I'm thinking …\nanswer");
+        assert_eq!(message.content.len(), 2);
+        match &message.content[0] {
+            ContentBlock::Thinking { thinking } => assert_eq!(thinking, "reasoning"),
+            other => panic!("expected Thinking, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_think_tags_passes_through() {
+        // Regular text without think tags should work as before.
+        let stream = events_to_stream(vec![
+            StreamEvent::TextDelta("Just normal text.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ]);
+
+        let mut output = RecordingOutput::new();
+        let (message, _, _) = process_stream(stream, &mut output).await.unwrap();
+
+        assert_eq!(output.text(), "Just normal text.");
+        assert_eq!(message.content.len(), 1);
+        match &message.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "Just normal text."),
             other => panic!("expected Text, got: {other:?}"),
         }
     }
