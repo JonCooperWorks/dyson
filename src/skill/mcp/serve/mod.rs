@@ -131,6 +131,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -144,6 +145,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
+
+/// Maximum number of concurrent connections the MCP server will accept.
+const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+
+/// Per-request timeout for MCP request handling.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 use crate::tool::workspace_search::WorkspaceSearchTool;
 use crate::tool::workspace_update::WorkspaceUpdateTool;
 use crate::tool::workspace_view::WorkspaceViewTool;
@@ -329,6 +336,7 @@ impl McpHttpServer {
         tracing::info!(port = port, "MCP HTTP server listening");
 
         let server = Arc::clone(&self);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
         let handle = tokio::spawn(async move {
             loop {
                 // Accept a new TCP connection.
@@ -340,13 +348,39 @@ impl McpHttpServer {
                     }
                 };
 
+                // Enforce connection limit via semaphore.
+                let permit = match semaphore.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        tracing::warn!("MCP server at connection limit, dropping connection");
+                        continue;
+                    }
+                };
+
                 // Spawn a task per connection for concurrency.
                 let server = Arc::clone(&server);
                 tokio::spawn(async move {
+                    let _permit = permit;
                     let io = TokioIo::new(stream);
                     let service = service_fn(move |req| {
                         let server = Arc::clone(&server);
-                        async move { Ok::<_, Infallible>(server.handle_request(req).await) }
+                        async move {
+                            match tokio::time::timeout(
+                                REQUEST_TIMEOUT,
+                                server.handle_request(req),
+                            )
+                            .await
+                            {
+                                Ok(resp) => Ok::<_, Infallible>(resp),
+                                Err(_) => {
+                                    tracing::warn!("MCP request timed out");
+                                    Ok(json_response(
+                                        StatusCode::GATEWAY_TIMEOUT,
+                                        &serde_json::json!({"error": "request timeout"}),
+                                    ))
+                                }
+                            }
+                        }
                     });
 
                     if let Err(e) = http1::Builder::new().serve_connection(io, service).await {

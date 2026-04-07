@@ -220,7 +220,7 @@ impl super::Agent {
     }
 
     /// Phase 1: replace `ToolResult` content in the middle with a placeholder.
-    fn prune_tool_outputs(&mut self, head_end: usize, tail_start: usize) {
+    pub(super) fn prune_tool_outputs(&mut self, head_end: usize, tail_start: usize) {
         for msg in &mut self.conversation.messages[head_end..tail_start] {
             for block in &mut msg.content {
                 if let ContentBlock::ToolResult { content, .. } = block {
@@ -231,7 +231,7 @@ impl super::Agent {
     }
 
     /// Find an existing `[Context Summary]` in the head region.
-    fn find_existing_summary(&self, head_end: usize) -> Option<String> {
+    pub(super) fn find_existing_summary(&self, head_end: usize) -> Option<String> {
         for msg in &self.conversation.messages[..head_end] {
             for block in &msg.content {
                 if let ContentBlock::Text { text } = block
@@ -282,7 +282,7 @@ impl super::Agent {
     }
 
     /// Build the system prompt for the summarisation LLM call.
-    fn build_compaction_prompt(&self, previous_summary: Option<&str>) -> String {
+    pub(super) fn build_compaction_prompt(&self, previous_summary: Option<&str>) -> String {
         let mut prompt = format!(
             "{}\n\n\
              You are being asked to summarise a conversation.  Produce a structured \

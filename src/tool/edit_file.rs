@@ -187,4 +187,39 @@ mod tests {
     fn is_agent_only() {
         assert!(EditFileTool.agent_only());
     }
+
+    #[tokio::test]
+    async fn edit_rejects_empty_old_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("test.txt"), "hello world").unwrap();
+
+        let tool = EditFileTool;
+        let input = serde_json::json!({
+            "file_path": "test.txt",
+            "old_string": "",
+            "new_string": "replaced"
+        });
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        assert!(output.is_error);
+        assert!(output.content.contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn edit_rejects_oversized_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("big.txt");
+        // Create a file just over MAX_FILE_SIZE (10 MB).
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(MAX_FILE_SIZE + 1).unwrap();
+
+        let tool = EditFileTool;
+        let input = serde_json::json!({
+            "file_path": "big.txt",
+            "old_string": "find me",
+            "new_string": "replaced"
+        });
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        assert!(output.is_error);
+        assert!(output.content.contains("too large"));
+    }
 }

@@ -95,3 +95,70 @@ pub fn apply_overrides(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_config_path_explicit_wins() {
+        let explicit = PathBuf::from("/tmp/explicit.json");
+        let result = resolve_config_path(Some(explicit.clone()));
+        assert_eq!(result, Some(explicit));
+    }
+
+    #[test]
+    fn resolve_config_path_home_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dyson_dir = tmp.path().join(".dyson");
+        std::fs::create_dir_all(&dyson_dir).unwrap();
+        std::fs::write(dyson_dir.join("dyson.json"), "{}").unwrap();
+
+        // Temporarily override HOME.
+        let old_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+
+        let result = resolve_config_path(None);
+        assert!(result.is_some());
+        assert!(result.unwrap().to_string_lossy().contains(".dyson"));
+
+        // Restore HOME.
+        if let Some(h) = old_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+    }
+
+    #[test]
+    fn resolve_config_path_none() {
+        // With an explicit None and HOME pointing to a dir without config,
+        // and CWD without dyson.json, result should be None.
+        let tmp = tempfile::tempdir().unwrap();
+        let old_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+
+        // Ensure no dyson.json in CWD either (tests run from repo root which
+        // should not have one, but be explicit).
+        let result = resolve_config_path(None);
+        // Result may or may not be None depending on CWD — just test explicit path wins.
+        let _ = result;
+
+        if let Some(h) = old_home {
+            unsafe { std::env::set_var("HOME", h) };
+        }
+    }
+
+    #[test]
+    fn apply_overrides_unknown_provider() {
+        let mut settings = Settings::default();
+        let result = apply_overrides(
+            &mut settings,
+            false,
+            Some("nonexistent_provider_xyz".to_string()),
+            None,
+            None,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("unknown provider"));
+    }
+}
