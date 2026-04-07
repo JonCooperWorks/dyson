@@ -391,12 +391,13 @@ fn filter_tools_empty_filter_returns_none() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn builtin_subagent_configs_returns_planner_and_researcher() {
+fn builtin_subagent_configs_returns_planner_researcher_and_verifier() {
     let configs = builtin_subagent_configs();
-    assert_eq!(configs.len(), 2);
+    assert_eq!(configs.len(), 3);
     assert_eq!(configs[0].name, "planner");
     assert_eq!(configs[1].name, "researcher");
-    // Both use the "default" provider.
+    assert_eq!(configs[2].name, "verifier");
+    // All use the "default" provider.
     assert!(configs.iter().all(|c| c.provider == "default"));
 }
 
@@ -411,6 +412,90 @@ fn builtin_subagents_have_tool_filters() {
     let researcher_tools = configs[1].tools.as_ref().unwrap();
     assert!(researcher_tools.contains(&"bash".to_string()));
     assert!(researcher_tools.contains(&"web_search".to_string()));
+    // Verifier has bash + read-only tools but no web_search.
+    let verifier_tools = configs[2].tools.as_ref().unwrap();
+    assert!(verifier_tools.contains(&"bash".to_string()));
+    assert!(verifier_tools.contains(&"read_file".to_string()));
+    assert!(!verifier_tools.contains(&"web_search".to_string()));
+}
+
+#[test]
+fn verifier_subagent_has_higher_limits() {
+    let configs = builtin_subagent_configs();
+    let verifier = &configs[2];
+    assert_eq!(verifier.name, "verifier");
+    // Verifier needs more iterations and tokens for thorough checking.
+    assert_eq!(verifier.max_iterations, Some(25));
+    assert_eq!(verifier.max_tokens, Some(8192));
+}
+
+#[test]
+fn verifier_system_prompt_requires_verdict() {
+    let configs = builtin_subagent_configs();
+    let verifier = &configs[2];
+    assert!(verifier.system_prompt.contains("VERDICT: PASS"));
+    assert!(verifier.system_prompt.contains("VERDICT: FAIL"));
+    assert!(verifier.system_prompt.contains("VERDICT: PARTIAL"));
+}
+
+#[test]
+fn verification_protocol_injected_when_verifier_present() {
+    let settings = crate::config::Settings {
+        agent: AgentSettings {
+            provider: LlmProvider::Anthropic,
+            api_key: crate::auth::Credential::new("test-key".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let configs = vec![SubagentAgentConfig {
+        name: "verifier".into(),
+        description: "Test verifier".into(),
+        system_prompt: "You verify.".into(),
+        provider: "default".into(),
+        model: None,
+        max_iterations: None,
+        max_tokens: None,
+        tools: None,
+    }];
+
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[]);
+
+    let prompt = skill.system_prompt().unwrap();
+    assert!(prompt.contains("Verification Protocol"));
+    assert!(prompt.contains("Verify-Before-Report Loop"));
+    assert!(prompt.contains("Never self-certify"));
+}
+
+#[test]
+fn verification_protocol_absent_without_verifier() {
+    let settings = crate::config::Settings {
+        agent: AgentSettings {
+            provider: LlmProvider::Anthropic,
+            api_key: crate::auth::Credential::new("test-key".into()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let configs = vec![SubagentAgentConfig {
+        name: "custom_agent".into(),
+        description: "Not a verifier".into(),
+        system_prompt: "You do things.".into(),
+        provider: "default".into(),
+        model: None,
+        max_iterations: None,
+        max_tokens: None,
+        tools: None,
+    }];
+
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[]);
+
+    let prompt = skill.system_prompt().unwrap();
+    assert!(!prompt.contains("Verification Protocol"));
 }
 
 #[test]

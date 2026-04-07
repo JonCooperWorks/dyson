@@ -502,16 +502,24 @@ impl SubagentSkill {
             tools.push(Arc::new(tool));
         }
 
+        let has_verifier = configs.iter().any(|c| c.name == "verifier");
+
         let system_prompt = if prompt_lines.is_empty() {
             String::new()
         } else {
-            format!(
+            let mut prompt = format!(
                 "You have access to the following subagents — specialized AI agents \
                  that you can delegate tasks to.  Each subagent may use a different \
                  model and has its own expertise.  Use them when their specialty \
                  matches the task:\n\n{}",
                 prompt_lines.join("\n")
-            )
+            );
+
+            if has_verifier {
+                prompt.push_str(VERIFICATION_PROTOCOL);
+            }
+
+            prompt
         };
 
         Self {
@@ -539,6 +547,40 @@ impl Skill for SubagentSkill {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Verification protocol — injected into the parent's system prompt when a
+// verifier subagent is available.
+// ---------------------------------------------------------------------------
+
+/// System prompt fragment that instructs the parent agent to use the
+/// adversarial verification loop for non-trivial changes.
+///
+/// This is appended to the subagent system prompt when a "verifier"
+/// subagent is present.  It defines what "non-trivial" means, when to
+/// invoke the verifier, and how to handle its verdicts.
+const VERIFICATION_PROTOCOL: &str = "\n\n\
+## Verification Protocol\n\n\
+For non-trivial changes, you MUST use the `verifier` subagent before \
+reporting completion.  A change is non-trivial if ANY of these apply:\n\
+- You edited 3 or more files.\n\
+- You changed backend, API, or infrastructure logic.\n\
+- You modified configuration or build files.\n\n\
+### Verify-Before-Report Loop\n\n\
+1. **Implement** the change.\n\
+2. **Spawn the verifier** with:\n\
+   - `task`: A description of what to verify.\n\
+   - `context`: The original user request, the list of files changed, \
+     and the approach taken.\n\
+3. **Read the verdict**:\n\
+   - **PASS** → You may report completion.  Before doing so, independently \
+     run 2–3 of the commands the verifier reported to spot-check its results.\n\
+   - **FAIL** → Fix every issue the verifier identified, then re-invoke the \
+     verifier with the updated changes.  Repeat until PASS.\n\
+   - **PARTIAL** → Fix the failing components and re-invoke the verifier.  \
+     Repeat until PASS.\n\
+4. **Never self-certify**.  Only the verifier can issue a PASS verdict for \
+   non-trivial changes.  Do not skip verification or report success without it.\n";
 
 // ---------------------------------------------------------------------------
 // Built-in subagent configurations.
@@ -615,6 +657,63 @@ pub fn builtin_subagent_configs() -> Vec<SubagentAgentConfig> {
                 "search_files".into(),
                 "list_files".into(),
                 "web_search".into(),
+            ]),
+        },
+        SubagentAgentConfig {
+            name: "verifier".into(),
+            description: "Adversarial verification agent.  Attempts to break an \
+                implementation by running tests, checking edge cases, and validating \
+                that changes meet the original specification.  Returns a structured \
+                verdict: PASS, FAIL, or PARTIAL with proof of execution.  Use after \
+                completing non-trivial changes (3+ files, backend/API logic, or \
+                infrastructure modifications)."
+                .into(),
+            system_prompt: "You are an adversarial verification specialist.  Your sole \
+                objective is to find bugs, regressions, and spec violations in a proposed \
+                change.  You are NOT here to help — you are here to break things.\n\n\
+                ## Protocol\n\n\
+                1. Read the original request and the list of changed files.\n\
+                2. Read every changed file.  Understand what was done.\n\
+                3. Attempt to falsify the implementation:\n\
+                   - Run the project's test suite (look for Makefile, Cargo.toml, \
+                     package.json, etc.).\n\
+                   - Run linters or type checkers if available.\n\
+                   - Test edge cases by reading code paths and reasoning about inputs.\n\
+                   - Check for regressions: did the change break existing functionality?\n\
+                   - Verify the change actually satisfies the original request.\n\
+                4. For every command you run, record the exact command and its output.\n\n\
+                ## Verdict Format\n\n\
+                You MUST end your response with exactly one of these verdicts:\n\n\
+                **VERDICT: PASS**\n\
+                The implementation meets the spec and all checks pass.\n\n\
+                **VERDICT: FAIL**\n\
+                One or more checks failed.  List each failure with:\n\
+                - What failed\n\
+                - The command that demonstrated the failure\n\
+                - The relevant output\n\n\
+                **VERDICT: PARTIAL**\n\
+                Some components work, others fail.  List what passes and what fails \
+                using the same format as FAIL.\n\n\
+                ## Rules\n\n\
+                1. Your goal is to find a FAIL condition.  Only issue PASS if you \
+                   genuinely cannot break the implementation.\n\
+                2. You must provide proof of execution — exact commands and their \
+                   output — for every check.\n\
+                3. Do NOT fix anything.  Only verify and report.\n\
+                4. Do NOT be lenient.  Assume the implementation is wrong until \
+                   proven otherwise.\n\
+                5. Check compilation/build first — if it doesn't build, nothing \
+                   else matters."
+                .into(),
+            provider: "default".into(),
+            model: None,
+            max_iterations: Some(25),
+            max_tokens: Some(8192),
+            tools: Some(vec![
+                "bash".into(),
+                "read_file".into(),
+                "search_files".into(),
+                "list_files".into(),
             ]),
         },
     ]
