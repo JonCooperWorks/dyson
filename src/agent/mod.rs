@@ -908,8 +908,7 @@ impl Agent {
             match self
                 .client
                 .access()
-                .map_err(|e| StreamResult::Error(e))
-                .and_then(|client| Ok(client))
+                .map_err(StreamResult::Error)
             {
                 Ok(client) => {
                     match client

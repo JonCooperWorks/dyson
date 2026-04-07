@@ -400,8 +400,10 @@ impl super::Controller for TelegramController {
 
                 if let Some(handled) = handle_instant_command(
                     &bot, &text, chat_id, &current_settings,
-                ).await {
-                    if handled { continue; }
+                ).await
+                    && handled
+                {
+                    continue;
                 }
 
                 if text == "/clear" || text == "/compact" || text.starts_with("/model ") {
@@ -536,6 +538,7 @@ async fn rebuild_agents_on_reload(
 }
 
 /// Handle a callback query (inline keyboard button press) for model switching.
+#[allow(clippy::too_many_arguments)]
 async fn handle_callback_query(
     bot: &BotApi,
     cb_data: &str,
@@ -609,6 +612,7 @@ async fn handle_callback_query(
 }
 
 /// Handle per-chat commands (/clear, /compact, /model) that need the agent lock.
+#[allow(clippy::too_many_arguments)]
 async fn handle_per_chat_command(
     bot: &BotApi,
     text: &str,
@@ -690,6 +694,7 @@ async fn handle_per_chat_command(
 }
 
 /// Run the agent for a message in a background task, with quick-response fallback.
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_for_message(
     bot: BotApi,
     chat_id: ChatId,

@@ -11,7 +11,6 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::error::DysonError;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 pub struct WorkspaceUpdateTool;
@@ -53,10 +52,7 @@ impl Tool for WorkspaceUpdateTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
-        let ws = ctx
-            .workspace
-            .as_ref()
-            .ok_or_else(|| DysonError::tool("workspace_update", "no workspace configured"))?;
+        let ws = ctx.workspace("workspace_update")?;
 
         let file = input["file"].as_str().unwrap_or("").to_string();
         let content = input["content"].as_str().unwrap_or("").to_string();
@@ -132,25 +128,11 @@ impl Tool for WorkspaceUpdateTool {
 mod tests {
     use super::*;
     use crate::workspace::InMemoryWorkspace;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
-
-    fn make_ctx(ws: InMemoryWorkspace) -> ToolContext {
-        let workspace: Box<dyn crate::workspace::Workspace> = Box::new(ws);
-        ToolContext {
-            working_dir: std::env::temp_dir(),
-            env: std::collections::HashMap::new(),
-            cancellation: tokio_util::sync::CancellationToken::new(),
-            workspace: Some(Arc::new(RwLock::new(workspace))),
-            depth: 0,
-            dangerous_no_sandbox: false,
-        }
-    }
 
     #[tokio::test]
     async fn set_under_limit_succeeds_with_usage() {
         let ws = InMemoryWorkspace::new().with_limit("MEMORY.md", 100);
-        let ctx = make_ctx(ws);
+        let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = WorkspaceUpdateTool;
 
         let result = tool
@@ -172,7 +154,7 @@ mod tests {
     #[tokio::test]
     async fn set_over_limit_errors() {
         let ws = InMemoryWorkspace::new().with_limit("MEMORY.md", 10);
-        let ctx = make_ctx(ws);
+        let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = WorkspaceUpdateTool;
 
         let result = tool
@@ -196,7 +178,7 @@ mod tests {
         let ws = InMemoryWorkspace::new()
             .with_file("MEMORY.md", "existing content")
             .with_limit("MEMORY.md", 20);
-        let ctx = make_ctx(ws);
+        let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = WorkspaceUpdateTool;
 
         let result = tool
@@ -218,7 +200,7 @@ mod tests {
     #[tokio::test]
     async fn unlimited_file_has_no_usage_stats() {
         let ws = InMemoryWorkspace::new();
-        let ctx = make_ctx(ws);
+        let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = WorkspaceUpdateTool;
 
         let result = tool

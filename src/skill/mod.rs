@@ -194,7 +194,7 @@ pub async fn create_skills(
                 )));
             }
             crate::config::SkillConfig::Mcp(cfg) => {
-                let mut mcp_skill = mcp::McpSkill::new(cfg.clone());
+                let mut mcp_skill = mcp::McpSkill::new(*cfg.clone());
                 match mcp_skill.on_load().await {
                     Ok(()) => {
                         tracing::info!(
