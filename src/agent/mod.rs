@@ -143,7 +143,7 @@ pub(crate) struct ToolRegistry {
     ///
     /// Shared ownership (Arc) with the skills — no cloning of tool
     /// implementations.
-    tools: HashMap<String, Arc<dyn Tool>>,
+    pub(crate) tools: HashMap<String, Arc<dyn Tool>>,
 
     /// Reverse index: tool_name → skill index in `Agent::skills`.
     ///
@@ -392,6 +392,11 @@ impl Agent {
             ),
             None => rate_limiter::RateLimited::unlimited(client),
         };
+
+        // Register Dyson's tools with CLI-based clients (Claude Code, Codex)
+        // so they can expose them as structured MCP tools.  API-based clients
+        // ignore this (default no-op).
+        client.get_ref().set_mcp_tools(tool_registry.tools.clone());
 
         tracing::info!(
             skill_count = skills.len(),

@@ -74,7 +74,7 @@ impl Workspace for MockWorkspace {
 fn make_server() -> Arc<McpHttpServer> {
     let ws: Arc<RwLock<Box<dyn Workspace>>> =
         Arc::new(RwLock::new(Box::new(MockWorkspace::new())));
-    Arc::new(McpHttpServer::new(ws, true))
+    Arc::new(McpHttpServer::new(ws, true, HashMap::new()))
 }
 
 // -----------------------------------------------------------------------

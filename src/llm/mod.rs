@@ -59,6 +59,7 @@ use std::fmt::Write as _;
 use crate::error::{DysonError, Result};
 use crate::llm::stream::StreamEvent;
 use crate::message::{ContentBlock, Message, Role};
+use crate::tool::Tool;
 
 // ---------------------------------------------------------------------------
 // CompletionConfig
@@ -203,6 +204,21 @@ pub trait LlmClient: Send + Sync {
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<StreamResponse>;
+
+    /// Register Dyson's tools for exposure via MCP to CLI-based backends.
+    ///
+    /// Called by the agent after construction to give CLI-based clients
+    /// (Claude Code, Codex) access to Dyson's tool implementations.  These
+    /// tools are then exposed as structured MCP tools alongside the workspace
+    /// tools, so the CLI subprocess can call them via `tools/call` instead of
+    /// relying on text descriptions in the prompt.
+    ///
+    /// API-based clients (Anthropic, OpenAI) ignore this — they receive tool
+    /// definitions via the `tools` parameter in `stream()` and Dyson's agent
+    /// loop executes the tools directly.
+    ///
+    /// The default implementation is a no-op.
+    fn set_mcp_tools(&self, _tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -460,15 +476,21 @@ pub(crate) struct McpServerInfo {
     pub url: String,
 }
 
-/// Start an in-process MCP HTTP server exposing workspace tools.
+/// Start an in-process MCP HTTP server exposing workspace tools and
+/// optionally Dyson's agent tools.
 ///
 /// Used by both `ClaudeCodeClient` and `CodexClient` to give CLI
-/// subprocesses access to workspace tools via MCP.  Each `stream()` call
+/// subprocesses access to tools via MCP.  Each `stream()` call
 /// starts a fresh server on a random port; the returned `JoinHandle`
 /// keeps it alive for the duration of the LLM turn.
+///
+/// `extra_tools` are additional Dyson tools (bash, web_fetch, etc.)
+/// to expose alongside the workspace tools.  Agent-only tools should
+/// be filtered out by the caller.
 pub(crate) async fn start_mcp_server(
     workspace: &std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
     dangerous_no_sandbox: bool,
+    extra_tools: &std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
 ) -> Result<McpServerInfo> {
     use crate::skill::mcp::serve::McpHttpServer;
     use std::sync::Arc;
@@ -476,6 +498,7 @@ pub(crate) async fn start_mcp_server(
     let server = Arc::new(McpHttpServer::new(
         Arc::clone(workspace),
         dangerous_no_sandbox,
+        extra_tools.clone(),
     ));
 
     let (port, handle, token) = server.start().await.map_err(|e| {
