@@ -85,6 +85,7 @@ use crate::llm::cli_subprocess::{CliLineParser, cli_event_stream};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use crate::message::Message;
+use crate::tool::Tool;
 use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
@@ -119,6 +120,9 @@ pub struct CodexClient {
 
     /// Whether sandbox enforcement is disabled.
     dangerous_no_sandbox: bool,
+
+    /// Dyson's agent tools to expose via MCP alongside workspace tools.
+    mcp_tools: std::sync::Mutex<std::collections::HashMap<String, Arc<dyn Tool>>>,
 }
 
 impl CodexClient {
@@ -148,6 +152,7 @@ impl CodexClient {
             codex_path: resolved,
             workspace,
             dangerous_no_sandbox,
+            mcp_tools: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -219,11 +224,13 @@ impl LlmClient for CodexClient {
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
-        // Format conversation history into a single prompt string.
-        // Filter out agent-only tools — Codex has its own built-in
-        // equivalents for file operations and search.
-        let filtered_tools: Vec<_> = tools.iter().filter(|t| !t.agent_only).collect();
-        let prompt = super::format_prompt(messages, &filtered_tools);
+        // When MCP is active, tools are structured — skip text descriptions.
+        let prompt_tools: Vec<_> = if self.workspace.is_some() {
+            vec![]
+        } else {
+            tools.iter().filter(|t| !t.agent_only).collect()
+        };
+        let prompt = super::format_prompt(messages, &prompt_tools);
 
         tracing::debug!(
             model = config.model,
@@ -239,7 +246,8 @@ impl LlmClient for CodexClient {
         let mut mcp_token: Option<String> = None;
 
         if let Some(ref workspace) = self.workspace {
-            let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox).await?;
+            let extra = self.mcp_tools.lock().unwrap().clone();
+            let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox, &extra).await?;
             tracing::info!(port = info.port, "MCP server started for Codex");
             mcp_url = Some(info.url);
             mcp_token = Some(info.token);
@@ -296,6 +304,13 @@ impl LlmClient for CodexClient {
             tool_mode: crate::llm::ToolMode::Observe,
             input_tokens: None,
         })
+    }
+
+    fn set_mcp_tools(&self, tools: std::collections::HashMap<String, Arc<dyn Tool>>) {
+        let filtered: std::collections::HashMap<_, _> =
+            tools.into_iter().filter(|(_, t)| !t.agent_only()).collect();
+        tracing::info!(tool_count = filtered.len(), "MCP tools registered");
+        *self.mcp_tools.lock().unwrap() = filtered;
     }
 }
 

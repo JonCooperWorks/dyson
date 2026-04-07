@@ -119,6 +119,12 @@ fn message_to_anthropic(msg: &Message) -> serde_json::Value {
                     "is_error": is_error,
                 })
             }
+            ContentBlock::Thinking { thinking } => {
+                serde_json::json!({
+                    "type": "thinking",
+                    "thinking": thinking,
+                })
+            }
             ContentBlock::Image { data, media_type } => {
                 serde_json::json!({
                     "type": "image",

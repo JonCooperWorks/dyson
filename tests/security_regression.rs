@@ -375,7 +375,7 @@ async fn mcp_server_binds_to_loopback_only() {
         dyson::workspace::InMemoryWorkspace::new(),
     )));
 
-    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, true));
+    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, true, std::collections::HashMap::new()));
     let (port, handle, token) = server.start().await.unwrap();
 
     // Verify the port is non-zero (OS assigned).
@@ -431,7 +431,7 @@ async fn mcp_server_rejects_unauthorized_request() {
         dyson::workspace::InMemoryWorkspace::new(),
     )));
 
-    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, true));
+    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, true, std::collections::HashMap::new()));
     let (port, handle, _token) = server.start().await.unwrap();
 
     // Send a request with no Authorization header.
@@ -470,7 +470,7 @@ async fn mcp_server_rejects_wrong_bearer_token() {
         dyson::workspace::InMemoryWorkspace::new(),
     )));
 
-    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, true));
+    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, true, std::collections::HashMap::new()));
     let (port, handle, _token) = server.start().await.unwrap();
 
     // Send a request with a wrong bearer token.
@@ -509,7 +509,7 @@ fn mcp_server_bearer_token_is_64_hex_chars() {
         RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())),
     );
 
-    let server = dyson::skill::mcp::serve::McpHttpServer::new(ws, true);
+    let server = dyson::skill::mcp::serve::McpHttpServer::new(ws, true, std::collections::HashMap::new());
     let token = server.bearer_token();
 
     assert_eq!(
@@ -535,8 +535,8 @@ fn mcp_server_generates_unique_tokens() {
         RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())),
     );
 
-    let server1 = dyson::skill::mcp::serve::McpHttpServer::new(ws1, true);
-    let server2 = dyson::skill::mcp::serve::McpHttpServer::new(ws2, true);
+    let server1 = dyson::skill::mcp::serve::McpHttpServer::new(ws1, true, std::collections::HashMap::new());
+    let server2 = dyson::skill::mcp::serve::McpHttpServer::new(ws2, true, std::collections::HashMap::new());
 
     assert_ne!(
         server1.bearer_token(),

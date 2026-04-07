@@ -143,7 +143,7 @@ pub(crate) struct ToolRegistry {
     ///
     /// Shared ownership (Arc) with the skills — no cloning of tool
     /// implementations.
-    tools: HashMap<String, Arc<dyn Tool>>,
+    pub(crate) tools: HashMap<String, Arc<dyn Tool>>,
 
     /// Reverse index: tool_name → skill index in `Agent::skills`.
     ///
@@ -392,6 +392,9 @@ impl Agent {
             ),
             None => rate_limiter::RateLimited::unlimited(client),
         };
+
+        // Expose tools via MCP for CLI backends (no-op for API clients).
+        client.get_ref().set_mcp_tools(tool_registry.tools.clone());
 
         tracing::info!(
             skill_count = skills.len(),
@@ -880,6 +883,7 @@ impl Agent {
                         format!("tool_result({tool_use_id}, error={is_error})")
                     }
                     crate::message::ContentBlock::Image { .. } => "image".to_string(),
+                    crate::message::ContentBlock::Thinking { .. } => "thinking".to_string(),
                 }).collect();
                 tracing::debug!(
                     msg_index = i,

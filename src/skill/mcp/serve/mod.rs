@@ -253,10 +253,14 @@ impl McpHttpServer {
     ///
     /// ```ignore
     /// let ws: Arc<RwLock<Box<dyn Workspace>>> = /* ... */;
-    /// let server = Arc::new(McpHttpServer::new(ws, true));
+    /// let server = Arc::new(McpHttpServer::new(ws, true, HashMap::new()));
     /// let (port, handle, token) = server.start().await?;
     /// ```
-    pub fn new(workspace: Arc<RwLock<Box<dyn Workspace>>>, dangerous_no_sandbox: bool) -> Self {
+    pub fn new(
+        workspace: Arc<RwLock<Box<dyn Workspace>>>,
+        dangerous_no_sandbox: bool,
+        extra_tools: HashMap<String, Arc<dyn Tool>>,
+    ) -> Self {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
 
         // Create the three workspace tools.  These are the same Tool impls
@@ -268,6 +272,11 @@ impl McpHttpServer {
         tools.insert(view.name().to_string(), view);
         tools.insert(search.name().to_string(), search);
         tools.insert(update.name().to_string(), update);
+
+        // Merge in extra (non-agent-only) tools from the agent.
+        for (name, tool) in extra_tools {
+            tools.insert(name, tool);
+        }
 
         let bearer_auth = crate::auth::BearerTokenAuth::generate();
         let bearer_token = bearer_auth.token().to_string();

@@ -148,6 +148,7 @@ use crate::llm::cli_subprocess::{CliLineParser, cli_event_stream};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call};
 use crate::message::Message;
+use crate::tool::Tool;
 use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
@@ -212,6 +213,9 @@ pub struct ClaudeCodeClient {
     /// 2. The flag flows consistently through the full chain:
     ///    CLI → Settings → create_client() → ClaudeCodeClient → McpHttpServer
     dangerous_no_sandbox: bool,
+
+    /// Dyson tools exposed via MCP (set by agent via `set_mcp_tools`).
+    mcp_tools: std::sync::Mutex<HashMap<String, Arc<dyn Tool>>>,
 }
 
 impl ClaudeCodeClient {
@@ -253,6 +257,7 @@ impl ClaudeCodeClient {
             mcp_configs,
             workspace,
             dangerous_no_sandbox,
+            mcp_tools: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -335,12 +340,13 @@ impl LlmClient for ClaudeCodeClient {
         // entire conversation history into a readable string so the model
         // has context from previous turns.
         //
-        // For single-turn conversations (most common), this is just the
-        // user's message.  For multi-turn, we include the full history.
-        // Filter out agent-only tools — Claude Code has its own built-in
-        // equivalents (Read, Write, Edit, Grep, Glob, etc.).
-        let filtered_tools: Vec<_> = tools.iter().filter(|t| !t.agent_only).collect();
-        let prompt = super::format_prompt(messages, &filtered_tools);
+        // When MCP is active, tools are structured — skip text descriptions.
+        let prompt_tools: Vec<_> = if self.workspace.is_some() {
+            vec![]
+        } else {
+            tools.iter().filter(|t| !t.agent_only).collect()
+        };
+        let prompt = super::format_prompt(messages, &prompt_tools);
 
         tracing::debug!(
             model = config.model,
@@ -358,7 +364,8 @@ impl LlmClient for ClaudeCodeClient {
         let mut mcp_config_json: Option<String> = None;
 
         if let Some(ref workspace) = self.workspace {
-            let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox).await?;
+            let extra = self.mcp_tools.lock().unwrap().clone();
+            let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox, &extra).await?;
 
             // Build MCP config JSON for Claude Code's --mcp-config flag.
             let config = serde_json::json!({
@@ -443,6 +450,12 @@ impl LlmClient for ClaudeCodeClient {
             tool_mode: crate::llm::ToolMode::Observe,
             input_tokens: None,
         })
+    }
+
+    fn set_mcp_tools(&self, tools: HashMap<String, Arc<dyn Tool>>) {
+        let filtered: HashMap<_, _> = tools.into_iter().filter(|(_, t)| !t.agent_only()).collect();
+        tracing::info!(tool_count = filtered.len(), "MCP tools registered");
+        *self.mcp_tools.lock().unwrap() = filtered;
     }
 }
 

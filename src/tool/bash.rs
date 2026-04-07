@@ -81,6 +81,10 @@ impl Tool for BashTool {
         "bash"
     }
 
+    fn agent_only(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> &str {
         "Execute a bash command and return its output. Use this for running \
          shell commands, scripts, build tools, file operations, and system \

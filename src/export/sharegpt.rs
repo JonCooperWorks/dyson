@@ -110,6 +110,7 @@ pub fn to_sharegpt(
                 ContentBlock::Image { media_type, .. } => {
                     text_parts.push(format!("[Image: {media_type}]"));
                 }
+                ContentBlock::Thinking { .. } => {}
             }
         }
 

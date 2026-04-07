@@ -59,6 +59,7 @@ use std::fmt::Write as _;
 use crate::error::{DysonError, Result};
 use crate::llm::stream::StreamEvent;
 use crate::message::{ContentBlock, Message, Role};
+use crate::tool::Tool;
 
 // ---------------------------------------------------------------------------
 // CompletionConfig
@@ -203,6 +204,10 @@ pub trait LlmClient: Send + Sync {
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<StreamResponse>;
+
+    /// Pass Dyson's tools to CLI-based backends for MCP exposure.
+    /// API-based clients (Anthropic, OpenAI) ignore this — no-op default.
+    fn set_mcp_tools(&self, _tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -460,15 +465,12 @@ pub(crate) struct McpServerInfo {
     pub url: String,
 }
 
-/// Start an in-process MCP HTTP server exposing workspace tools.
-///
-/// Used by both `ClaudeCodeClient` and `CodexClient` to give CLI
-/// subprocesses access to workspace tools via MCP.  Each `stream()` call
-/// starts a fresh server on a random port; the returned `JoinHandle`
-/// keeps it alive for the duration of the LLM turn.
+/// Start an MCP server exposing workspace + Dyson tools to CLI subprocesses.
+/// Fresh server per `stream()` call; lives until the returned handle is dropped.
 pub(crate) async fn start_mcp_server(
     workspace: &std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
     dangerous_no_sandbox: bool,
+    extra_tools: &std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
 ) -> Result<McpServerInfo> {
     use crate::skill::mcp::serve::McpHttpServer;
     use std::sync::Arc;
@@ -476,6 +478,7 @@ pub(crate) async fn start_mcp_server(
     let server = Arc::new(McpHttpServer::new(
         Arc::clone(workspace),
         dangerous_no_sandbox,
+        extra_tools.clone(),
     ));
 
     let (port, handle, token) = server.start().await.map_err(|e| {
@@ -603,6 +606,7 @@ pub(crate) fn format_prompt(messages: &[Message], tools: &[&ToolDefinition]) -> 
                     ContentBlock::Image { .. } => {
                         prompt.push_str("[Image attached]\n\n");
                     }
+                    ContentBlock::Thinking { .. } => {}
                 }
             }
         }
