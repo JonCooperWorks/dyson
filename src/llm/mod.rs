@@ -603,6 +603,7 @@ pub(crate) fn format_prompt(messages: &[Message], tools: &[&ToolDefinition]) -> 
                     ContentBlock::Image { .. } => {
                         prompt.push_str("[Image attached]\n\n");
                     }
+                    ContentBlock::Thinking { .. } => {}
                 }
             }
         }

@@ -124,6 +124,10 @@ pub async fn process_stream(
     // Buffer for accumulating text deltas into a single Text content block.
     let mut current_text = String::new();
 
+    // Buffer for accumulating thinking deltas into a Thinking content block.
+    let mut current_thinking = String::new();
+    let mut thinking_indicator_sent = false;
+
     // Timing and token counting.
     let stream_start = std::time::Instant::now();
     let mut first_token_time: Option<std::time::Instant> = None;
@@ -139,9 +143,22 @@ pub async fn process_stream(
         match event {
             StreamEvent::ThinkingDelta(text) => {
                 tracing::debug!(thinking = text, "model thinking");
+                // Send a one-time "thinking" indicator so the user knows
+                // the model is reasoning, but don't reveal the full text.
+                if !thinking_indicator_sent {
+                    if !typing_cleared {
+                        output.typing_indicator(false)?;
+                        typing_cleared = true;
+                    }
+                    output.text_delta("I'm thinking …\n")?;
+                    thinking_indicator_sent = true;
+                }
+                current_thinking.push_str(&text);
             }
 
             StreamEvent::TextDelta(text) => {
+                // Flush any accumulated thinking before text starts.
+                flush_thinking(&mut current_thinking, &mut content_blocks);
                 if first_token_time.is_none() {
                     first_token_time = Some(std::time::Instant::now());
                     let ttft_ms = first_token_time
@@ -166,6 +183,7 @@ pub async fn process_stream(
                     output.typing_indicator(false)?;
                     typing_cleared = true;
                 }
+                flush_thinking(&mut current_thinking, &mut content_blocks);
                 flush_text(&mut current_text, &mut content_blocks);
                 tracing::info!(tool = name, id = id, "tool call started");
                 output.tool_use_start(id, name)?;
@@ -219,6 +237,7 @@ pub async fn process_stream(
                     tool_calls = tool_calls.len(),
                     "stream complete"
                 );
+                flush_thinking(&mut current_thinking, &mut content_blocks);
                 flush_text(&mut current_text, &mut content_blocks);
             }
 
@@ -228,6 +247,7 @@ pub async fn process_stream(
         }
     }
 
+    flush_thinking(&mut current_thinking, &mut content_blocks);
     flush_text(&mut current_text, &mut content_blocks);
 
     let message = Message::assistant(content_blocks);
@@ -244,6 +264,15 @@ fn flush_text(current_text: &mut String, content_blocks: &mut Vec<ContentBlock>)
     if !current_text.is_empty() {
         content_blocks.push(ContentBlock::Text {
             text: std::mem::take(current_text),
+        });
+    }
+}
+
+/// If there's accumulated thinking, push it as a Thinking ContentBlock and clear the buffer.
+fn flush_thinking(current_thinking: &mut String, content_blocks: &mut Vec<ContentBlock>) {
+    if !current_thinking.is_empty() {
+        content_blocks.push(ContentBlock::Thinking {
+            thinking: std::mem::take(current_thinking),
         });
     }
 }
@@ -340,9 +369,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thinking_deltas_are_not_sent_to_output() {
-        // Thinking tokens should be logged but NOT appear in the output
-        // text or in the message content blocks.
+    async fn thinking_deltas_saved_to_history_but_hidden_from_output() {
+        // Thinking tokens should be saved to the message content blocks
+        // for history, but only a brief indicator shown to the user.
         let stream = events_to_stream(vec![
             StreamEvent::ThinkingDelta("Let me think...".into()),
             StreamEvent::ThinkingDelta("The answer is 42.".into()),
@@ -356,12 +385,18 @@ mod tests {
         let mut output = RecordingOutput::new();
         let (message, tool_calls, _tokens) = process_stream(stream, &mut output).await.unwrap();
 
-        // Only the TextDelta should appear in output — thinking is suppressed.
-        assert_eq!(output.text(), "The answer is 42.");
+        // Output should show the thinking indicator + the visible text.
+        assert_eq!(output.text(), "I'm thinking …\nThe answer is 42.");
         assert!(tool_calls.is_empty());
-        // Message should have one text block (not thinking).
-        assert_eq!(message.content.len(), 1);
+        // Message should have a Thinking block + a Text block.
+        assert_eq!(message.content.len(), 2);
         match &message.content[0] {
+            ContentBlock::Thinking { thinking } => {
+                assert_eq!(thinking, "Let me think...The answer is 42.");
+            }
+            other => panic!("expected Thinking, got: {other:?}"),
+        }
+        match &message.content[1] {
             ContentBlock::Text { text } => assert_eq!(text, "The answer is 42."),
             other => panic!("expected Text, got: {other:?}"),
         }

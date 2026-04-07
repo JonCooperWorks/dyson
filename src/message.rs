@@ -110,6 +110,16 @@ pub enum ContentBlock {
         is_error: bool,
     },
 
+    /// Internal model reasoning (extended thinking / hidden chain-of-thought).
+    ///
+    /// Preserved in the conversation history so the model can reference its
+    /// prior reasoning, but NOT shown to the user.  Controllers should send
+    /// a brief "thinking" indicator instead of the full text.
+    ///
+    /// When serialized back to the Anthropic API this becomes a `thinking`
+    /// content block.  OpenAI-compatible providers simply skip it.
+    Thinking { thinking: String },
+
     /// A base64-encoded image for vision-capable models.
     ///
     /// Images are resized and encoded by the media resolver before reaching
@@ -176,6 +186,7 @@ impl ContentBlock {
             } => {
                 tool_use_id.split_whitespace().count() + content.split_whitespace().count() + 5 // JSON structure overhead
             }
+            ContentBlock::Thinking { thinking } => thinking.split_whitespace().count().max(1),
             ContentBlock::Image { data, .. } => {
                 // Anthropic charges ~1600 tokens for a 1568x1568 image.
                 // Rough heuristic based on base64 data size.
