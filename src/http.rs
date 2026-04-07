@@ -55,6 +55,7 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .pool_idle_timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(32)
         .build()
         .expect("failed to build HTTP client")
 });

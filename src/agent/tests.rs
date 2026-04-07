@@ -1775,3 +1775,340 @@ mod test_tool_calling_integration {
         );
     }
 }
+
+// -----------------------------------------------------------------------
+// Compaction helper unit tests (Step 3)
+// -----------------------------------------------------------------------
+
+#[test]
+fn head_boundary_clamps_to_message_count() {
+    // protect_head > number of messages → clamp to len.
+    let (agent, _) = make_agent_with_history(
+        vec![Message::user("only one")],
+        vec![],
+        Some(CompactionConfig {
+            protect_head: 100,
+            ..CompactionConfig::default()
+        }),
+    );
+    let config = agent.compaction_config.unwrap();
+    assert_eq!(agent.head_boundary(&config), 1);
+}
+
+#[test]
+fn head_boundary_normal() {
+    let msgs = vec![
+        Message::user("a"),
+        Message::assistant(vec![ContentBlock::Text { text: "b".into() }]),
+        Message::user("c"),
+        Message::assistant(vec![ContentBlock::Text { text: "d".into() }]),
+    ];
+    let (agent, _) = make_agent_with_history(
+        msgs,
+        vec![],
+        Some(CompactionConfig {
+            protect_head: 2,
+            ..CompactionConfig::default()
+        }),
+    );
+    let config = agent.compaction_config.unwrap();
+    assert_eq!(agent.head_boundary(&config), 2);
+}
+
+#[test]
+fn tail_boundary_all_fit() {
+    // All non-head messages fit within the tail budget.
+    let msgs = vec![
+        Message::user("head"),
+        Message::user("a"),
+        Message::user("b"),
+    ];
+    let (agent, _) = make_agent_with_history(
+        msgs,
+        vec![],
+        Some(CompactionConfig {
+            protect_head: 1,
+            protect_tail_tokens: 100_000, // huge budget
+            ..CompactionConfig::default()
+        }),
+    );
+    let config = agent.compaction_config.unwrap();
+    // All non-head fit → tail_start == head_end.
+    assert_eq!(agent.tail_boundary(&config), agent.head_boundary(&config));
+}
+
+#[test]
+fn tail_boundary_partial() {
+    // Budget exhausted mid-conversation.
+    let msgs: Vec<Message> = (0..10)
+        .map(|i| Message::user(&format!("message {i} with some words")))
+        .collect();
+    let (agent, _) = make_agent_with_history(
+        msgs,
+        vec![],
+        Some(CompactionConfig {
+            protect_head: 1,
+            protect_tail_tokens: 10, // very small budget
+            ..CompactionConfig::default()
+        }),
+    );
+    let config = agent.compaction_config.unwrap();
+    let tail_start = agent.tail_boundary(&config);
+    // tail_start should be after head_end and before the end.
+    assert!(tail_start > agent.head_boundary(&config));
+    assert!(tail_start < agent.conversation.messages.len());
+}
+
+#[test]
+fn tail_boundary_empty() {
+    // No messages at all.
+    let (agent, _) = make_agent_with_history(
+        vec![],
+        vec![],
+        Some(CompactionConfig {
+            protect_head: 0,
+            protect_tail_tokens: 1000,
+            ..CompactionConfig::default()
+        }),
+    );
+    let config = agent.compaction_config.unwrap();
+    assert_eq!(agent.tail_boundary(&config), 0);
+}
+
+#[test]
+fn prune_tool_outputs_replaces_content() {
+    let msgs = vec![
+        Message::user("head"),
+        Message::tool_result("call_1", "big output data here", false),
+        Message::user("tail"),
+    ];
+    let (mut agent, _) = make_agent_with_history(
+        msgs,
+        vec![],
+        Some(CompactionConfig::default()),
+    );
+    agent.prune_tool_outputs(1, 2);
+    // The tool result in position 1 should be pruned.
+    match &agent.conversation.messages[1].content[0] {
+        ContentBlock::ToolResult { content, .. } => {
+            assert_eq!(content, "[tool output pruned]");
+        }
+        other => panic!("expected ToolResult, got: {other:?}"),
+    }
+}
+
+#[test]
+fn prune_tool_outputs_preserves_text() {
+    let msgs = vec![
+        Message::user("head"),
+        Message::assistant(vec![ContentBlock::Text { text: "keep me".into() }]),
+        Message::user("tail"),
+    ];
+    let (mut agent, _) = make_agent_with_history(
+        msgs,
+        vec![],
+        Some(CompactionConfig::default()),
+    );
+    agent.prune_tool_outputs(1, 2);
+    // Text blocks should be untouched.
+    match &agent.conversation.messages[1].content[0] {
+        ContentBlock::Text { text } => assert_eq!(text, "keep me"),
+        other => panic!("expected Text, got: {other:?}"),
+    }
+}
+
+#[test]
+fn find_existing_summary_found() {
+    let msgs = vec![
+        Message::user("[Context Summary]\n\nPrevious summary content."),
+        Message::assistant(vec![ContentBlock::Text { text: "ok".into() }]),
+        Message::user("continue"),
+    ];
+    let (agent, _) = make_agent_with_history(
+        msgs,
+        vec![],
+        Some(CompactionConfig::default()),
+    );
+    let summary = agent.find_existing_summary(2);
+    assert!(summary.is_some());
+    assert!(summary.unwrap().contains("Previous summary content"));
+}
+
+#[test]
+fn find_existing_summary_not_found() {
+    let msgs = vec![
+        Message::user("no summary here"),
+        Message::assistant(vec![ContentBlock::Text { text: "ok".into() }]),
+    ];
+    let (agent, _) = make_agent_with_history(
+        msgs,
+        vec![],
+        Some(CompactionConfig::default()),
+    );
+    assert!(agent.find_existing_summary(2).is_none());
+}
+
+#[test]
+fn fix_orphaned_uses_inserts_synthetic() {
+    // ToolUse without matching ToolResult.
+    let msgs = vec![
+        Message::assistant(vec![ContentBlock::ToolUse {
+            id: "orphan_1".into(),
+            name: "bash".into(),
+            input: serde_json::json!({}),
+        }]),
+        Message::user("continue"),
+    ];
+    let (mut agent, _) = make_agent_with_history(
+        msgs,
+        vec![],
+        Some(CompactionConfig::default()),
+    );
+    agent.fix_orphaned_tool_pairs();
+    // Should now have a synthetic ToolResult for orphan_1.
+    let has_result = agent.conversation.messages.iter().any(|m| {
+        m.content.iter().any(|b| {
+            matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "orphan_1")
+        })
+    });
+    assert!(has_result, "should insert synthetic result for orphaned tool_use");
+}
+
+#[test]
+fn fix_orphaned_results_removed() {
+    // ToolResult without matching ToolUse.
+    let msgs = vec![
+        Message::user("start"),
+        Message::tool_result("missing_call", "orphaned result", false),
+        Message::user("continue"),
+    ];
+    let (mut agent, _) = make_agent_with_history(
+        msgs,
+        vec![],
+        Some(CompactionConfig::default()),
+    );
+    agent.fix_orphaned_tool_pairs();
+    // The orphaned result should be removed.
+    let has_orphan = agent.conversation.messages.iter().any(|m| {
+        m.content.iter().any(|b| {
+            matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "missing_call")
+        })
+    });
+    assert!(!has_orphan, "orphaned tool_result should be removed");
+}
+
+#[test]
+fn fix_orphaned_mixed() {
+    // Both orphaned uses and orphaned results simultaneously.
+    let msgs = vec![
+        Message::assistant(vec![ContentBlock::ToolUse {
+            id: "use_no_result".into(),
+            name: "bash".into(),
+            input: serde_json::json!({}),
+        }]),
+        Message::tool_result("result_no_use", "orphaned", false),
+        Message::user("end"),
+    ];
+    let (mut agent, _) = make_agent_with_history(
+        msgs,
+        vec![],
+        Some(CompactionConfig::default()),
+    );
+    agent.fix_orphaned_tool_pairs();
+
+    // Synthetic result for "use_no_result" should exist.
+    let has_synthetic = agent.conversation.messages.iter().any(|m| {
+        m.content.iter().any(|b| {
+            matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "use_no_result")
+        })
+    });
+    assert!(has_synthetic);
+
+    // Orphaned result for "result_no_use" should be removed.
+    let has_orphan = agent.conversation.messages.iter().any(|m| {
+        m.content.iter().any(|b| {
+            matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "result_no_use")
+        })
+    });
+    assert!(!has_orphan);
+}
+
+#[test]
+fn estimate_context_tokens_basic() {
+    let msgs = vec![
+        Message::user("hello world"),
+        Message::assistant(vec![ContentBlock::Text { text: "hi there friend".into() }]),
+    ];
+    let (agent, _) = make_agent_with_history(
+        msgs,
+        vec![],
+        Some(CompactionConfig::default()),
+    );
+    let tokens = agent.estimate_context_tokens("system prompt here");
+    // system: 3 words + messages: ~2 + ~3 + framing → should be > 0
+    assert!(tokens > 0);
+    // Should include system prompt words.
+    assert!(tokens >= 3);
+}
+
+#[test]
+fn build_compaction_prompt_with_previous() {
+    let (agent, _) = make_agent_with_history(
+        vec![Message::user("test")],
+        vec![],
+        Some(CompactionConfig::default()),
+    );
+    let prompt = agent.build_compaction_prompt(Some("Previous summary text."));
+    assert!(prompt.contains("Previous context summary"));
+    assert!(prompt.contains("Previous summary text."));
+    assert!(prompt.contains("## Goal"));
+}
+
+#[test]
+fn build_compaction_prompt_without_previous() {
+    let (agent, _) = make_agent_with_history(
+        vec![Message::user("test")],
+        vec![],
+        Some(CompactionConfig::default()),
+    );
+    let prompt = agent.build_compaction_prompt(None);
+    assert!(prompt.contains("## Goal"));
+    assert!(!prompt.contains("Previous context summary"));
+}
+
+// -----------------------------------------------------------------------
+// is_retryable tests (Step 4)
+// -----------------------------------------------------------------------
+
+#[test]
+fn is_retryable_rate_limit() {
+    assert!(Agent::is_retryable(&DysonError::Llm("rate limit exceeded".into())));
+    assert!(Agent::is_retryable(&DysonError::Llm("HTTP 429 Too Many Requests".into())));
+}
+
+#[test]
+fn is_retryable_overloaded() {
+    assert!(Agent::is_retryable(&DysonError::Llm("server overloaded".into())));
+    assert!(Agent::is_retryable(&DysonError::Llm("HTTP 529".into())));
+    assert!(Agent::is_retryable(&DysonError::Llm("HTTP 502 Bad Gateway".into())));
+    assert!(Agent::is_retryable(&DysonError::Llm("HTTP 503 Service Unavailable".into())));
+}
+
+#[tokio::test]
+async fn is_retryable_http_error() {
+    // DysonError::Http is always retryable. Trigger a real reqwest error
+    // by trying to connect to a port that's not listening.
+    let err = reqwest::Client::new()
+        .get("http://127.0.0.1:1")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(Agent::is_retryable(&DysonError::Http(err)));
+}
+
+#[test]
+fn is_retryable_other() {
+    assert!(!Agent::is_retryable(&DysonError::Config("bad config".into())));
+    assert!(!Agent::is_retryable(&DysonError::tool("bash", "command failed")));
+    assert!(!Agent::is_retryable(&DysonError::Cancelled));
+}

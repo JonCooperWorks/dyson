@@ -154,4 +154,29 @@ mod tests {
     fn is_agent_only() {
         assert!(ListFilesTool.agent_only());
     }
+
+    #[tokio::test]
+    async fn list_empty_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = ListFilesTool;
+        let input = serde_json::json!({"pattern": "*"});
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        assert!(!output.is_error);
+        assert!(output.content.contains("No files matched"));
+    }
+
+    #[tokio::test]
+    async fn list_truncates_at_max_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create more than MAX_RESULTS files.
+        for i in 0..1005 {
+            std::fs::write(tmp.path().join(format!("file_{i:04}.txt")), "").unwrap();
+        }
+
+        let tool = ListFilesTool;
+        let input = serde_json::json!({"pattern": "*.txt"});
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        assert!(!output.is_error);
+        assert!(output.content.contains("truncated"));
+    }
 }

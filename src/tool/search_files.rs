@@ -213,4 +213,38 @@ mod tests {
     fn is_agent_only() {
         assert!(SearchFilesTool.agent_only());
     }
+
+    #[tokio::test]
+    async fn search_respects_include_glob() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn target() {}\n").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "fn target() {}\n").unwrap();
+
+        let tool = SearchFilesTool;
+        let input = serde_json::json!({
+            "pattern": "target",
+            "include": "*.rs"
+        });
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        assert!(!output.is_error);
+        assert!(output.content.contains("a.rs"));
+        // b.txt should be filtered out by the include glob.
+        assert!(!output.content.contains("b.txt"));
+    }
+
+    #[tokio::test]
+    async fn search_truncates_at_max_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create a file with more than MAX_MATCHES lines that all match.
+        let content: String = (0..600)
+            .map(|i| format!("match_line_{i}\n"))
+            .collect();
+        std::fs::write(tmp.path().join("big.txt"), &content).unwrap();
+
+        let tool = SearchFilesTool;
+        let input = serde_json::json!({"pattern": "match_line"});
+        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        assert!(!output.is_error);
+        assert!(output.content.contains("truncated"));
+    }
 }
