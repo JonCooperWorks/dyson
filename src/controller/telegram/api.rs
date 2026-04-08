@@ -182,11 +182,28 @@ impl BotApi {
         Ok(())
     }
 
-    /// Download a file by its file_id.
+    /// Download a file by its file_id, enforcing a size limit.
     ///
-    /// Calls getFile to get the path, then downloads from the Telegram file server.
-    pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, DysonError> {
+    /// Calls getFile to get the path and optional file size.  If the
+    /// server-reported size exceeds `max_bytes`, rejects immediately.
+    /// Otherwise streams the download, checking size incrementally so
+    /// we never buffer more than `max_bytes` in memory.
+    pub async fn download_file(
+        &self,
+        file_id: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, DysonError> {
         let file = self.get_file(file_id).await?;
+
+        // Early reject based on Telegram's reported file size.
+        if let Some(size) = file.file_size
+            && size > max_bytes
+        {
+            return Err(DysonError::Llm(format!(
+                "Telegram file too large ({size} bytes, limit {max_bytes})"
+            )));
+        }
+
         let file_path = file.file_path.ok_or_else(|| {
             DysonError::Llm("Telegram getFile returned no file_path".to_string())
         })?;
@@ -196,14 +213,23 @@ impl BotApi {
             self.token, file_path
         );
 
-        let response = crate::http::client()
+        let mut response = crate::http::client()
             .get(&url)
             .send()
             .await
             .map_err(DysonError::Http)?;
 
-        let bytes = response.bytes().await.map_err(DysonError::Http)?;
-        Ok(bytes.to_vec())
+        // Stream the body in chunks, enforcing the limit incrementally.
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(DysonError::Http)? {
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() as u64 > max_bytes {
+                return Err(DysonError::Llm(format!(
+                    "Telegram file download exceeded limit ({max_bytes} bytes)"
+                )));
+            }
+        }
+        Ok(bytes)
     }
 
     // -----------------------------------------------------------------------

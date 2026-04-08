@@ -196,7 +196,8 @@ impl DreamRunner {
                 let ctx = ctx_factory();
                 let dream_name = dream.name().to_string();
 
-                tokio::spawn(async move {
+                let dream_name_for_panic = dream_name.clone();
+                let handle = tokio::spawn(async move {
                     tracing::info!(dream = dream_name, "dream starting");
                     let start = std::time::Instant::now();
 
@@ -218,6 +219,19 @@ impl DreamRunner {
                                 "dream failed"
                             );
                         }
+                    }
+                });
+
+                // Monitor the JoinHandle so panics are logged instead of
+                // silently lost (the default for detached tokio tasks).
+                tokio::spawn(async move {
+                    if let Err(e) = handle.await
+                        && e.is_panic()
+                    {
+                        tracing::error!(
+                            dream = dream_name_for_panic,
+                            "dream task panicked"
+                        );
                     }
                 });
             }

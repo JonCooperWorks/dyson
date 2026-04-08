@@ -120,7 +120,7 @@ impl Tool for WebFetchTool {
         tracing::info!(url = url.as_str(), "web_fetch");
 
         // --- Fetch with timeout, race against cancellation ---
-        let response = tokio::select! {
+        let mut response = tokio::select! {
             res = self.client.get(&url).timeout(FETCH_TIMEOUT).send() => {
                 res.map_err(|e| DysonError::tool("web_fetch", format!("request failed: {e}")))?
             }
@@ -144,17 +144,31 @@ impl Tool for WebFetchTool {
             .unwrap_or("")
             .to_lowercase();
 
-        // --- Read body with size limit ---
-        let body_bytes = response
-            .bytes()
-            .await
-            .map_err(|e| DysonError::tool("web_fetch", format!("failed to read body: {e}")))?;
-
-        if body_bytes.len() > MAX_BODY_BYTES {
+        // --- Read body with streaming size limit ---
+        // Check Content-Length header for an early reject before downloading.
+        if let Some(cl) = response.content_length()
+            && cl > MAX_BODY_BYTES as u64
+        {
             return Ok(ToolOutput::error(format!(
-                "response too large ({} bytes, max {MAX_BODY_BYTES}). Try a more specific URL.",
-                body_bytes.len(),
+                "response too large ({cl} bytes per Content-Length, max {MAX_BODY_BYTES}). \
+                 Try a more specific URL.",
             )));
+        }
+
+        // Stream the body in chunks, enforcing the size limit incrementally
+        // so we never buffer more than MAX_BODY_BYTES in memory.
+        let mut body_bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| DysonError::tool("web_fetch", format!("failed to read body: {e}")))?
+        {
+            body_bytes.extend_from_slice(&chunk);
+            if body_bytes.len() > MAX_BODY_BYTES {
+                return Ok(ToolOutput::error(format!(
+                    "response too large (>{MAX_BODY_BYTES} bytes). Try a more specific URL.",
+                )));
+            }
         }
 
         let body_str = String::from_utf8_lossy(&body_bytes);

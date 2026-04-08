@@ -1111,7 +1111,9 @@ impl Agent {
 
         match response_opt {
             Some(r) => StreamResult::Response(r),
-            None => StreamResult::Error(last_err.unwrap()),
+            None => StreamResult::Error(last_err.unwrap_or_else(|| {
+                DysonError::Llm("retries exhausted with no error captured".into())
+            })),
         }
     }
 

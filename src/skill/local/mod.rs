@@ -40,6 +40,12 @@ use async_trait::async_trait;
 use crate::error::{DysonError, Result};
 use crate::tool::Tool;
 
+/// Maximum allowed SKILL.md content size (64 KB by default).
+///
+/// Prevents excessively large skill files from bloating the system prompt
+/// or being used as a vector for prompt injection via sheer volume.
+const MAX_SKILL_CONTENT_SIZE: usize = 64 * 1024;
+
 // ---------------------------------------------------------------------------
 // LocalSkill
 // ---------------------------------------------------------------------------
@@ -71,6 +77,8 @@ impl LocalSkill {
                 skill_md.display()
             ))
         })?;
+
+        validate_skill_content(&content, &skill_md)?;
 
         // Derive name from the directory (e.g., skills/code-review → "code-review").
         let dir_name = dir
@@ -201,6 +209,23 @@ impl LocalSkill {
             body,
         })
     }
+}
+
+/// Validate skill file content before use as a system prompt fragment.
+///
+/// Rejects content that exceeds the size limit.  This prevents oversized
+/// skill files (from shared or writable directories) from bloating the
+/// system prompt or serving as a prompt injection vector.
+fn validate_skill_content(content: &str, path: &Path) -> Result<()> {
+    if content.len() > MAX_SKILL_CONTENT_SIZE {
+        return Err(DysonError::Config(format!(
+            "skill file {} is too large ({} bytes, max {} bytes)",
+            path.display(),
+            content.len(),
+            MAX_SKILL_CONTENT_SIZE,
+        )));
+    }
+    Ok(())
 }
 
 /// Extract a value from frontmatter text for a given key.

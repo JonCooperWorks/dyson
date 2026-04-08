@@ -85,15 +85,47 @@ pub async fn run(
         }
     }
 
-    // Run controllers.
+    // Run controllers, racing against shutdown signals (SIGINT / SIGTERM).
     if controllers.is_empty() {
         return Err(dyson::error::DysonError::Config(
             "no valid controllers could be created from the configuration".into(),
         ));
-    } else if controllers.len() == 1 {
+    }
+
+    let shutdown = async {
+        // Wait for Ctrl-C (SIGINT).
+        let ctrl_c = tokio::signal::ctrl_c();
+
+        // On Unix, also listen for SIGTERM for graceful container shutdown.
+        #[cfg(unix)]
+        {
+            let mut sigterm = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::terminate(),
+            )
+            .expect("failed to register SIGTERM handler");
+
+            tokio::select! {
+                _ = ctrl_c => tracing::info!("received SIGINT"),
+                _ = sigterm.recv() => tracing::info!("received SIGTERM"),
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = ctrl_c.await;
+            tracing::info!("received SIGINT");
+        }
+    };
+
+    if controllers.len() == 1 {
         let controller = controllers.into_iter().next().expect("length checked above");
         tracing::info!(controller = controller.name(), "starting controller");
-        controller.run(&settings).await?;
+        tokio::select! {
+            result = controller.run(&settings) => { result?; }
+            _ = shutdown => {
+                tracing::info!("shutting down");
+            }
+        }
     } else {
         let mut handles = Vec::new();
         for controller in controllers {
@@ -106,8 +138,22 @@ pub async fn run(
                 }
             }));
         }
-        for handle in handles {
-            let _ = handle.await;
+
+        // Wait for either all controllers to finish or a shutdown signal.
+        tokio::select! {
+            _ = async {
+                for handle in &mut handles {
+                    let _ = handle.await;
+                }
+            } => {}
+            _ = shutdown => {
+                tracing::info!("shutting down — aborting controllers");
+                for handle in &handles {
+                    handle.abort();
+                }
+                // Give controllers a grace period to clean up.
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
         }
     }
 

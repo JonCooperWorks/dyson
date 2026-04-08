@@ -326,6 +326,10 @@ fn flush_thinking(current_thinking: &mut String, content_blocks: &mut Vec<Conten
 ///
 /// Usage: feed every `TextDelta` through [`feed()`].  It returns a list of
 /// `(is_thinking, text)` segments.
+/// Maximum pending buffer size before forcing a flush.  Protects against
+/// unbounded memory growth when a model sends an unclosed `<think>` tag.
+const MAX_PENDING: usize = 64 * 1024; // 64 KB
+
 struct ThinkTagParser {
     state: ThinkTagState,
     /// Bytes buffered while we're waiting to see if a partial match
@@ -381,6 +385,19 @@ impl ThinkTagParser {
 
             ThinkTagState::InsideThink => {
                 self.pending.push_str(text);
+
+                // Guard against unbounded growth from an unclosed <think> tag.
+                if self.pending.len() > MAX_PENDING {
+                    tracing::warn!(
+                        buffered = self.pending.len(),
+                        "think tag buffer exceeded {MAX_PENDING} bytes, flushing as thinking text"
+                    );
+                    let flushed = std::mem::take(&mut self.pending);
+                    self.state = ThinkTagState::PassThrough;
+                    out.push((true, flushed));
+                    return out;
+                }
+
                 const CLOSE: &str = "</think>";
                 if let Some(pos) = self.pending.find(CLOSE) {
                     // Found closing tag.

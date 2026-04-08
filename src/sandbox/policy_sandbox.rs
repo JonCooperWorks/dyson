@@ -178,7 +178,37 @@ impl Sandbox for PolicySandbox {
 // Per-tool check functions
 // ---------------------------------------------------------------------------
 
+/// Redact common secret patterns from a command string before logging.
+///
+/// Replaces Bearer tokens, Authorization headers, and environment variable
+/// assignments that look like secrets (names containing KEY, TOKEN, SECRET,
+/// PASSWORD, or CREDENTIAL) with `[REDACTED]`.
+fn redact_secrets(command: &str) -> String {
+    use regex::Regex;
+    use std::sync::LazyLock;
+
+    static BEARER_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)(Bearer\s+)\S+").unwrap());
+    static AUTH_HEADER_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"(?i)(-H\s+['"]?Authorization:\s*)[^'"}\s]+"#).unwrap());
+    static ENV_SECRET_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b(\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)\w*=)\S+").unwrap()
+    });
+
+    let s = BEARER_RE.replace_all(command, "${1}[REDACTED]");
+    let s = AUTH_HEADER_RE.replace_all(&s, "${1}[REDACTED]");
+    let s = ENV_SECRET_RE.replace_all(&s, "${1}[REDACTED]");
+    s.into_owned()
+}
+
 /// Check bash: generate OS-level sandbox wrapper from policy.
+///
+/// NOTE: `network: Deny` for bash is enforced at the OS level only (bwrap
+/// `--unshare-net` on Linux, network entitlement on macOS).  The
+/// application-level check here does not block network access — that would
+/// require inspecting the arbitrary command string, which is infeasible.
+/// On platforms without an OS sandbox, network deny is NOT enforced and a
+/// warning is logged.
 fn check_bash(
     input: &serde_json::Value,
     policy: &SandboxPolicy,
@@ -199,7 +229,7 @@ fn check_bash(
             build_container_command_from_policy(command, policy, &working_dir.to_string_lossy());
 
         tracing::debug!(
-            original = command,
+            original = %redact_secrets(command),
             "bash command wrapped in Apple Container"
         );
 
@@ -214,7 +244,7 @@ fn check_bash(
             build_bwrap_command_from_policy(command, policy, &working_dir.to_string_lossy());
 
         tracing::debug!(
-            original = command,
+            original = %redact_secrets(command),
             "bash command wrapped in OS sandbox (Linux bwrap, policy-based)"
         );
 
@@ -225,6 +255,12 @@ fn check_bash(
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
+        if policy.network == Access::Deny {
+            tracing::warn!(
+                "bash has network: Deny but OS sandbox is unavailable on this platform \
+                 — network access is NOT restricted"
+            );
+        }
         tracing::warn!("OS sandbox not available on this platform — running unsandboxed");
         Ok(SandboxDecision::Allow {
             input: input.clone(),

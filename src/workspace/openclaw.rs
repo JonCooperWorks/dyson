@@ -894,6 +894,69 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // Memory subdirectory and nested path tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn set_and_get_nested_memory_path() {
+        let (dir, mut ws) = temp_workspace();
+        ws.set("memory/notes/rust.md", "Rust notes");
+        assert_eq!(ws.get("memory/notes/rust.md").unwrap(), "Rust notes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_creates_parent_directories() {
+        let (dir, mut ws) = temp_workspace();
+        ws.set("memory/notes/deep/nested.md", "Deeply nested file");
+        ws.save().unwrap();
+
+        let on_disk =
+            std::fs::read_to_string(dir.join("memory/notes/deep/nested.md")).unwrap();
+        assert_eq!(on_disk, "Deeply nested file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_creates_entry_if_missing() {
+        let (dir, mut ws) = temp_workspace();
+        let journal = "memory/2099-01-01.md";
+        assert!(ws.get(journal).is_none());
+
+        ws.append(journal, "First entry");
+        assert_eq!(ws.get(journal).unwrap(), "First entry");
+
+        ws.append(journal, "Second entry");
+        let content = ws.get(journal).unwrap();
+        assert!(content.contains("First entry"));
+        assert!(content.contains("Second entry"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_skips_when_no_dirty_files() {
+        let (dir, ws) = temp_workspace();
+        // No modifications — save should succeed without writing.
+        ws.save().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reload_picks_up_disk_changes() {
+        let (dir, mut ws) = temp_workspace();
+        ws.set("MEMORY.md", "original");
+        ws.save().unwrap();
+        drop(ws);
+
+        // Modify on disk outside the workspace.
+        std::fs::write(dir.join("MEMORY.md"), "modified on disk").unwrap();
+
+        let ws = OpenClawWorkspace::load(&dir, MemoryConfig::default()).unwrap();
+        assert_eq!(ws.get("MEMORY.md").unwrap(), "modified on disk");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------------------------------------
     // Knowledge base tests
     // -------------------------------------------------------------------
 

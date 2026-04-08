@@ -171,6 +171,9 @@ pub struct File {
     pub file_id: String,
     #[serde(default)]
     pub file_path: Option<String>,
+    /// File size in bytes (provided by Telegram, used for early rejection).
+    #[serde(default)]
+    pub file_size: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------

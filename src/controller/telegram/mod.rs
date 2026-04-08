@@ -137,6 +137,32 @@ const MAX_MESSAGE_LEN: usize = 4000;
 ///   "allowed_chat_ids": [123456789]
 /// }
 /// ```
+/// Per-filetype download size limits for Telegram file handling.
+///
+/// Prevents OOM from oversized files.  Limits are checked both against the
+/// Telegram `file_size` metadata (early reject) and incrementally during
+/// the streaming download.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+struct DownloadLimits {
+    /// Maximum bytes for image files (photos and image documents).
+    image_max_bytes: u64,
+    /// Maximum bytes for audio/voice files.
+    audio_max_bytes: u64,
+    /// Maximum bytes for other document types.
+    document_max_bytes: u64,
+}
+
+impl Default for DownloadLimits {
+    fn default() -> Self {
+        Self {
+            image_max_bytes: 50 * 1024 * 1024,    // 50 MB
+            audio_max_bytes: 50 * 1024 * 1024,     // 50 MB
+            document_max_bytes: 200 * 1024 * 1024,  // 200 MB
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct TelegramControllerConfig {
     /// Bot API token (already resolved from secret reference by the config loader).
@@ -154,6 +180,9 @@ struct TelegramControllerConfig {
     /// open access from config errors.
     #[serde(default)]
     allow_all_chats: bool,
+    /// Per-filetype download size limits.
+    #[serde(default)]
+    download_limits: DownloadLimits,
 }
 
 /// Deserialize chat IDs from a mix of numbers and strings.
@@ -195,6 +224,7 @@ pub struct TelegramController {
     /// Bot API token.  Uses `Credential` for zeroize-on-drop.
     bot_token: crate::auth::Credential,
     allowed_chat_ids: Vec<i64>,
+    download_limits: Arc<DownloadLimits>,
 }
 
 impl TelegramController {
@@ -237,6 +267,7 @@ impl TelegramController {
         Some(Self {
             bot_token: crate::auth::Credential::new(tg_config.bot_token),
             allowed_chat_ids: tg_config.allowed_chat_ids,
+            download_limits: Arc::new(tg_config.download_limits),
         })
     }
 }
@@ -278,6 +309,7 @@ impl super::Controller for TelegramController {
         }
 
         let allowed_ids = self.allowed_chat_ids.clone();
+        let download_limits = Arc::clone(&self.download_limits);
         let mut current_settings = settings.clone();
         let controller_prompt = self.system_prompt().map(|s| s.to_string());
 
@@ -524,6 +556,7 @@ impl super::Controller for TelegramController {
                 let store_clone = chat_store.clone();
                 let transcriber_clone = transcriber.clone();
                 let client_for_task = registry.get_default();
+                let limits_clone = Arc::clone(&download_limits);
                 tokio::spawn(run_agent_for_message(
                     bot_clone,
                     chat_id,
@@ -533,6 +566,7 @@ impl super::Controller for TelegramController {
                     store_clone,
                     transcriber_clone,
                     client_for_task,
+                    limits_clone,
                 ));
             }
         }
@@ -773,10 +807,11 @@ async fn run_agent_for_message(
     chat_store: Arc<dyn crate::chat_history::ChatHistory>,
     transcriber: Arc<dyn media::audio::Transcriber>,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
+    download_limits: Arc<DownloadLimits>,
 ) {
     let chat_key = chat_id.0.to_string();
 
-    let content_blocks = match extract_content(&bot, &msg, &text, &transcriber).await {
+    let content_blocks = match extract_content(&bot, &msg, &text, &transcriber, &download_limits).await {
         Ok(blocks) => blocks,
         Err(e) => {
             tracing::error!(error = %e, "failed to extract media content");
@@ -1142,6 +1177,7 @@ async fn extract_content(
     msg: &types::Message,
     text: &str,
     transcriber: &Arc<dyn media::audio::Transcriber>,
+    limits: &DownloadLimits,
 ) -> crate::Result<Vec<ContentBlock>> {
     let mut blocks = Vec::new();
 
@@ -1161,7 +1197,7 @@ async fn extract_content(
             height = photo.height,
             "downloading photo from Telegram"
         );
-        match bot.download_file(&photo.file_id).await {
+        match bot.download_file(&photo.file_id, limits.image_max_bytes).await {
             Ok(data) => match media::resolve(
                 media::MediaInput::Image {
                     data,
@@ -1203,7 +1239,7 @@ async fn extract_content(
             .unwrap_or("audio/ogg")
             .to_string();
 
-        match bot.download_file(&voice.file_id).await {
+        match bot.download_file(&voice.file_id, limits.audio_max_bytes).await {
             Ok(data) => match media::resolve(
                 media::MediaInput::Audio {
                     data,
@@ -1253,7 +1289,7 @@ async fn extract_content(
                 .unwrap_or("image/jpeg")
                 .to_string();
 
-            match bot.download_file(&doc.file_id).await {
+            match bot.download_file(&doc.file_id, limits.document_max_bytes).await {
                 Ok(data) => match media::resolve(
                     media::MediaInput::Image {
                         data,
@@ -1721,6 +1757,7 @@ mod tests {
         let ctrl = TelegramController {
             bot_token: crate::auth::Credential::new("test".into()),
             allowed_chat_ids: vec![],
+            download_limits: Arc::new(DownloadLimits::default()),
         };
         let prompt = ctrl.system_prompt().expect("Telegram controller must provide a system prompt");
         assert!(prompt.contains("Telegram"), "should reference Telegram");

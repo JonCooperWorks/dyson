@@ -324,7 +324,9 @@ impl ProviderConfig {
     /// Panics if `models` is empty (should never happen — the loader
     /// always populates at least one model from registry defaults).
     pub fn default_model(&self) -> &str {
-        &self.models[0]
+        self.models
+            .first()
+            .expect("ProviderConfig.models must not be empty (loader guarantees at least one)")
     }
 }
 

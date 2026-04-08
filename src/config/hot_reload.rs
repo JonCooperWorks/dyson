@@ -391,6 +391,72 @@ mod tests {
     }
 
     #[test]
+    fn config_change_triggers_reload_attempt() {
+        let dir = temp_dir("config-reload");
+        let config = dir.join("dyson.json");
+        // Write a valid config.
+        std::fs::write(&config, r#"{"agent":{}}"#).unwrap();
+
+        let mut reloader = HotReloader::new(Some(&config), None);
+
+        // Modify the config file.
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&config, r#"{"agent":{"max_iterations":5}}"#).unwrap();
+
+        // Detect the change.
+        let (changed, _) = reloader.check_nonblocking().unwrap();
+        assert!(!changed, "should be debounced");
+
+        // Wait for debounce to settle.
+        std::thread::sleep(DEBOUNCE_DURATION + Duration::from_millis(50));
+
+        // Should report changed=true.  Settings may or may not load
+        // depending on environment (API key availability), but the
+        // reload path is exercised.
+        let (changed, _settings) = reloader.check_nonblocking().unwrap();
+        assert!(changed, "config change should trigger reload");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workspace_file_change_returns_no_settings() {
+        let dir = temp_dir("ws-change");
+        let ws_dir = dir.join("workspace");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        let soul = ws_dir.join("SOUL.md");
+        std::fs::write(&soul, "Be helpful.").unwrap();
+
+        let mut reloader = HotReloader::new(None, Some(&ws_dir));
+
+        // Modify a workspace file.
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&soul, "Be very helpful.").unwrap();
+
+        let (changed, _) = reloader.check_nonblocking().unwrap();
+        assert!(!changed, "should be debounced");
+
+        std::thread::sleep(DEBOUNCE_DURATION + Duration::from_millis(50));
+
+        let (changed, settings) = reloader.check_nonblocking().unwrap();
+        assert!(changed, "workspace change should trigger reload");
+        assert!(
+            settings.is_none(),
+            "workspace-only change should not produce Settings"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_watched_files_returns_false() {
+        let mut reloader = HotReloader::new(None, None);
+        let (changed, settings) = reloader.check_nonblocking().unwrap();
+        assert!(!changed);
+        assert!(settings.is_none());
+    }
+
+    #[test]
     fn rapid_writes_reset_debounce() {
         let dir = temp_dir("rapid-writes");
         let config = dir.join("dyson.json");

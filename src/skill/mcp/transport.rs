@@ -91,6 +91,8 @@ pub struct StdioTransport {
     next_id: AtomicU64,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
     _child: Arc<Mutex<Child>>,
+    /// Background task handles — aborted on drop to prevent orphaned tasks.
+    _reader_handle: tokio::task::JoinHandle<()>,
 }
 
 impl StdioTransport {
@@ -129,7 +131,7 @@ impl StdioTransport {
         // Background reader task.
         let pending_clone = Arc::clone(&pending);
         let command_name = command.to_string();
-        tokio::spawn(async move {
+        let reader_handle = tokio::spawn(async move {
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
 
@@ -166,7 +168,14 @@ impl StdioTransport {
             next_id: AtomicU64::new(1),
             pending,
             _child: Arc::new(Mutex::new(child)),
+            _reader_handle: reader_handle,
         })
+    }
+}
+
+impl Drop for StdioTransport {
+    fn drop(&mut self) {
+        self._reader_handle.abort();
     }
 }
 
@@ -206,10 +215,19 @@ impl McpTransport for StdioTransport {
             })?;
         }
 
-        let response = rx.await.map_err(|_| DysonError::Mcp {
-            server: method.to_string(),
-            message: "response channel closed (server died?)".into(),
-        })?;
+        /// Maximum time to wait for an MCP server to respond to a request.
+        const MCP_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+        let response = tokio::time::timeout(MCP_RESPONSE_TIMEOUT, rx)
+            .await
+            .map_err(|_| DysonError::Mcp {
+                server: method.to_string(),
+                message: format!("response timed out after {}s", MCP_RESPONSE_TIMEOUT.as_secs()),
+            })?
+            .map_err(|_| DysonError::Mcp {
+                server: method.to_string(),
+                message: "response channel closed (server died?)".into(),
+            })?;
 
         if let Some(err) = response.error {
             return Err(DysonError::Mcp {
@@ -456,5 +474,121 @@ impl McpTransport for HttpTransport {
         let _ = req.send().await;
 
         Ok(())
+    }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Spawn a mock MCP server that echoes JSON-RPC responses.
+    ///
+    /// The script reads a JSON line from stdin, extracts the id, and
+    /// writes back a JSON-RPC response with `{"ok": true}` as the result.
+    async fn spawn_echo_server() -> StdioTransport {
+        StdioTransport::spawn(
+            "sh",
+            &[
+                "-c".to_string(),
+                // Read lines, parse id with sed, echo a response.
+                r#"while IFS= read -r line; do
+                    id=$(echo "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+                    echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"ok\":true}}"
+                done"#
+                    .to_string(),
+            ],
+            &HashMap::new(),
+        )
+        .await
+        .expect("failed to spawn echo server")
+    }
+
+    #[tokio::test]
+    async fn send_request_receives_matching_response() {
+        let transport = spawn_echo_server().await;
+        let result = transport.send_request("test/method", None).await.unwrap();
+        assert_eq!(result, serde_json::json!({"ok": true}));
+    }
+
+    #[tokio::test]
+    async fn sequential_requests_match_by_id() {
+        let transport = spawn_echo_server().await;
+
+        let r1 = transport.send_request("method/one", None).await.unwrap();
+        let r2 = transport.send_request("method/two", None).await.unwrap();
+
+        assert_eq!(r1, serde_json::json!({"ok": true}));
+        assert_eq!(r2, serde_json::json!({"ok": true}));
+    }
+
+    #[tokio::test]
+    async fn request_timeout_on_dead_process() {
+        // Spawn a process that immediately exits without responding.
+        let transport = StdioTransport::spawn(
+            "sh",
+            &["-c".to_string(), "exit 0".to_string()],
+            &HashMap::new(),
+        )
+        .await
+        .expect("failed to spawn");
+
+        // Give the process a moment to exit.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let err = transport.send_request("test", None).await;
+        assert!(err.is_err(), "should fail when process dies");
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("closed") || msg.contains("timed out") || msg.contains("failed"),
+            "error should indicate connection loss: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_error_is_propagated() {
+        // Server returns a JSON-RPC error.
+        let transport = StdioTransport::spawn(
+            "sh",
+            &[
+                "-c".to_string(),
+                r#"while IFS= read -r line; do
+                    id=$(echo "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+                    echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"method not found\"}}"
+                done"#
+                    .to_string(),
+            ],
+            &HashMap::new(),
+        )
+        .await
+        .expect("failed to spawn error server");
+
+        let err = transport.send_request("nonexistent", None).await;
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("method not found"));
+    }
+
+    #[tokio::test]
+    async fn drop_aborts_reader_task() {
+        let transport = spawn_echo_server().await;
+        // Just verify that dropping doesn't panic.
+        drop(transport);
+        // Give tokio a moment to clean up.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_nonexistent_command_fails() {
+        let err = StdioTransport::spawn(
+            "nonexistent-command-xyz",
+            &[],
+            &HashMap::new(),
+        )
+        .await;
+        assert!(err.is_err());
     }
 }

@@ -268,6 +268,43 @@ fn parse_body_malformed_frontmatter_returns_whole_content() {
 }
 
 // -------------------------------------------------------------------
+// Content validation
+// -------------------------------------------------------------------
+
+#[test]
+fn validate_rejects_oversized_content() {
+    let dir = std::env::temp_dir().join(format!("dyson-skill-oversize-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Create a SKILL.md that exceeds the 64KB limit.
+    let oversized = "x".repeat(65 * 1024);
+    let content = format!("---\nname: big\n---\n\n{oversized}");
+    std::fs::write(dir.join("SKILL.md"), &content).unwrap();
+
+    let err = LocalSkill::from_dir(&dir).unwrap_err();
+    assert!(err.to_string().contains("too large"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn validate_accepts_normal_content() {
+    let dir = std::env::temp_dir().join(format!("dyson-skill-normal-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\nname: ok\ndescription: fine\n---\n\nNormal sized body.",
+    )
+    .unwrap();
+
+    let skill = LocalSkill::from_dir(&dir).unwrap();
+    assert_eq!(skill.body(), "Normal sized body.");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// -------------------------------------------------------------------
 // Skill trait
 // -------------------------------------------------------------------
 
