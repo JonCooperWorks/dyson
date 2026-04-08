@@ -436,6 +436,22 @@ impl super::Controller for TelegramController {
                     if !is_directed {
                         continue;
                     }
+
+                    // In group chats, only operators (users whose IDs are
+                    // in allowed_chat_ids) may use / commands.  Non-operators
+                    // can still talk to the bot via @mention or reply.
+                    if text.starts_with('/') && !is_public_command(&text) {
+                        let sender_id = msg.from.as_ref().map(|u| u.id);
+                        if !is_operator(sender_id, &allowed_ids) {
+                            tracing::info!(
+                                chat_id = chat_id.0,
+                                sender_id = ?sender_id,
+                                command = %text,
+                                "non-operator command in group — ignoring",
+                            );
+                            continue;
+                        }
+                    }
                 }
 
                 if let Some(handled) = handle_instant_command(
@@ -985,6 +1001,13 @@ fn is_reply_to_bot(msg: &types::Message, bot_id: i64) -> bool {
         .is_some_and(|reply| reply.from.as_ref().is_some_and(|from| from.id == bot_id))
 }
 
+/// Returns true if the sender is an operator (their user ID is in the
+/// allowed-chat-ids list).  In Telegram, private-chat IDs equal user IDs,
+/// so `allowed_chat_ids` doubles as the operator allowlist.
+pub fn is_operator(sender_id: Option<i64>, allowed_ids: &[i64]) -> bool {
+    sender_id.is_some_and(|id| allowed_ids.contains(&id))
+}
+
 /// Get or create a per-chat entry, restoring persisted history if available.
 ///
 /// Takes a read lock on the map first (fast path).  Only upgrades to a write
@@ -1480,6 +1503,106 @@ mod tests {
     fn private_chat_allowed_with_empty_allowlist() {
         // Empty allowlist = allow all private chats (guarded by allow_all_chats at init).
         assert!(!should_reject(false, &[], 999));
+    }
+
+    // -------------------------------------------------------------------
+    // Operator-only commands in group chats
+    // -------------------------------------------------------------------
+
+    /// Replicate the operator gate from the message loop.
+    /// In group chats, only operators (users whose IDs are in
+    /// `allowed_chat_ids`) may use / commands.
+    /// Returns true if the command should be REJECTED.
+    fn should_reject_group_command(
+        is_group: bool,
+        text: &str,
+        sender_id: Option<i64>,
+        allowed_ids: &[i64],
+    ) -> bool {
+        is_group
+            && text.starts_with('/')
+            && !is_public_command(text)
+            && !is_operator(sender_id, allowed_ids)
+    }
+
+    #[test]
+    fn group_command_from_non_operator_rejected() {
+        // A random user (id=999) NOT in the allowed list sends /clear in a group.
+        assert!(should_reject_group_command(
+            true,
+            "/clear",
+            Some(999),
+            &[111, 222],
+        ));
+    }
+
+    #[test]
+    fn group_command_from_operator_allowed() {
+        // An operator (id=111) in the allowed list sends /clear in a group.
+        assert!(!should_reject_group_command(
+            true,
+            "/clear",
+            Some(111),
+            &[111, 222],
+        ));
+    }
+
+    #[test]
+    fn group_command_from_unknown_sender_rejected() {
+        // No `from` field at all — should be rejected.
+        assert!(should_reject_group_command(
+            true,
+            "/logs",
+            None,
+            &[111, 222],
+        ));
+    }
+
+    #[test]
+    fn group_plain_message_from_non_operator_allowed() {
+        // Non-operator sends a regular message (not a command) in a group.
+        assert!(!should_reject_group_command(
+            true,
+            "hello bot",
+            Some(999),
+            &[111, 222],
+        ));
+    }
+
+    #[test]
+    fn private_command_unaffected_by_operator_check() {
+        // In private chats the operator gate does not apply.
+        assert!(!should_reject_group_command(
+            false,
+            "/clear",
+            Some(999),
+            &[111, 222],
+        ));
+    }
+
+    #[test]
+    fn group_whoami_allowed_for_non_operator() {
+        // /whoami is a public command, allowed for everyone even in groups.
+        assert!(!should_reject_group_command(
+            true,
+            "/whoami",
+            Some(999),
+            &[111, 222],
+        ));
+    }
+
+    #[test]
+    fn group_command_all_commands_restricted_for_non_operator() {
+        let commands = [
+            "/logs", "/logs 50", "/memory", "/memory some note",
+            "/clear", "/compact", "/model provider", "/models",
+        ];
+        for cmd in commands {
+            assert!(
+                should_reject_group_command(true, cmd, Some(999), &[111, 222]),
+                "{cmd} should be rejected for non-operators in groups",
+            );
+        }
     }
 
     // -------------------------------------------------------------------
