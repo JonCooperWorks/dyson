@@ -82,7 +82,7 @@ impl Tool for ListFilesTool {
             .canonicalize()
             .unwrap_or_else(|_| ctx.working_dir.clone());
 
-        let mut results = Vec::with_capacity(MAX_RESULTS);
+        let mut results = Vec::with_capacity(64);
         for entry in entries {
             if results.len() >= MAX_RESULTS {
                 break;

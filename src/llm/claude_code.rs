@@ -472,7 +472,12 @@ impl CliLineParser for StreamParserState {
 
         let json: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(_) => return events,
+            Err(e) => {
+                if !line.is_empty() {
+                    tracing::warn!(error = %e, line_prefix = &line[..line.len().min(120)], "Claude Code: malformed JSONL line");
+                }
+                return events;
+            }
         };
 
         let event_type = json["type"].as_str().unwrap_or("");

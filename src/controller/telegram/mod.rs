@@ -719,6 +719,30 @@ async fn handle_callback_query(
     let _ = bot.send_message(chat_id, &reply).await;
 }
 
+/// Drop guard that returns a temporarily-extracted agent to its `ChatEntry`
+/// mutex.  If the normal put-back path runs, `agent` is `take()`-n out of the
+/// guard first, making `Drop` a no-op.  On panic, `Drop` fires and the agent
+/// is returned via `try_lock()` — blocking `.lock().await` isn't available in
+/// a synchronous `Drop`, but `try_lock()` will succeed because the panic
+/// unwinds through the only code path that holds the extracted agent.
+struct AgentGuard {
+    entry: Arc<ChatEntry>,
+    agent: Option<crate::agent::Agent>,
+}
+
+impl Drop for AgentGuard {
+    fn drop(&mut self) {
+        if let Some(agent) = self.agent.take() {
+            // Best-effort: return the agent so the chat isn't permanently broken.
+            if let Ok(mut ca) = self.entry.agent.try_lock() {
+                ca.agent = Some(agent);
+            } else {
+                tracing::error!("AgentGuard::drop — could not reacquire lock to return agent");
+            }
+        }
+    }
+}
+
 /// Handle per-chat commands (/clear, /compact, /model) that need the agent lock.
 #[allow(clippy::too_many_arguments)]
 async fn handle_per_chat_command(
@@ -734,16 +758,26 @@ async fn handle_per_chat_command(
     // Extract agent from the mutex so execute_command (which may do an LLM
     // call for /compact) runs without holding the lock.  This prevents other
     // operations on this chat from being blocked for the duration.
+    //
+    // AgentGuard ensures the agent is put back even if a panic occurs between
+    // take() and the explicit put-back — without it a panic would leave the
+    // chat permanently agent-less.
     let mut ca = entry.agent.lock().await;
-    let mut agent = ca.agent.take().expect("agent not available");
+    let agent = ca.agent.take().expect("agent not available");
     let mut provider_name = ca.provider_name.clone();
     let mut model = ca.model.clone();
     drop(ca); // Release lock before command execution.
 
+    let mut guard = AgentGuard {
+        entry: Arc::clone(entry),
+        agent: Some(agent),
+    };
+    let agent = guard.agent.as_mut().expect("just set");
+
     let mut output = TelegramOutput::new(bot.clone(), chat_id, true);
     let result = super::execute_command(
         text,
-        &mut agent,
+        agent,
         &mut output,
         settings,
         &mut provider_name,
@@ -756,6 +790,7 @@ async fn handle_per_chat_command(
     // Snapshot state from the agent while we still own it (no lock needed).
     // CompletionConfig contains a String (model name) so it can't be Copy —
     // .clone() is required to extract owned values.
+    let agent = guard.agent.as_ref().expect("still held");
     let (snapshot_msgs, snapshot_prompt, snapshot_config) = match &result {
         super::CommandResult::Compacted => {
             (Some(agent.messages().to_vec()), None, None)
@@ -767,7 +802,9 @@ async fn handle_per_chat_command(
     };
 
     // Put the agent back and update provider/model if changed.
+    // take() from the guard so Drop becomes a no-op.
     {
+        let agent = guard.agent.take().expect("still held");
         let mut ca = entry.agent.lock().await;
         ca.agent = Some(agent);
         ca.provider_name = provider_name;
