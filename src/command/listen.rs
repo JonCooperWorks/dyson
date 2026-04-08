@@ -86,8 +86,12 @@ pub async fn run(
     }
 
     // Run controllers.
-    if controllers.len() == 1 {
-        let controller = controllers.into_iter().next().unwrap();
+    if controllers.is_empty() {
+        return Err(dyson::error::DysonError::Config(
+            "no valid controllers could be created from the configuration".into(),
+        ));
+    } else if controllers.len() == 1 {
+        let controller = controllers.into_iter().next().expect("length checked above");
         tracing::info!(controller = controller.name(), "starting controller");
         controller.run(&settings).await?;
     } else {

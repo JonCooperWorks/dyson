@@ -219,10 +219,10 @@ impl ClientRegistry {
         &mut self,
     ) -> crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>> {
         // Try to find the named provider that matches.
-        if let Some(name) = active_provider_name(&self.settings) {
-            if let Ok(handle) = self.get(&name) {
-                return handle;
-            }
+        if let Some(name) = active_provider_name(&self.settings)
+            && let Ok(handle) = self.get(&name)
+        {
+            return handle;
         }
 
         // Fallback: create client from the default agent settings.
@@ -382,10 +382,10 @@ fn inject_workspace_identity(
     let mut identity_parts: Vec<String> = Vec::new();
 
     for (label, file) in [("PERSONALITY", "SOUL.md"), ("IDENTITY", "IDENTITY.md")] {
-        if let Some(content) = workspace.get(file) {
-            if !content.trim().is_empty() {
-                identity_parts.push(format!("## {label}\n\n{content}"));
-            }
+        if let Some(content) = workspace.get(file)
+            && !content.trim().is_empty()
+        {
+            identity_parts.push(format!("## {label}\n\n{content}"));
         }
     }
 
@@ -509,6 +509,7 @@ pub enum ReloadOutcome {
 /// Preserves the user's provider/model selection across reloads.  Falls
 /// back to defaults only if the selected provider/model was removed from
 /// the new config.
+#[allow(clippy::too_many_arguments, clippy::ptr_arg)]
 pub async fn check_and_reload_agent(
     reloader: &mut crate::config::hot_reload::HotReloader,
     current_settings: &mut Settings,
@@ -543,10 +544,10 @@ pub async fn check_and_reload_agent(
             a.set_messages(messages);
             // Restore the user's provider/model selection if it differs
             // from the default.
-            if let Some(pc) = current_settings.providers.get(current_provider.as_str()) {
-                if let Ok(handle) = registry.get(current_provider) {
-                    a.swap_client(handle, current_model, &pc.provider_type);
-                }
+            if let Some(pc) = current_settings.providers.get(current_provider.as_str())
+                && let Ok(handle) = registry.get(current_provider)
+            {
+                a.swap_client(handle, current_model, &pc.provider_type);
             }
             *agent = a;
         }

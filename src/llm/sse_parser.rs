@@ -97,6 +97,9 @@ impl ToolBufferContext {
     ) -> Option<StreamEvent> {
         if let Some(buf) = self.tool_buffers.get_mut(&index) {
             if buf.json.len() + partial.len() > MAX_TOOL_JSON {
+                // Remove the buffer to prevent repeated error events and
+                // free the accumulated memory.
+                self.tool_buffers.remove(&index);
                 return Some(StreamEvent::TextDelta(
                     "[error: tool input exceeded 10 MB limit]".into(),
                 ));
@@ -173,5 +176,31 @@ impl<P: SseJsonParser + Send + 'static> SseStreamParser for BaseSseParser<P> {
         }
 
         events
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_buffer_removed_after_overflow() {
+        let mut ctx = ToolBufferContext::new();
+        ctx.start_tool(0, "id".into(), "name".into());
+
+        // Append data that exceeds MAX_TOOL_JSON.
+        let big = "x".repeat(MAX_TOOL_JSON + 1);
+        let event = ctx.append_tool_json(0, &big);
+        assert!(event.is_some(), "should return error event on overflow");
+
+        // Buffer should be removed so subsequent appends are harmless no-ops.
+        assert!(
+            !ctx.tool_buffers.contains_key(&0),
+            "buffer should be removed after overflow"
+        );
+
+        // Subsequent append to the same index should be a no-op.
+        let event2 = ctx.append_tool_json(0, "more");
+        assert!(event2.is_none(), "no buffer means no error event");
     }
 }

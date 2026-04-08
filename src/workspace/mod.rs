@@ -9,9 +9,9 @@
 //   (MEMORY.md), and daily journals (memory/YYYY-MM-DD.md).
 //
 // Module layout:
-//   mod.rs      — Workspace trait + factory (this file)
+//   mod.rs        — Workspace trait + factory (this file)
 //   openclaw.rs — OpenClawWorkspace (filesystem, OpenClaw format)
-//   in_memory.rs — InMemoryWorkspace (for testing)
+//   in_memory.rs  — InMemoryWorkspace (for testing)
 //
 // Backends:
 //   The Workspace trait abstracts storage.  Implementations decide where

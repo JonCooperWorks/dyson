@@ -34,17 +34,18 @@ use dyson::config::Settings;
 
 /// Default config path: ~/.dyson/dyson.json
 ///
-/// Panics if the `HOME` environment variable is not set, since operating
-/// without a home directory would produce confusing relative-path behaviour.
-pub fn dirs_config_path() -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME environment variable must be set");
-    PathBuf::from(home).join(".dyson").join("dyson.json")
+/// Returns an error if neither `HOME` nor `USERPROFILE` is set.
+pub fn dirs_config_path() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "HOME environment variable must be set".to_string())?;
+    Ok(PathBuf::from(home).join(".dyson").join("dyson.json"))
 }
 
 /// Resolve config path: explicit flag > ~/.dyson/dyson.json > ./dyson.json > None.
 pub fn resolve_config_path(explicit: Option<PathBuf>) -> Option<PathBuf> {
     explicit.or_else(|| {
-        let home_config = dirs_config_path();
+        let home_config = dirs_config_path().ok()?;
         if home_config.exists() {
             Some(home_config)
         } else {

@@ -364,7 +364,7 @@ impl LlmClient for ClaudeCodeClient {
         let mut mcp_config_json: Option<String> = None;
 
         if let Some(ref workspace) = self.workspace {
-            let extra = self.mcp_tools.lock().unwrap().clone();
+            let extra = self.mcp_tools.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox, &extra).await?;
 
             // Build MCP config JSON for Claude Code's --mcp-config flag.
@@ -455,7 +455,7 @@ impl LlmClient for ClaudeCodeClient {
     fn set_mcp_tools(&self, tools: HashMap<String, Arc<dyn Tool>>) {
         let filtered: HashMap<_, _> = tools.into_iter().filter(|(_, t)| !t.agent_only()).collect();
         tracing::info!(tool_count = filtered.len(), "MCP tools registered");
-        *self.mcp_tools.lock().unwrap() = filtered;
+        *self.mcp_tools.lock().unwrap_or_else(|e| e.into_inner()) = filtered;
     }
 }
 

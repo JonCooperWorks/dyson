@@ -115,7 +115,6 @@ fn format_tools_for_prompt(tools: &[ToolDefinition]) -> String {
 /// cleaned text (tool call portions removed) and the extracted calls.
 fn extract_gemma_tool_calls(text: &str) -> Option<(String, Vec<ExtractedToolCall>)> {
     let mut calls = Vec::new();
-    let mut cleaned = text.to_string();
 
     // Pattern 1: <start_function_call>call:name{...}<end_function_call>
     static TAGGED_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -147,8 +146,9 @@ fn extract_gemma_tool_calls(text: &str) -> Option<(String, Vec<ExtractedToolCall
         return None;
     }
 
-    cleaned = re.replace_all(&cleaned, "").to_string();
-    let cleaned = cleaned.trim().to_string();
+    // replace_all returns Cow — avoids allocation when there are no matches
+    // (already handled above), and allocates only once when there are.
+    let cleaned = re.replace_all(text, "").trim().to_string();
 
     Some((cleaned, calls))
 }

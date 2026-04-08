@@ -246,7 +246,7 @@ impl LlmClient for CodexClient {
         let mut mcp_token: Option<String> = None;
 
         if let Some(ref workspace) = self.workspace {
-            let extra = self.mcp_tools.lock().unwrap().clone();
+            let extra = self.mcp_tools.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox, &extra).await?;
             tracing::info!(port = info.port, "MCP server started for Codex");
             mcp_url = Some(info.url);
@@ -310,7 +310,7 @@ impl LlmClient for CodexClient {
         let filtered: std::collections::HashMap<_, _> =
             tools.into_iter().filter(|(_, t)| !t.agent_only()).collect();
         tracing::info!(tool_count = filtered.len(), "MCP tools registered");
-        *self.mcp_tools.lock().unwrap() = filtered;
+        *self.mcp_tools.lock().unwrap_or_else(|e| e.into_inner()) = filtered;
     }
 }
 
