@@ -54,6 +54,7 @@
 pub mod recording;
 pub mod telegram;
 pub mod terminal;
+pub mod web;
 
 use std::path::{Path, PathBuf};
 

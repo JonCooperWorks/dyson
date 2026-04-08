@@ -350,6 +350,85 @@ pub struct Agent {
     history_backend: Option<HistoryBackend>,
 }
 
+// ---------------------------------------------------------------------------
+// AgentBuilder — fluent construction for custom agent configurations.
+// ---------------------------------------------------------------------------
+
+/// Builder for constructing agents with selective components.
+///
+/// Use this when you need fine-grained control over agent construction —
+/// for example, building a public-facing agent with restricted tools and
+/// no workspace.  For standard full-featured agents, `Agent::new()` is
+/// simpler.
+///
+/// ```rust,ignore
+/// let agent = AgentBuilder::new(client, sandbox)
+///     .skills(vec![filtered_builtin])
+///     .settings(&agent_settings)
+///     .build()?;
+/// ```
+pub struct AgentBuilder {
+    client: Box<dyn LlmClient>,
+    sandbox: Arc<dyn Sandbox>,
+    skills: Vec<Box<dyn Skill>>,
+    settings: AgentSettings,
+    workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    nudge_interval: usize,
+}
+
+impl AgentBuilder {
+    /// Start building an agent with the required components.
+    pub fn new(client: Box<dyn LlmClient>, sandbox: Arc<dyn Sandbox>) -> Self {
+        Self {
+            client,
+            sandbox,
+            skills: Vec::new(),
+            settings: AgentSettings::default(),
+            workspace: None,
+            nudge_interval: 0,
+        }
+    }
+
+    /// Set the skills (and their tools) available to the agent.
+    pub fn skills(mut self, skills: Vec<Box<dyn Skill>>) -> Self {
+        self.skills = skills;
+        self
+    }
+
+    /// Set agent settings (model, system prompt, max_tokens, etc.).
+    pub fn settings(mut self, settings: &AgentSettings) -> Self {
+        self.settings = settings.clone();
+        self
+    }
+
+    /// Attach a workspace for identity, memory, and working directory.
+    pub fn workspace(
+        mut self,
+        ws: std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
+    ) -> Self {
+        self.workspace = Some(ws);
+        self
+    }
+
+    /// Set the dream nudge interval (0 = no dreams).
+    pub fn nudge_interval(mut self, n: usize) -> Self {
+        self.nudge_interval = n;
+        self
+    }
+
+    /// Build the agent. Consumes the builder.
+    pub fn build(self) -> Result<Agent> {
+        Agent::new(
+            self.client,
+            self.sandbox,
+            self.skills,
+            &self.settings,
+            self.workspace,
+            self.nudge_interval,
+        )
+    }
+}
+
 impl Agent {
     /// Construct a new agent from its components.
     ///

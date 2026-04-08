@@ -75,6 +75,15 @@ pub async fn run(
                         tracing::warn!("telegram controller missing bot_token — skipping");
                     }
                 }
+                "web" => {
+                    if let Some(ctrl) =
+                        dyson::controller::web::WebController::from_config(config)
+                    {
+                        controllers.push(Box::new(ctrl));
+                    } else {
+                        tracing::warn!("web controller configuration error — skipping");
+                    }
+                }
                 other => {
                     tracing::warn!(
                         controller_type = other,
