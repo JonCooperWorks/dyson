@@ -142,7 +142,26 @@ The controller just needs to decide *when* to use `AgentMode::Public`:
 
 ## Configuration
 
-No special configuration is needed. Group chat detection is automatic.
+### Telegram Privacy Mode
+
+Telegram bots have **privacy mode enabled by default**, which means the bot
+only receives `/commands` and replies in groups — not regular messages or
+@mentions.  To let users interact with the bot via `@botname` mentions,
+**disable privacy mode**:
+
+1. Open `@BotFather` on Telegram.
+2. `/mybots` → select your bot → **Bot Settings** → **Group Privacy** → **Turn off**.
+3. **Remove and re-add** the bot to existing groups (required for the change
+   to take effect in groups the bot was already in).
+
+Even with privacy mode off, Dyson **only processes messages directed at the
+bot** in groups — @mentions, replies to the bot, and `/commands`.  Other
+group messages are silently ignored, so the bot doesn't burn tokens
+responding to every conversation.
+
+### Chat ID Allowlists
+
+Group chat detection is automatic.
 Add the bot to a Telegram group and it works — group chats are always
 allowed regardless of `allowed_chat_ids`, since they run as public agents.
 

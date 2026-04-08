@@ -265,6 +265,18 @@ impl super::Controller for TelegramController {
         );
 
         let bot = BotApi::new(self.bot_token.expose());
+
+        // Fetch the bot's own identity so we can filter group messages
+        // to only those that @mention or reply to the bot.
+        let me = bot.get_me().await?;
+        let bot_username = me.username.unwrap_or_default().to_lowercase();
+        let bot_id = me.id;
+        if bot_username.is_empty() {
+            tracing::warn!("getMe returned no username — group mention filtering will not work");
+        } else {
+            tracing::info!(bot_username = bot_username.as_str(), "bot identity fetched");
+        }
+
         let allowed_ids = self.allowed_chat_ids.clone();
         let mut current_settings = settings.clone();
         let controller_prompt = self.system_prompt().map(|s| s.to_string());
@@ -394,7 +406,7 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                let text = strip_bot_mention(&text.unwrap_or_default());
+                let text = strip_bot_mention(&text.unwrap_or_default(), &bot_username);
                 let chat_id = ChatId(msg.chat.id);
 
                 if is_public_command(&text) {
@@ -410,6 +422,20 @@ impl super::Controller for TelegramController {
                 if !is_group && !allowed_ids.is_empty() && !allowed_ids.contains(&chat_id.0) {
                     tracing::warn!(chat_id = chat_id.0, "unauthorized private chat — ignoring");
                     continue;
+                }
+
+                // In groups, only process messages directed at this bot to
+                // avoid burning tokens on every group message.  Directed means:
+                //   - a /command (Telegram delivers these even with privacy mode)
+                //   - an @mention of this bot in the message text
+                //   - a reply to one of this bot's own messages
+                if is_group {
+                    let is_directed = text.starts_with('/')
+                        || is_bot_mentioned(&msg, &bot_username)
+                        || is_reply_to_bot(&msg, bot_id);
+                    if !is_directed {
+                        continue;
+                    }
                 }
 
                 if let Some(handled) = handle_instant_command(
@@ -921,6 +947,44 @@ async fn handle_models_command(bot: &BotApi, chat_id: ChatId, settings: &Setting
     let _ = bot.send_message_with_keyboard(chat_id, "Select a model:", &keyboard).await;
 }
 
+/// Returns true if the message text mentions the given bot username.
+///
+/// Uses a case-insensitive search with a word-boundary check to avoid
+/// false positives from longer usernames that happen to contain the bot's
+/// name as a substring.
+fn is_bot_mentioned(msg: &types::Message, bot_username: &str) -> bool {
+    if bot_username.is_empty() {
+        return false;
+    }
+    let text = msg
+        .text
+        .as_deref()
+        .or(msg.caption.as_deref())
+        .unwrap_or_default();
+    let lower = text.to_lowercase();
+    let target = format!("@{bot_username}");
+    let mut search_from = 0;
+    while let Some(rel) = lower[search_from..].find(&target) {
+        let after = search_from + rel + target.len();
+        // Valid Telegram username chars: [a-zA-Z0-9_]
+        let at_boundary = after >= lower.len()
+            || !lower.as_bytes()[after].is_ascii_alphanumeric()
+                && lower.as_bytes()[after] != b'_';
+        if at_boundary {
+            return true;
+        }
+        search_from += rel + 1;
+    }
+    false
+}
+
+/// Returns true if the message is a reply to a message sent by the given bot.
+fn is_reply_to_bot(msg: &types::Message, bot_id: i64) -> bool {
+    msg.reply_to_message
+        .as_ref()
+        .is_some_and(|reply| reply.from.as_ref().is_some_and(|from| from.id == bot_id))
+}
+
 /// Get or create a per-chat entry, restoring persisted history if available.
 ///
 /// Takes a read lock on the map first (fast path).  Only upgrades to a write
@@ -1205,3 +1269,123 @@ async fn extract_content(
 // TelegramOutput and formatting helpers are in submodules:
 // - output.rs    — TelegramOutput struct and Output trait impl
 // - formatting.rs — markdown-to-HTML conversion, message splitting, tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types::{Chat, ChatType, Message, User};
+
+    fn make_msg(text: &str, chat_type: ChatType) -> Message {
+        Message {
+            message_id: 1,
+            chat: Chat {
+                id: 100,
+                chat_type,
+            },
+            from: None,
+            text: Some(text.to_string()),
+            caption: None,
+            entities: None,
+            reply_to_message: None,
+            photo: None,
+            voice: None,
+            document: None,
+        }
+    }
+
+    fn make_group_msg(text: &str) -> Message {
+        make_msg(text, ChatType::Supergroup)
+    }
+
+    #[test]
+    fn mention_exact_match() {
+        let msg = make_group_msg("@dysonbot hello");
+        assert!(is_bot_mentioned(&msg, "dysonbot"));
+    }
+
+    #[test]
+    fn mention_case_insensitive() {
+        let msg = make_group_msg("@DysonBot hello");
+        assert!(is_bot_mentioned(&msg, "dysonbot"));
+    }
+
+    #[test]
+    fn mention_mid_text() {
+        let msg = make_group_msg("hey @dysonbot what's up");
+        assert!(is_bot_mentioned(&msg, "dysonbot"));
+    }
+
+    #[test]
+    fn mention_end_of_text() {
+        let msg = make_group_msg("hey @dysonbot");
+        assert!(is_bot_mentioned(&msg, "dysonbot"));
+    }
+
+    #[test]
+    fn mention_not_substring_of_longer_name() {
+        let msg = make_group_msg("@dysonbot_extra hello");
+        assert!(!is_bot_mentioned(&msg, "dysonbot"));
+    }
+
+    #[test]
+    fn mention_empty_username() {
+        let msg = make_group_msg("@dysonbot hello");
+        assert!(!is_bot_mentioned(&msg, ""));
+    }
+
+    #[test]
+    fn mention_no_mention() {
+        let msg = make_group_msg("just chatting");
+        assert!(!is_bot_mentioned(&msg, "dysonbot"));
+    }
+
+    #[test]
+    fn reply_to_bot_detected() {
+        let mut msg = make_group_msg("thanks");
+        msg.reply_to_message = Some(Box::new(Message {
+            message_id: 0,
+            chat: msg.chat.clone(),
+            from: Some(User {
+                id: 42,
+                is_bot: true,
+                username: Some("dysonbot".to_string()),
+            }),
+            text: Some("here's the answer".to_string()),
+            caption: None,
+            entities: None,
+            reply_to_message: None,
+            photo: None,
+            voice: None,
+            document: None,
+        }));
+        assert!(is_reply_to_bot(&msg, 42));
+    }
+
+    #[test]
+    fn reply_to_human_not_detected() {
+        let mut msg = make_group_msg("thanks");
+        msg.reply_to_message = Some(Box::new(Message {
+            message_id: 0,
+            chat: msg.chat.clone(),
+            from: Some(User {
+                id: 99,
+                is_bot: false,
+                username: Some("alice".to_string()),
+            }),
+            text: Some("some message".to_string()),
+            caption: None,
+            entities: None,
+            reply_to_message: None,
+            photo: None,
+            voice: None,
+            document: None,
+        }));
+        assert!(!is_reply_to_bot(&msg, 42));
+    }
+
+    #[test]
+    fn no_reply_not_detected() {
+        let msg = make_group_msg("hello");
+        assert!(!is_reply_to_bot(&msg, 42));
+    }
+}

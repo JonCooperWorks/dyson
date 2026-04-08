@@ -38,6 +38,12 @@ impl BotApi {
     // API methods
     // -----------------------------------------------------------------------
 
+    /// Fetch the bot's own user info (username, id, etc.).
+    pub async fn get_me(&self) -> Result<User, DysonError> {
+        let body = serde_json::json!({});
+        self.post_result("getMe", &body).await
+    }
+
     /// Long-poll for updates.
     pub async fn get_updates(
         &self,

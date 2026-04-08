@@ -18,6 +18,7 @@ overview, then dive into the component that interests you.
 | [Secrets](secrets.md) | Per-secret scheme routing, InsecureEnvironmentVariable, zeroize, adding resolvers |
 | [Tool Forwarding over MCP](tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth, bidirectional MCP |
 | [Subagents](subagents.md) | Child agents with different models, tool inheritance, delegation patterns |
+| [Public Agents](public-agents.md) | Group chat agents, AgentMode enum, tool restriction, SSRF protection, Telegram privacy mode |
 | [Adding a Provider](adding-a-provider.md) | How to add a new LLM provider (3-step process via the registry) |
 | [Prompt Caching](prompt-caching.md) | Why the prompt is split into stable/ephemeral parts, the 4-breakpoint Anthropic strategy, how KV prefix caching works |
 | [MCP OAuth](mcp-oauth.md) | OAuth 2.0 Authorization Code + PKCE for MCP servers |
