@@ -111,14 +111,13 @@ mod test_tool_hooks {
     struct BlockDangerousHook;
     impl ToolHook for BlockDangerousHook {
         fn on_event(&self, event: &ToolHookEvent) -> HookDecision {
-            if let ToolHookEvent::PreToolUse { call } = event {
-                if let Some(cmd) = call.input.get("command").and_then(|v| v.as_str()) {
-                    if cmd.contains("rm -rf") {
-                        return HookDecision::Block {
-                            reason: "dangerous command blocked".to_string(),
-                        };
-                    }
-                }
+            if let ToolHookEvent::PreToolUse { call } = event
+                && let Some(cmd) = call.input.get("command").and_then(|v| v.as_str())
+                && cmd.contains("rm -rf")
+            {
+                return HookDecision::Block {
+                    reason: "dangerous command blocked".to_string(),
+                };
             }
             HookDecision::Allow
         }
@@ -127,12 +126,12 @@ mod test_tool_hooks {
     struct AddTimeoutHook;
     impl ToolHook for AddTimeoutHook {
         fn on_event(&self, event: &ToolHookEvent) -> HookDecision {
-            if let ToolHookEvent::PreToolUse { call } = event {
-                if call.name == "bash" {
-                    let mut input = call.input.clone();
-                    input["timeout"] = json!(30);
-                    return HookDecision::Modify { input };
-                }
+            if let ToolHookEvent::PreToolUse { call } = event
+                && call.name == "bash"
+            {
+                let mut input = call.input.clone();
+                input["timeout"] = json!(30);
+                return HookDecision::Modify { input };
             }
             HookDecision::Allow
         }

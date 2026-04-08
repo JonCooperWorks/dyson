@@ -86,9 +86,10 @@ pub fn to_sharegpt(
 
     for message in messages {
         // Separate content blocks by type for this message.
-        let mut text_parts: Vec<String> = Vec::new();
-        let mut tool_calls: Vec<String> = Vec::new();
-        let mut tool_results: Vec<(String, bool)> = Vec::new();
+        let cap = message.content.len();
+        let mut text_parts: Vec<String> = Vec::with_capacity(cap);
+        let mut tool_calls: Vec<String> = Vec::with_capacity(cap);
+        let mut tool_results: Vec<(String, bool)> = Vec::with_capacity(cap);
 
         for block in &message.content {
             match block {

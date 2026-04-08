@@ -700,6 +700,70 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    #[test]
+    fn empty_line_returns_no_events() {
+        let mut state = StreamParserState::new();
+        let events = state.parse_line("");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn web_search_started_yields_tool_use_start() {
+        let mut state = StreamParserState::new();
+        let events = state.parse_line(
+            r#"{"type":"item.started","item":{"id":"ws_1","type":"web_search","query":"rust async","status":"in_progress"}}"#,
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Ok(StreamEvent::ToolUseStart { id, name }) => {
+                assert_eq!(id, "ws_1");
+                assert_eq!(name, "web_search");
+            }
+            other => panic!("expected ToolUseStart, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_search_completed_yields_tool_use_complete() {
+        let mut state = StreamParserState::new();
+        let events = state.parse_line(
+            r#"{"type":"item.completed","item":{"id":"ws_1","type":"web_search","query":"rust async","results":[],"status":"completed"}}"#,
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Ok(StreamEvent::ToolUseComplete { id, name, input }) => {
+                assert_eq!(id, "ws_1");
+                assert_eq!(name, "web_search");
+                assert_eq!(input["query"], "rust async");
+            }
+            other => panic!("expected ToolUseComplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_change_completed_yields_start_and_complete() {
+        let mut state = StreamParserState::new();
+        let events = state.parse_line(
+            r#"{"type":"item.completed","item":{"id":"fc_1","type":"file_change","changes":[{"path":"src/main.rs","action":"edit"}],"status":"completed"}}"#,
+        );
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            Ok(StreamEvent::ToolUseStart { id, name }) => {
+                assert_eq!(id, "fc_1");
+                assert_eq!(name, "file_change");
+            }
+            other => panic!("expected ToolUseStart, got: {other:?}"),
+        }
+        match &events[1] {
+            Ok(StreamEvent::ToolUseComplete { id, name, input }) => {
+                assert_eq!(id, "fc_1");
+                assert_eq!(name, "file_change");
+                assert!(input.is_array());
+            }
+            other => panic!("expected ToolUseComplete, got: {other:?}"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // build_args tests
     // -----------------------------------------------------------------------

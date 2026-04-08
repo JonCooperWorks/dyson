@@ -5,6 +5,7 @@
 use std::fmt::Write as _;
 
 use async_trait::async_trait;
+use tokio::io::AsyncBufReadExt;
 
 use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput, resolve_and_validate_path};
@@ -82,10 +83,10 @@ impl Tool for ReadFileTool {
             _ => {}
         }
 
-        // Read the full file, then apply offset/limit in memory.
-        // The size check above bounds peak memory usage.
-        let content = match tokio::fs::read_to_string(&path).await {
-            Ok(c) => c,
+        // Stream line-by-line with skip/take so that large files with small
+        // offset/limit ranges don't need to be read entirely into memory.
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(f) => f,
             Err(e) => {
                 return Ok(ToolOutput::error(format!(
                     "cannot read '{}': {e}",
@@ -94,17 +95,43 @@ impl Tool for ReadFileTool {
             }
         };
 
+        let reader = tokio::io::BufReader::new(file);
+        let mut lines = reader.lines();
         let start = offset - 1;
-        let iter = content.lines().skip(start);
-        let iter: Box<dyn Iterator<Item = &str>> = match limit {
-            Some(l) => Box::new(iter.take(l)),
-            None => Box::new(iter),
-        };
 
+        // Skip lines before the requested offset.
+        for _ in 0..start {
+            match lines.next_line().await {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(e) => {
+                    return Ok(ToolOutput::error(format!(
+                        "cannot read '{}': {e}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+
+        // Read the requested range.
+        let max_lines = limit.unwrap_or(usize::MAX);
         let mut output = String::new();
-        for (i, line) in iter.enumerate() {
-            let line_num = start + i + 1;
-            let _ = writeln!(output, "{line_num:>6}\t{line}");
+        let mut count = 0;
+        while count < max_lines {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    let line_num = start + count + 1;
+                    let _ = writeln!(output, "{line_num:>6}\t{line}");
+                    count += 1;
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    return Ok(ToolOutput::error(format!(
+                        "cannot read '{}': {e}",
+                        path.display()
+                    )));
+                }
+            }
         }
 
         // Truncate if too large.

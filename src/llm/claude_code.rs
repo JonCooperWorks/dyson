@@ -826,4 +826,108 @@ mod tests {
         let args = client.build_args("sonnet", "", None);
         assert!(args.contains(&extra));
     }
+
+    // -----------------------------------------------------------------------
+    // StreamParserState edge-case tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn empty_line_returns_no_events() {
+        let mut state = StreamParserState::new();
+        let events = state.parse_line("");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn malformed_json_returns_no_events() {
+        let mut state = StreamParserState::new();
+        let events = state.parse_line("{not valid json!!!");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn unknown_top_level_type_ignored() {
+        let mut state = StreamParserState::new();
+        let events = state.parse_line(r#"{"type":"banana","data":123}"#);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn full_tool_call_flow() {
+        let mut state = StreamParserState::new();
+
+        // 1. content_block_start with tool_use
+        let events = state.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_42","name":"bash"}}}"#,
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Ok(StreamEvent::ToolUseStart { id, name }) => {
+                assert_eq!(id, "call_42");
+                assert_eq!(name, "bash");
+            }
+            other => panic!("expected ToolUseStart, got: {other:?}"),
+        }
+
+        // 2. input_json_delta
+        let events = state.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":"}}}"#,
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Ok(StreamEvent::ToolUseInputDelta(delta)) => {
+                assert!(delta.contains("command"));
+            }
+            other => panic!("expected ToolUseInputDelta, got: {other:?}"),
+        }
+
+        // 3. more input
+        let events = state.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"ls\"}"}}}"#,
+        );
+        assert_eq!(events.len(), 1);
+
+        // 4. content_block_stop — should produce ToolUseComplete
+        let events = state.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#,
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Ok(StreamEvent::ToolUseComplete { id, name, input }) => {
+                assert_eq!(id, "call_42");
+                assert_eq!(name, "bash");
+                assert_eq!(input["command"], "ls");
+            }
+            other => panic!("expected ToolUseComplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn result_with_missing_fields_uses_defaults() {
+        let mut state = StreamParserState::new();
+        // Missing stop_reason and total_cost_usd — should still produce MessageComplete
+        let events = state.parse_line(
+            r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":100}"#,
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Ok(StreamEvent::MessageComplete { stop_reason, .. }) => {
+                assert_eq!(*stop_reason, StopReason::EndTurn);
+            }
+            other => panic!("expected MessageComplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_result_ignored() {
+        let mut state = StreamParserState::new();
+        let events1 = state.parse_line(
+            r#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","total_cost_usd":0.0,"duration_ms":0}"#,
+        );
+        assert_eq!(events1.len(), 1);
+        let events2 = state.parse_line(
+            r#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","total_cost_usd":0.0,"duration_ms":0}"#,
+        );
+        assert!(events2.is_empty(), "duplicate result should be ignored");
+    }
 }

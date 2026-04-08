@@ -77,8 +77,11 @@ use self::output::TelegramOutput;
 
 /// Per-chat agent state, tracking the active provider and model
 /// so within-provider model switching works.
+///
+/// `agent` is `Option` so it can be temporarily extracted (`.take()`) to
+/// release the mutex during long-running operations like `/compact`.
 struct ChatAgent {
-    agent: crate::agent::Agent,
+    agent: Option<crate::agent::Agent>,
     provider_name: String,
     model: String,
 }
@@ -590,7 +593,7 @@ async fn rebuild_agents_on_reload(
         let ca = entry.agent.lock().await;
         let provider_name = ca.provider_name.clone();
         let model = ca.model.clone();
-        let messages = ca.agent.messages().to_vec();
+        let messages = ca.agent.as_ref().expect("agent not available").messages().to_vec();
         let is_group = entry.is_group;
         drop(ca);
 
@@ -630,7 +633,7 @@ async fn rebuild_agents_on_reload(
                     chat_id,
                     Arc::new(ChatEntry {
                         agent: Mutex::new(ChatAgent {
-                            agent: new_agent,
+                            agent: Some(new_agent),
                             provider_name,
                             model,
                         }),
@@ -695,12 +698,14 @@ async fn handle_callback_query(
     let agents_map = agents.read().await;
     if let Some(entry) = agents_map.get(&chat_id.0) {
         let mut ca = entry.agent.lock().await;
-        ca.agent.swap_client(handle, model, &pc.provider_type);
+        let agent = ca.agent.as_mut().expect("agent not available");
+        agent.swap_client(handle, model, &pc.provider_type);
         ca.provider_name = provider.to_string();
         ca.model = model.to_string();
         // Update cached state for quick responses.
-        *entry.system_prompt.write().await = ca.agent.system_prompt().to_string();
-        *entry.config.write().await = ca.agent.config().clone();
+        let agent = ca.agent.as_ref().expect("agent not available");
+        *entry.system_prompt.write().await = agent.system_prompt().to_string();
+        *entry.config.write().await = agent.config().clone();
     }
     drop(agents_map);
 
@@ -726,36 +731,48 @@ async fn handle_per_chat_command(
     chat_store: &dyn crate::chat_history::ChatHistory,
     registry: &mut super::ClientRegistry,
 ) {
+    // Extract agent from the mutex so execute_command (which may do an LLM
+    // call for /compact) runs without holding the lock.  This prevents other
+    // operations on this chat from being blocked for the duration.
     let mut ca = entry.agent.lock().await;
+    let mut agent = ca.agent.take().expect("agent not available");
+    let mut provider_name = ca.provider_name.clone();
+    let mut model = ca.model.clone();
+    drop(ca); // Release lock before command execution.
+
     let mut output = TelegramOutput::new(bot.clone(), chat_id, true);
-    let ChatAgent {
-        ref mut agent,
-        ref mut provider_name,
-        ref mut model,
-    } = *ca;
     let result = super::execute_command(
         text,
-        agent,
+        &mut agent,
         &mut output,
         settings,
-        provider_name,
-        model,
+        &mut provider_name,
+        &mut model,
         config_path,
         registry,
     )
     .await;
 
-    // Snapshot state we need from the lock, then release it before I/O.
+    // Snapshot state from the agent while we still own it (no lock needed).
+    // CompletionConfig contains a String (model name) so it can't be Copy —
+    // .clone() is required to extract owned values.
     let (snapshot_msgs, snapshot_prompt, snapshot_config) = match &result {
         super::CommandResult::Compacted => {
-            (Some(ca.agent.messages().to_vec()), None, None)
+            (Some(agent.messages().to_vec()), None, None)
         }
         super::CommandResult::ModelSwitched { .. } => {
-            (None, Some(ca.agent.system_prompt().to_string()), Some(ca.agent.config().clone()))
+            (None, Some(agent.system_prompt().to_string()), Some(agent.config().clone()))
         }
         _ => (None, None, None),
     };
-    drop(ca); // Release lock before I/O and snapshot writes.
+
+    // Put the agent back and update provider/model if changed.
+    {
+        let mut ca = entry.agent.lock().await;
+        ca.agent = Some(agent);
+        ca.provider_name = provider_name;
+        ca.model = model;
+    }
 
     match result {
         super::CommandResult::Cleared => {
@@ -841,18 +858,21 @@ async fn run_agent_for_message(
         return;
     }
 
-    // try_lock() is the gate: if the agent is busy, fall back to a quick response.
+    // try_lock() is the gate: if the agent is busy (or temporarily extracted
+    // by handle_per_chat_command), fall back to a quick response.
     let mut ca = match entry.agent.try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
+        Ok(guard) if guard.agent.is_some() => guard,
+        _ => {
             tracing::info!(chat_id = chat_id.0, "agent busy — using quick response");
             send_quick_response(&bot, chat_id, &text, &entry, &client).await;
             return;
         }
     };
 
+    let agent = ca.agent.as_mut().expect("checked above");
+
     // Update snapshot so quick responses see latest context.
-    *entry.messages_snapshot.write().await = ca.agent.messages().to_vec();
+    *entry.messages_snapshot.write().await = agent.messages().to_vec();
 
     let mut output = TelegramOutput::new(bot.clone(), chat_id, !text.is_empty());
 
@@ -860,9 +880,9 @@ async fn run_agent_for_message(
         .iter()
         .any(|b| !matches!(b, ContentBlock::Text { .. }));
     let result = if has_non_text {
-        ca.agent.run_with_blocks(content_blocks, &mut output).await
+        agent.run_with_blocks(content_blocks, &mut output).await
     } else {
-        ca.agent.run(&text, &mut output).await
+        agent.run(&text, &mut output).await
     };
 
     if let Err(e) = result {
@@ -871,7 +891,8 @@ async fn run_agent_for_message(
     }
 
     // Snapshot messages, then release the lock before I/O.
-    let msgs = ca.agent.messages().to_vec();
+    let agent = ca.agent.as_ref().expect("checked above");
+    let msgs = agent.messages().to_vec();
     drop(ca);
 
     if let Err(e) = chat_store.save(&chat_key, &msgs) {
@@ -1124,7 +1145,7 @@ async fn get_or_create_entry(
 
     let entry = Arc::new(ChatEntry {
         agent: Mutex::new(ChatAgent {
-            agent,
+            agent: Some(agent),
             provider_name,
             model,
         }),

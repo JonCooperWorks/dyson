@@ -1622,7 +1622,7 @@ mod test_tool_calling_integration {
     #[test]
     fn respects_dependency_ordering() {
         // write then read = sequential phases.
-        let calls = vec![
+        let calls = [
             ToolCall::new("file_write", serde_json::json!({"path": "out.txt"})),
             ToolCall::new("file_read", serde_json::json!({"path": "out.txt"})),
         ];

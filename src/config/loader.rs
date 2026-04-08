@@ -795,6 +795,8 @@ fn parse_mcp_servers(
                 })
                 .unwrap_or_default();
 
+            // Owned Strings are required: McpTransportConfig stores HashMap<String, String>
+            // and outlives the borrowed JSON values parsed here.
             let env: std::collections::HashMap<String, String> = server_json["env"]
                 .as_object()
                 .map(|obj| {

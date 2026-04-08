@@ -265,6 +265,9 @@ fn install_to_path(base: &Path) -> dyson::error::Result<()> {
 /// Creates ~/.config/systemd/user/dyson.service and enables it.
 /// Falls back to /etc/systemd/system/dyson.service with sudo if
 /// user services aren't available.
+///
+/// Intentionally synchronous: `dyson init` is a one-shot CLI command with no
+/// concurrent async work, so blocking `std::process::Command` calls are fine.
 #[allow(unused_variables)]
 fn install_systemd_service(
     base: &Path,

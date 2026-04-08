@@ -259,7 +259,7 @@ mod test_result_formatter {
     #[test]
     fn formats_file_read_with_length() {
         let f = ResultFormatter::default();
-        let output = ToolOutput::success(&"x".repeat(1000));
+        let output = ToolOutput::success("x".repeat(1000));
         let fmt = f.format(
             &ToolCall::new("file_read", json!({"path": "main.rs"})),
             &output,
@@ -272,7 +272,7 @@ mod test_result_formatter {
     #[test]
     fn marks_truncated_outputs() {
         let f = ResultFormatter::default();
-        let output = ToolOutput::success(&"x".repeat(50000));
+        let output = ToolOutput::success("x".repeat(50000));
         let fmt = f.format(
             &ToolCall::new("bash", json!({"command": "cat big"})),
             &output,

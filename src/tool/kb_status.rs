@@ -41,8 +41,8 @@ impl Tool for KbStatusTool {
 
             let mut raw_bytes = 0usize;
             let mut wiki_bytes = 0usize;
-            let mut raw_files: Vec<String> = Vec::new();
-            let mut wiki_files: Vec<String> = Vec::new();
+            let mut raw_files: Vec<String> = Vec::with_capacity(files.len());
+            let mut wiki_files: Vec<String> = Vec::with_capacity(files.len());
 
             for name in &files {
                 if let Some(content) = ws.get(name) {

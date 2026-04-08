@@ -272,7 +272,7 @@ mod test_dependency_analyzer {
 
     #[test]
     fn detects_independent_calls() {
-        let calls = vec![
+        let calls = [
             ToolCall::new("bash", json!({"command": "ls"})),
             ToolCall::new("bash", json!({"command": "cat README"})),
         ];
@@ -284,7 +284,7 @@ mod test_dependency_analyzer {
 
     #[test]
     fn detects_write_then_read_dependency() {
-        let calls = vec![
+        let calls = [
             ToolCall::new("file_write", json!({"path": "f.txt"})),
             ToolCall::new("file_read", json!({"path": "f.txt"})),
         ];
@@ -294,7 +294,7 @@ mod test_dependency_analyzer {
 
     #[test]
     fn detects_same_resource_conflict() {
-        let calls = vec![
+        let calls = [
             ToolCall::new("file_write", json!({"path": "x.txt"})),
             ToolCall::new("file_write", json!({"path": "x.txt"})),
         ];
@@ -309,7 +309,7 @@ mod test_dependency_analyzer {
 
     #[test]
     fn groups_mixed_calls() {
-        let calls = vec![
+        let calls = [
             ToolCall::new("bash", json!({"command": "echo A"})),
             ToolCall::new("bash", json!({"command": "echo B"})),
             ToolCall::new("file_read", json!({"path": "unrelated.txt"})),
@@ -320,7 +320,7 @@ mod test_dependency_analyzer {
 
     #[test]
     fn infers_git_side_effects() {
-        let calls = vec![
+        let calls = [
             ToolCall::new("bash", json!({"command": "git add ."})),
             ToolCall::new("bash", json!({"command": "git status"})),
         ];
