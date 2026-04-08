@@ -111,23 +111,35 @@ pub trait Controller: Send {
 // Agent builder — shared logic for all controllers.
 // ---------------------------------------------------------------------------
 
+/// Whether an agent session is private (full access) or public (restricted).
+///
+/// Controllers pass this to `build_agent()` to declare the trust level of
+/// the session.  See `docs/public-agents.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentMode {
+    /// Full-featured agent: all tools, workspace, dreams.
+    /// For trusted users (e.g. Telegram private chats with the operator).
+    Private,
+    /// Hardened agent: web_search + web_fetch only, no filesystem/shell/workspace.
+    /// Sandbox always enforced.  For untrusted users (e.g. Telegram group chats).
+    Public,
+}
+
 /// Build an agent from settings.
 ///
-/// When `public` is `false` (the default), builds a full-featured private
-/// agent with all tools, workspace, and dreams.  When `public` is `true`,
-/// builds a hardened agent with only `web_search` and `web_fetch` — no
-/// filesystem, shell, workspace, or dream access.  See `docs/public-agents.md`.
+/// `mode` controls the trust level — `AgentMode::Private` builds a
+/// full-featured agent, `AgentMode::Public` builds a hardened agent with
+/// only `web_search` and `web_fetch`.  See `docs/public-agents.md`.
 ///
 /// Every controller should use this instead of building agents manually.
-/// The `public` flag is the single point of control — individual controllers
-/// just declare whether a session is public, and this function handles the
-/// rest.
+/// The mode is the single point of control — individual controllers just
+/// declare the trust level, and this function handles the rest.
 pub async fn build_agent(
     settings: &Settings,
     controller_prompt: Option<&str>,
-    public: bool,
+    mode: AgentMode,
 ) -> crate::Result<crate::agent::Agent> {
-    if public {
+    if mode == AgentMode::Public {
         return build_public_agent(settings, controller_prompt);
     }
 
@@ -263,7 +275,7 @@ pub async fn build_agent_with_provider(
     switched.agent.base_url = pc.base_url.clone();
 
     // Provider switching is only for private agents.
-    let mut agent = build_agent(&switched, controller_prompt, false).await?;
+    let mut agent = build_agent(&switched, controller_prompt, AgentMode::Private).await?;
     agent.set_messages(existing_messages);
     Ok(agent)
 }
@@ -418,7 +430,7 @@ pub async fn check_and_reload_agent(
         }
         Err(_) => {
             // Provider/model removed from config — fall back to defaults.
-            match build_agent(current_settings, controller_prompt, false).await {
+            match build_agent(current_settings, controller_prompt, AgentMode::Private).await {
                 Ok(a) => {
                     *agent = a;
                     *current_provider =

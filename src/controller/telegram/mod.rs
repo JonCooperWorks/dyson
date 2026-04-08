@@ -511,7 +511,7 @@ async fn rebuild_agents_on_reload(
 
         // Public agents rebuild from scratch; private agents preserve provider/model.
         let agent_result = if is_group {
-            super::build_agent(settings, controller_prompt, true).await.map(|mut a| {
+            super::build_agent(settings, controller_prompt, super::AgentMode::Public).await.map(|mut a| {
                 a.set_messages(messages.clone());
                 a
             })
@@ -944,9 +944,13 @@ async fn get_or_create_entry(
     }
 
     // Slow path: create a new agent for this chat.
-    // Public (group) agents get restricted tools; private agents get everything.
+    let mode = if is_group {
+        crate::controller::AgentMode::Public
+    } else {
+        crate::controller::AgentMode::Private
+    };
     let mut agent =
-        crate::controller::build_agent(settings, controller_prompt, is_group).await?;
+        crate::controller::build_agent(settings, controller_prompt, mode).await?;
 
     let chat_key = chat_id.to_string();
 
