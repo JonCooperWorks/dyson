@@ -48,12 +48,9 @@ pub async fn run(
     let workspace: std::sync::Arc<tokio::sync::RwLock<Box<dyn dyson::workspace::Workspace>>> =
         std::sync::Arc::new(tokio::sync::RwLock::new(workspace));
 
-    let client = dyson::llm::create_client(
-        &agent_settings,
-        Some(std::sync::Arc::clone(&workspace)),
-        settings.dangerous_no_sandbox,
-    );
     let sandbox = dyson::sandbox::create_sandbox(&settings.sandbox, settings.dangerous_no_sandbox);
+    let mut registry = dyson::controller::ClientRegistry::new(&settings, Some(std::sync::Arc::clone(&workspace)));
+    let client = registry.get_default();
     let skills = {
         let ws = workspace.read().await;
         dyson::skill::create_skills(
@@ -61,6 +58,7 @@ pub async fn run(
             Some(&**ws),
             std::sync::Arc::clone(&sandbox),
             Some(std::sync::Arc::clone(&workspace)),
+            &mut registry,
         )
         .await
     };

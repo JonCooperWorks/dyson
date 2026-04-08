@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+use dyson::agent::rate_limiter::RateLimitedHandle;
 use dyson::agent::Agent;
 use dyson::config::AgentSettings;
 use dyson::controller::recording::RecordingOutput;
@@ -229,7 +230,7 @@ async fn sandbox_deny_returns_error_to_llm() {
 
     let sandbox = DenySandbox::new("dangerous command blocked");
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         Arc::new(sandbox),
         builtin_skills(),
         &default_settings(),
@@ -269,7 +270,7 @@ async fn sandbox_redirect_routes_to_different_tool() {
 
     let sandbox = RedirectSandbox::new("workspace_view");
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         Arc::new(sandbox),
         builtin_skills(),
         &default_settings(),
@@ -312,7 +313,7 @@ async fn agent_stops_at_max_iterations() {
     settings.max_iterations = 3;
 
     let mut agent =
-        Agent::new(Box::new(llm), sandbox, builtin_skills(), &settings, None, 0).unwrap();
+        Agent::new(RateLimitedHandle::unlimited(Box::new(llm)), sandbox, builtin_skills(), &settings, None, 0).unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent.run("loop forever", &mut output).await.unwrap();
@@ -339,7 +340,7 @@ async fn conversation_persists_across_runs() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
         builtin_skills(),
         &default_settings(),
@@ -398,7 +399,7 @@ async fn multiple_tool_calls_in_one_turn() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
         builtin_skills(),
         &default_settings(),
@@ -437,7 +438,7 @@ async fn unknown_tool_returns_error() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
         builtin_skills(),
         &default_settings(),
@@ -493,7 +494,7 @@ async fn multi_turn_builds_correct_history() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
         builtin_skills(),
         &default_settings(),
@@ -527,7 +528,7 @@ async fn clear_resets_conversation_history() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
         builtin_skills(),
         &default_settings(),
@@ -570,7 +571,7 @@ async fn tool_error_is_reported_back() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
         builtin_skills(),
         &default_settings(),
@@ -607,7 +608,7 @@ async fn selective_sandbox_denies_specific_tools() {
 
     let sandbox = SelectiveDenySandbox::new(&["bash"]);
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         Arc::new(sandbox),
         builtin_skills(),
         &default_settings(),
@@ -641,7 +642,7 @@ async fn simple_text_response_no_tools() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
         builtin_skills(),
         &default_settings(),
@@ -669,7 +670,7 @@ async fn set_messages_restores_conversation() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
         builtin_skills(),
         &default_settings(),
@@ -709,7 +710,7 @@ async fn redirect_to_unknown_tool_is_handled_gracefully() {
     // Redirect all calls to a tool that doesn't exist.
     let sandbox = RedirectSandbox::new("tool_that_does_not_exist");
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         Arc::new(sandbox),
         builtin_skills(),
         &default_settings(),
@@ -762,7 +763,7 @@ async fn streaming_text_accumulates_correctly() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
         builtin_skills(),
         &default_settings(),
@@ -824,7 +825,7 @@ async fn concurrent_tool_calls_produce_all_results() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
         builtin_skills(),
         &default_settings(),
@@ -884,7 +885,7 @@ async fn token_budget_halts_agent_after_limit() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(
-        Box::new(llm),
+        RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
         builtin_skills(),
         &default_settings(),

@@ -68,7 +68,20 @@ impl super::Controller for TerminalController {
 
     async fn run(&self, settings: &Settings) -> crate::Result<()> {
         let mut current_settings = settings.clone();
-        let mut agent = super::build_agent(&current_settings, None, super::AgentMode::Private).await?;
+
+        // Lazily-loaded client registry — one LLM client per provider,
+        // shared across all agents and surviving provider switches.
+        let mut registry = super::ClientRegistry::new(&current_settings, None);
+
+        let client_handle = registry.get_default();
+        let mut agent = super::build_agent(
+            &current_settings,
+            None,
+            super::AgentMode::Private,
+            client_handle,
+            &mut registry,
+        )
+        .await?;
         let mut output = TerminalOutput::new();
 
         let mut current_provider =
@@ -90,6 +103,7 @@ impl super::Controller for TerminalController {
                 &mut current_provider,
                 &mut current_model,
                 None,
+                &mut registry,
             )
             .await
             {
@@ -128,7 +142,7 @@ impl super::Controller for TerminalController {
                 &mut current_provider,
                 &mut current_model,
                 config_path.as_deref(),
-                None,
+                &mut registry,
             )
             .await
             {

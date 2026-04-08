@@ -20,7 +20,7 @@ the `AgentMode` enum. Any future controller (HTTP API, Discord, Slack)
 passes `AgentMode::Public` to the same `build_agent()` function.
 
 **Key files:**
-- `src/controller/mod.rs` — `AgentMode` enum, `build_agent()`, `build_public_agent()`
+- `src/controller/mod.rs` — `AgentMode` enum, `build_agent()`, `build_public_agent()`, `ClientRegistry`
 - `src/controller/telegram/mod.rs` — `get_or_create_entry()` maps `is_group` to `AgentMode`
 - `src/controller/telegram/types.rs` — `ChatType` enum, `Chat::is_group()`
 - `src/sandbox/policy_sandbox.rs` — `check_web_fetch()`, `check_url_not_internal()` (SSRF protection)
@@ -65,6 +65,7 @@ pub async fn build_agent(
     settings: &Settings,
     controller_prompt: Option<&str>,
     mode: AgentMode,
+    client: RateLimitedHandle<Box<dyn LlmClient>>,
 ) -> Result<Agent>
 ```
 
@@ -87,7 +88,8 @@ Message arrives from Telegram
 ```
 
 Each chat gets its own agent instance and conversation history. The only
-difference is which tools are loaded.
+difference is which tools are loaded. All agents (public and private) share
+the same LLM client and rate-limit window via `ClientRegistry`.
 
 ---
 

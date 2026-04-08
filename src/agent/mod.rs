@@ -290,7 +290,11 @@ pub(crate) struct HistoryBackend {
 /// multi-turn conversations.
 pub struct Agent {
     /// LLM client for streaming completions, gated by rate limiting.
-    client: rate_limiter::RateLimited<Box<dyn LlmClient>>,
+    ///
+    /// Stored as a [`RateLimitedHandle`] so that multiple agents can share
+    /// the same underlying LLM client and rate-limit window.  The handle
+    /// is created by the controller from a single [`RateLimited`] source.
+    client: rate_limiter::RateLimitedHandle<Box<dyn LlmClient>>,
 
     /// Sandbox that gates all tool execution.
     ///
@@ -368,7 +372,7 @@ pub struct Agent {
 ///     .build()
 /// ```
 pub struct AgentBuilder {
-    client: Box<dyn LlmClient>,
+    client: rate_limiter::RateLimitedHandle<Box<dyn LlmClient>>,
     sandbox: Arc<dyn Sandbox>,
     skills: Vec<Box<dyn Skill>>,
     settings: AgentSettings,
@@ -419,7 +423,14 @@ impl AgentBuilder {
 
 impl Agent {
     /// Start building an agent with the two required components.
-    pub fn builder(client: Box<dyn LlmClient>, sandbox: Arc<dyn Sandbox>) -> AgentBuilder {
+    ///
+    /// The `client` handle comes from a shared [`RateLimited`] owned by
+    /// the controller — all agents built from the same source share one
+    /// LLM client and one rate-limit window.
+    pub fn builder(
+        client: rate_limiter::RateLimitedHandle<Box<dyn LlmClient>>,
+        sandbox: Arc<dyn Sandbox>,
+    ) -> AgentBuilder {
         AgentBuilder {
             client,
             sandbox,
@@ -445,7 +456,7 @@ impl Agent {
     /// Does not panic.  Duplicate tool names are handled by last-writer-wins
     /// (later skills override earlier ones), with a warning logged.
     pub fn new(
-        client: Box<dyn LlmClient>,
+        client: rate_limiter::RateLimitedHandle<Box<dyn LlmClient>>,
         sandbox: Arc<dyn Sandbox>,
         skills: Vec<Box<dyn Skill>>,
         settings: &AgentSettings,
@@ -463,15 +474,6 @@ impl Agent {
             model: settings.model.clone(),
             max_tokens: settings.max_tokens,
             temperature: None, // use provider default
-        };
-
-        let client = match settings.rate_limit.as_ref() {
-            Some(rl) => rate_limiter::RateLimited::new(
-                client,
-                rl.max_messages,
-                std::time::Duration::from_secs(rl.window_secs),
-            ),
-            None => rate_limiter::RateLimited::unlimited(client),
         };
 
         // Expose tools via MCP for CLI backends (no-op for API clients).
@@ -628,7 +630,7 @@ impl Agent {
 
         self.dream_handle.fire(
             event,
-            self.client.handle(rate_limiter::Priority::Background),
+            self.client.with_priority(rate_limiter::Priority::Background),
             self.config.clone(),
             self.tool_context.clone(),
             messages,
@@ -718,6 +720,45 @@ impl Agent {
                 }
             }
         }
+    }
+
+    /// Hot-swap the LLM client and model without rebuilding the agent.
+    ///
+    /// Updates the client handle, model name in `CompletionConfig`, and the
+    /// provider/model line in the system prompt.  Everything else (skills,
+    /// tools, sandbox, conversation, workspace) is preserved.
+    ///
+    /// This is the fast path for `/model` switches — no allocations beyond
+    /// the new handle and updated strings.
+    pub fn swap_client(
+        &mut self,
+        new_client: rate_limiter::RateLimitedHandle<Box<dyn LlmClient>>,
+        model: &str,
+        provider: &crate::config::LlmProvider,
+    ) {
+        self.client = new_client;
+        self.config.model = model.to_string();
+        self.client
+            .get_ref()
+            .set_mcp_tools(self.tool_registry.tools.clone());
+
+        // Patch the "You are running on model …" line in the system prompt.
+        let marker = "\n\nYou are running on model '";
+        if let Some(pos) = self.system_prompt.find(marker) {
+            let end = self.system_prompt[pos..]
+                .find('.')
+                .map(|i| pos + i + 1)
+                .unwrap_or(self.system_prompt.len());
+            let mut new_prompt = String::with_capacity(self.system_prompt.len());
+            new_prompt.push_str(&self.system_prompt[..pos]);
+            new_prompt.push_str(&format!(
+                "\n\nYou are running on model '{model}' via the {provider:?} provider.",
+            ));
+            new_prompt.push_str(&self.system_prompt[end..]);
+            self.system_prompt = Arc::from(new_prompt);
+        }
+
+        tracing::info!(model, provider = ?provider, "client swapped");
     }
 
     /// Get the system prompt (for quick response context).

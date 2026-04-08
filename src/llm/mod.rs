@@ -249,7 +249,7 @@ pub trait LlmClient: Send + Sync {
 /// it at construction time simplifies the `LlmClient` trait (stream() doesn't
 /// need workspace-awareness) and keeps the workspace coupling isolated to
 /// the CLI-subprocess backends (Claude Code and Codex).
-pub fn create_client(
+pub(crate) fn create_client(
     settings: &crate::config::AgentSettings,
     workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
     dangerous_no_sandbox: bool,

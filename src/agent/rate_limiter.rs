@@ -221,6 +221,21 @@ impl<T> Clone for RateLimitedHandle<T> {
 }
 
 impl<T> RateLimitedHandle<T> {
+    /// Create a handle with no rate limit at [`Priority::UserFacing`].
+    ///
+    /// **Test-only.** Production code must obtain handles from a
+    /// `ClientRegistry` to ensure all clients are shared and rate-limited.
+    ///
+    /// Not gated by `#[cfg(test)]` because integration tests in `tests/`
+    /// need it.  The `#[doc(hidden)]` keeps it out of public docs, and
+    /// `create_client()` being `pub(crate)` prevents external callers
+    /// from constructing real clients to pass here.
+    #[doc(hidden)]
+    pub fn unlimited(value: T) -> Self {
+        let rl = RateLimited::unlimited(value);
+        rl.handle(Priority::UserFacing)
+    }
+
     /// Attempt to access the inner value at this handle's priority.
     ///
     /// Returns a [`RateLimitGuard`] on success, or `Err(RateLimit)` if
@@ -233,6 +248,25 @@ impl<T> RateLimitedHandle<T> {
     /// The priority this handle operates at.
     pub fn priority(&self) -> Priority {
         self.priority
+    }
+
+    /// Create a new handle at a different priority, sharing the same
+    /// inner value and rate counter.
+    ///
+    /// This is how dreams get a `Background`-priority handle from the
+    /// agent's `UserFacing` handle without needing access to the
+    /// original `RateLimited`.
+    pub fn with_priority(&self, priority: Priority) -> RateLimitedHandle<T> {
+        RateLimitedHandle {
+            inner: Arc::clone(&self.inner),
+            state: Arc::clone(&self.state),
+            priority,
+        }
+    }
+
+    /// Direct reference to the inner value, bypassing the rate limiter.
+    pub fn get_ref(&self) -> &T {
+        &self.inner
     }
 }
 
@@ -380,5 +414,40 @@ mod tests {
         assert!(rl.access().is_ok());
         assert!(rl.access().is_err());
         assert_eq!(*rl.get_ref(), 99);
+    }
+
+    #[test]
+    fn handle_get_ref_bypasses_limiter() {
+        let rl = RateLimited::new(42, 1, Duration::from_secs(60));
+        let handle = rl.handle(Priority::UserFacing);
+        assert!(handle.access().is_ok());
+        assert!(handle.access().is_err());
+        assert_eq!(*handle.get_ref(), 42);
+    }
+
+    #[test]
+    fn with_priority_shares_state() {
+        let rl = RateLimited::new("val", 6, Duration::from_secs(60));
+        let uf = rl.handle(Priority::UserFacing);
+        let bg = uf.with_priority(Priority::Background);
+
+        // Background: 6 * 2/3 = 4 slots.
+        for _ in 0..4 {
+            assert!(bg.access().is_ok());
+        }
+        assert!(bg.access().is_err());
+
+        // UserFacing sees the same 4 consumed → 2 left.
+        assert!(uf.access().is_ok());
+        assert!(uf.access().is_ok());
+        assert!(uf.access().is_err());
+    }
+
+    #[test]
+    fn unlimited_handle_always_succeeds() {
+        let h = RateLimitedHandle::unlimited(77);
+        for _ in 0..1000 {
+            assert_eq!(*h.access().unwrap(), 77);
+        }
     }
 }

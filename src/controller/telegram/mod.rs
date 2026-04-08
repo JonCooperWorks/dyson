@@ -283,6 +283,10 @@ impl super::Controller for TelegramController {
 
         let (config_path, mut reloader) = super::create_hot_reloader(settings);
 
+        // Lazily-loaded client registry — one LLM client per provider,
+        // shared across all agents and surviving provider switches.
+        let mut registry = super::ClientRegistry::new(&current_settings, None);
+
         let agents: Arc<tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>> =
             Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
@@ -303,11 +307,14 @@ impl super::Controller for TelegramController {
                     current_settings = s;
                     current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
                 }
+                // Recreate the client registry so new API keys take effect.
+                registry = super::ClientRegistry::new(&current_settings, None);
                 rebuild_agents_on_reload(
                     &agents,
                     &current_settings,
                     controller_prompt.as_deref(),
                     &chat_store,
+                    &mut registry,
                 )
                 .await;
             }
@@ -373,9 +380,8 @@ impl super::Controller for TelegramController {
                             chat_id,
                             &agents,
                             &current_settings,
-                            controller_prompt.as_deref(),
                             config_path.as_deref(),
-                            &chat_store,
+                            &mut registry,
                         )
                         .await;
                     }
@@ -470,6 +476,7 @@ impl super::Controller for TelegramController {
                         &current_settings,
                         controller_prompt.as_deref(),
                         &chat_store,
+                        &mut registry,
                     )
                     .await
                     {
@@ -485,9 +492,9 @@ impl super::Controller for TelegramController {
                         chat_id,
                         &entry,
                         &current_settings,
-                        controller_prompt.as_deref(),
                         config_path.as_deref(),
                         &*chat_store,
+                        &mut registry,
                     )
                     .await;
                     continue;
@@ -502,6 +509,7 @@ impl super::Controller for TelegramController {
                     &current_settings,
                     controller_prompt.as_deref(),
                     &chat_store,
+                    &mut registry,
                 )
                 .await
                 {
@@ -513,18 +521,18 @@ impl super::Controller for TelegramController {
                 };
 
                 let bot_clone = bot.clone();
-                let settings_clone = current_settings.clone();
                 let store_clone = chat_store.clone();
                 let transcriber_clone = transcriber.clone();
+                let client_for_task = registry.get_default();
                 tokio::spawn(run_agent_for_message(
                     bot_clone,
                     chat_id,
                     msg,
                     text,
                     entry,
-                    settings_clone,
                     store_clone,
                     transcriber_clone,
+                    client_for_task,
                 ));
             }
         }
@@ -540,6 +548,7 @@ async fn rebuild_agents_on_reload(
     settings: &Settings,
     controller_prompt: Option<&str>,
     chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
+    registry: &mut super::ClientRegistry,
 ) {
     let mut agents_map = agents.write().await;
     let old_agents: Vec<(i64, Arc<ChatEntry>)> = agents_map.drain().collect();
@@ -551,22 +560,30 @@ async fn rebuild_agents_on_reload(
         let is_group = entry.is_group;
         drop(ca);
 
-        // Public agents rebuild from scratch; private agents preserve provider/model.
-        let agent_result = if is_group {
-            super::build_agent(settings, controller_prompt, super::AgentMode::Public).await.map(|mut a| {
-                a.set_messages(messages.clone());
-                a
-            })
+        // Both public and private agents are rebuilt from scratch on config
+        // reload (cheap — allocation is fine here).  Private agents with a
+        // non-default provider/model get a swap_client after building.
+        let default_client = registry.get_default();
+        let mode = if is_group {
+            super::AgentMode::Public
         } else {
-            super::build_agent_with_provider(
-                settings,
-                &provider_name,
-                Some(&model),
-                controller_prompt,
-                messages.clone(),
-            )
-            .await
+            super::AgentMode::Private
         };
+        let agent_result = super::build_agent(settings, controller_prompt, mode, default_client, registry)
+            .await
+            .map(|mut a| {
+                a.set_messages(messages.clone());
+                // If this private agent was using a non-default provider, swap
+                // to the correct client from the registry.
+                if !is_group {
+                    if let Some(pc) = settings.providers.get(&provider_name) {
+                        if let Ok(handle) = registry.get(&provider_name) {
+                            a.swap_client(handle, &model, &pc.provider_type);
+                        }
+                    }
+                }
+                a
+            });
 
         match agent_result {
             Ok(mut new_agent) => {
@@ -615,9 +632,8 @@ async fn handle_callback_query(
     chat_id: ChatId,
     agents: &Arc<tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>>,
     settings: &Settings,
-    controller_prompt: Option<&str>,
     config_path: Option<&std::path::Path>,
-    chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
+    registry: &mut super::ClientRegistry,
 ) {
     let Some(rest) = cb_data.strip_prefix("model:") else {
         return;
@@ -626,60 +642,43 @@ async fn handle_callback_query(
         return;
     };
 
-    let (existing_messages, is_group) = {
-        let agents_map = agents.read().await;
-        if let Some(entry) = agents_map.get(&chat_id.0) {
-            let ca = entry.agent.lock().await;
-            (ca.agent.messages().to_vec(), entry.is_group)
-        } else {
-            (Vec::new(), false)
+    let pc = match settings.providers.get(provider) {
+        Some(pc) => pc,
+        None => {
+            let _ = bot.send_message(chat_id, &format!("Unknown provider '{provider}'")).await;
+            return;
         }
     };
 
-    match super::build_agent_with_provider(
-        settings,
-        provider,
-        Some(model),
-        controller_prompt,
-        existing_messages.clone(),
-    )
-    .await
-    {
-        Ok(mut new_agent) => {
-            new_agent.set_chat_history(
-                Arc::clone(chat_store),
-                chat_id.0.to_string(),
-            );
-            let pc = &settings.providers[provider];
-            let reply = format!(
-                "Switched to '{}' — {:?} ({})",
-                provider, pc.provider_type, model,
-            );
-            let sys_prompt = new_agent.system_prompt().to_string();
-            let cfg = new_agent.config().clone();
-            agents.write().await.insert(
-                chat_id.0,
-                Arc::new(ChatEntry {
-                    agent: Mutex::new(ChatAgent {
-                        agent: new_agent,
-                        provider_name: provider.to_string(),
-                        model: model.to_string(),
-                    }),
-                    messages_snapshot: tokio::sync::RwLock::new(existing_messages),
-                    system_prompt: tokio::sync::RwLock::new(sys_prompt),
-                    config: tokio::sync::RwLock::new(cfg),
-                    is_group,
-                }),
-            );
-            if let Some(cp) = config_path {
-                crate::config::loader::persist_model_selection(cp, provider, model);
-            }
-            let _ = bot.send_message(chat_id, &reply).await;
-        }
+    let handle = match registry.get(provider) {
+        Ok(h) => h,
         Err(e) => {
             let _ = bot.send_message(chat_id, &format!("Switch error: {e}")).await;
+            return;
         }
+    };
+
+    // Hot-swap the client on the existing agent — no rebuild needed.
+    let agents_map = agents.read().await;
+    if let Some(entry) = agents_map.get(&chat_id.0) {
+        let mut ca = entry.agent.lock().await;
+        ca.agent.swap_client(handle, model, &pc.provider_type);
+        ca.provider_name = provider.to_string();
+        ca.model = model.to_string();
+        // Update cached state for quick responses.
+        *entry.system_prompt.write().await = ca.agent.system_prompt().to_string();
+        *entry.config.write().await = ca.agent.config().clone();
     }
+    drop(agents_map);
+
+    if let Some(cp) = config_path {
+        crate::config::loader::persist_model_selection(cp, provider, model);
+    }
+    let reply = format!(
+        "Switched to '{}' — {:?} ({})",
+        provider, pc.provider_type, model,
+    );
+    let _ = bot.send_message(chat_id, &reply).await;
 }
 
 /// Handle per-chat commands (/clear, /compact, /model) that need the agent lock.
@@ -690,9 +689,9 @@ async fn handle_per_chat_command(
     chat_id: ChatId,
     entry: &Arc<ChatEntry>,
     settings: &Settings,
-    controller_prompt: Option<&str>,
     config_path: Option<&std::path::Path>,
     chat_store: &dyn crate::chat_history::ChatHistory,
+    registry: &mut super::ClientRegistry,
 ) {
     let mut ca = entry.agent.lock().await;
     let mut output = TelegramOutput::new(bot.clone(), chat_id, true);
@@ -709,7 +708,7 @@ async fn handle_per_chat_command(
         provider_name,
         model,
         config_path,
-        controller_prompt,
+        registry,
     )
     .await;
 
@@ -772,9 +771,9 @@ async fn run_agent_for_message(
     msg: types::Message,
     text: String,
     entry: Arc<ChatEntry>,
-    settings: Settings,
     chat_store: Arc<dyn crate::chat_history::ChatHistory>,
     transcriber: Arc<dyn media::audio::Transcriber>,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) {
     let chat_key = chat_id.0.to_string();
 
@@ -796,7 +795,7 @@ async fn run_agent_for_message(
         Ok(guard) => guard,
         Err(_) => {
             tracing::info!(chat_id = chat_id.0, "agent busy — using quick response");
-            send_quick_response(&bot, chat_id, &text, &entry, &settings).await;
+            send_quick_response(&bot, chat_id, &text, &entry, &client).await;
             return;
         }
     };
@@ -828,27 +827,31 @@ async fn run_agent_for_message(
 }
 
 /// Send a quick response (no tools, fast) when the agent is busy.
+///
+/// Uses the shared client handle — no new LLM client is created.
 async fn send_quick_response(
     bot: &BotApi,
     chat_id: ChatId,
     text: &str,
     entry: &ChatEntry,
-    settings: &Settings,
+    client: &crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) {
     let messages_snap = entry.messages_snapshot.read().await.clone();
     let sys_prompt = entry.system_prompt.read().await.clone();
     let config = entry.config.read().await.clone();
 
-    let client = crate::llm::create_client(
-        &settings.agent,
-        None,
-        settings.dangerous_no_sandbox,
-    );
+    let llm_client = match client.access() {
+        Ok(guard) => guard,
+        Err(e) => {
+            tracing::warn!(error = %e, "quick response rate-limited");
+            return;
+        }
+    };
 
     let mut output = TelegramOutput::new(bot.clone(), chat_id, !text.is_empty());
 
     let result = crate::agent::quick_response(
-        client.as_ref(),
+        &**llm_client,
         &messages_snap,
         &sys_prompt,
         text,
@@ -1021,6 +1024,7 @@ async fn get_or_create_entry(
     settings: &Settings,
     controller_prompt: Option<&str>,
     chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
+    registry: &mut super::ClientRegistry,
 ) -> crate::Result<Arc<ChatEntry>> {
     // Fast path: entry already exists.
     {
@@ -1036,8 +1040,9 @@ async fn get_or_create_entry(
     } else {
         crate::controller::AgentMode::Private
     };
+    let client = registry.get_default();
     let mut agent =
-        crate::controller::build_agent(settings, controller_prompt, mode).await?;
+        crate::controller::build_agent(settings, controller_prompt, mode, client, registry).await?;
 
     let chat_key = chat_id.to_string();
 

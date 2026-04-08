@@ -125,11 +125,139 @@ pub enum AgentMode {
     Public,
 }
 
+// ---------------------------------------------------------------------------
+// ClientRegistry — one LLM client per provider, lazily created.
+// ---------------------------------------------------------------------------
+
+/// Registry of rate-limited LLM clients, one per configured provider.
+///
+/// Created once by the controller at startup.  Clients are created lazily
+/// on first access and cached for the lifetime of the registry.  This means
+/// rate-limit windows survive provider switches — switching from Claude to
+/// GPT and back doesn't reset the rate counter.
+///
+/// On config reload, the controller creates a new `ClientRegistry` (all
+/// clients are recreated so they pick up new API keys / base URLs).
+pub struct ClientRegistry {
+    /// One `RateLimited` per provider name.  Lazily populated on first
+    /// `get()` call for that provider.
+    clients: std::collections::HashMap<
+        String,
+        crate::agent::rate_limiter::RateLimited<Box<dyn crate::llm::LlmClient>>,
+    >,
+    /// Settings snapshot used to create clients on demand.
+    settings: Settings,
+    /// Workspace reference for CLI-subprocess providers (ClaudeCode, Codex).
+    workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+}
+
+impl ClientRegistry {
+    /// Create a new registry from the current settings.
+    ///
+    /// No clients are created yet — they are lazily instantiated on first
+    /// `get()`.  The registry keeps a clone of `settings` so it can build
+    /// clients at any time without borrowing from the controller.
+    pub fn new(
+        settings: &Settings,
+        workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    ) -> Self {
+        Self {
+            clients: std::collections::HashMap::new(),
+            settings: settings.clone(),
+            workspace,
+        }
+    }
+
+    /// Get a `UserFacing` handle to the client for a named provider.
+    ///
+    /// Creates the client on first access.  Returns `Err` if the provider
+    /// name is not in the settings.
+    pub fn get(
+        &mut self,
+        provider_name: &str,
+    ) -> crate::Result<crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>>
+    {
+        if !self.clients.contains_key(provider_name) {
+            let pc = self.settings.providers.get(provider_name).ok_or_else(|| {
+                crate::error::DysonError::Config(format!("unknown provider '{provider_name}'"))
+            })?;
+
+            let agent_settings = crate::config::AgentSettings {
+                provider: pc.provider_type.clone(),
+                api_key: pc.api_key.clone(),
+                base_url: pc.base_url.clone(),
+                ..self.settings.agent.clone()
+            };
+
+            let client = crate::llm::create_client(
+                &agent_settings,
+                self.workspace.clone(),
+                self.settings.dangerous_no_sandbox,
+            );
+
+            let rate_limited = match self.settings.agent.rate_limit.as_ref() {
+                Some(rl) => crate::agent::rate_limiter::RateLimited::new(
+                    client,
+                    rl.max_messages,
+                    std::time::Duration::from_secs(rl.window_secs),
+                ),
+                None => crate::agent::rate_limiter::RateLimited::unlimited(client),
+            };
+
+            self.clients.insert(provider_name.to_string(), rate_limited);
+        }
+
+        let rl = &self.clients[provider_name];
+        Ok(rl.handle(crate::agent::rate_limiter::Priority::UserFacing))
+    }
+
+    /// Get a handle for the default (active) provider from settings.
+    ///
+    /// Looks up the provider name that matches the current agent config,
+    /// or falls back to creating a client directly from the agent settings.
+    pub fn get_default(
+        &mut self,
+    ) -> crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>> {
+        // Try to find the named provider that matches.
+        if let Some(name) = active_provider_name(&self.settings) {
+            if let Ok(handle) = self.get(&name) {
+                return handle;
+            }
+        }
+
+        // Fallback: create client from the default agent settings.
+        // This handles the case where no named provider matches (e.g.
+        // single-provider config without a "providers" map).
+        if !self.clients.contains_key("__default__") {
+            let client = crate::llm::create_client(
+                &self.settings.agent,
+                self.workspace.clone(),
+                self.settings.dangerous_no_sandbox,
+            );
+            let rate_limited = match self.settings.agent.rate_limit.as_ref() {
+                Some(rl) => crate::agent::rate_limiter::RateLimited::new(
+                    client,
+                    rl.max_messages,
+                    std::time::Duration::from_secs(rl.window_secs),
+                ),
+                None => crate::agent::rate_limiter::RateLimited::unlimited(client),
+            };
+            self.clients.insert("__default__".to_string(), rate_limited);
+        }
+
+        self.clients["__default__"]
+            .handle(crate::agent::rate_limiter::Priority::UserFacing)
+    }
+}
+
 /// Build an agent from settings.
 ///
 /// `mode` controls the trust level — `AgentMode::Private` builds a
 /// full-featured agent, `AgentMode::Public` builds a hardened agent with
 /// only `web_search` and `web_fetch`.  See `docs/public-agents.md`.
+///
+/// The `client` handle comes from a [`ClientRegistry`] — all agents
+/// share the same LLM client and rate-limit window per provider.
 ///
 /// Every controller should use this instead of building agents manually.
 /// The mode is the single point of control — individual controllers just
@@ -138,9 +266,11 @@ pub async fn build_agent(
     settings: &Settings,
     controller_prompt: Option<&str>,
     mode: AgentMode,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
+    registry: &mut ClientRegistry,
 ) -> crate::Result<crate::agent::Agent> {
     if mode == AgentMode::Public {
-        return build_public_agent(settings, controller_prompt);
+        return build_public_agent(settings, controller_prompt, client);
     }
 
     // --- Private agent: full tools, workspace, dreams ---
@@ -168,11 +298,6 @@ pub async fn build_agent(
         ws.nudge_interval()
     };
 
-    let client = crate::llm::create_client(
-        &agent_settings,
-        Some(std::sync::Arc::clone(&workspace)),
-        settings.dangerous_no_sandbox,
-    );
     let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, settings.dangerous_no_sandbox);
     let skills = {
         let ws = workspace.read().await;
@@ -181,6 +306,7 @@ pub async fn build_agent(
             Some(&**ws),
             std::sync::Arc::clone(&sandbox),
             Some(std::sync::Arc::clone(&workspace)),
+            registry,
         )
         .await
     };
@@ -200,11 +326,12 @@ pub async fn build_agent(
 /// (read-only, in-memory only).  It does NOT receive a workspace reference,
 /// so it cannot modify identity or memory files via workspace tools.
 ///
-/// Called by `build_agent()` when `public == true`.  Kept as a separate
-/// function for clarity, not because callers should use it directly.
+/// Uses the shared `client` handle so public agents share the same LLM
+/// client and rate-limit window as private agents.
 fn build_public_agent(
     settings: &Settings,
     controller_prompt: Option<&str>,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) -> crate::Result<crate::agent::Agent> {
     let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
         crate::skill::builtin::BuiltinSkill::new_filtered(
@@ -235,7 +362,6 @@ fn build_public_agent(
         agent_settings.system_prompt.push_str(prompt);
     }
 
-    let client = crate::llm::create_client(&agent_settings, None, false);
     // SECURITY: Always false — public agent sandbox is never disabled.
     let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, false);
 
@@ -269,53 +395,6 @@ fn inject_workspace_identity(
             .system_prompt
             .push_str(&identity_parts.join("\n\n---\n\n"));
     }
-}
-
-// ---------------------------------------------------------------------------
-// Provider switching helpers
-// ---------------------------------------------------------------------------
-
-/// Build a new agent using a named provider, preserving conversation history.
-///
-/// Looks up `provider_name` in `settings.providers`, builds a new agent
-/// with that provider's config, and restores the given messages.  When
-/// `model` is `Some`, validates it against the provider's model list;
-/// otherwise uses the provider's default (first) model.
-pub async fn build_agent_with_provider(
-    settings: &Settings,
-    provider_name: &str,
-    model: Option<&str>,
-    controller_prompt: Option<&str>,
-    existing_messages: Vec<crate::message::Message>,
-) -> crate::Result<crate::agent::Agent> {
-    let pc = settings.providers.get(provider_name).ok_or_else(|| {
-        crate::error::DysonError::Config(format!("unknown provider '{provider_name}'"))
-    })?;
-
-    let resolved_model = match model {
-        Some(m) => {
-            if !pc.models.iter().any(|existing| existing == m) {
-                let available = pc.models.join(", ");
-                return Err(crate::error::DysonError::Config(format!(
-                    "unknown model '{m}' for provider '{provider_name}'. Available: {available}"
-                )));
-            }
-            m.to_string()
-        }
-        None => pc.default_model().to_string(),
-    };
-
-    // Build a modified settings with the new provider's fields.
-    let mut switched = settings.clone();
-    switched.agent.provider = pc.provider_type.clone();
-    switched.agent.model = resolved_model;
-    switched.agent.api_key = pc.api_key.clone();
-    switched.agent.base_url = pc.base_url.clone();
-
-    // Provider switching is only for private agents.
-    let mut agent = build_agent(&switched, controller_prompt, AgentMode::Private).await?;
-    agent.set_messages(existing_messages);
-    Ok(agent)
 }
 
 /// Parse a `/model` command argument into (provider_name, optional_model).
@@ -438,6 +517,7 @@ pub async fn check_and_reload_agent(
     current_provider: &mut String,
     current_model: &mut String,
     controller_prompt: Option<&str>,
+    registry: &mut ClientRegistry,
 ) -> ReloadOutcome {
     let (changed, new_settings) = match reloader.check().await {
         Ok(result) => result,
@@ -453,30 +533,25 @@ pub async fn check_and_reload_agent(
         current_settings.dangerous_no_sandbox = original_dangerous_no_sandbox;
     }
 
+    // Recreate the client registry so new API keys / base URLs take effect.
+    *registry = ClientRegistry::new(current_settings, None);
+
     let messages = agent.messages().to_vec();
-    match build_agent_with_provider(
-        current_settings,
-        current_provider,
-        Some(current_model),
-        controller_prompt,
-        messages,
-    )
-    .await
-    {
-        Ok(a) => {
+    let client = registry.get_default();
+    match build_agent(current_settings, controller_prompt, AgentMode::Private, client, registry).await {
+        Ok(mut a) => {
+            a.set_messages(messages);
+            // Restore the user's provider/model selection if it differs
+            // from the default.
+            if let Some(pc) = current_settings.providers.get(current_provider.as_str()) {
+                if let Ok(handle) = registry.get(current_provider) {
+                    a.swap_client(handle, current_model, &pc.provider_type);
+                }
+            }
             *agent = a;
         }
-        Err(_) => {
-            // Provider/model removed from config — fall back to defaults.
-            match build_agent(current_settings, controller_prompt, AgentMode::Private).await {
-                Ok(a) => {
-                    *agent = a;
-                    *current_provider =
-                        active_provider_name(current_settings).unwrap_or_default();
-                    *current_model = current_settings.agent.model.clone();
-                }
-                Err(e) => return ReloadOutcome::Error(format!("reload error: {e}")),
-            }
+        Err(e) => {
+            return ReloadOutcome::Error(format!("reload error: {e}"));
         }
     }
 
@@ -547,7 +622,7 @@ pub async fn execute_command(
     current_provider: &mut String,
     current_model: &mut String,
     config_path: Option<&Path>,
-    controller_prompt: Option<&str>,
+    registry: &mut ClientRegistry,
 ) -> CommandResult {
     if input == "/clear" {
         agent.clear();
@@ -601,23 +676,21 @@ pub async fn execute_command(
             Ok(parsed) => parsed,
             Err(e) => return CommandResult::ModelParseError(e),
         };
-        let messages = agent.messages().to_vec();
-        match build_agent_with_provider(
-            settings,
-            &target_provider,
-            target_model.as_deref(),
-            controller_prompt,
-            messages,
-        )
-        .await
-        {
-            Ok(new_agent) => {
-                *agent = new_agent;
-                let pc = &settings.providers[&target_provider];
-                let resolved = target_model
-                    .as_deref()
-                    .unwrap_or_else(|| pc.default_model())
-                    .to_string();
+        let pc = match settings.providers.get(&target_provider) {
+            Some(pc) => pc,
+            None => {
+                return CommandResult::ModelSwitchError(format!(
+                    "unknown provider '{target_provider}'"
+                ))
+            }
+        };
+        let resolved = target_model
+            .as_deref()
+            .unwrap_or_else(|| pc.default_model())
+            .to_string();
+        match registry.get(&target_provider) {
+            Ok(handle) => {
+                agent.swap_client(handle, &resolved, &pc.provider_type);
                 *current_model = resolved.clone();
                 *current_provider = target_provider.clone();
                 if let Some(cp) = config_path {
@@ -1034,6 +1107,7 @@ mod tests {
             None,
             false,
         );
+        let client = crate::agent::rate_limiter::RateLimitedHandle::unlimited(client);
 
         let agent = crate::agent::Agent::builder(client, sandbox)
             .skills(skills)
@@ -1165,6 +1239,7 @@ mod tests {
         let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
             std::sync::Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
         let client = crate::llm::create_client(&settings, None, false);
+        let client = crate::agent::rate_limiter::RateLimitedHandle::unlimited(client);
 
         let agent = crate::agent::Agent::builder(client, sandbox)
             .skills(skills)

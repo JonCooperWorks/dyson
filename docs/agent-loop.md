@@ -21,7 +21,7 @@ calls, execute them through the sandbox, feed results back, repeat.
 
 ```rust
 pub struct Agent {
-    client: Box<dyn LlmClient>,
+    client: RateLimitedHandle<Box<dyn LlmClient>>,
     sandbox: Box<dyn Sandbox>,
     skills: Vec<Box<dyn Skill>>,
     tools: HashMap<String, Arc<dyn Tool>>,
@@ -36,7 +36,7 @@ pub struct Agent {
 
 | Field | Purpose |
 |-------|---------|
-| `client` | Streams completions from any LLM provider (Anthropic, OpenAI, Claude Code, Codex) |
+| `client` | Handle to the shared, rate-limited LLM client (from `ClientRegistry`) |
 | `sandbox` | Gates every tool call (Allow/Deny/Redirect) |
 | `skills` | Retained for lifecycle management (`on_unload` on shutdown) |
 | `tools` | Flat lookup by tool name — `Arc` shared with skills |

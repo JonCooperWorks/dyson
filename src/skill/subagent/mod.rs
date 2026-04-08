@@ -184,8 +184,8 @@ impl Skill for FilteredSkill {
 /// A tool that spawns a child Agent, runs it to completion, and returns
 /// the result.
 ///
-/// Each invocation creates a **fresh** Agent with:
-/// - Its own LlmClient (constructed from the subagent's provider config)
+/// Each invocation creates a child Agent with:
+/// - A shared LLM client handle (from `ClientRegistry`, same rate limits)
 /// - Its own conversation history (empty — no context leak from parent)
 /// - The parent's sandbox (shared via Arc — security cannot be bypassed)
 /// - The parent's workspace (shared via Arc — memory is collaborative)
@@ -213,14 +213,13 @@ pub struct SubagentTool {
     /// Configuration for this subagent (name, description, provider, etc.).
     config: SubagentAgentConfig,
 
-    /// Resolved provider type for LLM client construction.
+    /// Resolved provider type (kept for system prompt injection).
     provider: LlmProvider,
 
-    /// Resolved API key for the subagent's provider.
-    api_key: crate::auth::Credential,
-
-    /// Optional base URL override for the provider.
-    base_url: Option<String>,
+    /// Shared LLM client handle — from the same `ClientRegistry` as the
+    /// parent agent.  Shares the rate-limit window so subagents can't
+    /// bypass the provider's rate limits.
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 
     /// Shared sandbox — same instance as the parent agent.
     sandbox: Arc<dyn Sandbox>,
@@ -244,16 +243,14 @@ impl SubagentTool {
     ///
     /// - `config`: Per-subagent settings (name, description, provider, etc.)
     /// - `provider`: Resolved LlmProvider enum variant
-    /// - `api_key`: Resolved API key for the provider
-    /// - `base_url`: Optional base URL override
+    /// - `client`: Shared LLM client handle (from `ClientRegistry`)
     /// - `sandbox`: Shared sandbox from the parent
     /// - `workspace`: Shared workspace from the parent
     /// - `inherited_tools`: Pre-filtered tools from the parent
     pub fn new(
         config: SubagentAgentConfig,
         provider: LlmProvider,
-        api_key: crate::auth::Credential,
-        base_url: Option<String>,
+        client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
         sandbox: Arc<dyn Sandbox>,
         workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
         inherited_tools: Vec<Arc<dyn Tool>>,
@@ -261,8 +258,7 @@ impl SubagentTool {
         Self {
             config,
             provider,
-            api_key,
-            base_url,
+            client,
             sandbox,
             workspace,
             inherited_tools,
@@ -342,19 +338,12 @@ impl Tool for SubagentTool {
             max_iterations: self.config.max_iterations.unwrap_or(10),
             max_tokens: self.config.max_tokens.unwrap_or(4096),
             system_prompt: self.config.system_prompt.clone(),
-            api_key: self.api_key.clone(),
             provider: self.provider.clone(),
-            base_url: self.base_url.clone(),
-            compaction: None,
-            rate_limit: None,
+            // api_key/base_url are unused — the client handle is pre-authenticated.
+            ..AgentSettings::default()
         };
 
-        // -- Create the child's LLM client --
-        let client = crate::llm::create_client(
-            &child_settings,
-            self.workspace.clone(),
-            false, // subagents don't forward dangerous_no_sandbox
-        );
+        let client = self.client.clone();
 
         // -- Build skills from inherited tools --
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(FilteredSkill {
@@ -432,38 +421,44 @@ impl SubagentSkill {
     /// - `sandbox`: Shared sandbox from the parent
     /// - `workspace`: Shared workspace from the parent
     /// - `parent_tools`: All tools loaded by the parent's other skills
+    /// - `registry`: Shared client registry for obtaining LLM client handles
     ///
-    /// Each config's `provider` field is looked up in `settings.providers`
-    /// to resolve the provider type, API key, and base URL.
+    /// Each config's `provider` field is looked up in `registry` to obtain
+    /// a shared client handle.  The "default" provider uses the parent's
+    /// active provider from the registry.
     pub fn new(
         configs: &[SubagentAgentConfig],
         settings: &crate::config::Settings,
         sandbox: Arc<dyn Sandbox>,
         workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
         parent_tools: &[Arc<dyn Tool>],
+        registry: &mut crate::controller::ClientRegistry,
     ) -> Self {
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut prompt_lines: Vec<String> = Vec::new();
 
         for cfg in configs {
-            // Resolve the provider.
+            // Resolve the provider and get a shared client handle.
             //
-            // The special name "default" uses the parent agent's own provider,
-            // API key, and base URL.  This lets built-in subagents work out of
-            // the box without requiring extra provider config.
-            let (provider, api_key, base_url) = if cfg.provider == "default" {
-                (
-                    settings.agent.provider.clone(),
-                    settings.agent.api_key.clone(),
-                    settings.agent.base_url.clone(),
-                )
+            // The special name "default" uses the parent agent's own provider.
+            // This lets built-in subagents work out of the box without
+            // requiring extra provider config.
+            let (provider, client) = if cfg.provider == "default" {
+                (settings.agent.provider.clone(), registry.get_default())
             } else {
                 match settings.providers.get(&cfg.provider) {
-                    Some(pc) => (
-                        pc.provider_type.clone(),
-                        pc.api_key.clone(),
-                        pc.base_url.clone(),
-                    ),
+                    Some(pc) => match registry.get(&cfg.provider) {
+                        Ok(handle) => (pc.provider_type.clone(), handle),
+                        Err(e) => {
+                            tracing::error!(
+                                subagent = cfg.name,
+                                provider = cfg.provider,
+                                error = %e,
+                                "failed to create client for subagent — skipping"
+                            );
+                            continue;
+                        }
+                    },
                     None => {
                         tracing::error!(
                             subagent = cfg.name,
@@ -481,8 +476,7 @@ impl SubagentSkill {
             let tool = SubagentTool::new(
                 cfg.clone(),
                 provider,
-                api_key,
-                base_url,
+                client,
                 Arc::clone(&sandbox),
                 workspace.clone(),
                 inherited,

@@ -179,6 +179,7 @@ pub async fn create_skills(
     workspace_arc: Option<
         std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
     >,
+    registry: &mut crate::controller::ClientRegistry,
 ) -> Vec<Box<dyn Skill>> {
     let mut skills: Vec<Box<dyn Skill>> = Vec::new();
     let mut subagent_configs: Vec<crate::config::SubagentAgentConfig> = Vec::new();
@@ -313,6 +314,7 @@ pub async fn create_skills(
             sandbox,
             workspace_arc,
             &parent_tools,
+            registry,
         );
 
         if !subagent_skill.tools().is_empty() {
