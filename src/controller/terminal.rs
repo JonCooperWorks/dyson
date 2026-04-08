@@ -79,6 +79,7 @@ impl super::Controller for TerminalController {
             None,
             super::AgentMode::Private,
             client_handle,
+            &mut registry,
         )
         .await?;
         let mut output = TerminalOutput::new();

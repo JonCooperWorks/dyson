@@ -74,8 +74,9 @@ fn subagent_tool_name_and_description() {
     let tool = SubagentTool::new(
         config,
         LlmProvider::Anthropic,
-        crate::auth::Credential::new(String::new()),
-        None,
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
+        ),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         vec![],
@@ -101,8 +102,9 @@ fn subagent_tool_input_schema_has_required_task() {
     let tool = SubagentTool::new(
         config,
         LlmProvider::Anthropic,
-        crate::auth::Credential::new(String::new()),
-        None,
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
+        ),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         vec![],
@@ -206,8 +208,9 @@ async fn subagent_depth_limit_prevents_recursion() {
     let tool = SubagentTool::new(
         config,
         LlmProvider::Anthropic,
-        crate::auth::Credential::new(String::new()),
-        None,
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
+        ),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         vec![],
@@ -246,8 +249,9 @@ async fn subagent_missing_task_returns_error() {
     let tool = SubagentTool::new(
         config,
         LlmProvider::Anthropic,
-        crate::auth::Credential::new(String::new()),
-        None,
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
+        ),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         vec![],
@@ -309,7 +313,8 @@ fn subagent_skill_system_prompt_lists_agents() {
     }];
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
-    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[]);
+    let mut registry = crate::controller::ClientRegistry::new(&settings, None);
+    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &mut registry);
 
     assert_eq!(skill.name(), "subagents");
     assert_eq!(skill.tools().len(), 1);
@@ -337,7 +342,8 @@ fn subagent_skill_skips_unknown_provider() {
     }];
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
-    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[]);
+    let mut registry = crate::controller::ClientRegistry::new(&settings, None);
+    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &mut registry);
 
     // Should have skipped the subagent with unknown provider.
     assert_eq!(skill.tools().len(), 0);
@@ -461,7 +467,8 @@ fn verification_protocol_injected_when_verifier_present() {
     }];
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
-    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[]);
+    let mut registry = crate::controller::ClientRegistry::new(&settings, None);
+    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &mut registry);
 
     let prompt = skill.system_prompt().unwrap();
     assert!(prompt.contains("Verification Protocol"));
@@ -492,7 +499,8 @@ fn verification_protocol_absent_without_verifier() {
     }];
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
-    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[]);
+    let mut registry = crate::controller::ClientRegistry::new(&settings, None);
+    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &mut registry);
 
     let prompt = skill.system_prompt().unwrap();
     assert!(!prompt.contains("Verification Protocol"));
@@ -523,7 +531,8 @@ fn default_provider_resolves_to_agent_settings() {
     }];
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
-    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[]);
+    let mut registry = crate::controller::ClientRegistry::new(&settings, None);
+    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &mut registry);
 
     // Should have resolved successfully (1 tool, not skipped).
     assert_eq!(skill.tools().len(), 1);

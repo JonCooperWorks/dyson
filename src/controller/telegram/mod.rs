@@ -569,7 +569,7 @@ async fn rebuild_agents_on_reload(
         } else {
             super::AgentMode::Private
         };
-        let agent_result = super::build_agent(settings, controller_prompt, mode, default_client)
+        let agent_result = super::build_agent(settings, controller_prompt, mode, default_client, registry)
             .await
             .map(|mut a| {
                 a.set_messages(messages.clone());
@@ -1042,7 +1042,7 @@ async fn get_or_create_entry(
     };
     let client = registry.get_default();
     let mut agent =
-        crate::controller::build_agent(settings, controller_prompt, mode, client).await?;
+        crate::controller::build_agent(settings, controller_prompt, mode, client, registry).await?;
 
     let chat_key = chat_id.to_string();
 

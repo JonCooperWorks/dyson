@@ -268,9 +268,10 @@ pub async fn build_agent(
     controller_prompt: Option<&str>,
     mode: AgentMode,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
+    registry: &mut ClientRegistry,
 ) -> crate::Result<crate::agent::Agent> {
     if mode == AgentMode::Public {
-        return build_public_agent(settings, controller_prompt, client);
+        return build_public_agent(settings, controller_prompt, client, registry);
     }
 
     // --- Private agent: full tools, workspace, dreams ---
@@ -306,6 +307,7 @@ pub async fn build_agent(
             Some(&**ws),
             std::sync::Arc::clone(&sandbox),
             Some(std::sync::Arc::clone(&workspace)),
+            registry,
         )
         .await
     };
@@ -331,6 +333,7 @@ fn build_public_agent(
     settings: &Settings,
     controller_prompt: Option<&str>,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
+    _registry: &mut ClientRegistry,
 ) -> crate::Result<crate::agent::Agent> {
     let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
         crate::skill::builtin::BuiltinSkill::new_filtered(
@@ -541,7 +544,7 @@ pub async fn check_and_reload_agent(
         .unwrap_or_else(|_| registry.get_default());
 
     let messages = agent.messages().to_vec();
-    match build_agent(current_settings, controller_prompt, AgentMode::Private, client).await {
+    match build_agent(current_settings, controller_prompt, AgentMode::Private, client, registry).await {
         Ok(mut a) => {
             a.set_messages(messages);
             // If the user had a non-default provider, swap to it.

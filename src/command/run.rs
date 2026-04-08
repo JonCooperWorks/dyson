@@ -55,6 +55,7 @@ pub async fn run(
     );
     let client = dyson::agent::rate_limiter::RateLimitedHandle::unlimited(client);
     let sandbox = dyson::sandbox::create_sandbox(&settings.sandbox, settings.dangerous_no_sandbox);
+    let mut registry = dyson::controller::ClientRegistry::new(&settings, None);
     let skills = {
         let ws = workspace.read().await;
         dyson::skill::create_skills(
@@ -62,6 +63,7 @@ pub async fn run(
             Some(&**ws),
             std::sync::Arc::clone(&sandbox),
             Some(std::sync::Arc::clone(&workspace)),
+            &mut registry,
         )
         .await
     };
