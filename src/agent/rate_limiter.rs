@@ -415,4 +415,39 @@ mod tests {
         assert!(rl.access().is_err());
         assert_eq!(*rl.get_ref(), 99);
     }
+
+    #[test]
+    fn handle_get_ref_bypasses_limiter() {
+        let rl = RateLimited::new(42, 1, Duration::from_secs(60));
+        let handle = rl.handle(Priority::UserFacing);
+        assert!(handle.access().is_ok());
+        assert!(handle.access().is_err());
+        assert_eq!(*handle.get_ref(), 42);
+    }
+
+    #[test]
+    fn with_priority_shares_state() {
+        let rl = RateLimited::new("val", 6, Duration::from_secs(60));
+        let uf = rl.handle(Priority::UserFacing);
+        let bg = uf.with_priority(Priority::Background);
+
+        // Background: 6 * 2/3 = 4 slots.
+        for _ in 0..4 {
+            assert!(bg.access().is_ok());
+        }
+        assert!(bg.access().is_err());
+
+        // UserFacing sees the same 4 consumed → 2 left.
+        assert!(uf.access().is_ok());
+        assert!(uf.access().is_ok());
+        assert!(uf.access().is_err());
+    }
+
+    #[test]
+    fn unlimited_handle_always_succeeds() {
+        let h = RateLimitedHandle::unlimited(77);
+        for _ in 0..1000 {
+            assert_eq!(*h.access().unwrap(), 77);
+        }
+    }
 }

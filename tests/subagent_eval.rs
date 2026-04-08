@@ -133,10 +133,9 @@ fn tool_call_events(id: &str, name: &str, input: serde_json::Value) -> Vec<Strea
 
 /// Tests the full subagent flow using CaptureOutput + FilteredSkill.
 ///
-/// Since SubagentTool::run() creates its own LlmClient via create_client()
-/// (which requires real API keys), this test constructs a child Agent
-/// manually using the same code path — verifying that the CaptureOutput,
-/// FilteredSkill, and Agent integration works correctly.
+/// This test constructs a child Agent manually with a MockLlm —
+/// verifying that CaptureOutput, FilteredSkill, and Agent integration
+/// work correctly.
 #[tokio::test]
 async fn subagent_child_agent_returns_result_via_capture_output() {
     // The child agent sees a simple text response.

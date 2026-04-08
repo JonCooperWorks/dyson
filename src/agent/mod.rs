@@ -736,42 +736,29 @@ impl Agent {
         model: &str,
         provider: &crate::config::LlmProvider,
     ) {
-        // Update the client handle.
         self.client = new_client;
-
-        // Update the model in the completion config.
         self.config.model = model.to_string();
-
-        // Re-expose tools for CLI backends (no-op for API clients).
         self.client
             .get_ref()
             .set_mcp_tools(self.tool_registry.tools.clone());
 
-        // Patch the provider/model line in the system prompt.
-        // The line is always at the end of the base prompt, before skill
-        // fragments (which are appended per-turn, not stored).
+        // Patch the "You are running on model …" line in the system prompt.
         let marker = "\n\nYou are running on model '";
         if let Some(pos) = self.system_prompt.find(marker) {
-            // Find the end of this line.
-            let rest = &self.system_prompt[pos..];
-            let end = rest.find('.')
+            let end = self.system_prompt[pos..]
+                .find('.')
                 .map(|i| pos + i + 1)
                 .unwrap_or(self.system_prompt.len());
             let mut new_prompt = String::with_capacity(self.system_prompt.len());
             new_prompt.push_str(&self.system_prompt[..pos]);
             new_prompt.push_str(&format!(
-                "\n\nYou are running on model '{}' via the {:?} provider.",
-                model, provider,
+                "\n\nYou are running on model '{model}' via the {provider:?} provider.",
             ));
             new_prompt.push_str(&self.system_prompt[end..]);
             self.system_prompt = Arc::from(new_prompt);
         }
 
-        tracing::info!(
-            model,
-            provider = ?provider,
-            "client swapped — agent preserved",
-        );
+        tracing::info!(model, provider = ?provider, "client swapped");
     }
 
     /// Get the system prompt (for quick response context).

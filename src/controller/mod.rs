@@ -256,9 +256,8 @@ impl ClientRegistry {
 /// full-featured agent, `AgentMode::Public` builds a hardened agent with
 /// only `web_search` and `web_fetch`.  See `docs/public-agents.md`.
 ///
-/// The `client` handle comes from a shared [`RateLimited`] created by
-/// [`create_shared_client()`] — all agents share the same LLM client
-/// and rate-limit window.
+/// The `client` handle comes from a [`ClientRegistry`] — all agents
+/// share the same LLM client and rate-limit window per provider.
 ///
 /// Every controller should use this instead of building agents manually.
 /// The mode is the single point of control — individual controllers just
@@ -271,7 +270,7 @@ pub async fn build_agent(
     registry: &mut ClientRegistry,
 ) -> crate::Result<crate::agent::Agent> {
     if mode == AgentMode::Public {
-        return build_public_agent(settings, controller_prompt, client, registry);
+        return build_public_agent(settings, controller_prompt, client);
     }
 
     // --- Private agent: full tools, workspace, dreams ---
@@ -333,7 +332,6 @@ fn build_public_agent(
     settings: &Settings,
     controller_prompt: Option<&str>,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
-    _registry: &mut ClientRegistry,
 ) -> crate::Result<crate::agent::Agent> {
     let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
         crate::skill::builtin::BuiltinSkill::new_filtered(
@@ -538,16 +536,13 @@ pub async fn check_and_reload_agent(
     // Recreate the client registry so new API keys / base URLs take effect.
     *registry = ClientRegistry::new(current_settings, None);
 
-    // Try to preserve the user's provider/model selection.
-    let client = registry
-        .get(current_provider)
-        .unwrap_or_else(|_| registry.get_default());
-
     let messages = agent.messages().to_vec();
+    let client = registry.get_default();
     match build_agent(current_settings, controller_prompt, AgentMode::Private, client, registry).await {
         Ok(mut a) => {
             a.set_messages(messages);
-            // If the user had a non-default provider, swap to it.
+            // Restore the user's provider/model selection if it differs
+            // from the default.
             if let Some(pc) = current_settings.providers.get(current_provider.as_str()) {
                 if let Ok(handle) = registry.get(current_provider) {
                     a.swap_client(handle, current_model, &pc.provider_type);

@@ -338,14 +338,11 @@ impl Tool for SubagentTool {
             max_iterations: self.config.max_iterations.unwrap_or(10),
             max_tokens: self.config.max_tokens.unwrap_or(4096),
             system_prompt: self.config.system_prompt.clone(),
-            api_key: crate::auth::Credential::new(String::new()),
             provider: self.provider.clone(),
-            base_url: None,
-            compaction: None,
-            rate_limit: None,
+            // api_key/base_url are unused — the client handle is pre-authenticated.
+            ..AgentSettings::default()
         };
 
-        // Use the shared client handle — same rate-limit window as parent.
         let client = self.client.clone();
 
         // -- Build skills from inherited tools --

@@ -152,13 +152,9 @@ impl crate::llm::LlmClient for MockLlm {
     }
 }
 
-/// Helper to create a SubagentTool that uses a MockLlm.
-///
-/// Since SubagentTool creates its own LlmClient internally via
-/// `crate::llm::create_client()`, we can't inject a MockLlm directly.
-/// Instead, we test the full flow by constructing a child Agent
-/// manually and running it — this tests the same code path that
-/// SubagentTool::run() uses.
+/// Test the subagent flow by constructing a child Agent manually with
+/// a MockLlm and running it — exercises the same code path as
+/// SubagentTool::run().
 #[tokio::test]
 async fn subagent_runs_child_and_returns_result() {
     // Build a mock child agent that returns "Research complete."
