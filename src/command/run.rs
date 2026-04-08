@@ -53,6 +53,7 @@ pub async fn run(
         Some(std::sync::Arc::clone(&workspace)),
         settings.dangerous_no_sandbox,
     );
+    let client = dyson::agent::rate_limiter::RateLimitedHandle::unlimited(client);
     let sandbox = dyson::sandbox::create_sandbox(&settings.sandbox, settings.dangerous_no_sandbox);
     let skills = {
         let ws = workspace.read().await;

@@ -125,11 +125,44 @@ pub enum AgentMode {
     Public,
 }
 
+/// Create a shared, rate-limited LLM client.
+///
+/// Returns a [`RateLimited`] that owns the single LLM client for the
+/// session.  All agents (private and public) should obtain
+/// [`RateLimitedHandle`]s from this source via [`RateLimited::handle()`]
+/// so they share the same client instance and rate-limit window — just
+/// like an HTTP client is created once and shared.
+///
+/// Controllers call this once at startup and keep the `RateLimited` alive
+/// for the session lifetime.
+pub fn create_shared_client(
+    settings: &Settings,
+    workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+) -> crate::agent::rate_limiter::RateLimited<Box<dyn crate::llm::LlmClient>> {
+    let client = crate::llm::create_client(
+        &settings.agent,
+        workspace,
+        settings.dangerous_no_sandbox,
+    );
+    match settings.agent.rate_limit.as_ref() {
+        Some(rl) => crate::agent::rate_limiter::RateLimited::new(
+            client,
+            rl.max_messages,
+            std::time::Duration::from_secs(rl.window_secs),
+        ),
+        None => crate::agent::rate_limiter::RateLimited::unlimited(client),
+    }
+}
+
 /// Build an agent from settings.
 ///
 /// `mode` controls the trust level — `AgentMode::Private` builds a
 /// full-featured agent, `AgentMode::Public` builds a hardened agent with
 /// only `web_search` and `web_fetch`.  See `docs/public-agents.md`.
+///
+/// The `client` handle comes from a shared [`RateLimited`] created by
+/// [`create_shared_client()`] — all agents share the same LLM client
+/// and rate-limit window.
 ///
 /// Every controller should use this instead of building agents manually.
 /// The mode is the single point of control — individual controllers just
@@ -138,9 +171,10 @@ pub async fn build_agent(
     settings: &Settings,
     controller_prompt: Option<&str>,
     mode: AgentMode,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) -> crate::Result<crate::agent::Agent> {
     if mode == AgentMode::Public {
-        return build_public_agent(settings, controller_prompt);
+        return build_public_agent(settings, controller_prompt, client);
     }
 
     // --- Private agent: full tools, workspace, dreams ---
@@ -168,11 +202,6 @@ pub async fn build_agent(
         ws.nudge_interval()
     };
 
-    let client = crate::llm::create_client(
-        &agent_settings,
-        Some(std::sync::Arc::clone(&workspace)),
-        settings.dangerous_no_sandbox,
-    );
     let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, settings.dangerous_no_sandbox);
     let skills = {
         let ws = workspace.read().await;
@@ -200,11 +229,12 @@ pub async fn build_agent(
 /// (read-only, in-memory only).  It does NOT receive a workspace reference,
 /// so it cannot modify identity or memory files via workspace tools.
 ///
-/// Called by `build_agent()` when `public == true`.  Kept as a separate
-/// function for clarity, not because callers should use it directly.
+/// Uses the shared `client` handle so public agents share the same LLM
+/// client and rate-limit window as private agents.
 fn build_public_agent(
     settings: &Settings,
     controller_prompt: Option<&str>,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) -> crate::Result<crate::agent::Agent> {
     let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
         crate::skill::builtin::BuiltinSkill::new_filtered(
@@ -235,7 +265,6 @@ fn build_public_agent(
         agent_settings.system_prompt.push_str(prompt);
     }
 
-    let client = crate::llm::create_client(&agent_settings, None, false);
     // SECURITY: Always false — public agent sandbox is never disabled.
     let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, false);
 
@@ -287,6 +316,7 @@ pub async fn build_agent_with_provider(
     model: Option<&str>,
     controller_prompt: Option<&str>,
     existing_messages: Vec<crate::message::Message>,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) -> crate::Result<crate::agent::Agent> {
     let pc = settings.providers.get(provider_name).ok_or_else(|| {
         crate::error::DysonError::Config(format!("unknown provider '{provider_name}'"))
@@ -313,7 +343,7 @@ pub async fn build_agent_with_provider(
     switched.agent.base_url = pc.base_url.clone();
 
     // Provider switching is only for private agents.
-    let mut agent = build_agent(&switched, controller_prompt, AgentMode::Private).await?;
+    let mut agent = build_agent(&switched, controller_prompt, AgentMode::Private, client).await?;
     agent.set_messages(existing_messages);
     Ok(agent)
 }
@@ -438,6 +468,7 @@ pub async fn check_and_reload_agent(
     current_provider: &mut String,
     current_model: &mut String,
     controller_prompt: Option<&str>,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) -> ReloadOutcome {
     let (changed, new_settings) = match reloader.check().await {
         Ok(result) => result,
@@ -460,6 +491,7 @@ pub async fn check_and_reload_agent(
         Some(current_model),
         controller_prompt,
         messages,
+        client.clone(),
     )
     .await
     {
@@ -468,7 +500,8 @@ pub async fn check_and_reload_agent(
         }
         Err(_) => {
             // Provider/model removed from config — fall back to defaults.
-            match build_agent(current_settings, controller_prompt, AgentMode::Private).await {
+            match build_agent(current_settings, controller_prompt, AgentMode::Private, client).await
+            {
                 Ok(a) => {
                     *agent = a;
                     *current_provider =
@@ -548,6 +581,7 @@ pub async fn execute_command(
     current_model: &mut String,
     config_path: Option<&Path>,
     controller_prompt: Option<&str>,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) -> CommandResult {
     if input == "/clear" {
         agent.clear();
@@ -608,6 +642,7 @@ pub async fn execute_command(
             target_model.as_deref(),
             controller_prompt,
             messages,
+            client,
         )
         .await
         {
@@ -1034,6 +1069,7 @@ mod tests {
             None,
             false,
         );
+        let client = crate::agent::rate_limiter::RateLimitedHandle::unlimited(client);
 
         let agent = crate::agent::Agent::builder(client, sandbox)
             .skills(skills)
@@ -1165,6 +1201,7 @@ mod tests {
         let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
             std::sync::Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
         let client = crate::llm::create_client(&settings, None, false);
+        let client = crate::agent::rate_limiter::RateLimitedHandle::unlimited(client);
 
         let agent = crate::agent::Agent::builder(client, sandbox)
             .skills(skills)

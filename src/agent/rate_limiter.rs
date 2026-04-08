@@ -221,6 +221,16 @@ impl<T> Clone for RateLimitedHandle<T> {
 }
 
 impl<T> RateLimitedHandle<T> {
+    /// Create a handle with no rate limit at [`Priority::UserFacing`].
+    ///
+    /// Convenience constructor for tests and single-use call sites that
+    /// don't need shared rate limiting.  Internally creates an unlimited
+    /// `RateLimited` and extracts a handle from it.
+    pub fn unlimited(value: T) -> Self {
+        let rl = RateLimited::unlimited(value);
+        rl.handle(Priority::UserFacing)
+    }
+
     /// Attempt to access the inner value at this handle's priority.
     ///
     /// Returns a [`RateLimitGuard`] on success, or `Err(RateLimit)` if
@@ -233,6 +243,25 @@ impl<T> RateLimitedHandle<T> {
     /// The priority this handle operates at.
     pub fn priority(&self) -> Priority {
         self.priority
+    }
+
+    /// Create a new handle at a different priority, sharing the same
+    /// inner value and rate counter.
+    ///
+    /// This is how dreams get a `Background`-priority handle from the
+    /// agent's `UserFacing` handle without needing access to the
+    /// original `RateLimited`.
+    pub fn with_priority(&self, priority: Priority) -> RateLimitedHandle<T> {
+        RateLimitedHandle {
+            inner: Arc::clone(&self.inner),
+            state: Arc::clone(&self.state),
+            priority,
+        }
+    }
+
+    /// Direct reference to the inner value, bypassing the rate limiter.
+    pub fn get_ref(&self) -> &T {
+        &self.inner
     }
 }
 

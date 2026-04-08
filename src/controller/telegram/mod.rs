@@ -283,6 +283,13 @@ impl super::Controller for TelegramController {
 
         let (config_path, mut reloader) = super::create_hot_reloader(settings);
 
+        // Create the shared LLM client once — all agents (public and private)
+        // share the same client instance and rate-limit window.
+        let shared_client = super::create_shared_client(&current_settings, None);
+        let client_handle = shared_client.handle(
+            crate::agent::rate_limiter::Priority::UserFacing,
+        );
+
         let agents: Arc<tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>> =
             Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
@@ -308,6 +315,7 @@ impl super::Controller for TelegramController {
                     &current_settings,
                     controller_prompt.as_deref(),
                     &chat_store,
+                    client_handle.clone(),
                 )
                 .await;
             }
@@ -376,6 +384,7 @@ impl super::Controller for TelegramController {
                             controller_prompt.as_deref(),
                             config_path.as_deref(),
                             &chat_store,
+                            client_handle.clone(),
                         )
                         .await;
                     }
@@ -470,6 +479,7 @@ impl super::Controller for TelegramController {
                         &current_settings,
                         controller_prompt.as_deref(),
                         &chat_store,
+                        client_handle.clone(),
                     )
                     .await
                     {
@@ -488,6 +498,7 @@ impl super::Controller for TelegramController {
                         controller_prompt.as_deref(),
                         config_path.as_deref(),
                         &*chat_store,
+                        client_handle.clone(),
                     )
                     .await;
                     continue;
@@ -502,6 +513,7 @@ impl super::Controller for TelegramController {
                     &current_settings,
                     controller_prompt.as_deref(),
                     &chat_store,
+                    client_handle.clone(),
                 )
                 .await
                 {
@@ -513,18 +525,18 @@ impl super::Controller for TelegramController {
                 };
 
                 let bot_clone = bot.clone();
-                let settings_clone = current_settings.clone();
                 let store_clone = chat_store.clone();
                 let transcriber_clone = transcriber.clone();
+                let client_clone = client_handle.clone();
                 tokio::spawn(run_agent_for_message(
                     bot_clone,
                     chat_id,
                     msg,
                     text,
                     entry,
-                    settings_clone,
                     store_clone,
                     transcriber_clone,
+                    client_clone,
                 ));
             }
         }
@@ -540,6 +552,7 @@ async fn rebuild_agents_on_reload(
     settings: &Settings,
     controller_prompt: Option<&str>,
     chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) {
     let mut agents_map = agents.write().await;
     let old_agents: Vec<(i64, Arc<ChatEntry>)> = agents_map.drain().collect();
@@ -553,7 +566,7 @@ async fn rebuild_agents_on_reload(
 
         // Public agents rebuild from scratch; private agents preserve provider/model.
         let agent_result = if is_group {
-            super::build_agent(settings, controller_prompt, super::AgentMode::Public).await.map(|mut a| {
+            super::build_agent(settings, controller_prompt, super::AgentMode::Public, client.clone()).await.map(|mut a| {
                 a.set_messages(messages.clone());
                 a
             })
@@ -564,6 +577,7 @@ async fn rebuild_agents_on_reload(
                 Some(&model),
                 controller_prompt,
                 messages.clone(),
+                client.clone(),
             )
             .await
         };
@@ -618,6 +632,7 @@ async fn handle_callback_query(
     controller_prompt: Option<&str>,
     config_path: Option<&std::path::Path>,
     chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) {
     let Some(rest) = cb_data.strip_prefix("model:") else {
         return;
@@ -642,6 +657,7 @@ async fn handle_callback_query(
         Some(model),
         controller_prompt,
         existing_messages.clone(),
+        client,
     )
     .await
     {
@@ -693,6 +709,7 @@ async fn handle_per_chat_command(
     controller_prompt: Option<&str>,
     config_path: Option<&std::path::Path>,
     chat_store: &dyn crate::chat_history::ChatHistory,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) {
     let mut ca = entry.agent.lock().await;
     let mut output = TelegramOutput::new(bot.clone(), chat_id, true);
@@ -710,6 +727,7 @@ async fn handle_per_chat_command(
         model,
         config_path,
         controller_prompt,
+        client,
     )
     .await;
 
@@ -772,9 +790,9 @@ async fn run_agent_for_message(
     msg: types::Message,
     text: String,
     entry: Arc<ChatEntry>,
-    settings: Settings,
     chat_store: Arc<dyn crate::chat_history::ChatHistory>,
     transcriber: Arc<dyn media::audio::Transcriber>,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) {
     let chat_key = chat_id.0.to_string();
 
@@ -796,7 +814,7 @@ async fn run_agent_for_message(
         Ok(guard) => guard,
         Err(_) => {
             tracing::info!(chat_id = chat_id.0, "agent busy — using quick response");
-            send_quick_response(&bot, chat_id, &text, &entry, &settings).await;
+            send_quick_response(&bot, chat_id, &text, &entry, &client).await;
             return;
         }
     };
@@ -828,27 +846,31 @@ async fn run_agent_for_message(
 }
 
 /// Send a quick response (no tools, fast) when the agent is busy.
+///
+/// Uses the shared client handle — no new LLM client is created.
 async fn send_quick_response(
     bot: &BotApi,
     chat_id: ChatId,
     text: &str,
     entry: &ChatEntry,
-    settings: &Settings,
+    client: &crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) {
     let messages_snap = entry.messages_snapshot.read().await.clone();
     let sys_prompt = entry.system_prompt.read().await.clone();
     let config = entry.config.read().await.clone();
 
-    let client = crate::llm::create_client(
-        &settings.agent,
-        None,
-        settings.dangerous_no_sandbox,
-    );
+    let llm_client = match client.access() {
+        Ok(guard) => guard,
+        Err(e) => {
+            tracing::warn!(error = %e, "quick response rate-limited");
+            return;
+        }
+    };
 
     let mut output = TelegramOutput::new(bot.clone(), chat_id, !text.is_empty());
 
     let result = crate::agent::quick_response(
-        client.as_ref(),
+        &**llm_client,
         &messages_snap,
         &sys_prompt,
         text,
@@ -1021,6 +1043,7 @@ async fn get_or_create_entry(
     settings: &Settings,
     controller_prompt: Option<&str>,
     chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
+    client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
 ) -> crate::Result<Arc<ChatEntry>> {
     // Fast path: entry already exists.
     {
@@ -1037,7 +1060,7 @@ async fn get_or_create_entry(
         crate::controller::AgentMode::Private
     };
     let mut agent =
-        crate::controller::build_agent(settings, controller_prompt, mode).await?;
+        crate::controller::build_agent(settings, controller_prompt, mode, client).await?;
 
     let chat_key = chat_id.to_string();
 

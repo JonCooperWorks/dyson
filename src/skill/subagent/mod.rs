@@ -350,11 +350,15 @@ impl Tool for SubagentTool {
         };
 
         // -- Create the child's LLM client --
+        // Subagents may use a different provider/model, so they get their
+        // own client.  Wrapped with an unlimited handle since the parent's
+        // rate limiter already gates overall LLM access.
         let client = crate::llm::create_client(
             &child_settings,
             self.workspace.clone(),
             false, // subagents don't forward dangerous_no_sandbox
         );
+        let client = crate::agent::rate_limiter::RateLimitedHandle::unlimited(client);
 
         // -- Build skills from inherited tools --
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(FilteredSkill {

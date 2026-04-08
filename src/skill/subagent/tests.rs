@@ -177,7 +177,7 @@ async fn subagent_runs_child_and_returns_result() {
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(FilteredSkill { tools: vec![] })];
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
-        crate::agent::Agent::new(Box::new(llm), sandbox, skills, &settings, None, 0).unwrap();
+        crate::agent::Agent::new(crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0).unwrap();
     agent.set_depth(1);
 
     let mut capture = CaptureOutput::new();

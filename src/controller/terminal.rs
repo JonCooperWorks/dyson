@@ -68,7 +68,21 @@ impl super::Controller for TerminalController {
 
     async fn run(&self, settings: &Settings) -> crate::Result<()> {
         let mut current_settings = settings.clone();
-        let mut agent = super::build_agent(&current_settings, None, super::AgentMode::Private).await?;
+
+        // Create the shared LLM client once — all agents (and reloads)
+        // share the same client instance and rate-limit window.
+        let shared_client = super::create_shared_client(&current_settings, None);
+
+        let client_handle = shared_client.handle(
+            crate::agent::rate_limiter::Priority::UserFacing,
+        );
+        let mut agent = super::build_agent(
+            &current_settings,
+            None,
+            super::AgentMode::Private,
+            client_handle.clone(),
+        )
+        .await?;
         let mut output = TerminalOutput::new();
 
         let mut current_provider =
@@ -90,6 +104,7 @@ impl super::Controller for TerminalController {
                 &mut current_provider,
                 &mut current_model,
                 None,
+                client_handle.clone(),
             )
             .await
             {
@@ -129,6 +144,7 @@ impl super::Controller for TerminalController {
                 &mut current_model,
                 config_path.as_deref(),
                 None,
+                client_handle.clone(),
             )
             .await
             {
