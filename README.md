@@ -165,6 +165,7 @@ Secrets can be literal strings or resolver references (`{ "resolver": "insecure_
 | [Knowledge Base](docs/knowledge-base.md) | Document storage, FTS5 search, kb/raw + kb/wiki, INDEX.md |
 | [Chat Persistence](docs/chat-persistence.md) | ChatHistory trait, per-chat agents |
 | [Tool Forwarding over MCP](docs/tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth |
+| [Public Agents](docs/public-agents.md) | Group chat agents, AgentMode, tool restriction, SSRF protection |
 | [Subagents](docs/subagents.md) | Child agents with different models, tool inheritance, delegation |
 
 ## Tests
