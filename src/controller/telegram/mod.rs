@@ -342,12 +342,17 @@ impl super::Controller for TelegramController {
                 offset = update.update_id + 1;
 
                 if let Some(cb) = &update.callback_query {
-                    let cb_chat_id = cb.message.as_ref().map(|m| ChatId(m.chat.id));
+                    let cb_chat = cb.message.as_ref().map(|m| &m.chat);
+                    let cb_chat_id = cb_chat.map(|c| ChatId(c.id));
+                    let cb_is_group = cb_chat.is_some_and(|c| c.is_group());
                     let cb_data = cb.data.clone().unwrap_or_default();
                     let _ = bot.answer_callback_query(&cb.id).await;
 
                     if let Some(chat_id) = cb_chat_id {
-                        if !allowed_ids.is_empty() && !allowed_ids.contains(&chat_id.0) {
+                        if !cb_is_group
+                            && !allowed_ids.is_empty()
+                            && !allowed_ids.contains(&chat_id.0)
+                        {
                             continue;
                         }
                         handle_callback_query(
@@ -397,8 +402,13 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                if !allowed_ids.is_empty() && !allowed_ids.contains(&chat_id.0) {
-                    tracing::warn!(chat_id = chat_id.0, "unauthorized chat — ignoring");
+                let is_group = msg.chat.is_group();
+
+                // Group chats are always allowed — they run as public agents
+                // with restricted tools, so they're safe without whitelisting.
+                // Private chats require explicit allowed_chat_ids.
+                if !is_group && !allowed_ids.is_empty() && !allowed_ids.contains(&chat_id.0) {
+                    tracing::warn!(chat_id = chat_id.0, "unauthorized private chat — ignoring");
                     continue;
                 }
 
@@ -409,8 +419,6 @@ impl super::Controller for TelegramController {
                 {
                     continue;
                 }
-
-                let is_group = msg.chat.is_group();
 
                 if text == "/clear" || text == "/compact" || text.starts_with("/model ") {
                     let entry = match get_or_create_entry(
@@ -501,9 +509,9 @@ async fn rebuild_agents_on_reload(
         let is_group = entry.is_group;
         drop(ca);
 
-        // Group chats get restricted agents; private chats get full agents.
-        let agent_result: crate::Result<crate::agent::Agent> = if is_group {
-            build_group_agent(settings, controller_prompt).map(|mut a| {
+        // Public agents rebuild from scratch; private agents preserve provider/model.
+        let agent_result = if is_group {
+            super::build_agent(settings, controller_prompt, true).await.map(|mut a| {
                 a.set_messages(messages.clone());
                 a
             })
@@ -913,46 +921,6 @@ async fn handle_models_command(bot: &BotApi, chat_id: ChatId, settings: &Setting
     let _ = bot.send_message_with_keyboard(chat_id, "Select a model:", &keyboard).await;
 }
 
-/// Build a restricted agent for group chats — web_search + web_fetch only.
-///
-/// SECURITY: Always creates a PolicySandbox regardless of the parent process's
-/// --dangerous-no-sandbox flag.  Group chat agents are public-facing and their
-/// SSRF sandbox MUST remain active.
-fn build_group_agent(
-    settings: &Settings,
-    controller_prompt: Option<&str>,
-) -> crate::Result<crate::agent::Agent> {
-    let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
-        crate::skill::builtin::BuiltinSkill::new_filtered(
-            settings.web_search.as_ref(),
-            &["web_search".into(), "web_fetch".into()],
-        ),
-    )];
-
-    let mut agent_settings = settings.agent.clone();
-
-    // Group chat system prompt: web research only, no file/shell access.
-    agent_settings.system_prompt.push_str(
-        "\n\nYou are in a Telegram group chat. You can search the web and fetch web pages \
-         to answer questions. You do NOT have access to the filesystem, shell commands, \
-         or any workspace tools. Be concise and cite your sources.",
-    );
-
-    if let Some(prompt) = controller_prompt {
-        agent_settings.system_prompt.push_str("\n\n");
-        agent_settings.system_prompt.push_str(prompt);
-    }
-
-    let client = crate::llm::create_client(&agent_settings, None, false);
-    // SECURITY: Always false — group chat sandbox is never disabled.
-    let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, false);
-
-    crate::agent::Agent::builder(client, sandbox)
-        .skills(skills)
-        .settings(&agent_settings)
-        .build()
-}
-
 /// Get or create a per-chat entry, restoring persisted history if available.
 ///
 /// Takes a read lock on the map first (fast path).  Only upgrades to a write
@@ -976,11 +944,9 @@ async fn get_or_create_entry(
     }
 
     // Slow path: create a new agent for this chat.
-    let mut agent = if is_group {
-        build_group_agent(settings, controller_prompt)?
-    } else {
-        crate::controller::build_agent(settings, controller_prompt).await?
-    };
+    // Public (group) agents get restricted tools; private agents get everything.
+    let mut agent =
+        crate::controller::build_agent(settings, controller_prompt, is_group).await?;
 
     let chat_key = chat_id.to_string();
 

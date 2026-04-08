@@ -14,13 +14,14 @@ public API means anyone can try to make the agent `rm -rf /`, read
 by removing the dangerous tools entirely and enforcing SSRF protection on
 what remains.
 
-**Current support:** Telegram group chats (automatic detection). The
-architecture is controller-agnostic — any future controller (HTTP API,
-Discord, Slack) can reuse `build_group_agent()` and the SSRF sandbox for
-its own public-facing mode.
+**Current support:** Telegram group chats (automatic — just add the bot to
+a group). The public/private decision is made at the controller level via a
+single `build_agent(settings, prompt, public)` call. Any future controller
+(HTTP API, Discord, Slack) uses the same function with `public: true`.
 
 **Key files:**
-- `src/controller/telegram/mod.rs` — `build_group_agent()`, `get_or_create_entry()` (group detection)
+- `src/controller/mod.rs` — `build_agent()` with `public` flag, `build_public_agent()` (the single configuration point)
+- `src/controller/telegram/mod.rs` — `get_or_create_entry()` passes `is_group` as the `public` flag
 - `src/controller/telegram/types.rs` — `ChatType` enum, `Chat::is_group()`
 - `src/sandbox/policy_sandbox.rs` — `check_web_fetch()`, `check_url_not_internal()` (SSRF protection)
 - `src/sandbox/policy.rs` — `web_fetch` default policy entry
@@ -46,23 +47,39 @@ search and page fetching, but it cannot touch the host system.
 
 ---
 
-## Telegram Integration
+## How It Works
+
+The `build_agent()` function in `src/controller/mod.rs` is the single point
+of control. It takes a `public: bool` parameter:
+
+```rust
+pub async fn build_agent(
+    settings: &Settings,
+    controller_prompt: Option<&str>,
+    public: bool,                        // ← controllers set this
+) -> Result<Agent>
+```
+
+Controllers don't configure tools, sandbox, or workspace themselves — they
+just declare whether a session is public, and `build_agent` handles the rest.
+
+### Telegram Integration
 
 The Telegram controller detects group chats via the `type` field in the
-Telegram Bot API's `Chat` object. When a message arrives from a group or
-supergroup, the controller builds a public agent instead of the full-featured
-one used for private chats.
+Telegram Bot API's `Chat` object. Group chats are automatically allowed
+without being in `allowed_chat_ids` — they always run as public agents,
+so they're safe without explicit whitelisting.
 
 ```text
 Message arrives from Telegram
   │
-  ├── chat.type == Private     →  build_agent()        [full tools + workspace]
-  └── chat.type == Group       →  build_group_agent()  [web_search + web_fetch only]
+  ├── chat.type == Private     →  build_agent(settings, prompt, false)  [full agent]
+  └── chat.type == Group       →  build_agent(settings, prompt, true)   [public agent]
           or Supergroup
 ```
 
-Each chat (private or group) gets its own agent instance and conversation
-history, exactly like before. The only difference is which tools are loaded.
+Each chat gets its own agent instance and conversation history. The only
+difference is which tools are loaded.
 
 ---
 
@@ -72,10 +89,11 @@ history, exactly like before. The only difference is which tools are loaded.
 |---------|-------------|----------|
 | Tool restriction | `BuiltinSkill::new_filtered()` with allowlist `["web_search", "web_fetch"]` | `build_group_agent()` |
 | No bash/file access | Tools not in registry — LLM cannot call them | `skill/builtin.rs` |
-| No workspace tools | No workspace passed to `Agent::builder()` — workspace tools have nothing to operate on | `build_group_agent()` |
-| No dreams | `nudge_interval = 0`, no workspace — dream system never fires | `build_group_agent()` |
+| No workspace tools | No workspace passed to `Agent::builder()` — workspace tools have nothing to operate on | `build_public_agent()` |
+| No dreams | `nudge_interval = 0`, no workspace — dream system never fires | `build_public_agent()` |
 | SSRF protection | `PolicySandbox` blocks internal/private IPs for `web_fetch` | `policy_sandbox.rs` |
-| Sandbox always active | `create_sandbox(config, false)` — hardcoded, ignores `--dangerous-no-sandbox` | `build_group_agent()` |
+| Sandbox always active | `create_sandbox(config, false)` — hardcoded, ignores `--dangerous-no-sandbox` | `build_public_agent()` |
+| Groups auto-allowed | Group chats bypass `allowed_chat_ids` — they're always public and safe | Telegram controller |
 | Per-chat isolation | Same `HashMap<i64, Arc<ChatEntry>>` as private chats | `get_or_create_entry()` |
 
 ### SSRF Protection
@@ -105,27 +123,23 @@ agents get SSRF protection too, not just public ones.
 
 ## Adding Public Agent Support to a New Controller
 
-Any controller can build a public agent by calling `build_group_agent()`
-(or reimplementing the same pattern):
+Call `build_agent(settings, prompt, true)`. That's it. The controller module
+handles tool filtering, sandbox enforcement, and workspace omission. The
+controller just needs to decide *when* to pass `true`:
 
-1. **Create restricted skills** — `BuiltinSkill::new_filtered()` with only
-   `["web_search", "web_fetch"]`.
-2. **Create client and sandbox** — pass `false` for `dangerous_no_sandbox`
-   to both `create_client()` and `create_sandbox()`. This is the critical
-   security invariant: the sandbox must always be active for public agents,
-   even if the operator started Dyson with `--dangerous-no-sandbox`.
-3. **Build via `Agent::builder()`** — no `.workspace()`, no `.nudge_interval()`.
-4. **Detect the public context** — Telegram uses chat type; an HTTP
-   controller might use a config flag or endpoint path.
+- **Telegram**: `msg.chat.is_group()` — group chats are public.
+- **HTTP API**: could be a config flag, endpoint path, or auth level.
+- **Discord**: public channels vs DMs.
 
 ---
 
 ## Configuration
 
 No special configuration is needed. Group chat detection is automatic.
-Add the bot to a Telegram group and it works.
+Add the bot to a Telegram group and it works — group chats are always
+allowed regardless of `allowed_chat_ids`, since they run as public agents.
 
-The group must be in the `allowed_chat_ids` list (or `allow_all_chats: true`):
+Private chats still require `allowed_chat_ids` (or `allow_all_chats: true`):
 
 ```json
 {
@@ -134,15 +148,12 @@ The group must be in the `allowed_chat_ids` list (or `allow_all_chats: true`):
       "type": "telegram",
       "bot_token": "...",
       "allowed_chat_ids": [
-        -1001234567890
+        123456789
       ]
     }
   ]
 }
 ```
-
-Group chat IDs are negative numbers in Telegram. Use the `/whoami` command
-in the group to discover the chat ID.
 
 ### Customizing the SSRF Policy
 
@@ -169,6 +180,6 @@ it cannot be disabled via configuration.
 ## Reload Behavior
 
 When the config or workspace is reloaded (file change detected), all agents
-are rebuilt. Public agents are rebuilt with `build_group_agent()` — they
-stay restricted. The `is_group` flag is stored per chat entry and preserved
-across reloads.
+are rebuilt. Public agents are rebuilt with `build_agent(settings, prompt, true)`
+— they stay restricted. The `is_group` flag is stored per chat entry and
+preserved across reloads.
