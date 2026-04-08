@@ -15,13 +15,13 @@ by removing the dangerous tools entirely and enforcing SSRF protection on
 what remains.
 
 **Current support:** Telegram group chats (automatic — just add the bot to
-a group). The public/private decision is made at the controller level via a
-single `build_agent(settings, prompt, public)` call. Any future controller
-(HTTP API, Discord, Slack) uses the same function with `public: true`.
+a group). The public/private decision is made at the controller level via
+the `AgentMode` enum. Any future controller (HTTP API, Discord, Slack)
+passes `AgentMode::Public` to the same `build_agent()` function.
 
 **Key files:**
-- `src/controller/mod.rs` — `build_agent()` with `public` flag, `build_public_agent()` (the single configuration point)
-- `src/controller/telegram/mod.rs` — `get_or_create_entry()` passes `is_group` as the `public` flag
+- `src/controller/mod.rs` — `AgentMode` enum, `build_agent()`, `build_public_agent()`
+- `src/controller/telegram/mod.rs` — `get_or_create_entry()` maps `is_group` to `AgentMode`
 - `src/controller/telegram/types.rs` — `ChatType` enum, `Chat::is_group()`
 - `src/sandbox/policy_sandbox.rs` — `check_web_fetch()`, `check_url_not_internal()` (SSRF protection)
 - `src/sandbox/policy.rs` — `web_fetch` default policy entry
@@ -49,32 +49,39 @@ search and page fetching, but it cannot touch the host system.
 
 ## How It Works
 
-The `build_agent()` function in `src/controller/mod.rs` is the single point
-of control. It takes a `public: bool` parameter:
+The `AgentMode` enum and `build_agent()` function in `src/controller/mod.rs`
+are the single point of control:
 
 ```rust
+pub enum AgentMode {
+    /// Full-featured agent for trusted users.
+    Private,
+    /// Hardened agent for untrusted users — web_search + web_fetch only.
+    Public,
+}
+
 pub async fn build_agent(
     settings: &Settings,
     controller_prompt: Option<&str>,
-    public: bool,                        // ← controllers set this
+    mode: AgentMode,
 ) -> Result<Agent>
 ```
 
 Controllers don't configure tools, sandbox, or workspace themselves — they
-just declare whether a session is public, and `build_agent` handles the rest.
+just declare the mode, and `build_agent` handles the rest.
 
 ### Telegram Integration
 
-The Telegram controller detects group chats via the `type` field in the
-Telegram Bot API's `Chat` object. Group chats are automatically allowed
-without being in `allowed_chat_ids` — they always run as public agents,
-so they're safe without explicit whitelisting.
+The Telegram controller detects group chats via the `ChatType` enum
+deserialized from the Telegram Bot API's `Chat` object. Group chats are
+automatically allowed without being in `allowed_chat_ids` — they always
+run as public agents, so they're safe without explicit whitelisting.
 
 ```text
 Message arrives from Telegram
   │
-  ├── chat.type == Private     →  build_agent(settings, prompt, false)  [full agent]
-  └── chat.type == Group       →  build_agent(settings, prompt, true)   [public agent]
+  ├── ChatType::Private     →  build_agent(settings, prompt, AgentMode::Private)
+  └── ChatType::Group       →  build_agent(settings, prompt, AgentMode::Public)
           or Supergroup
 ```
 
@@ -87,7 +94,7 @@ difference is which tools are loaded.
 
 | Concern | Enforcement | Location |
 |---------|-------------|----------|
-| Tool restriction | `BuiltinSkill::new_filtered()` with allowlist `["web_search", "web_fetch"]` | `build_group_agent()` |
+| Tool restriction | `BuiltinSkill::new_filtered()` with allowlist `["web_search", "web_fetch"]` | `build_public_agent()` |
 | No bash/file access | Tools not in registry — LLM cannot call them | `skill/builtin.rs` |
 | No workspace tools | No workspace passed to `Agent::builder()` — workspace tools have nothing to operate on | `build_public_agent()` |
 | No dreams | `nudge_interval = 0`, no workspace — dream system never fires | `build_public_agent()` |
@@ -123,11 +130,11 @@ agents get SSRF protection too, not just public ones.
 
 ## Adding Public Agent Support to a New Controller
 
-Call `build_agent(settings, prompt, true)`. That's it. The controller module
-handles tool filtering, sandbox enforcement, and workspace omission. The
-controller just needs to decide *when* to pass `true`:
+Pass `AgentMode::Public` to `build_agent()`. That's it. The controller
+module handles tool filtering, sandbox enforcement, and workspace omission.
+The controller just needs to decide *when* to use `AgentMode::Public`:
 
-- **Telegram**: `msg.chat.is_group()` — group chats are public.
+- **Telegram**: `msg.chat.is_group()` maps to `AgentMode::Public`.
 - **HTTP API**: could be a config flag, endpoint path, or auth level.
 - **Discord**: public channels vs DMs.
 
@@ -180,6 +187,6 @@ it cannot be disabled via configuration.
 ## Reload Behavior
 
 When the config or workspace is reloaded (file change detected), all agents
-are rebuilt. Public agents are rebuilt with `build_agent(settings, prompt, true)`
-— they stay restricted. The `is_group` flag is stored per chat entry and
-preserved across reloads.
+are rebuilt. Public agents are rebuilt with `AgentMode::Public` — they stay
+restricted. The `is_group` flag is stored per chat entry and preserved
+across reloads.
