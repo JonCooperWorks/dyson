@@ -102,6 +102,8 @@ pub async fn run(
             let mut sigterm = tokio::signal::unix::signal(
                 tokio::signal::unix::SignalKind::terminate(),
             )
+            // INVARIANT: signal handler registration only fails if the OS
+            // signal subsystem is broken — fatal, no recovery possible.
             .expect("failed to register SIGTERM handler");
 
             tokio::select! {

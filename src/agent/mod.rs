@@ -956,29 +956,34 @@ impl Agent {
     }
 
     /// Auto-compact if estimated context tokens exceed the threshold.
+    ///
+    /// When no explicit `CompactionConfig` is set, falls back to defaults
+    /// (200k context window, 50% threshold) so conversations always have a
+    /// safety net against unbounded growth.
     async fn auto_compact_if_needed(
         &mut self,
         turn_system_prompt: &str,
         output: &mut dyn Output,
     ) {
-        if let Some(ref config) = self.compaction_config
-            && self.conversation.messages.len() > config.protect_head
-        {
-            let threshold = config.threshold();
-            let estimated_tokens = self.estimate_context_tokens(turn_system_prompt);
-            if estimated_tokens > threshold {
-                tracing::info!(
-                    estimated_tokens,
-                    threshold,
-                    messages = self.conversation.messages.len(),
-                    "estimated context tokens exceed compaction threshold — compacting"
+        let config = self.compaction_config.unwrap_or_default();
+        if self.conversation.messages.len() <= config.protect_head {
+            return;
+        }
+        let threshold = config.threshold();
+        let estimated_tokens = self.estimate_context_tokens(turn_system_prompt);
+        if estimated_tokens > threshold {
+            tracing::info!(
+                estimated_tokens,
+                threshold,
+                messages = self.conversation.messages.len(),
+                has_explicit_config = self.compaction_config.is_some(),
+                "estimated context tokens exceed compaction threshold — compacting"
+            );
+            if let Err(e) = self.compact(output).await {
+                tracing::warn!(
+                    error = %e,
+                    "auto-compaction failed — continuing with full history"
                 );
-                if let Err(e) = self.compact(output).await {
-                    tracing::warn!(
-                        error = %e,
-                        "auto-compaction failed — continuing with full history"
-                    );
-                }
             }
         }
     }

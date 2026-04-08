@@ -81,7 +81,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::error::{DysonError, Result};
-use crate::llm::cli_subprocess::{CliLineParser, cli_event_stream};
+use crate::llm::cli_subprocess::{self, CliLineParser, cli_event_stream};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use crate::message::Message;
@@ -225,11 +225,7 @@ impl LlmClient for CodexClient {
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
         // When MCP is active, tools are structured — skip text descriptions.
-        let prompt_tools: Vec<_> = if self.workspace.is_some() {
-            vec![]
-        } else {
-            tools.iter().filter(|t| !t.agent_only).collect()
-        };
+        let prompt_tools = cli_subprocess::filter_tools_for_cli(tools, self.workspace.is_some());
         let prompt = super::format_prompt(messages, &prompt_tools);
 
         tracing::debug!(
@@ -299,11 +295,7 @@ impl LlmClient for CodexClient {
 
         let event_stream = cli_event_stream(stdout, StreamParserState::new(), keep_alive);
 
-        Ok(crate::llm::StreamResponse {
-            stream: event_stream,
-            tool_mode: crate::llm::ToolMode::Observe,
-            input_tokens: None,
-        })
+        Ok(cli_subprocess::build_observe_response(event_stream))
     }
 
     fn set_mcp_tools(&self, tools: std::collections::HashMap<String, Arc<dyn Tool>>) {

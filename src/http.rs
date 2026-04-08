@@ -57,6 +57,8 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .pool_idle_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(32)
         .build()
+        // INVARIANT: TLS crypto provider installed above; builder only fails
+        // on TLS init, which is fatal (no recovery possible).
         .expect("failed to build HTTP client")
 });
 

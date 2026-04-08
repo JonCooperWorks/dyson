@@ -353,6 +353,8 @@ impl DreamHandle {
 
                 tracing::debug!("dream thread shutting down");
             })
+            // INVARIANT: thread spawn only fails when the OS is out of
+            // resources — fatal for the agent, no graceful degradation.
             .expect("failed to spawn dream thread");
 
         Self {

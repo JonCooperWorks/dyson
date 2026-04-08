@@ -119,11 +119,13 @@ fn extract_gemma_tool_calls(text: &str) -> Option<(String, Vec<ExtractedToolCall
     // Pattern 1: <start_function_call>call:name{...}<end_function_call>
     static TAGGED_RE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"<start_function_call>\s*call:(\w+)\{([^}]*)\}\s*<end_function_call>")
+            // INVARIANT: hardcoded regex literal — compile failure is a code bug.
             .expect("tagged gemma regex")
     });
 
     // Pattern 2: bare call:name{...}
     static BARE_RE: LazyLock<Regex> = LazyLock::new(|| {
+        // INVARIANT: hardcoded regex literal — compile failure is a code bug.
         Regex::new(r"call:(\w+)\{([^}]*)\}").expect("bare gemma regex")
     });
 

@@ -19,6 +19,7 @@ use tokio::process::ChildStdout;
 
 use crate::error::{DysonError, Result};
 use crate::llm::stream::StreamEvent;
+use crate::llm::{StreamResponse, ToolDefinition, ToolMode};
 
 /// Trait for JSONL line parsers used by CLI subprocess clients.
 ///
@@ -84,4 +85,32 @@ pub(crate) fn cli_event_stream<P: CliLineParser>(
             yield event;
         }
     })
+}
+
+/// Build a `StreamResponse` for CLI clients that observe tool execution
+/// (the subprocess handles tools internally, Dyson doesn't execute them).
+pub(crate) fn build_observe_response(
+    stream: std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<StreamEvent>> + Send>>,
+) -> StreamResponse {
+    StreamResponse {
+        stream,
+        tool_mode: ToolMode::Observe,
+        input_tokens: None,
+    }
+}
+
+/// Filter tool definitions for CLI clients.
+///
+/// When a workspace is available, tools are served to the subprocess via
+/// MCP — return an empty list so the text prompt doesn't duplicate them.
+/// Otherwise, include non-agent-only tools for text-based tool descriptions.
+pub(crate) fn filter_tools_for_cli(
+    tools: &[ToolDefinition],
+    has_workspace: bool,
+) -> Vec<&ToolDefinition> {
+    if has_workspace {
+        vec![]
+    } else {
+        tools.iter().filter(|t| !t.agent_only).collect()
+    }
 }

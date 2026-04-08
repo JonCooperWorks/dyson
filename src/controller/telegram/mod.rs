@@ -745,6 +745,18 @@ async fn handle_per_chat_command(
     )
     .await;
 
+    // Snapshot state we need from the lock, then release it before I/O.
+    let (snapshot_msgs, snapshot_prompt, snapshot_config) = match &result {
+        super::CommandResult::Compacted => {
+            (Some(ca.agent.messages().to_vec()), None, None)
+        }
+        super::CommandResult::ModelSwitched { .. } => {
+            (None, Some(ca.agent.system_prompt().to_string()), Some(ca.agent.config().clone()))
+        }
+        _ => (None, None, None),
+    };
+    drop(ca); // Release lock before I/O and snapshot writes.
+
     match result {
         super::CommandResult::Cleared => {
             *entry.messages_snapshot.write().await = Vec::new();
@@ -754,9 +766,11 @@ async fn handle_per_chat_command(
         }
         super::CommandResult::Compacted => {
             let chat_key = chat_id.0.to_string();
-            let msgs = ca.agent.messages().to_vec();
-            *entry.messages_snapshot.write().await = msgs.clone();
-            let _ = chat_store.save(&chat_key, &msgs);
+            let msgs = snapshot_msgs.expect("set above for Compacted");
+            if let Err(e) = chat_store.save(&chat_key, &msgs) {
+                tracing::error!(error = %e, "failed to save chat history");
+            }
+            *entry.messages_snapshot.write().await = msgs;
             let _ = bot.send_message(chat_id, "Context compacted.").await;
             tracing::info!(chat_id = chat_id.0, "conversation compacted");
         }
@@ -768,9 +782,12 @@ async fn handle_per_chat_command(
             provider_type,
             model,
         } => {
-            *entry.system_prompt.write().await =
-                ca.agent.system_prompt().to_string();
-            *entry.config.write().await = ca.agent.config().clone();
+            if let Some(prompt) = snapshot_prompt {
+                *entry.system_prompt.write().await = prompt;
+            }
+            if let Some(config) = snapshot_config {
+                *entry.config.write().await = config;
+            }
             let _ = bot
                 .send_message(
                     chat_id,
@@ -853,11 +870,14 @@ async fn run_agent_for_message(
         let _ = output.error(&e);
     }
 
+    // Snapshot messages, then release the lock before I/O.
     let msgs = ca.agent.messages().to_vec();
-    *entry.messages_snapshot.write().await = msgs.clone();
+    drop(ca);
+
     if let Err(e) = chat_store.save(&chat_key, &msgs) {
         tracing::error!(error = %e, "failed to save chat history");
     }
+    *entry.messages_snapshot.write().await = msgs;
 }
 
 /// Send a quick response (no tools, fast) when the agent is busy.

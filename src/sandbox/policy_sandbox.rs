@@ -127,9 +127,9 @@ impl Sandbox for PolicySandbox {
             // ----- Network tools + unknown tools (including MCP) -----
             _ => {
                 if policy.network == Access::Deny {
-                    tracing::debug!(
+                    tracing::warn!(
                         tool = tool_name,
-                        "sandbox policy denies network access"
+                        "sandbox DENY: network access blocked"
                     );
                     return Ok(SandboxDecision::Deny {
                         reason: format!(
@@ -295,6 +295,7 @@ fn check_file_access(
     };
 
     if check_read && !check_path_access(&policy.file_read, file_path, working_dir) {
+        tracing::warn!(tool = tool_name, path = file_path, "sandbox DENY: file read blocked");
         return Ok(SandboxDecision::Deny {
             reason: format!(
                 "sandbox policy denies file read for '{file_path}' by tool '{tool_name}'"
@@ -303,6 +304,7 @@ fn check_file_access(
     }
 
     if check_write && !check_path_access(&policy.file_write, file_path, working_dir) {
+        tracing::warn!(tool = tool_name, path = file_path, "sandbox DENY: file write blocked");
         return Ok(SandboxDecision::Deny {
             reason: format!(
                 "sandbox policy denies file write for '{file_path}' by tool '{tool_name}'"

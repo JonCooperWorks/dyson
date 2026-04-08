@@ -89,6 +89,10 @@ impl OpenClawWorkspace {
 
         let mut files = HashMap::new();
 
+        // Maximum size for any single workspace file.  Files larger than
+        // this are skipped with a warning to avoid excessive memory usage.
+        const MAX_WORKSPACE_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+
         // Read top-level .md files.
         for entry in std::fs::read_dir(path)
             .map_err(|e| DysonError::Config(format!("cannot read workspace dir: {e}")))?
@@ -96,6 +100,10 @@ impl OpenClawWorkspace {
             let entry = entry.map_err(DysonError::Io)?;
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".md") && entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_WORKSPACE_FILE_SIZE {
+                    tracing::warn!(file = %name, "skipping workspace file — exceeds 10 MB size limit");
+                    continue;
+                }
                 let content = std::fs::read_to_string(entry.path())?;
                 files.insert(name, content);
             }
@@ -108,6 +116,10 @@ impl OpenClawWorkspace {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.ends_with(".md") {
+                    if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_WORKSPACE_FILE_SIZE {
+                        tracing::warn!(file = %format!("memory/{name}"), "skipping workspace file — exceeds 10 MB size limit");
+                        continue;
+                    }
                     let content = std::fs::read_to_string(entry.path())?;
                     files.insert(format!("memory/{name}"), content);
                 }

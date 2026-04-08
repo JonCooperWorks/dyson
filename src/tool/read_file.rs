@@ -62,8 +62,28 @@ impl Tool for ReadFileTool {
         let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize;
         let limit = input["limit"].as_u64().map(|l| l as usize);
 
-        // Read only the lines we need using skip/take to avoid loading
-        // the entire file when offset/limit are specified.
+        // Guard against reading very large files into memory.
+        const MAX_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
+        match tokio::fs::metadata(&path).await {
+            Ok(meta) if meta.len() > MAX_FILE_SIZE => {
+                return Ok(ToolOutput::error(format!(
+                    "file '{}' is too large ({:.1} MB, limit is {:.0} MB)",
+                    path.display(),
+                    meta.len() as f64 / (1024.0 * 1024.0),
+                    MAX_FILE_SIZE as f64 / (1024.0 * 1024.0),
+                )));
+            }
+            Err(e) => {
+                return Ok(ToolOutput::error(format!(
+                    "cannot stat '{}': {e}",
+                    path.display()
+                )));
+            }
+            _ => {}
+        }
+
+        // Read the full file, then apply offset/limit in memory.
+        // The size check above bounds peak memory usage.
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(e) => {
