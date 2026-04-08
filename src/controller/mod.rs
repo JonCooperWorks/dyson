@@ -170,14 +170,12 @@ pub async fn build_agent(
         .await
     };
 
-    crate::agent::Agent::new(
-        client,
-        sandbox,
-        skills,
-        &agent_settings,
-        Some(workspace),
-        nudge_interval,
-    )
+    crate::agent::Agent::builder(client, sandbox)
+        .skills(skills)
+        .settings(&agent_settings)
+        .workspace(workspace)
+        .nudge_interval(nudge_interval)
+        .build()
 }
 
 // ---------------------------------------------------------------------------

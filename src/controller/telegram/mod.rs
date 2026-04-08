@@ -502,9 +502,11 @@ async fn rebuild_agents_on_reload(
         drop(ca);
 
         // Group chats get restricted agents; private chats get full agents.
-        let agent_result = if is_group {
-            build_group_agent(settings, controller_prompt)
-                .map(|mut a| { a.set_messages(messages.clone()); a })
+        let agent_result: crate::Result<crate::agent::Agent> = if is_group {
+            build_group_agent(settings, controller_prompt).map(|mut a| {
+                a.set_messages(messages.clone());
+                a
+            })
         } else {
             super::build_agent_with_provider(
                 settings,
@@ -945,7 +947,7 @@ fn build_group_agent(
     // SECURITY: Always false — group chat sandbox is never disabled.
     let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, false);
 
-    crate::agent::AgentBuilder::new(client, sandbox)
+    crate::agent::Agent::builder(client, sandbox)
         .skills(skills)
         .settings(&agent_settings)
         .build()

@@ -111,7 +111,10 @@ impl Sandbox for PolicySandbox {
                 check_file_access(tool_name, input, &policy, &self.working_dir, true, true)
             }
 
-            // ----- Web fetch: network + SSRF check -----
+            // ----- Web tools -----
+            // web_search: queries a search API (no arbitrary URLs) — network gate only.
+            // web_fetch: fetches arbitrary URLs — network gate + SSRF check.
+            "web_search" => check_network_only(tool_name, &policy, input),
             "web_fetch" => check_web_fetch(input, &policy),
 
             // ----- Internal tools — always allowed -----
@@ -304,6 +307,22 @@ fn check_web_fetch(
     })
 }
 
+/// Check a tool that only needs network access — no SSRF or file checks.
+fn check_network_only(
+    tool_name: &str,
+    policy: &SandboxPolicy,
+    input: &serde_json::Value,
+) -> Result<SandboxDecision> {
+    if policy.network == Access::Deny {
+        return Ok(SandboxDecision::Deny {
+            reason: format!("sandbox policy denies network access for tool '{tool_name}'"),
+        });
+    }
+    Ok(SandboxDecision::Allow {
+        input: input.clone(),
+    })
+}
+
 /// Validate that a URL does not target internal network resources.
 ///
 /// Blocks:
@@ -422,21 +441,22 @@ fn check_ip_not_internal(ip: std::net::IpAddr, original_host: &str) -> std::resu
 }
 
 /// Check if the last two segments of an IPv4-mapped IPv6 address encode a private IPv4.
+///
+/// Reconstructs the embedded IPv4 address and delegates to the same std library
+/// checks used by `check_ip_not_internal` for native IPv4 — single source of truth.
 fn is_v4_mapped_private(hi: u16, lo: u16) -> bool {
-    let a = (hi >> 8) as u8;
-    let b = (hi & 0xff) as u8;
-    // 10.0.0.0/8
-    a == 10
-    // 172.16.0.0/12
-    || (a == 172 && (b & 0xf0) == 16)
-    // 192.168.0.0/16
-    || (a == 192 && b == 168)
-    // 127.0.0.0/8
-    || a == 127
-    // 169.254.0.0/16
-    || (a == 169 && b == 254)
-    // 0.0.0.0
-    || (a == 0 && b == 0 && (lo >> 8) == 0 && (lo & 0xff) == 0)
+    let v4 = std::net::Ipv4Addr::new(
+        (hi >> 8) as u8,
+        (hi & 0xff) as u8,
+        (lo >> 8) as u8,
+        (lo & 0xff) as u8,
+    );
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_unspecified()
+        || v4.octets()[0] >= 224
 }
 
 // ---------------------------------------------------------------------------

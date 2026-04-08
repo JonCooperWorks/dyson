@@ -68,14 +68,12 @@ pub async fn run(
         let ws = workspace.read().await;
         ws.nudge_interval()
     };
-    let mut agent = dyson::agent::Agent::new(
-        client,
-        sandbox,
-        skills,
-        &agent_settings,
-        Some(workspace),
-        nudge_interval,
-    )?;
+    let mut agent = dyson::agent::Agent::builder(client, sandbox)
+        .skills(skills)
+        .settings(&agent_settings)
+        .workspace(workspace)
+        .nudge_interval(nudge_interval)
+        .build()?;
     let mut output = dyson::controller::terminal::TerminalOutput::new();
     agent.run(&prompt, &mut output).await?;
     println!();

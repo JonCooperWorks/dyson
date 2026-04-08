@@ -351,21 +351,21 @@ pub struct Agent {
 }
 
 // ---------------------------------------------------------------------------
-// AgentBuilder — fluent construction for custom agent configurations.
+// AgentBuilder
 // ---------------------------------------------------------------------------
 
-/// Builder for constructing agents with selective components.
+/// Fluent builder for `Agent` — makes construction intent explicit.
 ///
-/// Use this when you need fine-grained control over agent construction —
-/// for example, building a public-facing agent with restricted tools and
-/// no workspace.  For standard full-featured agents, `Agent::new()` is
-/// simpler.
+/// Every agent construction path (full agent, provider switch, group chat)
+/// goes through this builder so the call site reads clearly:
 ///
 /// ```rust,ignore
-/// let agent = AgentBuilder::new(client, sandbox)
-///     .skills(vec![filtered_builtin])
-///     .settings(&agent_settings)
-///     .build()?;
+/// Agent::builder(client, sandbox)
+///     .skills(skills)
+///     .settings(&settings)
+///     .workspace(ws)
+///     .nudge_interval(5)
+///     .build()
 /// ```
 pub struct AgentBuilder {
     client: Box<dyn LlmClient>,
@@ -377,18 +377,6 @@ pub struct AgentBuilder {
 }
 
 impl AgentBuilder {
-    /// Start building an agent with the required components.
-    pub fn new(client: Box<dyn LlmClient>, sandbox: Arc<dyn Sandbox>) -> Self {
-        Self {
-            client,
-            sandbox,
-            skills: Vec::new(),
-            settings: AgentSettings::default(),
-            workspace: None,
-            nudge_interval: 0,
-        }
-    }
-
     /// Set the skills (and their tools) available to the agent.
     pub fn skills(mut self, skills: Vec<Box<dyn Skill>>) -> Self {
         self.skills = skills;
@@ -430,7 +418,21 @@ impl AgentBuilder {
 }
 
 impl Agent {
+    /// Start building an agent with the two required components.
+    pub fn builder(client: Box<dyn LlmClient>, sandbox: Arc<dyn Sandbox>) -> AgentBuilder {
+        AgentBuilder {
+            client,
+            sandbox,
+            skills: Vec::new(),
+            settings: AgentSettings::default(),
+            workspace: None,
+            nudge_interval: 0,
+        }
+    }
+
     /// Construct a new agent from its components.
+    ///
+    /// Prefer [`Agent::builder()`] for new code — it makes intent explicit.
     ///
     /// Delegates to focused constructors:
     /// - [`ToolRegistry::from_skills`] — flattens skills' tools into a lookup map.

@@ -60,19 +60,34 @@ impl Message {
     }
 }
 
+/// Telegram chat type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatType {
+    Private,
+    Group,
+    Supergroup,
+    Channel,
+}
+
+impl Default for ChatType {
+    fn default() -> Self {
+        Self::Private
+    }
+}
+
 /// A Telegram chat.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Chat {
     pub id: i64,
-    /// Chat type: "private", "group", "supergroup", or "channel".
     #[serde(rename = "type", default)]
-    pub chat_type: String,
+    pub chat_type: ChatType,
 }
 
 impl Chat {
     /// Returns true if this is a group or supergroup chat.
     pub fn is_group(&self) -> bool {
-        self.chat_type == "group" || self.chat_type == "supergroup"
+        matches!(self.chat_type, ChatType::Group | ChatType::Supergroup)
     }
 }
 
