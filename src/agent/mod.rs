@@ -725,6 +725,12 @@ impl Agent {
         &self.system_prompt
     }
 
+    /// Check whether a tool is registered by name.
+    #[cfg(test)]
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.tool_registry.tools.contains_key(name)
+    }
+
     /// Get the completion config (for quick response context).
     pub fn config(&self) -> &CompletionConfig {
         &self.config
