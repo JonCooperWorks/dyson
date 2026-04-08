@@ -193,8 +193,12 @@ pub async fn build_agent(
         .build()
 }
 
-/// Build a public agent — restricted to web_search + web_fetch, no workspace,
-/// sandbox always enforced.
+/// Build a public agent — restricted to web_search + web_fetch, no workspace
+/// write access, sandbox always enforced.
+///
+/// The agent gets SOUL.md and IDENTITY.md injected into its system prompt
+/// (read-only, in-memory only).  It does NOT receive a workspace reference,
+/// so it cannot modify identity or memory files via workspace tools.
 ///
 /// Called by `build_agent()` when `public == true`.  Kept as a separate
 /// function for clarity, not because callers should use it directly.
@@ -210,6 +214,29 @@ fn build_public_agent(
     )];
 
     let mut agent_settings = settings.agent.clone();
+
+    // Load the workspace read-only to extract SOUL.md and IDENTITY.md.
+    // The workspace is dropped after reading — the public agent never gets
+    // a workspace reference, so these files are read-only in-memory only.
+    if let Ok(workspace) = crate::workspace::create_workspace(&settings.workspace) {
+        let mut identity_parts: Vec<String> = Vec::new();
+
+        for (label, file) in [("PERSONALITY", "SOUL.md"), ("IDENTITY", "IDENTITY.md")] {
+            if let Some(content) = workspace.get(file) {
+                if !content.trim().is_empty() {
+                    identity_parts.push(format!("## {label}\n\n{content}"));
+                }
+            }
+        }
+
+        if !identity_parts.is_empty() {
+            agent_settings.system_prompt.push_str("\n\n");
+            agent_settings
+                .system_prompt
+                .push_str(&identity_parts.join("\n\n---\n\n"));
+        }
+        // workspace is dropped here — public agent has no write access.
+    }
 
     agent_settings.system_prompt.push_str(
         "\n\nYou are a public-facing agent with limited tools. You can search \

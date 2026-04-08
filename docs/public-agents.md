@@ -36,7 +36,8 @@ passes `AgentMode::Public` to the same `build_agent()` function.
 | Fetch web pages | Yes | Yes (SSRF-protected) |
 | Run shell commands | Yes | **No** |
 | Read/write files | Yes | **No** |
-| Workspace (memory, identity) | Yes | **No** |
+| Identity (SOUL.md, IDENTITY.md) | Yes (read/write) | **Read-only** (system prompt only) |
+| Workspace (memory, journals) | Yes | **No** |
 | Load/create skills | Yes | **No** |
 | MCP tools | Yes | **No** |
 | Subagents | Yes | **No** |
@@ -96,6 +97,7 @@ difference is which tools are loaded.
 |---------|-------------|----------|
 | Tool restriction | `BuiltinSkill::new_filtered()` with allowlist `["web_search", "web_fetch"]` | `build_public_agent()` |
 | No bash/file access | Tools not in registry — LLM cannot call them | `skill/builtin.rs` |
+| Read-only identity | SOUL.md and IDENTITY.md loaded into system prompt; no workspace reference passed to agent | `build_public_agent()` |
 | No workspace tools | No workspace passed to `Agent::builder()` — workspace tools have nothing to operate on | `build_public_agent()` |
 | No dreams | `nudge_interval = 0`, no workspace — dream system never fires | `build_public_agent()` |
 | SSRF protection | `PolicySandbox` blocks internal/private IPs for `web_fetch` | `policy_sandbox.rs` |
