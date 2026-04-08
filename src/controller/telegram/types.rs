@@ -64,6 +64,16 @@ impl Message {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Chat {
     pub id: i64,
+    /// Chat type: "private", "group", "supergroup", or "channel".
+    #[serde(rename = "type", default)]
+    pub chat_type: String,
+}
+
+impl Chat {
+    /// Returns true if this is a group or supergroup chat.
+    pub fn is_group(&self) -> bool {
+        self.chat_type == "group" || self.chat_type == "supergroup"
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -102,6 +102,10 @@ struct ChatEntry {
     system_prompt: tokio::sync::RwLock<String>,
     /// Completion config for quick response LLM calls.
     config: tokio::sync::RwLock<crate::llm::CompletionConfig>,
+    /// Whether this chat is a group/supergroup.
+    /// Group chats get restricted tools (web_search + web_fetch only)
+    /// with SSRF protection always enabled.
+    is_group: bool,
 }
 
 /// Minimum interval between message edits (milliseconds).
@@ -406,10 +410,13 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
+                let is_group = msg.chat.is_group();
+
                 if text == "/clear" || text == "/compact" || text.starts_with("/model ") {
                     let entry = match get_or_create_entry(
                         &agents,
                         chat_id.0,
+                        is_group,
                         &current_settings,
                         controller_prompt.as_deref(),
                         &chat_store,
@@ -436,11 +443,12 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                tracing::info!(chat_id = chat_id.0, "telegram message received");
+                tracing::info!(chat_id = chat_id.0, is_group, "telegram message received");
 
                 let entry = match get_or_create_entry(
                     &agents,
                     chat_id.0,
+                    is_group,
                     &current_settings,
                     controller_prompt.as_deref(),
                     &chat_store,
@@ -490,17 +498,25 @@ async fn rebuild_agents_on_reload(
         let provider_name = ca.provider_name.clone();
         let model = ca.model.clone();
         let messages = ca.agent.messages().to_vec();
+        let is_group = entry.is_group;
         drop(ca);
 
-        match super::build_agent_with_provider(
-            settings,
-            &provider_name,
-            Some(&model),
-            controller_prompt,
-            messages.clone(),
-        )
-        .await
-        {
+        // Group chats get restricted agents; private chats get full agents.
+        let agent_result = if is_group {
+            build_group_agent(settings, controller_prompt)
+                .map(|mut a| { a.set_messages(messages.clone()); a })
+        } else {
+            super::build_agent_with_provider(
+                settings,
+                &provider_name,
+                Some(&model),
+                controller_prompt,
+                messages.clone(),
+            )
+            .await
+        };
+
+        match agent_result {
             Ok(mut new_agent) => {
                 new_agent.set_chat_history(
                     Arc::clone(chat_store),
@@ -519,6 +535,7 @@ async fn rebuild_agents_on_reload(
                         messages_snapshot: tokio::sync::RwLock::new(messages),
                         system_prompt: tokio::sync::RwLock::new(sys_prompt),
                         config: tokio::sync::RwLock::new(cfg),
+                        is_group,
                     }),
                 );
             }
@@ -527,6 +544,7 @@ async fn rebuild_agents_on_reload(
                     chat_id,
                     provider = provider_name,
                     model,
+                    is_group,
                     error = %e,
                     "could not rebuild agent after reload — dropping",
                 );
@@ -556,13 +574,13 @@ async fn handle_callback_query(
         return;
     };
 
-    let existing_messages = {
+    let (existing_messages, is_group) = {
         let agents_map = agents.read().await;
         if let Some(entry) = agents_map.get(&chat_id.0) {
             let ca = entry.agent.lock().await;
-            ca.agent.messages().to_vec()
+            (ca.agent.messages().to_vec(), entry.is_group)
         } else {
-            Vec::new()
+            (Vec::new(), false)
         }
     };
 
@@ -598,6 +616,7 @@ async fn handle_callback_query(
                     messages_snapshot: tokio::sync::RwLock::new(existing_messages),
                     system_prompt: tokio::sync::RwLock::new(sys_prompt),
                     config: tokio::sync::RwLock::new(cfg),
+                    is_group,
                 }),
             );
             if let Some(cp) = config_path {
@@ -892,6 +911,46 @@ async fn handle_models_command(bot: &BotApi, chat_id: ChatId, settings: &Setting
     let _ = bot.send_message_with_keyboard(chat_id, "Select a model:", &keyboard).await;
 }
 
+/// Build a restricted agent for group chats — web_search + web_fetch only.
+///
+/// SECURITY: Always creates a PolicySandbox regardless of the parent process's
+/// --dangerous-no-sandbox flag.  Group chat agents are public-facing and their
+/// SSRF sandbox MUST remain active.
+fn build_group_agent(
+    settings: &Settings,
+    controller_prompt: Option<&str>,
+) -> crate::Result<crate::agent::Agent> {
+    let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
+        crate::skill::builtin::BuiltinSkill::new_filtered(
+            settings.web_search.as_ref(),
+            &["web_search".into(), "web_fetch".into()],
+        ),
+    )];
+
+    let mut agent_settings = settings.agent.clone();
+
+    // Group chat system prompt: web research only, no file/shell access.
+    agent_settings.system_prompt.push_str(
+        "\n\nYou are in a Telegram group chat. You can search the web and fetch web pages \
+         to answer questions. You do NOT have access to the filesystem, shell commands, \
+         or any workspace tools. Be concise and cite your sources.",
+    );
+
+    if let Some(prompt) = controller_prompt {
+        agent_settings.system_prompt.push_str("\n\n");
+        agent_settings.system_prompt.push_str(prompt);
+    }
+
+    let client = crate::llm::create_client(&agent_settings, None, false);
+    // SECURITY: Always false — group chat sandbox is never disabled.
+    let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, false);
+
+    crate::agent::AgentBuilder::new(client, sandbox)
+        .skills(skills)
+        .settings(&agent_settings)
+        .build()
+}
+
 /// Get or create a per-chat entry, restoring persisted history if available.
 ///
 /// Takes a read lock on the map first (fast path).  Only upgrades to a write
@@ -901,6 +960,7 @@ async fn handle_models_command(bot: &BotApi, chat_id: ChatId, settings: &Setting
 async fn get_or_create_entry(
     agents: &tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>,
     chat_id: i64,
+    is_group: bool,
     settings: &Settings,
     controller_prompt: Option<&str>,
     chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
@@ -914,8 +974,11 @@ async fn get_or_create_entry(
     }
 
     // Slow path: create a new agent for this chat.
-    let mut agent =
-        crate::controller::build_agent(settings, controller_prompt).await?;
+    let mut agent = if is_group {
+        build_group_agent(settings, controller_prompt)?
+    } else {
+        crate::controller::build_agent(settings, controller_prompt).await?
+    };
 
     let chat_key = chat_id.to_string();
 
@@ -950,6 +1013,7 @@ async fn get_or_create_entry(
         messages_snapshot: tokio::sync::RwLock::new(restored_messages),
         system_prompt: tokio::sync::RwLock::new(sys_prompt),
         config: tokio::sync::RwLock::new(config),
+        is_group,
     });
 
     // Insert under write lock.  Another task may have raced us, so use
