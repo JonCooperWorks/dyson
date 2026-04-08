@@ -76,7 +76,7 @@ CLI interrogate it generically — they never match on `LlmProvider` variants.
 | `default_model` | Fallback when user doesn't specify a model |
 | `env_var` | Environment variable for API key fallback |
 | `requires_api_key` | Whether to attempt key resolution at all |
-| `create_client` | Factory function called by the agent loop |
+| `create_client` | Factory function called by `ClientRegistry` to build the provider's `LlmClient` |
 | `canonical_name` | Display in `--provider` error messages |
 
 The `resolve_api_key()` method on `ProviderEntry` encapsulates the full

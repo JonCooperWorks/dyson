@@ -76,7 +76,7 @@ src/
     mod.rs                SecretResolver trait, SecretRegistry
     insecure_env.rs       InsecureEnvironmentVariable
   llm/
-    mod.rs                LlmClient trait, CompletionConfig, create_client() factory
+    mod.rs                LlmClient trait, CompletionConfig, create_client()
     registry.rs           Provider registry (aliases, defaults, env vars, factories)
     stream.rs             StreamEvent (TextDelta, ThinkingDelta, ToolUse*), StopReason
     anthropic.rs          Anthropic Messages API (extended thinking support)

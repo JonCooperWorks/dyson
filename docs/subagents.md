@@ -60,7 +60,7 @@ Parent Agent (e.g., Claude Sonnet)
 A subagent is **just a Tool**.  When the parent LLM calls it:
 
 1. `SubagentTool::run()` checks the recursion depth
-2. Creates a fresh `LlmClient` for the subagent's provider/model
+2. Creates an `LlmClient` for the subagent's provider/model (wrapped in an unlimited `RateLimitedHandle`)
 3. Wraps inherited parent tools in a `FilteredSkill`
 4. Constructs a child `Agent` with its own conversation history
 5. Runs the child to completion using `CaptureOutput`

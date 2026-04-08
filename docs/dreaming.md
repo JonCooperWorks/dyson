@@ -58,10 +58,11 @@ Dreams share the same sliding-window rate limiter as the main loop:
 A dream that hits the limit stops early — no retry, no blocking.
 
 ```
-RateLimited<Box<dyn LlmClient>>          (agent owns)
-    ├── access()                          → UserFacing (100%)
-    └── handle(Background)                → RateLimitedHandle (dreams get)
-            └── access()                  → Background (66%)
+RateLimited<Box<dyn LlmClient>>          (ClientRegistry owns)
+    └── handle(UserFacing)                → RateLimitedHandle (agent gets)
+            ├── access()                  → UserFacing (100%)
+            └── with_priority(Background) → RateLimitedHandle (dreams get)
+                    └── access()          → Background (66%)
 ```
 
 ## Core Types
