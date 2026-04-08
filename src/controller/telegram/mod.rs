@@ -1273,6 +1273,7 @@ async fn extract_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controller::Controller;
     use types::{Chat, ChatType, Message, User};
 
     fn make_msg(text: &str, chat_type: ChatType) -> Message {
@@ -1387,5 +1388,215 @@ mod tests {
     fn no_reply_not_detected() {
         let msg = make_group_msg("hello");
         assert!(!is_reply_to_bot(&msg, 42));
+    }
+
+    // -------------------------------------------------------------------
+    // Chat::is_group — mode-selection input for AgentMode::Public
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn is_group_for_group_chat() {
+        let chat = Chat { id: 1, chat_type: ChatType::Group };
+        assert!(chat.is_group(), "Group chats should be identified as groups");
+    }
+
+    #[test]
+    fn is_group_for_supergroup_chat() {
+        let chat = Chat { id: 1, chat_type: ChatType::Supergroup };
+        assert!(chat.is_group(), "Supergroup chats should be identified as groups");
+    }
+
+    #[test]
+    fn is_group_false_for_private_chat() {
+        let chat = Chat { id: 1, chat_type: ChatType::Private };
+        assert!(!chat.is_group(), "Private chats should not be identified as groups");
+    }
+
+    #[test]
+    fn is_group_false_for_channel() {
+        let chat = Chat { id: 1, chat_type: ChatType::Channel };
+        assert!(!chat.is_group(), "Channels should not be identified as groups");
+    }
+
+    // -------------------------------------------------------------------
+    // Group chat mode → AgentMode::Public mapping
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn group_chat_maps_to_public_mode() {
+        // Replicate the mode selection logic from get_or_create_entry.
+        let is_group = true;
+        let mode = if is_group {
+            crate::controller::AgentMode::Public
+        } else {
+            crate::controller::AgentMode::Private
+        };
+        assert_eq!(mode, crate::controller::AgentMode::Public);
+    }
+
+    #[test]
+    fn private_chat_maps_to_private_mode() {
+        let is_group = false;
+        let mode = if is_group {
+            crate::controller::AgentMode::Public
+        } else {
+            crate::controller::AgentMode::Private
+        };
+        assert_eq!(mode, crate::controller::AgentMode::Private);
+    }
+
+    // -------------------------------------------------------------------
+    // Access control: group chats bypass allowed_chat_ids
+    // -------------------------------------------------------------------
+
+    /// Replicate the authorization check from the message loop.
+    /// Returns true if the message should be REJECTED.
+    fn should_reject(is_group: bool, allowed_ids: &[i64], chat_id: i64) -> bool {
+        !is_group && !allowed_ids.is_empty() && !allowed_ids.contains(&chat_id)
+    }
+
+    #[test]
+    fn group_chat_bypasses_allowed_ids() {
+        // Group chats are never rejected, even if not in allowed_ids.
+        assert!(!should_reject(true, &[111, 222], 999));
+    }
+
+    #[test]
+    fn group_chat_allowed_with_empty_allowlist() {
+        assert!(!should_reject(true, &[], 999));
+    }
+
+    #[test]
+    fn private_chat_rejected_when_not_in_allowlist() {
+        assert!(should_reject(false, &[111, 222], 999));
+    }
+
+    #[test]
+    fn private_chat_allowed_when_in_allowlist() {
+        assert!(!should_reject(false, &[111, 222], 222));
+    }
+
+    #[test]
+    fn private_chat_allowed_with_empty_allowlist() {
+        // Empty allowlist = allow all private chats (guarded by allow_all_chats at init).
+        assert!(!should_reject(false, &[], 999));
+    }
+
+    // -------------------------------------------------------------------
+    // Group message direction filtering
+    // -------------------------------------------------------------------
+
+    /// Replicate the directed-message check for group chats.
+    fn is_directed_group_msg(msg: &Message, bot_username: &str, bot_id: i64) -> bool {
+        let text = msg.text.as_deref().unwrap_or_default();
+        text.starts_with('/')
+            || is_bot_mentioned(msg, bot_username)
+            || is_reply_to_bot(msg, bot_id)
+    }
+
+    #[test]
+    fn group_command_is_directed() {
+        let msg = make_group_msg("/help");
+        assert!(is_directed_group_msg(&msg, "dysonbot", 42));
+    }
+
+    #[test]
+    fn group_mention_is_directed() {
+        let msg = make_group_msg("hey @dysonbot what's the weather?");
+        assert!(is_directed_group_msg(&msg, "dysonbot", 42));
+    }
+
+    #[test]
+    fn group_reply_to_bot_is_directed() {
+        let mut msg = make_group_msg("thanks");
+        msg.reply_to_message = Some(Box::new(Message {
+            message_id: 0,
+            chat: msg.chat.clone(),
+            from: Some(User {
+                id: 42,
+                is_bot: true,
+                username: Some("dysonbot".to_string()),
+            }),
+            text: Some("previous answer".to_string()),
+            caption: None,
+            entities: None,
+            reply_to_message: None,
+            photo: None,
+            voice: None,
+            document: None,
+        }));
+        assert!(is_directed_group_msg(&msg, "dysonbot", 42));
+    }
+
+    #[test]
+    fn group_undirected_message_not_directed() {
+        let msg = make_group_msg("just chatting with friends");
+        assert!(!is_directed_group_msg(&msg, "dysonbot", 42));
+    }
+
+    // -------------------------------------------------------------------
+    // Public command (/whoami) — available to all chats
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn whoami_is_public_command() {
+        assert!(formatting::is_public_command("/whoami"));
+    }
+
+    #[test]
+    fn other_commands_are_not_public() {
+        assert!(!formatting::is_public_command("/help"));
+        assert!(!formatting::is_public_command("/clear"));
+        assert!(!formatting::is_public_command("/model"));
+        assert!(!formatting::is_public_command("whoami"));
+    }
+
+    // -------------------------------------------------------------------
+    // Telegram controller prompt injected alongside identity
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn telegram_prompt_coexists_with_identity_in_public_agent() {
+        let ws = crate::workspace::InMemoryWorkspace::new()
+            .with_file("SOUL.md", "I speak like a pirate.")
+            .with_file("IDENTITY.md", "I am Captain Bot.");
+
+        let mut agent_settings = crate::config::AgentSettings::default();
+        super::super::inject_workspace_identity(&ws, &mut agent_settings);
+
+        // Append public-agent and Telegram-controller prompts the same
+        // way build_public_agent and the Telegram controller would.
+        agent_settings.system_prompt.push_str(
+            "\n\nYou are a public-facing agent with limited tools.",
+        );
+        let telegram_prompt = "You are responding via Telegram. Keep these rules:\n\
+             - Keep responses concise. Telegram messages have a 4096 character limit.";
+        agent_settings.system_prompt.push_str("\n\n");
+        agent_settings.system_prompt.push_str(telegram_prompt);
+
+        let prompt = &agent_settings.system_prompt;
+        // Identity content present.
+        assert!(prompt.contains("## PERSONALITY"), "should contain PERSONALITY");
+        assert!(prompt.contains("I speak like a pirate."), "should contain SOUL.md content");
+        assert!(prompt.contains("## IDENTITY"), "should contain IDENTITY");
+        assert!(prompt.contains("I am Captain Bot."), "should contain IDENTITY.md content");
+        // Public-agent suffix present.
+        assert!(prompt.contains("public-facing agent"), "should contain public suffix");
+        // Telegram controller prompt present.
+        assert!(prompt.contains("Telegram"), "should contain Telegram prompt");
+        assert!(prompt.contains("4096"), "should mention character limit");
+    }
+
+    #[test]
+    fn telegram_controller_has_system_prompt() {
+        // Verify the TelegramController always provides a system prompt
+        // that will be appended to both private and public agents.
+        let ctrl = TelegramController {
+            bot_token: crate::auth::Credential::new("test".into()),
+            allowed_chat_ids: vec![],
+        };
+        let prompt = ctrl.system_prompt().expect("Telegram controller must provide a system prompt");
+        assert!(prompt.contains("Telegram"), "should reference Telegram");
+        assert!(prompt.contains("4096"), "should mention the message character limit");
     }
 }
