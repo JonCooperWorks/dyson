@@ -350,8 +350,89 @@ pub struct Agent {
     history_backend: Option<HistoryBackend>,
 }
 
+// ---------------------------------------------------------------------------
+// AgentBuilder
+// ---------------------------------------------------------------------------
+
+/// Fluent builder for `Agent` — makes construction intent explicit.
+///
+/// Every agent construction path (full agent, provider switch, group chat)
+/// goes through this builder so the call site reads clearly:
+///
+/// ```rust,ignore
+/// Agent::builder(client, sandbox)
+///     .skills(skills)
+///     .settings(&settings)
+///     .workspace(ws)
+///     .nudge_interval(5)
+///     .build()
+/// ```
+pub struct AgentBuilder {
+    client: Box<dyn LlmClient>,
+    sandbox: Arc<dyn Sandbox>,
+    skills: Vec<Box<dyn Skill>>,
+    settings: AgentSettings,
+    workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    nudge_interval: usize,
+}
+
+impl AgentBuilder {
+    /// Set the skills (and their tools) available to the agent.
+    pub fn skills(mut self, skills: Vec<Box<dyn Skill>>) -> Self {
+        self.skills = skills;
+        self
+    }
+
+    /// Set agent settings (model, system prompt, max_tokens, etc.).
+    pub fn settings(mut self, settings: &AgentSettings) -> Self {
+        self.settings = settings.clone();
+        self
+    }
+
+    /// Attach a workspace for identity, memory, and working directory.
+    pub fn workspace(
+        mut self,
+        ws: std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
+    ) -> Self {
+        self.workspace = Some(ws);
+        self
+    }
+
+    /// Set the dream nudge interval (0 = no dreams).
+    pub fn nudge_interval(mut self, n: usize) -> Self {
+        self.nudge_interval = n;
+        self
+    }
+
+    /// Build the agent. Consumes the builder.
+    pub fn build(self) -> Result<Agent> {
+        Agent::new(
+            self.client,
+            self.sandbox,
+            self.skills,
+            &self.settings,
+            self.workspace,
+            self.nudge_interval,
+        )
+    }
+}
+
 impl Agent {
+    /// Start building an agent with the two required components.
+    pub fn builder(client: Box<dyn LlmClient>, sandbox: Arc<dyn Sandbox>) -> AgentBuilder {
+        AgentBuilder {
+            client,
+            sandbox,
+            skills: Vec::new(),
+            settings: AgentSettings::default(),
+            workspace: None,
+            nudge_interval: 0,
+        }
+    }
+
     /// Construct a new agent from its components.
+    ///
+    /// Prefer [`Agent::builder()`] for new code — it makes intent explicit.
     ///
     /// Delegates to focused constructors:
     /// - [`ToolRegistry::from_skills`] — flattens skills' tools into a lookup map.

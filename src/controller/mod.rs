@@ -111,25 +111,42 @@ pub trait Controller: Send {
 // Agent builder — shared logic for all controllers.
 // ---------------------------------------------------------------------------
 
-/// Build an agent from settings, loading the workspace into the system
-/// prompt and applying any controller-specific prompt fragments.
+/// Whether an agent session is private (full access) or public (restricted).
+///
+/// Controllers pass this to `build_agent()` to declare the trust level of
+/// the session.  See `docs/public-agents.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentMode {
+    /// Full-featured agent: all tools, workspace, dreams.
+    /// For trusted users (e.g. Telegram private chats with the operator).
+    Private,
+    /// Hardened agent: web_search + web_fetch only, no filesystem/shell/workspace.
+    /// Sandbox always enforced.  For untrusted users (e.g. Telegram group chats).
+    Public,
+}
+
+/// Build an agent from settings.
+///
+/// `mode` controls the trust level — `AgentMode::Private` builds a
+/// full-featured agent, `AgentMode::Public` builds a hardened agent with
+/// only `web_search` and `web_fetch`.  See `docs/public-agents.md`.
 ///
 /// Every controller should use this instead of building agents manually.
-/// This ensures the workspace (SOUL.md, MEMORY.md, etc.) is always loaded
-/// and that the workspace is available to tools via `ToolContext.workspace`.
-///
-/// The workspace backend is determined by `settings.workspace.backend`
-/// (default: "openclaw") and loaded from `settings.workspace.connection_string`
-/// (default: "~/.dyson/").  The workspace is wrapped in `Arc<RwLock>` so
-/// tools can read and write workspace files concurrently.
+/// The mode is the single point of control — individual controllers just
+/// declare the trust level, and this function handles the rest.
 pub async fn build_agent(
     settings: &Settings,
     controller_prompt: Option<&str>,
+    mode: AgentMode,
 ) -> crate::Result<crate::agent::Agent> {
-    // Load the persistent workspace via the configured backend.
+    if mode == AgentMode::Public {
+        return build_public_agent(settings, controller_prompt);
+    }
+
+    // --- Private agent: full tools, workspace, dreams ---
+
     let workspace = crate::workspace::create_workspace(&settings.workspace)?;
 
-    // Compose the system prompt: base + workspace + controller.
     let mut agent_settings = settings.agent.clone();
 
     let ws_prompt = workspace.system_prompt();
@@ -143,11 +160,9 @@ pub async fn build_agent(
         agent_settings.system_prompt.push_str(prompt);
     }
 
-    // Wrap workspace in Arc<RwLock> for shared tool access.
     let workspace: std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>> =
         std::sync::Arc::new(tokio::sync::RwLock::new(workspace));
 
-    // Read nudge interval from workspace config.
     let nudge_interval = {
         let ws = workspace.read().await;
         ws.nudge_interval()
@@ -170,14 +185,52 @@ pub async fn build_agent(
         .await
     };
 
-    crate::agent::Agent::new(
-        client,
-        sandbox,
-        skills,
-        &agent_settings,
-        Some(workspace),
-        nudge_interval,
-    )
+    crate::agent::Agent::builder(client, sandbox)
+        .skills(skills)
+        .settings(&agent_settings)
+        .workspace(workspace)
+        .nudge_interval(nudge_interval)
+        .build()
+}
+
+/// Build a public agent — restricted to web_search + web_fetch, no workspace,
+/// sandbox always enforced.
+///
+/// Called by `build_agent()` when `public == true`.  Kept as a separate
+/// function for clarity, not because callers should use it directly.
+fn build_public_agent(
+    settings: &Settings,
+    controller_prompt: Option<&str>,
+) -> crate::Result<crate::agent::Agent> {
+    let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
+        crate::skill::builtin::BuiltinSkill::new_filtered(
+            settings.web_search.as_ref(),
+            &["web_search".into(), "web_fetch".into()],
+        ),
+    )];
+
+    let mut agent_settings = settings.agent.clone();
+
+    agent_settings.system_prompt.push_str(
+        "\n\nYou are a public-facing agent with limited tools. You can search \
+         the web and fetch web pages to answer questions. You do NOT have access \
+         to the filesystem, shell commands, or any workspace tools. Be concise \
+         and cite your sources.",
+    );
+
+    if let Some(prompt) = controller_prompt {
+        agent_settings.system_prompt.push_str("\n\n");
+        agent_settings.system_prompt.push_str(prompt);
+    }
+
+    let client = crate::llm::create_client(&agent_settings, None, false);
+    // SECURITY: Always false — public agent sandbox is never disabled.
+    let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, false);
+
+    crate::agent::Agent::builder(client, sandbox)
+        .skills(skills)
+        .settings(&agent_settings)
+        .build()
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +274,8 @@ pub async fn build_agent_with_provider(
     switched.agent.api_key = pc.api_key.clone();
     switched.agent.base_url = pc.base_url.clone();
 
-    let mut agent = build_agent(&switched, controller_prompt).await?;
+    // Provider switching is only for private agents.
+    let mut agent = build_agent(&switched, controller_prompt, AgentMode::Private).await?;
     agent.set_messages(existing_messages);
     Ok(agent)
 }
@@ -376,7 +430,7 @@ pub async fn check_and_reload_agent(
         }
         Err(_) => {
             // Provider/model removed from config — fall back to defaults.
-            match build_agent(current_settings, controller_prompt).await {
+            match build_agent(current_settings, controller_prompt, AgentMode::Private).await {
                 Ok(a) => {
                     *agent = a;
                     *current_provider =

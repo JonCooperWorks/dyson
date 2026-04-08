@@ -160,7 +160,7 @@ pub fn default_policy(tool_name: &str, working_dir: &Path) -> SandboxPolicy {
             file_write: PathAccess::RestrictTo(vec![cwd, tmp]),
             process_exec: Access::Allow,
         },
-        "web_search" => SandboxPolicy {
+        "web_search" | "web_fetch" => SandboxPolicy {
             network: Access::Allow,
             file_read: PathAccess::Deny,
             file_write: PathAccess::Deny,
@@ -327,6 +327,7 @@ impl PolicyTable {
         for name in &[
             "bash",
             "web_search",
+            "web_fetch",
             "read_file",
             "write_file",
             "edit_file",

@@ -68,7 +68,7 @@ impl super::Controller for TerminalController {
 
     async fn run(&self, settings: &Settings) -> crate::Result<()> {
         let mut current_settings = settings.clone();
-        let mut agent = super::build_agent(&current_settings, None).await?;
+        let mut agent = super::build_agent(&current_settings, None, super::AgentMode::Private).await?;
         let mut output = TerminalOutput::new();
 
         let mut current_provider =

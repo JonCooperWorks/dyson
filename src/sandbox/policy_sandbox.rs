@@ -111,6 +111,12 @@ impl Sandbox for PolicySandbox {
                 check_file_access(tool_name, input, &policy, &self.working_dir, true, true)
             }
 
+            // ----- Web tools -----
+            // web_search: queries a search API (no arbitrary URLs) — network gate only.
+            // web_fetch: fetches arbitrary URLs — network gate + SSRF check.
+            "web_search" => check_network_only(tool_name, &policy, input),
+            "web_fetch" => check_web_fetch(input, &policy),
+
             // ----- Internal tools — always allowed -----
             "workspace_view" | "workspace_search" | "workspace_update" | "memory_search" => {
                 Ok(SandboxDecision::Allow {
@@ -271,6 +277,186 @@ fn check_file_access(
     Ok(SandboxDecision::Allow {
         input: input.clone(),
     })
+}
+
+/// Check web_fetch: validate network policy and block internal/private URLs.
+///
+/// Same pattern as `check_file_access` but for URLs instead of paths.
+/// Blocks requests to loopback, private, link-local, and multicast addresses
+/// to prevent SSRF attacks.
+fn check_web_fetch(
+    input: &serde_json::Value,
+    policy: &SandboxPolicy,
+) -> Result<SandboxDecision> {
+    // Network policy gate (same as the catch-all for unknown tools).
+    if policy.network == Access::Deny {
+        return Ok(SandboxDecision::Deny {
+            reason: "sandbox policy denies network access for tool 'web_fetch'".into(),
+        });
+    }
+
+    // SSRF check: block internal/private network URLs.
+    if let Some(url) = input["url"].as_str() {
+        if let Err(reason) = check_url_not_internal(url) {
+            return Ok(SandboxDecision::Deny { reason });
+        }
+    }
+
+    Ok(SandboxDecision::Allow {
+        input: input.clone(),
+    })
+}
+
+/// Check a tool that only needs network access — no SSRF or file checks.
+fn check_network_only(
+    tool_name: &str,
+    policy: &SandboxPolicy,
+    input: &serde_json::Value,
+) -> Result<SandboxDecision> {
+    if policy.network == Access::Deny {
+        return Ok(SandboxDecision::Deny {
+            reason: format!("sandbox policy denies network access for tool '{tool_name}'"),
+        });
+    }
+    Ok(SandboxDecision::Allow {
+        input: input.clone(),
+    })
+}
+
+/// Validate that a URL does not target internal network resources.
+///
+/// Blocks:
+/// - Loopback: `127.0.0.0/8`, `::1`, `localhost`
+/// - Private: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
+/// - Link-local: `169.254.0.0/16`, `fe80::/10`
+/// - IPv6 ULA: `fc00::/7`
+/// - Multicast: `224.0.0.0/4`, `ff00::/8`
+/// - `0.0.0.0` (unspecified)
+///
+/// Uses `std::net::IpAddr` for parsing — no new dependencies.
+/// Hostnames are resolved via `std::net::ToSocketAddrs` to catch DNS
+/// rebinding of hostnames like `internal.company.com` pointing to `10.x`.
+fn check_url_not_internal(url: &str) -> std::result::Result<(), String> {
+    // Parse the URL to extract the host.
+    // We do minimal parsing: split on "://" to get scheme+authority,
+    // then extract the host portion.
+    let after_scheme = url
+        .find("://")
+        .map(|i| &url[i + 3..])
+        .ok_or_else(|| "web_fetch blocked: URL has no scheme".to_string())?;
+
+    // Strip path, query, fragment.
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    // Strip userinfo (user:pass@host).
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    // Strip port — careful with IPv6 bracket notation [::1]:8080.
+    let host = if host_port.starts_with('[') {
+        // IPv6 in brackets: [::1]:8080 → ::1
+        host_port
+            .find(']')
+            .map(|i| &host_port[1..i])
+            .unwrap_or(host_port)
+    } else {
+        // IPv4 or hostname: host:port → host
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+
+    if host.is_empty() {
+        return Err("web_fetch blocked: empty host in URL".into());
+    }
+
+    // Check well-known internal hostnames.
+    let host_lower = host.to_lowercase();
+    if host_lower == "localhost"
+        || host_lower.ends_with(".localhost")
+        || host_lower == "metadata.google.internal"
+        || host_lower.ends_with(".internal")
+    {
+        return Err(format!(
+            "web_fetch blocked: hostname '{host}' resolves to internal network"
+        ));
+    }
+
+    // Try to parse as IP address directly.
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return check_ip_not_internal(ip, host);
+    }
+
+    // Hostname — resolve to IP addresses and check each one.
+    // This catches DNS entries pointing to internal IPs.
+    let socket_addr = format!("{host}:80");
+    match std::net::ToSocketAddrs::to_socket_addrs(&socket_addr.as_str()) {
+        Ok(addrs) => {
+            for addr in addrs {
+                check_ip_not_internal(addr.ip(), host)?;
+            }
+        }
+        Err(_) => {
+            // DNS resolution failed — allow the request through.
+            // The actual HTTP client will fail with a more specific error.
+            // Blocking here would be overly restrictive for legitimate hosts
+            // that are temporarily unreachable.
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if an IP address is internal/private/reserved.
+fn check_ip_not_internal(ip: std::net::IpAddr, original_host: &str) -> std::result::Result<(), String> {
+    let is_internal = match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()                     // 127.0.0.0/8
+                || v4.is_private()               // 10/8, 172.16/12, 192.168/16
+                || v4.is_link_local()            // 169.254.0.0/16
+                || v4.is_broadcast()             // 255.255.255.255
+                || v4.is_unspecified()           // 0.0.0.0
+                || v4.octets()[0] >= 224         // multicast 224/4 + reserved 240/4
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()                     // ::1
+                || v6.is_unspecified()           // ::
+                || v6.is_multicast()             // ff00::/8
+                || {
+                    let seg = v6.segments();
+                    // Link-local: fe80::/10
+                    (seg[0] & 0xffc0) == 0xfe80
+                    // Unique local: fc00::/7
+                    || (seg[0] & 0xfe00) == 0xfc00
+                    // IPv4-mapped private: ::ffff:10.x.x.x, etc.
+                    || (seg[0] == 0 && seg[1] == 0 && seg[2] == 0
+                        && seg[3] == 0 && seg[4] == 0 && seg[5] == 0xffff
+                        && is_v4_mapped_private(seg[6], seg[7]))
+                }
+        }
+    };
+
+    if is_internal {
+        Err(format!(
+            "web_fetch blocked: '{original_host}' resolves to internal address {ip}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Check if the last two segments of an IPv4-mapped IPv6 address encode a private IPv4.
+///
+/// Reconstructs the embedded IPv4 address and delegates to the same std library
+/// checks used by `check_ip_not_internal` for native IPv4 — single source of truth.
+fn is_v4_mapped_private(hi: u16, lo: u16) -> bool {
+    let v4 = std::net::Ipv4Addr::new(
+        (hi >> 8) as u8,
+        (hi & 0xff) as u8,
+        (lo >> 8) as u8,
+        (lo & 0xff) as u8,
+    );
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_unspecified()
+        || v4.octets()[0] >= 224
 }
 
 // ---------------------------------------------------------------------------
@@ -877,5 +1063,210 @@ mod tests {
         let input = serde_json::json!({"file_path": "local.txt", "content": "nope"});
         let decision = s.check("write_file", &input, &ctx).await.unwrap();
         assert!(matches!(decision, SandboxDecision::Deny { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // web_fetch SSRF checks
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn web_fetch_allows_public_url() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        let input = serde_json::json!({"url": "https://example.com/page"});
+        let decision = s.check("web_fetch", &input, &ctx).await.unwrap();
+        assert!(matches!(decision, SandboxDecision::Allow { .. }));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_blocks_localhost() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        let input = serde_json::json!({"url": "http://localhost:8080/admin"});
+        let decision = s.check("web_fetch", &input, &ctx).await.unwrap();
+        assert!(matches!(decision, SandboxDecision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_blocks_127_0_0_1() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        let input = serde_json::json!({"url": "http://127.0.0.1:9200/_cat/indices"});
+        let decision = s.check("web_fetch", &input, &ctx).await.unwrap();
+        match decision {
+            SandboxDecision::Deny { reason } => {
+                assert!(reason.contains("internal address"));
+            }
+            other => panic!("expected Deny, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn web_fetch_blocks_private_10() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        let input = serde_json::json!({"url": "http://10.0.0.1/internal"});
+        let decision = s.check("web_fetch", &input, &ctx).await.unwrap();
+        assert!(matches!(decision, SandboxDecision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_blocks_private_172() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        let input = serde_json::json!({"url": "http://172.16.0.1:3000/"});
+        let decision = s.check("web_fetch", &input, &ctx).await.unwrap();
+        assert!(matches!(decision, SandboxDecision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_blocks_private_192() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        let input = serde_json::json!({"url": "http://192.168.1.1/"});
+        let decision = s.check("web_fetch", &input, &ctx).await.unwrap();
+        assert!(matches!(decision, SandboxDecision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_blocks_metadata_endpoint() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        let input = serde_json::json!({"url": "http://169.254.169.254/latest/meta-data/"});
+        let decision = s.check("web_fetch", &input, &ctx).await.unwrap();
+        match decision {
+            SandboxDecision::Deny { reason } => {
+                assert!(reason.contains("169.254.169.254"));
+            }
+            other => panic!("expected Deny, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn web_fetch_blocks_ipv6_loopback() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        let input = serde_json::json!({"url": "http://[::1]:8080/"});
+        let decision = s.check("web_fetch", &input, &ctx).await.unwrap();
+        assert!(matches!(decision, SandboxDecision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_blocks_zero_addr() {
+        let s = sandbox_default();
+        let ctx = ctx();
+        let input = serde_json::json!({"url": "http://0.0.0.0/"});
+        let decision = s.check("web_fetch", &input, &ctx).await.unwrap();
+        assert!(matches!(decision, SandboxDecision::Deny { .. }));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_denied_when_network_denied() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "web_fetch".into(),
+            ToolPolicyConfig {
+                network: Some("deny".into()),
+                ..Default::default()
+            },
+        );
+        let s = sandbox(overrides);
+        let ctx = ctx();
+        let input = serde_json::json!({"url": "https://example.com"});
+        let decision = s.check("web_fetch", &input, &ctx).await.unwrap();
+        assert!(matches!(decision, SandboxDecision::Deny { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // check_url_not_internal unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ssrf_allows_public_ip() {
+        assert!(check_url_not_internal("https://93.184.216.34/page").is_ok());
+    }
+
+    #[test]
+    fn ssrf_blocks_localhost_hostname() {
+        assert!(check_url_not_internal("http://localhost/").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_dot_localhost() {
+        assert!(check_url_not_internal("http://evil.localhost/").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_dot_internal() {
+        assert!(check_url_not_internal("http://metadata.google.internal/").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_127_x() {
+        assert!(check_url_not_internal("http://127.0.0.1/").is_err());
+        assert!(check_url_not_internal("http://127.255.255.255/").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_private_ranges() {
+        assert!(check_url_not_internal("http://10.0.0.1/").is_err());
+        assert!(check_url_not_internal("http://172.16.0.1/").is_err());
+        assert!(check_url_not_internal("http://172.31.255.255/").is_err());
+        assert!(check_url_not_internal("http://192.168.0.1/").is_err());
+    }
+
+    #[test]
+    fn ssrf_allows_172_outside_private() {
+        // 172.32.0.1 is NOT in the 172.16.0.0/12 range — should be allowed.
+        assert!(check_url_not_internal("http://172.32.0.1/").is_ok());
+    }
+
+    #[test]
+    fn ssrf_blocks_link_local() {
+        assert!(check_url_not_internal("http://169.254.169.254/").is_err());
+        assert!(check_url_not_internal("http://169.254.0.1/").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_multicast() {
+        assert!(check_url_not_internal("http://224.0.0.1/").is_err());
+        assert!(check_url_not_internal("http://239.255.255.255/").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6_loopback() {
+        assert!(check_url_not_internal("http://[::1]/").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6_link_local() {
+        assert!(check_url_not_internal("http://[fe80::1]/").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6_ula() {
+        assert!(check_url_not_internal("http://[fd12::1]/").is_err());
+    }
+
+    #[test]
+    fn ssrf_handles_url_with_port() {
+        assert!(check_url_not_internal("http://127.0.0.1:8080/").is_err());
+        assert!(check_url_not_internal("https://example.com:443/").is_ok());
+    }
+
+    #[test]
+    fn ssrf_handles_url_with_userinfo() {
+        assert!(check_url_not_internal("http://user:pass@127.0.0.1/").is_err());
+        assert!(check_url_not_internal("http://user@example.com/").is_ok());
+    }
+
+    #[test]
+    fn ssrf_rejects_no_scheme() {
+        assert!(check_url_not_internal("127.0.0.1/path").is_err());
+    }
+
+    #[test]
+    fn ssrf_handles_empty_host() {
+        assert!(check_url_not_internal("http:///path").is_err());
     }
 }

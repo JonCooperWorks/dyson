@@ -362,14 +362,13 @@ impl Tool for SubagentTool {
         })];
 
         // -- Create the child agent --
-        let mut child_agent = crate::agent::Agent::new(
-            client,
-            Arc::clone(&self.sandbox),
-            skills,
-            &child_settings,
-            self.workspace.clone(),
-            0, // no nudge for subagents
-        )?;
+        let mut builder = crate::agent::Agent::builder(client, Arc::clone(&self.sandbox))
+            .skills(skills)
+            .settings(&child_settings);
+        if let Some(ws) = &self.workspace {
+            builder = builder.workspace(Arc::clone(ws));
+        }
+        let mut child_agent = builder.build()?;
 
         // Set the child's depth = parent's depth + 1.
         child_agent.set_depth(ctx.depth + 1);
