@@ -43,9 +43,15 @@ pub struct Message {
     pub message_id: i32,
     pub chat: Chat,
     #[serde(default)]
+    pub from: Option<User>,
+    #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
     pub caption: Option<String>,
+    #[serde(default)]
+    pub entities: Option<Vec<MessageEntity>>,
+    #[serde(default)]
+    pub reply_to_message: Option<Box<Message>>,
     #[serde(default)]
     pub photo: Option<Vec<PhotoSize>>,
     #[serde(default)]
@@ -89,6 +95,33 @@ impl Chat {
     pub fn is_group(&self) -> bool {
         matches!(self.chat_type, ChatType::Group | ChatType::Supergroup)
     }
+}
+
+// ---------------------------------------------------------------------------
+// User
+// ---------------------------------------------------------------------------
+
+/// A Telegram user or bot.
+#[derive(Debug, Clone, Deserialize)]
+pub struct User {
+    pub id: i64,
+    #[serde(default)]
+    pub is_bot: bool,
+    #[serde(default)]
+    pub username: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Message entities (mentions, commands, etc.)
+// ---------------------------------------------------------------------------
+
+/// A single entity within a message (mention, command, URL, etc.).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessageEntity {
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub offset: usize,
+    pub length: usize,
 }
 
 // ---------------------------------------------------------------------------

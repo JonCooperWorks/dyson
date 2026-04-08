@@ -307,8 +307,16 @@ pub fn format_logs_for_telegram(logs: &str) -> Vec<String> {
         .collect()
 }
 
-/// Strip the `@botname` suffix that Telegram appends to commands in groups.
-pub fn strip_bot_mention(text: &str) -> String {
+/// Strip bot @mentions from message text.
+///
+/// For commands (`/logs@botname 10` → `/logs 10`): strips the `@botname`
+/// suffix that Telegram appends to commands in groups.
+///
+/// For regular messages (`@botname what's the weather?` → `what's the weather?`):
+/// strips the `@botname` mention so the agent sees clean text.  Only removes
+/// the mention matching `bot_username` (case-insensitive).
+pub fn strip_bot_mention(text: &str, bot_username: &str) -> String {
+    // Commands: strip @anything between the command and its arguments.
     if let Some(at) = text.find('@')
         && text.starts_with('/')
     {
@@ -317,6 +325,27 @@ pub fn strip_bot_mention(text: &str) -> String {
             .unwrap_or("");
         return format!("{}{}", &text[..at], after);
     }
+
+    // Regular messages: strip @botname (case-insensitive, word-boundary aware).
+    if !bot_username.is_empty() {
+        let target = format!("@{bot_username}");
+        let lower = text.to_lowercase();
+        if let Some(pos) = lower.find(&target) {
+            let after = pos + target.len();
+            let at_boundary = after >= lower.len()
+                || !lower.as_bytes()[after].is_ascii_alphanumeric()
+                    && lower.as_bytes()[after] != b'_';
+            if at_boundary {
+                let mut result = String::with_capacity(text.len());
+                result.push_str(&text[..pos]);
+                if after < text.len() {
+                    result.push_str(&text[after..]);
+                }
+                return result.trim().to_string();
+            }
+        }
+    }
+
     text.to_string()
 }
 
@@ -544,33 +573,33 @@ mod tests {
 
     #[test]
     fn strip_bot_mention_plain_command() {
-        assert_eq!(strip_bot_mention("/logs"), "/logs");
+        assert_eq!(strip_bot_mention("/logs", "dysonbot"), "/logs");
     }
 
     #[test]
     fn strip_bot_mention_with_botname() {
-        assert_eq!(strip_bot_mention("/logs@dysonbot"), "/logs");
+        assert_eq!(strip_bot_mention("/logs@dysonbot", "dysonbot"), "/logs");
     }
 
     #[test]
     fn strip_bot_mention_with_botname_and_args() {
-        assert_eq!(strip_bot_mention("/logs@dysonbot 10"), "/logs 10");
+        assert_eq!(strip_bot_mention("/logs@dysonbot 10", "dysonbot"), "/logs 10");
     }
 
     #[test]
     fn strip_bot_mention_plain_with_args() {
-        assert_eq!(strip_bot_mention("/logs 10"), "/logs 10");
+        assert_eq!(strip_bot_mention("/logs 10", "dysonbot"), "/logs 10");
     }
 
     #[test]
     fn strip_bot_mention_whoami() {
-        assert_eq!(strip_bot_mention("/whoami@mybot"), "/whoami");
+        assert_eq!(strip_bot_mention("/whoami@mybot", "mybot"), "/whoami");
     }
 
     #[test]
     fn logs_command_with_botname_parses_line_count() {
         let input = "/logs@mybot 3";
-        let normalized = strip_bot_mention(input);
+        let normalized = strip_bot_mention(input, "mybot");
         assert_eq!(normalized, "/logs 3");
         let n: usize = normalized
             .strip_prefix("/logs")
@@ -579,6 +608,47 @@ mod tests {
             .parse()
             .unwrap_or(20);
         assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn strip_bot_mention_regular_message() {
+        assert_eq!(
+            strip_bot_mention("@dysonbot what's the weather?", "dysonbot"),
+            "what's the weather?"
+        );
+    }
+
+    #[test]
+    fn strip_bot_mention_regular_message_mid_text() {
+        assert_eq!(
+            strip_bot_mention("hey @dysonbot what's up", "dysonbot"),
+            "hey  what's up"
+        );
+    }
+
+    #[test]
+    fn strip_bot_mention_no_match_longer_username() {
+        // Should NOT strip @dysonbot_extra since it's a different username.
+        assert_eq!(
+            strip_bot_mention("@dysonbot_extra hello", "dysonbot"),
+            "@dysonbot_extra hello"
+        );
+    }
+
+    #[test]
+    fn strip_bot_mention_case_insensitive() {
+        assert_eq!(
+            strip_bot_mention("@DysonBot hello", "dysonbot"),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn strip_bot_mention_no_username() {
+        assert_eq!(
+            strip_bot_mention("@dysonbot hello", ""),
+            "@dysonbot hello"
+        );
     }
 
     #[test]
