@@ -223,9 +223,14 @@ impl<T> Clone for RateLimitedHandle<T> {
 impl<T> RateLimitedHandle<T> {
     /// Create a handle with no rate limit at [`Priority::UserFacing`].
     ///
-    /// Convenience constructor for tests and single-use call sites that
-    /// don't need shared rate limiting.  Internally creates an unlimited
-    /// `RateLimited` and extracts a handle from it.
+    /// **Test-only.** Production code must obtain handles from a
+    /// `ClientRegistry` to ensure all clients are shared and rate-limited.
+    ///
+    /// Not gated by `#[cfg(test)]` because integration tests in `tests/`
+    /// need it.  The `#[doc(hidden)]` keeps it out of public docs, and
+    /// `create_client()` being `pub(crate)` prevents external callers
+    /// from constructing real clients to pass here.
+    #[doc(hidden)]
     pub fn unlimited(value: T) -> Self {
         let rl = RateLimited::unlimited(value);
         rl.handle(Priority::UserFacing)
