@@ -286,7 +286,55 @@ fn telegram_only_whoami_is_public() {
 }
 
 // =========================================================================
-// 6. Zeroize on drop (Credential zeroes secret memory)
+// 6. Only operators can use / commands in group chats
+// =========================================================================
+//
+// In group chats, only users whose IDs appear in `allowed_chat_ids` (the
+// operators) should be able to invoke / commands.  Non-operators may still
+// talk to the bot via @mention or reply, but / commands are privileged.
+
+#[test]
+fn group_commands_restricted_to_operators() {
+    use dyson::controller::telegram::is_operator;
+
+    let allowed = [111_i64, 222];
+
+    // Operator is recognised.
+    assert!(is_operator(Some(111), &allowed));
+    assert!(is_operator(Some(222), &allowed));
+
+    // Non-operator is rejected.
+    assert!(!is_operator(Some(999), &allowed));
+
+    // Missing sender is rejected.
+    assert!(!is_operator(None, &allowed));
+}
+
+#[test]
+fn group_all_protected_commands_blocked_for_non_operators() {
+    use dyson::controller::telegram::{is_operator, is_public_command};
+
+    let allowed = [111_i64];
+    let non_operator: Option<i64> = Some(999);
+
+    let protected = [
+        "/logs", "/logs 50", "/memory", "/memory some note",
+        "/clear", "/compact", "/model provider", "/models",
+    ];
+
+    for cmd in protected {
+        // The command is not public...
+        assert!(!is_public_command(cmd), "{cmd} must not be public");
+        // ...and the sender is not an operator, so it should be blocked.
+        assert!(
+            !is_operator(non_operator, &allowed),
+            "{cmd} should be blocked for non-operators",
+        );
+    }
+}
+
+// =========================================================================
+// 7. Zeroize on drop (Credential zeroes secret memory)
 // =========================================================================
 //
 // The Credential type wraps secret strings and zeroes them on drop.
