@@ -169,7 +169,7 @@ impl McpSkill {
         let auth_url = oauth::build_auth_url(
             &meta.authorization_endpoint, &client_id, &config.scopes,
             &redirect_uri, &pkce.challenge, &state,
-        );
+        )?;
 
         let pending = Arc::new(OAuthPending {
             server_name: server_name.to_string(), pkce_verifier: pkce.verifier,

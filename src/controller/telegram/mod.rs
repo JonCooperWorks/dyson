@@ -575,12 +575,11 @@ async fn rebuild_agents_on_reload(
                 a.set_messages(messages.clone());
                 // If this private agent was using a non-default provider, swap
                 // to the correct client from the registry.
-                if !is_group {
-                    if let Some(pc) = settings.providers.get(&provider_name) {
-                        if let Ok(handle) = registry.get(&provider_name) {
-                            a.swap_client(handle, &model, &pc.provider_type);
-                        }
-                    }
+                if !is_group
+                    && let Some(pc) = settings.providers.get(&provider_name)
+                    && let Ok(handle) = registry.get(&provider_name)
+                {
+                    a.swap_client(handle, &model, &pc.provider_type);
                 }
                 a
             });

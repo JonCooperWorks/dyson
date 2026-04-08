@@ -49,6 +49,14 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 
 use crate::util::truncate_output;
 
+/// Maximum bytes to read from subprocess stdout/stderr before stopping.
+///
+/// Prevents a runaway command (e.g. `yes` or an infinite loop printing to
+/// stdout) from consuming unbounded memory.  The downstream
+/// `truncate_output()` handles further truncation for the LLM context, but
+/// this cap protects the process itself from OOM.
+const MAX_READ_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
+
 // ---------------------------------------------------------------------------
 // BashTool
 // ---------------------------------------------------------------------------
@@ -170,10 +178,16 @@ impl Tool for BashTool {
                 let mut stdout_bytes = Vec::new();
                 let mut stderr_bytes = Vec::new();
                 if let Some(ref mut h) = stdout_handle {
-                    let _ = tokio::io::AsyncReadExt::read_to_end(h, &mut stdout_bytes).await;
+                    let _ = tokio::io::AsyncReadExt::read_to_end(
+                        &mut tokio::io::AsyncReadExt::take(h, MAX_READ_BYTES),
+                        &mut stdout_bytes,
+                    ).await;
                 }
                 if let Some(ref mut h) = stderr_handle {
-                    let _ = tokio::io::AsyncReadExt::read_to_end(h, &mut stderr_bytes).await;
+                    let _ = tokio::io::AsyncReadExt::read_to_end(
+                        &mut tokio::io::AsyncReadExt::take(h, MAX_READ_BYTES),
+                        &mut stderr_bytes,
+                    ).await;
                 }
                 Some((status, stdout_bytes, stderr_bytes))
             }

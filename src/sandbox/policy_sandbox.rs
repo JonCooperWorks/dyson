@@ -296,10 +296,10 @@ fn check_web_fetch(
     }
 
     // SSRF check: block internal/private network URLs.
-    if let Some(url) = input["url"].as_str() {
-        if let Err(reason) = check_url_not_internal(url) {
-            return Ok(SandboxDecision::Deny { reason });
-        }
+    if let Some(url) = input["url"].as_str()
+        && let Err(reason) = check_url_not_internal(url)
+    {
+        return Ok(SandboxDecision::Deny { reason });
     }
 
     Ok(SandboxDecision::Allow {

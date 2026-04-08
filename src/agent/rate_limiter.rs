@@ -22,6 +22,7 @@
 // the only way to get a reference is through access() or a handle.
 // ===========================================================================
 
+use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -69,7 +70,7 @@ impl Priority {
 struct RateLimiterState {
     max_calls: usize,
     window: Duration,
-    timestamps: Mutex<Vec<Instant>>,
+    timestamps: Mutex<VecDeque<Instant>>,
 }
 
 impl RateLimiterState {
@@ -81,10 +82,18 @@ impl RateLimiterState {
 
         let effective_limit = priority.effective_limit(self.max_calls);
         let now = Instant::now();
-        let mut timestamps = self.timestamps.lock().unwrap();
+        let mut timestamps = self.timestamps.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Prune timestamps outside the window.
-        timestamps.retain(|&t| now.duration_since(t) < self.window);
+        // Prune expired timestamps from the front (O(k) where k = expired,
+        // instead of O(n) retain over the entire vec).  Timestamps are always
+        // pushed in chronological order, so the front is the oldest.
+        while let Some(&front) = timestamps.front() {
+            if now.duration_since(front) >= self.window {
+                timestamps.pop_front();
+            } else {
+                break;
+            }
+        }
 
         if timestamps.len() >= effective_limit {
             return Err(DysonError::RateLimit {
@@ -93,7 +102,7 @@ impl RateLimiterState {
             });
         }
 
-        timestamps.push(now);
+        timestamps.push_back(now);
         Ok(())
     }
 }
@@ -138,7 +147,7 @@ impl<T> RateLimited<T> {
             state: Arc::new(RateLimiterState {
                 max_calls,
                 window,
-                timestamps: Mutex::new(Vec::new()),
+                timestamps: Mutex::new(VecDeque::new()),
             }),
         }
     }
@@ -150,7 +159,7 @@ impl<T> RateLimited<T> {
             state: Arc::new(RateLimiterState {
                 max_calls: usize::MAX,
                 window: Duration::ZERO,
-                timestamps: Mutex::new(Vec::new()),
+                timestamps: Mutex::new(VecDeque::new()),
             }),
         }
     }
