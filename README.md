@@ -167,6 +167,7 @@ Secrets can be literal strings or resolver references (`{ "resolver": "insecure_
 | [Tool Forwarding over MCP](docs/tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth |
 | [Public Agents](docs/public-agents.md) | Group chat agents, AgentMode, tool restriction, SSRF protection |
 | [Subagents](docs/subagents.md) | Child agents with different models, tool inheritance, delegation |
+| [Advisor](docs/advisor.md) | Advisor pattern — consult a stronger model for complex decisions |
 
 ## Tests
 
