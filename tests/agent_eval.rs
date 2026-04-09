@@ -237,7 +237,6 @@ async fn sandbox_deny_returns_error_to_llm() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
     let mut output = RecordingOutput::new();
@@ -279,7 +278,6 @@ async fn sandbox_redirect_routes_to_different_tool() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
     let mut output = RecordingOutput::new();
@@ -317,7 +315,7 @@ async fn agent_stops_at_max_iterations() {
     settings.max_iterations = 3;
 
     let mut agent =
-        Agent::new(RateLimitedHandle::unlimited(Box::new(llm)), sandbox, builtin_skills(), &settings, None, 0, None, Vec::new()).unwrap();
+        Agent::new(RateLimitedHandle::unlimited(Box::new(llm)), sandbox, builtin_skills(), &settings, None, 0, None).unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent.run("loop forever", &mut output).await.unwrap();
@@ -351,7 +349,6 @@ async fn conversation_persists_across_runs() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
 
@@ -412,7 +409,6 @@ async fn multiple_tool_calls_in_one_turn() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
     let mut output = RecordingOutput::new();
@@ -453,7 +449,6 @@ async fn unknown_tool_returns_error() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
     let mut output = RecordingOutput::new();
@@ -511,7 +506,6 @@ async fn multi_turn_builds_correct_history() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
 
@@ -547,7 +541,6 @@ async fn clear_resets_conversation_history() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
 
@@ -592,7 +585,6 @@ async fn tool_error_is_reported_back() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
     let mut output = RecordingOutput::new();
@@ -631,7 +623,6 @@ async fn selective_sandbox_denies_specific_tools() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
     let mut output = RecordingOutput::new();
@@ -667,7 +658,6 @@ async fn simple_text_response_no_tools() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
     let mut output = RecordingOutput::new();
@@ -697,7 +687,6 @@ async fn set_messages_restores_conversation() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
 
@@ -739,7 +728,6 @@ async fn redirect_to_unknown_tool_is_handled_gracefully() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
     let mut output = RecordingOutput::new();
@@ -794,7 +782,6 @@ async fn streaming_text_accumulates_correctly() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
     let mut output = RecordingOutput::new();
@@ -858,7 +845,6 @@ async fn concurrent_tool_calls_produce_all_results() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
     let mut output = RecordingOutput::new();
@@ -920,7 +906,6 @@ async fn token_budget_halts_agent_after_limit() {
         None,
         0,
         None,
-        Vec::new(),
     )
     .unwrap();
     agent.token_budget_mut().max_output_tokens = Some(50);

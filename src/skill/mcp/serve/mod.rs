@@ -735,7 +735,6 @@ impl McpHttpServer {
             workspace: Some(Arc::clone(&self.workspace)),
             depth: 0,
             dangerous_no_sandbox: false,
-            read_only_files: Vec::new(),
         };
 
         // -- Sandbox hook (future) --

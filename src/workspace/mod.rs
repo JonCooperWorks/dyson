@@ -134,6 +134,15 @@ pub trait Workspace: Send + Sync {
     fn programs_dir(&self) -> Option<std::path::PathBuf> {
         None
     }
+
+    /// Whether a workspace key is read-only (writes rejected by tools).
+    ///
+    /// Channel workspaces mark symlinked identity files (SOUL.md,
+    /// IDENTITY.md) as read-only so public agents can't modify them.
+    /// Default: all keys are writable.
+    fn is_read_only(&self, _name: &str) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -214,8 +223,8 @@ pub fn create_workspace(config: &WorkspaceConfig) -> Result<Box<dyn Workspace>> 
 /// Channel workspaces give public agents persistent memory scoped to a single
 /// channel (e.g. a Telegram group chat).  SOUL.md and IDENTITY.md are symlinked
 /// to the main workspace so identity changes propagate automatically.  The
-/// symlinked files should be treated as read-only by the agent (enforced via
-/// `ToolContext::read_only_files`).
+/// symlinked files are marked read-only in the workspace itself (enforced by
+/// `Workspace::is_read_only` and checked by `workspace_update`).
 ///
 /// On first creation:
 /// 1. The `channels/{channel_id}/` directory is created.
@@ -256,7 +265,15 @@ pub fn create_channel_workspace(
         }
     }
 
-    let ws = OpenClawWorkspace::load(&channel_path, config.memory.clone())?;
+    let mut ws = OpenClawWorkspace::load(&channel_path, config.memory.clone())?;
+
+    // Mark symlinked identity files as read-only so workspace_update
+    // rejects writes — prevents prompt injection from modifying personality
+    // and prevents writes from flowing through symlinks to the main workspace.
+    for file in ["SOUL.md", "IDENTITY.md", "AGENTS.md", "HEARTBEAT.md"] {
+        ws.mark_read_only(file);
+    }
+
     Ok(Box::new(ws))
 }
 

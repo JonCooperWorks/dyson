@@ -64,8 +64,8 @@ impl Tool for WorkspaceUpdateTool {
         if let Err(msg) = super::validate_workspace_path(&file) {
             return Ok(ToolOutput::error(msg));
         }
-        if ctx.read_only_files.iter().any(|f| f == &file) {
-            return Ok(ToolOutput::error(format!("'{file}' is read-only in this context")));
+        if ws.read().await.is_read_only(&file) {
+            return Ok(ToolOutput::error(format!("'{file}' is read-only")));
         }
         if content.is_empty() {
             return Ok(ToolOutput::error("content is required"));
@@ -225,9 +225,9 @@ mod tests {
     #[tokio::test]
     async fn read_only_file_rejected() {
         let ws = InMemoryWorkspace::new()
-            .with_file("SOUL.md", "original");
-        let mut ctx = ToolContext::for_test_with_workspace(ws);
-        ctx.read_only_files = vec!["SOUL.md".to_string()];
+            .with_file("SOUL.md", "original")
+            .with_read_only("SOUL.md");
+        let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = WorkspaceUpdateTool;
 
         let result = tool
@@ -249,9 +249,9 @@ mod tests {
     #[tokio::test]
     async fn non_read_only_file_allowed() {
         let ws = InMemoryWorkspace::new()
-            .with_file("MEMORY.md", "");
-        let mut ctx = ToolContext::for_test_with_workspace(ws);
-        ctx.read_only_files = vec!["SOUL.md".to_string()];
+            .with_file("MEMORY.md", "")
+            .with_read_only("SOUL.md");
+        let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = WorkspaceUpdateTool;
 
         let result = tool

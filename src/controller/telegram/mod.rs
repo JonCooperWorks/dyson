@@ -105,8 +105,8 @@ struct ChatEntry {
     /// Completion config for quick response LLM calls.
     config: tokio::sync::RwLock<crate::llm::CompletionConfig>,
     /// Whether this chat is a group/supergroup.
-    /// Group chats get restricted tools (web_search + web_fetch only)
-    /// with SSRF protection always enabled.
+    /// Group chats run as public agents with per-channel workspace
+    /// (workspace memory + web tools, no filesystem/shell).
     is_group: bool,
 }
 

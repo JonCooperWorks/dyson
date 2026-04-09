@@ -175,7 +175,7 @@ async fn subagent_runs_child_and_returns_result() {
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(FilteredSkill { tools: vec![] })];
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent =
-        crate::agent::Agent::new(crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
+        crate::agent::Agent::new(crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
     agent.set_depth(1);
 
     let mut capture = CaptureOutput::new();
@@ -220,7 +220,6 @@ async fn subagent_depth_limit_prevents_recursion() {
         workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
         dangerous_no_sandbox: false,
-        read_only_files: Vec::new(),
     };
 
     let input = serde_json::json!({"task": "should fail"});

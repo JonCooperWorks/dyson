@@ -386,7 +386,6 @@ pub struct AgentBuilder {
     workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
     nudge_interval: usize,
     transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
-    read_only_files: Vec<String>,
 }
 
 impl AgentBuilder {
@@ -423,14 +422,6 @@ impl AgentBuilder {
         self
     }
 
-    /// Mark workspace files as read-only for this agent.
-    ///
-    /// Used by public (channel) agents to protect symlinked identity files.
-    pub fn read_only_files(mut self, files: Vec<String>) -> Self {
-        self.read_only_files = files;
-        self
-    }
-
     /// Build the agent. Consumes the builder.
     pub fn build(self) -> Result<Agent> {
         Agent::new(
@@ -441,7 +432,6 @@ impl AgentBuilder {
             self.workspace,
             self.nudge_interval,
             self.transcriber,
-            self.read_only_files,
         )
     }
 }
@@ -464,7 +454,6 @@ impl Agent {
             workspace: None,
             nudge_interval: 0,
             transcriber: None,
-            read_only_files: Vec::new(),
         }
     }
 
@@ -492,12 +481,10 @@ impl Agent {
         >,
         nudge_interval: usize,
         transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
-        read_only_files: Vec<String>,
     ) -> Result<Self> {
         let tool_registry = ToolRegistry::from_skills(&skills);
         let system_prompt = Self::compose_system_prompt(settings, &skills);
-        let mut tool_context = Self::build_tool_context(&sandbox, workspace);
-        tool_context.read_only_files = read_only_files;
+        let tool_context = Self::build_tool_context(&sandbox, workspace);
         let dream_handle = Self::build_dream_handle(&tool_context, nudge_interval);
 
         let config = CompletionConfig {
@@ -579,7 +566,6 @@ impl Agent {
             workspace: None,
             depth: 0,
             dangerous_no_sandbox: sandbox.skip_path_validation(),
-            read_only_files: Vec::new(),
         };
         tool_context.workspace = workspace;
         tool_context

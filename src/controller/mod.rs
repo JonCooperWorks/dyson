@@ -120,8 +120,9 @@ pub enum AgentMode {
     /// Full-featured agent: all tools, workspace, dreams.
     /// For trusted users (e.g. Telegram private chats with the operator).
     Private,
-    /// Hardened agent: web_search + web_fetch only, no filesystem/shell/workspace.
-    /// Sandbox always enforced.  For untrusted users (e.g. Telegram group chats).
+    /// Per-channel workspace agent: workspace memory + web tools only.
+    /// No filesystem, shell, MCP, or subagent access.  Sandbox always enforced.
+    /// For untrusted users (e.g. Telegram group chats).
     Public,
 }
 
@@ -327,17 +328,6 @@ pub async fn build_agent(
         .build()
 }
 
-/// Workspace files that public agents must not modify.
-///
-/// Identity files are symlinked from the main workspace and must stay
-/// read-only.  AGENTS.md and HEARTBEAT.md are operator-only config.
-const PUBLIC_AGENT_READ_ONLY_FILES: &[&str] = &[
-    "SOUL.md",
-    "IDENTITY.md",
-    "AGENTS.md",
-    "HEARTBEAT.md",
-];
-
 /// Tools available to public agents — workspace memory + web research.
 const PUBLIC_AGENT_TOOLS: &[&str] = &[
     "workspace_view",
@@ -401,17 +391,11 @@ fn build_public_agent(
     // SECURITY: Always false — public agent sandbox is never disabled.
     let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, false);
 
-    let read_only: Vec<String> = PUBLIC_AGENT_READ_ONLY_FILES
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
-
     crate::agent::Agent::builder(client, sandbox)
         .skills(skills)
         .settings(&agent_settings)
         .workspace(workspace)
         .nudge_interval(nudge_interval)
-        .read_only_files(read_only)
         .build()
 }
 
@@ -1058,7 +1042,7 @@ mod tests {
     //
     // These verify that public agents get the correct tool set (workspace
     // memory + web, no filesystem/shell) and that identity files are
-    // protected from writes via read_only_files.
+    // protected from writes via workspace.is_read_only().
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1112,13 +1096,13 @@ mod tests {
         let ws = InMemoryWorkspace::new()
             .with_file("SOUL.md", "Be helpful.")
             .with_file("IDENTITY.md", "I am a test bot.")
-            .with_file("MEMORY.md", "");
+            .with_file("MEMORY.md", "")
+            .with_read_only("SOUL.md")
+            .with_read_only("IDENTITY.md")
+            .with_read_only("AGENTS.md")
+            .with_read_only("HEARTBEAT.md");
 
-        let mut ctx = crate::tool::ToolContext::for_test_with_workspace(ws);
-        ctx.read_only_files = PUBLIC_AGENT_READ_ONLY_FILES
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        let ctx = crate::tool::ToolContext::for_test_with_workspace(ws);
 
         let tool = crate::tool::workspace_update::WorkspaceUpdateTool;
 
@@ -1175,9 +1159,4 @@ mod tests {
         assert_eq!(PUBLIC_AGENT_TOOLS, expected);
     }
 
-    #[test]
-    fn public_agent_read_only_constant_matches_expected() {
-        let expected = &["SOUL.md", "IDENTITY.md", "AGENTS.md", "HEARTBEAT.md"];
-        assert_eq!(PUBLIC_AGENT_READ_ONLY_FILES, expected);
-    }
 }

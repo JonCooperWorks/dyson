@@ -63,6 +63,10 @@ pub struct OpenClawWorkspace {
 
     /// SQLite FTS5 index for Tier 2 memory search.
     memory_store: MemoryStore,
+
+    /// Keys that are read-only (e.g. symlinked identity files in channel
+    /// workspaces).  Writes to these keys are rejected by workspace tools.
+    read_only_keys: HashSet<String>,
 }
 
 impl OpenClawWorkspace {
@@ -166,6 +170,7 @@ impl OpenClawWorkspace {
             dirty: std::sync::Mutex::new(HashSet::new()),
             memory_config,
             memory_store,
+            read_only_keys: HashSet::new(),
         };
         workspace.ensure_defaults()?;
 
@@ -204,6 +209,14 @@ impl OpenClawWorkspace {
     /// The workspace directory path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Mark a workspace key as read-only.
+    ///
+    /// Used by `create_channel_workspace` to protect symlinked identity
+    /// files from being overwritten by the agent.
+    pub fn mark_read_only(&mut self, key: &str) {
+        self.read_only_keys.insert(key.to_string());
     }
 
     /// Get today's date as YYYY-MM-DD.
@@ -518,6 +531,10 @@ impl Workspace for OpenClawWorkspace {
             let _ = std::fs::create_dir_all(&dir);
         }
         Some(dir)
+    }
+
+    fn is_read_only(&self, name: &str) -> bool {
+        self.read_only_keys.contains(name)
     }
 }
 
