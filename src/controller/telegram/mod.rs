@@ -64,7 +64,6 @@ use serde::Deserialize;
 use crate::config::{ControllerConfig, Settings};
 use crate::controller::Output;
 use crate::media;
-use crate::message::ContentBlock;
 
 use self::formatting::{format_logs_for_telegram, strip_bot_mention};
 
@@ -330,8 +329,6 @@ impl super::Controller for TelegramController {
             Arc::from(store)
         };
 
-        let transcriber = media::audio::create_transcriber(settings.transcriber.as_ref());
-
         let mut offset: i64 = 0;
         let mut consecutive_failures: u64 = 0;
         let mut backoff_secs: u64 = 1;
@@ -557,7 +554,6 @@ impl super::Controller for TelegramController {
 
                 let bot_clone = bot.clone();
                 let store_clone = chat_store.clone();
-                let transcriber_clone = transcriber.clone();
                 let client_for_task = registry.get_default();
                 let limits_clone = Arc::clone(&download_limits);
                 tokio::spawn(run_agent_for_message(
@@ -567,7 +563,6 @@ impl super::Controller for TelegramController {
                     text,
                     entry,
                     store_clone,
-                    transcriber_clone,
                     client_for_task,
                     limits_clone,
                 ));
@@ -876,24 +871,12 @@ async fn run_agent_for_message(
     text: String,
     entry: Arc<ChatEntry>,
     chat_store: Arc<dyn crate::chat_history::ChatHistory>,
-    transcriber: Arc<dyn media::audio::Transcriber>,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
     download_limits: Arc<DownloadLimits>,
 ) {
     let chat_key = chat_id.0.to_string();
 
-    let content_blocks = match extract_content(&bot, &msg, &text, &transcriber, &download_limits).await {
-        Ok(blocks) => blocks,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to extract media content");
-            let _ = bot.send_message(chat_id, &format!("Media error: {e}")).await;
-            return;
-        }
-    };
-
-    if content_blocks.is_empty() {
-        return;
-    }
+    let attachments = extract_attachments(&bot, &msg, &download_limits).await;
 
     // try_lock() is the gate: if the agent is busy (or temporarily extracted
     // by handle_per_chat_command), fall back to a quick response.
@@ -913,13 +896,10 @@ async fn run_agent_for_message(
 
     let mut output = TelegramOutput::new(bot.clone(), chat_id, !text.is_empty());
 
-    let has_non_text = content_blocks
-        .iter()
-        .any(|b| !matches!(b, ContentBlock::Text { .. }));
-    let result = if has_non_text {
-        agent.run_with_blocks(content_blocks, &mut output).await
-    } else {
+    let result = if attachments.is_empty() {
         agent.run(&text, &mut output).await
+    } else {
+        agent.run_with_attachments(&text, attachments, &mut output).await
     };
 
     if let Err(e) = result {
@@ -1244,26 +1224,18 @@ fn save_memory_note(settings: &Settings, note: &str) -> crate::Result<()> {
 // Media extraction helpers
 // ---------------------------------------------------------------------------
 
-/// Extract content blocks from a Telegram message.
+/// Download media attachments from a Telegram message.
 ///
-/// Downloads and processes media (photos, voice notes, image documents)
-/// into `ContentBlock`s.  This function is media-only — it does not know
-/// about model capabilities.  If a model rejects the resulting blocks,
-/// the caller handles cleanup.
-async fn extract_content(
+/// Only handles Telegram-specific concerns: detecting media types from
+/// message fields and downloading via the Bot API.  Media resolution
+/// (resizing, transcription, PDF extraction) is handled by the agent
+/// via `run_with_attachments()`.
+async fn extract_attachments(
     bot: &BotApi,
     msg: &types::Message,
-    text: &str,
-    transcriber: &Arc<dyn media::audio::Transcriber>,
     limits: &DownloadLimits,
-) -> crate::Result<Vec<ContentBlock>> {
-    let mut blocks = Vec::new();
-
-    if !text.is_empty() {
-        blocks.push(ContentBlock::Text {
-            text: text.to_string(),
-        });
-    }
+) -> Vec<media::Attachment> {
+    let mut attachments = Vec::new();
 
     // Photos: pick the largest resolution (last in the array).
     if let Some(photos) = &msg.photo
@@ -1276,37 +1248,17 @@ async fn extract_content(
             "downloading photo from Telegram"
         );
         match bot.download_file(&photo.file_id, limits.image_max_bytes).await {
-            Ok(data) => match media::resolve(
-                media::MediaInput::Image {
+            Ok(data) => {
+                attachments.push(media::Attachment {
                     data,
-                    mime_type: "image/jpeg".to_string(),
-                },
-                transcriber,
-            )
-            .await
-            {
-                Ok(media::ResolvedMedia::Images(imgs)) => blocks.extend(imgs),
-                Ok(media::ResolvedMedia::Transcription(t)) => {
-                    blocks.push(ContentBlock::Text { text: t });
-                }
-                Ok(media::ResolvedMedia::Document(doc)) => blocks.push(doc),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to process photo");
-                    blocks.push(ContentBlock::Text {
-                        text: format!("[Image could not be processed: {e}]"),
-                    });
-                }
-            },
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to download photo");
-                blocks.push(ContentBlock::Text {
-                    text: format!("[Failed to download photo: {e}]"),
+                    mime_type: "image/jpeg".into(),
                 });
             }
+            Err(e) => tracing::warn!(error = %e, "failed to download photo"),
         }
     }
 
-    // Voice notes: transcribe via Whisper.
+    // Voice notes.
     if let Some(voice) = &msg.voice {
         tracing::info!(
             file_id = voice.file_id.as_str(),
@@ -1317,137 +1269,41 @@ async fn extract_content(
             .as_deref()
             .unwrap_or("audio/ogg")
             .to_string();
-
         match bot.download_file(&voice.file_id, limits.audio_max_bytes).await {
-            Ok(data) => match media::resolve(
-                media::MediaInput::Audio {
+            Ok(data) => {
+                attachments.push(media::Attachment {
                     data,
                     mime_type: mime,
-                },
-                transcriber,
-            )
-            .await
-            {
-                Ok(media::ResolvedMedia::Transcription(t)) => {
-                    blocks.push(ContentBlock::Text {
-                        text: format!("[Voice transcription]: {t}"),
-                    });
-                }
-                Ok(media::ResolvedMedia::Images(_)) => {}
-                Ok(media::ResolvedMedia::Document(doc)) => blocks.push(doc),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to transcribe voice note");
-                    blocks.push(ContentBlock::Text {
-                        text: format!("[Voice transcription failed: {e}]"),
-                    });
-                }
-            },
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to download voice note");
-                blocks.push(ContentBlock::Text {
-                    text: format!("[Failed to download voice note: {e}]"),
                 });
             }
+            Err(e) => tracing::warn!(error = %e, "failed to download voice note"),
         }
     }
 
-    // Documents with image MIME types (e.g. uncompressed photos).
+    // Documents: images and PDFs.
     if let Some(doc) = &msg.document {
-        let is_image = doc
-            .mime_type
-            .as_ref()
-            .is_some_and(|m| m.starts_with("image/"));
-        if is_image {
+        let mime = doc.mime_type.as_deref().unwrap_or("").to_string();
+        let is_supported = mime.starts_with("image/") || mime == "application/pdf";
+        if is_supported {
             tracing::info!(
                 file_id = doc.file_id.as_str(),
                 file_name = doc.file_name.as_deref().unwrap_or("unknown"),
-                "downloading image document from Telegram"
+                mime_type = mime.as_str(),
+                "downloading document from Telegram"
             );
-            let mime = doc
-                .mime_type
-                .as_deref()
-                .unwrap_or("image/jpeg")
-                .to_string();
-
             match bot.download_file(&doc.file_id, limits.document_max_bytes).await {
-                Ok(data) => match media::resolve(
-                    media::MediaInput::Image {
+                Ok(data) => {
+                    attachments.push(media::Attachment {
                         data,
                         mime_type: mime,
-                    },
-                    transcriber,
-                )
-                .await
-                {
-                    Ok(media::ResolvedMedia::Images(imgs)) => blocks.extend(imgs),
-                    Ok(media::ResolvedMedia::Transcription(t)) => {
-                        blocks.push(ContentBlock::Text { text: t });
-                    }
-                    Ok(media::ResolvedMedia::Document(doc)) => blocks.push(doc),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to process document image");
-                        blocks.push(ContentBlock::Text {
-                            text: format!("[Image could not be processed: {e}]"),
-                        });
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to download document");
-                    blocks.push(ContentBlock::Text {
-                        text: format!("[Failed to download document: {e}]"),
                     });
                 }
-            }
-        }
-
-        // PDF documents.
-        let is_pdf = doc
-            .mime_type
-            .as_ref()
-            .is_some_and(|m| m == "application/pdf");
-        if is_pdf {
-            tracing::info!(
-                file_id = doc.file_id.as_str(),
-                file_name = doc.file_name.as_deref().unwrap_or("unknown"),
-                "downloading PDF document from Telegram"
-            );
-
-            match bot.download_file(&doc.file_id, limits.document_max_bytes).await {
-                Ok(data) => match media::resolve(
-                    media::MediaInput::Pdf { data },
-                    transcriber,
-                )
-                .await
-                {
-                    Ok(media::ResolvedMedia::Document(doc)) => blocks.push(doc),
-                    Ok(media::ResolvedMedia::Transcription(t)) => {
-                        blocks.push(ContentBlock::Text { text: t });
-                    }
-                    Ok(media::ResolvedMedia::Images(_)) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to process PDF document");
-                        blocks.push(ContentBlock::Text {
-                            text: format!("[PDF could not be processed: {e}]"),
-                        });
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to download PDF document");
-                    blocks.push(ContentBlock::Text {
-                        text: format!("[Failed to download PDF: {e}]"),
-                    });
-                }
+                Err(e) => tracing::warn!(error = %e, "failed to download document"),
             }
         }
     }
 
-    if blocks.is_empty() {
-        blocks.push(ContentBlock::Text {
-            text: "[Empty message received]".to_string(),
-        });
-    }
-
-    Ok(blocks)
+    attachments
 }
 
 // TelegramOutput and formatting helpers are in submodules:
