@@ -1,8 +1,8 @@
 // ===========================================================================
 // Generic advisor — a subagent that consults a stronger LLM.
 //
-// Used when the executor is NOT Anthropic (so we can't use the native
-// advisor_20260301 API tool).  Registers an `advisor` tool that spawns
+// Used when the executor or advisor is not Anthropic (so we can't use
+// the native advisor_20260301 API tool).  Registers an `advisor` tool that spawns
 // a child agent with the parent's tools, sandbox, and workspace — just
 // like a SubagentTool but with an advisor-specific system prompt.
 // ===========================================================================

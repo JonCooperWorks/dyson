@@ -11,8 +11,8 @@
 //                             Works with any provider.
 //
 // Selection logic (in `create_advisor`):
-//   executor is Anthropic  →  NativeAnthropicAdvisor
-//   otherwise              →  GenericAdvisor
+//   both Anthropic  →  NativeAnthropicAdvisor
+//   otherwise       →  GenericAdvisor
 // ===========================================================================
 
 pub mod generic;

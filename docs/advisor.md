@@ -1,32 +1,32 @@
 # Advisor Pattern
 
-The advisor pattern pairs a cost-effective executor model with a more capable
-advisor model.  The executor drives the task end-to-end; when it hits a complex
-decision, it consults the advisor for strategic guidance.
+Pair a cost-effective executor with a stronger advisor model.  The executor
+drives the task; when it hits a complex decision it consults the advisor.
 
-This is based on [Anthropic's advisor strategy](https://claude.com/blog/the-advisor-strategy),
+Based on [Anthropic's advisor strategy](https://claude.com/blog/the-advisor-strategy),
 which introduced the `advisor_20260301` tool type in the Messages API.  Dyson
-extends the idea to work across all providers: when both models are Anthropic
-the native API feature is used; otherwise Dyson spawns a subagent.
+extends this to work across all providers: when both models are Anthropic the
+native API feature is used; otherwise Dyson spawns a subagent.
 
 **Key files:**
-- `src/advisor/mod.rs` -- `Advisor` trait, `NativeAnthropicAdvisor`, `create_advisor()` factory
-- `src/advisor/generic.rs` -- `GenericAdvisor`, `AdvisorTool` (subagent implementation)
-- `src/config/mod.rs` -- `AgentSettings.smartest_model`
-- `src/config/loader.rs` -- JSON parsing for `smartest_model`
-- `src/llm/mod.rs` -- `CompletionConfig.api_tool_injections`
-- `src/llm/anthropic.rs` -- injection into the Anthropic request body
-- `src/agent/mod.rs` -- `Agent::new()` advisor binding and tool registration
-- `src/agent/tests.rs` -- advisor unit tests
+- `src/advisor/mod.rs` -- `Advisor` trait, `NativeAnthropicAdvisor`, `create_advisor()`
+- `src/advisor/generic.rs` -- `GenericAdvisor`, `AdvisorTool`
+- `src/controller/mod.rs` -- `smartest_model` parsing and advisor wiring in `build_agent()`
+- `src/llm/anthropic.rs` -- `api_tool_injections` appended to the tools array
 
 ---
 
 ## Configuration
 
-Add `smartest_model` to the agent config in `provider/model` format:
+`smartest_model` uses `provider/model` format.  The provider name references
+an entry from the `"providers"` map.  Everything after the first `/` is the
+model identifier passed to that provider's API.
 
 ```json
 {
+  "providers": {
+    "claude": { "type": "anthropic", "models": ["claude-sonnet-4-20250514"] }
+  },
   "agent": {
     "provider": "claude",
     "model": "claude-sonnet-4-20250514",
@@ -35,9 +35,7 @@ Add `smartest_model` to the agent config in `provider/model` format:
 }
 ```
 
-The provider name references a named provider from the `"providers"` map.
-The model name is passed to that provider's API.  Cross-provider advisors
-work naturally:
+Cross-provider advisors work the same way:
 
 ```json
 {
@@ -47,140 +45,77 @@ work naturally:
   },
   "agent": {
     "provider": "claude",
-    "model": "claude-sonnet-4-20250514",
     "smartest_model": "openrouter/anthropic/claude-opus-4"
   }
 }
 ```
 
-**Skip rules:**
-- When `smartest_model` is absent, the advisor is disabled entirely.
-- When the advisor resolves to the same provider and model as the executor,
-  the advisor is skipped (no point consulting yourself).
+The advisor is **skipped** when:
+- `smartest_model` is absent
+- The advisor resolves to the same provider type and model as the executor
 
 ---
 
 ## Two Paths
 
-The `Advisor` trait abstracts over two fundamentally different mechanisms.
-The factory function `create_advisor()` picks the right one based on both
-the executor's and advisor's provider types.
+`build_agent()` in the controller parses `smartest_model`, resolves the
+provider client via `ClientRegistry::get()`, and calls `create_advisor()`.
+The factory checks both provider types to pick the implementation.
 
 ### Native Anthropic (both executor and advisor are Anthropic)
 
-Uses the `advisor_20260301` tool type from
-[Anthropic's advisor strategy](https://claude.com/blog/the-advisor-strategy).
-The advisor runs entirely server-side inside a single `/v1/messages` request.
+Injects an `advisor_20260301` entry into the Anthropic API request.  The
+advisor runs server-side inside a single `/v1/messages` call.  Dyson's
+agent loop never sees it.
 
 ```
-┌──────────────────────────────────────────────┐
-│  Agent::new()                                │
-│                                              │
-│  NativeAnthropicAdvisor                      │
-│    bind()  → no-op                           │
-│    tools() → [] (no Dyson tool)              │
-│    api_tool_entries() →                      │
-│      [{"type": "advisor_20260301",           │
-│        "name": "advisor",                    │
-│        "model": "claude-opus-4-6",           │
-│        "max_uses": 3}]                       │
-│                                              │
-│  Stored in config.api_tool_injections        │
-└──────────────────┬───────────────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────┐
-│  AnthropicClient::stream()                   │
-│                                              │
-│  tools_json = [bash, read_file, ...]         │
-│  tools_json.extend(api_tool_injections)      │
-│  tools_json = [..., advisor_20260301 entry]  │
-│                                              │
-│  POST /v1/messages with stream: true         │
-└──────────────────┬───────────────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────┐
-│  Anthropic API (server-side)                 │
-│                                              │
-│  Sonnet generates. Hits a hard decision.     │
-│  Internally consults Opus for guidance.      │
-│  Opus responds. Sonnet continues.            │
-│                                              │
-│  Dyson never sees the advisor call.          │
-│  Advisor tokens billed separately.           │
-└──────────────────────────────────────────────┘
+Agent::new()
+  NativeAnthropicAdvisor
+    bind()             → no-op
+    tools()            → []
+    api_tool_entries() → [{"type":"advisor_20260301","model":"...","max_uses":3}]
+      ↓
+  Stored in CompletionConfig.api_tool_injections
+      ↓
+AnthropicClient::stream()
+  tools_json = [bash, read_file, ...] ++ api_tool_injections
+  POST /v1/messages
+      ↓
+Anthropic API handles advisor internally
+  Executor consults advisor mid-generation
+  Advisor tokens billed separately
+  Dyson sees a normal streaming response
 ```
-
-Dyson's agent loop is completely unaware the advisor exists.  No `tool_use`
-events, no `tool_result` messages.  The only thing Dyson does is append a
-JSON entry to the tools array.
 
 ### Generic (executor or advisor is not Anthropic)
 
-Registers a Dyson-side `advisor` tool that spawns a child agent -- the same
-mechanism as `SubagentTool`.  The child agent inherits the parent's tools,
-sandbox, and workspace.
+Registers a Dyson-side `advisor` tool that spawns a child agent with the
+parent's tools, sandbox, and workspace — same mechanism as `SubagentTool`.
 
 ```
-┌──────────────────────────────────────────────┐
-│  Agent::new()                                │
-│                                              │
-│  1. Build tool_registry from skills          │
-│     → {bash, read_file, write_file, ...}     │
-│                                              │
-│  2. Collect inherited_tools from registry    │
-│                                              │
-│  3. advisor.bind(sandbox, workspace, tools)  │
-│     → GenericAdvisor creates AdvisorTool     │
-│       with same sandbox, workspace, tools    │
-│                                              │
-│  4. advisor.tools() → [Arc<AdvisorTool>]     │
-│     → registered as "advisor" in registry    │
-│                                              │
-│  5. advisor.api_tool_entries() → []          │
-└──────────────────┬───────────────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────┐
-│  Runtime: executor calls the advisor tool    │
-│                                              │
-│  ToolUseComplete {                           │
-│    name: "advisor",                          │
-│    input: { "query": "Should I use a         │
-│      trait object or an enum here?" }        │
-│  }                                           │
-└──────────────────┬───────────────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────┐
-│  AdvisorTool::run()                          │
-│                                              │
-│  Spawns a child Agent:                       │
-│    model:     advisor model (smartest_model)  │
-│    sandbox:   same Arc as parent             │
-│    workspace: same Arc as parent             │
-│    tools:     same as parent (Arc clones)    │
-│    max_iter:  15                             │
-│    depth:     parent.depth + 1               │
-│    prompt:    advisor guidance prompt         │
-│                                              │
-│  Child runs a full agent loop:               │
-│    → reads files, searches code              │
-│    → reasons about the architecture          │
-│    → returns advice as final text            │
-│                                              │
-│  → ToolOutput::success(advice_text)          │
-└──────────────────┬───────────────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────┐
-│  Parent agent loop continues                 │
-│                                              │
-│  Advice injected as tool_result.             │
-│  Executor reads it, makes its decision,      │
-│  continues the original task.                │
-└──────────────────────────────────────────────┘
+Agent::new()
+  1. Build tool_registry from skills
+  2. Collect inherited tools from registry
+  3. advisor.bind(sandbox, workspace, inherited_tools)
+     → GenericAdvisor creates AdvisorTool
+  4. advisor.tools() → [AdvisorTool]
+     → registered as "advisor" in tool_registry
+      ↓
+Runtime: executor calls the advisor tool
+      ↓
+AdvisorTool::run()
+  Spawns a child Agent:
+    model:      smartest_model (advisor provider's client)
+    sandbox:    same Arc as parent
+    workspace:  same Arc as parent
+    tools:      parent's tools (Arc clones)
+    max_iter:   15
+    max_tokens: 8192
+    depth:      parent + 1
+  Child runs a full agent loop (can read files, search, etc.)
+  Returns advice as ToolOutput::success(text)
+      ↓
+Parent agent loop continues with advice as tool_result
 ```
 
 ---
@@ -192,14 +127,10 @@ sandbox, and workspace.
 | Where advisor runs | Anthropic's servers | Dyson child agent |
 | Visible to agent loop | No | Yes (tool_use / tool_result) |
 | Advisor has tools | No (reasons over conversation context) | Yes (full parent toolset) |
-| Cost | Advisor tokens at advisor rates | Full completion at advisor model rates |
-| Latency | Lower (single request) | Higher (separate agent loop) |
 | Extra conversation turns | 0 | 1 tool_use + 1 tool_result |
 
-The generic path is more powerful in one sense: the advisor can investigate
-the codebase (read files, search code, run commands) before giving advice,
-while the native Anthropic advisor only reasons over the existing conversation
-context.
+The generic path is more capable: the advisor can investigate the codebase
+before giving advice.  The native path is cheaper and lower latency.
 
 ---
 
@@ -207,52 +138,34 @@ context.
 
 ```rust
 pub trait Advisor: Send + Sync {
-    /// Bind to parent resources.  Called from Agent::new() after the
-    /// tool registry is built.  No-op for native advisors.
-    fn bind(
-        &mut self,
-        sandbox: Arc<dyn Sandbox>,
-        workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
-        inherited_tools: Vec<Arc<dyn Tool>>,
-    ) {}
-
-    /// Raw JSON entries for the API tools array (native path).
+    fn bind(&mut self, sandbox: Arc<dyn Sandbox>,
+            workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
+            inherited_tools: Vec<Arc<dyn Tool>>) {}
     fn api_tool_entries(&self) -> Vec<serde_json::Value> { vec![] }
-
-    /// Dyson-side tools to register (generic path).
     fn tools(&self) -> Vec<Arc<dyn Tool>> { vec![] }
 }
 ```
 
-### Lifecycle
+**Lifecycle:**
 
-1. **`create_advisor()`** in the controller -- parses `smartest_model` as
-   `provider/model`, resolves the provider client, and picks
-   `NativeAnthropicAdvisor` (both Anthropic) or `GenericAdvisor` (otherwise).
-   Skipped entirely if the advisor is the currently loaded model.
+1. Controller parses `smartest_model` as `provider/model`, resolves the
+   provider client, checks skip rules, calls `create_advisor()`.
+2. `create_advisor()` returns `NativeAnthropicAdvisor` (both Anthropic) or
+   `GenericAdvisor` (otherwise).
+3. `Agent::new()` calls `bind()` with the parent's sandbox, workspace, and
+   tools.  Generic uses this to build `AdvisorTool`; native ignores it.
+4. `tools()` and `api_tool_entries()` are called to register the advisor in
+   the tool registry and/or `CompletionConfig.api_tool_injections`.
 
-2. **`bind()`** in `Agent::new()` -- called after the tool registry is built
-   from skills.  Passes the parent's sandbox, workspace, and flattened tool
-   list.  The `GenericAdvisor` uses this to construct its `AdvisorTool`.
-   The `NativeAnthropicAdvisor` ignores it (default no-op).
-
-3. **`tools()`** -- returns Dyson-side tools to register.  Generic returns
-   `[AdvisorTool]`; native returns `[]`.
-
-4. **`api_tool_entries()`** -- returns raw JSON for the API request body.
-   Native returns the `advisor_20260301` entry; generic returns `[]`.
-
-After these four steps, the advisor's work is done.  The results live in
-`tool_registry` (the advisor tool) and `config.api_tool_injections` (the
-API entries).  The advisor itself is not stored on the Agent.
+After step 4 the advisor is consumed.  Results live in `tool_registry` and
+`CompletionConfig` — the advisor itself is not stored on the `Agent`.
 
 ---
 
 ## Credits
 
-The advisor pattern and the `advisor_20260301` tool type were designed by
+The advisor pattern and `advisor_20260301` tool type were designed by
 [Anthropic](https://anthropic.com) and introduced in
 [The Advisor Strategy](https://claude.com/blog/the-advisor-strategy).
-Dyson's native Anthropic path uses their API feature directly; the generic
-path extends the concept to non-Anthropic providers using Dyson's existing
-subagent infrastructure.
+Dyson's native path uses their API feature directly; the generic path extends
+the concept to non-Anthropic providers using Dyson's subagent infrastructure.
