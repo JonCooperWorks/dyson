@@ -786,6 +786,16 @@ impl Agent {
         &self.system_prompt
     }
 
+    /// Set user attribution on the workspace for write auditing.
+    ///
+    /// Call before each `run()` in public-agent contexts to record which
+    /// user triggered any memory writes.  Pass `None` to clear.
+    pub async fn set_attribution(&self, user: Option<&str>) {
+        if let Some(ws) = &self.tool_context.workspace {
+            ws.write().await.set_attribution(user);
+        }
+    }
+
     /// Check whether a tool is registered by name.
     #[cfg(test)]
     pub fn has_tool(&self, name: &str) -> bool {
