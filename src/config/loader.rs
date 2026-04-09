@@ -68,7 +68,13 @@ use crate::secret::{SecretRegistry, SecretValue};
 
 /// Root of the dyson.json file.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonRoot {
+    /// Schema version — consumed by `migrate()`, retained here so
+    /// `deny_unknown_fields` doesn't reject it.
+    #[serde(default)]
+    #[allow(dead_code)]
+    config_version: Option<u32>,
     /// Named provider configurations.
     ///
     /// ```json
@@ -108,6 +114,7 @@ struct JsonRoot {
 /// }
 /// ```
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonTranscriber {
     /// Transcriber provider: "whisper-cli" (default).
     provider: Option<String>,
@@ -124,6 +131,7 @@ struct JsonTranscriber {
 /// }
 /// ```
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonWebSearch {
     /// Search provider: "brave" (default).
     provider: Option<String>,
@@ -135,6 +143,7 @@ struct JsonWebSearch {
 
 /// A single provider entry in the `"providers"` map.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonProviderConfig {
     /// Provider type: "anthropic", "openai", "claude-code", "codex".
     #[serde(rename = "type")]
@@ -174,6 +183,7 @@ struct JsonAgent {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonRateLimit {
     max_messages: usize,
     window_secs: u64,
@@ -201,6 +211,7 @@ enum JsonCompaction {
 
 /// The `"skills"` object.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonSkills {
     builtin: Option<JsonBuiltinSkill>,
     local: Option<Vec<JsonLocalSkill>>,
@@ -222,18 +233,21 @@ struct JsonSkills {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonLocalSkill {
     name: String,
     path: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonBuiltinSkill {
     tools: Option<Vec<String>>,
 }
 
 /// A single subagent definition in the `"subagents"` array.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonSubagent {
     /// Tool name (e.g., "research_agent").
     name: String,
@@ -262,6 +276,7 @@ struct JsonSubagent {
 /// }
 /// ```
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonSandbox {
     /// Sandbox names to disable.
     #[serde(default)]
@@ -283,6 +298,7 @@ struct JsonSandbox {
 /// }
 /// ```
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonToolPolicy {
     network: Option<String>,
     file_read: Option<serde_json::Value>,
@@ -298,6 +314,7 @@ struct JsonToolPolicy {
 /// { "workspace": { "path": "~/.dyson" } }
 /// ```
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonWorkspace {
     /// Backend type: "openclaw" (default).
     backend: Option<String>,
@@ -315,6 +332,7 @@ struct JsonWorkspace {
 /// { "memory": { "limits": { "MEMORY.md": 2200 }, "nudge_interval": 5 } }
 /// ```
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonMemory {
     /// Per-file character limits.
     limits: Option<std::collections::HashMap<String, usize>>,
@@ -328,6 +346,7 @@ struct JsonMemory {
 /// { "chat_history": { "backend": "disk", "connection_string": "~/.dyson/chats" } }
 /// ```
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonChatHistory {
     /// Backend type: "disk" (default).
     backend: Option<String>,

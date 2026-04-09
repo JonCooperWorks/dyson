@@ -377,6 +377,9 @@ pub struct Agent {
     /// `run_with_attachments()`.  Images and PDFs do not require a transcriber.
     transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
 
+    /// Ephemeral prompt fragment when an advisor is active.
+    /// Appended to skill_fragments (dynamic area) to avoid busting KV cache.
+    advisor_prompt: Option<&'static str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +535,16 @@ impl Agent {
             vec![]
         };
 
+        let advisor_prompt = if advisor.is_some() {
+            Some("\n\nYou have access to an `advisor` tool — a more capable model \
+                  you can consult for complex decisions. Use it when facing \
+                  architectural choices, ambiguous trade-offs, or problems that \
+                  would benefit from a second opinion. The advisor can read files \
+                  and investigate the codebase. Don't use it for simple tasks.")
+        } else {
+            None
+        };
+
         let system_prompt = Self::compose_system_prompt(settings, &skills);
         let tool_context = Self::build_tool_context(&sandbox, workspace);
         let dream_handle = Self::build_dream_handle(&tool_context, nudge_interval);
@@ -570,6 +583,7 @@ impl Agent {
             dream_handle,
             history_backend: None,
             transcriber,
+            advisor_prompt,
         })
     }
 
@@ -1083,6 +1097,9 @@ impl Agent {
                     );
                 }
             }
+        }
+        if let Some(prompt) = self.advisor_prompt {
+            fragments.push_str(prompt);
         }
         fragments
     }
