@@ -154,6 +154,7 @@ struct JsonProviderConfig {
 /// map.  The agent references a provider by name.  `model` can optionally
 /// override the provider's model.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JsonAgent {
     /// Optional model override — takes precedence over the provider's model.
     model: Option<String>,
