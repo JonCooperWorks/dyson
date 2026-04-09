@@ -1016,6 +1016,7 @@ impl Agent {
                         format!("tool_result({tool_use_id}, error={is_error})")
                     }
                     crate::message::ContentBlock::Image { .. } => "image".to_string(),
+                    crate::message::ContentBlock::Document { .. } => "document".to_string(),
                     crate::message::ContentBlock::Thinking { .. } => "thinking".to_string(),
                 }).collect();
                 tracing::debug!(

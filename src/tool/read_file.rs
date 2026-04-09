@@ -22,7 +22,8 @@ impl Tool for ReadFileTool {
     fn description(&self) -> &str {
         "Read the contents of a file. Returns lines with line numbers. \
          Use `offset` (1-based line number) and `limit` (number of lines) \
-         to read a specific range."
+         to read a specific range. PDF files are automatically detected \
+         and their text content is extracted."
     }
 
     fn agent_only(&self) -> bool {
@@ -81,6 +82,38 @@ impl Tool for ReadFileTool {
                 )));
             }
             _ => {}
+        }
+
+        // PDF files: extract text instead of reading raw binary.
+        if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) {
+            let data = match tokio::fs::read(&path).await {
+                Ok(d) => d,
+                Err(e) => {
+                    return Ok(ToolOutput::error(format!(
+                        "cannot read '{}': {e}",
+                        path.display()
+                    )));
+                }
+            };
+
+            let text = match pdf_extract::extract_text_from_mem(&data) {
+                Ok(t) => t,
+                Err(e) => {
+                    return Ok(ToolOutput::error(format!(
+                        "failed to extract text from '{}': {e}",
+                        path.display()
+                    )));
+                }
+            };
+
+            if text.trim().is_empty() {
+                return Ok(ToolOutput::success(
+                    "(PDF contains no extractable text — may be scanned/image-only)",
+                ));
+            }
+
+            let output = truncate_output(&text);
+            return Ok(ToolOutput::success(output));
         }
 
         // Stream line-by-line with skip/take so that large files with small

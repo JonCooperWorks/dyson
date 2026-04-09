@@ -1289,6 +1289,7 @@ async fn extract_content(
                 Ok(media::ResolvedMedia::Transcription(t)) => {
                     blocks.push(ContentBlock::Text { text: t });
                 }
+                Ok(media::ResolvedMedia::Document(doc)) => blocks.push(doc),
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to process photo");
                     blocks.push(ContentBlock::Text {
@@ -1333,6 +1334,7 @@ async fn extract_content(
                     });
                 }
                 Ok(media::ResolvedMedia::Images(_)) => {}
+                Ok(media::ResolvedMedia::Document(doc)) => blocks.push(doc),
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to transcribe voice note");
                     blocks.push(ContentBlock::Text {
@@ -1381,6 +1383,7 @@ async fn extract_content(
                     Ok(media::ResolvedMedia::Transcription(t)) => {
                         blocks.push(ContentBlock::Text { text: t });
                     }
+                    Ok(media::ResolvedMedia::Document(doc)) => blocks.push(doc),
                     Err(e) => {
                         tracing::warn!(error = %e, "failed to process document image");
                         blocks.push(ContentBlock::Text {
@@ -1392,6 +1395,46 @@ async fn extract_content(
                     tracing::warn!(error = %e, "failed to download document");
                     blocks.push(ContentBlock::Text {
                         text: format!("[Failed to download document: {e}]"),
+                    });
+                }
+            }
+        }
+
+        // PDF documents.
+        let is_pdf = doc
+            .mime_type
+            .as_ref()
+            .is_some_and(|m| m == "application/pdf");
+        if is_pdf {
+            tracing::info!(
+                file_id = doc.file_id.as_str(),
+                file_name = doc.file_name.as_deref().unwrap_or("unknown"),
+                "downloading PDF document from Telegram"
+            );
+
+            match bot.download_file(&doc.file_id, limits.document_max_bytes).await {
+                Ok(data) => match media::resolve(
+                    media::MediaInput::Pdf { data },
+                    transcriber,
+                )
+                .await
+                {
+                    Ok(media::ResolvedMedia::Document(doc)) => blocks.push(doc),
+                    Ok(media::ResolvedMedia::Transcription(t)) => {
+                        blocks.push(ContentBlock::Text { text: t });
+                    }
+                    Ok(media::ResolvedMedia::Images(_)) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to process PDF document");
+                        blocks.push(ContentBlock::Text {
+                            text: format!("[PDF could not be processed: {e}]"),
+                        });
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to download PDF document");
+                    blocks.push(ContentBlock::Text {
+                        text: format!("[Failed to download PDF: {e}]"),
                     });
                 }
             }

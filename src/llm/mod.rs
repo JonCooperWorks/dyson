@@ -606,6 +606,9 @@ pub(crate) fn format_prompt(messages: &[Message], tools: &[&ToolDefinition]) -> 
                     ContentBlock::Image { .. } => {
                         prompt.push_str("[Image attached]\n\n");
                     }
+                    ContentBlock::Document { extracted_text, .. } => {
+                        let _ = write!(prompt, "[PDF document]\n{extracted_text}\n\n");
+                    }
                     ContentBlock::Thinking { .. } => {}
                 }
             }

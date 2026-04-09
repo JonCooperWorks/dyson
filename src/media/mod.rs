@@ -16,6 +16,7 @@
 
 pub mod audio;
 pub mod image;
+pub mod pdf;
 
 use std::sync::Arc;
 
@@ -27,6 +28,8 @@ pub enum MediaInput {
     Image { data: Vec<u8>, mime_type: String },
     /// A raw audio file (OGG/Opus voice messages, MP3, WAV, etc.).
     Audio { data: Vec<u8>, mime_type: String },
+    /// A PDF document.
+    Pdf { data: Vec<u8> },
 }
 
 /// Resolved media ready for the message pipeline.
@@ -35,6 +38,8 @@ pub enum ResolvedMedia {
     Images(Vec<ContentBlock>),
     /// A text transcription of audio.
     Transcription(String),
+    /// A processed PDF document (base64 + extracted text).
+    Document(ContentBlock),
 }
 
 /// Resolve raw media into ContentBlocks.
@@ -53,6 +58,10 @@ pub async fn resolve(
         MediaInput::Audio { data, mime_type } => {
             let text = transcriber.transcribe(&data, &mime_type).await?;
             Ok(ResolvedMedia::Transcription(text))
+        }
+        MediaInput::Pdf { data } => {
+            let block = pdf::process_pdf(&data)?;
+            Ok(ResolvedMedia::Document(block))
         }
     }
 }

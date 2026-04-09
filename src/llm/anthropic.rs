@@ -135,6 +135,16 @@ fn message_to_anthropic(msg: &Message) -> serde_json::Value {
                     }
                 })
             }
+            ContentBlock::Document { data, .. } => {
+                serde_json::json!({
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": data,
+                    }
+                })
+            }
         })
         .collect();
 

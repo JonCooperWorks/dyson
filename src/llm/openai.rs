@@ -231,6 +231,7 @@ fn extract_text(content: &[ContentBlock]) -> String {
         .iter()
         .filter_map(|b| match b {
             ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Document { extracted_text, .. } => Some(extracted_text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -326,6 +327,11 @@ fn message_to_openai(msg: &Message) -> serde_json::Value {
                     "image_url": {
                         "url": format!("data:{media_type};base64,{data}"),
                     }
+                })),
+                // PDFs in a multimodal message: inline the extracted text.
+                ContentBlock::Document { extracted_text, .. } => Some(serde_json::json!({
+                    "type": "text",
+                    "text": extracted_text,
                 })),
                 _ => None,
             })
