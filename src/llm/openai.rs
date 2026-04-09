@@ -306,14 +306,14 @@ fn message_to_openai(msg: &Message) -> serde_json::Value {
         });
     }
 
-    // Check if this message contains any image blocks.
-    let has_images = msg
+    // Check if this message contains any image or document blocks.
+    let has_multimodal = msg
         .content
         .iter()
-        .any(|b| matches!(b, ContentBlock::Image { .. }));
+        .any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::Document { .. }));
 
-    if has_images {
-        // Vision-capable format: content is an array of typed blocks.
+    if has_multimodal {
+        // Multimodal format: content is an array of typed blocks.
         let content_array: Vec<serde_json::Value> = msg
             .content
             .iter()
@@ -328,10 +328,12 @@ fn message_to_openai(msg: &Message) -> serde_json::Value {
                         "url": format!("data:{media_type};base64,{data}"),
                     }
                 })),
-                // PDFs in a multimodal message: inline the extracted text.
-                ContentBlock::Document { extracted_text, .. } => Some(serde_json::json!({
-                    "type": "text",
-                    "text": extracted_text,
+                ContentBlock::Document { data, .. } => Some(serde_json::json!({
+                    "type": "file",
+                    "file": {
+                        "filename": "document.pdf",
+                        "file_data": format!("data:application/pdf;base64,{data}"),
+                    }
                 })),
                 _ => None,
             })
