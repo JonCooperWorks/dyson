@@ -437,7 +437,7 @@ impl super::Controller for TelegramController {
                     || msg.document.as_ref().is_some_and(|d| {
                         d.mime_type
                             .as_ref()
-                            .is_some_and(|m| m.starts_with("image/"))
+                            .is_some_and(|m| m.starts_with("image/") || m == "application/pdf")
                     });
 
                 if text.is_none() && !has_media {
@@ -876,10 +876,10 @@ async fn run_agent_for_message(
 ) {
     let chat_key = chat_id.0.to_string();
 
-    let attachments = extract_attachments(&bot, &msg, &download_limits).await;
-
     // try_lock() is the gate: if the agent is busy (or temporarily extracted
     // by handle_per_chat_command), fall back to a quick response.
+    // Check this BEFORE downloading attachments to avoid wasting time on
+    // network I/O when the agent can't accept the message anyway.
     let mut ca = match entry.agent.try_lock() {
         Ok(guard) if guard.agent.is_some() => guard,
         _ => {
@@ -888,6 +888,8 @@ async fn run_agent_for_message(
             return;
         }
     };
+
+    let attachments = extract_attachments(&bot, &msg, &download_limits).await;
 
     let agent = ca.agent.as_mut().expect("checked above");
 

@@ -65,7 +65,10 @@ pub async fn resolve_attachment(
 ) -> crate::Result<Vec<ContentBlock>> {
     let mime = attachment.mime_type.as_str();
     if mime.starts_with("image/") {
-        let block = image::process_image(&attachment.data)?;
+        let data = attachment.data;
+        let block = tokio::task::spawn_blocking(move || image::process_image(&data))
+            .await
+            .map_err(|e| crate::DysonError::Config(format!("image task panicked: {e}")))??;
         Ok(vec![block])
     } else if mime.starts_with("audio/") {
         let t = transcriber.ok_or_else(|| {
@@ -76,7 +79,10 @@ pub async fn resolve_attachment(
         let text = t.transcribe(&attachment.data, mime).await?;
         Ok(vec![ContentBlock::Text { text }])
     } else if mime == "application/pdf" {
-        let block = pdf::process_pdf(&attachment.data)?;
+        let data = attachment.data;
+        let block = tokio::task::spawn_blocking(move || pdf::process_pdf(&data))
+            .await
+            .map_err(|e| crate::DysonError::Config(format!("PDF task panicked: {e}")))??;
         Ok(vec![block])
     } else {
         Err(crate::DysonError::Config(format!(
@@ -119,7 +125,9 @@ pub async fn resolve(
 ) -> crate::Result<ResolvedMedia> {
     match input {
         MediaInput::Image { data, .. } => {
-            let block = image::process_image(&data)?;
+            let block = tokio::task::spawn_blocking(move || image::process_image(&data))
+                .await
+                .map_err(|e| crate::DysonError::Config(format!("image task panicked: {e}")))??;
             Ok(ResolvedMedia::Images(vec![block]))
         }
         MediaInput::Audio { data, mime_type } => {
@@ -127,7 +135,9 @@ pub async fn resolve(
             Ok(ResolvedMedia::Transcription(text))
         }
         MediaInput::Pdf { data } => {
-            let block = pdf::process_pdf(&data)?;
+            let block = tokio::task::spawn_blocking(move || pdf::process_pdf(&data))
+                .await
+                .map_err(|e| crate::DysonError::Config(format!("PDF task panicked: {e}")))??;
             Ok(ResolvedMedia::Document(block))
         }
     }
