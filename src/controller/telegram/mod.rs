@@ -876,20 +876,32 @@ async fn run_agent_for_message(
 ) {
     let chat_key = chat_id.0.to_string();
 
-    // try_lock() is the gate: if the agent is busy (or temporarily extracted
-    // by handle_per_chat_command), fall back to a quick response.
-    // Check this BEFORE downloading attachments to avoid wasting time on
-    // network I/O when the agent can't accept the message anyway.
+    // Peek the lock before downloading: if the agent is already busy,
+    // bail out to a quick response immediately without wasting bandwidth.
+    {
+        match entry.agent.try_lock() {
+            Ok(guard) if guard.agent.is_some() => { /* available — drop guard and download */ }
+            _ => {
+                tracing::info!(chat_id = chat_id.0, "agent busy — using quick response");
+                send_quick_response(&bot, chat_id, &text, &entry, &client).await;
+                return;
+            }
+        }
+    }
+
+    // Download attachments outside the lock so other tasks aren't blocked.
+    let attachments = extract_attachments(&bot, &msg, &download_limits).await;
+
+    // Re-acquire the lock.  The agent may have become busy during the
+    // download (rare), in which case we fall back to quick response.
     let mut ca = match entry.agent.try_lock() {
         Ok(guard) if guard.agent.is_some() => guard,
         _ => {
-            tracing::info!(chat_id = chat_id.0, "agent busy — using quick response");
+            tracing::info!(chat_id = chat_id.0, "agent became busy during download — using quick response");
             send_quick_response(&bot, chat_id, &text, &entry, &client).await;
             return;
         }
     };
-
-    let attachments = extract_attachments(&bot, &msg, &download_limits).await;
 
     let agent = ca.agent.as_mut().expect("checked above");
 
