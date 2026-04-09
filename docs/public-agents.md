@@ -126,9 +126,9 @@ LLM client and rate-limit window via `ClientRegistry`.
 |---------|-------------|----------|
 | Tool restriction | `BuiltinSkill::new_filtered()` with `PUBLIC_AGENT_TOOLS` allowlist | `build_public_agent()` |
 | No bash/file access | Tools not in registry — LLM cannot call them | `skill/builtin.rs` |
-| Read-only identity | SOUL.md/IDENTITY.md symlinked from main workspace; writes dropped by `ChannelWorkspace` wrapper | `create_channel_workspace()`, `channel.rs` |
+| Read-only identity | SOUL.md/IDENTITY.md symlinked from main workspace; `ChannelWorkspace` only allows writes to whitelisted keys | `create_channel_workspace()`, `channel.rs` |
 | Per-channel isolation | Separate workspace directory per channel ID | `create_channel_workspace()` |
-| No dangerous workspace writes | `ChannelWorkspace` wrapper silently drops `set`/`append` to protected keys | `channel.rs` |
+| Default-deny writes | `ChannelWorkspace` only forwards `set`/`append` for explicitly allowed keys (`MEMORY.md`, `USER.md`, `memory/*`) | `channel.rs` |
 | Dreams (per-channel) | Dream thread uses channel workspace, not main workspace | `build_public_agent()` |
 | SSRF protection | `PolicySandbox` blocks internal/private IPs for `web_fetch` | `policy_sandbox.rs` |
 | Sandbox always active | `create_sandbox(config, false)` — hardcoded, ignores `--dangerous-no-sandbox` | `build_public_agent()` |
@@ -159,20 +159,22 @@ agents get SSRF protection too, not just public ones.
 
 ### Read-Only Files
 
-Public agents can read but not write to identity files. The channel
-workspace is wrapped in a `ChannelWorkspace` decorator that silently
-drops `set()` and `append()` calls to protected keys. The protection
-lives in the workspace implementation itself — tools don't need to know
-about it. Protected files:
+The `ChannelWorkspace` wrapper uses a default-deny model: writes are
+only forwarded to the inner workspace for explicitly whitelisted keys.
+Everything else is silently dropped. Tools don't need to know — the
+workspace itself enforces the policy.
 
+**Writable keys:**
+- `MEMORY.md` — channel-specific long-term memory
+- `USER.md` — channel-specific user profile
+- `memory/*` — daily journals (prefix match)
+
+**Protected by default** (all other keys, including):
 - `SOUL.md` — agent personality (symlinked from main workspace)
 - `IDENTITY.md` — agent identity (symlinked from main workspace)
 - `AGENTS.md` — operating procedures
 - `HEARTBEAT.md` — periodic task checklist
-
-The agent can freely write to `MEMORY.md`, `USER.md`, and `memory/*.md`
-journal files. This gives it persistent memory while protecting the
-operator's identity configuration from prompt injection.
+- Any new file the agent tries to create
 
 ---
 

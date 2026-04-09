@@ -259,14 +259,15 @@ pub fn create_channel_workspace(
 
     let ws = OpenClawWorkspace::load(&channel_path, config.memory.clone())?;
 
-    // Wrap in ChannelWorkspace to protect identity files from writes.
-    // The wrapper silently drops set/append calls to protected keys,
-    // preventing prompt injection from modifying personality and
-    // preventing writes from flowing through symlinks to the main workspace.
-    let protected = [
-        "SOUL.md", "IDENTITY.md", "AGENTS.md", "HEARTBEAT.md",
-    ].iter().map(|s| s.to_string());
-    Ok(Box::new(channel::ChannelWorkspace::new(Box::new(ws), protected)))
+    // Wrap in ChannelWorkspace — only explicitly allowed keys are writable.
+    // Everything else (SOUL.md, IDENTITY.md, AGENTS.md, etc.) is protected
+    // by default.  This prevents prompt injection from modifying identity
+    // and prevents writes from flowing through symlinks to the main workspace.
+    let ws = channel::ChannelWorkspace::new(Box::new(ws))
+        .allow("MEMORY.md")
+        .allow("USER.md")
+        .allow_prefix("memory/");
+    Ok(Box::new(ws))
 }
 
 // ===========================================================================

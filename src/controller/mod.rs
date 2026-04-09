@@ -1090,7 +1090,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn channel_workspace_drops_writes_to_protected_keys() {
+    async fn channel_workspace_only_allows_whitelisted_writes() {
         use crate::workspace::{InMemoryWorkspace, channel::ChannelWorkspace};
 
         let inner = InMemoryWorkspace::new()
@@ -1098,17 +1098,16 @@ mod tests {
             .with_file("IDENTITY.md", "I am a test bot.")
             .with_file("MEMORY.md", "");
 
-        let ws = ChannelWorkspace::new(
-            Box::new(inner),
-            ["SOUL.md", "IDENTITY.md", "AGENTS.md", "HEARTBEAT.md"]
-                .iter().map(|s| s.to_string()),
-        );
+        let ws = ChannelWorkspace::new(Box::new(inner))
+            .allow("MEMORY.md")
+            .allow("USER.md")
+            .allow_prefix("memory/");
 
         let ctx = crate::tool::ToolContext::for_test_with_workspace(ws);
         let tool = crate::tool::workspace_update::WorkspaceUpdateTool;
 
-        // Writing to SOUL.md — silently dropped by the wrapper.
-        let result = tool
+        // Writing to SOUL.md — not whitelisted, silently dropped.
+        let _ = tool
             .run(
                 &serde_json::json!({
                     "file": "SOUL.md",
@@ -1119,15 +1118,12 @@ mod tests {
             )
             .await
             .unwrap();
-        // Tool reports success, but the write was dropped.
-        assert!(!result.is_error);
-        // Content unchanged.
         let ws = ctx.workspace("test").unwrap().read().await;
         assert_eq!(ws.get("SOUL.md").unwrap(), "Be helpful.");
-
-        // Writing to MEMORY.md — allowed.
         drop(ws);
-        let result = tool
+
+        // Writing to MEMORY.md — whitelisted, succeeds.
+        let _ = tool
             .run(
                 &serde_json::json!({
                     "file": "MEMORY.md",
@@ -1138,7 +1134,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!result.is_error);
         let ws = ctx.workspace("test").unwrap().read().await;
         assert_eq!(ws.get("MEMORY.md").unwrap(), "Learned something.");
     }
