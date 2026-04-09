@@ -240,6 +240,23 @@ impl ToolRegistry {
         }
     }
 
+    /// Register an extra tool not owned by any skill (e.g., advisor tool).
+    fn register_extra_tool(&mut self, tool: Arc<dyn Tool>) {
+        let name = tool.name().to_string();
+        let tokens = name.split_whitespace().count()
+            + tool.description().split_whitespace().count()
+            + crate::message::estimate_json_tokens(&tool.input_schema())
+            + 10;
+        self.definitions.push(ToolDefinition {
+            name: name.clone(),
+            description: tool.description().to_string(),
+            input_schema: tool.input_schema(),
+            agent_only: tool.agent_only(),
+        });
+        self.tools.insert(name, tool);
+        self.cached_tokens += tokens;
+    }
+
     /// Mark tools as disabled — subsequent LLM calls will omit definitions.
     fn disable(&mut self) {
         self.disabled = true;
@@ -359,6 +376,9 @@ pub struct Agent {
     /// When present, the agent can resolve audio attachments in
     /// `run_with_attachments()`.  Images and PDFs do not require a transcriber.
     transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
+
+    /// Optional advisor — a stronger model the executor can consult.
+    advisor: Option<Box<dyn crate::advisor::Advisor>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +406,7 @@ pub struct AgentBuilder {
     workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
     nudge_interval: usize,
     transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
+    advisor: Option<Box<dyn crate::advisor::Advisor>>,
 }
 
 impl AgentBuilder {
@@ -422,6 +443,12 @@ impl AgentBuilder {
         self
     }
 
+    /// Attach an advisor — a stronger model the executor can consult.
+    pub fn advisor(mut self, advisor: Box<dyn crate::advisor::Advisor>) -> Self {
+        self.advisor = Some(advisor);
+        self
+    }
+
     /// Build the agent. Consumes the builder.
     pub fn build(self) -> Result<Agent> {
         Agent::new(
@@ -432,6 +459,7 @@ impl AgentBuilder {
             self.workspace,
             self.nudge_interval,
             self.transcriber,
+            self.advisor,
         )
     }
 }
@@ -454,6 +482,7 @@ impl Agent {
             workspace: None,
             nudge_interval: 0,
             transcriber: None,
+            advisor: None,
         }
     }
 
@@ -481,8 +510,30 @@ impl Agent {
         >,
         nudge_interval: usize,
         transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
+        advisor: Option<Box<dyn crate::advisor::Advisor>>,
     ) -> Result<Self> {
-        let tool_registry = ToolRegistry::from_skills(&skills);
+        let mut tool_registry = ToolRegistry::from_skills(&skills);
+
+        // Bind the advisor to the parent's resources, then register its tools
+        // and collect API injections.
+        let mut advisor = advisor;
+        let api_tool_injections = if let Some(ref mut advisor) = advisor {
+            // Collect the parent's tools for the advisor to inherit.
+            let inherited_tools: Vec<Arc<dyn Tool>> =
+                tool_registry.tools.values().cloned().collect();
+            advisor.bind(
+                Arc::clone(&sandbox),
+                workspace.as_ref().map(Arc::clone),
+                inherited_tools,
+            );
+            for tool in advisor.tools() {
+                tool_registry.register_extra_tool(tool);
+            }
+            advisor.api_tool_entries()
+        } else {
+            vec![]
+        };
+
         let system_prompt = Self::compose_system_prompt(settings, &skills);
         let tool_context = Self::build_tool_context(&sandbox, workspace);
         let dream_handle = Self::build_dream_handle(&tool_context, nudge_interval);
@@ -491,6 +542,7 @@ impl Agent {
             model: settings.model.clone(),
             max_tokens: settings.max_tokens,
             temperature: None, // use provider default
+            api_tool_injections,
         };
 
         // Expose tools via MCP for CLI backends (no-op for API clients).
@@ -520,6 +572,7 @@ impl Agent {
             dream_handle,
             history_backend: None,
             transcriber,
+            advisor,
         })
     }
 
@@ -1257,6 +1310,7 @@ pub async fn quick_response(
         model: config.model.clone(),
         max_tokens: config.max_tokens.min(1024),
         temperature: config.temperature,
+        api_tool_injections: vec![],
     };
 
     // Augment the system prompt to signal brevity.

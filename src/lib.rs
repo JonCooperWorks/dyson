@@ -40,6 +40,7 @@
 //     configurable backends (OpenClaw filesystem, disk JSON, future: cloud)
 // ===========================================================================
 
+pub mod advisor;
 pub mod agent;
 pub mod auth;
 pub mod chat_history;

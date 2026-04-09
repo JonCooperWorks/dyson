@@ -302,6 +302,11 @@ impl LlmClient for AnthropicClient {
             })
             .collect();
 
+        // Inject provider-native tool entries (e.g., Anthropic advisor).
+        for entry in &config.api_tool_injections {
+            tools_json.push(entry.clone());
+        }
+
         // Mark the last tool with cache_control so the entire tool set is cached.
         if let Some(last_tool) = tools_json.last_mut() {
             last_tool["cache_control"] = serde_json::json!({ "type": "ephemeral" });

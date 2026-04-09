@@ -75,7 +75,7 @@ async fn simple_text_response() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent.run("hi", &mut output).await.unwrap();
@@ -121,7 +121,7 @@ async fn tool_call_loop() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent
@@ -164,7 +164,7 @@ async fn internal_tools_provider_skips_tool_execution() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent.run("list files", &mut output).await.unwrap();
@@ -316,6 +316,7 @@ async fn synthesize_to_workspace_updates_memory() {
         model: "test".to_string(),
         max_tokens: 1024,
         temperature: None,
+        api_tool_injections: vec![],
     };
 
     let summary = "User asked about Rust lifetimes and learned about borrowing.";
@@ -457,7 +458,7 @@ async fn token_budget_stops_agent_loop() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     agent.conversation.token_budget.max_output_tokens = Some(150);
     let mut output = RecordingOutput::new();
 
@@ -588,7 +589,7 @@ async fn tool_output_files_dispatched_via_send_file() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(MockFileSkill::new())];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent.run("send me a file", &mut output).await.unwrap();
@@ -636,7 +637,7 @@ async fn tool_output_no_files_means_no_send_file() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     let mut output = RecordingOutput::new();
 
     agent.run("echo hello", &mut output).await.unwrap();
@@ -708,7 +709,7 @@ fn make_agent_with_history(
     };
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     agent.conversation.messages = messages;
     (agent, RecordingOutput::new())
 }
@@ -1274,7 +1275,7 @@ async fn auto_compaction_triggers_on_threshold() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     let mut output = RecordingOutput::new();
 
     // First turn.
@@ -1425,6 +1426,7 @@ async fn quick_response_returns_text_without_tools() {
         model: "test-model".into(),
         max_tokens: 4096,
         temperature: None,
+        api_tool_injections: vec![],
     };
 
     let mut output = RecordingOutput::new();
@@ -1485,6 +1487,7 @@ async fn quick_response_caps_max_tokens() {
         model: "test".into(),
         max_tokens: 8192,
         temperature: None,
+        api_tool_injections: vec![],
     };
     let mut output = RecordingOutput::new();
 
@@ -1536,6 +1539,7 @@ async fn quick_response_sends_no_tools() {
         model: "test".into(),
         max_tokens: 1024,
         temperature: None,
+        api_tool_injections: vec![],
     };
     let mut output = RecordingOutput::new();
 
@@ -1630,7 +1634,7 @@ mod test_tool_calling_integration {
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
         agent.set_messages(messages.clone());
 
         let popped = agent.pop_last_message();
@@ -1652,7 +1656,7 @@ mod test_tool_calling_integration {
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
 
         assert!(agent.pop_last_message().is_none());
     }
@@ -1666,7 +1670,7 @@ mod test_tool_calling_integration {
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
 
         agent.set_messages(vec![
             Message::user_multimodal(vec![
@@ -1717,7 +1721,7 @@ mod test_tool_calling_integration {
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
 
         agent.set_messages(vec![
             Message::user("hello"),
@@ -2032,4 +2036,118 @@ fn is_retryable_other() {
     assert!(!Agent::is_retryable(&DysonError::Config("bad config".into())));
     assert!(!Agent::is_retryable(&DysonError::tool("bash", "command failed")));
     assert!(!Agent::is_retryable(&DysonError::Cancelled));
+}
+
+// -----------------------------------------------------------------------
+// Advisor tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn generic_advisor_inherits_parent_tools() {
+    // Create a generic advisor and verify it registers an "advisor" tool
+    // that has access to the parent agent's tools.
+    let llm = MockLlm::new(vec![]);
+    let advisor_llm = MockLlm::new(vec![]);
+
+    let settings = AgentSettings {
+        api_key: "test".into(),
+        ..Default::default()
+    };
+
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+
+    // Count the tools from skills (before advisor).
+    let skill_tool_count: usize = skills.iter().map(|s| s.tools().len()).sum();
+    assert!(skill_tool_count > 0, "skills should provide at least one tool");
+
+    let advisor: Box<dyn crate::advisor::Advisor> = Box::new(
+        crate::advisor::generic::GenericAdvisor::new(
+            "test-advisor-model".to_string(),
+            crate::config::LlmProvider::OpenAi,
+            rate_limiter::RateLimitedHandle::unlimited(Box::new(advisor_llm)),
+        ),
+    );
+
+    let agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        Some(advisor),
+    )
+    .unwrap();
+
+    // The agent should have all the original tools PLUS the advisor tool.
+    assert_eq!(
+        agent.tool_registry.tools.len(),
+        skill_tool_count + 1,
+        "advisor tool should be registered alongside skill tools"
+    );
+    assert!(
+        agent.tool_registry.tools.contains_key("advisor"),
+        "tool registry should contain the 'advisor' tool"
+    );
+
+    // API tool injections should be empty for the generic path.
+    assert!(
+        agent.config.api_tool_injections.is_empty(),
+        "generic advisor should not inject API tools"
+    );
+}
+
+#[test]
+fn native_anthropic_advisor_injects_api_tool() {
+    // When the executor is Anthropic, the advisor should inject an
+    // advisor_20260301 tool entry and NOT register any Dyson-side tools.
+    let llm = MockLlm::new(vec![]);
+
+    let settings = AgentSettings {
+        api_key: "test".into(),
+        provider: crate::config::LlmProvider::Anthropic,
+        ..Default::default()
+    };
+
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+    let skill_tool_count: usize = skills.iter().map(|s| s.tools().len()).sum();
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+
+    let advisor_client = rate_limiter::RateLimitedHandle::unlimited(
+        Box::new(MockLlm::new(vec![])) as Box<dyn LlmClient>,
+    );
+    let advisor = crate::advisor::create_advisor(
+        &crate::config::LlmProvider::Anthropic,
+        "claude-opus-4-6",
+        advisor_client,
+    );
+
+    let agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        Some(advisor),
+    )
+    .unwrap();
+
+    // No extra Dyson-side tools — native advisor is API-level.
+    assert_eq!(
+        agent.tool_registry.tools.len(),
+        skill_tool_count,
+        "native advisor should not add Dyson-side tools"
+    );
+
+    // Should have one API tool injection.
+    assert_eq!(agent.config.api_tool_injections.len(), 1);
+    let injection = &agent.config.api_tool_injections[0];
+    assert_eq!(injection["type"], "advisor_20260301");
+    assert_eq!(injection["name"], "advisor");
+    assert_eq!(injection["model"], "claude-opus-4-6");
+    assert_eq!(injection["max_uses"], 3);
 }

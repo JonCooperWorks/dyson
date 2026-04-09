@@ -319,13 +319,25 @@ pub async fn build_agent(
 
     let transcriber = crate::media::audio::create_transcriber(settings.transcriber.as_ref());
 
-    crate::agent::Agent::builder(client, sandbox)
+    let mut builder = crate::agent::Agent::builder(client, sandbox)
         .skills(skills)
         .settings(&agent_settings)
         .workspace(workspace)
         .nudge_interval(nudge_interval)
-        .transcriber(transcriber)
-        .build()
+        .transcriber(transcriber);
+
+    // Create advisor if smartest_model is configured.
+    if let Some(ref smartest_model) = settings.agent.smartest_model {
+        let advisor_client = registry.get_default();
+        let advisor = crate::advisor::create_advisor(
+            &settings.agent.provider,
+            smartest_model,
+            advisor_client,
+        );
+        builder = builder.advisor(advisor);
+    }
+
+    builder.build()
 }
 
 /// Tools available to public agents — workspace memory + web research.

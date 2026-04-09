@@ -83,6 +83,12 @@ pub struct CompletionConfig {
     /// Lower = more deterministic, higher = more creative.
     /// Tool-heavy tasks often benefit from lower temperature (0.0–0.3).
     pub temperature: Option<f64>,
+
+    /// Provider-native tool entries to inject into the API request body.
+    ///
+    /// Used by the advisor pattern to inject `advisor_20260301` entries into
+    /// Anthropic requests.  Non-Anthropic clients ignore this field.
+    pub api_tool_injections: Vec<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------

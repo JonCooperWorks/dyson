@@ -162,6 +162,8 @@ struct JsonAgent {
     system_prompt: Option<String>,
     /// Name of the provider from the `"providers"` map.
     provider: Option<String>,
+    /// Advisor model for the advisor pattern.
+    smartest_model: Option<String>,
     /// Context compaction configuration.  Accepts either:
     /// - an integer: shorthand for `{ "context_window": <value> }` with defaults
     /// - an object: full `CompactionConfig` with optional fields
@@ -659,6 +661,9 @@ fn parse_agent_settings(agent: Option<JsonAgent>, settings: &mut Settings) {
             max_messages: rl.max_messages,
             window_secs: rl.window_secs,
         });
+    }
+    if agent.smartest_model.is_some() {
+        settings.agent.smartest_model = agent.smartest_model;
     }
 }
 
