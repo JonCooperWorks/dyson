@@ -2145,6 +2145,7 @@ fn native_anthropic_advisor_injects_api_tool() {
     );
     let advisor = crate::advisor::create_advisor(
         &crate::config::LlmProvider::Anthropic,
+        &crate::config::LlmProvider::Anthropic,
         "claude-opus-4-6",
         advisor_client,
     );

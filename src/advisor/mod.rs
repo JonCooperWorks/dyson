@@ -104,18 +104,22 @@ impl Advisor for NativeAnthropicAdvisor {
 // Factory
 // ---------------------------------------------------------------------------
 
-/// Create the appropriate advisor for the given executor provider.
+/// Create the appropriate advisor for the given providers.
 ///
-/// When the executor is Anthropic, returns a `NativeAnthropicAdvisor` that
-/// injects the advisor tool into the API request (zero-overhead, server-side).
-/// Otherwise, returns a `GenericAdvisor` that registers a Dyson-side tool
-/// making a separate LLM call to the advisor model.
+/// When both the executor and advisor are Anthropic, returns a
+/// `NativeAnthropicAdvisor` that injects the `advisor_20260301` tool
+/// into the API request (zero-overhead, server-side).  Otherwise,
+/// returns a `GenericAdvisor` that spawns a subagent with the advisor
+/// model and the parent's tools.
 pub fn create_advisor(
     executor_provider: &LlmProvider,
+    advisor_provider: &LlmProvider,
     advisor_model: &str,
     client: RateLimitedHandle<Box<dyn LlmClient>>,
 ) -> Box<dyn Advisor> {
-    if *executor_provider == LlmProvider::Anthropic {
+    if *executor_provider == LlmProvider::Anthropic
+        && *advisor_provider == LlmProvider::Anthropic
+    {
         tracing::info!(
             advisor_model = advisor_model,
             "using native Anthropic advisor"
@@ -126,11 +130,12 @@ pub fn create_advisor(
     } else {
         tracing::info!(
             advisor_model = advisor_model,
+            ?advisor_provider,
             "using generic advisor tool"
         );
         Box::new(generic::GenericAdvisor::new(
             advisor_model.to_string(),
-            executor_provider.clone(),
+            advisor_provider.clone(),
             client,
         ))
     }

@@ -327,14 +327,59 @@ pub async fn build_agent(
         .transcriber(transcriber);
 
     // Create advisor if smartest_model is configured.
+    // Format: "provider_name/model" (e.g. "openrouter/glm-5", "claude/claude-opus-4-6").
+    // Skip if the advisor resolves to the same model the executor is already using.
     if let Some(ref smartest_model) = settings.agent.smartest_model {
-        let advisor_client = registry.get_default();
-        let advisor = crate::advisor::create_advisor(
-            &settings.agent.provider,
-            smartest_model,
-            advisor_client,
-        );
-        builder = builder.advisor(advisor);
+        if let Some((provider_name, advisor_model)) = smartest_model.split_once('/') {
+            // Skip if the advisor is the currently loaded model.
+            let is_same_model = settings
+                .providers
+                .get(provider_name)
+                .map_or(false, |pc| {
+                    pc.provider_type == settings.agent.provider
+                        && advisor_model == settings.agent.model
+                });
+
+            if !is_same_model {
+                let advisor_provider_type = settings
+                    .providers
+                    .get(provider_name)
+                    .map(|pc| pc.provider_type.clone())
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            provider = provider_name,
+                            "advisor provider not found, falling back to generic"
+                        );
+                        crate::config::LlmProvider::OpenAi // will use generic path
+                    });
+
+                let advisor_client = match registry.get(provider_name) {
+                    Ok(handle) => handle,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to create advisor client, skipping");
+                        return builder.build();
+                    }
+                };
+
+                let advisor = crate::advisor::create_advisor(
+                    &settings.agent.provider,
+                    &advisor_provider_type,
+                    advisor_model,
+                    advisor_client,
+                );
+                builder = builder.advisor(advisor);
+            } else {
+                tracing::info!(
+                    smartest_model = smartest_model.as_str(),
+                    "advisor model is the currently loaded model, skipping"
+                );
+            }
+        } else {
+            tracing::warn!(
+                smartest_model = smartest_model.as_str(),
+                "smartest_model must be in 'provider/model' format (e.g. 'claude/claude-opus-4-6')"
+            );
+        }
     }
 
     builder.build()

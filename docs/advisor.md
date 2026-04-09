@@ -23,30 +23,50 @@ the native API feature is used; otherwise Dyson spawns a subagent.
 
 ## Configuration
 
-Add `smartest_model` to the agent config:
+Add `smartest_model` to the agent config in `provider/model` format:
 
 ```json
 {
   "agent": {
     "provider": "claude",
     "model": "claude-sonnet-4-20250514",
-    "smartest_model": "claude-opus-4-6"
+    "smartest_model": "claude/claude-opus-4-6"
   }
 }
 ```
 
-When `smartest_model` is absent, the advisor is disabled and behavior is
-identical to before.
+The provider name references a named provider from the `"providers"` map.
+The model name is passed to that provider's API.  Cross-provider advisors
+work naturally:
+
+```json
+{
+  "providers": {
+    "claude": { "type": "anthropic", "models": ["claude-sonnet-4-20250514"] },
+    "openrouter": { "type": "openrouter", "models": ["anthropic/claude-opus-4"] }
+  },
+  "agent": {
+    "provider": "claude",
+    "model": "claude-sonnet-4-20250514",
+    "smartest_model": "openrouter/anthropic/claude-opus-4"
+  }
+}
+```
+
+**Skip rules:**
+- When `smartest_model` is absent, the advisor is disabled entirely.
+- When the advisor resolves to the same provider and model as the executor,
+  the advisor is skipped (no point consulting yourself).
 
 ---
 
 ## Two Paths
 
 The `Advisor` trait abstracts over two fundamentally different mechanisms.
-The factory function `create_advisor()` picks the right one based on the
-executor's provider.
+The factory function `create_advisor()` picks the right one based on both
+the executor's and advisor's provider types.
 
-### Native Anthropic (executor is Anthropic)
+### Native Anthropic (both executor and advisor are Anthropic)
 
 Uses the `advisor_20260301` tool type from
 [Anthropic's advisor strategy](https://claude.com/blog/the-advisor-strategy).
@@ -96,7 +116,7 @@ Dyson's agent loop is completely unaware the advisor exists.  No `tool_use`
 events, no `tool_result` messages.  The only thing Dyson does is append a
 JSON entry to the tools array.
 
-### Generic (executor is not Anthropic)
+### Generic (executor or advisor is not Anthropic)
 
 Registers a Dyson-side `advisor` tool that spawns a child agent -- the same
 mechanism as `SubagentTool`.  The child agent inherits the parent's tools,
@@ -206,8 +226,10 @@ pub trait Advisor: Send + Sync {
 
 ### Lifecycle
 
-1. **`create_advisor()`** in the controller -- picks `NativeAnthropicAdvisor`
-   or `GenericAdvisor` based on the executor's provider.
+1. **`create_advisor()`** in the controller -- parses `smartest_model` as
+   `provider/model`, resolves the provider client, and picks
+   `NativeAnthropicAdvisor` (both Anthropic) or `GenericAdvisor` (otherwise).
+   Skipped entirely if the advisor is the currently loaded model.
 
 2. **`bind()`** in `Agent::new()` -- called after the tool registry is built
    from skills.  Passes the parent's sandbox, workspace, and flattened tool
