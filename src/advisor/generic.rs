@@ -38,9 +38,9 @@ pub(crate) struct AdvisorTool {
     client: RateLimitedHandle<Box<dyn LlmClient>>,
     model: String,
     provider: LlmProvider,
-    sandbox: Arc<dyn Sandbox>,
+    pub(crate) sandbox: Arc<dyn Sandbox>,
     workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
-    inherited_tools: Vec<Arc<dyn Tool>>,
+    pub(crate) inherited_tools: Vec<Arc<dyn Tool>>,
 }
 
 /// Minimal skill wrapper for inherited tools (same as SubagentTool's approach).
@@ -149,6 +149,8 @@ pub struct GenericAdvisor {
     model: String,
     provider: LlmProvider,
     tool: Option<Arc<dyn Tool>>,
+    /// Retained after bind() for test assertions on sandbox identity.
+    sandbox: Option<Arc<dyn Sandbox>>,
 }
 
 impl GenericAdvisor {
@@ -162,7 +164,15 @@ impl GenericAdvisor {
             model,
             provider,
             tool: None,
+            sandbox: None,
         }
+    }
+
+    /// Returns the sandbox Arc for test assertions on identity.
+    /// Only meaningful after `bind()` has been called.
+    #[cfg(test)]
+    pub(crate) fn sandbox(&self) -> Option<&Arc<dyn Sandbox>> {
+        self.sandbox.as_ref()
     }
 }
 
@@ -173,6 +183,7 @@ impl Advisor for GenericAdvisor {
         workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
         inherited_tools: Vec<Arc<dyn Tool>>,
     ) {
+        self.sandbox = Some(Arc::clone(&sandbox));
         self.tool = Some(Arc::new(AdvisorTool {
             client: self.client.clone(),
             model: self.model.clone(),

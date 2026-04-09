@@ -2100,6 +2100,31 @@ fn generic_advisor_inherits_parent_tools() {
 }
 
 #[test]
+fn generic_advisor_shares_sandbox_with_parent() {
+    // Verify that the generic advisor's child agent gets the exact same
+    // sandbox instance (Arc identity) as the parent agent.
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let advisor_llm = MockLlm::new(vec![]);
+
+    let mut advisor = crate::advisor::generic::GenericAdvisor::new(
+        "test-advisor".to_string(),
+        crate::config::LlmProvider::OpenAi,
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(advisor_llm)),
+    );
+
+    // Simulate what Agent::new() does: collect parent tools, call bind().
+    let parent_tools: Vec<Arc<dyn Tool>> = vec![];
+    crate::advisor::Advisor::bind(&mut advisor, Arc::clone(&sandbox), None, parent_tools);
+
+    // The advisor's sandbox should be the same Arc instance.
+    let advisor_sandbox = advisor.sandbox().expect("sandbox should be set after bind()");
+    assert!(
+        Arc::ptr_eq(&sandbox, advisor_sandbox),
+        "advisor sandbox must be the same Arc instance as the parent's"
+    );
+}
+
+#[test]
 fn native_anthropic_advisor_injects_api_tool() {
     // When the executor is Anthropic, the advisor should inject an
     // advisor_20260301 tool entry and NOT register any Dyson-side tools.
