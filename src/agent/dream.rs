@@ -58,7 +58,7 @@ use super::reflection;
 /// Dreams are passive — they don't poll or schedule themselves.  Instead,
 /// the [`DreamRunner`] checks each dream's trigger against events that
 /// the agent loop emits (turn completed, compaction happened, etc.).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum DreamTrigger {
     /// Fire every N user turns (e.g. memory maintenance every 5 turns).
     EveryNTurns(usize),
@@ -409,7 +409,7 @@ impl DreamHandle {
     /// expensive work (like cloning the message history) when no dream
     /// would fire.
     pub fn would_fire(&self, event: &DreamEvent) -> bool {
-        self.triggers.iter().any(|t| should_activate(t.clone(), event))
+        self.triggers.iter().any(|t| should_activate(*t, event))
     }
 
     /// Send a dream event to the background thread.
