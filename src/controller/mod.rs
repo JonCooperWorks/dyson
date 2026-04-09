@@ -311,11 +311,14 @@ pub async fn build_agent(
         .await
     };
 
+    let transcriber = crate::media::audio::create_transcriber(settings.transcriber.as_ref());
+
     crate::agent::Agent::builder(client, sandbox)
         .skills(skills)
         .settings(&agent_settings)
         .workspace(workspace)
         .nudge_interval(nudge_interval)
+        .transcriber(transcriber)
         .build()
 }
 

@@ -133,6 +133,22 @@ pub enum ContentBlock {
         /// MIME type, e.g. `"image/jpeg"`, `"image/png"`.
         media_type: String,
     },
+
+    /// A PDF document.
+    ///
+    /// Carries both the raw base64-encoded PDF (for providers that support
+    /// native document input, like Anthropic) and pre-extracted text (for
+    /// providers that don't).  The media resolver populates both fields so
+    /// each LLM client can choose the best representation:
+    /// - Anthropic: `{"type": "document", "source": {"type": "base64", ...}}`
+    /// - OpenAI/OpenRouter: falls back to the extracted text
+    /// - CLI subprocess clients: uses the extracted text
+    Document {
+        /// Base64-encoded PDF data.
+        data: String,
+        /// Text extracted from the PDF via `pdf-extract`.
+        extracted_text: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +208,11 @@ impl ContentBlock {
                 // Rough heuristic based on base64 data size.
                 let decoded_bytes = data.len() * 3 / 4;
                 (decoded_bytes / 750).max(100)
+            }
+            ContentBlock::Document { extracted_text, .. } => {
+                // Use the extracted text for token estimation since that's
+                // what most providers will actually consume.
+                extracted_text.split_whitespace().count().max(1)
             }
         }
     }

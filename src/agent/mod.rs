@@ -352,6 +352,13 @@ pub struct Agent {
 
     /// Optional persistence backend for rotating pre-compaction snapshots.
     history_backend: Option<HistoryBackend>,
+
+    /// Optional audio transcriber for resolving media attachments.
+    ///
+    /// Created from `Settings::transcriber` config at agent construction time.
+    /// When present, the agent can resolve audio attachments in
+    /// `run_with_attachments()`.  Images and PDFs do not require a transcriber.
+    transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +385,7 @@ pub struct AgentBuilder {
     settings: AgentSettings,
     workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
     nudge_interval: usize,
+    transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
 }
 
 impl AgentBuilder {
@@ -408,6 +416,12 @@ impl AgentBuilder {
         self
     }
 
+    /// Attach a transcriber for resolving audio attachments.
+    pub fn transcriber(mut self, t: std::sync::Arc<dyn crate::media::audio::Transcriber>) -> Self {
+        self.transcriber = Some(t);
+        self
+    }
+
     /// Build the agent. Consumes the builder.
     pub fn build(self) -> Result<Agent> {
         Agent::new(
@@ -417,6 +431,7 @@ impl AgentBuilder {
             &self.settings,
             self.workspace,
             self.nudge_interval,
+            self.transcriber,
         )
     }
 }
@@ -438,6 +453,7 @@ impl Agent {
             settings: AgentSettings::default(),
             workspace: None,
             nudge_interval: 0,
+            transcriber: None,
         }
     }
 
@@ -464,6 +480,7 @@ impl Agent {
             std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
         >,
         nudge_interval: usize,
+        transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
     ) -> Result<Self> {
         let tool_registry = ToolRegistry::from_skills(&skills);
         let system_prompt = Self::compose_system_prompt(settings, &skills);
@@ -502,6 +519,7 @@ impl Agent {
             tool_hooks: Vec::new(),
             dream_handle,
             history_backend: None,
+            transcriber,
         })
     }
 
@@ -829,7 +847,55 @@ impl Agent {
         self.run_inner(output).await
     }
 
-    /// Inner agent loop shared by [`run()`] and [`run_with_blocks()`].
+    /// Run the agent loop with text and raw media attachments.
+    ///
+    /// Resolves each attachment into ContentBlocks (images are resized,
+    /// audio is transcribed, PDFs are extracted), then builds a multimodal
+    /// user message and enters the agent loop.
+    ///
+    /// This is the primary entry point for controllers with media support.
+    /// Controllers only need to provide raw bytes + MIME type — the agent
+    /// handles all resolution.
+    pub async fn run_with_attachments(
+        &mut self,
+        text: &str,
+        attachments: Vec<crate::media::Attachment>,
+        output: &mut dyn Output,
+    ) -> Result<String> {
+        tracing::info!(
+            text_len = text.len(),
+            attachment_count = attachments.len(),
+            "user message with attachments received"
+        );
+
+        let mut blocks = Vec::new();
+        if !text.is_empty() {
+            blocks.push(ContentBlock::Text {
+                text: text.to_string(),
+            });
+        }
+
+        for attachment in attachments {
+            let mime = attachment.mime_type.clone();
+            match crate::media::resolve_attachment(attachment, self.transcriber.as_ref()).await {
+                Ok(resolved) => blocks.extend(resolved),
+                Err(e) => {
+                    tracing::warn!(error = %e, mime_type = %mime, "failed to resolve attachment");
+                    blocks.push(ContentBlock::Text {
+                        text: format!("[Failed to process {mime} attachment: {e}]"),
+                    });
+                }
+            }
+        }
+
+        self.conversation
+            .messages
+            .push(Message::user_multimodal(blocks));
+        self.run_inner(output).await
+    }
+
+    /// Inner agent loop shared by [`run()`], [`run_with_blocks()`], and
+    /// [`run_with_attachments()`].
     ///
     /// Assumes the caller has already pushed the user message to
     /// `self.conversation.messages`.
@@ -1016,6 +1082,7 @@ impl Agent {
                         format!("tool_result({tool_use_id}, error={is_error})")
                     }
                     crate::message::ContentBlock::Image { .. } => "image".to_string(),
+                    crate::message::ContentBlock::Document { .. } => "document".to_string(),
                     crate::message::ContentBlock::Thinking { .. } => "thinking".to_string(),
                 }).collect();
                 tracing::debug!(

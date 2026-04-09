@@ -184,6 +184,12 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
                 ContentBlock::Image { media_type, .. } => {
                     summary.push_str(&format!("[Image: {media_type}]\n"));
                 }
+                ContentBlock::Document { extracted_text, .. } => {
+                    summary.push_str(&format!(
+                        "[PDF: {} chars extracted]\n",
+                        extracted_text.len()
+                    ));
+                }
                 ContentBlock::Thinking { .. } => {}
             }
         }

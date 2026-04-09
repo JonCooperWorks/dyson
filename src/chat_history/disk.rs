@@ -149,16 +149,20 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
 
     for msg in messages {
         for block in &msg.content {
-            if let ContentBlock::Image { data, .. } = block
-                && !data.starts_with(MEDIA_REF_PREFIX)
-            {
-                needs_externalization = true;
-                let ptr: *const str = data.as_str();
-                hash_cache.entry(ptr).or_insert_with(|| {
-                    let hash = simple_hash(data);
-                    to_write.entry(hash.clone()).or_insert(data.as_str());
-                    hash
-                });
+            match block {
+                ContentBlock::Image { data, .. }
+                | ContentBlock::Document { data, .. }
+                    if !data.starts_with(MEDIA_REF_PREFIX) =>
+                {
+                    needs_externalization = true;
+                    let ptr: *const str = data.as_str();
+                    hash_cache.entry(ptr).or_insert_with(|| {
+                        let hash = simple_hash(data);
+                        to_write.entry(hash.clone()).or_insert(data.as_str());
+                        hash
+                    });
+                }
+                _ => {}
             }
         }
     }
@@ -194,6 +198,17 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
                             media_type: media_type.clone(),
                         }
                     }
+                    ContentBlock::Document {
+                        data,
+                        extracted_text,
+                    } if !data.starts_with(MEDIA_REF_PREFIX) => {
+                        let ptr: *const str = data.as_str();
+                        let hash = &hash_cache[&ptr];
+                        ContentBlock::Document {
+                            data: format!("{MEDIA_REF_PREFIX}{hash}"),
+                            extracted_text: extracted_text.clone(),
+                        }
+                    }
                     other => other.clone(),
                 })
                 .collect();
@@ -220,19 +235,22 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
 fn restore_images(messages: &mut [Message], media_dir: &std::path::Path) {
     for msg in messages.iter_mut() {
         for block in msg.content.iter_mut() {
-            if let ContentBlock::Image { data, .. } = block
-                && let Some(hash) = data.strip_prefix(MEDIA_REF_PREFIX)
-            {
+            let data_ref = match block {
+                ContentBlock::Image { data, .. } | ContentBlock::Document { data, .. } => data,
+                _ => continue,
+            };
+            if let Some(hash) = data_ref.strip_prefix(MEDIA_REF_PREFIX) {
+                let hash = hash.to_string();
                 let file_path = media_dir.join(format!("{hash}.b64"));
                 match std::fs::read_to_string(&file_path) {
                     Ok(content) => {
-                        *data = content;
+                        *data_ref = content;
                     }
                     Err(e) => {
                         tracing::warn!(
                             hash = hash,
                             error = %e,
-                            "failed to restore externalized image — keeping reference"
+                            "failed to restore externalized media — keeping reference"
                         );
                     }
                 }

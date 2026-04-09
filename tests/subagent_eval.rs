@@ -154,7 +154,7 @@ async fn subagent_child_agent_returns_result_via_capture_output() {
         dyson::skill::subagent::tests_support::FilteredSkillPublic::new(vec![]),
     )];
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(RateLimitedHandle::unlimited(Box::new(child_llm)), sandbox, skills, &settings, None, 0).unwrap();
+    let mut agent = Agent::new(RateLimitedHandle::unlimited(Box::new(child_llm)), sandbox, skills, &settings, None, 0, None).unwrap();
     agent.set_depth(1); // This is a child agent.
 
     let mut capture = dyson::skill::subagent::CaptureOutput::new();
@@ -200,6 +200,7 @@ async fn subagent_shares_sandbox_with_parent() {
         },
         None,
         0,
+        None,
     )
     .unwrap();
 
@@ -232,6 +233,7 @@ async fn subagent_shares_sandbox_with_parent() {
         },
         None,
         0,
+        None,
     )
     .unwrap();
     child.set_depth(1);
@@ -280,6 +282,7 @@ async fn subagent_conversation_isolated_from_parent() {
         &settings,
         None,
         0,
+        None,
     )
     .unwrap();
     let mut output = RecordingOutput::new();
@@ -299,6 +302,7 @@ async fn subagent_conversation_isolated_from_parent() {
         &settings,
         None,
         0,
+        None,
     )
     .unwrap();
     child.set_depth(1);
@@ -329,7 +333,7 @@ async fn depth_propagates_to_child_tool_context() {
     let llm = MockLlm::new(vec![text_response_events("OK.")]);
     let skills: Vec<Box<dyn Skill>> =
         vec![Box::new(dyson::skill::builtin::BuiltinSkill::new(None))];
-    let mut agent = Agent::new(RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0).unwrap();
+    let mut agent = Agent::new(RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
     agent.set_depth(2);
 
     let mut output = RecordingOutput::new();

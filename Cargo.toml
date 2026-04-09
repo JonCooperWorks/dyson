@@ -34,6 +34,7 @@ base64 = "0.22"
 subtle = "2"
 sha2 = "0.10"
 nanohtml2text = "0.1"
+pdf-extract = "0.10"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
