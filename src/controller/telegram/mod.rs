@@ -105,8 +105,8 @@ struct ChatEntry {
     /// Completion config for quick response LLM calls.
     config: tokio::sync::RwLock<crate::llm::CompletionConfig>,
     /// Whether this chat is a group/supergroup.
-    /// Group chats get restricted tools (web_search + web_fetch only)
-    /// with SSRF protection always enabled.
+    /// Group chats run as public agents with per-channel workspace
+    /// (workspace memory + web tools, no filesystem/shell).
     is_group: bool,
 }
 
@@ -601,7 +601,9 @@ async fn rebuild_agents_on_reload(
         } else {
             super::AgentMode::Private
         };
-        let agent_result = super::build_agent(settings, controller_prompt, mode, default_client, registry)
+        let channel_id_str = chat_id.to_string();
+        let ch = if is_group { Some(channel_id_str.as_str()) } else { None };
+        let agent_result = super::build_agent(settings, controller_prompt, mode, default_client, registry, ch)
             .await
             .map(|mut a| {
                 a.set_messages(messages.clone());
@@ -1133,10 +1135,10 @@ async fn get_or_create_entry(
         crate::controller::AgentMode::Private
     };
     let client = registry.get_default();
-    let mut agent =
-        crate::controller::build_agent(settings, controller_prompt, mode, client, registry).await?;
-
     let chat_key = chat_id.to_string();
+    let ch = if is_group { Some(chat_key.as_str()) } else { None };
+    let mut agent =
+        crate::controller::build_agent(settings, controller_prompt, mode, client, registry, ch).await?;
 
     // Attach chat history so compaction can rotate pre-compaction snapshots.
     agent.set_chat_history(Arc::clone(chat_store), chat_key.clone());
@@ -1697,28 +1699,38 @@ mod tests {
 
     #[test]
     fn telegram_prompt_coexists_with_identity_in_public_agent() {
+        use crate::workspace::Workspace;
+
+        // Public agents now get identity via workspace.system_prompt(),
+        // which is composed from SOUL.md and IDENTITY.md by the workspace.
+        // Here we verify the prompt composition order works correctly.
         let ws = crate::workspace::InMemoryWorkspace::new()
             .with_file("SOUL.md", "I speak like a pirate.")
             .with_file("IDENTITY.md", "I am Captain Bot.");
 
         let mut agent_settings = crate::config::AgentSettings::default();
-        super::super::inject_workspace_identity(&ws, &mut agent_settings);
 
-        // Append public-agent and Telegram-controller prompts the same
-        // way build_public_agent and the Telegram controller would.
+        // Workspace system prompt provides identity.
+        let ws_prompt = ws.system_prompt();
+        if !ws_prompt.is_empty() {
+            agent_settings.system_prompt.push_str("\n\n");
+            agent_settings.system_prompt.push_str(&ws_prompt);
+        }
+
+        // Public-agent suffix.
         agent_settings.system_prompt.push_str(
-            "\n\nYou are a public-facing agent with limited tools.",
+            "\n\nYou are a public-facing agent.",
         );
+
+        // Telegram controller prompt.
         let telegram_prompt = "You are responding via Telegram. Keep these rules:\n\
              - Keep responses concise. Telegram messages have a 4096 character limit.";
         agent_settings.system_prompt.push_str("\n\n");
         agent_settings.system_prompt.push_str(telegram_prompt);
 
         let prompt = &agent_settings.system_prompt;
-        // Identity content present.
-        assert!(prompt.contains("## PERSONALITY"), "should contain PERSONALITY");
+        // Identity content from workspace system prompt.
         assert!(prompt.contains("I speak like a pirate."), "should contain SOUL.md content");
-        assert!(prompt.contains("## IDENTITY"), "should contain IDENTITY");
         assert!(prompt.contains("I am Captain Bot."), "should contain IDENTITY.md content");
         // Public-agent suffix present.
         assert!(prompt.contains("public-facing agent"), "should contain public suffix");

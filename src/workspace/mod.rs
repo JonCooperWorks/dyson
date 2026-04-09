@@ -38,6 +38,7 @@
 //   ```
 // ===========================================================================
 
+pub mod channel;
 pub mod in_memory;
 pub mod memory_store;
 pub mod migrate;
@@ -207,6 +208,66 @@ pub fn create_workspace(config: &WorkspaceConfig) -> Result<Box<dyn Workspace>> 
             "unknown workspace backend: '{other}'.  Supported: 'openclaw'."
         ))),
     }
+}
+
+/// Create a per-channel workspace under `{main_workspace}/channels/{channel_id}/`.
+///
+/// Channel workspaces give public agents persistent memory scoped to a single
+/// channel (e.g. a Telegram group chat).  SOUL.md and IDENTITY.md are symlinked
+/// to the main workspace so identity changes propagate automatically.  The
+/// The returned workspace is wrapped in a [`ChannelWorkspace`] that silently
+/// drops writes to the protected identity keys.
+///
+/// On first creation:
+/// 1. The `channels/{channel_id}/` directory is created.
+/// 2. SOUL.md and IDENTITY.md are symlinked to the main workspace's copies.
+/// 3. `OpenClawWorkspace::load()` creates default MEMORY.md, etc.
+///
+/// On subsequent loads, existing symlinks are left in place.
+pub fn create_channel_workspace(
+    config: &WorkspaceConfig,
+    channel_id: &str,
+) -> Result<Box<dyn Workspace>> {
+    let main_path = openclaw::resolve_tilde(config.connection_string.expose());
+    let channel_path = main_path.join("channels").join(channel_id);
+
+    // Create the channel directory if it doesn't exist.
+    std::fs::create_dir_all(&channel_path).map_err(|e| {
+        DysonError::Config(format!(
+            "cannot create channel workspace at {}: {e}",
+            channel_path.display()
+        ))
+    })?;
+
+    // Symlink identity files from the main workspace.  Skip if the symlink
+    // already exists or the source file is missing.
+    for file in ["SOUL.md", "IDENTITY.md"] {
+        let target = channel_path.join(file);
+        let source = main_path.join(file);
+        if !target.exists() && source.exists() {
+            if let Err(e) = std::os::unix::fs::symlink(&source, &target) {
+                tracing::warn!(
+                    file,
+                    source = %source.display(),
+                    target = %target.display(),
+                    error = %e,
+                    "failed to symlink identity file into channel workspace"
+                );
+            }
+        }
+    }
+
+    let ws = OpenClawWorkspace::load(&channel_path, config.memory.clone())?;
+
+    // Wrap in ChannelWorkspace — only explicitly allowed keys are writable.
+    // Everything else (SOUL.md, IDENTITY.md, AGENTS.md, etc.) is protected
+    // by default.  This prevents prompt injection from modifying identity
+    // and prevents writes from flowing through symlinks to the main workspace.
+    let ws = channel::ChannelWorkspace::new(Box::new(ws))
+        .allow("MEMORY.md")
+        .allow("USER.md")
+        .allow_prefix("memory/");
+    Ok(Box::new(ws))
 }
 
 // ===========================================================================
