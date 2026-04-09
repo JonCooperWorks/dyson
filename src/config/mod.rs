@@ -220,12 +220,12 @@ pub struct AgentSettings {
     /// Optional base URL override for the LLM API.
     pub base_url: Option<String>,
 
-    /// Optional advisor model for the advisor pattern.
+    /// Advisor model in `provider/model` format (e.g. `"claude/claude-opus-4-6"`).
     ///
-    /// When set, the executor model can consult this stronger model for
-    /// complex decisions.  If the executor is Anthropic, uses the native
-    /// `advisor_20260301` API tool (zero-overhead, server-side).  Otherwise,
-    /// registers a Dyson-side `advisor` tool that makes a separate LLM call.
+    /// When set, the executor can consult a stronger model for complex
+    /// decisions.  If both executor and advisor are Anthropic, uses the
+    /// native `advisor_20260301` API tool.  Otherwise, spawns a subagent.
+    /// Skipped when the advisor resolves to the currently loaded model.
     pub smartest_model: Option<String>,
 
     /// Context compaction configuration.

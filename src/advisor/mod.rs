@@ -37,7 +37,7 @@ use crate::tool::Tool;
 ///
 /// ## Lifecycle
 ///
-/// 1. `create_advisor()` — construct with model + client
+/// 1. `create_advisor()` — construct with providers, model, and client
 /// 2. `bind()` — called from `Agent::new()` after tools/sandbox/workspace
 ///    are available, so the advisor tool can inherit the parent's resources
 /// 3. `api_tool_entries()` / `tools()` — used during agent construction
