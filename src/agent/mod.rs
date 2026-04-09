@@ -377,8 +377,6 @@ pub struct Agent {
     /// `run_with_attachments()`.  Images and PDFs do not require a transcriber.
     transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
 
-    /// Optional advisor — a stronger model the executor can consult.
-    advisor: Option<Box<dyn crate::advisor::Advisor>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -572,7 +570,6 @@ impl Agent {
             dream_handle,
             history_backend: None,
             transcriber,
-            advisor,
         })
     }
 
