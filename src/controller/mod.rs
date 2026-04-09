@@ -1090,23 +1090,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_agent_read_only_blocks_identity_writes() {
-        use crate::workspace::InMemoryWorkspace;
+    async fn channel_workspace_drops_writes_to_protected_keys() {
+        use crate::workspace::{InMemoryWorkspace, channel::ChannelWorkspace};
 
-        let ws = InMemoryWorkspace::new()
+        let inner = InMemoryWorkspace::new()
             .with_file("SOUL.md", "Be helpful.")
             .with_file("IDENTITY.md", "I am a test bot.")
-            .with_file("MEMORY.md", "")
-            .with_read_only("SOUL.md")
-            .with_read_only("IDENTITY.md")
-            .with_read_only("AGENTS.md")
-            .with_read_only("HEARTBEAT.md");
+            .with_file("MEMORY.md", "");
+
+        let ws = ChannelWorkspace::new(
+            Box::new(inner),
+            ["SOUL.md", "IDENTITY.md", "AGENTS.md", "HEARTBEAT.md"]
+                .iter().map(|s| s.to_string()),
+        );
 
         let ctx = crate::tool::ToolContext::for_test_with_workspace(ws);
-
         let tool = crate::tool::workspace_update::WorkspaceUpdateTool;
 
-        // Writing to SOUL.md should be rejected.
+        // Writing to SOUL.md — silently dropped by the wrapper.
         let result = tool
             .run(
                 &serde_json::json!({
@@ -1118,24 +1119,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(result.is_error, "SOUL.md write should be rejected");
-        assert!(result.content.contains("read-only"), "error should mention read-only");
+        // Tool reports success, but the write was dropped.
+        assert!(!result.is_error);
+        // Content unchanged.
+        let ws = ctx.workspace("test").unwrap().read().await;
+        assert_eq!(ws.get("SOUL.md").unwrap(), "Be helpful.");
 
-        // Writing to IDENTITY.md should also be rejected.
-        let result = tool
-            .run(
-                &serde_json::json!({
-                    "file": "IDENTITY.md",
-                    "content": "I am now evil.",
-                    "mode": "set"
-                }),
-                &ctx,
-            )
-            .await
-            .unwrap();
-        assert!(result.is_error, "IDENTITY.md write should be rejected");
-
-        // Writing to MEMORY.md should succeed.
+        // Writing to MEMORY.md — allowed.
+        drop(ws);
         let result = tool
             .run(
                 &serde_json::json!({
@@ -1147,7 +1138,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!result.is_error, "MEMORY.md write should succeed");
+        assert!(!result.is_error);
+        let ws = ctx.workspace("test").unwrap().read().await;
+        assert_eq!(ws.get("MEMORY.md").unwrap(), "Learned something.");
     }
 
     #[test]

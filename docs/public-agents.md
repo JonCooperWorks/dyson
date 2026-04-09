@@ -126,9 +126,9 @@ LLM client and rate-limit window via `ClientRegistry`.
 |---------|-------------|----------|
 | Tool restriction | `BuiltinSkill::new_filtered()` with `PUBLIC_AGENT_TOOLS` allowlist | `build_public_agent()` |
 | No bash/file access | Tools not in registry — LLM cannot call them | `skill/builtin.rs` |
-| Read-only identity | SOUL.md/IDENTITY.md symlinked from main workspace; writes blocked by `Workspace::is_read_only()` | `create_channel_workspace()`, `workspace_update.rs` |
+| Read-only identity | SOUL.md/IDENTITY.md symlinked from main workspace; writes dropped by `ChannelWorkspace` wrapper | `create_channel_workspace()`, `channel.rs` |
 | Per-channel isolation | Separate workspace directory per channel ID | `create_channel_workspace()` |
-| No dangerous workspace writes | `Workspace::is_read_only()` blocks writes to SOUL.md, IDENTITY.md, AGENTS.md, HEARTBEAT.md | `workspace_update.rs` |
+| No dangerous workspace writes | `ChannelWorkspace` wrapper silently drops `set`/`append` to protected keys | `channel.rs` |
 | Dreams (per-channel) | Dream thread uses channel workspace, not main workspace | `build_public_agent()` |
 | SSRF protection | `PolicySandbox` blocks internal/private IPs for `web_fetch` | `policy_sandbox.rs` |
 | Sandbox always active | `create_sandbox(config, false)` — hardcoded, ignores `--dangerous-no-sandbox` | `build_public_agent()` |
@@ -159,11 +159,11 @@ agents get SSRF protection too, not just public ones.
 
 ### Read-Only Files
 
-Public agents can read but not write to identity files. The workspace
-itself tracks which keys are read-only via `Workspace::is_read_only()`,
-checked by `workspace_update` before every write. The read-only keys are
-set by `create_channel_workspace()` when the workspace is created.
-Protected files:
+Public agents can read but not write to identity files. The channel
+workspace is wrapped in a `ChannelWorkspace` decorator that silently
+drops `set()` and `append()` calls to protected keys. The protection
+lives in the workspace implementation itself — tools don't need to know
+about it. Protected files:
 
 - `SOUL.md` — agent personality (symlinked from main workspace)
 - `IDENTITY.md` — agent identity (symlinked from main workspace)

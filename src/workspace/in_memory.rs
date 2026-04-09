@@ -17,7 +17,6 @@ use crate::workspace::openclaw::chrono_today;
 pub struct InMemoryWorkspace {
     files: HashMap<String, String>,
     limits: HashMap<String, usize>,
-    read_only: std::collections::HashSet<String>,
     nudge_interval: usize,
 }
 
@@ -26,7 +25,6 @@ impl InMemoryWorkspace {
         Self {
             files: HashMap::new(),
             limits: HashMap::new(),
-            read_only: std::collections::HashSet::new(),
             nudge_interval: 5,
         }
     }
@@ -34,12 +32,6 @@ impl InMemoryWorkspace {
     /// Builder: add a file to the workspace.
     pub fn with_file(mut self, name: &str, content: &str) -> Self {
         self.files.insert(name.to_string(), content.to_string());
-        self
-    }
-
-    /// Builder: mark a file as read-only.
-    pub fn with_read_only(mut self, file: &str) -> Self {
-        self.read_only.insert(file.to_string());
         self
     }
 
@@ -141,10 +133,6 @@ impl Workspace for InMemoryWorkspace {
 
     fn nudge_interval(&self) -> usize {
         self.nudge_interval
-    }
-
-    fn is_read_only(&self, name: &str) -> bool {
-        self.read_only.contains(name)
     }
 }
 
