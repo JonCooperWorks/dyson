@@ -30,10 +30,6 @@ use crate::error::Result;
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::ToolDefinition;
 
-/// Maximum text buffer size for dialect tool extraction.
-/// Prevents unbounded memory growth if a model generates a very long response.
-const MAX_TEXT_BUFFER: usize = 2 * 1024 * 1024; // 2 MB
-
 // ---------------------------------------------------------------------------
 // TextToolHandler trait and types
 // ---------------------------------------------------------------------------
@@ -211,25 +207,6 @@ impl Stream for TextToolExtractorStream {
                 StreamEvent::TextDelta(ref text) => {
                     this.text_buffer.push_str(text);
                     this.buffered_events.push(event);
-
-                    // Guard: if the text buffer exceeds the cap, stop
-                    // buffering and flush everything as pass-through.
-                    // This prevents unbounded memory growth from very
-                    // long responses on dialect models.
-                    if this.text_buffer.len() > MAX_TEXT_BUFFER {
-                        tracing::warn!(
-                            buffered = this.text_buffer.len(),
-                            "dialect text buffer exceeded {} bytes, disabling extraction",
-                            MAX_TEXT_BUFFER,
-                        );
-                        this.has_structured_tools = true; // skip extraction
-                        for buffered in this.buffered_events.drain(..) {
-                            this.pending_events.push_back(Ok(buffered));
-                        }
-                        this.text_buffer = String::new();
-                        return Poll::Ready(Some(this.pending_events.pop_front().unwrap()));
-                    }
-
                     // Don't emit yet — we need to wait for completion
                     // to know if we should extract tool calls.
                     cx.waker().wake_by_ref();
