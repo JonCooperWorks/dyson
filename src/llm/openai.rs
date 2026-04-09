@@ -202,9 +202,11 @@ impl LlmClient for OpenAiClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "failed to read error body".into());
-            return Err(DysonError::Llm(format!(
-                "OpenAI API returned {status}: {body}"
-            )));
+            return Err(match status.as_u16() {
+                429 => DysonError::LlmRateLimit(format!("OpenAI API rate limited: {body}")),
+                502 | 503 | 529 => DysonError::LlmOverloaded(format!("OpenAI API returned {status}: {body}")),
+                _ => DysonError::Llm(format!("OpenAI API returned {status}: {body}")),
+            });
         }
 
         // -- Parse SSE stream --

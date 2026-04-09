@@ -652,7 +652,7 @@ fn parse_agent_settings(agent: Option<JsonAgent>, settings: &mut Settings) {
         settings.agent.system_prompt = prompt;
     }
     if let Some(compaction) = agent.compaction {
-        settings.agent.compaction = Some(parse_compaction(compaction));
+        settings.agent.compaction = parse_compaction(compaction);
     }
     if let Some(rl) = agent.rate_limit {
         settings.agent.rate_limit = Some(crate::config::RateLimitConfig {

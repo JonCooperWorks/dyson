@@ -222,12 +222,12 @@ pub struct AgentSettings {
 
     /// Context compaction configuration.
     ///
-    /// When set, the agent automatically compacts conversation history when
-    /// the estimated context size exceeds `compaction.threshold()`.  Uses a
-    /// Hermes-style five-phase algorithm that preserves the head and tail of
-    /// the conversation while summarising the middle.
-    /// `None` = automatic compaction disabled (default).
-    pub compaction: Option<CompactionConfig>,
+    /// Controls automatic conversation compaction.  When the estimated context
+    /// size exceeds `compaction.threshold()`, the agent runs a Hermes-style
+    /// five-phase algorithm that preserves the head and tail of the conversation
+    /// while summarising the middle.  Defaults to sensible values (200k window,
+    /// 50% threshold).
+    pub compaction: CompactionConfig,
 
     /// Rate limiting configuration.
     ///
@@ -797,7 +797,7 @@ impl Default for AgentSettings {
             api_key: crate::auth::Credential::new(String::new()),
             provider: LlmProvider::Anthropic,
             base_url: None,
-            compaction: None,
+            compaction: CompactionConfig::default(),
             rate_limit: None,
         }
     }

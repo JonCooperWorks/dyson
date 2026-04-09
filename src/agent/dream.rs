@@ -159,14 +159,30 @@ pub trait Dream: Send + Sync {
 // DreamRunner — the scheduler that lives on the Agent
 // ---------------------------------------------------------------------------
 
+/// Maximum number of concurrent dream tasks.  Prevents unbounded task
+/// accumulation when dreams are slow and events arrive quickly.
+const MAX_CONCURRENT_DREAMS: usize = 4;
+
 /// Holds registered dreams and fires them when events match their triggers.
 ///
 /// The runner never awaits dream completion — it spawns and moves on.
 /// This is the enforcement point for the "never block the controller loop"
 /// contract.
-#[derive(Default)]
 pub struct DreamRunner {
     dreams: Vec<Arc<dyn Dream>>,
+    /// Semaphore limiting concurrent dream tasks.  Acquired before spawning,
+    /// released when the task finishes.  If all permits are taken, new dreams
+    /// are dropped with a warning rather than queued.
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for DreamRunner {
+    fn default() -> Self {
+        Self {
+            dreams: Vec::new(),
+            semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DREAMS)),
+        }
+    }
 }
 
 impl DreamRunner {
@@ -191,6 +207,21 @@ impl DreamRunner {
 
         for dream in &self.dreams {
             if should_activate(dream.trigger(), event) {
+                // Try to acquire a semaphore permit without blocking.
+                // If all permits are taken, skip this dream rather than
+                // accumulating unbounded tasks.
+                let permit = match self.semaphore.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        tracing::warn!(
+                            dream = dream.name(),
+                            max = MAX_CONCURRENT_DREAMS,
+                            "dream skipped — max concurrent dreams reached"
+                        );
+                        continue;
+                    }
+                };
+
                 activated += 1;
                 let dream = Arc::clone(dream);
                 let ctx = ctx_factory();
@@ -198,6 +229,9 @@ impl DreamRunner {
 
                 let dream_name_for_panic = dream_name.clone();
                 let handle = tokio::spawn(async move {
+                    // Hold the permit for the duration of the dream.
+                    let _permit = permit;
+
                     tracing::info!(dream = dream_name, "dream starting");
                     let start = std::time::Instant::now();
 
@@ -292,6 +326,10 @@ struct DreamRequest {
 /// so the main loop never pays that cost.
 pub struct DreamHandle {
     tx: std::sync::mpsc::Sender<DreamRequest>,
+    /// Cached triggers from registered dreams — used for cheap pre-filtering
+    /// on the main thread so we can skip the message snapshot when no dream
+    /// would activate for the event.
+    triggers: Vec<DreamTrigger>,
     // Held so the thread lives as long as the handle.
     _thread: std::thread::JoinHandle<()>,
 }
@@ -304,6 +342,7 @@ impl DreamHandle {
     /// (e.g. in unit tests) the thread still starts but dreams that
     /// need `tokio::spawn` will be silently skipped.
     pub fn new(dreams: Vec<Arc<dyn Dream>>) -> Self {
+        let triggers: Vec<DreamTrigger> = dreams.iter().map(|d| d.trigger()).collect();
         let (tx, rx) = std::sync::mpsc::channel::<DreamRequest>();
         let tokio_handle = tokio::runtime::Handle::try_current().ok();
 
@@ -359,8 +398,18 @@ impl DreamHandle {
 
         Self {
             tx,
+            triggers,
             _thread: thread,
         }
+    }
+
+    /// Check if any registered dream would activate for this event.
+    ///
+    /// This is a cheap, main-thread pre-filter so the caller can skip
+    /// expensive work (like cloning the message history) when no dream
+    /// would fire.
+    pub fn would_fire(&self, event: &DreamEvent) -> bool {
+        self.triggers.iter().any(|t| should_activate(t.clone(), event))
     }
 
     /// Send a dream event to the background thread.

@@ -124,18 +124,12 @@ impl Agent {
 
     /// Check if an LLM error is retryable (rate limit, overloaded, network).
     pub(super) fn is_retryable(err: &DysonError) -> bool {
-        match err {
-            DysonError::Llm(msg) => {
-                msg.contains("rate limit")
-                    || msg.contains("429")
-                    || msg.contains("overloaded")
-                    || msg.contains("529")
-                    || msg.contains("502")
-                    || msg.contains("503")
-            }
-            DysonError::Http(_) => true, // network errors are always retryable
-            _ => false,
-        }
+        matches!(
+            err,
+            DysonError::LlmRateLimit(_)
+                | DysonError::LlmOverloaded(_)
+                | DysonError::Http(_)
+        )
     }
 
     /// Process a tool execution result: render to output, format for the LLM,
@@ -143,11 +137,11 @@ impl Agent {
     fn handle_tool_result(
         &mut self,
         call: &ToolCall,
-        result: Result<ToolOutput>,
+        result: Result<(ToolOutput, std::time::Duration)>,
         output: &mut dyn Output,
     ) -> Result<()> {
         let tool_result_msg = match result {
-            Ok(ref tool_output) => {
+            Ok((ref tool_output, duration)) => {
                 output.tool_result(tool_output)?;
 
                 // Send any attached files to the user via the controller.
@@ -161,10 +155,8 @@ impl Agent {
                     }
                 }
 
-                // Format the result for the LLM.
-                let formatted = self
-                    .formatter
-                    .format(call, tool_output, std::time::Duration::ZERO);
+                // Format the result for the LLM with the actual execution duration.
+                let formatted = self.formatter.format(call, tool_output, duration);
                 let content = formatted.to_llm_message();
                 Message::tool_result(&call.id, &content, tool_output.is_error)
             }
@@ -180,7 +172,10 @@ impl Agent {
     /// This is the concurrent-safe entry point — it doesn't touch `output`
     /// (which is `&mut` and can't be shared across futures).  The caller
     /// handles output rendering after all futures resolve.
-    async fn execute_tool_call_timed(&self, call: &ToolCall) -> Result<ToolOutput> {
+    ///
+    /// Returns the tool output paired with the wall-clock execution duration
+    /// so the caller can thread it to the result formatter.
+    async fn execute_tool_call_timed(&self, call: &ToolCall) -> Result<(ToolOutput, std::time::Duration)> {
         if tracing::enabled!(tracing::Level::INFO) {
             let input_str = call.input.to_string();
             let input_preview = &input_str[..input_str.len().min(500)];
@@ -202,7 +197,7 @@ impl Agent {
             match decision {
                 HookDecision::Block { reason } => {
                     tracing::info!(tool = call.name, reason = reason, "tool call blocked by hook");
-                    return Ok(ToolOutput::error(format!("Blocked by hook: {reason}")));
+                    return Ok((ToolOutput::error(format!("Blocked by hook: {reason}")), std::time::Duration::ZERO));
                 }
                 HookDecision::Modify { input } => {
                     effective_call = ToolCall::new(&call.name, input);
@@ -261,7 +256,7 @@ impl Agent {
                 "tool call failed"
             ),
         }
-        result
+        result.map(|out| (out, duration))
     }
 
     /// Notify the owning skill that one of its tools was executed.

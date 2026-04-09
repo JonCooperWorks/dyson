@@ -7,9 +7,6 @@
 //   3. Summarise the middle section via an LLM call.
 //   4. Reassemble: head + [Context Summary] + tail.
 //   5. Fix orphaned tool_use/tool_result pairs.
-//
-// Also includes legacy compaction (summarise entire history) and the
-// offline token estimator used to decide when compaction is needed.
 // ===========================================================================
 
 use crate::config::CompactionConfig;
@@ -21,9 +18,9 @@ use crate::message::{ContentBlock, Message};
 use super::stream_handler;
 
 impl super::Agent {
-    /// Compact the conversation using a five-phase Hermes-style algorithm.
+    /// Compact the conversation using the five-phase Hermes-style algorithm.
     ///
-    /// When a `CompactionConfig` is set, the algorithm:
+    /// The algorithm:
     ///   1. **Prune tool outputs** — replace old `ToolResult` content outside
     ///      protected regions with placeholders (no LLM call).
     ///   2. **Identify regions** — protect the first N messages (head) and the
@@ -33,9 +30,6 @@ impl super::Agent {
     ///   4. **Reassemble** — head + `[Context Summary]` + tail.
     ///   5. **Fix orphaned tool pairs** — insert synthetic `ToolResult` for any
     ///      `ToolUse` whose result was in the summarised section.
-    ///
-    /// When no `CompactionConfig` is set, falls back to legacy behaviour:
-    /// summarise the entire history into a single `[Context Summary]` message.
     ///
     /// ## When to use
     ///
@@ -49,10 +43,6 @@ impl super::Agent {
         }
 
         // Rotate pre-compaction snapshot for fine-tuning preservation.
-        //
-        // When a chat history backend is attached, save the current verbatim
-        // conversation to a timestamped archive before we summarise it away.
-        // This ensures the full conversation is always recoverable.
         if let Some(ref backend) = self.history_backend {
             if let Err(e) = backend.store.save(&backend.chat_id, &self.conversation.messages) {
                 tracing::warn!(error = %e, "failed to save pre-compaction snapshot");
@@ -63,9 +53,7 @@ impl super::Agent {
             }
         }
 
-        // Fire compaction-triggered dreams (learning synthesis) in the
-        // background.  This doesn't block — compaction proceeds immediately
-        // while dreams run in parallel.
+        // Fire compaction-triggered dreams (learning synthesis) in the background.
         self.fire_dreams(super::dream::DreamEvent::Compaction);
 
         tracing::info!(
@@ -74,52 +62,11 @@ impl super::Agent {
             "compacting conversation context"
         );
 
-        // Dispatch to five-phase or legacy compaction.
-        if let Some(config) = self.compaction_config {
-            self.compact_hermes(&config, output).await
-        } else {
-            self.compact_legacy(output).await
-        }
-    }
+        let config = self.compaction_config;
 
-    /// Legacy compaction: summarise the entire history into one message.
-    async fn compact_legacy(&mut self, output: &mut dyn Output) -> Result<()> {
-        // Temporarily move messages out to avoid cloning the entire history.
-        // On success we replace them with the summary; on error we restore.
-        let messages = std::mem::take(&mut self.conversation.messages);
-        let old_count = messages.len();
-
-        let summary = match self.summarise_messages(&messages, None, output).await {
-            Ok(s) => s,
-            Err(e) => {
-                self.conversation.messages = messages;
-                return Err(e);
-            }
-        };
-
-        if summary.is_empty() {
-            tracing::warn!("compaction produced empty summary — keeping original history");
-            self.conversation.messages = messages;
-            return Ok(());
-        }
-
-        self.conversation.messages
-            .push(Message::user(&format!("[Context Summary]\n\n{summary}")));
-        self.conversation.token_budget.reset();
-
-        tracing::info!(old_messages = old_count, "context compacted (legacy)");
-        Ok(())
-    }
-
-    /// Five-phase Hermes-style compaction.
-    async fn compact_hermes(
-        &mut self,
-        config: &CompactionConfig,
-        output: &mut dyn Output,
-    ) -> Result<()> {
         // Phase 2: identify protected regions.
-        let head_end = self.head_boundary(config);
-        let tail_start = self.tail_boundary(config);
+        let head_end = self.head_boundary(&config);
+        let tail_start = self.tail_boundary(&config);
 
         // If there's no middle section, nothing to summarise.
         if head_end >= tail_start {
@@ -131,17 +78,29 @@ impl super::Agent {
             return Ok(());
         }
 
-        // Phase 1: prune tool outputs in the middle (cheap, no LLM).
-        self.prune_tool_outputs(head_end, tail_start);
-
         // Check for a previous [Context Summary] in the head for iterative merging.
         let previous_summary = self.find_existing_summary(head_end);
 
-        // Phase 3: summarise the middle section.
-        // Temporarily take messages to avoid cloning the middle slice.
+        // Phase 1 + Phase 3: prune tool outputs then summarise.
+        //
+        // We take the messages out, prune a clone of the middle for the
+        // summarisation LLM call, but keep the originals intact.  If
+        // summarisation fails, the unpruned messages are restored — no
+        // silent data loss on the error path.
         let messages = std::mem::take(&mut self.conversation.messages);
-        let middle = &messages[head_end..tail_start];
-        let summary = match self.summarise_messages(middle, previous_summary.as_deref(), output).await {
+
+        // Build a pruned copy of the middle for summarisation.
+        let mut pruned_middle: Vec<Message> = messages[head_end..tail_start].to_vec();
+        for msg in &mut pruned_middle {
+            for block in &mut msg.content {
+                if let ContentBlock::ToolResult { content, .. } = block {
+                    *content = "[tool output pruned]".to_string();
+                }
+            }
+        }
+
+        // Phase 3: summarise the pruned middle section.
+        let summary = match self.summarise_messages(&pruned_middle, previous_summary.as_deref(), output).await {
             Ok(s) => s,
             Err(e) => {
                 self.conversation.messages = messages;
@@ -188,7 +147,7 @@ impl super::Agent {
         tracing::info!(
             old_messages = old_count,
             new_messages = self.conversation.messages.len(),
-            "context compacted (hermes)"
+            "context compacted"
         );
         Ok(())
     }
@@ -219,17 +178,6 @@ impl super::Agent {
         head_end
     }
 
-    /// Phase 1: replace `ToolResult` content in the middle with a placeholder.
-    pub(super) fn prune_tool_outputs(&mut self, head_end: usize, tail_start: usize) {
-        for msg in &mut self.conversation.messages[head_end..tail_start] {
-            for block in &mut msg.content {
-                if let ContentBlock::ToolResult { content, .. } = block {
-                    *content = "[tool output pruned]".to_string();
-                }
-            }
-        }
-    }
-
     /// Find an existing `[Context Summary]` in the head region.
     pub(super) fn find_existing_summary(&self, head_end: usize) -> Option<String> {
         for msg in &self.conversation.messages[..head_end] {
@@ -237,7 +185,6 @@ impl super::Agent {
                 if let ContentBlock::Text { text } = block
                     && text.starts_with("[Context Summary]")
                 {
-                    // Strip the prefix to get just the summary body.
                     return Some(
                         text.strip_prefix("[Context Summary]")
                             .unwrap_or(text)
@@ -319,7 +266,6 @@ impl super::Agent {
     pub(super) fn fix_orphaned_tool_pairs(&mut self) {
         use std::collections::{HashMap, HashSet};
 
-        // Collect all tool_use IDs (with positions) and tool_result IDs.
         let mut tool_use_positions: HashMap<String, usize> = HashMap::new();
         let mut tool_result_ids: HashSet<String> = HashSet::new();
 
@@ -337,14 +283,12 @@ impl super::Agent {
             }
         }
 
-        // Find orphaned tool_use IDs (no matching result) with their positions.
         let mut orphaned_uses: Vec<(String, usize)> = tool_use_positions
             .iter()
             .filter(|(id, _)| !tool_result_ids.contains(id.as_str()))
             .map(|(id, &pos)| (id.clone(), pos))
             .collect();
 
-        // Find orphaned tool_result IDs (no matching use).
         let tool_use_ids: HashSet<&str> =
             tool_use_positions.keys().map(|s| s.as_str()).collect();
         let orphaned_results: HashSet<String> = tool_result_ids

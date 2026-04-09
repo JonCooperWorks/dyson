@@ -328,9 +328,9 @@ pub struct Agent {
     tool_context: ToolContext,
 
     /// Context compaction configuration.
-    /// When set, the agent automatically compacts conversation history when
-    /// the estimated context size exceeds `compaction_config.threshold()`.
-    compaction_config: Option<CompactionConfig>,
+    /// The agent automatically compacts conversation history when the
+    /// estimated context size exceeds `compaction_config.threshold()`.
+    compaction_config: CompactionConfig,
 
     /// Per-turn tool call rate limiter.
     limiter: ToolLimiter,
@@ -622,10 +622,10 @@ impl Agent {
 
     /// Send a dream event to the persistent dream thread.
     ///
-    /// Snapshots messages into an `Arc<[Message]>` so the dream thread owns
-    /// a shared reference — avoids cloning the entire conversation Vec on
-    /// every turn.  The snapshot is only materialised when dreams are
-    /// actually going to fire (workspace present, messages non-empty).
+    /// Pre-checks triggers on the main thread so the expensive message
+    /// snapshot (`Arc<[Message]>`) is only materialised when at least one
+    /// dream will activate.  This avoids cloning the entire conversation
+    /// Vec on turns where no dream fires (e.g. turn 3 with EveryNTurns(5)).
     fn fire_dreams(&self, event: DreamEvent) {
         if self.conversation.messages.is_empty() {
             tracing::debug!(?event, "fire_dreams skipped: no messages");
@@ -635,6 +635,10 @@ impl Agent {
             tracing::debug!(?event, "fire_dreams skipped: no workspace");
             return;
         }
+        if !self.dream_handle.would_fire(&event) {
+            tracing::debug!(?event, "fire_dreams skipped: no dream matches");
+            return;
+        }
 
         tracing::debug!(
             ?event,
@@ -642,8 +646,6 @@ impl Agent {
             "sending dream event"
         );
 
-        // Snapshot into Arc<[Message]> — the dream thread converts to Vec
-        // only if a dream actually activates and needs to summarise.
         let messages: Arc<[Message]> = self.conversation.messages.clone().into();
 
         self.dream_handle.fire(
@@ -966,7 +968,11 @@ impl Agent {
 
             self.log_response(&assistant_msg, &tool_calls);
 
-            // If no tool calls or provider handles tools internally, we're done.
+            // If no tool calls, we're done.  If the provider set Observe mode,
+            // tool calls in the stream are informational only — the provider
+            // already executed them internally (e.g. Claude Code CLI, Codex).
+            // We display them to the user but don't re-execute, and break to
+            // avoid an infinite loop re-feeding already-handled tool_use blocks.
             if tool_calls.is_empty() || tool_mode == crate::llm::ToolMode::Observe {
                 if let Some(text) = assistant_msg.last_text() {
                     final_text = text.to_string();
@@ -1022,27 +1028,21 @@ impl Agent {
     }
 
     /// Auto-compact if estimated context tokens exceed the threshold.
-    ///
-    /// When no explicit `CompactionConfig` is set, falls back to defaults
-    /// (200k context window, 50% threshold) so conversations always have a
-    /// safety net against unbounded growth.
     async fn auto_compact_if_needed(
         &mut self,
         turn_system_prompt: &str,
         output: &mut dyn Output,
     ) {
-        let config = self.compaction_config.unwrap_or_default();
-        if self.conversation.messages.len() <= config.protect_head {
+        if self.conversation.messages.len() <= self.compaction_config.protect_head {
             return;
         }
-        let threshold = config.threshold();
+        let threshold = self.compaction_config.threshold();
         let estimated_tokens = self.estimate_context_tokens(turn_system_prompt);
         if estimated_tokens > threshold {
             tracing::info!(
                 estimated_tokens,
                 threshold,
                 messages = self.conversation.messages.len(),
-                has_explicit_config = self.compaction_config.is_some(),
                 "estimated context tokens exceed compaction threshold — compacting"
             );
             if let Err(e) = self.compact(output).await {

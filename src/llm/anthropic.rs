@@ -360,13 +360,13 @@ impl LlmClient for AnthropicClient {
             // to the agent to avoid leaking internal API details.
             tracing::error!(status = %status, body = %body, "Anthropic API error");
 
-            let summary = match status.as_u16() {
-                401 => "authentication failed (check API key)".to_string(),
-                429 => "rate limited — try again shortly".to_string(),
-                529 => "Anthropic API overloaded — try again shortly".to_string(),
-                _ => format!("HTTP {status}"),
-            };
-            return Err(DysonError::Llm(format!("Anthropic API error: {summary}")));
+            return Err(match status.as_u16() {
+                401 => DysonError::Llm("Anthropic API error: authentication failed (check API key)".into()),
+                429 => DysonError::LlmRateLimit("Anthropic API rate limited — try again shortly".into()),
+                502 | 503 => DysonError::LlmOverloaded(format!("Anthropic API returned HTTP {status}")),
+                529 => DysonError::LlmOverloaded("Anthropic API overloaded — try again shortly".into()),
+                _ => DysonError::Llm(format!("Anthropic API error: HTTP {status}")),
+            });
         }
 
         // -- Transform the SSE byte stream into StreamEvents --
@@ -506,7 +506,13 @@ impl SseJsonParser for AnthropicJsonParser {
                     .as_str()
                     .unwrap_or("unknown error")
                     .to_string();
-                events.push(Ok(StreamEvent::Error(DysonError::Llm(message))));
+                let error_type = json["error"]["type"].as_str().unwrap_or("");
+                let err = match error_type {
+                    "overloaded_error" => DysonError::LlmOverloaded(message),
+                    "rate_limit_error" => DysonError::LlmRateLimit(message),
+                    _ => DysonError::Llm(message),
+                };
+                events.push(Ok(StreamEvent::Error(err)));
             }
 
             _ => {}
@@ -614,7 +620,7 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         match events[0].as_ref().unwrap() {
-            StreamEvent::Error(DysonError::Llm(msg)) => assert_eq!(msg, "Overloaded"),
+            StreamEvent::Error(DysonError::LlmOverloaded(msg)) => assert_eq!(msg, "Overloaded"),
             other => panic!("expected Error, got: {other:?}"),
         }
     }

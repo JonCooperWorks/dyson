@@ -45,9 +45,17 @@
 /// ```
 #[derive(Debug, thiserror::Error)]
 pub enum DysonError {
-    /// An error from the LLM provider (API rejection, rate limit, etc.).
+    /// An error from the LLM provider (API rejection, etc.).
     #[error("LLM error: {0}")]
     Llm(String),
+
+    /// The LLM provider returned a rate limit error (HTTP 429 or equivalent).
+    #[error("LLM rate limited: {0}")]
+    LlmRateLimit(String),
+
+    /// The LLM provider is overloaded (HTTP 529, 502, 503, or equivalent).
+    #[error("LLM overloaded: {0}")]
+    LlmOverloaded(String),
 
     /// A tool failed during execution.
     ///

@@ -396,13 +396,12 @@ fn token_budget_unlimited_never_fails() {
 
 #[test]
 fn retryable_error_detection() {
-    assert!(Agent::is_retryable(&DysonError::Llm("rate limited".into())));
-    assert!(Agent::is_retryable(&DysonError::Llm("HTTP 429".into())));
-    assert!(Agent::is_retryable(&DysonError::Llm("overloaded".into())));
-    assert!(Agent::is_retryable(&DysonError::Llm("HTTP 529".into())));
-    assert!(Agent::is_retryable(&DysonError::Llm("HTTP 503".into())));
+    // Structured retryable variants.
+    assert!(Agent::is_retryable(&DysonError::LlmRateLimit("rate limited".into())));
+    assert!(Agent::is_retryable(&DysonError::LlmOverloaded("overloaded".into())));
 
-    // Non-retryable errors.
+    // Generic LLM errors are NOT retryable — retryable errors should use
+    // the structured variants.
     assert!(!Agent::is_retryable(&DysonError::Llm(
         "authentication failed".into()
     )));
@@ -699,7 +698,7 @@ fn compaction_config_threshold_with_custom_ratio() {
 fn make_agent_with_history(
     messages: Vec<Message>,
     llm_responses: Vec<Vec<StreamEvent>>,
-    compaction: Option<CompactionConfig>,
+    compaction: CompactionConfig,
 ) -> (Agent, RecordingOutput) {
     let llm = MockLlm::new(llm_responses);
     let settings = AgentSettings {
@@ -721,7 +720,7 @@ fn make_agent_with_history(
 #[tokio::test]
 async fn compact_on_empty_history_is_noop() {
     // No LLM responses queued — would panic if called.
-    let (mut agent, mut output) = make_agent_with_history(vec![], vec![], None);
+    let (mut agent, mut output) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
     agent.compact(&mut output).await.unwrap();
     assert!(agent.conversation.messages.is_empty());
 }
@@ -741,7 +740,7 @@ async fn compact_short_history_skips_when_no_middle() {
         ..CompactionConfig::default()
     };
     let (mut agent, mut output) =
-        make_agent_with_history(messages.clone(), vec![], Some(config));
+        make_agent_with_history(messages.clone(), vec![], config);
 
     agent.compact(&mut output).await.unwrap();
     // All 3 messages preserved — no compaction needed.
@@ -780,7 +779,7 @@ async fn compact_preserves_head_and_tail() {
     ];
 
     let (mut agent, mut output) =
-        make_agent_with_history(messages.clone(), vec![summary_response], Some(config));
+        make_agent_with_history(messages.clone(), vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
 
@@ -869,7 +868,7 @@ async fn compact_prunes_tool_outputs_in_middle() {
     ];
 
     let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], Some(config));
+        make_agent_with_history(messages, vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
 
@@ -938,7 +937,7 @@ async fn compact_fixes_orphaned_tool_pairs() {
     ];
 
     let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], Some(config));
+        make_agent_with_history(messages, vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
 
@@ -1002,7 +1001,7 @@ async fn compact_structured_summary_prompt() {
     ];
 
     let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], Some(config));
+        make_agent_with_history(messages, vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
 
@@ -1053,7 +1052,7 @@ async fn compact_resets_token_budget() {
     ];
 
     let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], Some(config));
+        make_agent_with_history(messages, vec![summary_response], config);
 
     agent.conversation.token_budget.record(50).unwrap();
     assert_eq!(agent.conversation.token_budget.output_tokens_used, 50);
@@ -1112,7 +1111,7 @@ async fn compact_iterative_merges_with_previous_summary() {
     ];
 
     let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], Some(config));
+        make_agent_with_history(messages, vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
 
@@ -1171,7 +1170,7 @@ async fn compact_empty_summary_keeps_original_history() {
 
     let original_len = messages.len();
     let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], Some(config));
+        make_agent_with_history(messages, vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
     // Original history should be preserved (though tool outputs may be pruned).
@@ -1212,7 +1211,7 @@ async fn compact_tail_protection_by_token_budget() {
     ];
 
     let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], Some(config));
+        make_agent_with_history(messages, vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
 
@@ -1263,13 +1262,13 @@ async fn auto_compaction_triggers_on_threshold() {
 
     let settings = AgentSettings {
         api_key: "test".into(),
-        compaction: Some(CompactionConfig {
+        compaction: CompactionConfig {
             context_window: 20, // very low
             threshold_ratio: 0.50,
             protect_head: 1,
             protect_tail_tokens: 0,
             ..CompactionConfig::default()
-        }),
+        },
         ..Default::default()
     };
 
@@ -1285,46 +1284,6 @@ async fn auto_compaction_triggers_on_threshold() {
     // Second turn — triggers auto-compact.
     let result = agent.run("second message", &mut output).await.unwrap();
     assert_eq!(result, "Second response.");
-}
-
-#[tokio::test]
-async fn compact_no_config_uses_legacy_full_summary() {
-    // When compaction_config is None, compact() should still work
-    // (legacy behavior: summarise everything into one message).
-    let messages = vec![
-        Message::user("hello"),
-        Message::assistant(vec![ContentBlock::Text { text: "hi".into() }]),
-        Message::user("more"),
-        Message::assistant(vec![ContentBlock::Text {
-            text: "more".into(),
-        }]),
-    ];
-
-    let summary_response = vec![
-        StreamEvent::TextDelta("Full conversation summary.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ];
-
-    let (mut agent, mut output) = make_agent_with_history(
-        messages,
-        vec![summary_response],
-        None, // no config
-    );
-
-    agent.compact(&mut output).await.unwrap();
-
-    // Legacy: everything replaced with a single summary message.
-    assert_eq!(agent.conversation.messages.len(), 1);
-    match &agent.conversation.messages[0].content[0] {
-        ContentBlock::Text { text } => {
-            assert!(text.starts_with("[Context Summary]"));
-            assert!(text.contains("Full conversation summary"));
-        }
-        other => panic!("expected Text, got: {other:?}"),
-    }
 }
 
 // -----------------------------------------------------------------------
@@ -1363,7 +1322,7 @@ async fn compact_rotates_pre_compaction_history() {
     };
 
     let (mut agent, mut output) =
-        make_agent_with_history(messages.clone(), vec![summary_response], Some(config));
+        make_agent_with_history(messages.clone(), vec![summary_response], config);
 
     // Attach a disk chat history so we can verify the rotation.
     let dir = std::env::temp_dir().join(format!(
@@ -1404,8 +1363,7 @@ async fn compact_rotates_pre_compaction_history() {
 
 #[tokio::test]
 async fn compact_without_chat_history_does_not_rotate() {
-    // When no chat history is attached, compact should work as before
-    // without any rotation side effects.
+    // When no chat history is attached, compact should work normally.
     let messages = vec![
         Message::user("hello"),
         Message::assistant(vec![ContentBlock::Text { text: "hi".into() }]),
@@ -1423,18 +1381,23 @@ async fn compact_without_chat_history_does_not_rotate() {
         },
     ];
 
+    let config = CompactionConfig {
+        protect_head: 1,
+        protect_tail_tokens: 0,
+        ..CompactionConfig::default()
+    };
+
     let (mut agent, mut output) = make_agent_with_history(
         messages,
         vec![summary_response],
-        None,
+        config,
     );
 
-    // No chat history attached — compact should still work.
     assert!(agent.history_backend.is_none());
     agent.compact(&mut output).await.unwrap();
 
-    // Legacy compaction: single summary message.
-    assert_eq!(agent.conversation.messages.len(), 1);
+    // Head (1 msg) + summary + no tail = 2 messages.
+    assert_eq!(agent.conversation.messages.len(), 2);
 }
 
 // -----------------------------------------------------------------------
@@ -1786,12 +1749,12 @@ fn head_boundary_clamps_to_message_count() {
     let (agent, _) = make_agent_with_history(
         vec![Message::user("only one")],
         vec![],
-        Some(CompactionConfig {
+        CompactionConfig {
             protect_head: 100,
             ..CompactionConfig::default()
-        }),
+        },
     );
-    let config = agent.compaction_config.unwrap();
+    let config = agent.compaction_config;
     assert_eq!(agent.head_boundary(&config), 1);
 }
 
@@ -1806,12 +1769,12 @@ fn head_boundary_normal() {
     let (agent, _) = make_agent_with_history(
         msgs,
         vec![],
-        Some(CompactionConfig {
+        CompactionConfig {
             protect_head: 2,
             ..CompactionConfig::default()
-        }),
+        },
     );
-    let config = agent.compaction_config.unwrap();
+    let config = agent.compaction_config;
     assert_eq!(agent.head_boundary(&config), 2);
 }
 
@@ -1826,13 +1789,13 @@ fn tail_boundary_all_fit() {
     let (agent, _) = make_agent_with_history(
         msgs,
         vec![],
-        Some(CompactionConfig {
+        CompactionConfig {
             protect_head: 1,
             protect_tail_tokens: 100_000, // huge budget
             ..CompactionConfig::default()
-        }),
+        },
     );
-    let config = agent.compaction_config.unwrap();
+    let config = agent.compaction_config;
     // All non-head fit → tail_start == head_end.
     assert_eq!(agent.tail_boundary(&config), agent.head_boundary(&config));
 }
@@ -1846,13 +1809,13 @@ fn tail_boundary_partial() {
     let (agent, _) = make_agent_with_history(
         msgs,
         vec![],
-        Some(CompactionConfig {
+        CompactionConfig {
             protect_head: 1,
             protect_tail_tokens: 10, // very small budget
             ..CompactionConfig::default()
-        }),
+        },
     );
-    let config = agent.compaction_config.unwrap();
+    let config = agent.compaction_config;
     let tail_start = agent.tail_boundary(&config);
     // tail_start should be after head_end and before the end.
     assert!(tail_start > agent.head_boundary(&config));
@@ -1865,56 +1828,14 @@ fn tail_boundary_empty() {
     let (agent, _) = make_agent_with_history(
         vec![],
         vec![],
-        Some(CompactionConfig {
+        CompactionConfig {
             protect_head: 0,
             protect_tail_tokens: 1000,
             ..CompactionConfig::default()
-        }),
+        },
     );
-    let config = agent.compaction_config.unwrap();
+    let config = agent.compaction_config;
     assert_eq!(agent.tail_boundary(&config), 0);
-}
-
-#[test]
-fn prune_tool_outputs_replaces_content() {
-    let msgs = vec![
-        Message::user("head"),
-        Message::tool_result("call_1", "big output data here", false),
-        Message::user("tail"),
-    ];
-    let (mut agent, _) = make_agent_with_history(
-        msgs,
-        vec![],
-        Some(CompactionConfig::default()),
-    );
-    agent.prune_tool_outputs(1, 2);
-    // The tool result in position 1 should be pruned.
-    match &agent.conversation.messages[1].content[0] {
-        ContentBlock::ToolResult { content, .. } => {
-            assert_eq!(content, "[tool output pruned]");
-        }
-        other => panic!("expected ToolResult, got: {other:?}"),
-    }
-}
-
-#[test]
-fn prune_tool_outputs_preserves_text() {
-    let msgs = vec![
-        Message::user("head"),
-        Message::assistant(vec![ContentBlock::Text { text: "keep me".into() }]),
-        Message::user("tail"),
-    ];
-    let (mut agent, _) = make_agent_with_history(
-        msgs,
-        vec![],
-        Some(CompactionConfig::default()),
-    );
-    agent.prune_tool_outputs(1, 2);
-    // Text blocks should be untouched.
-    match &agent.conversation.messages[1].content[0] {
-        ContentBlock::Text { text } => assert_eq!(text, "keep me"),
-        other => panic!("expected Text, got: {other:?}"),
-    }
 }
 
 #[test]
@@ -1927,7 +1848,7 @@ fn find_existing_summary_found() {
     let (agent, _) = make_agent_with_history(
         msgs,
         vec![],
-        Some(CompactionConfig::default()),
+        CompactionConfig::default(),
     );
     let summary = agent.find_existing_summary(2);
     assert!(summary.is_some());
@@ -1943,7 +1864,7 @@ fn find_existing_summary_not_found() {
     let (agent, _) = make_agent_with_history(
         msgs,
         vec![],
-        Some(CompactionConfig::default()),
+        CompactionConfig::default(),
     );
     assert!(agent.find_existing_summary(2).is_none());
 }
@@ -1962,7 +1883,7 @@ fn fix_orphaned_uses_inserts_synthetic() {
     let (mut agent, _) = make_agent_with_history(
         msgs,
         vec![],
-        Some(CompactionConfig::default()),
+        CompactionConfig::default(),
     );
     agent.fix_orphaned_tool_pairs();
     // Should now have a synthetic ToolResult for orphan_1.
@@ -1985,7 +1906,7 @@ fn fix_orphaned_results_removed() {
     let (mut agent, _) = make_agent_with_history(
         msgs,
         vec![],
-        Some(CompactionConfig::default()),
+        CompactionConfig::default(),
     );
     agent.fix_orphaned_tool_pairs();
     // The orphaned result should be removed.
@@ -2012,7 +1933,7 @@ fn fix_orphaned_mixed() {
     let (mut agent, _) = make_agent_with_history(
         msgs,
         vec![],
-        Some(CompactionConfig::default()),
+        CompactionConfig::default(),
     );
     agent.fix_orphaned_tool_pairs();
 
@@ -2042,7 +1963,7 @@ fn estimate_context_tokens_basic() {
     let (agent, _) = make_agent_with_history(
         msgs,
         vec![],
-        Some(CompactionConfig::default()),
+        CompactionConfig::default(),
     );
     let tokens = agent.estimate_context_tokens("system prompt here");
     // system: 3 words + messages: ~2 + ~3 + framing → should be > 0
@@ -2056,7 +1977,7 @@ fn build_compaction_prompt_with_previous() {
     let (agent, _) = make_agent_with_history(
         vec![Message::user("test")],
         vec![],
-        Some(CompactionConfig::default()),
+        CompactionConfig::default(),
     );
     let prompt = agent.build_compaction_prompt(Some("Previous summary text."));
     assert!(prompt.contains("Previous context summary"));
@@ -2069,7 +1990,7 @@ fn build_compaction_prompt_without_previous() {
     let (agent, _) = make_agent_with_history(
         vec![Message::user("test")],
         vec![],
-        Some(CompactionConfig::default()),
+        CompactionConfig::default(),
     );
     let prompt = agent.build_compaction_prompt(None);
     assert!(prompt.contains("## Goal"));
@@ -2082,16 +2003,16 @@ fn build_compaction_prompt_without_previous() {
 
 #[test]
 fn is_retryable_rate_limit() {
-    assert!(Agent::is_retryable(&DysonError::Llm("rate limit exceeded".into())));
-    assert!(Agent::is_retryable(&DysonError::Llm("HTTP 429 Too Many Requests".into())));
+    assert!(Agent::is_retryable(&DysonError::LlmRateLimit("rate limit exceeded".into())));
+    assert!(Agent::is_retryable(&DysonError::LlmRateLimit("HTTP 429 Too Many Requests".into())));
 }
 
 #[test]
 fn is_retryable_overloaded() {
-    assert!(Agent::is_retryable(&DysonError::Llm("server overloaded".into())));
-    assert!(Agent::is_retryable(&DysonError::Llm("HTTP 529".into())));
-    assert!(Agent::is_retryable(&DysonError::Llm("HTTP 502 Bad Gateway".into())));
-    assert!(Agent::is_retryable(&DysonError::Llm("HTTP 503 Service Unavailable".into())));
+    assert!(Agent::is_retryable(&DysonError::LlmOverloaded("server overloaded".into())));
+    assert!(Agent::is_retryable(&DysonError::LlmOverloaded("HTTP 529".into())));
+    assert!(Agent::is_retryable(&DysonError::LlmOverloaded("HTTP 502 Bad Gateway".into())));
+    assert!(Agent::is_retryable(&DysonError::LlmOverloaded("HTTP 503 Service Unavailable".into())));
 }
 
 #[tokio::test]
