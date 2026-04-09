@@ -64,6 +64,9 @@ impl Tool for WorkspaceUpdateTool {
         if let Err(msg) = super::validate_workspace_path(&file) {
             return Ok(ToolOutput::error(msg));
         }
+        if ctx.read_only_files.iter().any(|f| f == &file) {
+            return Ok(ToolOutput::error(format!("'{file}' is read-only in this context")));
+        }
         if content.is_empty() {
             return Ok(ToolOutput::error("content is required"));
         }
@@ -217,5 +220,52 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(!result.content.contains("chars]"));
+    }
+
+    #[tokio::test]
+    async fn read_only_file_rejected() {
+        let ws = InMemoryWorkspace::new()
+            .with_file("SOUL.md", "original");
+        let mut ctx = ToolContext::for_test_with_workspace(ws);
+        ctx.read_only_files = vec!["SOUL.md".to_string()];
+        let tool = WorkspaceUpdateTool;
+
+        let result = tool
+            .run(
+                &serde_json::json!({
+                    "file": "SOUL.md",
+                    "content": "overwrite attempt",
+                    "mode": "set"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("read-only"));
+    }
+
+    #[tokio::test]
+    async fn non_read_only_file_allowed() {
+        let ws = InMemoryWorkspace::new()
+            .with_file("MEMORY.md", "");
+        let mut ctx = ToolContext::for_test_with_workspace(ws);
+        ctx.read_only_files = vec!["SOUL.md".to_string()];
+        let tool = WorkspaceUpdateTool;
+
+        let result = tool
+            .run(
+                &serde_json::json!({
+                    "file": "MEMORY.md",
+                    "content": "allowed write",
+                    "mode": "set"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
     }
 }

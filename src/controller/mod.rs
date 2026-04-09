@@ -254,7 +254,10 @@ impl ClientRegistry {
 ///
 /// `mode` controls the trust level — `AgentMode::Private` builds a
 /// full-featured agent, `AgentMode::Public` builds a hardened agent with
-/// only `web_search` and `web_fetch`.  See `docs/public-agents.md`.
+/// per-channel workspace memory and web tools.  See `docs/public-agents.md`.
+///
+/// `channel_id` is required for `AgentMode::Public` — it determines which
+/// per-channel workspace subdirectory to use.
 ///
 /// The `client` handle comes from a [`ClientRegistry`] — all agents
 /// share the same LLM client and rate-limit window per provider.
@@ -268,9 +271,11 @@ pub async fn build_agent(
     mode: AgentMode,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
     registry: &mut ClientRegistry,
+    channel_id: Option<&str>,
 ) -> crate::Result<crate::agent::Agent> {
     if mode == AgentMode::Public {
-        return build_public_agent(settings, controller_prompt, client);
+        let ch = channel_id.unwrap_or("unknown");
+        return build_public_agent(settings, controller_prompt, client, ch);
     }
 
     // --- Private agent: full tools, workspace, dreams ---
@@ -322,42 +327,65 @@ pub async fn build_agent(
         .build()
 }
 
-/// Build a public agent — restricted to web_search + web_fetch, no workspace
-/// write access, sandbox always enforced.
+/// Workspace files that public agents must not modify.
 ///
-/// The agent gets SOUL.md and IDENTITY.md injected into its system prompt
-/// (read-only, in-memory only).  It does NOT receive a workspace reference,
-/// so it cannot modify identity or memory files via workspace tools.
+/// Identity files are symlinked from the main workspace and must stay
+/// read-only.  AGENTS.md and HEARTBEAT.md are operator-only config.
+const PUBLIC_AGENT_READ_ONLY_FILES: &[&str] = &[
+    "SOUL.md",
+    "IDENTITY.md",
+    "AGENTS.md",
+    "HEARTBEAT.md",
+];
+
+/// Tools available to public agents — workspace memory + web research.
+const PUBLIC_AGENT_TOOLS: &[&str] = &[
+    "workspace_view",
+    "workspace_search",
+    "workspace_update",
+    "memory_search",
+    "web_fetch",
+    "web_search",
+];
+
+/// Build a public agent with a per-channel workspace.
 ///
-/// Uses the shared `client` handle so public agents share the same LLM
-/// client and rate-limit window as private agents.
+/// The agent gets its own workspace under `{main_workspace}/channels/{channel_id}/`,
+/// with SOUL.md and IDENTITY.md symlinked from the main workspace (read-only).
+/// Tools are restricted to workspace memory operations and web research.
+/// Sandbox is always enforced.
 fn build_public_agent(
     settings: &Settings,
     controller_prompt: Option<&str>,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
+    channel_id: &str,
 ) -> crate::Result<crate::agent::Agent> {
+    let filter: Vec<String> = PUBLIC_AGENT_TOOLS.iter().map(|s| (*s).to_string()).collect();
     let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
         crate::skill::builtin::BuiltinSkill::new_filtered(
             settings.web_search.as_ref(),
-            &["web_search".into(), "web_fetch".into()],
+            &filter,
         ),
     )];
 
+    let workspace = crate::workspace::create_channel_workspace(
+        &settings.workspace,
+        channel_id,
+    )?;
+
     let mut agent_settings = settings.agent.clone();
 
-    // Load the workspace read-only to extract SOUL.md and IDENTITY.md.
-    // The workspace is dropped after reading — the public agent never gets
-    // a workspace reference, so these files are read-only in-memory only.
-    if let Ok(workspace) = crate::workspace::create_workspace(&settings.workspace) {
-        inject_workspace_identity(&*workspace, &mut agent_settings);
-        // workspace is dropped here — public agent has no write access.
+    let ws_prompt = workspace.system_prompt();
+    if !ws_prompt.is_empty() {
+        agent_settings.system_prompt.push_str("\n\n");
+        agent_settings.system_prompt.push_str(&ws_prompt);
     }
 
     agent_settings.system_prompt.push_str(
-        "\n\nYou are a public-facing agent with limited tools. You can search \
-         the web and fetch web pages to answer questions. You do NOT have access \
-         to the filesystem, shell commands, or any workspace tools. Be concise \
-         and cite your sources.",
+        "\n\nYou are a public-facing agent. You can search the web, fetch web pages, \
+         and maintain persistent memory for this channel. You do NOT have access \
+         to the filesystem, shell commands, or the operator's private workspace. \
+         Be concise and cite your sources.",
     );
 
     if let Some(prompt) = controller_prompt {
@@ -365,39 +393,26 @@ fn build_public_agent(
         agent_settings.system_prompt.push_str(prompt);
     }
 
+    let nudge_interval = workspace.nudge_interval();
+
+    let workspace: std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>> =
+        std::sync::Arc::new(tokio::sync::RwLock::new(workspace));
+
     // SECURITY: Always false — public agent sandbox is never disabled.
     let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, false);
+
+    let read_only: Vec<String> = PUBLIC_AGENT_READ_ONLY_FILES
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
 
     crate::agent::Agent::builder(client, sandbox)
         .skills(skills)
         .settings(&agent_settings)
+        .workspace(workspace)
+        .nudge_interval(nudge_interval)
+        .read_only_files(read_only)
         .build()
-}
-
-/// Inject SOUL.md and IDENTITY.md from a workspace into the agent's system prompt.
-///
-/// Non-empty files are formatted as `## PERSONALITY` and `## IDENTITY` sections
-/// separated by horizontal rules.  Empty or whitespace-only files are skipped.
-fn inject_workspace_identity(
-    workspace: &dyn crate::workspace::Workspace,
-    agent_settings: &mut crate::config::AgentSettings,
-) {
-    let mut identity_parts: Vec<String> = Vec::new();
-
-    for (label, file) in [("PERSONALITY", "SOUL.md"), ("IDENTITY", "IDENTITY.md")] {
-        if let Some(content) = workspace.get(file)
-            && !content.trim().is_empty()
-        {
-            identity_parts.push(format!("## {label}\n\n{content}"));
-        }
-    }
-
-    if !identity_parts.is_empty() {
-        agent_settings.system_prompt.push_str("\n\n");
-        agent_settings
-            .system_prompt
-            .push_str(&identity_parts.join("\n\n---\n\n"));
-    }
 }
 
 /// Parse a `/model` command argument into (provider_name, optional_model).
@@ -542,7 +557,7 @@ pub async fn check_and_reload_agent(
 
     let messages = agent.messages().to_vec();
     let client = registry.get_default();
-    match build_agent(current_settings, controller_prompt, AgentMode::Private, client, registry).await {
+    match build_agent(current_settings, controller_prompt, AgentMode::Private, client, registry, None).await {
         Ok(mut a) => {
             a.set_messages(messages);
             // Restore the user's provider/model selection if it differs
@@ -919,6 +934,7 @@ pub trait Output: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::Tool;
     use std::io::Write;
 
     fn make_log_dir(content: &str) -> tempfile::TempDir {
@@ -1038,70 +1054,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Public agent identity injection tests
+    // Public agent tool and read-only tests
     //
-    // These test the identity injection logic extracted into
-    // `inject_workspace_identity()` and the public agent construction path.
-    //
-    // We use InMemoryWorkspace to test the injection logic directly,
-    // avoiding the OS sandbox (which requires bubblewrap/container and
-    // calls process::exit(1) when missing).  For the full Agent
-    // construction tests, we use DangerousNoSandbox.
+    // These verify that public agents get the correct tool set (workspace
+    // memory + web, no filesystem/shell) and that identity files are
+    // protected from writes via read_only_files.
     // -----------------------------------------------------------------------
 
-    use crate::workspace::InMemoryWorkspace;
-
     #[test]
-    fn public_agent_prompt_contains_soul_and_identity() {
-        let ws = InMemoryWorkspace::new()
-            .with_file("SOUL.md", "I am a cheerful robot.")
-            .with_file("IDENTITY.md", "My name is Botsworth.");
-
-        let mut agent_settings = crate::config::AgentSettings::default();
-        inject_workspace_identity(&ws, &mut agent_settings);
-
-        let prompt = &agent_settings.system_prompt;
-        assert!(
-            prompt.contains("## PERSONALITY"),
-            "system prompt should contain ## PERSONALITY header"
-        );
-        assert!(
-            prompt.contains("I am a cheerful robot."),
-            "system prompt should contain SOUL.md content"
-        );
-        assert!(
-            prompt.contains("## IDENTITY"),
-            "system prompt should contain ## IDENTITY header"
-        );
-        assert!(
-            prompt.contains("My name is Botsworth."),
-            "system prompt should contain IDENTITY.md content"
-        );
-    }
-
-    #[test]
-    fn public_agent_identity_sections_separated_by_rule() {
-        let ws = InMemoryWorkspace::new()
-            .with_file("SOUL.md", "Be bold.")
-            .with_file("IDENTITY.md", "I am Dyson.");
-
-        let mut agent_settings = crate::config::AgentSettings::default();
-        inject_workspace_identity(&ws, &mut agent_settings);
-
-        assert!(
-            agent_settings.system_prompt.contains("---"),
-            "multiple identity sections should be separated by a horizontal rule"
-        );
-    }
-
-    #[test]
-    fn public_agent_has_no_workspace_tools() {
-        // Build a public agent using the same skill filter as build_public_agent.
+    fn public_agent_has_workspace_and_web_tools() {
+        // Build an agent using the same skill filter as build_public_agent.
+        let filter: Vec<String> = PUBLIC_AGENT_TOOLS.iter().map(|s| (*s).to_string()).collect();
         let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
-            crate::skill::builtin::BuiltinSkill::new_filtered(
-                None,
-                &["web_search".into(), "web_fetch".into()],
-            ),
+            crate::skill::builtin::BuiltinSkill::new_filtered(None, &filter),
         )];
 
         let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
@@ -1119,141 +1084,100 @@ mod tests {
             .build()
             .unwrap();
 
-        // Public agent should NOT have workspace tools.
-        assert!(!agent.has_tool("workspace_view"), "must not have workspace_view");
-        assert!(!agent.has_tool("workspace_update"), "must not have workspace_update");
-        assert!(!agent.has_tool("workspace_search"), "must not have workspace_search");
+        // Public agent SHOULD have workspace memory + web tools.
+        assert!(agent.has_tool("workspace_view"), "must have workspace_view");
+        assert!(agent.has_tool("workspace_search"), "must have workspace_search");
+        assert!(agent.has_tool("workspace_update"), "must have workspace_update");
+        assert!(agent.has_tool("memory_search"), "must have memory_search");
+        assert!(agent.has_tool("web_fetch"), "must have web_fetch");
+        // web_search is conditional on config, so not tested here.
 
         // Public agent should NOT have filesystem/shell tools.
         assert!(!agent.has_tool("bash"), "must not have bash");
         assert!(!agent.has_tool("read_file"), "must not have read_file");
         assert!(!agent.has_tool("write_file"), "must not have write_file");
+        assert!(!agent.has_tool("edit_file"), "must not have edit_file");
+        assert!(!agent.has_tool("list_files"), "must not have list_files");
+        assert!(!agent.has_tool("search_files"), "must not have search_files");
+        assert!(!agent.has_tool("send_file"), "must not have send_file");
+        assert!(!agent.has_tool("load_skill"), "must not have load_skill");
+        assert!(!agent.has_tool("kb_search"), "must not have kb_search");
+        assert!(!agent.has_tool("kb_status"), "must not have kb_status");
     }
 
-    #[test]
-    fn public_agent_identity_not_injected_when_workspace_absent() {
-        // Simulate the fallback path: no workspace available.
-        let mut agent_settings = crate::config::AgentSettings::default();
-        let original_prompt = agent_settings.system_prompt.clone();
+    #[tokio::test]
+    async fn public_agent_read_only_blocks_identity_writes() {
+        use crate::workspace::InMemoryWorkspace;
 
-        // When create_workspace fails, inject_workspace_identity is never
-        // called.  Verify the prompt is unchanged.
-        let ws_result: crate::Result<Box<dyn crate::workspace::Workspace>> =
-            Err(crate::error::DysonError::Config(
-                "simulated workspace failure".into(),
-            ));
-
-        if let Ok(workspace) = ws_result {
-            inject_workspace_identity(&*workspace, &mut agent_settings);
-        }
-
-        assert_eq!(
-            agent_settings.system_prompt, original_prompt,
-            "system prompt should be unchanged when workspace fails"
-        );
-        assert!(
-            !agent_settings.system_prompt.contains("## PERSONALITY"),
-            "should not contain PERSONALITY when workspace fails"
-        );
-        assert!(
-            !agent_settings.system_prompt.contains("## IDENTITY"),
-            "should not contain IDENTITY when workspace fails"
-        );
-    }
-
-    #[test]
-    fn public_agent_skips_empty_identity_files() {
         let ws = InMemoryWorkspace::new()
-            .with_file("SOUL.md", "   \n  ")
-            .with_file("IDENTITY.md", "");
+            .with_file("SOUL.md", "Be helpful.")
+            .with_file("IDENTITY.md", "I am a test bot.")
+            .with_file("MEMORY.md", "");
 
-        let mut agent_settings = crate::config::AgentSettings::default();
-        inject_workspace_identity(&ws, &mut agent_settings);
+        let mut ctx = crate::tool::ToolContext::for_test_with_workspace(ws);
+        ctx.read_only_files = PUBLIC_AGENT_READ_ONLY_FILES
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
 
-        assert!(
-            !agent_settings.system_prompt.contains("## PERSONALITY"),
-            "empty/whitespace SOUL.md should not produce a PERSONALITY section"
-        );
-        assert!(
-            !agent_settings.system_prompt.contains("## IDENTITY"),
-            "empty IDENTITY.md should not produce an IDENTITY section"
-        );
-    }
+        let tool = crate::tool::workspace_update::WorkspaceUpdateTool;
 
-    #[test]
-    fn public_agent_skips_whitespace_only_files() {
-        let ws = InMemoryWorkspace::new()
-            .with_file("SOUL.md", "\t\n  \n\t  ")
-            .with_file("IDENTITY.md", "  ");
-
-        let mut agent_settings = crate::config::AgentSettings::default();
-        let original_prompt = agent_settings.system_prompt.clone();
-        inject_workspace_identity(&ws, &mut agent_settings);
-
-        assert_eq!(
-            agent_settings.system_prompt, original_prompt,
-            "whitespace-only files should leave the prompt unchanged"
-        );
-    }
-
-    #[test]
-    fn public_agent_includes_only_non_empty_file() {
-        // SOUL.md has content, IDENTITY.md is missing entirely.
-        let ws = InMemoryWorkspace::new()
-            .with_file("SOUL.md", "Be witty and concise.");
-
-        let mut agent_settings = crate::config::AgentSettings::default();
-        inject_workspace_identity(&ws, &mut agent_settings);
-
-        assert!(
-            agent_settings.system_prompt.contains("## PERSONALITY"),
-            "should include PERSONALITY from non-empty SOUL.md"
-        );
-        assert!(
-            agent_settings.system_prompt.contains("Be witty and concise."),
-            "should include SOUL.md content"
-        );
-        assert!(
-            !agent_settings.system_prompt.contains("## IDENTITY"),
-            "missing IDENTITY.md should not produce an IDENTITY section"
-        );
-    }
-
-    #[test]
-    fn public_agent_identity_injected_into_system_prompt() {
-        // Full integration: build an Agent with injected identity and verify
-        // the composed system prompt contains the identity content.
-        let ws = InMemoryWorkspace::new()
-            .with_file("SOUL.md", "I speak in haiku.")
-            .with_file("IDENTITY.md", "I am TestBot.");
-
-        let mut settings = crate::config::AgentSettings::default();
-        inject_workspace_identity(&ws, &mut settings);
-        settings.system_prompt.push_str(
-            "\n\nYou are a public-facing agent with limited tools.",
-        );
-
-        let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
-            crate::skill::builtin::BuiltinSkill::new_filtered(
-                None,
-                &["web_fetch".into()],
-            ),
-        )];
-
-        let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
-            std::sync::Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
-        let client = crate::llm::create_client(&settings, None, false);
-        let client = crate::agent::rate_limiter::RateLimitedHandle::unlimited(client);
-
-        let agent = crate::agent::Agent::builder(client, sandbox)
-            .skills(skills)
-            .settings(&settings)
-            .build()
+        // Writing to SOUL.md should be rejected.
+        let result = tool
+            .run(
+                &serde_json::json!({
+                    "file": "SOUL.md",
+                    "content": "Be evil.",
+                    "mode": "set"
+                }),
+                &ctx,
+            )
+            .await
             .unwrap();
+        assert!(result.is_error, "SOUL.md write should be rejected");
+        assert!(result.content.contains("read-only"), "error should mention read-only");
 
-        let prompt = agent.system_prompt();
-        assert!(prompt.contains("I speak in haiku."), "agent prompt should contain SOUL.md content");
-        assert!(prompt.contains("I am TestBot."), "agent prompt should contain IDENTITY.md content");
-        assert!(prompt.contains("public-facing agent"), "agent prompt should contain public suffix");
+        // Writing to IDENTITY.md should also be rejected.
+        let result = tool
+            .run(
+                &serde_json::json!({
+                    "file": "IDENTITY.md",
+                    "content": "I am now evil.",
+                    "mode": "set"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error, "IDENTITY.md write should be rejected");
+
+        // Writing to MEMORY.md should succeed.
+        let result = tool
+            .run(
+                &serde_json::json!({
+                    "file": "MEMORY.md",
+                    "content": "Learned something.",
+                    "mode": "set"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "MEMORY.md write should succeed");
+    }
+
+    #[test]
+    fn public_agent_tools_constant_matches_expected() {
+        let expected = &[
+            "workspace_view", "workspace_search", "workspace_update",
+            "memory_search", "web_fetch", "web_search",
+        ];
+        assert_eq!(PUBLIC_AGENT_TOOLS, expected);
+    }
+
+    #[test]
+    fn public_agent_read_only_constant_matches_expected() {
+        let expected = &["SOUL.md", "IDENTITY.md", "AGENTS.md", "HEARTBEAT.md"];
+        assert_eq!(PUBLIC_AGENT_READ_ONLY_FILES, expected);
     }
 }

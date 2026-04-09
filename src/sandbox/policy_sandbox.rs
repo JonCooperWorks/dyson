@@ -604,6 +604,7 @@ mod tests {
             workspace: None,
             depth: 0,
             dangerous_no_sandbox: false,
+            read_only_files: Vec::new(),
         }
     }
 

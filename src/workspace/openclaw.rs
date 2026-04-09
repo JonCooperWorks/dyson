@@ -99,7 +99,10 @@ impl OpenClawWorkspace {
         {
             let entry = entry.map_err(DysonError::Io)?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".md") && entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            // Use path().is_file() instead of file_type().is_file() so that
+            // symlinks to .md files are followed (used by channel workspaces
+            // that symlink SOUL.md/IDENTITY.md from the main workspace).
+            if name.ends_with(".md") && entry.path().is_file() {
                 if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_WORKSPACE_FILE_SIZE {
                     tracing::warn!(file = %name, "skipping workspace file — exceeds 10 MB size limit");
                     continue;

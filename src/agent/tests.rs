@@ -75,7 +75,7 @@ async fn simple_text_response() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent.run("hi", &mut output).await.unwrap();
@@ -121,7 +121,7 @@ async fn tool_call_loop() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent
@@ -164,7 +164,7 @@ async fn internal_tools_provider_skips_tool_execution() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent.run("list files", &mut output).await.unwrap();
@@ -191,6 +191,7 @@ async fn memory_system_prompt_contains_usage_stats() {
         workspace: Some(std::sync::Arc::new(tokio::sync::RwLock::new(workspace))),
         depth: 0,
         dangerous_no_sandbox: false,
+        read_only_files: Vec::new(),
     };
 
     let prompt = reflection::build_memory_system_prompt(&ctx).await;
@@ -211,6 +212,7 @@ async fn reflection_system_prompt_lists_tools() {
         workspace: None,
         depth: 0,
         dangerous_no_sandbox: false,
+        read_only_files: Vec::new(),
     };
     let prompt = reflection::build_reflection_system_prompt(&ctx).await;
     assert!(prompt.contains("skill_create"));
@@ -458,7 +460,7 @@ async fn token_budget_stops_agent_loop() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
     agent.conversation.token_budget.max_output_tokens = Some(150);
     let mut output = RecordingOutput::new();
 
@@ -589,7 +591,7 @@ async fn tool_output_files_dispatched_via_send_file() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(MockFileSkill::new())];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent.run("send me a file", &mut output).await.unwrap();
@@ -637,7 +639,7 @@ async fn tool_output_no_files_means_no_send_file() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
     let mut output = RecordingOutput::new();
 
     agent.run("echo hello", &mut output).await.unwrap();
@@ -709,7 +711,7 @@ fn make_agent_with_history(
     };
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
     agent.conversation.messages = messages;
     (agent, RecordingOutput::new())
 }
@@ -1275,7 +1277,7 @@ async fn auto_compaction_triggers_on_threshold() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
     let mut output = RecordingOutput::new();
 
     // First turn.
@@ -1667,7 +1669,7 @@ mod test_tool_calling_integration {
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
         agent.set_messages(messages.clone());
 
         let popped = agent.pop_last_message();
@@ -1689,7 +1691,7 @@ mod test_tool_calling_integration {
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
 
         assert!(agent.pop_last_message().is_none());
     }
@@ -1703,7 +1705,7 @@ mod test_tool_calling_integration {
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
 
         agent.set_messages(vec![
             Message::user_multimodal(vec![
@@ -1754,7 +1756,7 @@ mod test_tool_calling_integration {
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None).unwrap();
+        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, Vec::new()).unwrap();
 
         agent.set_messages(vec![
             Message::user("hello"),

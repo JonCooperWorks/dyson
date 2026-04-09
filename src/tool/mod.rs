@@ -225,6 +225,13 @@ pub struct ToolContext {
     /// Set from `--dangerous-no-sandbox` on the CLI.  Allows tools like
     /// `send_file` to access paths outside the working directory.
     pub dangerous_no_sandbox: bool,
+
+    /// Workspace files that tools must not modify.
+    ///
+    /// Used by public (channel) agents to protect symlinked identity files
+    /// (SOUL.md, IDENTITY.md) from being overwritten via `workspace_update`.
+    /// Empty for private agents (no restrictions).
+    pub read_only_files: Vec<String>,
 }
 
 impl Clone for ToolContext {
@@ -236,6 +243,7 @@ impl Clone for ToolContext {
             workspace: self.workspace.as_ref().map(Arc::clone),
             depth: self.depth,
             dangerous_no_sandbox: self.dangerous_no_sandbox,
+            read_only_files: self.read_only_files.clone(),
         }
     }
 }
@@ -253,6 +261,7 @@ impl ToolContext {
             workspace: None,
             depth: 0,
             dangerous_no_sandbox: false,
+            read_only_files: Vec::new(),
         })
     }
 
@@ -269,6 +278,7 @@ impl ToolContext {
             workspace: None,
             depth: 0,
             dangerous_no_sandbox: false,
+            read_only_files: Vec::new(),
         }
     }
 
@@ -286,6 +296,7 @@ impl ToolContext {
             workspace: Some(Arc::new(RwLock::new(workspace))),
             depth: 0,
             dangerous_no_sandbox: false,
+            read_only_files: Vec::new(),
         }
     }
 

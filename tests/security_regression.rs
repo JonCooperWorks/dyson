@@ -785,6 +785,7 @@ async fn list_files_rejects_path_traversal() {
         workspace: None,
         depth: 0,
         dangerous_no_sandbox: false,
+        read_only_files: Vec::new(),
     };
 
     let tool = dyson::tool::list_files::ListFilesTool;
@@ -808,6 +809,7 @@ async fn search_files_rejects_path_traversal() {
         workspace: None,
         depth: 0,
         dangerous_no_sandbox: false,
+        read_only_files: Vec::new(),
     };
 
     let tool = dyson::tool::search_files::SearchFilesTool;
