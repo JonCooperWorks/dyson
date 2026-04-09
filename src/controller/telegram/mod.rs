@@ -893,6 +893,15 @@ async fn run_agent_for_message(
 
     let agent = ca.agent.as_mut().expect("checked above");
 
+    // Set attribution for write auditing in public agents.
+    // Uses the sender's @username, falling back to their numeric user ID.
+    let sender_label = msg.from.as_ref().map(|u| {
+        u.username
+            .clone()
+            .unwrap_or_else(|| u.id.to_string())
+    });
+    agent.set_attribution(sender_label.as_deref()).await;
+
     // Update snapshot so quick responses see latest context.
     *entry.messages_snapshot.write().await = agent.messages().to_vec();
 
@@ -908,6 +917,9 @@ async fn run_agent_for_message(
         tracing::error!(error = %e, "agent run failed");
         let _ = output.error(&e);
     }
+
+    // Clear attribution so background dreams don't inherit a stale user.
+    agent.set_attribution(None).await;
 
     // Snapshot messages, then release the lock before I/O.
     let agent = ca.agent.as_ref().expect("checked above");

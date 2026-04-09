@@ -135,6 +135,15 @@ pub trait Workspace: Send + Sync {
     fn programs_dir(&self) -> Option<std::path::PathBuf> {
         None
     }
+
+    /// Set the current user attribution for write auditing.
+    ///
+    /// When set, implementations may record who triggered each write
+    /// operation.  Pass `None` to clear (e.g., for dream/system writes).
+    ///
+    /// Default implementation is a no-op — only `ChannelWorkspace`
+    /// (public agents) tracks attribution.
+    fn set_attribution(&mut self, _user: Option<&str>) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -263,10 +272,14 @@ pub fn create_channel_workspace(
     // Everything else (SOUL.md, IDENTITY.md, AGENTS.md, etc.) is protected
     // by default.  This prevents prompt injection from modifying identity
     // and prevents writes from flowing through symlinks to the main workspace.
-    let ws = channel::ChannelWorkspace::new(Box::new(ws))
+    let mut ws = channel::ChannelWorkspace::new(Box::new(ws))
         .allow("MEMORY.md")
         .allow("USER.md")
         .allow_prefix("memory/");
+
+    // Prune old journal files to bound storage growth.
+    ws.expire_journals();
+
     Ok(Box::new(ws))
 }
 
