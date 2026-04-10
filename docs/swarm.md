@@ -290,6 +290,66 @@ web_search" tasks to nodes that have those tools.
 
 ---
 
+## Network Security
+
+The hub exposes unauthenticated HTTP endpoints. **Do not expose it on an
+untrusted network.** Run it only over a secure transport — SSH port
+forwarding or a Tailscale/WireGuard mesh are the recommended options.
+
+### SSH port forwarding
+
+Run the hub on a remote machine bound to localhost, then forward the port
+to each node:
+
+```bash
+# On the hub machine — bind to localhost only (the default)
+cargo run -p swarm -- --bind 127.0.0.1:8080 --data-dir ./hub-data
+
+# On each node machine — forward local 8080 to the hub
+ssh -L 8080:127.0.0.1:8080 user@hub-host -N
+```
+
+Node configs point at `http://127.0.0.1:8080` — traffic travels encrypted
+through the SSH tunnel.
+
+### Tailscale
+
+With [Tailscale](https://tailscale.com) installed on both the hub and
+every node, bind the hub to its Tailscale IP:
+
+```bash
+# On the hub machine — bind to the Tailscale address
+cargo run -p swarm -- --bind 100.x.y.z:8080 --data-dir ./hub-data
+```
+
+Node configs use the Tailscale address directly:
+
+```json
+{
+  "controllers": [
+    {
+      "type": "swarm",
+      "url": "http://100.x.y.z:8080",
+      "public_key": "v1:K2dYr0base64encodedkey...",
+      "node_name": "gpu-workstation-01"
+    }
+  ]
+}
+```
+
+All traffic between nodes stays within the Tailscale mesh — encrypted,
+authenticated, and invisible to the public internet. No firewall rules or
+port forwarding needed.
+
+### What NOT to do
+
+Do not bind the hub to `0.0.0.0` on a machine with a public IP without a
+secure overlay network in front of it. The hub endpoints have no
+authentication beyond Ed25519 task signing — anyone who can reach the HTTP
+port can register fake nodes, submit tasks, or read blob payloads.
+
+---
+
 ## Testing
 
 ```bash

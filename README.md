@@ -32,6 +32,7 @@ Dyson is a fully functional agent — not just a learning exercise. It streams c
 - **Multi-channel** — Terminal REPL and Telegram bot run concurrently. Add new channels by implementing the `Controller` trait.
 - **Dependency analysis** — Tool calls are grouped by resource dependencies and executed in parallel when safe, sequentially when not.
 - **MCP server mode** — Dyson can also expose itself as an MCP server over HTTP with bearer token auth, forwarding its workspace tools to other agents.
+- **Swarm** — Distribute tasks across multiple Dyson nodes. A central hub matches tasks to workers by hardware (GPU, RAM) and capabilities, dispatches signed work over SSE, and exposes an MCP interface so any agent can submit tasks. See [Swarm](docs/swarm.md).
 
 ## The sandbox is the point
 
@@ -170,6 +171,7 @@ Secrets can be literal strings or resolver references (`{ "resolver": "insecure_
 | [Subagents](docs/subagents.md) | Child agents with different models, tool inheritance, delegation |
 | [Dreaming](docs/dreaming.md) | Background cognition — memory consolidation, self-improvement, skill creation |
 | [Advisor](docs/advisor.md) | Advisor pattern — consult a stronger model for complex decisions |
+| [Swarm](docs/swarm.md) | Distributed task routing — hub, workers, constraint matching, Ed25519 signing |
 
 ## Tests
 
