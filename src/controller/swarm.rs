@@ -251,14 +251,6 @@ impl super::Controller for SwarmController {
 
                     tokio::time::sleep(delay).await;
                 }
-                SessionResult::Connected => {
-                    // Successfully connected at least once, reset counter.
-                    consecutive_failures = 0;
-                }
-                SessionResult::FatalError(e) => {
-                    tracing::error!(error = %e, "fatal swarm error");
-                    return Err(e);
-                }
             }
         }
 
@@ -273,10 +265,6 @@ enum SessionResult {
     HubShutdown,
     /// SSE stream disconnected (retryable).
     Disconnected(DysonError),
-    /// Connected successfully (reset backoff counter).
-    Connected,
-    /// Fatal error (don't retry).
-    FatalError(DysonError),
 }
 
 impl SwarmController {
@@ -319,10 +307,6 @@ impl SwarmController {
             }
         });
 
-        // Signal that we connected (resets backoff).
-        // We process this in the outer loop after the first successful event.
-        let mut ever_connected = false;
-
         // Event loop.
         let result = loop {
             let event_result = match events.recv().await {
@@ -331,10 +315,6 @@ impl SwarmController {
                     DysonError::Swarm("SSE channel closed".into()),
                 ),
             };
-
-            if !ever_connected {
-                ever_connected = true;
-            }
 
             match event_result {
                 Ok(SwarmEvent::Task(wire_bytes)) => {
@@ -403,14 +383,6 @@ impl SwarmController {
         };
 
         heartbeat_handle.abort();
-
-        if ever_connected {
-            // We got at least one event, so the connection was real.
-            // Return Connected first to reset backoff, then the actual result
-            // will come on the next iteration if it's a disconnect.
-            // Actually, just return the result — the outer loop resets on
-            // successful registration anyway.
-        }
 
         result
     }

@@ -180,6 +180,7 @@ async fn detect_ram() -> u64 {
 // Shared helpers
 // ===========================================================================
 
+#[cfg(not(target_os = "macos"))]
 fn fallback_cpu() -> CpuInfo {
     CpuInfo {
         model: "unknown".into(),
