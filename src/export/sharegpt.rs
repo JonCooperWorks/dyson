@@ -30,7 +30,7 @@
 
 use serde::Serialize;
 
-use crate::controller::telegram::feedback::{FeedbackEntry, FeedbackRating};
+use crate::feedback::{FeedbackEntry, FeedbackRating};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -47,9 +47,9 @@ pub struct ShareGptConversation {
     /// The ordered list of turns in this conversation.
     pub conversations: Vec<ShareGptTurn>,
 
-    /// Per-turn feedback metadata for fine-tuning / RLHF weighting.
+    /// Per-turn feedback for fine-tuning / RLHF weighting.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub feedback: Option<Vec<ShareGptFeedback>>,
+    pub feedback: Option<Vec<FeedbackEntry>>,
 }
 
 /// A single turn in a ShareGPT conversation.
@@ -63,22 +63,11 @@ pub struct ShareGptTurn {
 
     /// Rating for this turn (only present when feedback is available).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rating: Option<String>,
+    pub rating: Option<FeedbackRating>,
 
     /// Numeric score for this turn (-3 to +3, only present when feedback is available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub score: Option<i8>,
-}
-
-/// Feedback annotation for a specific conversation turn.
-#[derive(Debug, Clone, Serialize)]
-pub struct ShareGptFeedback {
-    /// Index into the original `messages` Vec (assistant message position).
-    pub turn_index: usize,
-    /// Human-readable rating label.
-    pub rating: String,
-    /// Numeric score (-3 to +3).
-    pub score: i8,
 }
 
 // ---------------------------------------------------------------------------
@@ -133,15 +122,8 @@ pub fn to_sharegpt_with_feedback(
         // Look up feedback for this message index.
         let (rating, score) = if has_feedback && message.role == Role::Assistant {
             match feedback_map.get(&msg_index) {
-                Some(entry) => (
-                    Some(entry.rating.label().to_string()),
-                    Some(entry.rating.score()),
-                ),
-                // Default: no explicit reaction = "decent".
-                None => (
-                    Some(FeedbackRating::Decent.label().to_string()),
-                    Some(FeedbackRating::Decent.score()),
-                ),
+                Some(entry) => (Some(entry.rating), Some(entry.score)),
+                None => (Some(FeedbackRating::Decent), Some(0)),
             }
         } else {
             (None, None)
@@ -196,13 +178,11 @@ pub fn to_sharegpt_with_feedback(
                     score: None,
                 });
             }
-            // If there were also text parts in this message (unlikely for
-            // tool result messages, but handle gracefully), emit them too.
             if !text_parts.is_empty() {
                 turns.push(ShareGptTurn {
                     from: role_to_sharegpt(&message.role).to_string(),
                     value: text_parts.join("\n"),
-                    rating: rating.clone(),
+                    rating,
                     score,
                 });
             }
@@ -237,26 +217,14 @@ pub fn to_sharegpt_with_feedback(
         }
     }
 
-    // Build top-level feedback summary.
-    let feedback_summary = if has_feedback {
-        Some(
-            feedback
-                .iter()
-                .map(|e| ShareGptFeedback {
-                    turn_index: e.turn_index,
-                    rating: e.rating.label().to_string(),
-                    score: e.rating.score(),
-                })
-                .collect(),
-        )
-    } else {
-        None
-    };
-
     ShareGptConversation {
         id,
         conversations: turns,
-        feedback: feedback_summary,
+        feedback: if has_feedback {
+            Some(feedback.to_vec())
+        } else {
+            None
+        },
     }
 }
 
@@ -459,9 +427,9 @@ mod tests {
         ];
 
         let feedback = vec![FeedbackEntry {
-            turn_index: 1, // First assistant message
+            turn_index: 1,
             rating: FeedbackRating::Excellent,
-            emoji: "❤️".to_string(),
+            score: 3,
             timestamp: 1712750400,
         }];
 
@@ -471,21 +439,17 @@ mod tests {
         assert!(conv.conversations[0].rating.is_none());
 
         // First assistant turn: rated excellent.
-        assert_eq!(
-            conv.conversations[1].rating.as_deref(),
-            Some("excellent")
-        );
+        assert_eq!(conv.conversations[1].rating, Some(FeedbackRating::Excellent));
         assert_eq!(conv.conversations[1].score, Some(3));
 
         // Second assistant turn: no explicit feedback → decent.
-        assert_eq!(conv.conversations[3].rating.as_deref(), Some("decent"));
+        assert_eq!(conv.conversations[3].rating, Some(FeedbackRating::Decent));
         assert_eq!(conv.conversations[3].score, Some(0));
 
-        // Top-level feedback summary.
+        // Top-level feedback passed through.
         let fb = conv.feedback.as_ref().unwrap();
         assert_eq!(fb.len(), 1);
         assert_eq!(fb[0].turn_index, 1);
-        assert_eq!(fb[0].rating, "excellent");
         assert_eq!(fb[0].score, 3);
     }
 
@@ -500,7 +464,7 @@ mod tests {
         let feedback = vec![FeedbackEntry {
             turn_index: 1,
             rating: FeedbackRating::Good,
-            emoji: "👍".to_string(),
+            score: 1,
             timestamp: 1712750400,
         }];
 

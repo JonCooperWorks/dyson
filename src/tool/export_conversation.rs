@@ -15,7 +15,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::controller::telegram::feedback::FeedbackStore;
+use crate::feedback::FeedbackStore;
 use crate::error::DysonError;
 use crate::export::sharegpt;
 use crate::tool::{Tool, ToolContext, ToolOutput};

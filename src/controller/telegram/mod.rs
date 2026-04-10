@@ -335,7 +335,7 @@ impl super::Controller for TelegramController {
         };
 
         // Feedback store for emoji reactions — lives alongside chat history.
-        let feedback_store = Arc::new(feedback::FeedbackStore::new(
+        let feedback_store = Arc::new(crate::feedback::FeedbackStore::new(
             crate::workspace::openclaw::resolve_tilde(settings.chat_history.connection_string.expose()),
         ));
 
@@ -404,8 +404,7 @@ impl super::Controller for TelegramController {
 
                 // Handle emoji reactions for feedback/RLHF signal.
                 if let Some(reaction) = &update.message_reaction {
-                    let reaction_chat_id = reaction.chat.id;
-                    handle_reaction(reaction, &agents, &feedback_store, reaction_chat_id).await;
+                    handle_reaction(reaction, &agents, &feedback_store).await;
                     continue;
                 }
 
@@ -735,12 +734,15 @@ async fn handle_callback_query(
 }
 
 /// Handle a message_reaction update — record emoji feedback for RLHF.
+///
+/// Converts the Telegram-specific emoji reaction into a domain-level
+/// `FeedbackEntry` before passing it to the store.
 async fn handle_reaction(
     reaction: &types::MessageReactionUpdated,
     agents: &tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>,
-    feedback_store: &feedback::FeedbackStore,
-    chat_id: i64,
+    feedback_store: &crate::feedback::FeedbackStore,
 ) {
+    let chat_id = reaction.chat.id;
     let chat_key = chat_id.to_string();
     let message_id = reaction.message_id;
 
@@ -775,7 +777,7 @@ async fn handle_reaction(
         return;
     }
 
-    // Use the first emoji reaction for the rating.
+    // Extract the first standard emoji from the reaction.
     let emoji = reaction
         .new_reaction
         .iter()
@@ -792,21 +794,28 @@ async fn handle_reaction(
         return;
     };
 
+    // Convert emoji → rating at the Telegram boundary.
     let Some(rating) = feedback::emoji_to_rating(emoji) else {
         tracing::debug!(chat_id, emoji, "unknown emoji reaction — ignoring");
         return;
     };
 
-    if let Err(e) = feedback_store.upsert(&chat_key, turn_index, rating, emoji) {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let entry = crate::feedback::FeedbackEntry {
+        turn_index,
+        rating,
+        score: rating.score(),
+        timestamp,
+    };
+
+    if let Err(e) = feedback_store.upsert(&chat_key, entry) {
         tracing::warn!(error = %e, chat_id, turn_index, "failed to save feedback");
     } else {
-        tracing::info!(
-            chat_id,
-            turn_index,
-            emoji,
-            rating = rating.label(),
-            "feedback recorded"
-        );
+        tracing::info!(chat_id, turn_index, emoji, "feedback recorded");
     }
 }
 
