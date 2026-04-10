@@ -866,6 +866,21 @@ impl Agent {
         self.tool_registry.tools.contains_key(name)
     }
 
+    /// Get a tool by name.
+    pub fn get_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tool_registry.tools.get(name).cloned()
+    }
+
+    /// Replace a tool by name with a different implementation.
+    ///
+    /// Used by the swarm controller to wrap `list_nodes` with a version
+    /// that filters out the current node before the LLM sees the result.
+    pub fn replace_tool(&mut self, name: &str, tool: Arc<dyn Tool>) {
+        if let Some(existing) = self.tool_registry.tools.get_mut(name) {
+            *existing = tool;
+        }
+    }
+
     /// Get the names of all registered tools.
     ///
     /// Used by the swarm controller to report capabilities in the node

@@ -50,7 +50,7 @@ use crate::swarm::types::{
     BlobRef, NodeManifest, NodeStatus, Payload, SwarmResult, SwarmTask, TaskStatus,
 };
 use crate::swarm::verify::{SwarmPublicKey, verify_signed_payload};
-use crate::tool::ToolOutput;
+use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Delay between heartbeats.
 ///
@@ -74,6 +74,37 @@ const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(2);
 
 /// Maximum size for inline result payloads (64 KiB).
 const INLINE_THRESHOLD: usize = 64 * 1024;
+
+// ---------------------------------------------------------------------------
+// FilteredListNodesTool — wraps the MCP list_nodes tool and strips self.
+// ---------------------------------------------------------------------------
+
+/// Wraps the real `list_nodes` MCP tool and removes the current node
+/// from the result before the LLM sees it.
+struct FilteredListNodesTool {
+    inner: Arc<dyn Tool>,
+    node_name: String,
+}
+
+#[async_trait::async_trait]
+impl Tool for FilteredListNodesTool {
+    fn name(&self) -> &str { self.inner.name() }
+    fn description(&self) -> &str { self.inner.description() }
+    fn input_schema(&self) -> serde_json::Value { self.inner.input_schema() }
+
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+        let mut output = self.inner.run(input, ctx).await?;
+
+        // The content is a JSON array of node objects. Parse, filter, re-serialize.
+        if let Ok(mut nodes) = serde_json::from_str::<Vec<serde_json::Value>>(&output.content) {
+            nodes.retain(|n| n["node_name"].as_str() != Some(&self.node_name));
+            output.content = serde_json::to_string_pretty(&nodes)
+                .unwrap_or_else(|_| output.content);
+        }
+
+        Ok(output)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // SwarmCaptureOutput — collects text + file paths from the agent
@@ -208,7 +239,6 @@ impl super::Controller for SwarmController {
         // before handing settings to the agent builder.
         let mut local_settings = settings.clone();
         // Exclude swarm_dispatch to prevent recursive task spawning.
-        // The agent retains list_nodes and swarm_status (read-only).
         for skill in &mut local_settings.skills {
             if let crate::config::SkillConfig::Mcp(mcp) = skill {
                 if mcp.name.starts_with("swarm_") {
@@ -223,11 +253,7 @@ impl super::Controller for SwarmController {
             "You are '{node_name}', a Dyson swarm node executing tasks dispatched by a swarm hub.\n\
              \n\
              Use your tools to complete tasks. Use bash to run commands, inspect the system, \
-             read files, and gather real information. Never guess — always verify with tools.\n\
-             \n\
-             You are node '{node_name}' in the swarm. When you call list_nodes, ignore your \
-             own entry — the other entries are your peers. You cannot dispatch tasks to them \
-             (swarm_dispatch is not available). Focus on completing the task yourself."
+             read files, and gather real information. Never guess — always verify with tools."
         );
 
         let client_handle = registry.get_default();
@@ -240,6 +266,14 @@ impl super::Controller for SwarmController {
             None,
         )
         .await?;
+
+        // Wrap list_nodes so the agent never sees its own node in results.
+        if let Some(inner) = agent.get_tool("list_nodes") {
+            agent.replace_tool("list_nodes", Arc::new(FilteredListNodesTool {
+                inner,
+                node_name: node_name.clone(),
+            }));
+        }
 
         // ── 2. PROBE HARDWARE ──
         let tool_names = agent.tool_names();
