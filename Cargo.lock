@@ -462,6 +462,7 @@ dependencies = [
  "async-trait",
  "base64",
  "clap",
+ "dyson-swarm-protocol",
  "futures-util",
  "glob",
  "http-body-util",
@@ -493,6 +494,18 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "zeroize",
+]
+
+[[package]]
+name = "dyson-swarm-protocol"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
