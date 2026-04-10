@@ -52,6 +52,8 @@ pub async fn events_handler(
     let (tx, rx) = mpsc::channel::<SseEvent>(SSE_CHANNEL_DEPTH);
     hub.registry.attach_sse(&node_id, tx.clone()).await;
 
+    tracing::info!(%node_id, "node SSE stream opened");
+
     // Prepend the initial "registered" event, then stream the channel.
     let initial = SseEvent::Registered {
         node_id: node_id.clone(),
@@ -60,16 +62,27 @@ pub async fn events_handler(
     let channel_stream = ReceiverStream::new(rx);
     let full_stream = stream::once(async move { initial }).chain(channel_stream);
 
-    let byte_stream = full_stream.map(|event| Ok::<_, Infallible>(encode_event(&event)));
+    // Terminate the stream when the hub broadcasts shutdown.  Without this,
+    // axum's `with_graceful_shutdown` would wait forever for the SSE stream
+    // to end (it never does on its own), and Ctrl-C would appear to hang.
+    let shutdown = hub.shutdown_notified();
+    let byte_stream = full_stream
+        .take_until(shutdown)
+        .map(|event| Ok::<_, Infallible>(encode_event(&event)));
 
-    // Detach on disconnect.  We spawn a guard task that waits until the
-    // channel's tx is dropped (i.e. the client has disconnected or the
-    // server is shutting down) and then clears the registry entry.
+    // Remove the node from the registry as soon as it disconnects (client
+    // closed the stream, network died, or the hub is shutting down).  This
+    // is what the operator expects — a disconnected node should vanish
+    // from `list_nodes` immediately, not linger until the reaper catches
+    // up 15–90 seconds later.  Nodes reconnect by re-registering, which
+    // the swarm controller already does automatically.
     let registry = hub.registry.clone();
     let detach_id = node_id.clone();
     tokio::spawn(async move {
         tx.closed().await;
-        registry.detach_sse(&detach_id).await;
+        if registry.remove_node(&detach_id).await {
+            tracing::info!(node_id = %detach_id, "node disconnected — removed from registry");
+        }
     });
 
     Response::builder()

@@ -80,17 +80,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build shared state.
     let hub = Hub::new(key, &config.data_dir)?;
 
-    // Spawn the heartbeat reaper.
+    // Spawn the heartbeat reaper.  It exits when the hub broadcasts
+    // shutdown so tokio's runtime can terminate cleanly on Ctrl-C.
     {
         let registry = hub.registry.clone();
         let timeout = config.heartbeat_timeout;
+        let shutdown_fut = hub.shutdown_notified();
         tokio::spawn(async move {
+            tokio::pin!(shutdown_fut);
             let mut ticker = tokio::time::interval(Duration::from_secs(15));
             loop {
-                ticker.tick().await;
-                let reaped = registry.reap_stale(timeout).await;
-                for id in reaped {
-                    tracing::warn!(node_id = %id, "reaped stale node");
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        let reaped = registry.reap_stale(timeout).await;
+                        for id in reaped {
+                            tracing::warn!(node_id = %id, "reaped stale node");
+                        }
+                    }
+                    _ = &mut shutdown_fut => {
+                        tracing::debug!("reaper shutting down");
+                        break;
+                    }
                 }
             }
         });
@@ -102,9 +112,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local_addr = listener.local_addr()?;
     tracing::info!(%local_addr, "HTTP server listening");
 
-    // Graceful shutdown on SIGINT / SIGTERM.
+    // Graceful shutdown: when a signal arrives, broadcast shutdown through
+    // the hub so every open SSE stream ends (via `take_until`), then let
+    // axum drain the remaining connections.  Without the broadcast step,
+    // the SSE streams would block graceful shutdown forever — that was the
+    // "Ctrl-C does nothing" bug.
+    let hub_for_shutdown = hub.clone();
+    let graceful = async move {
+        shutdown_signal().await;
+        tracing::info!("closing SSE streams");
+        hub_for_shutdown.trigger_shutdown();
+    };
+
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(graceful)
         .await?;
 
     tracing::info!("swarm hub shut down");
