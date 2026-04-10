@@ -4,6 +4,10 @@ A streaming AI agent loop in Rust, built to understand how these things actually
 
 > **Educational project.** I'm an AppSec engineer building this to demystify AI agents — how they work, how to secure them, and how to deploy them responsibly. If you need a production agent, see [the projects that inspired this](#inspired-by). If you want to understand what's happening inside the loop, read on.
 
+<p align="center">
+  <img src="docs/images/dyson-swarm.png" alt="Dyson Swarm" width="600">
+</p>
+
 ## Why
 
 AI agents run tools in a loop — reading files, executing commands, making network requests. If you're going to trust one with access to your system, you should understand exactly what's happening inside that loop.
