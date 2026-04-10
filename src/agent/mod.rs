@@ -866,6 +866,16 @@ impl Agent {
         self.tool_registry.tools.contains_key(name)
     }
 
+    /// Get the names of all registered tools.
+    ///
+    /// Used by the swarm controller to report capabilities in the node
+    /// manifest.  Returns tool names sorted for deterministic output.
+    pub fn tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.tool_registry.tools.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     /// Get the completion config (for quick response context).
     pub fn config(&self) -> &CompletionConfig {
         &self.config

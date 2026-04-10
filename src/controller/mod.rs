@@ -52,6 +52,7 @@
 // ===========================================================================
 
 pub mod recording;
+pub mod swarm;
 pub mod telegram;
 pub mod terminal;
 

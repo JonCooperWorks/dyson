@@ -74,6 +74,16 @@ pub(crate) fn escape_single_quotes(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
+/// Generate a short (8-char) hex hash of a string.
+///
+/// Used to create deterministic-but-readable identifiers from URLs, paths,
+/// etc.  Not cryptographic — just a short fingerprint for display.
+pub(crate) fn short_hash(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(s.as_bytes());
+    format!("{:x}", hash)[..8].to_string()
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
