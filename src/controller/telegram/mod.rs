@@ -878,6 +878,8 @@ async fn run_agent_for_message(
 ) {
     let chat_key = chat_id.0.to_string();
 
+    let text = prepend_reply_context(&msg, text);
+
     // try_lock() is the gate: if the agent is busy (or temporarily extracted
     // by handle_per_chat_command), fall back to a quick response.
     let mut ca = match entry.agent.try_lock() {
@@ -1101,6 +1103,27 @@ fn is_bot_mentioned(msg: &types::Message, bot_username: &str) -> bool {
         search_from += rel + 1;
     }
     false
+}
+
+/// If the message is a reply, prepend the original message's text and sender
+/// so the agent sees both the replied-to content and the new reply.
+fn prepend_reply_context(msg: &types::Message, text: String) -> String {
+    match msg.reply_to_message {
+        Some(ref reply) => {
+            let original = reply
+                .text
+                .as_deref()
+                .or(reply.caption.as_deref())
+                .unwrap_or("[no text]");
+            let sender = reply
+                .from
+                .as_ref()
+                .and_then(|u| u.username.as_deref())
+                .unwrap_or("unknown");
+            format!("[Replying to message from @{sender}: \"{original}\"]\n\n{text}")
+        }
+        None => text,
+    }
 }
 
 /// Returns true if the message is a reply to a message sent by the given bot.
@@ -1763,5 +1786,97 @@ mod tests {
         let prompt = ctrl.system_prompt().expect("Telegram controller must provide a system prompt");
         assert!(prompt.contains("Telegram"), "should reference Telegram");
         assert!(prompt.contains("4096"), "should mention the message character limit");
+    }
+
+    // -------------------------------------------------------------------
+    // Reply context — prepend_reply_context
+    // -------------------------------------------------------------------
+
+    /// Helper to build a reply Message with the given text and sender username.
+    fn make_reply(text: Option<&str>, username: Option<&str>) -> Message {
+        Message {
+            message_id: 0,
+            chat: Chat {
+                id: 100,
+                chat_type: ChatType::Private,
+            },
+            from: username.map(|u| User {
+                id: 1,
+                is_bot: false,
+                username: Some(u.to_string()),
+            }),
+            text: text.map(|t| t.to_string()),
+            caption: None,
+            entities: None,
+            reply_to_message: None,
+            photo: None,
+            voice: None,
+            document: None,
+        }
+    }
+
+    #[test]
+    fn reply_context_includes_original_text_and_sender() {
+        let mut msg = make_msg("my reply", ChatType::Private);
+        msg.reply_to_message = Some(Box::new(make_reply(
+            Some("original message"),
+            Some("alice"),
+        )));
+        let result = prepend_reply_context(&msg, "my reply".to_string());
+        assert_eq!(
+            result,
+            "[Replying to message from @alice: \"original message\"]\n\nmy reply",
+        );
+    }
+
+    #[test]
+    fn reply_context_uses_caption_when_no_text() {
+        let mut reply = make_reply(None, Some("bob"));
+        reply.caption = Some("photo caption".to_string());
+
+        let mut msg = make_msg("nice pic", ChatType::Private);
+        msg.reply_to_message = Some(Box::new(reply));
+
+        let result = prepend_reply_context(&msg, "nice pic".to_string());
+        assert!(result.contains("\"photo caption\""));
+        assert!(result.ends_with("nice pic"));
+    }
+
+    #[test]
+    fn reply_context_falls_back_to_no_text() {
+        let mut msg = make_msg("what was that?", ChatType::Private);
+        msg.reply_to_message = Some(Box::new(make_reply(None, Some("carol"))));
+
+        let result = prepend_reply_context(&msg, "what was that?".to_string());
+        assert!(result.contains("[no text]"));
+    }
+
+    #[test]
+    fn reply_context_falls_back_to_unknown_sender() {
+        let mut reply = make_reply(Some("hello"), None);
+        reply.from = None;
+
+        let mut msg = make_msg("hey", ChatType::Private);
+        msg.reply_to_message = Some(Box::new(reply));
+
+        let result = prepend_reply_context(&msg, "hey".to_string());
+        assert!(result.contains("@unknown"));
+    }
+
+    #[test]
+    fn no_reply_returns_text_unchanged() {
+        let msg = make_msg("hello", ChatType::Private);
+        let result = prepend_reply_context(&msg, "hello".to_string());
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn reply_context_preserves_empty_reply_text() {
+        let mut msg = make_msg("", ChatType::Private);
+        msg.reply_to_message = Some(Box::new(make_reply(Some("original"), Some("dave"))));
+
+        let result = prepend_reply_context(&msg, String::new());
+        assert!(result.contains("\"original\""));
+        assert!(result.ends_with("\n\n"));
     }
 }
