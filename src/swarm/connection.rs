@@ -51,7 +51,10 @@ pub enum SwarmEvent {
 #[derive(Clone)]
 pub struct SwarmConnection {
     base_url: String,
+    /// Client for POST requests (has request timeout).
     client: reqwest::Client,
+    /// Client for SSE stream (no request timeout — connection stays open).
+    sse_client: reqwest::Client,
     auth_token: Option<String>,
 }
 
@@ -63,8 +66,13 @@ impl SwarmConnection {
             base_url: base_url.trim_end_matches('/').to_string(),
             client: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("failed to build HTTP client"),
+            sse_client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("failed to build SSE client"),
             auth_token: None,
         }
     }
@@ -153,7 +161,7 @@ impl SwarmConnection {
         &self,
     ) -> Result<tokio::sync::mpsc::Receiver<Result<SwarmEvent>>> {
         let url = format!("{}/swarm/events", self.base_url);
-        let req = self.authed(self.client.get(&url).header("Accept", "text/event-stream"));
+        let req = self.authed(self.sse_client.get(&url).header("Accept", "text/event-stream"));
         let resp = req.send().await?;
 
         if resp.status() != StatusCode::OK {

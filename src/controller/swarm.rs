@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
 
 use crate::config::{Settings, SwarmControllerConfig};
 use crate::controller::ClientRegistry;
@@ -150,14 +151,14 @@ impl super::Controller for SwarmController {
         let mut events = conn.open_event_stream().await?;
 
         // ── 5. HEARTBEAT (background) ──
+        let status = Arc::new(Mutex::new(NodeStatus::Idle));
         let heartbeat_conn = conn.clone();
+        let heartbeat_status = Arc::clone(&status);
         let heartbeat_handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(HEARTBEAT_INTERVAL).await;
-                if let Err(e) = heartbeat_conn
-                    .heartbeat(&NodeStatus::Idle)
-                    .await
-                {
+                let current = heartbeat_status.lock().await.clone();
+                if let Err(e) = heartbeat_conn.heartbeat(&current).await {
                     tracing::warn!(error = %e, "heartbeat failed");
                 }
             }
@@ -201,12 +202,10 @@ impl super::Controller for SwarmController {
                         "executing swarm task"
                     );
 
-                    // Send busy status.
-                    let _ = conn
-                        .heartbeat(&NodeStatus::Busy {
-                            task_id: task.task_id.clone(),
-                        })
-                        .await;
+                    // Mark busy.
+                    *status.lock().await = NodeStatus::Busy {
+                        task_id: task.task_id.clone(),
+                    };
 
                     // Execute the task.
                     let result = execute_task(&mut agent, &conn, &task).await;
@@ -220,8 +219,8 @@ impl super::Controller for SwarmController {
                         );
                     }
 
-                    // Send idle status.
-                    let _ = conn.heartbeat(&NodeStatus::Idle).await;
+                    // Mark idle.
+                    *status.lock().await = NodeStatus::Idle;
 
                     // Reset conversation for next task.
                     agent.clear();
