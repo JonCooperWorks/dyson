@@ -30,7 +30,7 @@ struct Harness {
 
 async fn start_hub() -> Harness {
     let tempdir = tempfile::tempdir().unwrap();
-    let key = HubKeyPair::load_or_generate(&tempdir.path().join("hub.key")).unwrap();
+    let key = HubKeyPair::generate(&tempdir.path().join("hub.key")).unwrap();
     let public_key_config = key.public_key_config();
 
     let hub = Hub::new(key, tempdir.path()).unwrap();

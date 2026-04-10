@@ -60,14 +60,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Ensure data dir exists.
     std::fs::create_dir_all(&config.data_dir)?;
 
-    // Load or generate the signing key.
+    // Load the signing key.  The hub itself never generates one — that
+    // is the job of the `swarm-keygen` binary.  Failing loudly here
+    // keeps key provisioning explicit and out of the hot path.
     let key_path = config.key_path();
-    let is_new_key = !key_path.exists();
-    let key = HubKeyPair::load_or_generate(&key_path)?;
-
-    if is_new_key {
-        println!("Generated new hub signing key at {}", key_path.display());
-    }
+    let key = HubKeyPair::load(&key_path).map_err(|e| {
+        eprintln!("error: {e}");
+        eprintln!(
+            "\nGenerate one with:\n    swarm-keygen --out {}",
+            key_path.display()
+        );
+        e
+    })?;
     println!(
         "Hub public key (add to node config): {}",
         key.public_key_config()

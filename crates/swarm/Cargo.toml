@@ -9,6 +9,10 @@ description = "The Dyson swarm hub — a task routing server for Dyson nodes"
 name = "swarm"
 path = "src/main.rs"
 
+[[bin]]
+name = "swarm-keygen"
+path = "src/bin/keygen.rs"
+
 [lib]
 name = "swarm"
 path = "src/lib.rs"

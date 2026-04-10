@@ -1,8 +1,9 @@
 //! Hub keypair management and task signing.
 //!
-//! The hub has a single Ed25519 keypair.  On first run, it is generated
-//! and persisted to `data_dir/hub.key` (PKCS#8, 0600).  On subsequent
-//! runs, it is loaded from the same file.
+//! The hub has a single Ed25519 keypair.  It is generated out-of-band
+//! by the `swarm-keygen` binary and persisted to a PKCS#8 file (0600).
+//! The `swarm` hub binary only *loads* the key — if the file is missing
+//! it exits with an instruction to run `swarm-keygen` first.
 //!
 //! The wire format for signed tasks is:
 //!
@@ -40,6 +41,10 @@ pub enum KeyError {
     Generate,
     #[error("failed to parse PKCS#8 keypair at {path}: {message}")]
     Parse { path: String, message: String },
+    #[error("key file not found at {0} — run `swarm-keygen --out {0}` first")]
+    Missing(String),
+    #[error("key file already exists at {0} — refusing to overwrite")]
+    AlreadyExists(String),
 }
 
 /// An in-memory Ed25519 keypair the hub uses to sign tasks.
@@ -49,36 +54,30 @@ pub struct HubKeyPair {
 }
 
 impl HubKeyPair {
-    /// Load from `path`, generating and persisting a new PKCS#8 keypair
-    /// on first run.
+    /// Load an existing PKCS#8 keypair from `path`.
     ///
-    /// On generation the file is created with mode `0600` on Unix.  On
-    /// subsequent runs the existing file is loaded silently.
-    pub fn load_or_generate(path: &Path) -> Result<Self, KeyError> {
+    /// Returns [`KeyError::Missing`] if the file does not exist — the
+    /// operator is expected to run `swarm-keygen` to create one.
+    pub fn load(path: &Path) -> Result<Self, KeyError> {
+        if !path.exists() {
+            return Err(KeyError::Missing(path.display().to_string()));
+        }
+        let pkcs8 = fs::read(path)?;
+        Self::from_pkcs8(&pkcs8, path)
+    }
+
+    /// Generate a fresh keypair and persist it to `path` atomically.
+    ///
+    /// Refuses to overwrite an existing file: returns
+    /// [`KeyError::AlreadyExists`] in that case.  The on-disk file is
+    /// chmod'd `0600` on Unix.
+    pub fn generate(path: &Path) -> Result<Self, KeyError> {
         if path.exists() {
-            let pkcs8 = fs::read(path)?;
-            let key_pair = Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|e| KeyError::Parse {
-                path: path.display().to_string(),
-                message: e.to_string(),
-            })?;
-            let mut public_bytes = [0u8; 32];
-            public_bytes.copy_from_slice(key_pair.public_key().as_ref());
-            return Ok(Self {
-                key_pair,
-                public_bytes,
-            });
+            return Err(KeyError::AlreadyExists(path.display().to_string()));
         }
 
-        // Generate.
         let rng = SystemRandom::new();
-        let pkcs8 =
-            Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| KeyError::Generate)?;
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(|e| {
-            KeyError::Parse {
-                path: path.display().to_string(),
-                message: e.to_string(),
-            }
-        })?;
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| KeyError::Generate)?;
 
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -90,9 +89,17 @@ impl HubKeyPair {
         set_permissions_0600(&tmp)?;
         fs::rename(&tmp, path)?;
 
+        Self::from_pkcs8(pkcs8.as_ref(), path)
+    }
+
+    /// Build a `HubKeyPair` from raw PKCS#8 bytes.
+    fn from_pkcs8(pkcs8: &[u8], path: &Path) -> Result<Self, KeyError> {
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|e| KeyError::Parse {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
         let mut public_bytes = [0u8; 32];
         public_bytes.copy_from_slice(key_pair.public_key().as_ref());
-
         Ok(Self {
             key_pair,
             public_bytes,
@@ -145,7 +152,7 @@ mod tests {
     #[test]
     fn sign_roundtrip_verifies_with_protocol_crate() {
         let dir = tempfile::tempdir().unwrap();
-        let key = HubKeyPair::load_or_generate(&dir.path().join("hub.key")).unwrap();
+        let key = HubKeyPair::generate(&dir.path().join("hub.key")).unwrap();
 
         let task = SwarmTask {
             task_id: "test-task-42".into(),
@@ -166,15 +173,36 @@ mod tests {
     }
 
     #[test]
-    fn load_or_generate_is_persistent() {
+    fn generate_then_load_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hub.key");
 
-        let first = HubKeyPair::load_or_generate(&path).unwrap();
+        let first = HubKeyPair::generate(&path).unwrap();
         assert!(path.exists(), "key file should be created");
 
-        let second = HubKeyPair::load_or_generate(&path).unwrap();
+        let second = HubKeyPair::load(&path).unwrap();
         assert_eq!(first.public_bytes(), second.public_bytes());
+    }
+
+    #[test]
+    fn load_missing_file_is_descriptive_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hub.key");
+        let err = HubKeyPair::load(&path).err().expect("should be Err");
+        match err {
+            KeyError::Missing(p) => assert!(p.contains("hub.key")),
+            other => panic!("expected Missing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generate_refuses_to_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hub.key");
+        HubKeyPair::generate(&path).unwrap();
+
+        let err = HubKeyPair::generate(&path).err().expect("should be Err");
+        assert!(matches!(err, KeyError::AlreadyExists(_)));
     }
 
     #[cfg(unix)]
@@ -184,7 +212,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hub.key");
-        let _ = HubKeyPair::load_or_generate(&path).unwrap();
+        let _ = HubKeyPair::generate(&path).unwrap();
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "key file should be chmod 0600");
@@ -193,7 +221,7 @@ mod tests {
     #[test]
     fn public_key_config_has_v1_prefix() {
         let dir = tempfile::tempdir().unwrap();
-        let key = HubKeyPair::load_or_generate(&dir.path().join("hub.key")).unwrap();
+        let key = HubKeyPair::generate(&dir.path().join("hub.key")).unwrap();
         let cfg = key.public_key_config();
         assert!(cfg.starts_with("v1:"), "got '{cfg}'");
         // Decodable as base64 and 32 bytes.
