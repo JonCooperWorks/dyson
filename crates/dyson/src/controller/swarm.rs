@@ -201,13 +201,11 @@ impl super::Controller for SwarmController {
         // controllers (terminal, telegram) can call `swarm_dispatch` to
         // hand work off to the swarm.  The swarm controller itself must
         // NOT have that tool — otherwise the agent executing a swarm task
-        // can dispatch another swarm task, which routes back to itself,
-        // and we get infinite loops.
+        // can dispatch another swarm task, creating infinite loops.
         //
-        // Strip any `SkillConfig::Mcp` whose name starts with `swarm_`
-        // before handing settings to the agent builder.
+        // The hub's `?caller=` query param already filters `list_nodes`
+        // results so the agent never sees its own node.
         let mut local_settings = settings.clone();
-        // Exclude swarm_dispatch to prevent recursive task spawning.
         for skill in &mut local_settings.skills {
             if let crate::config::SkillConfig::Mcp(mcp) = skill {
                 if mcp.name.starts_with("swarm_") {

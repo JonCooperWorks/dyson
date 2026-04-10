@@ -95,18 +95,14 @@ pub async fn run(
                                 }
                             };
 
+                        let node_name = swarm_config.node_name_or_default();
+                        let hub_base = swarm_config.url.trim_end_matches('/');
+
                         settings.skills.push(dyson::config::SkillConfig::Mcp(
                             Box::new(dyson::config::McpConfig {
-                                name: format!(
-                                    "swarm_{}",
-                                    swarm_config.node_name_or_default()
-                                ),
+                                name: format!("swarm_{node_name}"),
                                 transport: dyson::config::McpTransportConfig::Http {
-                                    url: format!(
-                                        "{}/mcp?caller={}",
-                                        swarm_config.url.trim_end_matches('/'),
-                                        swarm_config.node_name_or_default()
-                                    ),
+                                    url: format!("{hub_base}/mcp?caller={node_name}"),
                                     headers: std::collections::HashMap::new(),
                                     auth: None,
                                 },

@@ -26,11 +26,6 @@ use crate::router::{RoutingConstraints, select_node};
 /// Default timeout for a `swarm_dispatch` call when none is supplied.
 const DEFAULT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// The minimum JSON-RPC envelope we handle.
-///
-/// We deliberately parse into `Value` rather than a typed struct because
-/// MCP clients sometimes send `id` as a string or omit it entirely for
-/// notifications, and we want to be forgiving.
 /// Optional query parameters on the MCP endpoint.
 ///
 /// `?caller=<node_name>` identifies the calling node so `list_nodes`
@@ -40,6 +35,11 @@ pub struct McpQuery {
     caller: Option<String>,
 }
 
+/// The minimum JSON-RPC envelope we handle.
+///
+/// We deliberately parse into `Value` rather than a typed struct because
+/// MCP clients sometimes send `id` as a string or omit it entirely for
+/// notifications, and we want to be forgiving.
 pub async fn mcp_handler(
     State(hub): State<Arc<Hub>>,
     axum::extract::Query(query): axum::extract::Query<McpQuery>,
@@ -206,10 +206,7 @@ fn tool_result_text(text: String, is_error: bool) -> Value {
     })
 }
 
-/// `list_nodes` — a JSON array of the registered nodes.
-///
-/// When `caller` is set (from `?caller=<node_name>` on the MCP endpoint),
-/// the calling node is excluded from results so it only sees its peers.
+/// `list_nodes` — registered nodes, excluding `caller` if set.
 async fn list_nodes(hub: &Arc<Hub>, caller: Option<&str>) -> Value {
     hub.registry
         .with_entries(|entries| {
