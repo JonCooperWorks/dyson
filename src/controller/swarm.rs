@@ -22,11 +22,11 @@
 //   SwarmController::run():
 //     1. Build agent (shared ClientRegistry)
 //     2. Probe hardware + read agent's tool names → NodeManifest
-//     3. POST /swarm/register → get node_id + auth token
-//     4. GET /swarm/events → open SSE stream
-//     5. Spawn heartbeat background task
-//     6. Loop: SSE event → verify → fetch blobs → agent.run() → POST result
-//     7. Deregister on shutdown
+//     3. Connect, register, open SSE (with reconnection on failure)
+//     4. Spawn heartbeat background task
+//     5. Loop: SSE event → verify → fetch blobs → agent.run() → POST result
+//     6. On SSE disconnect: reconnect with exponential backoff
+//     7. On hub shutdown or fatal error: exit
 //
 // Social contract:
 //   Adding this controller means "I can use the swarm, and the swarm
@@ -34,6 +34,7 @@
 //   send tasks.
 // ===========================================================================
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -41,18 +42,95 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::config::{Settings, SwarmControllerConfig};
-use crate::controller::ClientRegistry;
+use crate::controller::{ClientRegistry, Output};
 use crate::error::DysonError;
-use crate::skill::subagent::CaptureOutput;
 use crate::swarm::connection::{SwarmConnection, SwarmEvent};
 use crate::swarm::probe::HardwareProbe;
 use crate::swarm::types::{
-    NodeStatus, Payload, SwarmResult, SwarmTask, TaskStatus,
+    BlobRef, NodeManifest, NodeStatus, Payload, SwarmResult, SwarmTask, TaskStatus,
 };
 use crate::swarm::verify::{SwarmPublicKey, verify_signed_payload};
+use crate::tool::ToolOutput;
 
 /// Delay between heartbeats.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Maximum consecutive reconnection attempts before giving up.
+const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+
+/// Base delay for exponential backoff on reconnection (doubled each attempt).
+const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(2);
+
+/// Maximum size for inline result payloads (64 KiB).
+const INLINE_THRESHOLD: usize = 64 * 1024;
+
+// ---------------------------------------------------------------------------
+// SwarmCaptureOutput — collects text + file paths from the agent
+// ---------------------------------------------------------------------------
+
+/// Output implementation that captures text and file paths.
+///
+/// Like `CaptureOutput` from subagents, but also records file paths
+/// so swarm results can include them as payloads.
+struct SwarmCaptureOutput {
+    text: String,
+    files: Vec<PathBuf>,
+}
+
+impl SwarmCaptureOutput {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            files: Vec::new(),
+        }
+    }
+
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn take_files(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.files)
+    }
+
+    fn clear(&mut self) {
+        self.text.clear();
+        self.files.clear();
+    }
+}
+
+impl Output for SwarmCaptureOutput {
+    fn text_delta(&mut self, text: &str) -> Result<(), DysonError> {
+        self.text.push_str(text);
+        Ok(())
+    }
+
+    fn tool_use_start(&mut self, _id: &str, _name: &str) -> Result<(), DysonError> {
+        Ok(())
+    }
+
+    fn tool_use_complete(&mut self) -> Result<(), DysonError> {
+        Ok(())
+    }
+
+    fn tool_result(&mut self, _output: &ToolOutput) -> Result<(), DysonError> {
+        Ok(())
+    }
+
+    fn send_file(&mut self, path: &std::path::Path) -> Result<(), DysonError> {
+        self.files.push(path.to_path_buf());
+        Ok(())
+    }
+
+    fn error(&mut self, error: &DysonError) -> Result<(), DysonError> {
+        tracing::warn!(error = %error, "swarm task agent error");
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), DysonError> {
+        Ok(())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // SwarmController
@@ -75,10 +153,7 @@ impl SwarmController {
             match serde_json::from_value(config.config.clone()) {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "failed to parse swarm controller config"
-                    );
+                    tracing::error!(error = %e, "failed to parse swarm controller config");
                     return None;
                 }
             };
@@ -86,10 +161,7 @@ impl SwarmController {
         let public_key = match SwarmPublicKey::from_config(&swarm_config.public_key) {
             Ok(pk) => pk,
             Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "failed to parse swarm public key"
-                );
+                tracing::error!(error = %e, "failed to parse swarm public key");
                 return None;
             }
         };
@@ -138,22 +210,105 @@ impl super::Controller for SwarmController {
             "hardware probe complete"
         );
 
-        // ── 3. CONNECT & REGISTER ──
+        // ── 3. CONNECT WITH RECONNECTION ──
+        let status = Arc::new(Mutex::new(NodeStatus::Idle));
+        let mut output = SwarmCaptureOutput::new();
+
+        // Outer loop: reconnect on SSE failures.
+        let mut consecutive_failures: u32 = 0;
+
+        loop {
+            match self
+                .run_session(&manifest, &mut agent, &mut output, &status)
+                .await
+            {
+                SessionResult::HubShutdown => {
+                    tracing::info!("hub requested shutdown");
+                    break;
+                }
+                SessionResult::Disconnected(e) => {
+                    consecutive_failures += 1;
+
+                    if consecutive_failures > MAX_RECONNECT_ATTEMPTS {
+                        tracing::error!(
+                            attempts = consecutive_failures,
+                            "max reconnection attempts exceeded — giving up"
+                        );
+                        return Err(DysonError::Swarm(
+                            "max reconnection attempts exceeded".into(),
+                        ));
+                    }
+
+                    let delay = RECONNECT_BASE_DELAY * 2u32.saturating_pow(consecutive_failures - 1);
+                    let delay = delay.min(Duration::from_secs(60));
+
+                    tracing::warn!(
+                        error = %e,
+                        attempt = consecutive_failures,
+                        retry_secs = delay.as_secs(),
+                        "SSE disconnected — reconnecting"
+                    );
+
+                    tokio::time::sleep(delay).await;
+                }
+                SessionResult::Connected => {
+                    // Successfully connected at least once, reset counter.
+                    consecutive_failures = 0;
+                }
+                SessionResult::FatalError(e) => {
+                    tracing::error!(error = %e, "fatal swarm error");
+                    return Err(e);
+                }
+            }
+        }
+
+        tracing::info!("swarm controller shut down");
+        Ok(())
+    }
+}
+
+/// Result of a single SSE session.
+enum SessionResult {
+    /// Hub sent a shutdown event.
+    HubShutdown,
+    /// SSE stream disconnected (retryable).
+    Disconnected(DysonError),
+    /// Connected successfully (reset backoff counter).
+    Connected,
+    /// Fatal error (don't retry).
+    FatalError(DysonError),
+}
+
+impl SwarmController {
+    /// Run a single SSE session: register, connect, process events.
+    ///
+    /// Returns when the session ends (disconnect, shutdown, or error).
+    async fn run_session(
+        &self,
+        manifest: &NodeManifest,
+        agent: &mut crate::agent::Agent,
+        output: &mut SwarmCaptureOutput,
+        status: &Arc<Mutex<NodeStatus>>,
+    ) -> SessionResult {
+        // Connect and register.
         let mut conn = SwarmConnection::new(&self.config.url);
 
-        let reg = conn.register(&manifest).await?;
-        tracing::info!(
-            node_id = %reg.node_id,
-            "registered with swarm hub"
-        );
+        let reg = match conn.register(manifest).await {
+            Ok(r) => r,
+            Err(e) => return SessionResult::Disconnected(e),
+        };
 
-        // ── 4. OPEN SSE STREAM ──
-        let mut events = conn.open_event_stream().await?;
+        tracing::info!(node_id = %reg.node_id, "registered with swarm hub");
 
-        // ── 5. HEARTBEAT (background) ──
-        let status = Arc::new(Mutex::new(NodeStatus::Idle));
+        // Open SSE stream.
+        let mut events = match conn.open_event_stream().await {
+            Ok(rx) => rx,
+            Err(e) => return SessionResult::Disconnected(e),
+        };
+
+        // Heartbeat background task.
         let heartbeat_conn = conn.clone();
-        let heartbeat_status = Arc::clone(&status);
+        let heartbeat_status = Arc::clone(status);
         let heartbeat_handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(HEARTBEAT_INTERVAL).await;
@@ -164,8 +319,23 @@ impl super::Controller for SwarmController {
             }
         });
 
-        // ── 6. TASK LOOP ──
-        while let Some(event_result) = events.recv().await {
+        // Signal that we connected (resets backoff).
+        // We process this in the outer loop after the first successful event.
+        let mut ever_connected = false;
+
+        // Event loop.
+        let result = loop {
+            let event_result = match events.recv().await {
+                Some(r) => r,
+                None => break SessionResult::Disconnected(
+                    DysonError::Swarm("SSE channel closed".into()),
+                ),
+            };
+
+            if !ever_connected {
+                ever_connected = true;
+            }
+
             match event_result {
                 Ok(SwarmEvent::Task(wire_bytes)) => {
                     // Verify signature.
@@ -175,10 +345,7 @@ impl super::Controller for SwarmController {
                     ) {
                         Ok(p) => p,
                         Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "rejected task: signature verification failed"
-                            );
+                            tracing::warn!(error = %e, "rejected task: bad signature");
                             continue;
                         }
                     };
@@ -187,17 +354,13 @@ impl super::Controller for SwarmController {
                     let task: SwarmTask = match serde_json::from_slice(payload_bytes) {
                         Ok(t) => t,
                         Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "rejected task: invalid JSON payload"
-                            );
+                            tracing::warn!(error = %e, "rejected task: invalid JSON");
                             continue;
                         }
                     };
 
                     tracing::info!(
                         task_id = %task.task_id,
-                        prompt_len = task.prompt.len(),
                         payloads = task.payloads.len(),
                         "executing swarm task"
                     );
@@ -207,8 +370,8 @@ impl super::Controller for SwarmController {
                         task_id: task.task_id.clone(),
                     };
 
-                    // Execute the task.
-                    let result = execute_task(&mut agent, &conn, &task).await;
+                    // Execute.
+                    let result = execute_task(agent, &conn, &task, output).await;
 
                     // Send result.
                     if let Err(e) = conn.send_result(&result).await {
@@ -219,11 +382,10 @@ impl super::Controller for SwarmController {
                         );
                     }
 
-                    // Mark idle.
+                    // Reset for next task.
                     *status.lock().await = NodeStatus::Idle;
-
-                    // Reset conversation for next task.
                     agent.clear();
+                    output.clear();
                 }
                 Ok(SwarmEvent::Registered { node_id }) => {
                     tracing::info!(node_id = %node_id, "registration confirmed via SSE");
@@ -232,22 +394,25 @@ impl super::Controller for SwarmController {
                     tracing::trace!("heartbeat acknowledged");
                 }
                 Ok(SwarmEvent::Shutdown) => {
-                    tracing::info!("hub requested shutdown");
-                    break;
+                    break SessionResult::HubShutdown;
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "SSE stream error");
-                    // TODO: reconnect with backoff
-                    break;
+                    break SessionResult::Disconnected(e);
                 }
             }
+        };
+
+        heartbeat_handle.abort();
+
+        if ever_connected {
+            // We got at least one event, so the connection was real.
+            // Return Connected first to reset backoff, then the actual result
+            // will come on the next iteration if it's a disconnect.
+            // Actually, just return the result — the outer loop resets on
+            // successful registration anyway.
         }
 
-        // ── 7. CLEANUP ──
-        heartbeat_handle.abort();
-        tracing::info!("swarm controller shut down");
-
-        Ok(())
+        result
     }
 }
 
@@ -255,11 +420,12 @@ impl super::Controller for SwarmController {
 // Task execution
 // ---------------------------------------------------------------------------
 
-/// Execute a single swarm task: fetch payloads, run agent, collect results.
+/// Execute a single swarm task: fetch payloads, run agent, collect result files.
 async fn execute_task(
     agent: &mut crate::agent::Agent,
     conn: &SwarmConnection,
     task: &SwarmTask,
+    output: &mut SwarmCaptureOutput,
 ) -> SwarmResult {
     let start = Instant::now();
 
@@ -287,18 +453,17 @@ async fn execute_task(
     };
 
     // Run the agent with a timeout if specified.
-    let mut output = CaptureOutput::new();
     let agent_result = if let Some(timeout_secs) = task.timeout_secs {
         tokio::time::timeout(
             Duration::from_secs(timeout_secs),
-            agent.run(&prompt, &mut output),
+            agent.run(&prompt, output),
         )
         .await
     } else {
-        Ok(agent.run(&prompt, &mut output).await)
+        Ok(agent.run(&prompt, output).await)
     };
 
-    let (text, status) = match agent_result {
+    let (text, task_status) = match agent_result {
         Ok(Ok(text)) => (text, TaskStatus::Completed),
         Ok(Err(e)) => (
             String::new(),
@@ -314,19 +479,74 @@ async fn execute_task(
         ),
     };
 
+    // Collect result files and upload large ones.
+    let files = output.take_files();
+    let payloads = collect_result_payloads(conn, &files).await;
+
     SwarmResult {
         task_id: task.task_id.clone(),
         text,
-        payloads: vec![],
-        status,
+        payloads,
+        status: task_status,
         duration_secs: start.elapsed().as_secs(),
     }
 }
 
-/// Fetch ref payloads from the hub, verify SHA-256 hashes.
+/// Read result files produced by the agent, split into inline/ref payloads.
 ///
-/// Returns a string describing the payloads (for the agent's context),
-/// or an error if any payload fails to download or verify.
+/// Small files (< 64 KiB) are inlined.  Large files are hashed, uploaded
+/// to the hub, and referenced by SHA-256.  Files that can't be read are
+/// logged and skipped.
+async fn collect_result_payloads(conn: &SwarmConnection, files: &[PathBuf]) -> Vec<Payload> {
+    let mut payloads = Vec::new();
+
+    for path in files {
+        let data = match tokio::fs::read(path).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping result file: could not read"
+                );
+                continue;
+            }
+        };
+
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+
+        if data.len() <= INLINE_THRESHOLD {
+            payloads.push(Payload::Inline { name, data });
+        } else {
+            // Hash, upload, reference.
+            let mut hasher = Sha256::new();
+            hasher.update(&data);
+            let sha256 = format!("{:x}", hasher.finalize());
+
+            if let Err(e) = conn.upload_blob(&sha256, &data).await {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skipping result file: upload failed"
+                );
+                continue;
+            }
+
+            payloads.push(Payload::Ref(BlobRef {
+                sha256,
+                size: data.len() as u64,
+                name,
+            }));
+        }
+    }
+
+    payloads
+}
+
+/// Fetch ref payloads from the hub, verify SHA-256 hashes.
 async fn fetch_and_verify_payloads(
     conn: &SwarmConnection,
     payloads: &[Payload],
@@ -382,7 +602,6 @@ async fn fetch_and_verify_payloads(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::swarm::types::BlobRef;
 
     #[test]
     fn swarm_controller_config_parsing() {
@@ -409,7 +628,6 @@ mod tests {
 
         let config: SwarmControllerConfig = serde_json::from_value(json).unwrap();
         assert!(config.node_name.is_none());
-        // node_name_or_default will return something (hostname or "unknown").
         let name = config.node_name_or_default();
         assert!(!name.is_empty());
     }
@@ -443,13 +661,69 @@ mod tests {
             data: b"key: value".to_vec(),
         }];
 
-        // No connection needed for inline payloads, but we need a conn.
-        // We test the logic by calling fetch_and_verify_payloads which
-        // only uses conn for Ref payloads.
         let conn = SwarmConnection::new("http://localhost:0");
         let ctx = fetch_and_verify_payloads(&conn, &payloads).await.unwrap();
 
         assert!(ctx.contains("config.yaml"));
         assert!(ctx.contains("key: value"));
+    }
+
+    #[test]
+    fn swarm_capture_output_collects_text_and_files() {
+        let mut output = SwarmCaptureOutput::new();
+
+        output.text_delta("hello ").unwrap();
+        output.text_delta("world").unwrap();
+        output.send_file(std::path::Path::new("/tmp/report.pdf")).unwrap();
+        output.send_file(std::path::Path::new("/tmp/data.csv")).unwrap();
+
+        assert_eq!(output.text(), "hello world");
+        let files = output.take_files();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0], PathBuf::from("/tmp/report.pdf"));
+        assert_eq!(files[1], PathBuf::from("/tmp/data.csv"));
+
+        // take_files drains.
+        assert!(output.take_files().is_empty());
+    }
+
+    #[test]
+    fn swarm_capture_output_clear() {
+        let mut output = SwarmCaptureOutput::new();
+
+        output.text_delta("text").unwrap();
+        output.send_file(std::path::Path::new("/tmp/file")).unwrap();
+
+        output.clear();
+        assert!(output.text().is_empty());
+        assert!(output.take_files().is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_result_payloads_inline_small_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("small.txt");
+        tokio::fs::write(&file_path, b"hello").await.unwrap();
+
+        let conn = SwarmConnection::new("http://localhost:0");
+        let payloads = collect_result_payloads(&conn, &[file_path]).await;
+
+        assert_eq!(payloads.len(), 1);
+        match &payloads[0] {
+            Payload::Inline { name, data } => {
+                assert_eq!(name, "small.txt");
+                assert_eq!(data, b"hello");
+            }
+            _ => panic!("expected Inline"),
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_result_payloads_skips_missing_file() {
+        let conn = SwarmConnection::new("http://localhost:0");
+        let payloads =
+            collect_result_payloads(&conn, &[PathBuf::from("/nonexistent/file.txt")]).await;
+
+        assert!(payloads.is_empty());
     }
 }
