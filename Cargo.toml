@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/dyson-swarm-protocol",
     "crates/dyson",
+    "crates/swarm",
 ]
 
 [workspace.package]

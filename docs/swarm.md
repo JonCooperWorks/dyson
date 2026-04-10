@@ -78,8 +78,8 @@ Two protocols:
 
 ## The Hub (Server)
 
-The swarm hub is a **separate service** (not part of this codebase). It is
-responsible for:
+The hub lives at [`crates/swarm/`](../crates/swarm/) and ships as a binary
+named `swarm`.  It is an in-memory, tokio-based HTTP server responsible for:
 
 1. **Node registry** — Accepting `POST /swarm/register` with a `NodeManifest`,
    assigning a `node_id` and auth token.
@@ -95,6 +95,34 @@ responsible for:
    accepting result payloads (`PUT /swarm/blob/{sha256}`).
 
 5. **Health monitoring** — Receiving heartbeats from nodes, reaping stale entries.
+
+### Running the hub
+
+```bash
+# First run: generates a fresh signing key and prints the public key
+# string you drop into node dyson.json configs.
+cargo run -p swarm -- --bind 0.0.0.0:8080 --data-dir ./hub-data
+```
+
+CLI flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--bind` | `127.0.0.1:8080` | HTTP listen address |
+| `--data-dir` | `./hub-data` | Where `hub.key` and `blobs/` live |
+| `--heartbeat-timeout-secs` | `90` | Reap nodes whose last heartbeat is older than this |
+| `--log-level` | `info` | `tracing` env filter |
+
+On first run the hub generates a fresh PKCS#8 Ed25519 keypair under
+`data_dir/hub.key` (chmod `0600`) and prints the public key in the
+`"v1:..."` format node operators need:
+
+```
+Hub public key (add to node config): v1:K2dYr0base64encodedkey...
+```
+
+Subsequent runs load the existing key silently.  State is ephemeral: a
+hub restart forgets every registered node and every in-flight task.
 
 ### Hub endpoints
 
