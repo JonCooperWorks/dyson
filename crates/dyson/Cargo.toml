@@ -1,0 +1,47 @@
+[package]
+name = "dyson"
+version = "0.1.0"
+edition = "2024"
+description = "Streaming, composable AI agent loop in Rust"
+
+[dependencies]
+dyson-swarm-protocol = { path = "../dyson-swarm-protocol" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "signal", "process", "sync", "time"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["stream", "json", "multipart", "form", "query", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+async-trait = "0.1"
+async-stream = "0.3"
+tokio-stream = { version = "0.1", features = ["io-util"] }
+tokio-util = "0.7"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+rand = "0.10"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+regex = "1"
+rusqlite = { version = "0.39", features = ["bundled"] }
+zeroize = "1"
+glob = "0.3"
+ignore = "0.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+base64 = "0.22"
+subtle = "2"
+sha2 = "0.10"
+ring = "0.17"
+libc = "0.2"
+nanohtml2text = "0.1"
+pdf-extract = "0.10"
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"

@@ -55,7 +55,10 @@
 //   encodes the version: "v1:base64...".
 // ===========================================================================
 
+// Re-export the wire protocol types from dyson-swarm-protocol so
+// existing call sites (`crate::swarm::types::SwarmTask`, etc.) keep
+// working without churn.
+pub use dyson_swarm_protocol::{error as protocol_error, types, verify};
+
 pub mod connection;
 pub mod probe;
-pub mod types;
-pub mod verify;

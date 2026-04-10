@@ -38,7 +38,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use ring::signature;
 
-use crate::error::{DysonError, Result};
+use crate::error::{ProtocolError, Result};
 
 /// The version byte for Ed25519 signatures.
 const V1: u8 = 0x01;
@@ -74,25 +74,25 @@ impl SwarmPublicKey {
     /// is invalid or the key length is wrong for the algorithm.
     pub fn from_config(s: &str) -> Result<Self> {
         let (version_str, key_b64) = s.split_once(':').ok_or_else(|| {
-            DysonError::Config("swarm public_key must be in format 'v1:base64...'".into())
+            ProtocolError::WireFormat("swarm public_key must be in format 'v1:base64...'".into())
         })?;
 
         let version = match version_str {
             "v1" => V1,
             other => {
-                return Err(DysonError::Config(format!(
+                return Err(ProtocolError::PublicKey(format!(
                     "unsupported swarm public key version '{other}' (supported: v1)"
                 )));
             }
         };
 
         let key_bytes = STANDARD.decode(key_b64).map_err(|e| {
-            DysonError::Config(format!("swarm public_key base64 decode failed: {e}"))
+            ProtocolError::PublicKey(format!("swarm public_key base64 decode failed: {e}"))
         })?;
 
         // V1 = Ed25519, key must be exactly 32 bytes.
         if version == V1 && key_bytes.len() != ED25519_PUBLIC_KEY_LEN {
-            return Err(DysonError::Config(format!(
+            return Err(ProtocolError::PublicKey(format!(
                 "swarm public_key v1 must be 32 bytes, got {}",
                 key_bytes.len()
             )));
@@ -126,7 +126,7 @@ pub fn verify_signed_payload<'a>(
     public_key: &SwarmPublicKey,
 ) -> Result<&'a [u8]> {
     if wire_bytes.len() < MIN_WIRE_LEN {
-        return Err(DysonError::Swarm(format!(
+        return Err(ProtocolError::WireFormat(format!(
             "signed message too short: {} bytes (minimum {MIN_WIRE_LEN})",
             wire_bytes.len()
         )));
@@ -136,7 +136,7 @@ pub fn verify_signed_payload<'a>(
 
     // Version must match the configured key.  No fallback.
     if version != public_key.version {
-        return Err(DysonError::Swarm(format!(
+        return Err(ProtocolError::Signature(format!(
             "signature version mismatch: got {version:#04x}, expected {:#04x}",
             public_key.version
         )));
@@ -147,7 +147,7 @@ pub fn verify_signed_payload<'a>(
 
     match version {
         V1 => verify_v1(payload, sig_bytes, &public_key.key_bytes),
-        _ => Err(DysonError::Swarm(format!(
+        _ => Err(ProtocolError::Signature(format!(
             "unsupported signature version {version:#04x}"
         ))),
     }?;
@@ -162,7 +162,7 @@ fn verify_v1(payload: &[u8], sig_bytes: &[u8], key_bytes: &[u8]) -> Result<()> {
 
     public_key
         .verify(payload, sig_bytes)
-        .map_err(|_| DysonError::Swarm("Ed25519 signature verification failed".into()))
+        .map_err(|_| ProtocolError::Signature("Ed25519 signature verification failed".into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -316,7 +316,7 @@ mod tests {
     fn roundtrip_sign_verify_json_task() {
         let (kp, pk) = test_keypair();
 
-        let task = crate::swarm::types::SwarmTask {
+        let task = crate::types::SwarmTask {
             task_id: "550e8400-e29b-41d4-a716-446655440000".into(),
             prompt: "Fine-tune llama-3".into(),
             payloads: vec![],
@@ -327,7 +327,7 @@ mod tests {
         let wire = sign_payload(&payload, &kp);
 
         let verified = verify_signed_payload(&wire, &pk).unwrap();
-        let parsed: crate::swarm::types::SwarmTask = serde_json::from_slice(verified).unwrap();
+        let parsed: crate::types::SwarmTask = serde_json::from_slice(verified).unwrap();
 
         assert_eq!(parsed.task_id, task.task_id);
         assert_eq!(parsed.prompt, task.prompt);

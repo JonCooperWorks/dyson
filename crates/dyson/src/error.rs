@@ -153,6 +153,12 @@ pub fn classify_llm_error(err: &str) -> LlmErrorKind {
 // From impls for types that don't use #[from]
 // ---------------------------------------------------------------------------
 
+impl From<dyson_swarm_protocol::ProtocolError> for DysonError {
+    fn from(e: dyson_swarm_protocol::ProtocolError) -> Self {
+        DysonError::Swarm(e.to_string())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Convenience type alias
 // ---------------------------------------------------------------------------
