@@ -1,7 +1,0 @@
-target/
-.git/
-.env
-dyson-local.json
-*.md
-.github/
-docs/
