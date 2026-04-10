@@ -108,7 +108,16 @@ pub struct HardwareInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuInfo {
     pub model: String,
+    /// Logical core count (hardware threads, post-SMT/HT).
     pub cores: u32,
+    /// Physical core count for this model, when the probe can determine it.
+    ///
+    /// On Linux this is the number of unique `(physical id, core id)` pairs
+    /// reported in `/proc/cpuinfo`.  On macOS it's `hw.physicalcpu` (the sum
+    /// of performance + efficiency cores on Apple Silicon).  `None` when the
+    /// platform doesn't expose it.
+    #[serde(default)]
+    pub physical_cores: Option<u32>,
 }
 
 /// GPU information.
@@ -118,6 +127,13 @@ pub struct GpuInfo {
     /// Total VRAM in bytes.
     pub vram_bytes: u64,
     pub driver: String,
+    /// GPU core count, when reported by the platform.
+    ///
+    /// Apple Silicon GPUs surface this via `system_profiler` as `sppci_cores`
+    /// (e.g. 38 for an M2 Max).  `None` when the probe cannot determine it
+    /// (discrete NVIDIA GPUs, Linux, etc.).
+    #[serde(default)]
+    pub cores: Option<u32>,
 }
 
 /// Current status of a node.

@@ -94,12 +94,14 @@ mod tests {
                     cpus: vec![CpuInfo {
                         model: "test".into(),
                         cores: 4,
+                        physical_cores: Some(4),
                     }],
                     gpus: (0..gpus)
                         .map(|_| GpuInfo {
                             model: "test gpu".into(),
                             vram_bytes: 8 * 1024 * 1024 * 1024,
                             driver: "test".into(),
+                            cores: None,
                         })
                         .collect(),
                     ram_bytes: ram_gb * 1024 * 1024 * 1024,
