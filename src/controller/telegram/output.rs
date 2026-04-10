@@ -30,6 +30,9 @@ pub struct TelegramOutput {
     rt: tokio::runtime::Handle,
     has_text: bool,
     typing_handle: Option<tokio::task::JoinHandle<()>>,
+    /// All Telegram message IDs sent during this output session.
+    /// Used to map reactions back to conversation turns.
+    sent_message_ids: Vec<MessageId>,
 }
 
 impl TelegramOutput {
@@ -43,6 +46,7 @@ impl TelegramOutput {
             last_edit: Instant::now(),
             rt: tokio::runtime::Handle::current(),
             typing_handle: None,
+            sent_message_ids: Vec::new(),
         }
     }
 
@@ -53,12 +57,21 @@ impl TelegramOutput {
     pub fn send_message(&mut self, text: &str) -> Result<MessageId, DysonError> {
         let result = self.block_on(self.bot.send_message_html(self.chat_id, text));
         match result {
-            Ok(msg) => Ok(msg.id()),
+            Ok(msg) => {
+                let id = msg.id();
+                self.sent_message_ids.push(id);
+                Ok(id)
+            }
             Err(e) => {
                 tracing::error!(error = %e, "failed to send Telegram message");
                 Err(e)
             }
         }
+    }
+
+    /// Returns all Telegram message IDs sent during this output session.
+    pub fn sent_message_ids(&self) -> &[MessageId] {
+        &self.sent_message_ids
     }
 
     fn edit_message(&self, message_id: MessageId, text: &str) {
