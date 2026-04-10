@@ -159,6 +159,53 @@ Register in `Agent::new()`:
 dreams.push(Arc::new(MyDream));
 ```
 
+## Skill Creation and Hot Reload
+
+`SelfImprovementDream` can create new skills via the `skill_create` tool
+during a dream cycle.  These skills take effect **in the same session** —
+no restart required — thanks to the hot-reload mechanism.
+
+### How it works
+
+1. Dream calls `skill_create` → writes `skills/{name}/SKILL.md` to workspace
+2. Writing a new skill directory changes the `skills/` directory mtime
+3. Before the next user turn, the controller calls `check_and_reload_agent()`
+4. `HotReloader` detects the mtime change (after 500ms debounce)
+5. Controller rebuilds the agent → `create_skills()` → `workspace.skill_dirs()`
+   discovers the new skill
+6. New skill is active for the next turn
+
+```
+SelfImprovementDream (background)
+  skill_create("code-review", ...)
+    → writes skills/code-review/SKILL.md
+    → skills/ directory mtime changes
+        │
+        ▼
+HotReloader.check() (next turn)
+  → detects mtime change on skills/
+  → returns (changed: true, ...)
+        │
+        ▼
+check_and_reload_agent()
+  → build_agent() → create_skills()
+    → workspace.skill_dirs() finds new skill
+    → LocalSkill::from_dir("skills/code-review/")
+  → conversation messages restored
+  → new skill active
+```
+
+The same mechanism handles skill updates and improvements — any write to a
+`SKILL.md` file triggers the reload path.
+
+`HotReloader::scan_workspace()` watches:
+- The `skills/` directory itself (catches new/removed skill dirs)
+- Each `SKILL.md` that existed at scan time (catches content edits)
+
+See `src/config/hot_reload.rs` for the debounced mtime-based watcher.
+
+---
+
 ## Non-blocking Guarantee
 
 Enforced at every level:
