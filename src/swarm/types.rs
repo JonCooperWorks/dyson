@@ -83,6 +83,8 @@ impl Payload {
 pub struct NodeManifest {
     /// Human-readable node name (from config or hostname).
     pub node_name: String,
+    /// Operating system (e.g. "linux", "macos").
+    pub os: String,
     /// Detected hardware on this machine.
     pub hardware: HardwareInfo,
     /// Tool/skill names loaded on this node's agent.

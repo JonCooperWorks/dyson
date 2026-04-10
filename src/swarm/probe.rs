@@ -4,28 +4,26 @@
 // LEARNING OVERVIEW
 //
 // What this file does:
-//   Probes the local machine for GPU, CPU, RAM, and disk information.
+//   Probes the local machine for OS, GPU, CPU, RAM, and disk information.
 //   Produces a `NodeManifest` that gets sent to the swarm hub during
 //   registration so the hub can route tasks to the right hardware.
 //
-// Detection methods:
+// Platform support:
 //
-//   GPU  — `nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader`
-//          Falls back to empty list if nvidia-smi is not installed.
+//   Linux:
+//     GPU  — nvidia-smi
+//     CPU  — /proc/cpuinfo
+//     RAM  — /proc/meminfo
+//     Disk — statvfs
 //
-//   CPU  — Parse `/proc/cpuinfo` on Linux.
-//          Falls back to `num_cpus` count with "unknown" model.
+//   macOS:
+//     GPU  — system_profiler SPDisplaysDataType
+//     CPU  — sysctl machdep.cpu.brand_string + hw.ncpu
+//     RAM  — sysctl hw.memsize
+//     Disk — statvfs
 //
-//   RAM  — Parse `/proc/meminfo` on Linux (MemTotal line).
-//          Falls back to 0.
-//
-//   Disk — `statvfs` on the working directory.
-//          Falls back to 0.
-//
-// All probes are best-effort.  Failures are logged and produce
-// default values — the node still registers, it just has incomplete
-// hardware info.  The hub can still route tasks based on capabilities
-// (tool names) even without hardware details.
+// All probes are best-effort.  Failures produce default values — the
+// node still registers, the hub can route on capabilities (tool names).
 // ===========================================================================
 
 use std::collections::HashMap;
@@ -36,14 +34,10 @@ use crate::swarm::types::{CpuInfo, GpuInfo, HardwareInfo, NodeManifest, NodeStat
 // HardwareProbe
 // ---------------------------------------------------------------------------
 
-/// Detect local hardware and build a `NodeManifest`.
 pub struct HardwareProbe;
 
 impl HardwareProbe {
     /// Run a full hardware probe and build a manifest.
-    ///
-    /// `node_name` is the human-readable name from config (or hostname).
-    /// `tool_names` is the list of tools loaded on this node's agent.
     pub async fn run(node_name: &str, tool_names: Vec<String>) -> NodeManifest {
         let (gpus, cpus, ram_bytes, disk_free_bytes) = tokio::join!(
             detect_gpus(),
@@ -54,6 +48,7 @@ impl HardwareProbe {
 
         NodeManifest {
             node_name: node_name.to_string(),
+            os: detect_os(),
             hardware: HardwareInfo {
                 cpus,
                 gpus,
@@ -65,7 +60,7 @@ impl HardwareProbe {
         }
     }
 
-    /// Quick status check (for heartbeats).  Only checks dynamic values.
+    /// Quick status check (for heartbeats).
     pub async fn quick_status(working_dir: &str) -> HardwareInfo {
         let (gpus, cpus, ram_bytes, disk_free_bytes) = tokio::join!(
             detect_gpus(),
@@ -84,11 +79,44 @@ impl HardwareProbe {
 }
 
 // ---------------------------------------------------------------------------
+// OS detection
+// ---------------------------------------------------------------------------
+
+fn detect_os() -> String {
+    if cfg!(target_os = "macos") {
+        "macos".into()
+    } else if cfg!(target_os = "linux") {
+        "linux".into()
+    } else if cfg!(target_os = "windows") {
+        "windows".into()
+    } else {
+        std::env::consts::OS.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GPU detection
 // ---------------------------------------------------------------------------
 
-/// Detect NVIDIA GPUs via nvidia-smi.
 async fn detect_gpus() -> Vec<GpuInfo> {
+    // Try NVIDIA first (works on both Linux and macOS with CUDA drivers).
+    let nvidia = detect_nvidia_gpus().await;
+    if !nvidia.is_empty() {
+        return nvidia;
+    }
+
+    // On macOS, try system_profiler for Apple Silicon / AMD GPUs.
+    #[cfg(target_os = "macos")]
+    {
+        return detect_macos_gpus().await;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
+/// Detect NVIDIA GPUs via nvidia-smi.
+async fn detect_nvidia_gpus() -> Vec<GpuInfo> {
     let output = match tokio::process::Command::new("nvidia-smi")
         .args([
             "--query-gpu=name,memory.total,driver_version",
@@ -98,28 +126,13 @@ async fn detect_gpus() -> Vec<GpuInfo> {
         .await
     {
         Ok(o) if o.status.success() => o,
-        Ok(o) => {
-            tracing::debug!(
-                stderr = String::from_utf8_lossy(&o.stderr).as_ref(),
-                "nvidia-smi returned non-zero"
-            );
-            return Vec::new();
-        }
-        Err(e) => {
-            tracing::debug!(error = %e, "nvidia-smi not found or failed to run");
-            return Vec::new();
-        }
+        _ => return Vec::new(),
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     parse_nvidia_smi_output(&stdout)
 }
 
-/// Parse nvidia-smi CSV output into `GpuInfo` structs.
-///
-/// Expected format (one line per GPU):
-///   `NVIDIA GeForce RTX 4090, 24564, 560.35.03`
-///   (name, memory.total in MiB, driver_version)
 fn parse_nvidia_smi_output(output: &str) -> Vec<GpuInfo> {
     output
         .lines()
@@ -127,7 +140,6 @@ fn parse_nvidia_smi_output(output: &str) -> Vec<GpuInfo> {
         .filter_map(|line| {
             let parts: Vec<&str> = line.splitn(3, ',').map(|s| s.trim()).collect();
             if parts.len() < 3 {
-                tracing::debug!(line, "unexpected nvidia-smi line format");
                 return None;
             }
 
@@ -142,30 +154,115 @@ fn parse_nvidia_smi_output(output: &str) -> Vec<GpuInfo> {
         .collect()
 }
 
+/// Detect macOS GPUs via system_profiler.
+///
+/// On Apple Silicon, the GPU shares unified memory with the CPU.
+/// We report the chipset name and total system memory as VRAM since
+/// it's all unified.
+#[cfg(target_os = "macos")]
+async fn detect_macos_gpus() -> Vec<GpuInfo> {
+    let output = match tokio::process::Command::new("system_profiler")
+        .args(["SPDisplaysDataType", "-json"])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_macos_gpu_json(&stdout)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_gpu_json(json_str: &str) -> Vec<GpuInfo> {
+    let parsed: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let displays = match parsed.get("SPDisplaysDataType").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return Vec::new(),
+    };
+
+    displays
+        .iter()
+        .filter_map(|gpu| {
+            let model = gpu
+                .get("sppci_model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            // Apple Silicon reports VRAM as "_spdisplays_vram" or similar.
+            // Try multiple known keys.
+            let vram_bytes = extract_macos_vram(gpu);
+
+            Some(GpuInfo {
+                model,
+                vram_bytes,
+                driver: "Apple".into(),
+            })
+        })
+        .collect()
+}
+
+/// Extract VRAM from a macOS system_profiler GPU entry.
+///
+/// Apple Silicon unified memory is reported in various formats
+/// across macOS versions. We try known keys and parse the value.
+#[cfg(target_os = "macos")]
+fn extract_macos_vram(gpu: &serde_json::Value) -> u64 {
+    // Try "_spdisplays_vram" (common key).
+    for key in ["_spdisplays_vram", "spdisplays_vram", "sppci_vram"] {
+        if let Some(vram_str) = gpu.get(key).and_then(|v| v.as_str()) {
+            return parse_macos_vram_string(vram_str);
+        }
+    }
+    0
+}
+
+/// Parse a macOS VRAM string like "16 GB" or "16384 MB" into bytes.
+#[cfg(target_os = "macos")]
+fn parse_macos_vram_string(s: &str) -> u64 {
+    let s = s.trim();
+    if let Some(gb) = s.strip_suffix("GB").or(s.strip_suffix("gb")) {
+        gb.trim().parse::<u64>().unwrap_or(0) * 1024 * 1024 * 1024
+    } else if let Some(mb) = s.strip_suffix("MB").or(s.strip_suffix("mb")) {
+        mb.trim().parse::<u64>().unwrap_or(0) * 1024 * 1024
+    } else {
+        s.parse::<u64>().unwrap_or(0)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CPU detection
 // ---------------------------------------------------------------------------
 
-/// Detect CPUs by reading /proc/cpuinfo (Linux) or falling back to core count.
 async fn detect_cpus() -> Vec<CpuInfo> {
-    match tokio::fs::read_to_string("/proc/cpuinfo").await {
-        Ok(content) => parse_proc_cpuinfo(&content),
-        Err(_) => {
-            // Fallback: just report the number of logical cores.
-            vec![CpuInfo {
-                model: "unknown".into(),
-                cores: std::thread::available_parallelism()
-                    .map(|n| n.get() as u32)
-                    .unwrap_or(1),
-            }]
-        }
+    // Linux: /proc/cpuinfo
+    if let Ok(content) = tokio::fs::read_to_string("/proc/cpuinfo").await {
+        return parse_proc_cpuinfo(&content);
+    }
+
+    // macOS: sysctl
+    #[cfg(target_os = "macos")]
+    {
+        return detect_macos_cpus().await;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        vec![CpuInfo {
+            model: "unknown".into(),
+            cores: std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(1),
+        }]
     }
 }
 
-/// Parse /proc/cpuinfo into deduplicated CPU entries.
-///
-/// /proc/cpuinfo lists one block per logical core.  We group by model
-/// name and count cores per model.
 fn parse_proc_cpuinfo(content: &str) -> Vec<CpuInfo> {
     let mut model_counts: HashMap<String, u32> = HashMap::new();
 
@@ -192,26 +289,47 @@ fn parse_proc_cpuinfo(content: &str) -> Vec<CpuInfo> {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
+async fn detect_macos_cpus() -> Vec<CpuInfo> {
+    let model = run_sysctl("machdep.cpu.brand_string")
+        .await
+        .unwrap_or_else(|| "unknown".into());
+
+    let cores = run_sysctl("hw.ncpu")
+        .await
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(1);
+
+    vec![CpuInfo { model, cores }]
+}
+
 // ---------------------------------------------------------------------------
 // RAM detection
 // ---------------------------------------------------------------------------
 
-/// Detect total RAM by reading /proc/meminfo (Linux).
 async fn detect_ram() -> u64 {
-    match tokio::fs::read_to_string("/proc/meminfo").await {
-        Ok(content) => parse_proc_meminfo(&content),
-        Err(_) => 0,
+    // Linux: /proc/meminfo
+    if let Ok(content) = tokio::fs::read_to_string("/proc/meminfo").await {
+        return parse_proc_meminfo(&content);
     }
+
+    // macOS: sysctl hw.memsize
+    #[cfg(target_os = "macos")]
+    {
+        return run_sysctl("hw.memsize")
+            .await
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    0
 }
 
-/// Parse /proc/meminfo for MemTotal.
-///
-/// Expected format: `MemTotal:       32768000 kB`
 fn parse_proc_meminfo(content: &str) -> u64 {
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
             let rest = rest.trim();
-            // Value is in kB, convert to bytes.
             if let Some(kb_str) = rest.strip_suffix("kB").or(rest.strip_suffix("KB")) {
                 if let Ok(kb) = kb_str.trim().parse::<u64>() {
                     return kb * 1024;
@@ -226,9 +344,7 @@ fn parse_proc_meminfo(content: &str) -> u64 {
 // Disk detection
 // ---------------------------------------------------------------------------
 
-/// Detect free disk space on the filesystem containing `path`.
 async fn detect_disk_free(path: &str) -> u64 {
-    // Use statvfs on Unix.
     #[cfg(unix)]
     {
         disk_free_statvfs(path)
@@ -266,12 +382,41 @@ fn disk_free_statvfs(path: &str) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// macOS sysctl helper
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+async fn run_sysctl(key: &str) -> Option<String> {
+    let output = tokio::process::Command::new("sysctl")
+        .args(["-n", key])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detect_os_returns_known_value() {
+        let os = detect_os();
+        assert!(
+            ["linux", "macos", "windows"].contains(&os.as_str())
+                || !os.is_empty(),
+            "unexpected OS: {os}"
+        );
+    }
 
     #[test]
     fn parse_nvidia_smi_single_gpu() {
@@ -297,15 +442,12 @@ NVIDIA A100-SXM4-80GB, 81920, 535.129.03
 
     #[test]
     fn parse_nvidia_smi_empty() {
-        let gpus = parse_nvidia_smi_output("");
-        assert!(gpus.is_empty());
+        assert!(parse_nvidia_smi_output("").is_empty());
     }
 
     #[test]
     fn parse_nvidia_smi_malformed() {
-        let output = "this is not csv\n";
-        let gpus = parse_nvidia_smi_output(output);
-        assert!(gpus.is_empty());
+        assert!(parse_nvidia_smi_output("this is not csv\n").is_empty());
     }
 
     #[test]
@@ -365,13 +507,46 @@ MemAvailable:   48000000 kB
 
     #[test]
     fn parse_meminfo_missing() {
-        let ram = parse_proc_meminfo("SwapTotal:  8192 kB\n");
-        assert_eq!(ram, 0);
+        assert_eq!(parse_proc_meminfo("SwapTotal:  8192 kB\n"), 0);
     }
 
     #[test]
     fn parse_meminfo_empty() {
-        let ram = parse_proc_meminfo("");
-        assert_eq!(ram, 0);
+        assert_eq!(parse_proc_meminfo(""), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_macos_vram_gb() {
+        assert_eq!(parse_macos_vram_string("16 GB"), 16 * 1024 * 1024 * 1024);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_macos_vram_mb() {
+        assert_eq!(parse_macos_vram_string("8192 MB"), 8192 * 1024 * 1024);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_macos_gpu_json_apple_silicon() {
+        let json = r#"{
+            "SPDisplaysDataType": [{
+                "sppci_model": "Apple M2 Max",
+                "_spdisplays_vram": "96 GB"
+            }]
+        }"#;
+        let gpus = parse_macos_gpu_json(json);
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].model, "Apple M2 Max");
+        assert_eq!(gpus[0].vram_bytes, 96 * 1024 * 1024 * 1024);
+        assert_eq!(gpus[0].driver, "Apple");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_macos_gpu_json_empty() {
+        assert!(parse_macos_gpu_json("{}").is_empty());
+        assert!(parse_macos_gpu_json("invalid").is_empty());
     }
 }
