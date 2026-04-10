@@ -98,6 +98,10 @@ pub enum DysonError {
     /// Rate limit exceeded — too many messages in the time window.
     #[error("Rate limited: {limit} messages per {window_secs}s exceeded")]
     RateLimit { limit: usize, window_secs: u64 },
+
+    /// A swarm operation failed (signature verification, connection, etc.).
+    #[error("Swarm error: {0}")]
+    Swarm(String),
 }
 
 // ---------------------------------------------------------------------------

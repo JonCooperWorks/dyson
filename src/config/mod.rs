@@ -191,6 +191,46 @@ pub struct ControllerConfig {
 }
 
 // ---------------------------------------------------------------------------
+// SwarmControllerConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for the swarm controller.
+///
+/// Parsed from the opaque `ControllerConfig::config` JSON blob when the
+/// controller type is `"swarm"`.
+///
+/// ```json
+/// {
+///   "type": "swarm",
+///   "url": "https://hub.example.com",
+///   "public_key": "v1:base64...",
+///   "node_name": "gpu-workstation-01"
+/// }
+/// ```
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct SwarmControllerConfig {
+    /// Base URL of the swarm hub.
+    pub url: String,
+
+    /// Versioned public key for verifying task signatures.
+    /// Format: `"v1:base64..."` where the prefix selects the algorithm.
+    pub public_key: String,
+
+    /// Human-readable node name.  Defaults to the system hostname.
+    pub node_name: Option<String>,
+}
+
+impl SwarmControllerConfig {
+    /// Resolve the node name: explicit config value or a default
+    /// derived from the hub URL.
+    pub fn node_name_or_default(&self) -> String {
+        self.node_name.clone().unwrap_or_else(|| {
+            format!("dyson-node-{}", crate::util::short_hash(&self.url))
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AgentSettings
 // ---------------------------------------------------------------------------
 

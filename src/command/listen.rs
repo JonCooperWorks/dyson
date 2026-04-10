@@ -79,6 +79,41 @@ pub async fn run(
                         tracing::warn!("telegram controller missing bot_token — skipping");
                     }
                 }
+                "swarm" => {
+                    if let Some(ctrl) =
+                        dyson::controller::swarm::SwarmController::from_config(config)
+                    {
+                        // Auto-inject the hub as an MCP skill so ALL agents
+                        // (terminal, telegram, etc.) get swarm tools.
+                        let swarm_config: dyson::config::SwarmControllerConfig =
+                            match serde_json::from_value(config.config.clone()) {
+                                Ok(c) => c,
+                                Err(_) => {
+                                    tracing::warn!("swarm controller config already parsed — skipping MCP auto-wire");
+                                    controllers.push(Box::new(ctrl));
+                                    continue;
+                                }
+                            };
+
+                        settings.skills.push(dyson::config::SkillConfig::Mcp(
+                            Box::new(dyson::config::McpConfig {
+                                name: format!(
+                                    "swarm_{}",
+                                    swarm_config.node_name_or_default()
+                                ),
+                                transport: dyson::config::McpTransportConfig::Http {
+                                    url: format!("{}/mcp", swarm_config.url.trim_end_matches('/')),
+                                    headers: std::collections::HashMap::new(),
+                                    auth: None,
+                                },
+                            }),
+                        ));
+
+                        controllers.push(Box::new(ctrl));
+                    } else {
+                        tracing::warn!("swarm controller config invalid — skipping");
+                    }
+                }
                 other => {
                     tracing::warn!(
                         controller_type = other,
