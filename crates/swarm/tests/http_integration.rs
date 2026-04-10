@@ -1,0 +1,571 @@
+//! End-to-end HTTP integration tests.
+//!
+//! Each test binds the hub to `127.0.0.1:0`, grabs the ephemeral port,
+//! and talks to it with `reqwest`.  The hub runs in a background task
+//! that's aborted at the end of the test.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use dyson_swarm_protocol::types::{
+    HardwareInfo, NodeManifest, NodeStatus, Payload, SwarmResult, SwarmTask, TaskStatus,
+};
+use dyson_swarm_protocol::verify::{SwarmPublicKey, verify_signed_payload};
+use futures_util::StreamExt;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use swarm::Hub;
+use swarm::http::build_router;
+use swarm::key::HubKeyPair;
+
+struct Harness {
+    base_url: String,
+    public_key_config: String,
+    _task: tokio::task::JoinHandle<()>,
+    _tempdir: tempfile::TempDir,
+}
+
+async fn start_hub() -> Harness {
+    let tempdir = tempfile::tempdir().unwrap();
+    let key = HubKeyPair::load_or_generate(&tempdir.path().join("hub.key")).unwrap();
+    let public_key_config = key.public_key_config();
+
+    let hub = Hub::new(key, tempdir.path()).unwrap();
+    let app = build_router(Arc::clone(&hub));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    Harness {
+        base_url,
+        public_key_config,
+        _task: task,
+        _tempdir: tempdir,
+    }
+}
+
+fn sample_manifest(name: &str) -> NodeManifest {
+    NodeManifest {
+        node_name: name.into(),
+        os: "linux".into(),
+        hardware: HardwareInfo {
+            cpus: vec![],
+            gpus: vec![],
+            ram_bytes: 16 * 1024 * 1024 * 1024,
+            disk_free_bytes: 0,
+        },
+        capabilities: vec!["bash".into()],
+        status: NodeStatus::Idle,
+    }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    format!("{:x}", h.finalize())
+}
+
+#[tokio::test]
+async fn register_returns_node_id_and_token() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("alpha"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["node_id"].as_str().unwrap().len() > 10);
+    assert!(!body["token"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sse_stream_yields_registered_then_heartbeat_ack() {
+    let h = start_hub().await;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+
+    let reg: Value = client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("beta"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = reg["token"].as_str().unwrap().to_string();
+
+    // Open SSE.
+    let resp = client
+        .get(format!("{}/swarm/events", h.base_url))
+        .bearer_auth(&token)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let mut stream = resp.bytes_stream();
+    let mut buffer = Vec::new();
+
+    // Read the initial `registered` event.
+    let first = read_one_event(&mut stream, &mut buffer).await;
+    assert!(first.contains("event: registered"));
+    assert!(first.contains("\"node_id\""));
+
+    // POST a heartbeat — should produce a heartbeat_ack event.
+    let status = client
+        .post(format!("{}/swarm/heartbeat", h.base_url))
+        .bearer_auth(&token)
+        .json(&NodeStatus::Idle)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status.status(), 200);
+
+    let second = read_one_event(&mut stream, &mut buffer).await;
+    assert!(second.contains("event: heartbeat_ack"));
+}
+
+#[tokio::test]
+async fn heartbeat_rejects_bad_token() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/swarm/heartbeat", h.base_url))
+        .bearer_auth("not-a-real-token")
+        .json(&NodeStatus::Idle)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn blob_put_mismatch_is_rejected() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    // Register to get a token.
+    let reg: Value = client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("blobtest"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = reg["token"].as_str().unwrap().to_string();
+
+    let wrong_hash = "0".repeat(64);
+    let resp = client
+        .put(format!("{}/swarm/blob/{wrong_hash}", h.base_url))
+        .bearer_auth(&token)
+        .body("hello".to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn blob_put_then_get_roundtrip() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let reg: Value = client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("blobtest"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = reg["token"].as_str().unwrap().to_string();
+
+    let data = b"some bytes to store".to_vec();
+    let hash = hex_sha256(&data);
+
+    let put = client
+        .put(format!("{}/swarm/blob/{hash}", h.base_url))
+        .bearer_auth(&token)
+        .body(data.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 200);
+
+    let got = client
+        .get(format!("{}/swarm/blob/{hash}", h.base_url))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.status(), 200);
+    let body = got.bytes().await.unwrap();
+    assert_eq!(body.as_ref(), data.as_slice());
+}
+
+#[tokio::test]
+async fn mcp_list_nodes_after_register() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("visible"))
+        .send()
+        .await
+        .unwrap();
+
+    let resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_nodes", "arguments": {} }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\"node_name\": \"visible\""));
+}
+
+#[tokio::test]
+async fn mcp_dispatch_no_nodes_is_error() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "swarm_dispatch",
+                "arguments": { "prompt": "do the thing" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(resp["result"]["isError"], Value::Bool(true));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("no eligible node"));
+}
+
+#[tokio::test]
+async fn mcp_initialize_returns_protocol_version() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(resp["id"], 1);
+}
+
+#[tokio::test]
+async fn mcp_tools_list_has_three_tools() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let tools = resp["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"list_nodes"));
+    assert!(names.contains(&"swarm_status"));
+    assert!(names.contains(&"swarm_dispatch"));
+}
+
+/// End-to-end: register, dispatch via MCP, fake the node consuming the
+/// SSE task, POST a result, assert the MCP caller gets it back.
+#[tokio::test]
+async fn end_to_end_dispatch_and_result() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    // 1. Register.
+    let reg: Value = client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("worker"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = reg["token"].as_str().unwrap().to_string();
+
+    // 2. Open SSE.
+    let sse_client = reqwest::Client::new();
+    let sse_resp = sse_client
+        .get(format!("{}/swarm/events", h.base_url))
+        .bearer_auth(&token)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse_resp.status(), 200);
+    let mut stream = sse_resp.bytes_stream();
+    let mut buffer = Vec::new();
+
+    // Swallow the initial `registered` event.
+    let first = read_one_event(&mut stream, &mut buffer).await;
+    assert!(first.contains("event: registered"));
+
+    // 3. Kick off swarm_dispatch from a separate task so the SSE parser
+    //    and result POST can run concurrently.
+    let base_url = h.base_url.clone();
+    let dispatch_client = reqwest::Client::new();
+    let dispatch_task = tokio::spawn(async move {
+        let resp: Value = dispatch_client
+            .post(format!("{base_url}/mcp"))
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "tools/call",
+                "params": {
+                    "name": "swarm_dispatch",
+                    "arguments": {
+                        "prompt": "compute 2 + 2",
+                        "timeout_secs": 30
+                    }
+                }
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        resp
+    });
+
+    // 4. Read the task event off the SSE stream.
+    let task_event = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_one_event(&mut stream, &mut buffer),
+    )
+    .await
+    .expect("task event did not arrive");
+    assert!(task_event.contains("event: task"));
+
+    // Extract the base64 data line.
+    let data_b64 = task_event
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .unwrap()
+        .trim();
+    let wire_bytes = STANDARD.decode(data_b64).unwrap();
+
+    // Verify the signature with the protocol crate.
+    let pk = SwarmPublicKey::from_config(&h.public_key_config).unwrap();
+    let payload = verify_signed_payload(&wire_bytes, &pk).unwrap();
+    let task: SwarmTask = serde_json::from_slice(payload).unwrap();
+    assert_eq!(task.prompt, "compute 2 + 2");
+
+    // 5. Post a result matching task_id.
+    let result = SwarmResult {
+        task_id: task.task_id.clone(),
+        text: "4".into(),
+        payloads: vec![],
+        status: TaskStatus::Completed,
+        duration_secs: 1,
+    };
+    let post = client
+        .post(format!("{}/swarm/result", h.base_url))
+        .bearer_auth(&token)
+        .json(&result)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post.status(), 200);
+
+    // 6. Dispatch call should return the result.
+    let dispatch_response = tokio::time::timeout(Duration::from_secs(5), dispatch_task)
+        .await
+        .expect("dispatch did not return")
+        .unwrap();
+    let text = dispatch_response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(text.contains("\"text\": \"4\""));
+    assert!(text.contains("completed"));
+}
+
+/// End-to-end: payload inline propagates from MCP dispatch through the
+/// signed task to the SSE receiver.
+#[tokio::test]
+async fn dispatch_preserves_inline_payload() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let reg: Value = client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("worker"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = reg["token"].as_str().unwrap().to_string();
+
+    let sse_resp = client
+        .get(format!("{}/swarm/events", h.base_url))
+        .bearer_auth(&token)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    let mut stream = sse_resp.bytes_stream();
+    let mut buffer = Vec::new();
+    let _ = read_one_event(&mut stream, &mut buffer).await;
+
+    let base_url = h.base_url.clone();
+    let dispatch_client = reqwest::Client::new();
+    let dispatch_task = tokio::spawn(async move {
+        dispatch_client
+            .post(format!("{base_url}/mcp"))
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "swarm_dispatch",
+                    "arguments": {
+                        "prompt": "read the file",
+                        "payloads": [ Payload::Inline {
+                            name: "config.yaml".into(),
+                            data: b"key: value".to_vec(),
+                        } ],
+                        "timeout_secs": 30
+                    }
+                }
+            }))
+            .send()
+            .await
+    });
+
+    let task_event = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_one_event(&mut stream, &mut buffer),
+    )
+    .await
+    .expect("task event did not arrive");
+
+    let data_b64 = task_event
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .unwrap()
+        .trim();
+    let wire_bytes = STANDARD.decode(data_b64).unwrap();
+    let pk = SwarmPublicKey::from_config(&h.public_key_config).unwrap();
+    let payload = verify_signed_payload(&wire_bytes, &pk).unwrap();
+    let task: SwarmTask = serde_json::from_slice(payload).unwrap();
+
+    assert_eq!(task.prompt, "read the file");
+    assert_eq!(task.payloads.len(), 1);
+    match &task.payloads[0] {
+        Payload::Inline { name, data } => {
+            assert_eq!(name, "config.yaml");
+            assert_eq!(data, b"key: value");
+        }
+        _ => panic!("expected inline payload"),
+    }
+
+    // Close the dispatch task by posting a result.
+    let result = SwarmResult {
+        task_id: task.task_id.clone(),
+        text: "ok".into(),
+        payloads: vec![],
+        status: TaskStatus::Completed,
+        duration_secs: 0,
+    };
+    let _ = client
+        .post(format!("{}/swarm/result", h.base_url))
+        .bearer_auth(&token)
+        .json(&result)
+        .send()
+        .await;
+    let _ = dispatch_task.await;
+}
+
+/// Pull one complete SSE event out of a byte stream.
+async fn read_one_event(
+    stream: &mut (impl StreamExt<Item = reqwest::Result<bytes::Bytes>> + Unpin),
+    buffer: &mut Vec<u8>,
+) -> String {
+    loop {
+        if let Some(pos) = find_subseq(buffer, b"\n\n") {
+            let event = String::from_utf8_lossy(&buffer[..pos]).into_owned();
+            buffer.drain(..pos + 2);
+            return event;
+        }
+        match stream.next().await {
+            Some(Ok(chunk)) => buffer.extend_from_slice(&chunk),
+            Some(Err(e)) => panic!("SSE stream error: {e}"),
+            None => panic!("SSE stream ended before event delivered"),
+        }
+    }
+}
+
+fn find_subseq(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
