@@ -53,7 +53,18 @@ use crate::swarm::verify::{SwarmPublicKey, verify_signed_payload};
 use crate::tool::ToolOutput;
 
 /// Delay between heartbeats.
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+///
+/// The hub's default reaper timeout is 90 s, so at 15 s per heartbeat we
+/// tolerate up to five consecutive misses before the node gets reaped.
+/// That's enough slack for a transient network blip without leaving dead
+/// nodes in the registry for too long.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Number of consecutive heartbeat failures before we tear the session
+/// down so the outer reconnect loop picks it up.  Without this the
+/// heartbeat task would quietly log warnings forever while the SSE loop
+/// thinks it's still connected.
+const HEARTBEAT_MAX_FAILURES: u32 = 3;
 
 /// Maximum consecutive reconnection attempts before giving up.
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
@@ -185,9 +196,27 @@ impl super::Controller for SwarmController {
         registry: &Arc<ClientRegistry>,
     ) -> crate::Result<()> {
         // ── 1. BUILD AGENT ──
+        //
+        // `listen.rs` auto-injects the hub as an MCP skill so other
+        // controllers (terminal, telegram) can call `swarm_dispatch` to
+        // hand work off to the swarm.  The swarm controller itself must
+        // NOT have that tool — otherwise the agent executing a swarm task
+        // can dispatch another swarm task, which routes back to itself,
+        // and we get infinite loops.
+        //
+        // Strip any `SkillConfig::Mcp` whose name starts with `swarm_`
+        // before handing settings to the agent builder.
+        let mut local_settings = settings.clone();
+        local_settings.skills.retain(|skill| {
+            !matches!(
+                skill,
+                crate::config::SkillConfig::Mcp(mcp) if mcp.name.starts_with("swarm_")
+            )
+        });
+
         let client_handle = registry.get_default();
         let mut agent = super::build_agent(
-            settings,
+            &local_settings,
             None,
             super::AgentMode::Private,
             client_handle,
@@ -295,25 +324,69 @@ impl SwarmController {
         };
 
         // Heartbeat background task.
+        //
+        // Flips `heartbeat_dead` when we miss too many heartbeats in a
+        // row so the main event loop can tear the session down and the
+        // outer loop reconnects — otherwise heartbeat failures would
+        // just log forever while the SSE loop (falsely) thinks the
+        // connection is healthy.
         let heartbeat_conn = conn.clone();
         let heartbeat_status = Arc::clone(status);
+        let heartbeat_dead = Arc::new(tokio::sync::Notify::new());
+        let heartbeat_dead_signal = heartbeat_dead.clone();
         let heartbeat_handle = tokio::spawn(async move {
+            let mut consecutive_failures: u32 = 0;
             loop {
                 tokio::time::sleep(HEARTBEAT_INTERVAL).await;
                 let current = heartbeat_status.lock().await.clone();
-                if let Err(e) = heartbeat_conn.heartbeat(&current).await {
-                    tracing::warn!(error = %e, "heartbeat failed");
+                match heartbeat_conn.heartbeat(&current).await {
+                    Ok(()) => {
+                        if consecutive_failures > 0 {
+                            tracing::info!(
+                                recovered_after = consecutive_failures,
+                                "heartbeat recovered"
+                            );
+                        }
+                        consecutive_failures = 0;
+                        tracing::debug!(?current, "heartbeat sent");
+                    }
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        tracing::warn!(
+                            error = %e,
+                            consecutive_failures,
+                            "heartbeat failed"
+                        );
+                        if consecutive_failures >= HEARTBEAT_MAX_FAILURES {
+                            tracing::error!(
+                                consecutive_failures,
+                                "heartbeat dead — signalling session teardown"
+                            );
+                            heartbeat_dead_signal.notify_one();
+                            return;
+                        }
+                    }
                 }
             }
         });
 
         // Event loop.
         let result = loop {
-            let event_result = match events.recv().await {
-                Some(r) => r,
-                None => break SessionResult::Disconnected(
-                    DysonError::Swarm("SSE channel closed".into()),
-                ),
+            let event_result = tokio::select! {
+                biased;
+                _ = heartbeat_dead.notified() => {
+                    break SessionResult::Disconnected(
+                        DysonError::Swarm(
+                            "heartbeats failed repeatedly — reconnecting".into(),
+                        ),
+                    );
+                }
+                recv = events.recv() => match recv {
+                    Some(r) => r,
+                    None => break SessionResult::Disconnected(
+                        DysonError::Swarm("SSE channel closed".into()),
+                    ),
+                },
             };
 
             match event_result {

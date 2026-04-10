@@ -15,7 +15,7 @@ pub mod router;
 
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 
 use crate::blob::BlobStore;
 use crate::key::HubKeyPair;
@@ -44,17 +44,46 @@ pub struct Hub {
             tokio::sync::oneshot::Sender<dyson_swarm_protocol::types::SwarmResult>,
         >,
     >,
+    /// Broadcast channel used to tell long-lived handlers (specifically
+    /// the SSE event stream) that the server is shutting down.
+    ///
+    /// Without this, axum's `with_graceful_shutdown` would wait forever
+    /// for the open SSE connections to drain — they're indefinite by
+    /// design — and Ctrl-C would appear to do nothing.
+    shutdown: broadcast::Sender<()>,
 }
 
 impl Hub {
     /// Build a new hub from an already-loaded key and data directory.
     pub fn new(key: HubKeyPair, data_dir: &std::path::Path) -> std::io::Result<Arc<Self>> {
         let blobs = BlobStore::new(data_dir.join("blobs"))?;
+        // capacity = 1: we only ever broadcast once (on shutdown), and a
+        // late subscriber will just see a "lagged" error that we ignore.
+        let (shutdown, _) = broadcast::channel(1);
         Ok(Arc::new(Self {
             registry: NodeRegistry::new(),
             blobs,
             key,
             pending_dispatches: Mutex::new(std::collections::HashMap::new()),
+            shutdown,
         }))
+    }
+
+    /// Subscribe to the shutdown signal.  The returned future resolves
+    /// as soon as shutdown has been requested (or the broadcast sender is
+    /// dropped, which also means we're shutting down).
+    pub fn shutdown_notified(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut rx = self.shutdown.subscribe();
+        async move {
+            let _ = rx.recv().await;
+        }
+    }
+
+    /// Request a graceful shutdown.  Wakes every `shutdown_notified()`
+    /// future so SSE streams end and the registry reaper can exit.
+    pub fn trigger_shutdown(&self) {
+        // Send failure just means nobody was listening — fine, we still
+        // want shutdown semantics (the main task owns the only sender).
+        let _ = self.shutdown.send(());
     }
 }

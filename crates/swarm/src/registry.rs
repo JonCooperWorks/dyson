@@ -111,6 +111,23 @@ impl NodeRegistry {
         }
     }
 
+    /// Remove a node from the registry entirely, clearing both the id
+    /// index and the token index.  Returns `true` if the node existed.
+    ///
+    /// Called when the node's SSE stream disconnects: the operator
+    /// expects a disconnected node to vanish immediately, not linger as
+    /// a stale entry until the reaper catches up.  A reconnecting node
+    /// simply re-registers and gets a fresh id+token.
+    pub async fn remove_node(&self, node_id: &str) -> bool {
+        let mut inner = self.inner.write().await;
+        if let Some(entry) = inner.by_id.remove(node_id) {
+            inner.token_to_id.remove(&entry.token);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Push an event to the node's SSE stream if one is attached.
     ///
     /// Returns `false` if the node is unknown or has no SSE sender, or if
@@ -274,6 +291,21 @@ mod tests {
 
         let counts = reg.counts().await;
         assert_eq!(counts.total, 0);
+    }
+
+    #[tokio::test]
+    async fn remove_node_clears_both_indices() {
+        let reg = NodeRegistry::new();
+        let (node_id, token) = reg.register(test_manifest("delta")).await;
+
+        assert!(reg.remove_node(&node_id).await);
+        assert_eq!(reg.counts().await.total, 0);
+        // Token index must be cleared too, otherwise a reused token
+        // would resolve back to a dead node_id.
+        assert!(reg.node_id_for_token(&token).await.is_none());
+
+        // Second remove is a no-op.
+        assert!(!reg.remove_node(&node_id).await);
     }
 
     #[tokio::test]
