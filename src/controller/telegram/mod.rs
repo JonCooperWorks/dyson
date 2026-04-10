@@ -48,6 +48,7 @@
 // ===========================================================================
 
 mod api;
+pub mod feedback;
 mod formatting;
 pub mod output;
 pub mod types;
@@ -108,6 +109,10 @@ struct ChatEntry {
     /// Group chats run as public agents with per-channel workspace
     /// (workspace memory + web tools, no filesystem/shell).
     is_group: bool,
+    /// Maps Telegram message IDs (sent by the bot) → conversation turn index.
+    /// Used to associate emoji reactions with the correct assistant response.
+    /// In-memory only — rebuilt each session.
+    message_id_map: tokio::sync::RwLock<HashMap<i32, usize>>,
 }
 
 /// Minimum interval between message edits (milliseconds).
@@ -329,6 +334,11 @@ impl super::Controller for TelegramController {
             Arc::from(store)
         };
 
+        // Feedback store for emoji reactions — lives alongside chat history.
+        let feedback_store = Arc::new(feedback::FeedbackStore::new(
+            crate::workspace::openclaw::resolve_tilde(settings.chat_history.connection_string.expose()),
+        ));
+
         let mut offset: i64 = 0;
         let mut consecutive_failures: u64 = 0;
         let mut backoff_secs: u64 = 1;
@@ -391,6 +401,13 @@ impl super::Controller for TelegramController {
 
             for update in &updates {
                 offset = update.update_id + 1;
+
+                // Handle emoji reactions for feedback/RLHF signal.
+                if let Some(reaction) = &update.message_reaction {
+                    let reaction_chat_id = reaction.chat.id;
+                    handle_reaction(reaction, &agents, &feedback_store, reaction_chat_id).await;
+                    continue;
+                }
 
                 if let Some(cb) = &update.callback_query {
                     let cb_chat = cb.message.as_ref().map(|m| &m.chat);
@@ -638,6 +655,7 @@ async fn rebuild_agents_on_reload(
                         system_prompt: tokio::sync::RwLock::new(sys_prompt),
                         config: tokio::sync::RwLock::new(cfg),
                         is_group,
+                        message_id_map: tokio::sync::RwLock::new(HashMap::new()),
                     }),
                 );
             }
@@ -714,6 +732,82 @@ async fn handle_callback_query(
         provider, pc.provider_type, model,
     );
     let _ = bot.send_message(chat_id, &reply).await;
+}
+
+/// Handle a message_reaction update — record emoji feedback for RLHF.
+async fn handle_reaction(
+    reaction: &types::MessageReactionUpdated,
+    agents: &tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>,
+    feedback_store: &feedback::FeedbackStore,
+    chat_id: i64,
+) {
+    let chat_key = chat_id.to_string();
+    let message_id = reaction.message_id;
+
+    // Look up the chat entry to find the message_id → turn_index mapping.
+    let agents_map = agents.read().await;
+    let entry = match agents_map.get(&chat_id) {
+        Some(e) => Arc::clone(e),
+        None => {
+            tracing::debug!(chat_id, message_id, "reaction on unknown chat — ignoring");
+            return;
+        }
+    };
+    drop(agents_map);
+
+    let id_map = entry.message_id_map.read().await;
+    let turn_index = match id_map.get(&message_id) {
+        Some(&idx) => idx,
+        None => {
+            tracing::debug!(chat_id, message_id, "reaction on unmapped message — ignoring");
+            return;
+        }
+    };
+    drop(id_map);
+
+    // Empty new_reaction means the user removed their reaction.
+    if reaction.new_reaction.is_empty() {
+        if let Err(e) = feedback_store.remove(&chat_key, turn_index) {
+            tracing::warn!(error = %e, chat_id, turn_index, "failed to remove feedback");
+        } else {
+            tracing::info!(chat_id, turn_index, "feedback removed (reaction cleared)");
+        }
+        return;
+    }
+
+    // Use the first emoji reaction for the rating.
+    let emoji = reaction
+        .new_reaction
+        .iter()
+        .find_map(|r| {
+            if r.reaction_type == "emoji" {
+                r.emoji.as_deref()
+            } else {
+                None
+            }
+        });
+
+    let Some(emoji) = emoji else {
+        tracing::debug!(chat_id, message_id, "reaction has no standard emoji — ignoring");
+        return;
+    };
+
+    let Some(rating) = feedback::emoji_to_rating(emoji) else {
+        tracing::debug!(chat_id, emoji, "unknown emoji reaction — ignoring");
+        return;
+    };
+
+    if let Err(e) = feedback_store.upsert(&chat_key, turn_index, rating, emoji) {
+        tracing::warn!(error = %e, chat_id, turn_index, "failed to save feedback");
+    } else {
+        tracing::info!(
+            chat_id,
+            turn_index,
+            emoji,
+            rating = rating.label(),
+            "feedback recorded"
+        );
+    }
 }
 
 /// Drop guard that returns a temporarily-extracted agent to its `ChatEntry`
@@ -927,6 +1021,19 @@ async fn run_agent_for_message(
     let agent = ca.agent.as_ref().expect("checked above");
     let msgs = agent.messages().to_vec();
     drop(ca);
+
+    // Record which Telegram message IDs correspond to this assistant turn.
+    // This lets us map emoji reactions back to the conversation turn index.
+    let sent_ids = output.sent_message_ids();
+    if !sent_ids.is_empty() {
+        // Find the last assistant message index in the conversation.
+        if let Some(turn_index) = msgs.iter().rposition(|m| m.role == crate::message::Role::Assistant) {
+            let mut id_map = entry.message_id_map.write().await;
+            for msg_id in sent_ids {
+                id_map.insert(msg_id.0, turn_index);
+            }
+        }
+    }
 
     if let Err(e) = chat_store.save(&chat_key, &msgs) {
         tracing::error!(error = %e, "failed to save chat history");
@@ -1207,6 +1314,7 @@ async fn get_or_create_entry(
         system_prompt: tokio::sync::RwLock::new(sys_prompt),
         config: tokio::sync::RwLock::new(config),
         is_group,
+        message_id_map: tokio::sync::RwLock::new(HashMap::new()),
     });
 
     // Insert under write lock.  Another task may have raced us, so use

@@ -31,6 +31,8 @@ pub struct Update {
     pub message: Option<Message>,
     #[serde(default)]
     pub callback_query: Option<CallbackQuery>,
+    #[serde(default)]
+    pub message_reaction: Option<MessageReactionUpdated>,
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +209,33 @@ impl InlineKeyboardButton {
             callback_data: Some(data.into()),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Message reactions (Bot API 7.0+)
+// ---------------------------------------------------------------------------
+
+/// A reaction change on a message.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessageReactionUpdated {
+    pub chat: Chat,
+    pub message_id: i32,
+    #[serde(default)]
+    pub user: Option<User>,
+    /// The new list of reactions set by the user (empty = reaction removed).
+    #[serde(default)]
+    pub new_reaction: Vec<ReactionType>,
+}
+
+/// A single reaction emoji (standard or custom).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReactionType {
+    /// "emoji" for standard Unicode reactions, "custom_emoji" for premium.
+    #[serde(rename = "type")]
+    pub reaction_type: String,
+    /// The emoji string (present when `reaction_type` is "emoji").
+    #[serde(default)]
+    pub emoji: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

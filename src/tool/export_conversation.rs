@@ -15,6 +15,7 @@
 use async_trait::async_trait;
 use serde_json::json;
 
+use crate::controller::telegram::feedback::FeedbackStore;
 use crate::error::DysonError;
 use crate::export::sharegpt;
 use crate::tool::{Tool, ToolContext, ToolOutput};
@@ -51,6 +52,11 @@ impl Tool for ExportConversationTool {
                 "id": {
                     "type": "string",
                     "description": "Optional conversation ID to include in the export."
+                },
+                "include_feedback": {
+                    "type": "boolean",
+                    "description": "Whether to include emoji reaction feedback ratings in the export \
+                                    for fine-tuning/RLHF. Defaults to true."
                 }
             }
         })
@@ -74,6 +80,7 @@ impl Tool for ExportConversationTool {
 
         let path_str = input["path"].as_str().unwrap_or("");
         let include_system = input["include_system_prompt"].as_bool().unwrap_or(false);
+        let include_feedback = input["include_feedback"].as_bool().unwrap_or(true);
         let id = input["id"].as_str().map(String::from);
 
         // Generate default filename with timestamp.
@@ -101,13 +108,25 @@ impl Tool for ExportConversationTool {
 
         // Read messages from chat history files in the workspace.
         // Look for the most recent chat history JSON file.
-        let messages = self.find_messages(ctx).await?;
+        let (messages, chat_dir, chat_id) = self.find_messages_with_metadata(ctx).await?;
 
         if messages.is_empty() {
             return Ok(ToolOutput::error(
                 "No conversation messages found. The conversation may not have been saved yet.",
             ));
         }
+
+        // Load feedback if requested and available.
+        let feedback = if include_feedback {
+            if let (Some(dir), Some(id)) = (&chat_dir, &chat_id) {
+                let store = FeedbackStore::new(dir.clone());
+                store.load(id).unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
 
         // Get system prompt from workspace if requested.
         let system_prompt = if include_system {
@@ -121,8 +140,14 @@ impl Tool for ExportConversationTool {
             None
         };
 
-        let conversation = sharegpt::to_sharegpt(&messages, system_prompt.as_deref(), id);
+        let conversation = sharegpt::to_sharegpt_with_feedback(
+            &messages,
+            system_prompt.as_deref(),
+            id,
+            &feedback,
+        );
 
+        let feedback_count = feedback.len();
         let conversations = vec![conversation];
         let json = sharegpt::to_sharegpt_json(&conversations)?;
 
@@ -134,8 +159,13 @@ impl Tool for ExportConversationTool {
         })?;
 
         let turn_count = conversations[0].conversations.len();
+        let feedback_info = if feedback_count > 0 {
+            format!(" with {feedback_count} feedback entries")
+        } else {
+            String::new()
+        };
         Ok(ToolOutput::success(format!(
-            "Exported {turn_count} turns to '{output_filename}' (ShareGPT format, {} bytes).",
+            "Exported {turn_count} turns{feedback_info} to '{output_filename}' (ShareGPT format, {} bytes).",
             json.len()
         ))
         .with_file(&output_path))
@@ -143,14 +173,18 @@ impl Tool for ExportConversationTool {
 }
 
 impl ExportConversationTool {
-    /// Find the most recent conversation messages.
+    /// Find the most recent conversation messages, with directory and chat_id metadata.
     ///
-    /// Searches the workspace's chat history directory for JSON files
-    /// containing serialized message arrays.
-    async fn find_messages(
+    /// Returns `(messages, chat_history_dir, chat_id)` where the dir and id
+    /// can be used to load feedback from the FeedbackStore.
+    async fn find_messages_with_metadata(
         &self,
         ctx: &ToolContext,
-    ) -> crate::Result<Vec<crate::message::Message>> {
+    ) -> crate::Result<(
+        Vec<crate::message::Message>,
+        Option<std::path::PathBuf>,
+        Option<String>,
+    )> {
         // Strategy: look for chat history files in common locations.
         // DiskChatHistory stores files as `<chat_id>.json` in the history dir.
         let mut candidates = vec![
@@ -170,7 +204,16 @@ impl ExportConversationTool {
             let mut entries: Vec<_> = std::fs::read_dir(dir)
                 .map_err(DysonError::Io)?
                 .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+                .filter(|e| {
+                    let path = e.path();
+                    // Only consider non-feedback, non-rotated JSON files.
+                    path.extension().is_some_and(|ext| ext == "json")
+                        && !path
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .contains("_feedback")
+                })
                 .collect();
 
             entries.sort_by_key(|e| {
@@ -183,14 +226,18 @@ impl ExportConversationTool {
                 let content = std::fs::read_to_string(entry.path()).map_err(DysonError::Io)?;
                 if let Ok(messages) = serde_json::from_str::<Vec<crate::message::Message>>(&content)
                 {
-                    return Ok(messages);
+                    // Extract chat_id from filename (e.g., "12345.json" → "12345").
+                    let chat_id = entry
+                        .path()
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string());
+                    return Ok((messages, Some(dir.clone()), chat_id));
                 }
             }
         }
 
         // No chat history found — return empty.
-        // The agent can still use this tool by first saving via chat_history.
-        Ok(vec![])
+        Ok((vec![], None, None))
     }
 }
 

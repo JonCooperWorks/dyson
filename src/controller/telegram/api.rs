@@ -45,6 +45,9 @@ impl BotApi {
     }
 
     /// Long-poll for updates.
+    ///
+    /// Requests message, callback_query, and message_reaction update types
+    /// so we can capture emoji feedback on bot responses.
     pub async fn get_updates(
         &self,
         offset: i64,
@@ -53,6 +56,7 @@ impl BotApi {
         let body = json!({
             "offset": offset,
             "timeout": timeout,
+            "allowed_updates": ["message", "callback_query", "message_reaction"],
         });
         let resp: ApiResponse<Vec<Update>> = self.post("getUpdates", &body).await?;
         Ok(resp.result.unwrap_or_default())
