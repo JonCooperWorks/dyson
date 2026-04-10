@@ -878,6 +878,26 @@ async fn run_agent_for_message(
 ) {
     let chat_key = chat_id.0.to_string();
 
+    // Prepend reply-to context so the agent knows which message the user is
+    // responding to.
+    let text = if let Some(ref reply) = msg.reply_to_message {
+        let original = reply
+            .text
+            .as_deref()
+            .or(reply.caption.as_deref())
+            .unwrap_or("[no text]");
+        let sender = reply
+            .from
+            .as_ref()
+            .and_then(|u| u.username.as_deref())
+            .unwrap_or("unknown");
+        format!(
+            "[Replying to message from @{sender}: \"{original}\"]\n\n{text}"
+        )
+    } else {
+        text
+    };
+
     // try_lock() is the gate: if the agent is busy (or temporarily extracted
     // by handle_per_chat_command), fall back to a quick response.
     let mut ca = match entry.agent.try_lock() {
