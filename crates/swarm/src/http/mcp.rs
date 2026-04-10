@@ -31,8 +31,18 @@ const DEFAULT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(600);
 /// We deliberately parse into `Value` rather than a typed struct because
 /// MCP clients sometimes send `id` as a string or omit it entirely for
 /// notifications, and we want to be forgiving.
+/// Optional query parameters on the MCP endpoint.
+///
+/// `?caller=<node_name>` identifies the calling node so `list_nodes`
+/// can exclude it from results (the node shouldn't see itself).
+#[derive(serde::Deserialize, Default)]
+pub struct McpQuery {
+    caller: Option<String>,
+}
+
 pub async fn mcp_handler(
     State(hub): State<Arc<Hub>>,
+    axum::extract::Query(query): axum::extract::Query<McpQuery>,
     Json(request): Json<Value>,
 ) -> Json<Value> {
     let id = request.get("id").cloned();
@@ -56,7 +66,7 @@ pub async fn mcp_handler(
         })),
         "notifications/initialized" => Ok(json!({})),
         "tools/list" => Ok(tools_list_response()),
-        "tools/call" => handle_tools_call(&hub, params).await,
+        "tools/call" => handle_tools_call(&hub, query.caller.as_deref(), params).await,
         other => Err(McpError::method_not_found(other)),
     };
 
@@ -158,7 +168,7 @@ fn tools_list_response() -> Value {
 }
 
 /// Shared implementation for the `tools/call` dispatcher.
-async fn handle_tools_call(hub: &Arc<Hub>, params: Option<Value>) -> Result<Value, McpError> {
+async fn handle_tools_call(hub: &Arc<Hub>, caller: Option<&str>, params: Option<Value>) -> Result<Value, McpError> {
     let params = params.ok_or_else(|| McpError::invalid_params("missing params"))?;
     let name = params
         .get("name")
@@ -168,7 +178,7 @@ async fn handle_tools_call(hub: &Arc<Hub>, params: Option<Value>) -> Result<Valu
 
     match name {
         "list_nodes" => Ok(tool_result_text(
-            serde_json::to_string_pretty(&list_nodes(hub).await).unwrap(),
+            serde_json::to_string_pretty(&list_nodes(hub, caller).await).unwrap(),
             false,
         )),
         "swarm_status" => Ok(tool_result_text(
@@ -197,11 +207,15 @@ fn tool_result_text(text: String, is_error: bool) -> Value {
 }
 
 /// `list_nodes` — a JSON array of the registered nodes.
-async fn list_nodes(hub: &Arc<Hub>) -> Value {
+///
+/// When `caller` is set (from `?caller=<node_name>` on the MCP endpoint),
+/// the calling node is excluded from results so it only sees its peers.
+async fn list_nodes(hub: &Arc<Hub>, caller: Option<&str>) -> Value {
     hub.registry
         .with_entries(|entries| {
             let mut rows: Vec<Value> = entries
                 .values()
+                .filter(|entry| caller.map_or(true, |c| entry.manifest.node_name != c))
                 .map(|entry| {
                     json!({
                         "node_id": entry.node_id,

@@ -50,7 +50,7 @@ use crate::swarm::types::{
     BlobRef, NodeManifest, NodeStatus, Payload, SwarmResult, SwarmTask, TaskStatus,
 };
 use crate::swarm::verify::{SwarmPublicKey, verify_signed_payload};
-use crate::tool::{Tool, ToolContext, ToolOutput};
+use crate::tool::ToolOutput;
 
 /// Delay between heartbeats.
 ///
@@ -74,37 +74,6 @@ const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(2);
 
 /// Maximum size for inline result payloads (64 KiB).
 const INLINE_THRESHOLD: usize = 64 * 1024;
-
-// ---------------------------------------------------------------------------
-// FilteredListNodesTool — wraps the MCP list_nodes tool and strips self.
-// ---------------------------------------------------------------------------
-
-/// Wraps the real `list_nodes` MCP tool and removes the current node
-/// from the result before the LLM sees it.
-struct FilteredListNodesTool {
-    inner: Arc<dyn Tool>,
-    node_name: String,
-}
-
-#[async_trait::async_trait]
-impl Tool for FilteredListNodesTool {
-    fn name(&self) -> &str { self.inner.name() }
-    fn description(&self) -> &str { self.inner.description() }
-    fn input_schema(&self) -> serde_json::Value { self.inner.input_schema() }
-
-    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
-        let mut output = self.inner.run(input, ctx).await?;
-
-        // The content is a JSON array of node objects. Parse, filter, re-serialize.
-        if let Ok(mut nodes) = serde_json::from_str::<Vec<serde_json::Value>>(&output.content) {
-            nodes.retain(|n| n["node_name"].as_str() != Some(&self.node_name));
-            output.content = serde_json::to_string_pretty(&nodes)
-                .unwrap_or_else(|_| output.content);
-        }
-
-        Ok(output)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // SwarmCaptureOutput — collects text + file paths from the agent
@@ -266,14 +235,6 @@ impl super::Controller for SwarmController {
             None,
         )
         .await?;
-
-        // Wrap list_nodes so the agent never sees its own node in results.
-        if let Some(inner) = agent.get_tool("list_nodes") {
-            agent.replace_tool("list_nodes", Arc::new(FilteredListNodesTool {
-                inner,
-                node_name: node_name.clone(),
-            }));
-        }
 
         // ── 2. PROBE HARDWARE ──
         let tool_names = agent.tool_names();

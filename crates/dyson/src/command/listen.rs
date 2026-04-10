@@ -102,7 +102,11 @@ pub async fn run(
                                     swarm_config.node_name_or_default()
                                 ),
                                 transport: dyson::config::McpTransportConfig::Http {
-                                    url: format!("{}/mcp", swarm_config.url.trim_end_matches('/')),
+                                    url: format!(
+                                        "{}/mcp?caller={}",
+                                        swarm_config.url.trim_end_matches('/'),
+                                        swarm_config.node_name_or_default()
+                                    ),
                                     headers: std::collections::HashMap::new(),
                                     auth: None,
                                 },
