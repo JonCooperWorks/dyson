@@ -11,26 +11,9 @@
 //   Outbound (node → hub): POST requests to /swarm/register, /heartbeat,
 //                           /result, /blob
 //
-// SSE (Server-Sent Events):
-//   A simple HTTP-based push protocol.  The client sends a GET, the server
-//   holds the connection open and pushes newline-delimited events:
-//
-//     event: task
-//     data: base64-of-signed-wire-bytes
-//
-//     event: heartbeat_ack
-//     data: {}
-//
-//   Each event has a type (`event:` line) and payload (`data:` line).
-//   Empty lines delimit events.  That's it — no framing, no binary, no
-//   negotiation.  reqwest's streaming response handles the chunked
-//   transfer encoding transparently.
-//
 // Why SSE instead of WebSocket?
 //   SSE is HTTP.  It reuses the same reqwest client, the same TLS config,
-//   the same proxy settings.  No new dependency.  WebSocket would add
-//   tokio-tungstenite and a second protocol stack for no real benefit —
-//   the outbound direction is already POST requests.
+//   the same proxy settings.  No new dependency.
 // ===========================================================================
 
 use base64::Engine;
@@ -50,8 +33,7 @@ use crate::swarm::types::{NodeManifest, NodeStatus, SwarmResult};
 pub enum SwarmEvent {
     /// Hub acknowledged registration.
     Registered { node_id: String },
-    /// Hub is sending a signed task.  The bytes are the raw signed wire
-    /// format (version || signature || JSON payload).
+    /// Hub is sending a signed task (raw wire bytes: version || signature || JSON).
     Task(Vec<u8>),
     /// Hub acknowledged a heartbeat.
     HeartbeatAck,
@@ -65,41 +47,44 @@ pub enum SwarmEvent {
 
 /// Connection to a swarm hub.
 ///
-/// Manages SSE for inbound events and POST for outbound messages.
 /// Clone is cheap (reqwest::Client is Arc-based internally).
 #[derive(Clone)]
 pub struct SwarmConnection {
-    /// Base URL of the hub (e.g. "https://hub.example.com").
     base_url: String,
-    /// HTTP client (shared process-wide singleton).
     client: reqwest::Client,
-    /// Node token for authentication (received after registration,
-    /// or derived from public key).  Set after register() succeeds.
     auth_token: Option<String>,
 }
 
 impl SwarmConnection {
     /// Create a new connection to the hub.
     pub fn new(base_url: &str) -> Self {
-        // Ensure TLS crypto provider is installed (idempotent).
         crate::http::ensure_crypto_provider();
-
-        // Build a separate client for SSE with no request timeout
-        // (the SSE stream stays open indefinitely).
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
-                // No overall timeout — SSE streams are long-lived.
                 .build()
-                .expect("failed to build SSE HTTP client"),
+                .expect("failed to build HTTP client"),
             auth_token: None,
         }
     }
 
-    /// Set the auth token (received from hub after registration).
-    pub fn set_auth_token(&mut self, token: String) {
-        self.auth_token = Some(token);
+    /// Apply bearer auth to a request builder if a token is set.
+    fn authed(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.auth_token {
+            Some(ref token) => req.bearer_auth(token),
+            None => req,
+        }
+    }
+
+    /// Check response status; return a `Swarm` error with body on failure.
+    async fn check(resp: reqwest::Response, context: &str) -> Result<reqwest::Response> {
+        if resp.status().is_success() {
+            return Ok(resp);
+        }
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(DysonError::Swarm(format!("{context}: {status} — {body}")))
     }
 
     // -----------------------------------------------------------------------
@@ -107,22 +92,10 @@ impl SwarmConnection {
     // -----------------------------------------------------------------------
 
     /// Register this node with the hub.
-    ///
-    /// Returns the node_id and auth token assigned by the hub.
-    pub async fn register(
-        &mut self,
-        manifest: &NodeManifest,
-    ) -> Result<RegisterResponse> {
+    pub async fn register(&mut self, manifest: &NodeManifest) -> Result<RegisterResponse> {
         let url = format!("{}/swarm/register", self.base_url);
         let resp = self.client.post(&url).json(manifest).send().await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DysonError::Swarm(format!(
-                "registration failed: {status} — {body}"
-            )));
-        }
+        let resp = Self::check(resp, "registration failed").await?;
 
         let reg: RegisterResponse = resp.json().await.map_err(|e| {
             DysonError::Swarm(format!("failed to parse registration response: {e}"))
@@ -135,74 +108,36 @@ impl SwarmConnection {
     /// Send a heartbeat to the hub.
     pub async fn heartbeat(&self, status: &NodeStatus) -> Result<()> {
         let url = format!("{}/swarm/heartbeat", self.base_url);
-        let mut req = self.client.post(&url).json(status);
-        if let Some(ref token) = self.auth_token {
-            req = req.bearer_auth(token);
-        }
+        let req = self.authed(self.client.post(&url).json(status));
         let resp = req.send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DysonError::Swarm(format!(
-                "heartbeat failed: {status} — {body}"
-            )));
-        }
+        Self::check(resp, "heartbeat failed").await?;
         Ok(())
     }
 
     /// Send a task result back to the hub.
     pub async fn send_result(&self, result: &SwarmResult) -> Result<()> {
         let url = format!("{}/swarm/result", self.base_url);
-        let mut req = self.client.post(&url).json(result);
-        if let Some(ref token) = self.auth_token {
-            req = req.bearer_auth(token);
-        }
+        let req = self.authed(self.client.post(&url).json(result));
         let resp = req.send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(DysonError::Swarm(format!(
-                "result submission failed: {status} — {body}"
-            )));
-        }
+        Self::check(resp, "result submission failed").await?;
         Ok(())
     }
 
     /// Fetch a blob by SHA-256 hash from the hub.
-    ///
-    /// Returns the raw bytes.  Caller is responsible for verifying the
-    /// hash matches what was in the signed task envelope.
     pub async fn fetch_blob(&self, sha256: &str) -> Result<Vec<u8>> {
         let url = format!("{}/swarm/blob/{sha256}", self.base_url);
-        let mut req = self.client.get(&url);
-        if let Some(ref token) = self.auth_token {
-            req = req.bearer_auth(token);
-        }
+        let req = self.authed(self.client.get(&url));
         let resp = req.send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            return Err(DysonError::Swarm(format!(
-                "blob fetch failed for {sha256}: {status}"
-            )));
-        }
-        let bytes = resp.bytes().await?;
-        Ok(bytes.to_vec())
+        let resp = Self::check(resp, &format!("blob fetch failed for {sha256}")).await?;
+        Ok(resp.bytes().await?.to_vec())
     }
 
     /// Upload a blob to the hub (for large result payloads).
     pub async fn upload_blob(&self, sha256: &str, data: &[u8]) -> Result<()> {
         let url = format!("{}/swarm/blob/{sha256}", self.base_url);
-        let mut req = self.client.put(&url).body(data.to_vec());
-        if let Some(ref token) = self.auth_token {
-            req = req.bearer_auth(token);
-        }
+        let req = self.authed(self.client.put(&url).body(data.to_vec()));
         let resp = req.send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            return Err(DysonError::Swarm(format!(
-                "blob upload failed for {sha256}: {status}"
-            )));
-        }
+        Self::check(resp, &format!("blob upload failed for {sha256}")).await?;
         Ok(())
     }
 
@@ -212,17 +147,13 @@ impl SwarmConnection {
 
     /// Open the SSE event stream from the hub.
     ///
-    /// Returns a receiver that yields `SwarmEvent`s.  The SSE connection
+    /// Returns a receiver that yields `SwarmEvent`s.  The connection
     /// stays open until the hub closes it or the receiver is dropped.
     pub async fn open_event_stream(
         &self,
     ) -> Result<tokio::sync::mpsc::Receiver<Result<SwarmEvent>>> {
         let url = format!("{}/swarm/events", self.base_url);
-        let mut req = self.client.get(&url).header("Accept", "text/event-stream");
-        if let Some(ref token) = self.auth_token {
-            req = req.bearer_auth(token);
-        }
-
+        let req = self.authed(self.client.get(&url).header("Accept", "text/event-stream"));
         let resp = req.send().await?;
 
         if resp.status() != StatusCode::OK {
@@ -243,30 +174,23 @@ impl SwarmConnection {
                 match chunk {
                     Ok(bytes) => {
                         buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-                        // Process complete events (delimited by blank lines).
                         while let Some(event) = extract_sse_event(&mut buffer) {
                             if tx.send(Ok(event)).await.is_err() {
-                                return; // receiver dropped
+                                return;
                             }
                         }
                     }
                     Err(e) => {
                         let _ = tx
-                            .send(Err(DysonError::Swarm(format!(
-                                "SSE stream error: {e}"
-                            ))))
+                            .send(Err(DysonError::Swarm(format!("SSE stream error: {e}"))))
                             .await;
                         return;
                     }
                 }
             }
 
-            // Stream ended (hub closed connection).
             let _ = tx
-                .send(Err(DysonError::Swarm(
-                    "SSE stream closed by hub".into(),
-                )))
+                .send(Err(DysonError::Swarm("SSE stream closed by hub".into())))
                 .await;
         });
 
@@ -281,9 +205,7 @@ impl SwarmConnection {
 /// Response from the hub after successful registration.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct RegisterResponse {
-    /// Hub-assigned node ID.
     pub node_id: String,
-    /// Auth token for subsequent requests.
     pub token: String,
 }
 
@@ -291,17 +213,11 @@ pub struct RegisterResponse {
 // SSE parser
 // ---------------------------------------------------------------------------
 
-/// Try to extract one complete SSE event from the buffer.
-///
-/// SSE events are delimited by blank lines (`\n\n`).  Each event has
-/// optional `event:` and `data:` fields.  Returns `None` if no complete
-/// event is available yet.
+/// Extract one complete SSE event from the buffer, if available.
 fn extract_sse_event(buffer: &mut String) -> Option<SwarmEvent> {
-    // Find the first blank-line delimiter.
     let delimiter = buffer.find("\n\n")?;
 
     let event_text = buffer[..delimiter].to_string();
-    // Remove the event + delimiter from the buffer.
     buffer.drain(..delimiter + 2);
 
     let mut event_type = String::new();
@@ -321,7 +237,6 @@ fn extract_sse_event(buffer: &mut String) -> Option<SwarmEvent> {
     parse_sse_event(&event_type, &data)
 }
 
-/// Parse an SSE event type + data into a `SwarmEvent`.
 fn parse_sse_event(event_type: &str, data: &str) -> Option<SwarmEvent> {
     match event_type {
         "registered" => {
@@ -330,14 +245,13 @@ fn parse_sse_event(event_type: &str, data: &str) -> Option<SwarmEvent> {
             Some(SwarmEvent::Registered { node_id })
         }
         "task" => {
-            // Task data is base64-encoded signed wire bytes.
             let wire_bytes = STANDARD.decode(data.trim()).ok()?;
             Some(SwarmEvent::Task(wire_bytes))
         }
         "heartbeat_ack" => Some(SwarmEvent::HeartbeatAck),
         "shutdown" => Some(SwarmEvent::Shutdown),
         _ => {
-            tracing::debug!(event_type, "unknown SSE event type — ignoring");
+            tracing::debug!(event_type, "unknown SSE event type");
             None
         }
     }
@@ -364,7 +278,7 @@ mod tests {
 
     #[test]
     fn parse_sse_task() {
-        let wire_data = vec![0x01u8; 70]; // fake signed bytes
+        let wire_data = vec![0x01u8; 70];
         let b64 = STANDARD.encode(&wire_data);
         let mut buf = format!("event: task\ndata: {b64}\n\n");
         let event = extract_sse_event(&mut buf).unwrap();
@@ -393,15 +307,15 @@ mod tests {
         let mut buf = "event: unknown_type\ndata: whatever\n\n".to_string();
         let event = extract_sse_event(&mut buf);
         assert!(event.is_none());
-        assert!(buf.is_empty()); // still consumed from buffer
+        assert!(buf.is_empty());
     }
 
     #[test]
     fn parse_sse_incomplete_event() {
-        let mut buf = "event: task\ndata: AAAA".to_string(); // no trailing \n\n
+        let mut buf = "event: task\ndata: AAAA".to_string();
         let event = extract_sse_event(&mut buf);
         assert!(event.is_none());
-        assert_eq!(buf, "event: task\ndata: AAAA"); // buffer unchanged
+        assert_eq!(buf, "event: task\ndata: AAAA");
     }
 
     #[test]
@@ -420,7 +334,6 @@ mod tests {
 
     #[test]
     fn parse_sse_multiline_data() {
-        // SSE spec: multiple `data:` lines are joined with newlines.
         let mut buf = "event: registered\ndata: {\"node_id\":\ndata:  \"abc\"}\n\n".to_string();
         let event = extract_sse_event(&mut buf).unwrap();
         match event {

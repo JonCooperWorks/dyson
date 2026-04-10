@@ -33,13 +33,6 @@ use serde::{Deserialize, Serialize};
 // Payload types — inline vs content-addressed reference
 // ---------------------------------------------------------------------------
 
-/// Maximum size for inline payloads (64 KiB).
-///
-/// Payloads smaller than this travel inside the signed envelope.
-/// Larger payloads are referenced by hash and fetched separately.
-/// The hub decides at send time; the node handles both.
-pub const INLINE_PAYLOAD_THRESHOLD: usize = 64 * 1024;
-
 /// A content-addressed blob reference.
 ///
 /// The SHA-256 hash is the identity.  The size lets the receiver

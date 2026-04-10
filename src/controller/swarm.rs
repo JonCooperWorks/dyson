@@ -53,14 +53,6 @@ use crate::swarm::verify::{SwarmPublicKey, verify_signed_payload};
 /// Delay between heartbeats.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Maximum consecutive reconnection attempts before giving up.
-#[allow(dead_code)]
-const MAX_RECONNECT_ATTEMPTS: u32 = 10;
-
-/// Base delay for exponential backoff on reconnection.
-#[allow(dead_code)]
-const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(2);
-
 // ---------------------------------------------------------------------------
 // SwarmController
 // ---------------------------------------------------------------------------
