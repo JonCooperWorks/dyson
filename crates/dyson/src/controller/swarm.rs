@@ -207,8 +207,8 @@ impl super::Controller for SwarmController {
         // Strip any `SkillConfig::Mcp` whose name starts with `swarm_`
         // before handing settings to the agent builder.
         let mut local_settings = settings.clone();
-        // Exclude only swarm_dispatch to prevent recursive task spawning.
-        // The agent retains read-only swarm tools (list_nodes, swarm_status).
+        // Exclude swarm_dispatch to prevent recursive task spawning.
+        // The agent retains list_nodes and swarm_status (read-only).
         for skill in &mut local_settings.skills {
             if let crate::config::SkillConfig::Mcp(mcp) = skill {
                 if mcp.name.starts_with("swarm_") {
@@ -217,10 +217,23 @@ impl super::Controller for SwarmController {
             }
         }
 
+        let node_name = self.config.node_name_or_default();
+
+        let controller_prompt = format!(
+            "You are '{node_name}', a Dyson swarm node executing tasks dispatched by a swarm hub.\n\
+             \n\
+             Use your tools to complete tasks. Use bash to run commands, inspect the system, \
+             read files, and gather real information. Never guess — always verify with tools.\n\
+             \n\
+             You are node '{node_name}' in the swarm. When you call list_nodes, ignore your \
+             own entry — the other entries are your peers. You cannot dispatch tasks to them \
+             (swarm_dispatch is not available). Focus on completing the task yourself."
+        );
+
         let client_handle = registry.get_default();
         let mut agent = super::build_agent(
             &local_settings,
-            None,
+            Some(&controller_prompt),
             super::AgentMode::Private,
             client_handle,
             registry,
@@ -229,7 +242,6 @@ impl super::Controller for SwarmController {
         .await?;
 
         // ── 2. PROBE HARDWARE ──
-        let node_name = self.config.node_name_or_default();
         let tool_names = agent.tool_names();
         let manifest = HardwareProbe::run(&node_name, tool_names).await;
 
