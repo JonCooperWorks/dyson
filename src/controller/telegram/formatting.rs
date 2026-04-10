@@ -679,4 +679,35 @@ mod tests {
             assert!(part.ends_with("</pre>"), "part should end with </pre>");
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Empty-text guard tests — verify the conditions that caused
+    // "Telegram sendMessage failed: Bad Request: text must be non-empty"
+    // when the LLM returned tool calls with no text content.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn split_for_telegram_empty_input_returns_one_empty_part() {
+        // split_for_telegram("") returns vec![""], NOT an empty vec.
+        // Callers must guard against sending parts[0] when it's empty.
+        let parts = split_for_telegram("");
+        assert_eq!(parts, vec![""]);
+    }
+
+    #[test]
+    fn newline_only_converts_to_empty_html() {
+        // A lone newline (common in tool-only LLM responses) produces
+        // empty HTML after the trailing-newline strip.
+        assert_eq!(markdown_to_telegram_html("\n"), "");
+    }
+
+    #[test]
+    fn horizontal_rule_then_split_produces_empty_part() {
+        // End-to-end: markdown that converts to empty HTML, then split,
+        // yields a sendable part that is empty — the exact bug scenario.
+        let html = markdown_to_telegram_html("---");
+        let parts = split_for_telegram(&html);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].is_empty(), "part should be empty after HR conversion");
+    }
 }

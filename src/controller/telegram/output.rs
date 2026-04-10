@@ -85,6 +85,10 @@ impl TelegramOutput {
         let parts = split_for_telegram(&html);
         let text = &parts[0];
 
+        if text.is_empty() {
+            return Ok(());
+        }
+
         match self.current_message_id {
             Some(msg_id) => self.edit_message(msg_id, text),
             None => {
@@ -106,6 +110,9 @@ impl TelegramOutput {
         let parts = split_for_telegram(&html);
 
         for (i, part) in parts.iter().enumerate() {
+            if part.is_empty() {
+                continue;
+            }
             if i == 0 {
                 match self.current_message_id {
                     Some(msg_id) => self.edit_message(msg_id, part),
