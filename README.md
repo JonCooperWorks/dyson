@@ -22,6 +22,7 @@ Dyson is a from-scratch implementation of the core agent pattern: **LLM streams 
 
 Dyson is a fully functional agent — not just a learning exercise. It streams completions, calls tools, manages context, and persists state across conversations.
 
+- **Self-improvement** — Dyson creates its own skills. Background "dream" tasks analyze completed work and distill reusable procedures into `SKILL.md` files. New skills hot-reload into the running session via mtime-based file watching — no restart needed. The agent gets better at recurring tasks the more it does them.
 - **Six LLM backends** — Anthropic, OpenAI, OpenRouter, Ollama Cloud, Claude Code, and Codex. Swap providers with a flag; the agent loop doesn't care which one it's talking to.
 - **Sandboxed tool execution** — Every tool call passes through a `Sandbox` that can allow, deny, or redirect it. The default `PolicySandbox` wraps bash in OS-level sandboxes (macOS Apple Containers / Linux bubblewrap) and enforces per-tool capability policies.
 - **MCP integration** — Connect to any MCP server (stdio or HTTP). MCP servers are just another skill; the agent loop doesn't know they exist.
@@ -167,6 +168,7 @@ Secrets can be literal strings or resolver references (`{ "resolver": "insecure_
 | [Tool Forwarding over MCP](docs/tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth |
 | [Public Agents](docs/public-agents.md) | Group chat agents, AgentMode, tool restriction, SSRF protection |
 | [Subagents](docs/subagents.md) | Child agents with different models, tool inheritance, delegation |
+| [Dreaming](docs/dreaming.md) | Background cognition — memory consolidation, self-improvement, skill creation |
 | [Advisor](docs/advisor.md) | Advisor pattern — consult a stronger model for complex decisions |
 
 ## Tests

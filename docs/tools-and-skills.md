@@ -198,7 +198,21 @@ Frontmatter requires `name`; `description` is optional. Body is loaded on demand
 - **`load_skill`**: fetch full instructions by name
 - **`skill_create`**: create/update/improve skills (modes: `create`, `update`, `improve`)
 
-Hot reload watches `skills/` for changes. Failed skills are logged and skipped — they never stop the agent.
+Failed skills are logged and skipped — they never stop the agent.
+
+### Hot Reload
+
+Skills hot-reload within the same session.  The `HotReloader`
+(`src/config/hot_reload.rs`) watches the `skills/` directory and all
+existing `SKILL.md` files by mtime.  Before each user turn the controller
+calls `check_and_reload_agent()` — if any skill file changed, the agent
+is rebuilt with fresh skills.  Conversation messages are preserved across
+the rebuild.
+
+This means skills created by the `SelfImprovementDream` (or by the agent
+itself via `skill_create`) are active by the next turn — no restart
+needed.  See [Dreaming](dreaming.md#skill-creation-and-hot-reload) for
+the full lifecycle.
 
 ---
 
