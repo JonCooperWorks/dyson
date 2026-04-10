@@ -231,6 +231,10 @@ impl McpSkill {
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut descs: Vec<String> = Vec::new();
         for def in defs {
+            if self.config.exclude_tools.contains(&def.name) {
+                tracing::debug!(server = server_name, tool = def.name, "excluding tool");
+                continue;
+            }
             let desc = def.description.clone().unwrap_or_default();
             // Sanitize description to prevent prompt injection from MCP servers.
             // Strip control characters and limit length to prevent abuse.

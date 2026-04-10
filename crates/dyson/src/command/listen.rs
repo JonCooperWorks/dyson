@@ -106,6 +106,7 @@ pub async fn run(
                                     headers: std::collections::HashMap::new(),
                                     auth: None,
                                 },
+                                exclude_tools: vec![],
                             }),
                         ));
 

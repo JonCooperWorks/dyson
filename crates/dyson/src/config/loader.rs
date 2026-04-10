@@ -864,6 +864,7 @@ fn parse_mcp_servers(
         settings.skills.push(SkillConfig::Mcp(Box::new(McpConfig {
             name: name.clone(),
             transport,
+            exclude_tools: vec![],
         })));
     }
 }

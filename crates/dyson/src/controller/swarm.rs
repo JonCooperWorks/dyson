@@ -207,12 +207,15 @@ impl super::Controller for SwarmController {
         // Strip any `SkillConfig::Mcp` whose name starts with `swarm_`
         // before handing settings to the agent builder.
         let mut local_settings = settings.clone();
-        local_settings.skills.retain(|skill| {
-            !matches!(
-                skill,
-                crate::config::SkillConfig::Mcp(mcp) if mcp.name.starts_with("swarm_")
-            )
-        });
+        // Exclude only swarm_dispatch to prevent recursive task spawning.
+        // The agent retains read-only swarm tools (list_nodes, swarm_status).
+        for skill in &mut local_settings.skills {
+            if let crate::config::SkillConfig::Mcp(mcp) = skill {
+                if mcp.name.starts_with("swarm_") {
+                    mcp.exclude_tools.push("swarm_dispatch".to_string());
+                }
+            }
+        }
 
         let client_handle = registry.get_default();
         let mut agent = super::build_agent(

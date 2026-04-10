@@ -401,6 +401,9 @@ pub enum SkillConfig {
 pub struct McpConfig {
     pub name: String,
     pub transport: McpTransportConfig,
+    /// Tool names to exclude after MCP discovery.
+    /// Used to selectively hide tools (e.g., prevent recursive swarm dispatch).
+    pub exclude_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
