@@ -62,6 +62,22 @@ impl TelegramOutput {
                 self.sent_message_ids.push(id);
                 Ok(id)
             }
+            Err(e) if is_telegram_parse_error(&e) => {
+                tracing::warn!(error = %e, "HTML parse failed, falling back to plain text");
+                let plain = strip_html_tags(text);
+                let fallback = self.block_on(self.bot.send_message(self.chat_id, &plain));
+                match fallback {
+                    Ok(msg) => {
+                        let id = msg.id();
+                        self.sent_message_ids.push(id);
+                        Ok(id)
+                    }
+                    Err(e2) => {
+                        tracing::error!(error = %e2, "plain-text fallback also failed");
+                        Err(e2)
+                    }
+                }
+            }
             Err(e) => {
                 tracing::error!(error = %e, "failed to send Telegram message");
                 Err(e)
@@ -80,7 +96,16 @@ impl TelegramOutput {
                 .edit_message_text(self.chat_id, message_id, text),
         );
         if let Err(e) = result {
-            tracing::debug!(error = %e, "failed to edit Telegram message");
+            if is_telegram_parse_error(&e) {
+                tracing::warn!(error = %e, "HTML parse failed on edit, falling back to plain text");
+                let plain = strip_html_tags(text);
+                let _ = self.block_on(
+                    self.bot
+                        .edit_message_text_plain(self.chat_id, message_id, &plain),
+                );
+            } else {
+                tracing::debug!(error = %e, "failed to edit Telegram message");
+            }
         }
     }
 
@@ -235,5 +260,92 @@ impl Drop for TelegramOutput {
         if let Some(handle) = self.typing_handle.take() {
             handle.abort();
         }
+    }
+}
+
+/// Returns `true` if the error is a Telegram "can't parse entities" rejection.
+fn is_telegram_parse_error(e: &DysonError) -> bool {
+    let msg = e.to_string();
+    msg.contains("can't parse entities")
+}
+
+/// Strip HTML tags from a string, producing readable plain text.
+fn strip_html_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_telegram_parse_error() {
+        let err = DysonError::Llm(
+            "Telegram sendMessage failed: Bad Request: can't parse entities: \
+             Unexpected end tag at byte offset 1116"
+                .to_string(),
+        );
+        assert!(is_telegram_parse_error(&err));
+    }
+
+    #[test]
+    fn non_parse_error_not_detected() {
+        let err = DysonError::Llm("Telegram sendMessage failed: Bad Request: text must be non-empty".to_string());
+        assert!(!is_telegram_parse_error(&err));
+    }
+
+    #[test]
+    fn strip_tags_basic() {
+        assert_eq!(
+            strip_html_tags("<b>bold</b> and <i>italic</i>"),
+            "bold and italic"
+        );
+    }
+
+    #[test]
+    fn strip_tags_pre_block() {
+        assert_eq!(
+            strip_html_tags("<pre>fn main() {}</pre>"),
+            "fn main() {}"
+        );
+    }
+
+    #[test]
+    fn strip_tags_no_tags() {
+        assert_eq!(strip_html_tags("plain text"), "plain text");
+    }
+
+    #[test]
+    fn strip_tags_preserves_entities() {
+        assert_eq!(
+            strip_html_tags("a &lt; b &amp; c &gt; d"),
+            "a &lt; b &amp; c &gt; d"
+        );
+    }
+
+    #[test]
+    fn strip_tags_nested() {
+        assert_eq!(
+            strip_html_tags("<b>bold <i>and italic</i></b>"),
+            "bold and italic"
+        );
+    }
+
+    #[test]
+    fn strip_tags_with_attributes() {
+        assert_eq!(
+            strip_html_tags("<a href=\"https://example.com\">link</a>"),
+            "link"
+        );
     }
 }

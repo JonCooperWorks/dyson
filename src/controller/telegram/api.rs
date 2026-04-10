@@ -123,6 +123,22 @@ impl BotApi {
         Ok(())
     }
 
+    /// Edit an existing message's text (plain text, no parse mode).
+    pub async fn edit_message_text_plain(
+        &self,
+        chat_id: ChatId,
+        message_id: MessageId,
+        text: &str,
+    ) -> Result<(), DysonError> {
+        let body = json!({
+            "chat_id": chat_id.0,
+            "message_id": message_id.0,
+            "text": text,
+        });
+        let _: Result<ApiResponse<serde_json::Value>, _> = self.post("editMessageText", &body).await;
+        Ok(())
+    }
+
     /// Send a document (file) by path.
     pub async fn send_document(
         &self,
