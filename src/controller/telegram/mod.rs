@@ -296,7 +296,11 @@ impl super::Controller for TelegramController {
         )
     }
 
-    async fn run(&self, settings: &Settings) -> crate::Result<()> {
+    async fn run(
+        &self,
+        settings: &Settings,
+        registry: &std::sync::Arc<super::ClientRegistry>,
+    ) -> crate::Result<()> {
         eprintln!(
             "Dyson v{} — running as Telegram bot",
             env!("CARGO_PKG_VERSION")
@@ -322,10 +326,6 @@ impl super::Controller for TelegramController {
 
         let (config_path, mut reloader) = super::create_hot_reloader(settings);
 
-        // Lazily-loaded client registry — one LLM client per provider,
-        // shared across all agents and surviving provider switches.
-        let mut registry = super::ClientRegistry::new(&current_settings, None);
-
         let agents: Arc<tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>> =
             Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
@@ -349,14 +349,14 @@ impl super::Controller for TelegramController {
                     current_settings = s;
                     current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
                 }
-                // Recreate the client registry so new API keys take effect.
-                registry = super::ClientRegistry::new(&current_settings, None);
+                // Reload the client registry so new API keys take effect.
+                registry.reload(&current_settings, None);
                 rebuild_agents_on_reload(
                     &agents,
                     &current_settings,
                     controller_prompt.as_deref(),
                     &chat_store,
-                    &mut registry,
+                    registry,
                 )
                 .await;
             }
@@ -429,7 +429,7 @@ impl super::Controller for TelegramController {
                             &agents,
                             &current_settings,
                             config_path.as_deref(),
-                            &mut registry,
+                            registry,
                         )
                         .await;
                     }
@@ -524,7 +524,7 @@ impl super::Controller for TelegramController {
                         &current_settings,
                         controller_prompt.as_deref(),
                         &chat_store,
-                        &mut registry,
+                        registry,
                     )
                     .await
                     {
@@ -542,7 +542,7 @@ impl super::Controller for TelegramController {
                         &current_settings,
                         config_path.as_deref(),
                         &*chat_store,
-                        &mut registry,
+                        registry,
                     )
                     .await;
                     continue;
@@ -557,7 +557,7 @@ impl super::Controller for TelegramController {
                     &current_settings,
                     controller_prompt.as_deref(),
                     &chat_store,
-                    &mut registry,
+                    registry,
                 )
                 .await
                 {
@@ -596,7 +596,7 @@ async fn rebuild_agents_on_reload(
     settings: &Settings,
     controller_prompt: Option<&str>,
     chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
-    registry: &mut super::ClientRegistry,
+    registry: &super::ClientRegistry,
 ) {
     let mut agents_map = agents.write().await;
     let old_agents: Vec<(i64, Arc<ChatEntry>)> = agents_map.drain().collect();
@@ -683,7 +683,7 @@ async fn handle_callback_query(
     agents: &Arc<tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>>,
     settings: &Settings,
     config_path: Option<&std::path::Path>,
-    registry: &mut super::ClientRegistry,
+    registry: &super::ClientRegistry,
 ) {
     let Some(rest) = cb_data.strip_prefix("model:") else {
         return;
@@ -853,7 +853,7 @@ async fn handle_per_chat_command(
     settings: &Settings,
     config_path: Option<&std::path::Path>,
     chat_store: &dyn crate::chat_history::ChatHistory,
-    registry: &mut super::ClientRegistry,
+    registry: &super::ClientRegistry,
 ) {
     // Extract agent from the mutex so execute_command (which may do an LLM
     // call for /compact) runs without holding the lock.  This prevents other
@@ -1269,7 +1269,7 @@ async fn get_or_create_entry(
     settings: &Settings,
     controller_prompt: Option<&str>,
     chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
-    registry: &mut super::ClientRegistry,
+    registry: &super::ClientRegistry,
 ) -> crate::Result<Arc<ChatEntry>> {
     // Fast path: entry already exists.
     {

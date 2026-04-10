@@ -52,6 +52,10 @@ pub async fn run(
         "configuration loaded"
     );
 
+    // Single shared client registry — one LLM client per provider,
+    // shared across all controllers and surviving provider switches.
+    let registry = std::sync::Arc::new(dyson::controller::ClientRegistry::new(&settings, None));
+
     // Build controllers.
     let mut controllers: Vec<Box<dyn Controller>> = Vec::new();
 
@@ -123,7 +127,7 @@ pub async fn run(
         let controller = controllers.into_iter().next().expect("length checked above");
         tracing::info!(controller = controller.name(), "starting controller");
         tokio::select! {
-            result = controller.run(&settings) => { result?; }
+            result = controller.run(&settings, &registry) => { result?; }
             _ = shutdown => {
                 tracing::info!("shutting down");
             }
@@ -132,10 +136,11 @@ pub async fn run(
         let mut handles = Vec::new();
         for controller in controllers {
             let settings = settings.clone();
+            let registry = std::sync::Arc::clone(&registry);
             let name = controller.name().to_string();
             tracing::info!(controller = name, "starting controller");
             handles.push(tokio::spawn(async move {
-                if let Err(e) = controller.run(&settings).await {
+                if let Err(e) = controller.run(&settings, &registry).await {
                     tracing::error!(controller = name, error = %e, "controller failed");
                 }
             }));

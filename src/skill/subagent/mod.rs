@@ -432,7 +432,7 @@ impl SubagentSkill {
         sandbox: Arc<dyn Sandbox>,
         workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
         parent_tools: &[Arc<dyn Tool>],
-        registry: &mut crate::controller::ClientRegistry,
+        registry: &crate::controller::ClientRegistry,
     ) -> Self {
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut prompt_lines: Vec<String> = Vec::new();
