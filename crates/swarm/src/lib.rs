@@ -12,6 +12,7 @@ pub mod key;
 pub mod queue;
 pub mod registry;
 pub mod router;
+pub mod tls;
 
 use std::sync::Arc;
 

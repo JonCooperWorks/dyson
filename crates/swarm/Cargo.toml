@@ -25,8 +25,17 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 
 # HTTP server
 axum = { version = "0.7", features = ["json", "macros"] }
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "server-graceful", "http1", "http2"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
+tower-service = "0.3"
+
+# TLS
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+rustls-acme = "0.12"
 
 # Shared with protocol crate
 serde = { workspace = true }

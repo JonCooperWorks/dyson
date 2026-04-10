@@ -15,6 +15,7 @@ use swarm::Hub;
 use swarm::config::SwarmConfig;
 use swarm::http::build_router;
 use swarm::key::HubKeyPair;
+use swarm::tls;
 
 /// CLI arguments.
 #[derive(Debug, Parser)]
@@ -35,6 +36,37 @@ struct Args {
     /// `tracing` env filter.
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    // -- TLS --
+
+    /// Path to TLS certificate chain (PEM format).  Use with --private-key.
+    #[arg(long, requires = "private_key", conflicts_with = "letsencrypt")]
+    cert: Option<PathBuf>,
+
+    /// Path to TLS private key (PEM format).  Use with --cert.
+    #[arg(long, requires = "cert", conflicts_with = "letsencrypt")]
+    private_key: Option<PathBuf>,
+
+    /// Use Let's Encrypt for automatic TLS certificates (TLS-ALPN-01 challenge).
+    #[arg(long, requires = "domain")]
+    letsencrypt: bool,
+
+    /// Domain name (for Let's Encrypt certificate provisioning).
+    #[arg(long)]
+    domain: Option<String>,
+
+    /// Contact email for Let's Encrypt registration.
+    #[arg(long, requires = "letsencrypt")]
+    letsencrypt_email: Option<String>,
+
+    /// Directory to cache Let's Encrypt certificates.
+    #[arg(long, requires = "letsencrypt", default_value = ".swarm-certs")]
+    cert_cache_dir: PathBuf,
+
+    /// Allow running without TLS (plain HTTP) on external interfaces.
+    /// Not required for localhost/127.0.0.1/::1 — those skip TLS automatically.
+    #[arg(long)]
+    dangerous_no_tls: bool,
 }
 
 #[tokio::main]
@@ -106,17 +138,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    // Validate TLS configuration.
+    let tls_mode = validate_tls(&args)?;
+
     // Build the axum router.
     let app = build_router(hub.clone());
-    let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    let local_addr = listener.local_addr()?;
-    tracing::info!(%local_addr, "HTTP server listening");
+    let addr = config.bind.to_string();
 
     // Graceful shutdown: when a signal arrives, broadcast shutdown through
     // the hub so every open SSE stream ends (via `take_until`), then let
-    // axum drain the remaining connections.  Without the broadcast step,
-    // the SSE streams would block graceful shutdown forever — that was the
-    // "Ctrl-C does nothing" bug.
+    // axum/hyper drain the remaining connections.
     let hub_for_shutdown = hub.clone();
     let graceful = async move {
         shutdown_signal().await;
@@ -124,12 +155,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         hub_for_shutdown.trigger_shutdown();
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(graceful)
-        .await?;
+    match tls_mode {
+        tls::TlsMode::None => {
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            tracing::info!(addr = %listener.local_addr()?, "HTTP server listening (plain)");
+            axum::serve(listener, app)
+                .with_graceful_shutdown(graceful)
+                .await?;
+        }
+        tls::TlsMode::Manual { ref cert, ref key } => {
+            tracing::info!(%addr, "HTTPS server listening (manual TLS)");
+            tls::serve_manual_tls(app, &addr, cert, key, graceful).await?;
+        }
+        tls::TlsMode::LetsEncrypt { ref domain, ref email, ref cache_dir } => {
+            tracing::info!(%addr, %domain, "HTTPS server listening (Let's Encrypt)");
+            tls::serve_letsencrypt(
+                app, &addr, domain, email.as_deref(), cache_dir, graceful,
+            ).await?;
+        }
+    }
 
     tracing::info!("swarm hub shut down");
     Ok(())
+}
+
+fn is_loopback(addr: &SocketAddr) -> bool {
+    addr.ip().is_loopback()
+}
+
+fn validate_tls(args: &Args) -> Result<tls::TlsMode, Box<dyn std::error::Error>> {
+    if args.letsencrypt {
+        let domain = args.domain.clone().expect("clap requires --domain with --letsencrypt");
+        return Ok(tls::TlsMode::LetsEncrypt {
+            domain,
+            email: args.letsencrypt_email.clone(),
+            cache_dir: args.cert_cache_dir.clone(),
+        });
+    }
+
+    if let (Some(cert), Some(key)) = (&args.cert, &args.private_key) {
+        return Ok(tls::TlsMode::Manual {
+            cert: cert.clone(),
+            key: key.clone(),
+        });
+    }
+
+    if args.dangerous_no_tls || is_loopback(&args.bind) {
+        return Ok(tls::TlsMode::None);
+    }
+
+    Err(format!(
+        "TLS is required when binding to a non-localhost address ({}).\n\n\
+         Provide TLS certificates:\n  \
+           --cert <path> --private-key <path>\n\n\
+         Or use Let's Encrypt:\n  \
+           --letsencrypt --domain <domain>\n\n\
+         Or explicitly disable TLS (not recommended):\n  \
+           --dangerous-no-tls",
+        args.bind
+    ).into())
 }
 
 async fn shutdown_signal() {
