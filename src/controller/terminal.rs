@@ -66,12 +66,12 @@ impl super::Controller for TerminalController {
         "terminal"
     }
 
-    async fn run(&self, settings: &Settings) -> crate::Result<()> {
+    async fn run(
+        &self,
+        settings: &Settings,
+        registry: &std::sync::Arc<super::ClientRegistry>,
+    ) -> crate::Result<()> {
         let mut current_settings = settings.clone();
-
-        // Lazily-loaded client registry — one LLM client per provider,
-        // shared across all agents and surviving provider switches.
-        let mut registry = super::ClientRegistry::new(&current_settings, None);
 
         let client_handle = registry.get_default();
         let mut agent = super::build_agent(
@@ -79,7 +79,7 @@ impl super::Controller for TerminalController {
             None,
             super::AgentMode::Private,
             client_handle,
-            &mut registry,
+            registry,
             None,
         )
         .await?;
@@ -104,7 +104,7 @@ impl super::Controller for TerminalController {
                 &mut current_provider,
                 &mut current_model,
                 None,
-                &mut registry,
+                registry,
             )
             .await
             {
@@ -143,7 +143,7 @@ impl super::Controller for TerminalController {
                 &mut current_provider,
                 &mut current_model,
                 config_path.as_deref(),
-                &mut registry,
+                registry,
             )
             .await
             {

@@ -95,7 +95,14 @@ pub trait Controller: Send {
     /// 2. Sourcing user input (stdin, messages, HTTP requests)
     /// 3. Running `agent.run()` with an appropriate `Output`
     /// 4. Delivering the response to the user
-    async fn run(&self, settings: &Settings) -> crate::Result<()>;
+    ///
+    /// The `registry` is shared across all controllers — all controllers
+    /// use the same LLM client instances and rate-limit counters.
+    async fn run(
+        &self,
+        settings: &Settings,
+        registry: &std::sync::Arc<ClientRegistry>,
+    ) -> crate::Result<()>;
 
     /// Optional system prompt fragment contributed by this controller.
     ///
@@ -132,16 +139,22 @@ pub enum AgentMode {
 
 /// Registry of rate-limited LLM clients, one per configured provider.
 ///
-/// Created once by the controller at startup.  Clients are created lazily
-/// on first access and cached for the lifetime of the registry.  This means
-/// rate-limit windows survive provider switches — switching from Claude to
-/// GPT and back doesn't reset the rate counter.
+/// Created once and shared across all controllers via `Arc`.  Clients are
+/// created lazily on first access and cached.  This means rate-limit
+/// windows survive provider switches and are shared across controllers —
+/// switching from Claude to GPT and back doesn't reset the rate counter.
 ///
-/// On config reload, the controller creates a new `ClientRegistry` (all
-/// clients are recreated so they pick up new API keys / base URLs).
+/// On config reload, call [`ClientRegistry::reload()`] to swap in new
+/// settings.  All cached clients are dropped so subsequent `get()` calls
+/// pick up new API keys / base URLs.
 pub struct ClientRegistry {
     /// One `RateLimited` per provider name.  Lazily populated on first
-    /// `get()` call for that provider.
+    /// `get()` call for that provider.  Behind a `Mutex` for interior
+    /// mutability so the registry can be shared via `Arc`.
+    inner: std::sync::Mutex<ClientRegistryInner>,
+}
+
+struct ClientRegistryInner {
     clients: std::collections::HashMap<
         String,
         crate::agent::rate_limiter::RateLimited<Box<dyn crate::llm::LlmClient>>,
@@ -163,10 +176,28 @@ impl ClientRegistry {
         workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
     ) -> Self {
         Self {
-            clients: std::collections::HashMap::new(),
-            settings: settings.clone(),
-            workspace,
+            inner: std::sync::Mutex::new(ClientRegistryInner {
+                clients: std::collections::HashMap::new(),
+                settings: settings.clone(),
+                workspace,
+            }),
         }
+    }
+
+    /// Drop all cached clients and swap in new settings.
+    ///
+    /// Subsequent `get()` calls will create new clients with the updated
+    /// API keys / base URLs.  Call this on config reload instead of
+    /// replacing the entire registry.
+    pub fn reload(
+        &self,
+        settings: &Settings,
+        workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    ) {
+        let mut inner = self.inner.lock().expect("ClientRegistry poisoned");
+        inner.clients.clear();
+        inner.settings = settings.clone();
+        inner.workspace = workspace;
     }
 
     /// Get a `UserFacing` handle to the client for a named provider.
@@ -174,12 +205,14 @@ impl ClientRegistry {
     /// Creates the client on first access.  Returns `Err` if the provider
     /// name is not in the settings.
     pub fn get(
-        &mut self,
+        &self,
         provider_name: &str,
     ) -> crate::Result<crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>>
     {
-        if !self.clients.contains_key(provider_name) {
-            let pc = self.settings.providers.get(provider_name).ok_or_else(|| {
+        let mut inner = self.inner.lock().expect("ClientRegistry poisoned");
+
+        if !inner.clients.contains_key(provider_name) {
+            let pc = inner.settings.providers.get(provider_name).ok_or_else(|| {
                 crate::error::DysonError::Config(format!("unknown provider '{provider_name}'"))
             })?;
 
@@ -187,16 +220,16 @@ impl ClientRegistry {
                 provider: pc.provider_type.clone(),
                 api_key: pc.api_key.clone(),
                 base_url: pc.base_url.clone(),
-                ..self.settings.agent.clone()
+                ..inner.settings.agent.clone()
             };
 
             let client = crate::llm::create_client(
                 &agent_settings,
-                self.workspace.clone(),
-                self.settings.dangerous_no_sandbox,
+                inner.workspace.clone(),
+                inner.settings.dangerous_no_sandbox,
             );
 
-            let rate_limited = match self.settings.agent.rate_limit.as_ref() {
+            let rate_limited = match inner.settings.agent.rate_limit.as_ref() {
                 Some(rl) => crate::agent::rate_limiter::RateLimited::new(
                     client,
                     rl.max_messages,
@@ -205,10 +238,10 @@ impl ClientRegistry {
                 None => crate::agent::rate_limiter::RateLimited::unlimited(client),
             };
 
-            self.clients.insert(provider_name.to_string(), rate_limited);
+            inner.clients.insert(provider_name.to_string(), rate_limited);
         }
 
-        let rl = &self.clients[provider_name];
+        let rl = &inner.clients[provider_name];
         Ok(rl.handle(crate::agent::rate_limiter::Priority::UserFacing))
     }
 
@@ -217,25 +250,30 @@ impl ClientRegistry {
     /// Looks up the provider name that matches the current agent config,
     /// or falls back to creating a client directly from the agent settings.
     pub fn get_default(
-        &mut self,
+        &self,
     ) -> crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>> {
+        let mut inner = self.inner.lock().expect("ClientRegistry poisoned");
+
         // Try to find the named provider that matches.
-        if let Some(name) = active_provider_name(&self.settings)
-            && let Ok(handle) = self.get(&name)
-        {
-            return handle;
+        if let Some(name) = active_provider_name(&inner.settings) {
+            // Release the lock temporarily so `get()` can re-acquire it.
+            drop(inner);
+            if let Ok(handle) = self.get(&name) {
+                return handle;
+            }
+            inner = self.inner.lock().expect("ClientRegistry poisoned");
         }
 
         // Fallback: create client from the default agent settings.
         // This handles the case where no named provider matches (e.g.
         // single-provider config without a "providers" map).
-        if !self.clients.contains_key("__default__") {
+        if !inner.clients.contains_key("__default__") {
             let client = crate::llm::create_client(
-                &self.settings.agent,
-                self.workspace.clone(),
-                self.settings.dangerous_no_sandbox,
+                &inner.settings.agent,
+                inner.workspace.clone(),
+                inner.settings.dangerous_no_sandbox,
             );
-            let rate_limited = match self.settings.agent.rate_limit.as_ref() {
+            let rate_limited = match inner.settings.agent.rate_limit.as_ref() {
                 Some(rl) => crate::agent::rate_limiter::RateLimited::new(
                     client,
                     rl.max_messages,
@@ -243,10 +281,10 @@ impl ClientRegistry {
                 ),
                 None => crate::agent::rate_limiter::RateLimited::unlimited(client),
             };
-            self.clients.insert("__default__".to_string(), rate_limited);
+            inner.clients.insert("__default__".to_string(), rate_limited);
         }
 
-        self.clients["__default__"]
+        inner.clients["__default__"]
             .handle(crate::agent::rate_limiter::Priority::UserFacing)
     }
 }
@@ -271,7 +309,7 @@ pub async fn build_agent(
     controller_prompt: Option<&str>,
     mode: AgentMode,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
-    registry: &mut ClientRegistry,
+    registry: &ClientRegistry,
     channel_id: Option<&str>,
 ) -> crate::Result<crate::agent::Agent> {
     if mode == AgentMode::Public {
@@ -577,7 +615,7 @@ pub async fn check_and_reload_agent(
     current_provider: &mut String,
     current_model: &mut String,
     controller_prompt: Option<&str>,
-    registry: &mut ClientRegistry,
+    registry: &ClientRegistry,
 ) -> ReloadOutcome {
     let (changed, new_settings) = match reloader.check().await {
         Ok(result) => result,
@@ -593,8 +631,8 @@ pub async fn check_and_reload_agent(
         current_settings.dangerous_no_sandbox = original_dangerous_no_sandbox;
     }
 
-    // Recreate the client registry so new API keys / base URLs take effect.
-    *registry = ClientRegistry::new(current_settings, None);
+    // Reload the client registry so new API keys / base URLs take effect.
+    registry.reload(current_settings, None);
 
     let messages = agent.messages().to_vec();
     let client = registry.get_default();
@@ -682,7 +720,7 @@ pub async fn execute_command(
     current_provider: &mut String,
     current_model: &mut String,
     config_path: Option<&Path>,
-    registry: &mut ClientRegistry,
+    registry: &ClientRegistry,
 ) -> CommandResult {
     if input == "/clear" {
         agent.clear();
