@@ -2,41 +2,33 @@
 
 A streaming AI agent loop in Rust, built to understand how these things actually work — and how to secure them.
 
-> **Educational project.** I'm an AppSec engineer building this to demystify AI agents — how they work, how to secure them, and how to deploy them responsibly. If you need a production agent, see [the projects that inspired this](#inspired-by). If you want to understand what's happening inside the loop, read on.
+> **Educational project.** I'm an AppSec engineer building this to demystify AI agents — how they work, how to secure them, and how to deploy them responsibly. Trust the loop, read the loop. If you need a production agent, see [the projects that inspired this](#inspired-by).
 
 <p align="center">
   <img src="docs/images/dyson-swarm.png" alt="Dyson Swarm" width="600">
 </p>
 
-## Why
-
-AI agents run tools in a loop — reading files, executing commands, making network requests. If you're going to trust one with access to your system, you should understand exactly what's happening inside that loop.
-
-Dyson is a from-scratch implementation of the core agent pattern: **LLM streams a response → detects tool calls → executes them → feeds results back → repeats**. Every component is a trait, every decision point is a hook, and every file is annotated. The goal isn't to replace Claude Code or Cursor — it's to make the loop legible and the security boundaries obvious.
-
 ## What you learn by reading this codebase
 
 - **Streaming** — SSE parsing, partial JSON accumulation, token-by-token delivery
-- **Tool calling** — `tool_use` blocks, execution, `tool_result` messages back to the LLM
-- **Security boundaries** — every tool call passes through a `Sandbox` that can allow, deny, or redirect
-- **MCP** — MCP servers are just another skill implementation; the agent loop doesn't know they exist
-- **Provider differences** — Anthropic and OpenAI have different SSE formats, message schemas, and tool calling conventions
+- **Tool calling** — `tool_use` blocks, execution, result messages back to the LLM
+- **Security boundaries** — every tool call passes through a `Sandbox`
+- **MCP** — MCP servers are just another skill; the agent loop doesn't know they exist
+- **Provider differences** — Anthropic and OpenAI have different SSE formats, schemas, and tool conventions
 
 ## What it does
 
-Dyson is a fully functional agent — not just a learning exercise. It streams completions, calls tools, manages context, and persists state across conversations.
+Dyson is a fully functional agent — not just a learning exercise.
 
-- **Self-improvement** — Dyson creates its own skills. Background "dream" tasks analyze completed work and distill reusable procedures into `SKILL.md` files. New skills hot-reload into the running session via mtime-based file watching — no restart needed. The agent gets better at recurring tasks the more it does them.
-- **Six LLM backends** — Anthropic, OpenAI, OpenRouter, Ollama Cloud, Claude Code, and Codex. Swap providers with a flag; the agent loop doesn't care which one it's talking to.
-- **Sandboxed tool execution** — Every tool call passes through a `Sandbox` that can allow, deny, or redirect it. The default `PolicySandbox` wraps bash in OS-level sandboxes (macOS Apple Containers / Linux bubblewrap) and enforces per-tool capability policies.
-- **MCP integration** — Connect to any MCP server (stdio or HTTP). MCP servers are just another skill; the agent loop doesn't know they exist.
-- **Workspace persistence** — Conversations, memory, and a knowledge base are stored in SQLite. Memory is tiered: always-in-context, FTS5 search, and journals. The knowledge base supports document ingestion with full-text search.
-- **Context compaction** — When the context window fills up, Dyson runs a five-phase summarization to compress history while preserving key information. Pre-compaction history is rotated for fine-tuning preservation.
-- **Subagents** — Spawn child agents with different models and tool sets. They inherit parent tools and report back.
-- **Multi-channel** — Terminal REPL and Telegram bot run concurrently. Add new channels by implementing the `Controller` trait.
-- **Dependency analysis** — Tool calls are grouped by resource dependencies and executed in parallel when safe, sequentially when not.
-- **MCP server mode** — Dyson can also expose itself as an MCP server over HTTP with bearer token auth, forwarding its workspace tools to other agents.
-- **Swarm** — Distribute tasks across multiple Dyson nodes. A central hub matches tasks to workers by hardware (GPU, RAM) and capabilities, dispatches signed work over SSE, and exposes an MCP interface so any agent can submit tasks. See [Swarm](docs/swarm.md).
+- **Self-improvement** — background "dream" tasks distill completed work into `SKILL.md` files that hot-reload via mtime watching
+- **Sandboxed tool execution** — every tool call passes through a `Sandbox` that can allow, deny, or redirect; the default `PolicySandbox` wraps bash in OS-level sandboxes (macOS Apple Containers / Linux bubblewrap)
+- **Workspace persistence** — conversations, memory, and a knowledge base in SQLite with tiered memory and FTS5 search
+- **Context compaction** — five-phase summarization when the context window fills; pre-compaction history rotated for fine-tuning
+- **Subagents** — child agents with different models and tool sets, inheriting parent tools
+- **Multi-channel** — terminal REPL and Telegram bot concurrently; add channels via the `Controller` trait
+- **Dependency analysis** — tool calls grouped by resource dependencies, executed in parallel when safe
+- **MCP server mode** — expose Dyson as an MCP server over HTTP with bearer token auth
+- **Swarm** — distribute tasks across Dyson nodes; see [Swarm (trusted-network only)](#swarm-trusted-network-only)
 
 ## The sandbox is the point
 
@@ -44,24 +36,28 @@ The `Sandbox` trait is the key abstraction. Every tool call goes through it:
 
 ```
 LLM says: tool_use("bash", {"command": "rm -rf /"})
-  → sandbox.check("bash", input, ctx)
-    → Allow { input }      — run the tool (with possibly rewritten input)
-    → Deny { reason }      — block it, tell the LLM why
-    → Redirect { tool, input } — transparently swap to a different tool
-  → sandbox.after(name, input, &mut output)
-    → inspect/redact/audit the output
+  -> sandbox.check("bash", input, ctx)
+    -> Allow { input }      — run the tool (with possibly rewritten input)
+    -> Deny { reason }      — block it, tell the LLM why
+    -> Redirect { tool, input } — transparently swap to a different tool
+  -> sandbox.after(name, input, &mut output)
+    -> inspect/redact/audit the output
 ```
 
-Sandbox implementations:
-
-- **PolicySandbox** — wraps bash commands in the OS's native sandbox (macOS [Apple Containers](https://github.com/apple/container) / Linux [bubblewrap](https://github.com/containers/bubblewrap)). Enforces per-tool capability policies at both the application level and OS level. Truncates oversized tool outputs.
+- **PolicySandbox** — wraps bash in the OS's native sandbox (macOS [Apple Containers](https://github.com/apple/container) / Linux [bubblewrap](https://github.com/containers/bubblewrap)). Enforces per-tool capability policies. Truncates oversized outputs.
 - **DangerousNoSandbox** — passthrough, no restrictions (development only)
 
-Sandbox prerequisites:
-- **macOS (Apple Silicon):** `brew install container`
-- **Linux:** `apt install bubblewrap`
-
 Dyson refuses to start without the OS sandbox binary unless `--dangerous-no-sandbox` is passed.
+
+## Swarm (trusted-network only)
+
+The swarm distributes tasks across Dyson nodes. A central hub signs work with Ed25519; nodes verify before executing.
+
+**Security model:** Ed25519 signing ensures tasks came from the hub you trust. It does **not** authenticate or authorize callers. `/mcp` and `/swarm/register` are open endpoints — anyone who can reach the hub can register as a node or dispatch tasks.
+
+**Recommended transports:** run the hub on a Tailscale mesh or behind an SSH port-forward. TLS is mandatory for off-localhost binds but it encrypts traffic — it does not gate callers. If you deploy the hub on the public internet, firewall it to known peers.
+
+See [docs/swarm.md](docs/swarm.md) for the full architecture, configuration, and task lifecycle.
 
 ## Footprint
 
@@ -71,16 +67,16 @@ Dyson refuses to start without the OS sandbox binary unless `--dangerous-no-sand
 
 ```
 User input
-  → Controller (terminal, Telegram, etc.)
-    → Agent.run()
-      → LlmClient.stream(messages, system_prompt, tools)
-        → Stream<StreamEvent>
-          → TextDelta("Hello")     → output immediately
-          → ToolUseComplete{...}   → Sandbox.check() → Tool.run() → Sandbox.after()
-          → MessageComplete        → done, or loop if tools were called
+  -> Controller (terminal, Telegram, etc.)
+    -> Agent.run()
+      -> LlmClient.stream(messages, system_prompt, tools)
+        -> Stream<StreamEvent>
+          -> TextDelta("Hello")     -> output immediately
+          -> ToolUseComplete{...}   -> Sandbox.check() -> Tool.run() -> Sandbox.after()
+          -> MessageComplete        -> done, or loop if tools were called
 ```
 
-Everything is a trait: `LlmClient` (streaming from any provider), `Tool` (a single capability), `Skill` (a bundle of tools with lifecycle hooks), `Sandbox` (gate every tool call), `Controller` (own the I/O lifecycle), and `SecretResolver` (resolve secrets from any backend).
+Everything is a trait: `LlmClient`, `Tool`, `Skill`, `Sandbox`, `Controller`, `SecretResolver`.
 
 ## Providers
 
@@ -92,7 +88,7 @@ Six LLM backends, selectable via `--provider` or config:
 | OpenAI | `"openai"` | `OPENAI_API_KEY` | Also works with vLLM, Together, rLLM, etc. via `base_url` |
 | OpenRouter | `"openrouter"` | `OPENROUTER_API_KEY` | 200+ models via OpenAI-compatible API |
 | Ollama Cloud | `"ollama-cloud"` | `OLLAMA_API_KEY` | Cloud-hosted models on ollama.com |
-| Claude Code | `"claude-code"` | None (uses stored creds) | Spawns the `claude` CLI. Zero config. Claude Code handles tools |
+| Claude Code | `"claude-code"` | None (uses stored creds) | Spawns the `claude` CLI. Zero config |
 | Codex | `"codex"` | None (uses stored creds) | Spawns the `codex` CLI. OpenAI Codex agent loop |
 
 Adding a new provider is a 3-step process — see [Adding a Provider](docs/adding-a-provider.md).
@@ -106,13 +102,6 @@ cargo run -- --dangerous-no-sandbox "what files are in this directory?"
 
 # Claude Code (no API key needed)
 cargo run -- --dangerous-no-sandbox --provider claude-code "hello"
-
-# Ollama Cloud
-export OLLAMA_API_KEY="..."
-cargo run -- --dangerous-no-sandbox --provider ollama-cloud --model llama3.3 "hello"
-
-# Local model (vLLM, rLLM, local Ollama, etc.)
-cargo run -- --dangerous-no-sandbox --provider openai --base-url http://localhost:9000 --model llama-3.2-3b-instruct "hello"
 ```
 
 `--dangerous-no-sandbox` disables all sandboxes — an explicit acknowledgment that tool calls are unrestricted. Run without arguments for interactive mode. Use `--config` for config files (see [`examples/`](examples/)).
@@ -133,7 +122,7 @@ Minimal:
 }
 ```
 
-With web search, MCP, and Telegram:
+With MCP and Telegram:
 
 ```json
 {
@@ -142,7 +131,6 @@ With web search, MCP, and Telegram:
     "claude": { "type": "claude-code", "models": ["sonnet"] }
   },
   "agent": { "provider": "claude" },
-  "web_search": { "provider": "searxng", "base_url": "https://searx.be" },
   "mcp_servers": {
     "context7": { "url": "https://mcp.context7.com/mcp" }
   },
@@ -175,7 +163,7 @@ Secrets can be literal strings or resolver references (`{ "resolver": "insecure_
 | [Subagents](docs/subagents.md) | Child agents with different models, tool inheritance, delegation |
 | [Dreaming](docs/dreaming.md) | Background cognition — memory consolidation, self-improvement, skill creation |
 | [Advisor](docs/advisor.md) | Advisor pattern — consult a stronger model for complex decisions |
-| [Swarm](docs/swarm.md) | Distributed task routing — hub, workers, constraint matching, Ed25519 signing |
+| [Swarm](docs/swarm.md) | Distributed task routing over a trusted network — hub, workers, Ed25519-signed dispatch |
 
 ## Tests
 

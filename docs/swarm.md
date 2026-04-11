@@ -42,79 +42,80 @@ Participation is symmetric: you use the swarm because you are part of it.
 
 ## Architecture
 
-```
-+--------------------------------------------------------+
-|                     SWARM HUB                          |
-|                                                        |
-|  /mcp               <- MCP server (tool discovery)     |
-|  /swarm/register    <- POST (node registration)        |
-|  /swarm/events      <- SSE  (push tasks to nodes)      |
-|  /swarm/heartbeat   <- POST (node status updates)      |
-|  /swarm/result      <- POST (task results from nodes)  |
-|  /swarm/checkpoint  <- POST (progress events from task)|
-|  /swarm/blob/{sha}  <- GET/PUT (large payloads)        |
-|                                                        |
-+------+----------+----------------------+---------------+
-       | SSE      | SSE                  | MCP
-       v          v                      v
-   +--------+ +--------+          +------------+
-   | Node A | | Node B |          | Any Dyson  |
-   | (GPU)  | | (CPU)  |          | (client)   |
-   |        | |        |          |            |
-   | Swarm  | | Swarm  |          | LLM calls: |
-   | Ctrl   | | Ctrl   |          | swarm_     |
-   |        | |        |          | dispatch   |
-   +--------+ +--------+          +------------+
-    Workers                        Task submitter
-    (receive + execute)            (via auto-wired MCP)
+```mermaid
+graph TB
+    subgraph Hub["Swarm Hub"]
+        MCP["/mcp"]
+        REG["/swarm/register"]
+        EVT["/swarm/events"]
+        HB["/swarm/heartbeat"]
+        RES["/swarm/result"]
+        CP["/swarm/checkpoint"]
+        BLOB["/swarm/blob/sha"]
+    end
+
+    A["Node A (GPU)"] -- "POST register/heartbeat/result" --> Hub
+    B["Node B (CPU)"] -- "POST register/heartbeat/result" --> Hub
+    Hub -- "SSE tasks + cancels" --> A
+    Hub -- "SSE tasks + cancels" --> B
+    C["Any Dyson (client)"] -- "MCP: swarm_dispatch / list_nodes" --> MCP
 ```
 
-Two protocols:
+- **SSE** (hub -> node): signed tasks and cancel events pushed to connected nodes.
+- **POST** (node -> hub): registration, heartbeats, results, checkpoints.
+- **MCP** (any agent -> hub): auto-wired so agents get `swarm_dispatch` and other hub-defined tools.
 
-- **SSE** (hub -> node): The hub pushes signed tasks to connected nodes.
-- **POST** (node -> hub): Nodes send registration, heartbeats, and results.
-- **MCP** (any agent -> hub): Auto-wired so agents get `swarm_dispatch` and other hub-defined tools.
+---
+
+## Task lifecycle
+
+End-to-end flow from dispatch through result delivery:
+
+```mermaid
+sequenceDiagram
+    participant Caller as Caller (any agent)
+    participant Hub
+    participant Node
+
+    Caller->>Hub: list_nodes
+    Hub-->>Caller: node manifests + status
+    Caller->>Hub: swarm_dispatch / swarm_submit (target_node_id)
+    Hub->>Hub: sign task (Ed25519)
+    Hub->>Node: SSE event: task (signed bytes)
+    Node->>Node: verify signature + parse
+    Node->>Node: fetch ref payloads, verify SHA-256
+    Node->>Node: execute (agent.run)
+    loop During execution
+        Node->>Hub: POST /swarm/checkpoint
+    end
+    Node->>Hub: POST /swarm/result
+    Hub-->>Caller: result (sync) or poll via swarm_task_result (async)
+```
+
+**Sync vs async dispatch:**
+
+| Path | Blocks? | Returns | Use when |
+|------|---------|---------|----------|
+| `swarm_dispatch` | Yes (up to timeout, default 600 s) | `SwarmResult` directly | Quick commands |
+| `swarm_submit` | No | `{ task_id, node_id, state: "running" }` | Fine-tuning, batch jobs, pipelines |
+
+Both insert into the same `TaskStore`, so `swarm_task_list`, `swarm_task_status`, `swarm_task_checkpoints`, `swarm_task_result`, and `swarm_task_cancel` work uniformly across them.
 
 ---
 
 ## Routing: the caller decides
 
-The hub holds the Ed25519 signing key, tracks nodes, and carries blobs.
-Those are its irreducible responsibilities. What it deliberately does
-**not** do is decide *which* node should run a given task. That
-decision is pushed to the caller — the LLM using the MCP tools — for
-one simple reason: any JSON schema the hub could invent to describe a
-"good fit" is strictly weaker than the caller's own reasoning. An LLM
-that has just watched a conversation about "fine-tune this on the
-dataset we cached yesterday" knows things about node affinity, loaded
-tools, OS preferences, and pipeline continuity that a three-field
-filter never will.
+The hub signs, tracks, and carries blobs. It deliberately does **not** decide which node runs a task — the caller (the LLM using MCP tools) does, because any JSON filter the hub could invent is strictly weaker than the caller's own reasoning about node affinity, loaded tools, OS preferences, and pipeline continuity.
 
 The flow:
 
-1. The calling agent calls `list_nodes`. This returns every peer's
-   full CPU list, GPU list (model + VRAM + driver), total RAM, free
-   disk, OS, capabilities (loaded MCP tools), current status, the
-   `busy_task_id` if busy, and the last heartbeat timestamp.
-2. The agent reasons about which node best fits the task and calls
-   `swarm_dispatch` / `swarm_submit` with `target_node_id` set to that
-   node's id.
-3. The hub validates the target (exists, idle) and dispatches. On
-   `NodeNotFound` or `NodeNotIdle`, the caller re-lists and retries
-   with a different node.
+1. Call `list_nodes` — returns every peer's CPUs, GPUs (model + VRAM + driver), RAM, disk, OS, capabilities, status, `busy_task_id` if busy, and last heartbeat.
+2. Reason about the best fit and call `swarm_dispatch` / `swarm_submit` with `target_node_id`.
+3. Hub validates (exists, idle) and dispatches. On error, re-list and retry.
 
-For callers that genuinely don't care which node runs it ("any idle
-node with a GPU and 64G RAM is fine"), the legacy `constraints` path
-stays as a shortcut. Exactly one of `target_node_id` or `constraints`
-must be provided on every dispatch — a bare `{prompt}`-only call is
-rejected with `NoTargetOrConstraints`, because "I didn't think about
-where this should run" is rarely what the caller actually means.
+For callers that don't care ("any idle GPU node with 64 GB"), the legacy `constraints` path stays as a shortcut. Exactly one of `target_node_id` or `constraints` must be provided — a bare `{prompt}` is rejected with `NoTargetOrConstraints`.
 
-Constraint filter rules (when the shortcut is used):
-
-1. Idle nodes only (busy and draining are dropped).
-2. Optional `needs_gpu` / `needs_capability` / `min_ram_gb` filter.
-3. Prefer the most free RAM, ties broken by lowest `node_id`.
+Constraint filter rules (shortcut path): idle nodes only; optional `needs_gpu` / `needs_capability` / `min_ram_gb`; prefer most free RAM, ties broken by lowest `node_id`.
 
 Dispatch errors surfaced to the caller:
 
@@ -131,58 +132,28 @@ Dispatch errors surfaced to the caller:
 
 ## The Hub (Server)
 
-The hub lives at [`crates/swarm/`](../crates/swarm/) and ships as a binary
-named `swarm`.  It is an in-memory, tokio-based HTTP server responsible for:
+The hub lives at [`crates/swarm/`](../crates/swarm/) and ships as a binary named `swarm`. It is an in-memory, tokio-based HTTP server responsible for:
 
-1. **Node registry** — Accepting `POST /swarm/register` with a `NodeManifest`,
-   assigning a `node_id` and auth token.
+1. **Node registry** — `POST /swarm/register` with a `NodeManifest`; returns `{ node_id, token }`.
+2. **Node selection** — validates caller's `target_node_id` or falls back to constraint filter.
+3. **Task dispatch + lifecycle** — signs the `SwarmTask` (Ed25519), pushes via SSE, records a `TaskRecord` in `TaskStore`.
+4. **Progress checkpoints** — `POST /swarm/checkpoint` appended to task record; callers tail via `swarm_task_checkpoints { since_sequence }`.
+5. **Cancellation** — marks record `Cancelled`, wakes sync waiters, pushes `cancel_task` SSE event. First-writer-wins on terminal states.
+6. **Blob storage** — `GET/PUT /swarm/blob/{sha256}` for large payloads.
+7. **Health monitoring** — heartbeats, stale-node reaping, terminal-task reaping (24 h, same 15 s ticker).
 
-2. **Node selection** — When a task is submitted (via MCP `swarm_dispatch`
-   or `swarm_submit`), the hub either validates an explicit
-   `target_node_id` from the caller (preferred — see
-   [Routing: the caller decides](#routing-the-caller-decides)) or
-   falls back to a simple constraint filter (GPU / capability / RAM)
-   when the caller uses the shortcut path. Exactly one of the two
-   must be provided on every dispatch.
-
-3. **Task dispatch + lifecycle tracking** — Signing the `SwarmTask` with its
-   Ed25519 private key, pushing it to the selected node via SSE
-   (`event: task`), and recording a `TaskRecord` in the in-memory
-   `TaskStore`.  Sync dispatches attach a oneshot waiter to the record;
-   async submissions leave it `None` and poll for results.  Every task
-   flows through the same store, so `swarm_task_list` sees sync and
-   async dispatches uniformly and `swarm_task_cancel` works on both.
-
-4. **Progress checkpoints** — Accepting `POST /swarm/checkpoint` from
-   nodes mid-task and appending them to the task's record.  Callers
-   tail progress via `swarm_task_checkpoints { since_sequence }`
-   without waiting for the final result.
-
-5. **Cancellation** — `swarm_task_cancel` marks the record `Cancelled`,
-   wakes any sync waiter with a synthetic Cancelled result, and pushes
-   a `cancel_task` SSE event so the owning node drops the in-flight
-   agent run.  `TaskStore::finalize` is first-writer-wins, so a late
-   real result from the node cannot overwrite the Cancelled state.
-
-6. **Blob storage** — Serving large payloads (`GET /swarm/blob/{sha256}`)
-   and accepting result payloads (`PUT /swarm/blob/{sha256}`).
-
-7. **Health monitoring** — Receiving heartbeats from nodes, reaping stale
-   entries, and also reaping terminal `TaskRecord`s older than 24 h
-   (same 15 s ticker, one reaper task).
+State is ephemeral: a hub restart forgets every registered node and every in-flight task.
 
 ### Running the hub
-
-Generate a signing key first, then start the hub:
 
 ```bash
 # Generate a signing key (one-time)
 swarm-keygen --out ./hub-data/hub.key
 
-# Start the hub (localhost — no TLS needed)
+# Localhost (no TLS needed)
 swarm --bind 127.0.0.1:8080 --data-dir ./hub-data
 
-# Start on an external interface (TLS required)
+# External interface with manual TLS
 swarm --bind 0.0.0.0:443 --data-dir ./hub-data \
       --cert cert.pem --private-key key.pem
 
@@ -191,14 +162,7 @@ swarm --bind 0.0.0.0:443 --data-dir ./hub-data \
       --letsencrypt --domain hub.example.com
 ```
 
-The hub prints the public key on startup:
-
-```
-Hub public key (add to node config): v1:K2dYr0base64encodedkey...
-```
-
-State is ephemeral: a hub restart forgets every registered node and
-every in-flight task.
+The hub prints the public key on startup: `Hub public key (add to node config): v1:K2dYr0base64encodedkey...`
 
 ### CLI flags
 
@@ -217,19 +181,6 @@ every in-flight task.
 | `--dangerous-no-tls` | — | Allow plain HTTP on non-localhost interfaces |
 | `--dangerous-no-auth` | — | Allow running without authentication on non-localhost interfaces |
 
-### TLS
-
-TLS is **mandatory** when binding to a non-localhost address.  Localhost
-(`127.0.0.1`, `::1`) skips TLS automatically.  Two TLS modes:
-
-- **Manual**: provide `--cert` and `--private-key` PEM files.
-- **Let's Encrypt**: provide `--letsencrypt` and `--domain`. Certificates
-  are automatically provisioned via TLS-ALPN-01 (same port, no port 80
-  needed) and cached in `--cert-cache-dir`.
-
-Pass `--dangerous-no-tls` to explicitly serve plain HTTP on external
-interfaces (not recommended).
-
 ### Hub endpoints
 
 | Endpoint | Method | Purpose |
@@ -243,14 +194,11 @@ interfaces (not recommended).
 | `/swarm/blob/{sha256}` | GET | Download a payload blob by hash |
 | `/swarm/blob/{sha256}` | PUT | Upload a result payload blob |
 
-The `/mcp` endpoint accepts an optional `?caller=<node_name>` query
-parameter.  When set, `list_nodes` results exclude the calling node so
-it only sees its peers.  `/swarm/checkpoint` and `/swarm/result` are
-authed by the node's bearer token from registration.
+`/mcp` accepts an optional `?caller=<node_name>` to exclude the calling node from `list_nodes`. `/swarm/checkpoint` and `/swarm/result` are authed by the node's bearer token from registration.
 
 ### SSE event types
 
-Events flow hub → node over `/swarm/events`.
+Events flow hub -> node over `/swarm/events`.
 
 | Event | Data | Description |
 |-------|------|-------------|
@@ -262,87 +210,60 @@ Events flow hub → node over `/swarm/events`.
 
 ### Signing tasks
 
-The hub signs every task with its Ed25519 private key. The wire format:
+The hub signs every task with its Ed25519 private key. Wire format:
 
 ```
 version (1 byte) || signature (64 bytes) || canonical JSON payload
 ```
 
-V1 = Ed25519. No algorithmic agility. To change the algorithm, bump the
-version. Nodes reject any version they don't recognize.
+V1 = Ed25519. No algorithmic agility. To change the algorithm, bump the version. Nodes reject any version they don't recognize.
 
 ---
 
 ## The Node (Client)
 
-The Dyson side. When `"type": "swarm"` appears in the controllers config,
-Dyson does two things automatically:
+When `"type": "swarm"` appears in the controllers config, Dyson does two things automatically.
 
 ### 1. Creates a SwarmController (worker)
 
-The controller lifecycle:
+Lifecycle phases:
 
-```
-SwarmController::run()
-  |-- build_agent() with shared ClientRegistry
-  |     Excludes swarm_dispatch from MCP tools (prevents recursion)
-  |     Injects controller prompt (instructs agent to use tools and
-  |       emit checkpoints during long operations)
-  |     Wraps list_nodes via ?caller= so agent only sees peers
-  |
-  |-- HardwareProbe::run() -> NodeManifest
-  |     |-- OS detection (compile-time)
-  |     |-- GPU: nvidia-smi (Linux/macOS), system_profiler (macOS)
-  |     |-- CPU: /proc/cpuinfo (Linux), sysctl (macOS)
-  |     |-- RAM: /proc/meminfo (Linux), sysctl (macOS)
-  |     |-- Disk: statvfs (Unix)
-  |     +-- Capabilities: agent.tool_names()
-  |
-  |-- POST /swarm/register -> { node_id, token }
-  |-- GET /swarm/events -> open SSE stream
-  |-- Spawn heartbeat task (POST every 15s, tears down session on
-  |     3 consecutive failures so the outer loop reconnects)
-  |
-  +-- Event loop:
-        |-- SSE "task" event received
-        |     |-- Verify Ed25519 signature against public_key
-        |     |-- Parse SwarmTask from JSON; mark status Busy{task_id}
-        |     |-- Fetch ref payloads (GET /swarm/blob/{sha256})
-        |     |-- Verify SHA-256 hash of each blob
-        |     |
-        |     |-- Create per-task CancellationToken; install on
-        |     |     agent.tool_context.cancellation so cooperative
-        |     |     tools (web_fetch, web_search) observe it
-        |     |
-        |     |-- Spawn per-task checkpoint forwarder:
-        |     |     mpsc::Receiver<TaskCheckpoint>
-        |     |       -> POST /swarm/checkpoint
-        |     |     (channel scoped to this task; stray events
-        |     |      between tasks can't land on the wrong record)
-        |     |
-        |     |-- Attach (task_id, task_start, cp_tx) to
-        |     |     SwarmCaptureOutput so Output::checkpoint builds
-        |     |     a TaskCheckpoint with a monotonic sequence and
-        |     |     try_send's it to the forwarder
-        |     |
-        |     |-- Nested select! while execute_task runs:
-        |     |     |-- agent future wins   -> SwarmResult
-        |     |     |-- cancel_task event   -> token.cancel()
-        |     |     +-- other events       -> logged and deferred
-        |     |
-        |     |-- Inside execute_task, agent.run is raced against:
-        |     |     |-- cancel_token.cancelled() -> Cancelled
-        |     |     |-- timeout_secs (if any)    -> Failed
-        |     |     +-- agent completion         -> Completed / Failed
-        |     |
-        |     |-- Drop checkpoint tx; forwarder drains and exits
-        |     |-- POST /swarm/result  (first-writer-wins on the hub)
-        |     +-- agent.clear() (reset for next task)
-        |
-        |-- SSE "cancel_task" with no in-flight task -> log + ignore
-        |-- SSE "shutdown" -> break
-        +-- SSE disconnect -> reconnect with exponential backoff
-              (base 2s, capped at 60s, max 10 attempts)
+- **Build agent** — shared `ClientRegistry`; excludes `swarm_dispatch` (prevents recursion); injects controller prompt; wraps `list_nodes` via `?caller=` so the agent only sees peers.
+- **Probe hardware** — `HardwareProbe::run()` detects OS, GPUs (`nvidia-smi` / `system_profiler`), CPUs (`/proc/cpuinfo` / `sysctl`), RAM, disk. Capabilities = agent's loaded tool names.
+- **Register** — `POST /swarm/register` -> `{ node_id, token }`.
+- **Connect** — `GET /swarm/events` opens the SSE stream; spawns a heartbeat task (POST every 15 s, tears down on 3 consecutive failures).
+- **Event loop** — receives tasks, executes, reconnects on disconnect (exponential backoff: base 2 s, cap 60 s, max 10 attempts).
+
+Per-task execution with the nested `select!` races:
+
+```mermaid
+sequenceDiagram
+    participant Loop as Event Loop
+    participant Exec as execute_task
+    participant Agent as agent.run()
+    participant Fwd as Checkpoint Forwarder
+    participant Hub
+
+    Loop->>Loop: verify signature, parse SwarmTask
+    Loop->>Loop: fetch + verify ref payloads
+    Loop->>Fwd: spawn (mpsc rx -> POST /swarm/checkpoint)
+    Loop->>Exec: spawn with CancellationToken
+
+    par Nested select! in event loop
+        Exec->>Agent: run
+        Note over Exec: select! agent vs cancel_token vs timeout
+    and SSE events while task runs
+        Loop->>Loop: cancel_task -> token.cancel()
+        Loop->>Loop: other events -> log + defer
+    end
+
+    Agent-->>Fwd: checkpoint events via mpsc tx
+    Fwd->>Hub: POST /swarm/checkpoint (per event)
+
+    Exec-->>Loop: SwarmResult
+    Loop->>Loop: drop checkpoint tx (forwarder drains + exits)
+    Loop->>Hub: POST /swarm/result
+    Loop->>Loop: agent.clear() (reset for next task)
 ```
 
 ### 2. Auto-wires the hub as an MCP skill (client)
@@ -364,55 +285,16 @@ settings.skills.push(SkillConfig::Mcp(Box::new(McpConfig {
 })));
 ```
 
-This means **every** agent on this Dyson (terminal, telegram, swarm) gets
-the hub's MCP tools — `swarm_dispatch`, `swarm_submit`, `swarm_status`,
-`list_nodes`, and the task-query tools below.
+This means **every** agent on this Dyson (terminal, telegram, swarm) gets the hub's MCP tools — `swarm_dispatch`, `swarm_submit`, `swarm_status`, `list_nodes`, and the task-query tools.
 
 The swarm controller's own agent is special:
 - `swarm_dispatch` is excluded (prevents recursive task loops)
-- `list_nodes` results are filtered by the hub (via `?caller=`) so the
-  agent never sees its own node — only peers
-- A controller prompt instructs the agent to use tools (especially bash)
-  and never guess at system details
+- `list_nodes` results are filtered by the hub (via `?caller=`) so the agent never sees its own node
+- A controller prompt instructs the agent to use tools (especially bash) and never guess at system details
 
 ---
 
-## Long-running tasks and checkpoints
-
-There are two MCP dispatch paths, and they share everything except
-whether the caller blocks:
-
-- **`swarm_dispatch`** — synchronous.  The hub inserts a `TaskRecord`
-  with a `oneshot::Sender<SwarmResult>` waiter, pushes the signed task,
-  and blocks the MCP call until the node posts a result (capped by the
-  dispatch timeout, default 600 s).  Fine for quick commands.
-- **`swarm_submit`** — asynchronous.  Same flow, but the record's
-  waiter is `None` and the tool returns a `task_id` in milliseconds.
-  The caller observes progress and the final result via the query
-  tools below.
-
-Both paths insert into the same `TaskStore`, so `swarm_task_list`,
-`swarm_task_status`, `swarm_task_checkpoints`, `swarm_task_result`, and
-`swarm_task_cancel` work uniformly across them.  A stuck
-`swarm_dispatch` can even be introspected from a second MCP client via
-`swarm_task_status`.
-
-Use `swarm_submit` for anything you wouldn't want blocked on:
-fine-tuning, multi-hour batch jobs, dataset processing, etc.
-
-### `swarm_submit` — fire and acknowledge
-
-```
-swarm_submit { prompt, payloads?, timeout_secs?, constraints? }
-  → { task_id, node_id, submitted_at_unix, state: "running" }
-```
-
-Returns in a few milliseconds.  The task is signed, pushed to the
-selected node over SSE, and tracked in the hub's in-memory `TaskStore`.
-No oneshot waiter is registered; the caller discovers progress and the
-final result by polling.
-
-### `swarm_checkpoint` — progress from inside the task
+## Checkpoints
 
 A built-in tool the swarm controller's agent can call during execution:
 
@@ -420,29 +302,29 @@ A built-in tool the swarm controller's agent can call during execution:
 swarm_checkpoint { message, progress? }
 ```
 
-Each call attaches a `CheckpointEvent` to the tool's `ToolOutput` as a
-side-channel, mirroring how `send_file` attaches file paths.  The
-agent execution loop forwards `tool_output.checkpoints` to the
-controller's `Output::checkpoint` hook the same way it forwards
-`tool_output.files` to `Output::send_file`.
+Each call attaches a `CheckpointEvent` to the tool's `ToolOutput` as a side-channel. The agent execution loop forwards these to the controller's `Output::checkpoint` hook.
 
-The swarm controller's `Output::checkpoint` impl stamps the event
-with a monotonic sequence number and the elapsed seconds since task
-start, packs it into a `TaskCheckpoint`, and `try_send`s it down a
-**per-task** `mpsc::Sender<TaskCheckpoint>` installed at the start
-of the task.  A dedicated forwarder tokio task reads from the
-receiver and POSTs each event to `/swarm/checkpoint`.  Scoping the
-channel per task means stray events from one task can never land on
-another's record — when the task finishes, the controller drops the
-sender, the forwarder drains, and the channel is gone.
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Output as SwarmCaptureOutput
+    participant TX as mpsc tx (per-task)
+    participant Fwd as Forwarder task
+    participant Hub
 
-Outside the swarm controller the default `Output::checkpoint` impl
-drops the event, so the tool is a harmless no-op for terminal and
-telegram agents — no conditional skill wiring needed.
+    Note over TX: created at task start
+    Agent->>Output: checkpoint(message, progress)
+    Output->>Output: stamp sequence + elapsed
+    Output->>TX: try_send(TaskCheckpoint)
+    TX->>Fwd: recv
+    Fwd->>Hub: POST /swarm/checkpoint
+    Note over TX: task ends -> tx dropped
+    Fwd->>Fwd: drain remaining -> exit
+```
 
-The agent is encouraged (via the controller prompt) to emit checkpoints
-at natural milestones — once per epoch during training, once per batch
-during processing, once per stage of a pipeline.
+The channel is scoped per task — stray events can never land on the wrong record. Outside the swarm controller, the default `Output::checkpoint` impl drops the event, so the tool is a harmless no-op for terminal and telegram agents.
+
+The agent is encouraged (via the controller prompt) to emit checkpoints at natural milestones — per epoch, per batch, per pipeline stage.
 
 ### Polling MCP tools
 
@@ -454,90 +336,46 @@ during processing, once per stage of a pipeline.
 | `swarm_task_cancel { task_id }` | Mark a running task cancelled and push a `cancel_task` SSE event to the owning node |
 | `swarm_task_list { limit? }` | Recent tasks newest-first, bounded by `limit` (default 50). Includes sync dispatches too — every task flows through the same store |
 
-`swarm_task_result` uses a single shape: while running, only `state`
-appears; once the task is terminal (`completed` / `failed` / `cancelled`)
-the full `SwarmResult` is attached.  Callers can't confuse "still
-running" with "completed successfully" because `result` is only present
-in the terminal case.
+`swarm_task_result` shape: while running, only `state` appears; once terminal (`completed` / `failed` / `cancelled`) the full `SwarmResult` is attached.
 
 ### Storage and lifetime
 
-`TaskRecord`s are kept in-memory on the hub only — there is **no
-persistence across hub restart**.  The same reaper task that culls stale
-nodes also drops terminal tasks older than 24 hours.  Long-running
-callers should retrieve their results before the hub is restarted.
+`TaskRecord`s are in-memory only — no persistence across hub restart. The reaper drops terminal tasks older than 24 hours. Retrieve results before restarting the hub.
 
-### Cancellation
+---
+
+## Cancellation
 
 `swarm_task_cancel { task_id }` is a three-step cooperative cancel:
 
-1. **Hub** — `TaskStore::cancel` atomically marks the record
-   `Cancelled`, stores a synthetic `TaskStatus::Cancelled`
-   `SwarmResult`, and takes out the oneshot waiter (if any).  If a
-   `swarm_dispatch` caller was blocked on this task, the waiter is
-   fired with the synthetic result and the sync tool call returns
-   immediately.  The hub then flips the node back to Idle and pushes
-   a `cancel_task` SSE event to the owning node.
-2. **Node event loop** — while `execute_task` is running, the outer
-   event loop races `exec_fut` against `events.recv()` inside a
-   nested `tokio::select!`.  A matching `cancel_task` event calls
-   `cancel_token.cancel()` on the per-task `CancellationToken`.
-3. **Node execution** — `execute_task` itself races `agent.run()`
-   against `cancel_token.cancelled()` (and the optional timeout) in
-   another select.  On cancel the agent future is dropped, any text
-   accumulated in `SwarmCaptureOutput` is preserved, and the function
-   returns a `TaskStatus::Cancelled` result.  Tools that poll
-   `ctx.cancellation` (currently `web_fetch` and `web_search`)
-   observe the token directly; others — including bash — only stop
-   at the next `await` point when the enclosing future is dropped.
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Hub
+    participant Loop as Node Event Loop
+    participant Exec as execute_task
+    participant Agent as agent.run()
 
-This makes cancellation **cooperative, not instant**: a bash command
-already running will keep going until it completes its current output
-read, then the tool result is discarded.  Training loops that yield
-regularly stop almost immediately; a tight CPU-bound bash loop doesn't.
-Treat cancellation as "please stop soon" rather than a hard kill.
+    Caller->>Hub: swarm_task_cancel { task_id }
+    Hub->>Hub: mark Cancelled (first-writer-wins)
+    Hub->>Hub: wake sync waiter (if any)
+    Hub->>Hub: flip node to Idle
+    Hub->>Loop: SSE cancel_task { task_id }
 
-`TaskStore::finalize` is first-writer-wins for terminal states: if the
-node races the hub and posts a real result after cancellation, the
-state stays `Cancelled` but the node's actual `SwarmResult` is still
-stored under `result` for debugging.
+    Note over Loop,Exec: nested select!
+    Loop->>Exec: cancel_token.cancel()
 
-### What v1 still doesn't do
+    Note over Exec,Agent: inner select!
+    Exec->>Agent: drop agent future
+    Exec->>Exec: preserve accumulated output
+    Exec-->>Loop: TaskStatus::Cancelled
 
-- **Persistence**: hub restart loses all in-flight and recent task state.
-- **Queueing**: if no node is eligible, both `swarm_dispatch` and
-  `swarm_submit` fail fast with `no eligible node`.
-- **Automatic progress**: checkpoints are explicitly emitted by the
-  agent calling `swarm_checkpoint`.  There's no automatic scraping of
-  bash stdout.
-- **Hard kill of bash subprocesses on cancel**: tools that don't check
-  `ctx.cancellation` (e.g. bash) keep running until their next async
-  yield point.
-
-### Example flow — fine-tune a model
-
+    Loop->>Hub: POST /swarm/result (Cancelled)
 ```
-1. Caller:  swarm_submit { prompt: "fine-tune meta-llama/Llama-3.1-8B on data.jsonl ...",
-                           constraints: { needs_gpu: true, min_ram_gb: 64 } }
-            → { task_id: "abc-123", node_id: "gpu-02", state: "running" }
 
-2. Node agent during execution:
-   - loads dataset
-   - calls swarm_checkpoint { message: "dataset loaded", progress: 0.05 }
-   - starts training
-   - per epoch: swarm_checkpoint { message: "epoch N/10 loss=...", progress: N/10 }
-   - saves weights to ./model.safetensors (picked up via send_file)
-   - finishes
+Cancellation is **cooperative, not instant**: a running bash command finishes its current output read before the tool result is discarded. Training loops that yield regularly stop almost immediately; a tight CPU-bound bash loop doesn't. Treat cancellation as "please stop soon" rather than a hard kill.
 
-3. Caller polls every minute:
-   - swarm_task_status { task_id: "abc-123" }
-     → { state: "running", checkpoint_count: 4, last_sequence: 4, ... }
-   - swarm_task_checkpoints { task_id: "abc-123", since_sequence: 0 }
-     → all four progress lines so far
-
-4. Eventually: swarm_task_result { task_id: "abc-123" }
-   → { state: "completed", result: { text: "...", payloads: [...] } }
-```
+`TaskStore::finalize` is first-writer-wins: if the node races the hub and posts a result after cancellation, the state stays `Cancelled` but the node's actual `SwarmResult` is stored under `result` for debugging.
 
 ---
 
@@ -551,16 +389,13 @@ Tasks and results can carry file attachments. Two tiers:
 { "type": "inline", "name": "config.yaml", "data": "base64..." }
 ```
 
-**Ref** — Large data (datasets, model weights) is referenced by SHA-256 hash
-and transferred separately:
+**Ref** — Large data (datasets, model weights) is referenced by SHA-256 hash and transferred separately:
 
 ```json
 { "type": "ref", "name": "dataset.json", "sha256": "a1b2c3...", "size": 2147483648 }
 ```
 
-The signature covers the hashes, so tampering with referenced data breaks the
-verification chain. The node fetches blobs via `GET /swarm/blob/{sha256}` and
-verifies the hash before starting work.
+The signature covers the hashes, so tampering with referenced data breaks the verification chain. The node fetches blobs via `GET /swarm/blob/{sha256}` and verifies the hash before starting work.
 
 ---
 
@@ -580,44 +415,17 @@ The public key in config encodes the version:
               version    32 bytes, base64
 ```
 
-Verification:
-
-1. Read version byte from wire message
+Verification steps:
+1. Read version byte from wire message.
 2. Version doesn't match config key? **Reject.** No fallback.
-3. Verify Ed25519 signature over the JSON payload bytes
-4. Invalid? **Reject.**
-5. Parse the now-trusted JSON as `SwarmTask`
+3. Verify Ed25519 signature over the JSON payload bytes.
+4. Invalid? **Reject.** Parse the now-trusted JSON as `SwarmTask`.
 
 ---
 
-## Node Manifest
+## Node Manifest and `list_nodes`
 
-Sent during registration. The hub stores this and surfaces it via
-`list_nodes` so callers can reason about target selection.
-
-```json
-{
-  "node_name": "gpu-workstation-01",
-  "os": "linux",
-  "hardware": {
-    "cpus": [{ "model": "AMD Ryzen 9 7950X", "cores": 32, "physical_cores": 16 }],
-    "gpus": [{ "model": "NVIDIA RTX 4090", "vram_bytes": 25769803776, "driver": "560.35", "cores": null }],
-    "ram_bytes": 68719476736,
-    "disk_free_bytes": 500000000000
-  },
-  "capabilities": ["bash", "read_file", "web_search", "mcp__github__create_pull_request"],
-  "status": { "status": "idle" }
-}
-```
-
-Hardware detection is conditional-compiled per OS. Capabilities are the
-agent's loaded tool names.
-
-### `list_nodes` output
-
-Each row in `list_nodes` surfaces the full manifest plus runtime
-state. The enriched shape is deliberately verbose so the LLM caller
-has enough detail to reason about a `target_node_id`:
+Sent during registration; the hub stores it and surfaces it via `list_nodes`. Each row returns the manifest plus runtime state:
 
 ```json
 {
@@ -626,134 +434,74 @@ has enough detail to reason about a `target_node_id`:
   "os": "linux",
   "status": "busy",
   "busy_task_id": "uuid",
-  "capabilities": ["bash", "web_search"],
+  "capabilities": ["bash", "read_file", "web_search", "mcp__github__create_pull_request"],
   "hardware": {
-    "ram_bytes": 68719476736,
-    "disk_free_bytes": 500000000000,
     "cpus": [{ "model": "AMD Ryzen 9 7950X", "cores": 32, "physical_cores": 16 }],
-    "gpus": [{ "model": "NVIDIA RTX 4090", "vram_bytes": 25769803776, "driver": "560.35", "cores": null }]
+    "gpus": [{ "model": "NVIDIA RTX 4090", "vram_bytes": 25769803776, "driver": "560.35", "cores": null }],
+    "ram_bytes": 68719476736,
+    "disk_free_bytes": 500000000000
   },
   "last_heartbeat_unix": 1744387200
 }
 ```
 
-`busy_task_id` only appears when `status` is `"busy"`.
-`last_heartbeat_unix` is the wall-clock time of the node's most recent
-heartbeat (0 if the clock error path triggers).
+Hardware detection is conditional-compiled per OS. `busy_task_id` only appears when `status` is `"busy"`. `last_heartbeat_unix` is the wall-clock time of the most recent heartbeat.
 
 ---
 
 ## Network Security
 
-The hub has two security layers that are enforced by default on
-non-localhost interfaces.  Both must be explicitly disabled if you
-want to run without them.
+The hub enforces two safety checks on non-localhost interfaces. Localhost (`127.0.0.1`, `::1`) skips both automatically.
 
-Binding to an external interface requires **both** `--dangerous-no-tls`
-and `--dangerous-no-auth` if you don't have TLS configured:
+### TLS
 
-```bash
-# This will fail — two separate checks must pass:
-swarm --bind 0.0.0.0:8080 --data-dir ./hub-data
+TLS is **mandatory** when binding to a non-localhost address. Two modes:
 
-# This works — both risks explicitly acknowledged:
-swarm --bind 0.0.0.0:8080 --data-dir ./hub-data \
-      --dangerous-no-tls --dangerous-no-auth
-```
+- **Manual**: `--cert` and `--private-key` PEM files.
+- **Let's Encrypt**: `--letsencrypt` and `--domain`. Certificates provisioned via TLS-ALPN-01 (same port, no port 80 needed), cached in `--cert-cache-dir` (default `.swarm-certs`).
 
-Localhost (`127.0.0.1`, `::1`) skips both checks automatically.
-
-### TLS (transport encryption)
-
-TLS is **mandatory** when binding to a non-localhost address.  The hub
-refuses to start without it.
-
-**Manual TLS:**
-
-```bash
-swarm --bind 0.0.0.0:443 --data-dir ./hub-data \
-      --cert /path/to/fullchain.pem \
-      --private-key /path/to/privkey.pem
-```
-
-**Let's Encrypt (automatic):**
-
-```bash
-swarm --bind 0.0.0.0:443 --data-dir ./hub-data \
-      --letsencrypt --domain hub.example.com \
-      --letsencrypt-email admin@example.com
-```
-
-Certificates are provisioned via TLS-ALPN-01 (same port, no port 80
-needed) and cached in `--cert-cache-dir` (default: `.swarm-certs`).
-
-**Disabling TLS (not recommended):**
-
-```bash
-swarm --bind 0.0.0.0:8080 --data-dir ./hub-data --dangerous-no-tls
-```
+Pass `--dangerous-no-tls` to serve plain HTTP on external interfaces (not recommended).
 
 ### Authentication
 
-The hub requires `--dangerous-no-auth` when binding to a non-localhost
-address.  There is no pluggable auth system yet — this flag exists to
-make the lack of authentication explicit and intentional.
+Bearer tokens for node-level auth. On `POST /swarm/register` the hub generates a random 32-byte token; all subsequent node requests must include `Authorization: Bearer <token>`.
 
-The hub uses bearer tokens for node-level authentication.  When a node
-registers via `POST /swarm/register`, the hub generates a random
-32-byte token and returns it.  All subsequent requests from that node
-must include `Authorization: Bearer <token>`.
+- **Protected:** `/swarm/events`, `/swarm/heartbeat`, `/swarm/result`, `/swarm/blob`
+- **Unprotected:** `/swarm/register` (to obtain a token), `/mcp` (serves tool calls from any Dyson agent)
 
-Protected endpoints: `/swarm/events`, `/swarm/heartbeat`,
-`/swarm/result`, `/swarm/blob`.
-
-Unprotected endpoints: `/swarm/register` (to obtain a token), `/mcp`.
-
-The `/mcp` endpoint is open because it serves tool calls from any
-Dyson agent — not just registered nodes.  Ed25519 task signing
-provides integrity for dispatched work, but the MCP endpoint itself
-has no auth gate.
+There is no pluggable auth system yet — `--dangerous-no-auth` exists to make the lack of caller-level authentication explicit. Ed25519 signing provides integrity for dispatched work, but the MCP endpoint has no auth gate.
 
 ### Deployment patterns
 
-**Localhost (development):**
+| Pattern | Command | Notes |
+|---------|---------|-------|
+| **Localhost** | `swarm --bind 127.0.0.1:8080 --data-dir ./hub-data` | No TLS, no flags. Good for development. |
+| **SSH forward** | Hub: `--bind 127.0.0.1:8080`; nodes: `ssh -L 8080:127.0.0.1:8080 user@hub -N` | Nodes point at `http://127.0.0.1:8080`; traffic encrypted via SSH. |
+| **Tailscale / WireGuard** | `swarm --bind 100.x.y.z:443 --data-dir ./hub-data --cert cert.pem --private-key key.pem` | All traffic within the mesh. |
+| **Public internet** | `swarm --bind 0.0.0.0:443 --data-dir ./hub-data --letsencrypt --domain hub.example.com` | TLS mandatory. Restrict access at the firewall to known node IPs. |
 
-```bash
-swarm --bind 127.0.0.1:8080 --data-dir ./hub-data
+---
+
+## Example flow — fine-tune a model
+
 ```
+1. Caller:  swarm_submit { prompt: "fine-tune meta-llama/Llama-3.1-8B on data.jsonl ...",
+                           constraints: { needs_gpu: true, min_ram_gb: 64 } }
+            -> { task_id: "abc-123", node_id: "gpu-02", state: "running" }
 
-No TLS, no flags.  Good for local testing.
+2. Node agent during execution:
+   - loads dataset
+   - swarm_checkpoint { message: "dataset loaded", progress: 0.05 }
+   - starts training
+   - per epoch: swarm_checkpoint { message: "epoch N/10 loss=...", progress: N/10 }
+   - saves weights to ./model.safetensors (picked up via send_file)
 
-**SSH port forwarding:**
-
-```bash
-# Hub machine — localhost only
-swarm --bind 127.0.0.1:8080 --data-dir ./hub-data
-
-# Each node — forward local 8080 to the hub
-ssh -L 8080:127.0.0.1:8080 user@hub-host -N
+3. Caller polls:
+   - swarm_task_checkpoints { task_id: "abc-123", since_sequence: 0 }
+     -> progress lines so far
+   - swarm_task_result { task_id: "abc-123" }
+     -> { state: "completed", result: { text: "...", payloads: [...] } }
 ```
-
-Nodes point at `http://127.0.0.1:8080` — traffic is encrypted via SSH.
-
-**Tailscale / WireGuard:**
-
-```bash
-swarm --bind 100.x.y.z:443 --data-dir ./hub-data \
-      --cert cert.pem --private-key key.pem
-```
-
-All traffic stays within the mesh.
-
-**Public internet:**
-
-```bash
-swarm --bind 0.0.0.0:443 --data-dir ./hub-data \
-      --letsencrypt --domain hub.example.com
-```
-
-TLS is mandatory.  Consider additionally restricting access at the
-firewall level to known node IPs.
 
 ---
 
@@ -777,3 +525,12 @@ Tests cover:
 - macOS VRAM string parsing, system_profiler JSON parsing (macOS only)
 - SwarmControllerConfig: valid, defaults, missing required fields
 - Inline payload fetch and verification
+
+---
+
+## What v1 doesn't do
+
+- **Persistence**: hub restart loses all in-flight and recent task state.
+- **Queueing**: if no node is eligible, both dispatch paths fail fast with `no eligible node`.
+- **Automatic progress**: checkpoints are explicitly emitted by the agent calling `swarm_checkpoint`. No automatic scraping of bash stdout.
+- **Hard kill of bash subprocesses on cancel**: tools that don't check `ctx.cancellation` keep running until their next async yield point.
