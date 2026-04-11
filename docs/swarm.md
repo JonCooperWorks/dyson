@@ -342,32 +342,113 @@ web_search" tasks to nodes that have those tools.
 
 ## Network Security
 
-TLS is enforced for non-localhost binds. The hub refuses to start on an
-external interface without `--cert`/`--private-key`, `--letsencrypt`, or
-`--dangerous-no-tls`.
+The hub has two security layers that are enforced by default on
+non-localhost interfaces.  Both must be explicitly disabled if you
+want to run without them.
 
-For additional network-level isolation, consider running behind a secure
-overlay:
+### TLS (transport encryption)
 
-### SSH port forwarding
+TLS is **mandatory** when binding to a non-localhost address.  The hub
+refuses to start without it:
+
+```
+$ swarm --bind 0.0.0.0:8080 --data-dir ./hub-data
+Error: TLS is required when binding to a non-localhost address (0.0.0.0:8080).
+
+Provide TLS certificates:
+  --cert <path> --private-key <path>
+
+Or use Let's Encrypt:
+  --letsencrypt --domain <domain>
+
+Or explicitly disable TLS (not recommended):
+  --dangerous-no-tls
+```
+
+Localhost (`127.0.0.1`, `::1`) skips TLS automatically — no flags needed.
+
+**Manual TLS:**
 
 ```bash
-# On the hub machine — bind to localhost only (the default)
+swarm --bind 0.0.0.0:443 --data-dir ./hub-data \
+      --cert /path/to/fullchain.pem \
+      --private-key /path/to/privkey.pem
+```
+
+**Let's Encrypt (automatic):**
+
+```bash
+swarm --bind 0.0.0.0:443 --data-dir ./hub-data \
+      --letsencrypt --domain hub.example.com \
+      --letsencrypt-email admin@example.com
+```
+
+Certificates are provisioned via TLS-ALPN-01 (same port, no port 80
+needed) and cached in `--cert-cache-dir` (default: `.swarm-certs`).
+
+**Disabling TLS (not recommended):**
+
+```bash
+swarm --bind 0.0.0.0:8080 --data-dir ./hub-data --dangerous-no-tls
+```
+
+### Authentication
+
+The hub uses bearer tokens for node authentication.  When a node
+registers via `POST /swarm/register`, the hub generates a random
+32-byte token and returns it.  All subsequent requests from that node
+must include `Authorization: Bearer <token>`.
+
+Protected endpoints: `/swarm/events`, `/swarm/heartbeat`,
+`/swarm/result`, `/swarm/blob`.
+
+Unprotected endpoints: `/swarm/register` (to obtain a token), `/mcp`.
+
+The `/mcp` endpoint is open because it serves tool calls from any
+Dyson agent — not just registered nodes.  Ed25519 task signing
+provides integrity for dispatched work, but the MCP endpoint itself
+has no auth gate.
+
+### Deployment patterns
+
+**Localhost (development):**
+
+```bash
+swarm --bind 127.0.0.1:8080 --data-dir ./hub-data
+```
+
+No TLS, no flags.  Good for local testing.
+
+**SSH port forwarding:**
+
+```bash
+# Hub machine — localhost only
 swarm --bind 127.0.0.1:8080 --data-dir ./hub-data
 
-# On each node machine — forward local 8080 to the hub
+# Each node — forward local 8080 to the hub
 ssh -L 8080:127.0.0.1:8080 user@hub-host -N
 ```
 
-### Tailscale
+Nodes point at `http://127.0.0.1:8080` — traffic is encrypted via SSH.
+
+**Tailscale / WireGuard:**
 
 ```bash
-# On the hub machine — bind to the Tailscale address with TLS
-swarm --bind 100.x.y.z:8080 --data-dir ./hub-data \
+swarm --bind 100.x.y.z:443 --data-dir ./hub-data \
       --cert cert.pem --private-key key.pem
 ```
 
-All traffic between nodes stays within the Tailscale mesh.
+All traffic stays within the mesh.
+
+**Public internet:**
+
+```bash
+swarm --bind 0.0.0.0:443 --data-dir ./hub-data \
+      --letsencrypt --domain hub.example.com
+```
+
+TLS is mandatory.  Consider additionally restricting access at the
+firewall level to known node IPs.
 
 ---
 
