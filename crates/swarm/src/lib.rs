@@ -21,7 +21,8 @@ use tokio::sync::broadcast;
 
 use crate::blob::BlobStore;
 use crate::key::HubKeyPair;
-use crate::registry::NodeRegistry;
+use crate::registry::persistence::{NodePersistence, SqliteNodePersistence};
+use crate::registry::{NodeRegistry, reconcile_recovered_nodes};
 use crate::tasks::persistence::{SqliteTaskPersistence, TaskPersistence};
 use crate::tasks::{TaskStore, reconcile_orphaned_running};
 
@@ -99,8 +100,9 @@ pub struct Hub {
 impl Hub {
     /// Build a new hub from an already-loaded key and data directory.
     ///
-    /// Opens the SQLite task persistence store at `data_dir/tasks.db`
-    /// and rehydrates any previously-persisted tasks into memory.
+    /// Opens the SQLite task and node-registry persistence stores at
+    /// `data_dir/tasks.db` and `data_dir/nodes.db` and rehydrates any
+    /// previously-persisted state into memory.
     pub async fn new(
         key: HubKeyPair,
         data_dir: &std::path::Path,
@@ -108,30 +110,54 @@ impl Hub {
     ) -> std::io::Result<Arc<Self>> {
         let blobs = BlobStore::new(data_dir.join("blobs"))?;
 
-        let db_path = data_dir.join("tasks.db");
-        let persistence: Arc<dyn TaskPersistence> = Arc::new(
-            SqliteTaskPersistence::open(&db_path)
+        let tasks_db_path = data_dir.join("tasks.db");
+        let task_persistence: Arc<dyn TaskPersistence> = Arc::new(
+            SqliteTaskPersistence::open(&tasks_db_path)
                 .await
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
         );
-        let mut recovered = persistence
+        let mut recovered_tasks = task_persistence
             .load_all()
             .await
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        let recovered_count = recovered.len();
+        let recovered_task_count = recovered_tasks.len();
         // Any task still marked Running after a restart is orphaned: its
         // node lost its SSE session and its node_id/token when the old
         // process died.  Flip them to Failed up-front so `swarm_task_*`
         // tools report a terminal state instead of lying.
-        let orphaned_count = reconcile_orphaned_running(&*persistence, &mut recovered)
+        let orphaned_count = reconcile_orphaned_running(&*task_persistence, &mut recovered_tasks)
             .await
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        let tasks = TaskStore::with_persistence(persistence, recovered);
-        if recovered_count > 0 {
+        let tasks = TaskStore::with_persistence(task_persistence, recovered_tasks);
+        if recovered_task_count > 0 {
             tracing::info!(
-                recovered = recovered_count,
+                recovered = recovered_task_count,
                 orphaned = orphaned_count,
                 "recovered tasks from disk"
+            );
+        }
+
+        let nodes_db_path = data_dir.join("nodes.db");
+        let node_persistence: Arc<dyn NodePersistence> = Arc::new(
+            SqliteNodePersistence::open(&nodes_db_path)
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+        );
+        let mut recovered_nodes = node_persistence
+            .load_all()
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let recovered_node_count = recovered_nodes.len();
+        // Every recovered node lost its SSE channel when the old
+        // process died.  Until it reconnects and heartbeats, flip it
+        // to Draining so the router refuses to dispatch new work.
+        let draining_count = reconcile_recovered_nodes(&mut recovered_nodes);
+        let registry = NodeRegistry::with_persistence(node_persistence, recovered_nodes);
+        if recovered_node_count > 0 {
+            tracing::info!(
+                recovered = recovered_node_count,
+                draining = draining_count,
+                "recovered nodes from disk"
             );
         }
 
@@ -139,7 +165,7 @@ impl Hub {
         // late subscriber will just see a "lagged" error that we ignore.
         let (shutdown, _) = broadcast::channel(1);
         Ok(Arc::new(Self {
-            registry: NodeRegistry::new(),
+            registry,
             blobs,
             key,
             tasks,

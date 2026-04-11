@@ -548,7 +548,7 @@ Tests cover:
 
 ## What v1 doesn't do
 
-- **Node registry persistence**: the node registry is in-memory; nodes must re-register after a hub restart. (Task records and blobs *are* durable — see above.) Running tasks at the moment of a restart are flipped to `Failed { error: "hub restarted mid-task" }` since their owning node has been disconnected and re-identified.
+- **Node identity preservation across restart**: the node registry *is* now durable (SQLite at `data_dir/nodes.db`), but a reconnecting node re-registers from scratch and gets a fresh `node_id`/token pair. Recovered rows come back with status forced to `Draining` so the router refuses to dispatch new work to them, and the reaper drops them after `heartbeat-timeout-secs`. Matching a reconnecting node back to its previous identity needs a protocol change on `POST /swarm/register` and is a v2 concern. Running tasks at the moment of a restart are still flipped to `Failed { error: "hub restarted mid-task" }` since the hub can no longer talk to the node that was running them.
 - **Queueing**: if no node is eligible, both dispatch paths fail fast with `no eligible node`.
 - **Automatic progress**: checkpoints are explicitly emitted by the agent calling `swarm_checkpoint`. No automatic scraping of bash stdout.
 - **Hard kill of bash subprocesses on cancel**: tools that don't check `ctx.cancellation` keep running until their next async yield point.

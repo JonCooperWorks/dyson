@@ -220,14 +220,14 @@ mod tests {
 
     #[tokio::test]
     async fn select_node_returns_none_on_empty_registry() {
-        let reg = NodeRegistry::new();
+        let reg = NodeRegistry::new_for_test().await;
         let pick = select_node(&reg, &RoutingConstraints::default()).await;
         assert!(pick.is_none());
     }
 
     #[tokio::test]
     async fn select_node_prefers_most_ram() {
-        let reg = NodeRegistry::new();
+        let reg = NodeRegistry::new_for_test().await;
         let mut big = entry("big", 64, 0, &[], NodeStatus::Idle);
         let mut small = entry("small", 8, 0, &[], NodeStatus::Idle);
         big.node_id = "big".into();
@@ -245,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn select_node_tie_breaks_by_node_id() {
-        let reg = NodeRegistry::new();
+        let reg = NodeRegistry::new_for_test().await;
         let a = entry("a", 16, 0, &[], NodeStatus::Idle);
         let b = entry("b", 16, 0, &[], NodeStatus::Idle);
         {
@@ -259,7 +259,7 @@ mod tests {
 
     #[tokio::test]
     async fn select_node_by_id_returns_idle_node() {
-        let reg = NodeRegistry::new();
+        let reg = NodeRegistry::new_for_test().await;
         let e = entry("a", 16, 0, &[], NodeStatus::Idle);
         {
             let mut inner = reg.inner_for_test().await;
@@ -271,7 +271,7 @@ mod tests {
 
     #[tokio::test]
     async fn select_node_by_id_rejects_busy() {
-        let reg = NodeRegistry::new();
+        let reg = NodeRegistry::new_for_test().await;
         let e = entry(
             "a",
             16,
@@ -297,7 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn select_node_by_id_rejects_draining() {
-        let reg = NodeRegistry::new();
+        let reg = NodeRegistry::new_for_test().await;
         let e = entry("a", 16, 0, &[], NodeStatus::Draining);
         {
             let mut inner = reg.inner_for_test().await;
@@ -315,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn select_node_by_id_rejects_unknown() {
-        let reg = NodeRegistry::new();
+        let reg = NodeRegistry::new_for_test().await;
         let err = select_node_by_id(&reg, "missing").await.unwrap_err();
         match err {
             DispatchError::NodeNotFound(id) => assert_eq!(id, "missing"),
