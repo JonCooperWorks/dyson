@@ -273,45 +273,18 @@ async fn detect_gpus() -> Vec<GpuInfo> {
 
 #[cfg(target_os = "macos")]
 async fn detect_cpus() -> Vec<CpuInfo> {
-    let model = run_sysctl("machdep.cpu.brand_string")
-        .await
-        .unwrap_or_else(|| "unknown".into());
+    let model = run_sysctl("machdep.cpu.brand_string").await;
+    let logical = run_sysctl("hw.logicalcpu").await.and_then(|s| s.parse::<u32>().ok());
+    let ncpu = run_sysctl("hw.ncpu").await.and_then(|s| s.parse::<u32>().ok());
 
-    // Prefer sysctl; fall back to available_parallelism() instead of
-    // hardcoding 1 so a sysctl failure (PATH, permissions, etc.) doesn't
-    // misreport the machine as a single-core node.
-    let cores = run_sysctl("hw.logicalcpu")
-        .await
-        .and_then(|s| s.parse::<u32>().ok())
-        .or_else(|| {
-            // hw.logicalcpu was added in 10.5 but hw.ncpu is the legacy key.
-            // Try both before giving up.
-            None::<u32>
-        });
-    let cores = match cores {
-        Some(n) => n,
-        None => run_sysctl("hw.ncpu")
-            .await
-            .and_then(|s| s.parse::<u32>().ok())
-            .or_else(|| {
-                std::thread::available_parallelism()
-                    .ok()
-                    .map(|n| n.get() as u32)
-            })
-            .unwrap_or(1),
-    };
+    let cores = logical.or(ncpu).unwrap_or_else(|| fallback_cpu().cores);
+    let model = model.unwrap_or_else(|| "unknown".into());
 
-    // hw.physicalcpu = performance cores + efficiency cores (on Apple
-    // Silicon); equals hw.logicalcpu on Intel Macs without SMT.
     let physical_cores = run_sysctl("hw.physicalcpu")
         .await
         .and_then(|s| s.parse::<u32>().ok());
 
-    vec![CpuInfo {
-        model,
-        cores,
-        physical_cores,
-    }]
+    vec![CpuInfo { model, cores, physical_cores }]
 }
 
 #[cfg(target_os = "macos")]
