@@ -239,32 +239,32 @@ Per-task execution with the nested `select!` races:
 
 ```mermaid
 sequenceDiagram
-    participant Loop as Event Loop
+    participant EL as Event Loop
     participant Exec as execute_task
     participant Agent as agent.run()
     participant Fwd as Checkpoint Forwarder
     participant Hub
 
-    Loop->>Loop: verify signature, parse SwarmTask
-    Loop->>Loop: fetch + verify ref payloads
-    Loop->>Fwd: spawn (mpsc rx -> POST /swarm/checkpoint)
-    Loop->>Exec: spawn with CancellationToken
+    EL->>EL: verify signature, parse SwarmTask
+    EL->>EL: fetch + verify ref payloads
+    EL->>Fwd: spawn (mpsc rx -> POST /swarm/checkpoint)
+    EL->>Exec: spawn with CancellationToken
 
     par Nested select! in event loop
         Exec->>Agent: run
         Note over Exec: select! agent vs cancel_token vs timeout
     and SSE events while task runs
-        Loop->>Loop: cancel_task -> token.cancel()
-        Loop->>Loop: other events -> log + defer
+        EL->>EL: cancel_task -> token.cancel()
+        EL->>EL: other events -> log + defer
     end
 
     Agent-->>Fwd: checkpoint events via mpsc tx
     Fwd->>Hub: POST /swarm/checkpoint (per event)
 
-    Exec-->>Loop: SwarmResult
-    Loop->>Loop: drop checkpoint tx (forwarder drains + exits)
-    Loop->>Hub: POST /swarm/result
-    Loop->>Loop: agent.clear() (reset for next task)
+    Exec-->>EL: SwarmResult
+    EL->>EL: drop checkpoint tx (forwarder drains + exits)
+    EL->>Hub: POST /swarm/result
+    EL->>EL: agent.clear() (reset for next task)
 ```
 
 ### 2. Auto-wires the hub as an MCP skill (client)
@@ -353,7 +353,7 @@ The agent is encouraged (via the controller prompt) to emit checkpoints at natur
 sequenceDiagram
     participant Caller
     participant Hub
-    participant Loop as Node Event Loop
+    participant EL as Node Event Loop
     participant Exec as execute_task
     participant Agent as agent.run()
 
@@ -361,17 +361,17 @@ sequenceDiagram
     Hub->>Hub: mark Cancelled (first-writer-wins)
     Hub->>Hub: wake sync waiter (if any)
     Hub->>Hub: flip node to Idle
-    Hub->>Loop: SSE cancel_task { task_id }
+    Hub->>EL: SSE cancel_task { task_id }
 
-    Note over Loop,Exec: nested select!
-    Loop->>Exec: cancel_token.cancel()
+    Note over EL,Exec: nested select!
+    EL->>Exec: cancel_token.cancel()
 
     Note over Exec,Agent: inner select!
     Exec->>Agent: drop agent future
     Exec->>Exec: preserve accumulated output
-    Exec-->>Loop: TaskStatus::Cancelled
+    Exec-->>EL: TaskStatus::Cancelled
 
-    Loop->>Hub: POST /swarm/result (Cancelled)
+    EL->>Hub: POST /swarm/result (Cancelled)
 ```
 
 Cancellation is **cooperative, not instant**: a running bash command finishes its current output read before the tool result is discarded. Training loops that yield regularly stop almost immediately; a tight CPU-bound bash loop doesn't. Treat cancellation as "please stop soon" rather than a hard kill.
