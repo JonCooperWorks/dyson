@@ -46,7 +46,7 @@ included in the system prompt for session continuity.
 ~/.dyson/
 ├── SOUL.md              personality, vibe, behavioral guidelines
 ├── IDENTITY.md          who the agent is, capabilities
-├── MEMORY.md            curated long-term memory  (Tier 1, 2200 char limit)
+├── MEMORY.md            curated long-term memory  (Tier 1, 2500 soft / 3375 ceiling)
 ├── USER.md              user profile              (Tier 1, 1375 char limit)
 ├── AGENTS.md            operating procedures
 ├── HEARTBEAT.md         periodic task checklist (reserved for future use)
@@ -84,14 +84,33 @@ To add a migration: bump `CURRENT_WORKSPACE_VERSION` in `src/workspace/migrate.r
 
 ---
 
-## Character Limits
+## Character Limits — Fuzzy Soft Target + Hard Ceiling
 
-| File | Default Limit |
-|------|--------------|
-| `MEMORY.md` | 2,200 chars |
-| `USER.md` | 1,375 chars |
+`MEMORY.md` and `USER.md` are not capped by a single hard limit. Each file has
+a **soft target** (what the curator aims for) and a **hard ceiling** (the only
+size the tool actually refuses). Writes in the overflow band between the two
+succeed with a warning — 2,700 chars of valuable signal is better than 2,470
+chars of truncated context.
 
-`workspace_update` rejects writes exceeding limits and reports `[current/limit chars]` on success. Other files (`SOUL.md`, `AGENTS.md`) have no limit.
+| File | Soft Target | Hard Ceiling (target × 1.35) |
+|------|-------------|------------------------------|
+| `MEMORY.md` | 2,500 chars | 3,375 chars |
+| `USER.md` | 1,375 chars | 1,856 chars |
+
+`workspace_update` behaviour:
+
+- **At or below soft target** — success, `[current/target chars]`.
+- **In the overflow band** — success, `[current/target chars — over soft target, within ceiling N]`.
+- **Above the ceiling** — rejected with a "Would exceed hard ceiling" error.
+
+The ceiling is derived from `soft_target × overflow_factor`. Tune the factor
+in `dyson.json` under `workspace.memory.overflow_factor` (default `1.35`).
+Other files (`SOUL.md`, `AGENTS.md`) have no limit.
+
+Curation — the process of picking what to keep — is handled by the
+`LearningSynthesisDream` and `MemoryMaintenanceDream` (see `docs/dreaming.md`).
+Both apply a Keep / Refine / Discard judgment that deliberately ignores
+timestamps so night sessions are never penalised.
 
 ---
 
@@ -126,9 +145,10 @@ Memory settings live in `dyson.json` under `workspace.memory`:
     "connection_string": "~/.dyson",
     "memory": {
       "limits": {
-        "MEMORY.md": 2200,
+        "MEMORY.md": 2500,
         "USER.md": 1375
       },
+      "overflow_factor": 1.35,
       "nudge_interval": 5
     }
   }
@@ -137,7 +157,8 @@ Memory settings live in `dyson.json` under `workspace.memory`:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `limits` | `{string: number}` | See above | Per-file character limits. Files not listed have no limit. |
+| `limits` | `{string: number}` | See above | Per-file **soft** character targets. Files not listed have no limit. |
+| `overflow_factor` | `number` | `1.35` | Multiplier that turns a soft target into a hard ceiling. Writes between the two succeed with a warning. |
 | `nudge_interval` | `number` | `5` | Inject nudge every N turns. `0` disables nudges. |
 
 ---

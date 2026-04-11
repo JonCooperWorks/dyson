@@ -3,15 +3,21 @@
 //
 // This module contains the three built-in dreams:
 //
-//   1. LearningSynthesisDream  — single LLM call to merge conversation
-//      learnings into MEMORY.md.  Fires after compaction.
+//   1. LearningSynthesisDream  — single LLM call that curates MEMORY.md
+//      (Keep / Refine / Discard judgment) and folds in new signal from the
+//      conversation.  Fires after compaction.
 //
-//   2. MemoryMaintenanceDream  — mini agent loop with workspace tools
-//      to update MEMORY.md, USER.md, and overflow notes.  Fires every
-//      N user turns.
+//   2. MemoryMaintenanceDream  — mini agent loop with workspace tools to
+//      curate MEMORY.md, USER.md, and overflow notes.  Applies the same
+//      Keep / Refine / Discard judgment and writes an audit trail to
+//      improvement/{epoch}.json.  Fires every N user turns.
 //
 //   3. SelfImprovementDream    — mini agent loop that creates skills
 //      or exports training data.  Fires every 2N turns.
+//
+// Curation (not merging) is the key verb for dreams 1 and 2: they walk
+// the existing file and actively delete low-value entries rather than
+// only appending new ones.  The shared rules live in CURATION_RULES.
 //
 // All three implement the Dream trait (see dream.rs) and run as
 // fire-and-forget background tasks.  Nothing from these calls enters
@@ -33,6 +39,63 @@ use crate::tool::{Tool, ToolContext};
 use super::dream::{Dream, DreamContext, DreamOutcome, DreamTrigger};
 use super::silent_output::SilentOutput;
 use super::stream_handler;
+
+// ---------------------------------------------------------------------------
+// Curation rules — shared by every dream that mutates MEMORY.md.
+//
+// Both LearningSynthesisDream and MemoryMaintenanceDream embed this exact
+// text in their system prompts so the signal/noise judgment stays in sync.
+// The rules treat curation as a Keep/Refine/Discard decision, not a merge,
+// and they explicitly forbid time-of-day or entry-age heuristics so that
+// work done at night is never penalised.
+// ---------------------------------------------------------------------------
+
+const CURATION_RULES: &str = "\
+## Curation rules (Keep / Refine / Discard)\n\
+\n\
+Your job is not to merge — it is to **curate**.  Walk the existing file \
+line by line and apply this judgment to every block:\n\
+\n\
+### KEEP (signal)\n\
+- Reusable procedures and non-obvious debugging patterns\n\
+- Architecture decisions and their rationale\n\
+- Bug fixes with an identified root cause\n\
+- User preferences, workflow patterns, communication style\n\
+- Technical constraints future sessions must respect\n\
+- References to active skills or tools\n\
+\n\
+### REFINE (compress, preserve meaning)\n\
+- Verbose entries restating the same fact — collapse to one bullet\n\
+- Overlapping entries covering the same decision — merge into one\n\
+- Multi-line narratives that can become a single bullet\n\
+\n\
+### DISCARD (noise)\n\
+- Chitchat, greetings, acknowledgments\n\
+- Brainstorming that did not lead to a decision\n\
+- Failed experiments with no transferable lesson\n\
+- Duplicates of entries already present elsewhere in the file\n\
+- Raw tool output (summarise the insight, not the data)\n\
+- One-off session state: temp paths, ephemeral task IDs, scratch values\n\
+\n\
+### CRITICAL — the anti-timestamp rule\n\
+NEVER use time-of-day, day-of-week, date, or apparent entry age as a \
+pruning signal.  We work heavily at night.  An entry written at 3 AM is \
+as valuable as one written at 3 PM.  Judge purely on content value.  If \
+you cannot justify a DISCARD decision without referencing *when* an \
+entry was made, you must KEEP it.\n\
+\n\
+### Fuzzy sizing\n\
+Aim for the soft target but do not truncate valuable signal to hit it.  \
+Overflow up to the ceiling is allowed when every extra character is \
+paying its way.  2,700 chars of valuable context beats 2,470 chars of \
+truncated context.  Only the hard ceiling is a refusal — the tool will \
+warn you when you are over soft target but still within the ceiling, \
+and that is a fine place to land.\n\
+\n\
+### Safety rails\n\
+- Preserve all user preferences and explicit user instructions.\n\
+- When in doubt, KEEP.  A false discard is worse than a slightly full file.\n\
+- Doing nothing is acceptable if the file is already well curated.\n";
 
 // ---------------------------------------------------------------------------
 // Shared mini agent loop — used by MemoryMaintenance and SelfImprovement
@@ -209,11 +272,12 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
 // 1. LearningSynthesisDream
 // ===========================================================================
 
-/// Consolidates conversation learnings into MEMORY.md via a single LLM call.
+/// Curates MEMORY.md via a single LLM call.
 ///
 /// This is the lightest dream — no tools, just one prompt asking the LLM
-/// to merge new information into the existing memory file.  Fires after
-/// compaction so learnings are captured before the conversation is condensed.
+/// to apply a Keep / Refine / Discard judgment to the existing memory file
+/// and fold in genuine new signal from the conversation.  Fires after
+/// compaction so curation happens before the conversation is condensed.
 pub struct LearningSynthesisDream;
 
 #[async_trait]
@@ -263,12 +327,18 @@ impl Dream for LearningSynthesisDream {
 // 2. MemoryMaintenanceDream
 // ===========================================================================
 
-/// Reviews conversation and updates workspace memory files using tools.
+/// Curates workspace memory files using tools and an agent mini-loop.
 ///
 /// Unlike LearningSynthesisDream (which does a single write), this dream
 /// runs a mini agent loop with workspace_view, workspace_update,
-/// workspace_search, and memory_search tools.  It can read existing
-/// files, make targeted updates, and use overflow storage.
+/// workspace_search, and memory_search tools.  It reads the existing
+/// files, applies a Keep / Refine / Discard judgment (see
+/// [`CURATION_RULES`]), rewrites them via `workspace_update mode=set`,
+/// and moves overflow to `memory/notes/` when even the ceiling is tight.
+///
+/// When the curation pass takes at least one action, the dream writes an
+/// audit trail to `improvement/{epoch}.json` via [`save_reflection_log`]
+/// so humans can inspect what was kept and what was discarded.
 pub struct MemoryMaintenanceDream {
     /// Fire every N user turns.
     nudge_interval: usize,
@@ -311,6 +381,20 @@ impl Dream for MemoryMaintenanceDream {
         )
         .await?;
 
+        // Audit trail: record the curation pass so the user can see what
+        // Keep/Refine/Discard judgment was applied.  Only log when the
+        // dream actually took action — silent no-ops don't need a log.
+        if actions_taken > 0 {
+            save_reflection_log(
+                &ctx.tool_context,
+                &memory_system,
+                &[Message::user(&ctx.conversation_summary)],
+                actions_taken,
+                ctx.turn_count,
+            )
+            .await;
+        }
+
         Ok(DreamOutcome {
             dream_name: self.name().to_string(),
             actions_taken,
@@ -333,28 +417,35 @@ pub(super) async fn synthesize_to_workspace(
     conversation_summary: &str,
     workspace: &Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
 ) -> Result<()> {
-    let current_memory = {
+    let (current_memory, soft_target, ceiling) = {
         let ws = workspace.read().await;
-        ws.get("MEMORY.md").unwrap_or_default()
+        let current = ws.get("MEMORY.md").unwrap_or_default();
+        let target = ws.char_limit("MEMORY.md").unwrap_or(0);
+        let ceil = ws.char_ceiling("MEMORY.md").unwrap_or(target);
+        (current, target, ceil)
     };
+    let current_len = current_memory.chars().count();
 
-    let system = "\
-        You are a memory maintenance engine.  You will receive the current \
-        contents of MEMORY.md and a summary of a conversation that is about \
-        to be cleared.  Your job is to produce an updated MEMORY.md that \
-        incorporates any important new information from the conversation.\n\n\
-        Rules:\n\
-        - Output ONLY the new file contents, no commentary or markdown fences.\n\
-        - Synthesise — merge new information into the existing text rather \
-          than appending.\n\
-        - Be concise.  Keep the file under 4000 characters.\n\
-        - Omit trivial exchanges (greetings, simple lookups).\n\
-        - Preserve existing information unless it's been superseded.\n\
-        - If there is nothing worth persisting, output the existing file \
-          unchanged.";
+    let system = format!(
+        "You are a memory curator.  You will receive the current contents \
+         of MEMORY.md and a summary of a conversation that is about to be \
+         cleared.  Your job is to produce a **curated** MEMORY.md that \
+         applies a Keep / Refine / Discard judgment to the existing file \
+         AND folds in any genuine new signal from the conversation.\n\n\
+         ## File sizing\n\
+         - Soft target: {soft_target} chars (aim here)\n\
+         - Hard ceiling: {ceiling} chars (never exceed)\n\
+         - Current size: {current_len} chars\n\n\
+         ## Output format\n\
+         - Output ONLY the new file contents.  No commentary, no markdown fences.\n\
+         - Synthesise — do not append.  Rewrite the file as one coherent document.\n\
+         - If nothing needs changing, output the existing file unchanged.\n\n\
+         {CURATION_RULES}"
+    );
 
     let user_message = format!(
-        "## Current MEMORY.md\n\n{current_memory}\n\n\
+        "## Current MEMORY.md ({current_len} chars, soft target {soft_target}, ceiling {ceiling})\n\n\
+         {current_memory}\n\n\
          ## Conversation summary\n\n{conversation_summary}"
     );
 
@@ -362,7 +453,7 @@ pub(super) async fn synthesize_to_workspace(
     let empty_tools: Vec<ToolDefinition> = Vec::new();
 
     let response = client
-        .stream(&messages, system, "", &empty_tools, config)
+        .stream(&messages, &system, "", &empty_tools, config)
         .await?;
 
     let mut silent = SilentOutput;
@@ -411,45 +502,44 @@ pub(super) async fn synthesize_to_workspace(
 
 /// Build the system prompt for memory maintenance.
 pub(super) async fn build_memory_system_prompt(ctx: &ToolContext) -> String {
-    let (memory_usage, memory_limit, user_usage, user_limit) =
+    let (memory_usage, memory_target, memory_ceiling, user_usage, user_target, user_ceiling) =
         if let Some(ref ws) = ctx.workspace {
             let ws = ws.read().await;
             let mu = ws.get("MEMORY.md").map(|c| c.chars().count()).unwrap_or(0);
-            let ml = ws.char_limit("MEMORY.md").unwrap_or(0);
+            let mt = ws.char_limit("MEMORY.md").unwrap_or(0);
+            let mc = ws.char_ceiling("MEMORY.md").unwrap_or(mt);
             let uu = ws.get("USER.md").map(|c| c.chars().count()).unwrap_or(0);
-            let ul = ws.char_limit("USER.md").unwrap_or(0);
-            (mu, ml, uu, ul)
+            let ut = ws.char_limit("USER.md").unwrap_or(0);
+            let uc = ws.char_ceiling("USER.md").unwrap_or(ut);
+            (mu, mt, mc, uu, ut, uc)
         } else {
-            (0, 0, 0, 0)
+            (0, 0, 0, 0, 0, 0)
         };
 
     format!(
-        "You are a memory maintenance engine for an AI agent.  Your job is to review \
-         a conversation that just happened and persist important information.\n\n\
-         You have workspace tools to view and update the agent's memory files.\n\n\
-         ## Files and limits\n\
-         - **MEMORY.md** ({memory_usage}/{memory_limit} chars): Agent's curated long-term \
-           memory.  Store key facts, decisions, patterns, and lessons learned.\n\
-         - **USER.md** ({user_usage}/{user_limit} chars): What the agent knows about the \
-           user — preferences, workflow, communication style.\n\
-         - **memory/notes/*.md**: Overflow storage for details that don't fit in \
-           MEMORY.md.  Searchable via memory_search.\n\n\
-         ## What to persist\n\
-         - Important facts, decisions, or conclusions from the conversation\n\
-         - User preferences or workflow patterns you observed\n\
-         - Technical details that would be useful in future sessions\n\
-         - Lessons learned from errors or unexpected results\n\n\
-         ## What NOT to persist\n\
-         - Trivial or one-off exchanges (greetings, simple questions)\n\
-         - Information already in the memory files\n\
-         - Raw tool output — summarize the insight, not the data\n\n\
-         First use workspace_view to read the current memory files.  Then \
-         synthesize new information into the existing content — rewrite the \
-         file as one cohesive, concise document rather than appending.  Use \
-         workspace_update with mode \"set\" to replace the full file.  If a \
-         file is near its limit, tighten prose or move lower-priority details \
-         to memory/notes/.\n\n\
-         Doing nothing is fine if there's nothing worth persisting."
+        "You are a memory curator for an AI agent.  Your job is not merely to \
+         record new information — it is to **curate** the existing memory files \
+         using a strict signal-vs-noise judgment, and to fold in genuine new \
+         signal from the conversation that just happened.\n\n\
+         You have workspace tools to view and rewrite the agent's memory files.\n\n\
+         ## Files (soft target / hard ceiling, current usage)\n\
+         - **MEMORY.md** — current {memory_usage} chars, soft target {memory_target}, \
+           hard ceiling {memory_ceiling}.  Curated long-term memory: key facts, \
+           decisions, patterns, lessons.\n\
+         - **USER.md** — current {user_usage} chars, soft target {user_target}, \
+           hard ceiling {user_ceiling}.  What the agent knows about the user.\n\
+         - **memory/notes/*.md** — unlimited overflow storage, searchable via \
+           memory_search.  Park detail here when even the ceiling is tight.\n\n\
+         ## Process\n\
+         1. Call workspace_view to read the current memory files.\n\
+         2. For every existing line or block, silently label it KEEP, REFINE, \
+            or DISCARD using the rules below.\n\
+         3. Call workspace_update with mode \"set\" to rewrite the file: \
+            DISCARD lines removed, REFINE lines compressed, KEEP lines \
+            preserved, new signal folded in.\n\
+         4. If a file is already well curated, doing nothing is the right \
+            answer.\n\n\
+         {CURATION_RULES}"
     )
 }
 

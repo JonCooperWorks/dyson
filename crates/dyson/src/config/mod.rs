@@ -647,7 +647,8 @@ impl Default for WorkspaceConfig {
 /// {
 ///   "workspace": {
 ///     "memory": {
-///       "limits": { "MEMORY.md": 2200, "USER.md": 1375 },
+///       "limits": { "MEMORY.md": 2500, "USER.md": 1375 },
+///       "overflow_factor": 1.35,
 ///       "nudge_interval": 7
 ///     }
 ///   }
@@ -655,21 +656,47 @@ impl Default for WorkspaceConfig {
 /// ```
 #[derive(Debug, Clone)]
 pub struct MemoryConfig {
-    /// Per-file character limits.  Keys are file names (e.g. "MEMORY.md").
+    /// Per-file soft character targets.  Keys are file names (e.g. "MEMORY.md").
+    ///
+    /// These are **soft targets**, not hard caps.  The curator aims for the
+    /// target but is allowed to overflow up to `target * overflow_factor`
+    /// (the "hard ceiling") when the extra characters carry genuine signal.
+    /// 2,700 chars of valuable context is better than 2,470 chars of
+    /// truncated context — only the ceiling is a hard refusal.
+    ///
     /// Files not listed here have no limit.
     pub limits: std::collections::HashMap<String, usize>,
+
+    /// Multiplier that converts a soft target into a hard ceiling.
+    ///
+    /// `ceiling = soft_target * overflow_factor`.  Default `1.35` allows
+    /// ~35% overflow so curation can preserve valuable signal instead of
+    /// truncating it to hit the target exactly.
+    pub overflow_factor: f32,
 
     /// Inject a memory maintenance nudge every N turns.  0 = disabled.
     pub nudge_interval: usize,
 }
 
+impl MemoryConfig {
+    /// Compute the hard ceiling for a file given its soft target.
+    pub fn ceiling_for(&self, file: &str) -> Option<usize> {
+        let target = *self.limits.get(file)?;
+        let ceiling = (target as f32 * self.overflow_factor).round() as usize;
+        Some(ceiling.max(target))
+    }
+}
+
 impl Default for MemoryConfig {
     fn default() -> Self {
         let mut limits = std::collections::HashMap::new();
-        limits.insert("MEMORY.md".into(), 2200);
+        // Soft targets — curation aims here but may overflow up to
+        // `target * overflow_factor` when the extra chars are signal.
+        limits.insert("MEMORY.md".into(), 2500);
         limits.insert("USER.md".into(), 1375);
         Self {
             limits,
+            overflow_factor: 1.35,
             nudge_interval: 7,
         }
     }

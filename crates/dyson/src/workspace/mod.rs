@@ -95,9 +95,24 @@ pub trait Workspace: Send + Sync {
     /// Append to today's journal.
     fn journal(&mut self, entry: &str);
 
-    /// Character limit for a given file, or None if unlimited.
+    /// Soft character target for a given file, or None if unlimited.
+    ///
+    /// This is a **soft** target — curation aims here but is allowed to
+    /// overflow up to `char_ceiling()` when the extra chars carry signal.
     fn char_limit(&self, _file: &str) -> Option<usize> {
         None
+    }
+
+    /// Hard character ceiling for a given file, or None if unlimited.
+    ///
+    /// Writes up to this number of characters are accepted (with a warning
+    /// in the overflow band between `char_limit` and `char_ceiling`).
+    /// Writes above the ceiling are rejected outright.
+    ///
+    /// Default implementation returns `char_limit()` — backends that
+    /// support fuzzy limits override this to return the ceiling.
+    fn char_ceiling(&self, file: &str) -> Option<usize> {
+        self.char_limit(file)
     }
 
     /// How often (in turns) to inject a memory maintenance nudge.  0 = disabled.
