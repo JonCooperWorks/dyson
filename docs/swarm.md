@@ -46,12 +46,13 @@ Participation is symmetric: you use the swarm because you are part of it.
 +--------------------------------------------------------+
 |                     SWARM HUB                          |
 |                                                        |
-|  /mcp             <- MCP server (tool discovery)       |
-|  /swarm/register  <- POST (node registration)          |
-|  /swarm/events    <- SSE (push tasks to nodes)         |
-|  /swarm/heartbeat <- POST (node status updates)        |
-|  /swarm/result    <- POST (task results from nodes)    |
-|  /swarm/blob/{sha256} <- GET/PUT (large payloads)      |
+|  /mcp               <- MCP server (tool discovery)     |
+|  /swarm/register    <- POST (node registration)        |
+|  /swarm/events      <- SSE  (push tasks to nodes)      |
+|  /swarm/heartbeat   <- POST (node status updates)      |
+|  /swarm/result      <- POST (task results from nodes)  |
+|  /swarm/checkpoint  <- POST (progress events from task)|
+|  /swarm/blob/{sha}  <- GET/PUT (large payloads)        |
 |                                                        |
 +------+----------+----------------------+---------------+
        | SSE      | SSE                  | MCP
@@ -84,17 +85,36 @@ named `swarm`.  It is an in-memory, tokio-based HTTP server responsible for:
 1. **Node registry** — Accepting `POST /swarm/register` with a `NodeManifest`,
    assigning a `node_id` and auth token.
 
-2. **Constraint matching** — When a task is submitted (via MCP `swarm_dispatch`),
-   the hub selects the best node based on hardware (GPU, RAM), capabilities
-   (loaded tools), and current status (idle vs busy).
+2. **Constraint matching** — When a task is submitted (via MCP `swarm_dispatch`
+   or `swarm_submit`), the hub selects the best node based on hardware
+   (GPU, RAM), capabilities (loaded tools), and current status (idle vs
+   busy).
 
-3. **Task dispatch** — Signing the `SwarmTask` with its Ed25519 private key and
-   pushing it to the selected node via SSE (`event: task`).
+3. **Task dispatch + lifecycle tracking** — Signing the `SwarmTask` with its
+   Ed25519 private key, pushing it to the selected node via SSE
+   (`event: task`), and recording a `TaskRecord` in the in-memory
+   `TaskStore`.  Sync dispatches attach a oneshot waiter to the record;
+   async submissions leave it `None` and poll for results.  Every task
+   flows through the same store, so `swarm_task_list` sees sync and
+   async dispatches uniformly and `swarm_task_cancel` works on both.
 
-4. **Blob storage** — Serving large payloads (`GET /swarm/blob/{sha256}`) and
-   accepting result payloads (`PUT /swarm/blob/{sha256}`).
+4. **Progress checkpoints** — Accepting `POST /swarm/checkpoint` from
+   nodes mid-task and appending them to the task's record.  Callers
+   tail progress via `swarm_task_checkpoints { since_sequence }`
+   without waiting for the final result.
 
-5. **Health monitoring** — Receiving heartbeats from nodes, reaping stale entries.
+5. **Cancellation** — `swarm_task_cancel` marks the record `Cancelled`,
+   wakes any sync waiter with a synthetic Cancelled result, and pushes
+   a `cancel_task` SSE event so the owning node drops the in-flight
+   agent run.  `TaskStore::finalize` is first-writer-wins, so a late
+   real result from the node cannot overwrite the Cancelled state.
+
+6. **Blob storage** — Serving large payloads (`GET /swarm/blob/{sha256}`)
+   and accepting result payloads (`PUT /swarm/blob/{sha256}`).
+
+7. **Health monitoring** — Receiving heartbeats from nodes, reaping stale
+   entries, and also reaping terminal `TaskRecord`s older than 24 h
+   (same 15 s ticker, one reaper task).
 
 ### Running the hub
 
@@ -159,25 +179,30 @@ interfaces (not recommended).
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/mcp` | POST | MCP JSON-RPC (tool discovery + task dispatch) |
+| `/mcp` | POST | MCP JSON-RPC (tool discovery + task dispatch + task queries) |
 | `/swarm/register` | POST | Node registration, returns `{ node_id, token }` |
-| `/swarm/events` | GET | SSE stream for pushing tasks to a node |
+| `/swarm/events` | GET | SSE stream for pushing tasks/cancels to a node |
 | `/swarm/heartbeat` | POST | Node status update |
 | `/swarm/result` | POST | Task result from a node |
+| `/swarm/checkpoint` | POST | Progress event from an in-flight task |
 | `/swarm/blob/{sha256}` | GET | Download a payload blob by hash |
 | `/swarm/blob/{sha256}` | PUT | Upload a result payload blob |
 
 The `/mcp` endpoint accepts an optional `?caller=<node_name>` query
 parameter.  When set, `list_nodes` results exclude the calling node so
-it only sees its peers.
+it only sees its peers.  `/swarm/checkpoint` and `/swarm/result` are
+authed by the node's bearer token from registration.
 
 ### SSE event types
+
+Events flow hub → node over `/swarm/events`.
 
 | Event | Data | Description |
 |-------|------|-------------|
 | `registered` | `{ "node_id": "..." }` | Registration confirmed |
 | `task` | base64 of signed wire bytes | Execute this task |
 | `heartbeat_ack` | `{}` | Heartbeat received |
+| `cancel_task` | `{ "task_id": "..." }` | Cancel the named in-flight task |
 | `shutdown` | `{}` | Graceful disconnect requested |
 
 ### Signing tasks
@@ -206,7 +231,8 @@ The controller lifecycle:
 SwarmController::run()
   |-- build_agent() with shared ClientRegistry
   |     Excludes swarm_dispatch from MCP tools (prevents recursion)
-  |     Injects controller prompt (instructs agent to use tools)
+  |     Injects controller prompt (instructs agent to use tools and
+  |       emit checkpoints during long operations)
   |     Wraps list_nodes via ?caller= so agent only sees peers
   |
   |-- HardwareProbe::run() -> NodeManifest
@@ -219,18 +245,46 @@ SwarmController::run()
   |
   |-- POST /swarm/register -> { node_id, token }
   |-- GET /swarm/events -> open SSE stream
-  |-- Spawn heartbeat task (POST every 15s)
+  |-- Spawn heartbeat task (POST every 15s, tears down session on
+  |     3 consecutive failures so the outer loop reconnects)
   |
-  +-- Loop:
+  +-- Event loop:
         |-- SSE "task" event received
         |     |-- Verify Ed25519 signature against public_key
-        |     |-- Parse SwarmTask from JSON
+        |     |-- Parse SwarmTask from JSON; mark status Busy{task_id}
         |     |-- Fetch ref payloads (GET /swarm/blob/{sha256})
         |     |-- Verify SHA-256 hash of each blob
-        |     |-- agent.run(prompt) with optional timeout
-        |     |-- POST /swarm/result
+        |     |
+        |     |-- Create per-task CancellationToken; install on
+        |     |     agent.tool_context.cancellation so cooperative
+        |     |     tools (web_fetch, web_search) observe it
+        |     |
+        |     |-- Spawn per-task checkpoint forwarder:
+        |     |     mpsc::Receiver<TaskCheckpoint>
+        |     |       -> POST /swarm/checkpoint
+        |     |     (channel scoped to this task; stray events
+        |     |      between tasks can't land on the wrong record)
+        |     |
+        |     |-- Attach (task_id, task_start, cp_tx) to
+        |     |     SwarmCaptureOutput so Output::checkpoint builds
+        |     |     a TaskCheckpoint with a monotonic sequence and
+        |     |     try_send's it to the forwarder
+        |     |
+        |     |-- Nested select! while execute_task runs:
+        |     |     |-- agent future wins   -> SwarmResult
+        |     |     |-- cancel_task event   -> token.cancel()
+        |     |     +-- other events       -> logged and deferred
+        |     |
+        |     |-- Inside execute_task, agent.run is raced against:
+        |     |     |-- cancel_token.cancelled() -> Cancelled
+        |     |     |-- timeout_secs (if any)    -> Failed
+        |     |     +-- agent completion         -> Completed / Failed
+        |     |
+        |     |-- Drop checkpoint tx; forwarder drains and exits
+        |     |-- POST /swarm/result  (first-writer-wins on the hub)
         |     +-- agent.clear() (reset for next task)
         |
+        |-- SSE "cancel_task" with no in-flight task -> log + ignore
         |-- SSE "shutdown" -> break
         +-- SSE disconnect -> reconnect with exponential backoff
               (base 2s, capped at 60s, max 10 attempts)
@@ -256,7 +310,8 @@ settings.skills.push(SkillConfig::Mcp(Box::new(McpConfig {
 ```
 
 This means **every** agent on this Dyson (terminal, telegram, swarm) gets
-the hub's MCP tools — `swarm_dispatch`, `swarm_status`, `list_nodes`.
+the hub's MCP tools — `swarm_dispatch`, `swarm_submit`, `swarm_status`,
+`list_nodes`, and the task-query tools below.
 
 The swarm controller's own agent is special:
 - `swarm_dispatch` is excluded (prevents recursive task loops)
@@ -264,6 +319,170 @@ The swarm controller's own agent is special:
   agent never sees its own node — only peers
 - A controller prompt instructs the agent to use tools (especially bash)
   and never guess at system details
+
+---
+
+## Long-running tasks and checkpoints
+
+There are two MCP dispatch paths, and they share everything except
+whether the caller blocks:
+
+- **`swarm_dispatch`** — synchronous.  The hub inserts a `TaskRecord`
+  with a `oneshot::Sender<SwarmResult>` waiter, pushes the signed task,
+  and blocks the MCP call until the node posts a result (capped by the
+  dispatch timeout, default 600 s).  Fine for quick commands.
+- **`swarm_submit`** — asynchronous.  Same flow, but the record's
+  waiter is `None` and the tool returns a `task_id` in milliseconds.
+  The caller observes progress and the final result via the query
+  tools below.
+
+Both paths insert into the same `TaskStore`, so `swarm_task_list`,
+`swarm_task_status`, `swarm_task_checkpoints`, `swarm_task_result`, and
+`swarm_task_cancel` work uniformly across them.  A stuck
+`swarm_dispatch` can even be introspected from a second MCP client via
+`swarm_task_status`.
+
+Use `swarm_submit` for anything you wouldn't want blocked on:
+fine-tuning, multi-hour batch jobs, dataset processing, etc.
+
+### `swarm_submit` — fire and acknowledge
+
+```
+swarm_submit { prompt, payloads?, timeout_secs?, constraints? }
+  → { task_id, node_id, submitted_at_unix, state: "running" }
+```
+
+Returns in a few milliseconds.  The task is signed, pushed to the
+selected node over SSE, and tracked in the hub's in-memory `TaskStore`.
+No oneshot waiter is registered; the caller discovers progress and the
+final result by polling.
+
+### `swarm_checkpoint` — progress from inside the task
+
+A built-in tool the swarm controller's agent can call during execution:
+
+```
+swarm_checkpoint { message, progress? }
+```
+
+Each call attaches a `CheckpointEvent` to the tool's `ToolOutput` as a
+side-channel, mirroring how `send_file` attaches file paths.  The
+agent execution loop forwards `tool_output.checkpoints` to the
+controller's `Output::checkpoint` hook the same way it forwards
+`tool_output.files` to `Output::send_file`.
+
+The swarm controller's `Output::checkpoint` impl stamps the event
+with a monotonic sequence number and the elapsed seconds since task
+start, packs it into a `TaskCheckpoint`, and `try_send`s it down a
+**per-task** `mpsc::Sender<TaskCheckpoint>` installed at the start
+of the task.  A dedicated forwarder tokio task reads from the
+receiver and POSTs each event to `/swarm/checkpoint`.  Scoping the
+channel per task means stray events from one task can never land on
+another's record — when the task finishes, the controller drops the
+sender, the forwarder drains, and the channel is gone.
+
+Outside the swarm controller the default `Output::checkpoint` impl
+drops the event, so the tool is a harmless no-op for terminal and
+telegram agents — no conditional skill wiring needed.
+
+The agent is encouraged (via the controller prompt) to emit checkpoints
+at natural milestones — once per epoch during training, once per batch
+during processing, once per stage of a pipeline.
+
+### Polling MCP tools
+
+| Tool | Purpose |
+|------|---------|
+| `swarm_task_status { task_id }` | Lightweight state: `state`, `checkpoint_count`, `last_sequence`, timestamps |
+| `swarm_task_checkpoints { task_id, since_sequence? }` | Ordered checkpoint list with sequence strictly greater than `since_sequence` (default 0) — tail progress incrementally |
+| `swarm_task_result { task_id }` | `{ state, result? }`.  `result` is absent while running, present once terminal |
+| `swarm_task_cancel { task_id }` | Mark a running task cancelled and push a `cancel_task` SSE event to the owning node |
+| `swarm_task_list { limit? }` | Recent tasks newest-first, bounded by `limit` (default 50). Includes sync dispatches too — every task flows through the same store |
+
+`swarm_task_result` uses a single shape: while running, only `state`
+appears; once the task is terminal (`completed` / `failed` / `cancelled`)
+the full `SwarmResult` is attached.  Callers can't confuse "still
+running" with "completed successfully" because `result` is only present
+in the terminal case.
+
+### Storage and lifetime
+
+`TaskRecord`s are kept in-memory on the hub only — there is **no
+persistence across hub restart**.  The same reaper task that culls stale
+nodes also drops terminal tasks older than 24 hours.  Long-running
+callers should retrieve their results before the hub is restarted.
+
+### Cancellation
+
+`swarm_task_cancel { task_id }` is a three-step cooperative cancel:
+
+1. **Hub** — `TaskStore::cancel` atomically marks the record
+   `Cancelled`, stores a synthetic `TaskStatus::Cancelled`
+   `SwarmResult`, and takes out the oneshot waiter (if any).  If a
+   `swarm_dispatch` caller was blocked on this task, the waiter is
+   fired with the synthetic result and the sync tool call returns
+   immediately.  The hub then flips the node back to Idle and pushes
+   a `cancel_task` SSE event to the owning node.
+2. **Node event loop** — while `execute_task` is running, the outer
+   event loop races `exec_fut` against `events.recv()` inside a
+   nested `tokio::select!`.  A matching `cancel_task` event calls
+   `cancel_token.cancel()` on the per-task `CancellationToken`.
+3. **Node execution** — `execute_task` itself races `agent.run()`
+   against `cancel_token.cancelled()` (and the optional timeout) in
+   another select.  On cancel the agent future is dropped, any text
+   accumulated in `SwarmCaptureOutput` is preserved, and the function
+   returns a `TaskStatus::Cancelled` result.  Tools that poll
+   `ctx.cancellation` (currently `web_fetch` and `web_search`)
+   observe the token directly; others — including bash — only stop
+   at the next `await` point when the enclosing future is dropped.
+
+This makes cancellation **cooperative, not instant**: a bash command
+already running will keep going until it completes its current output
+read, then the tool result is discarded.  Training loops that yield
+regularly stop almost immediately; a tight CPU-bound bash loop doesn't.
+Treat cancellation as "please stop soon" rather than a hard kill.
+
+`TaskStore::finalize` is first-writer-wins for terminal states: if the
+node races the hub and posts a real result after cancellation, the
+state stays `Cancelled` but the node's actual `SwarmResult` is still
+stored under `result` for debugging.
+
+### What v1 still doesn't do
+
+- **Persistence**: hub restart loses all in-flight and recent task state.
+- **Queueing**: if no node is eligible, both `swarm_dispatch` and
+  `swarm_submit` fail fast with `no eligible node`.
+- **Automatic progress**: checkpoints are explicitly emitted by the
+  agent calling `swarm_checkpoint`.  There's no automatic scraping of
+  bash stdout.
+- **Hard kill of bash subprocesses on cancel**: tools that don't check
+  `ctx.cancellation` (e.g. bash) keep running until their next async
+  yield point.
+
+### Example flow — fine-tune a model
+
+```
+1. Caller:  swarm_submit { prompt: "fine-tune meta-llama/Llama-3.1-8B on data.jsonl ...",
+                           constraints: { needs_gpu: true, min_ram_gb: 64 } }
+            → { task_id: "abc-123", node_id: "gpu-02", state: "running" }
+
+2. Node agent during execution:
+   - loads dataset
+   - calls swarm_checkpoint { message: "dataset loaded", progress: 0.05 }
+   - starts training
+   - per epoch: swarm_checkpoint { message: "epoch N/10 loss=...", progress: N/10 }
+   - saves weights to ./model.safetensors (picked up via send_file)
+   - finishes
+
+3. Caller polls every minute:
+   - swarm_task_status { task_id: "abc-123" }
+     → { state: "running", checkpoint_count: 4, last_sequence: 4, ... }
+   - swarm_task_checkpoints { task_id: "abc-123", since_sequence: 0 }
+     → all four progress lines so far
+
+4. Eventually: swarm_task_result { task_id: "abc-123" }
+   → { state: "completed", result: { text: "...", payloads: [...] } }
+```
 
 ---
 

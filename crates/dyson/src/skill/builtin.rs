@@ -36,6 +36,7 @@ use crate::tool::memory_search::MemorySearchTool;
 use crate::tool::read_file::ReadFileTool;
 use crate::tool::search_files::SearchFilesTool;
 use crate::tool::send_file::SendFileTool;
+use crate::tool::swarm_checkpoint::SwarmCheckpointTool;
 use crate::tool::web_fetch::WebFetchTool;
 use crate::tool::web_search;
 use crate::tool::workspace_search::WorkspaceSearchTool;
@@ -100,6 +101,7 @@ impl BuiltinSkill {
             Arc::new(LoadSkillTool),
             Arc::new(KbSearchTool),
             Arc::new(KbStatusTool),
+            Arc::new(SwarmCheckpointTool),
             Arc::new(WebFetchTool::default()),
         ];
 
@@ -210,7 +212,7 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new(None);
         let tools = skill.tools();
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 16);
         assert_eq!(tools[0].name(), "bash");
         assert_eq!(tools[1].name(), "read_file");
         assert_eq!(tools[2].name(), "write_file");
@@ -225,7 +227,8 @@ mod tests {
         assert_eq!(tools[11].name(), "load_skill");
         assert_eq!(tools[12].name(), "kb_search");
         assert_eq!(tools[13].name(), "kb_status");
-        assert_eq!(tools[14].name(), "web_fetch");
+        assert_eq!(tools[14].name(), "swarm_checkpoint");
+        assert_eq!(tools[15].name(), "web_fetch");
     }
 
     #[test]

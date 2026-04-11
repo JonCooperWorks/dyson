@@ -94,25 +94,16 @@ impl Tool for OAuthSubmitTool {
 
     async fn run(&self, input: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
         let Some(code) = extract_code(input["code_or_url"].as_str().unwrap_or("")) else {
-            return Ok(ToolOutput {
-                content: "No authorization code found.".into(),
-                is_error: true, metadata: None, files: vec![],
-            });
+            return Ok(ToolOutput::error("No authorization code found."));
         };
 
         match self.pending.complete(&code).await {
-            Ok(true) => Ok(ToolOutput {
-                content: format!("OAuth complete for '{}'. Reconnecting...", self.pending.server_name),
-                is_error: false, metadata: None, files: vec![],
-            }),
-            Ok(false) => Ok(ToolOutput {
-                content: "Already authorized.".into(),
-                is_error: false, metadata: None, files: vec![],
-            }),
-            Err(e) => Ok(ToolOutput {
-                content: format!("Token exchange failed: {e}"),
-                is_error: true, metadata: None, files: vec![],
-            }),
+            Ok(true) => Ok(ToolOutput::success(format!(
+                "OAuth complete for '{}'. Reconnecting...",
+                self.pending.server_name
+            ))),
+            Ok(false) => Ok(ToolOutput::success("Already authorized.")),
+            Err(e) => Ok(ToolOutput::error(format!("Token exchange failed: {e}"))),
         }
     }
 }
@@ -369,7 +360,13 @@ impl Tool for McpRemoteTool {
         let content: String = tool_result.content.iter()
             .filter_map(|c| match c { McpContent::Text { text } => Some(text.as_str()), _ => None })
             .collect::<Vec<_>>().join("\n");
-        Ok(ToolOutput { content, is_error: tool_result.is_error, metadata: None, files: vec![] })
+        Ok(ToolOutput {
+            content,
+            is_error: tool_result.is_error,
+            metadata: None,
+            files: vec![],
+            checkpoints: vec![],
+        })
     }
 }
 

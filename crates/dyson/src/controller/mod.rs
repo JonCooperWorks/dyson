@@ -60,7 +60,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Settings;
 use crate::error::DysonError;
-use crate::tool::ToolOutput;
+use crate::tool::{CheckpointEvent, ToolOutput};
 
 // ---------------------------------------------------------------------------
 // Controller trait
@@ -977,6 +977,26 @@ pub trait Output: Send {
     /// Each controller delivers files differently (e.g. printing the path,
     /// sending a document message).
     fn send_file(&mut self, path: &Path) -> std::result::Result<(), DysonError>;
+
+    /// Receive a progress checkpoint event emitted by a tool call.
+    ///
+    /// Called by the agent loop whenever a tool attaches one or more
+    /// `CheckpointEvent`s to its output.  Like `send_file`, this is a
+    /// side-channel — the event does not appear in the LLM's conversation
+    /// history.
+    ///
+    /// The default impl drops the event, which is the correct behaviour
+    /// for every controller except `SwarmController`.  The swarm
+    /// controller forwards checkpoints to the hub via
+    /// `POST /swarm/checkpoint` so callers observing a long-running
+    /// task see progress in real time.
+    fn checkpoint(
+        &mut self,
+        event: &CheckpointEvent,
+    ) -> std::result::Result<(), DysonError> {
+        let _ = event;
+        Ok(())
+    }
 
     /// An error occurred.
     fn error(&mut self, error: &DysonError) -> std::result::Result<(), DysonError>;

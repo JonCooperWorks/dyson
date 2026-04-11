@@ -255,6 +255,7 @@ impl Tool for BashTool {
                         "stderr_bytes": output.stderr.len(),
                     })),
                     files: Vec::new(),
+                    checkpoints: Vec::new(),
                 })
             }
 

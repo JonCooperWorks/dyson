@@ -64,6 +64,7 @@ pub mod read_file;
 pub mod search_files;
 pub mod send_file;
 pub mod skill_create;
+pub mod swarm_checkpoint;
 pub mod web_fetch;
 pub mod web_search;
 pub mod workspace_search;
@@ -338,6 +339,30 @@ pub struct ToolOutput {
     /// *after* the text content — they are not included in the LLM's
     /// conversation history.
     pub files: Vec<PathBuf>,
+
+    /// Progress checkpoint events produced by this tool call.
+    ///
+    /// Like `files`, this is a side-channel: checkpoints flow through
+    /// the controller's `Output::checkpoint()` hook and do not appear
+    /// in the LLM's conversation history.  The `SwarmCaptureOutput`
+    /// impl forwards them to the swarm hub so long-running tasks can
+    /// report progress without waiting for the final result.
+    ///
+    /// Outside of the swarm controller the default `Output::checkpoint`
+    /// impl drops events on the floor, so the `swarm_checkpoint` tool
+    /// is a harmless no-op for terminal / telegram agents.
+    pub checkpoints: Vec<CheckpointEvent>,
+}
+
+/// A single progress/checkpoint event emitted by a tool during its run.
+///
+/// Used only as a side-channel — not serialized into the LLM conversation.
+#[derive(Debug, Clone)]
+pub struct CheckpointEvent {
+    /// Human-readable progress message.
+    pub message: String,
+    /// Optional fractional progress in the range 0.0..=1.0.
+    pub progress: Option<f32>,
 }
 
 /// Validate a workspace file path to prevent path traversal.
@@ -446,6 +471,7 @@ impl ToolOutput {
             is_error: false,
             metadata: None,
             files: Vec::new(),
+            checkpoints: Vec::new(),
         }
     }
 
@@ -456,6 +482,7 @@ impl ToolOutput {
             is_error: true,
             metadata: None,
             files: Vec::new(),
+            checkpoints: Vec::new(),
         }
     }
 
@@ -473,6 +500,18 @@ impl ToolOutput {
     #[cfg(test)]
     pub fn with_files(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
         self.files.extend(paths.into_iter().map(Into::into));
+        self
+    }
+
+    /// Attach a progress checkpoint event to the output.
+    ///
+    /// Checkpoints are delivered to the controller's `Output::checkpoint`
+    /// hook as a side-channel — they do not appear in the LLM
+    /// conversation history.  Outside of the swarm controller the
+    /// default hook drops them, making the builtin `swarm_checkpoint`
+    /// tool a safe no-op for other controllers.
+    pub fn with_checkpoint(mut self, event: CheckpointEvent) -> Self {
+        self.checkpoints.push(event);
         self
     }
 }

@@ -12,15 +12,17 @@ pub mod key;
 pub mod queue;
 pub mod registry;
 pub mod router;
+pub mod tasks;
 pub mod tls;
 
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::broadcast;
 
 use crate::blob::BlobStore;
 use crate::key::HubKeyPair;
 use crate::registry::NodeRegistry;
+use crate::tasks::TaskStore;
 
 /// A handle to the running hub shared across axum handlers.
 ///
@@ -33,18 +35,15 @@ pub struct Hub {
     pub blobs: BlobStore,
     /// The hub's signing key pair.  Used to sign dispatched tasks.
     pub key: HubKeyPair,
-    /// Pending dispatches awaiting results.
+    /// Unified task state store.
     ///
-    /// When the MCP endpoint signs and dispatches a task, it inserts a
-    /// oneshot sender keyed on the task_id.  When `POST /swarm/result`
-    /// arrives, the result is pushed through that sender and the MCP
-    /// caller wakes up.
-    pub pending_dispatches: Mutex<
-        std::collections::HashMap<
-            String,
-            tokio::sync::oneshot::Sender<dyson_swarm_protocol::types::SwarmResult>,
-        >,
-    >,
+    /// Holds state for every dispatched task — sync (blocking
+    /// `swarm_dispatch`) and async (`swarm_submit`) alike.  Sync
+    /// dispatches insert a `oneshot::Sender<SwarmResult>` as the
+    /// `waiter` field on their record; async dispatches leave it `None`.
+    /// `POST /swarm/result` drives both paths through
+    /// `TaskStore::finalize`, guaranteeing one lock and one ordering.
+    pub tasks: TaskStore,
     /// Broadcast channel used to tell long-lived handlers (specifically
     /// the SSE event stream) that the server is shutting down.
     ///
@@ -65,7 +64,7 @@ impl Hub {
             registry: NodeRegistry::new(),
             blobs,
             key,
-            pending_dispatches: Mutex::new(std::collections::HashMap::new()),
+            tasks: TaskStore::new(),
             shutdown,
         }))
     }

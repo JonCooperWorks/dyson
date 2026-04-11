@@ -684,6 +684,17 @@ impl Agent {
         self.tool_context.depth = depth;
     }
 
+    /// Replace the agent's tool-context cancellation token.
+    ///
+    /// Used by the swarm controller to install a fresh per-task
+    /// `CancellationToken` so a `swarm_task_cancel` MCP call can
+    /// cooperatively abort any tool calls that observe the token
+    /// (currently `web_fetch` and `web_search`; other tools will drop
+    /// naturally when the agent future is dropped).
+    pub fn set_cancellation_token(&mut self, token: CancellationToken) {
+        self.tool_context.cancellation = token;
+    }
+
     /// Send a dream event to the persistent dream thread.
     ///
     /// Pre-checks triggers on the main thread so the expensive message

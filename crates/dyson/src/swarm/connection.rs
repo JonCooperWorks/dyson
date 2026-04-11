@@ -22,7 +22,7 @@ use futures_util::StreamExt;
 use reqwest::StatusCode;
 
 use crate::error::{DysonError, Result};
-use crate::swarm::types::{NodeManifest, NodeStatus, SwarmResult};
+use crate::swarm::types::{NodeManifest, NodeStatus, SwarmResult, TaskCheckpoint};
 
 // ---------------------------------------------------------------------------
 // SSE event types
@@ -37,6 +37,8 @@ pub enum SwarmEvent {
     Task(Vec<u8>),
     /// Hub acknowledged a heartbeat.
     HeartbeatAck,
+    /// Hub requests cancellation of the named task.
+    CancelTask { task_id: String },
     /// Hub is requesting graceful shutdown.
     Shutdown,
 }
@@ -128,6 +130,18 @@ impl SwarmConnection {
         let req = self.authed(self.client.post(&url).json(result));
         let resp = req.send().await?;
         Self::check(resp, "result submission failed").await?;
+        Ok(())
+    }
+
+    /// POST a progress checkpoint for an in-flight task.
+    ///
+    /// Non-fatal for the task if it fails — the checkpoint is best-effort
+    /// metadata.  Callers should log send failures and continue executing.
+    pub async fn send_checkpoint(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
+        let url = format!("{}/swarm/checkpoint", self.base_url);
+        let req = self.authed(self.client.post(&url).json(checkpoint));
+        let resp = req.send().await?;
+        Self::check(resp, "checkpoint submission failed").await?;
         Ok(())
     }
 
@@ -257,6 +271,11 @@ fn parse_sse_event(event_type: &str, data: &str) -> Option<SwarmEvent> {
             Some(SwarmEvent::Task(wire_bytes))
         }
         "heartbeat_ack" => Some(SwarmEvent::HeartbeatAck),
+        "cancel_task" => {
+            let parsed: serde_json::Value = serde_json::from_str(data).ok()?;
+            let task_id = parsed["task_id"].as_str()?.to_string();
+            Some(SwarmEvent::CancelTask { task_id })
+        }
         "shutdown" => Some(SwarmEvent::Shutdown),
         _ => {
             tracing::debug!(event_type, "unknown SSE event type");
@@ -301,6 +320,16 @@ mod tests {
         let mut buf = "event: heartbeat_ack\ndata: {}\n\n".to_string();
         let event = extract_sse_event(&mut buf).unwrap();
         assert!(matches!(event, SwarmEvent::HeartbeatAck));
+    }
+
+    #[test]
+    fn parse_sse_cancel_task() {
+        let mut buf = "event: cancel_task\ndata: {\"task_id\":\"abc-123\"}\n\n".to_string();
+        let event = extract_sse_event(&mut buf).unwrap();
+        match event {
+            SwarmEvent::CancelTask { task_id } => assert_eq!(task_id, "abc-123"),
+            _ => panic!("expected CancelTask"),
+        }
     }
 
     #[test]
