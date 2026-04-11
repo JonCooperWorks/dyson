@@ -336,6 +336,7 @@ async fn mcp_tools_list_has_expected_tools() {
         "swarm_task_status",
         "swarm_task_checkpoints",
         "swarm_task_result",
+        "swarm_task_cancel",
         "swarm_task_list",
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
@@ -554,6 +555,162 @@ async fn dispatch_preserves_inline_payload() {
         .send()
         .await;
     let _ = dispatch_task.await;
+}
+
+/// Call an MCP tool and return the parsed JSON payload from the
+/// response's single text content block.  Collapses ~10 lines of
+/// boilerplate into one call.
+async fn mcp_call_tool(
+    client: &reqwest::Client,
+    base_url: &str,
+    name: &str,
+    arguments: Value,
+) -> Value {
+    let resp: Value = client
+        .post(format!("{base_url}/mcp"))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("tool result had no text content");
+    serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string()))
+}
+
+/// End-to-end: a task submitted via swarm_submit can be cancelled via
+/// swarm_task_cancel.  The hub pushes a cancel_task SSE event to the
+/// owning node and marks the record as Cancelled.
+#[tokio::test]
+async fn async_dispatch_can_be_cancelled() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let reg: Value = client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("cancelee"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = reg["token"].as_str().unwrap().to_string();
+
+    let sse_resp = client
+        .get(format!("{}/swarm/events", h.base_url))
+        .bearer_auth(&token)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    let mut stream = sse_resp.bytes_stream();
+    let mut buffer = Vec::new();
+    let _ = read_one_event(&mut stream, &mut buffer).await; // registered
+
+    // Submit a task.
+    let submit = mcp_call_tool(
+        &client,
+        &h.base_url,
+        "swarm_submit",
+        json!({ "prompt": "run forever" }),
+    )
+    .await;
+    let task_id = submit["task_id"].as_str().unwrap().to_string();
+
+    // Drain the task SSE event.
+    let _task_event = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_one_event(&mut stream, &mut buffer),
+    )
+    .await
+    .expect("task event did not arrive");
+
+    // Cancel it.
+    let cancel = mcp_call_tool(
+        &client,
+        &h.base_url,
+        "swarm_task_cancel",
+        json!({ "task_id": task_id }),
+    )
+    .await;
+    assert_eq!(cancel["state"], "cancelled");
+    assert_eq!(cancel["event_delivered"], true);
+
+    // Node should now see a cancel_task SSE event.
+    let cancel_event = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_one_event(&mut stream, &mut buffer),
+    )
+    .await
+    .expect("cancel_task event did not arrive");
+    assert!(cancel_event.contains("event: cancel_task"));
+    assert!(cancel_event.contains(&task_id));
+
+    // Status reflects cancelled.
+    let status = mcp_call_tool(
+        &client,
+        &h.base_url,
+        "swarm_task_status",
+        json!({ "task_id": task_id }),
+    )
+    .await;
+    assert_eq!(status["state"]["state"], "cancelled");
+
+    // Cancelling twice is an error.
+    let resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "swarm_task_cancel",
+                "arguments": { "task_id": task_id }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["result"]["isError"], true);
+
+    // A late result POST from the node after cancellation does not
+    // overwrite the Cancelled state (first-writer-wins in finalize).
+    let late = SwarmResult {
+        task_id: task_id.clone(),
+        text: "finished just now".into(),
+        payloads: vec![],
+        status: TaskStatus::Completed,
+        duration_secs: 5,
+    };
+    let post = client
+        .post(format!("{}/swarm/result", h.base_url))
+        .bearer_auth(&token)
+        .json(&late)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post.status(), 200);
+
+    let after = mcp_call_tool(
+        &client,
+        &h.base_url,
+        "swarm_task_status",
+        json!({ "task_id": task_id }),
+    )
+    .await;
+    assert_eq!(after["state"]["state"], "cancelled");
 }
 
 /// End-to-end: swarm_submit returns fast, node posts checkpoints, MCP

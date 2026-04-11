@@ -169,6 +169,12 @@ impl TaskStore {
     /// the oneshot waiter out of the record so the caller can fire it
     /// outside any lock.  Returns `None` if the task is unknown or if
     /// there was no waiter (async submission).
+    ///
+    /// If the task is already in terminal state `Cancelled` (because
+    /// `cancel()` was called before this result arrived), the state is
+    /// left as `Cancelled` but the node's actual result is still stored
+    /// for debugging.  Other terminal states are similarly preserved on
+    /// a second finalize — first writer wins.
     pub async fn finalize(
         &self,
         task_id: &str,
@@ -176,7 +182,9 @@ impl TaskStore {
     ) -> Option<oneshot::Sender<SwarmResult>> {
         let mut inner = self.inner.write().await;
         let record = inner.get_mut(task_id)?;
-        record.state = TaskState::from_task_status(&result.status);
+        if !record.state.is_terminal() {
+            record.state = TaskState::from_task_status(&result.status);
+        }
         record.last_update = SystemTime::now();
         record.result = Some(result);
         record.waiter.take()
@@ -191,6 +199,44 @@ impl TaskStore {
         if let Some(record) = inner.get_mut(task_id) {
             record.waiter = None;
         }
+    }
+
+    /// Mark a running task as Cancelled and return info about it.
+    ///
+    /// Returns `Some((node_id, waiter))` on success — the waiter is the
+    /// sync dispatcher's oneshot (if any), which the caller should fire
+    /// with a synthetic Cancelled `SwarmResult` so a blocking
+    /// `swarm_dispatch` returns promptly.  The node_id lets the caller
+    /// push a `CancelTask` SSE event to the owning node.
+    ///
+    /// Returns `None` if the task is unknown or already terminal.
+    ///
+    /// A late `finalize` call from the node after cancellation will
+    /// find the task in a terminal state and update the record's
+    /// `result` with whatever the node actually reported — handy for
+    /// debugging which callback ran last — while leaving the state as
+    /// whatever the node decided (Cancelled, Completed, Failed).  For
+    /// async callers that never poll again, the Cancelled state
+    /// recorded here is the final word.
+    pub async fn cancel(
+        &self,
+        task_id: &str,
+    ) -> Option<(String, Option<oneshot::Sender<SwarmResult>>)> {
+        let mut inner = self.inner.write().await;
+        let record = inner.get_mut(task_id)?;
+        if record.state.is_terminal() {
+            return None;
+        }
+        record.state = TaskState::Cancelled;
+        record.last_update = SystemTime::now();
+        record.result = Some(SwarmResult {
+            task_id: task_id.to_string(),
+            text: String::new(),
+            payloads: vec![],
+            status: TaskStatus::Cancelled,
+            duration_secs: 0,
+        });
+        Some((record.node_id.clone(), record.waiter.take()))
     }
 
     /// Return a snapshot of one task if it exists.
@@ -422,6 +468,44 @@ mod tests {
             .finalize("t1", sample_result("t1", TaskStatus::Completed))
             .await;
         assert!(waiter.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancel_running_task_sets_cancelled_and_returns_waiter() {
+        let store = TaskStore::new();
+        let (tx, rx) = oneshot::channel::<SwarmResult>();
+        let mut rec = blank_record("t1");
+        rec.waiter = Some(tx);
+        store.insert(rec).await;
+
+        let (node_id, waiter) = store.cancel("t1").await.unwrap();
+        assert_eq!(node_id, "node-a");
+        assert!(waiter.is_some());
+
+        // Fire the waiter with a synthetic Cancelled result so any sync
+        // dispatcher unblocks.
+        waiter
+            .unwrap()
+            .send(sample_result("t1", TaskStatus::Cancelled))
+            .unwrap();
+        let r = rx.await.unwrap();
+        assert!(matches!(r.status, TaskStatus::Cancelled));
+
+        let snap = store.get("t1").await.unwrap();
+        assert!(matches!(snap.state, TaskState::Cancelled));
+        assert!(snap.result.is_some());
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_or_terminal_returns_none() {
+        let store = TaskStore::new();
+        assert!(store.cancel("nope").await.is_none());
+
+        store.insert(blank_record("t1")).await;
+        store
+            .finalize("t1", sample_result("t1", TaskStatus::Completed))
+            .await;
+        assert!(store.cancel("t1").await.is_none());
     }
 
     #[tokio::test]

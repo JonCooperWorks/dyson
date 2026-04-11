@@ -34,6 +34,10 @@ pub enum SseEvent {
     Task(Vec<u8>),
     /// Heartbeat acknowledgement.
     HeartbeatAck,
+    /// Cancel a running task.  The node checks whether it's currently
+    /// executing this task_id and, if so, cancels the per-task token
+    /// so the agent loop drops the in-flight work.
+    CancelTask(String),
     /// Graceful shutdown request.
     Shutdown,
 }

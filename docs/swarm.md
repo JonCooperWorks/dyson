@@ -318,6 +318,7 @@ during processing, once per stage of a pipeline.
 | `swarm_task_status { task_id }` | Lightweight state: `state`, `checkpoint_count`, `last_sequence`, timestamps |
 | `swarm_task_checkpoints { task_id, since_sequence? }` | Ordered checkpoint list with sequence strictly greater than `since_sequence` (default 0) — tail progress incrementally |
 | `swarm_task_result { task_id }` | `{ state, result? }`.  `result` is absent while running, present once terminal |
+| `swarm_task_cancel { task_id }` | Mark a running task cancelled and push a `cancel_task` SSE event to the owning node |
 | `swarm_task_list { limit? }` | Recent tasks newest-first, bounded by `limit` (default 50). Includes sync dispatches too — every task flows through the same store |
 
 `swarm_task_result` uses a single shape: while running, only `state`
@@ -333,16 +334,37 @@ persistence across hub restart**.  The same reaper task that culls stale
 nodes also drops terminal tasks older than 24 hours.  Long-running
 callers should retrieve their results before the hub is restarted.
 
-### What v1 doesn't do yet
+### Cancellation
 
-- **Cancellation**: a submitted task cannot be stopped mid-flight.
-  Document this to your agent if it matters.
+`swarm_task_cancel { task_id }` marks the task `Cancelled` on the hub,
+wakes any blocking `swarm_dispatch` caller with a synthetic Cancelled
+result, and pushes a `cancel_task` SSE event to the owning node.  On
+the node, the swarm controller drops the in-flight `agent.run` future
+via `tokio::select!` against the per-task `CancellationToken`.  Tools
+that poll `ctx.cancellation` (currently `web_fetch` and `web_search`)
+observe the token directly; other tools — including bash — only stop
+at the next `await` point when the enclosing future is dropped.
+
+This makes cancellation **cooperative, not instant**: a bash command
+already running will keep going until it completes its current output
+read, then the tool result is discarded.  That's acceptable for most
+long-running jobs (training loops usually yield regularly), but
+you should treat cancellation as "please stop soon" rather than a
+hard kill.  If the node races the hub and POSTs a real result after
+cancellation, `TaskStore::finalize` preserves the `Cancelled` state
+(first writer wins).
+
+### What v1 still doesn't do
+
 - **Persistence**: hub restart loses all in-flight and recent task state.
 - **Queueing**: if no node is eligible, both `swarm_dispatch` and
   `swarm_submit` fail fast with `no eligible node`.
 - **Automatic progress**: checkpoints are explicitly emitted by the
   agent calling `swarm_checkpoint`.  There's no automatic scraping of
   bash stdout.
+- **Hard kill of bash subprocesses on cancel**: tools that don't check
+  `ctx.cancellation` (e.g. bash) keep running until their next async
+  yield point.
 
 ### Example flow — fine-tune a model
 

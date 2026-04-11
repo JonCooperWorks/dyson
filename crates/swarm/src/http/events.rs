@@ -106,6 +106,10 @@ pub fn encode_event(event: &SseEvent) -> bytes::Bytes {
             format!("event: task\ndata: {b64}\n\n")
         }
         SseEvent::HeartbeatAck => "event: heartbeat_ack\ndata: {}\n\n".to_string(),
+        SseEvent::CancelTask(task_id) => {
+            let json = serde_json::json!({ "task_id": task_id });
+            format!("event: cancel_task\ndata: {json}\n\n")
+        }
         SseEvent::Shutdown => "event: shutdown\ndata: {}\n\n".to_string(),
     };
     bytes::Bytes::from(text)
@@ -150,5 +154,14 @@ mod tests {
     fn encode_shutdown() {
         let bytes = encode_event(&SseEvent::Shutdown);
         assert_eq!(&bytes[..], b"event: shutdown\ndata: {}\n\n");
+    }
+
+    #[test]
+    fn encode_cancel_task() {
+        let bytes = encode_event(&SseEvent::CancelTask("t-123".into()));
+        let s = std::str::from_utf8(&bytes).unwrap();
+        assert!(s.starts_with("event: cancel_task\n"));
+        assert!(s.contains("\"task_id\":\"t-123\""));
+        assert!(s.ends_with("\n\n"));
     }
 }

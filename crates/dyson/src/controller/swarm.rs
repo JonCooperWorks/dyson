@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use crate::config::{Settings, SwarmControllerConfig};
 use crate::controller::{ClientRegistry, Output};
@@ -503,6 +504,14 @@ impl SwarmController {
                         task_id: task.task_id.clone(),
                     };
 
+                    // Per-task cancellation token.  Installed on the
+                    // agent's tool_context so tools that respect
+                    // cooperative cancellation observe it, and also
+                    // used as a select! branch inside execute_task so
+                    // `agent.run` is dropped promptly on cancel.
+                    let cancel_token = CancellationToken::new();
+                    agent.set_cancellation_token(cancel_token.clone());
+
                     // Spawn a per-task forwarder that POSTs every
                     // checkpoint emitted by `swarm_checkpoint` tool
                     // calls to the hub.  The channel is scoped to this
@@ -531,8 +540,59 @@ impl SwarmController {
                         cp_tx,
                     );
 
-                    // Execute.
-                    let result = execute_task(agent, &conn, &task, output).await;
+                    // Execute while concurrently polling the SSE
+                    // stream for a CancelTask event targeting this
+                    // task_id.  On cancel, trigger the token — the
+                    // execute_task future notices via its own select!
+                    // and returns a Cancelled SwarmResult promptly.
+                    //
+                    // Scoped so `exec_fut` is dropped (releasing its
+                    // borrows on agent and output) before we touch
+                    // them again below.
+                    let result = {
+                        let exec_fut = execute_task(
+                            agent,
+                            &conn,
+                            &task,
+                            output,
+                            cancel_token.clone(),
+                        );
+                        tokio::pin!(exec_fut);
+                        loop {
+                            tokio::select! {
+                                biased;
+                                r = &mut exec_fut => break r,
+                                ev = events.recv() => match ev {
+                                    Some(Ok(SwarmEvent::CancelTask { task_id: id }))
+                                        if id == task.task_id =>
+                                    {
+                                        tracing::info!(
+                                            task_id = %id,
+                                            "cancel_task received — cancelling in-flight task"
+                                        );
+                                        cancel_token.cancel();
+                                    }
+                                    Some(Ok(other)) => {
+                                        tracing::debug!(
+                                            ?other,
+                                            "event during task execution — deferred"
+                                        );
+                                    }
+                                    Some(Err(e)) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "SSE error during task execution"
+                                        );
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            "SSE channel closed during task execution"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    };
 
                     // Drop the sender so the forwarder drains and
                     // exits cleanly.  `clear()` below also clears the
@@ -555,6 +615,12 @@ impl SwarmController {
                     *status.lock().await = NodeStatus::Idle;
                     agent.clear();
                     output.clear();
+                }
+                Ok(SwarmEvent::CancelTask { task_id }) => {
+                    // Cancel for a task we aren't executing — either
+                    // we finished, never received it, or it's a stale
+                    // signal.  Nothing to do.
+                    tracing::debug!(%task_id, "cancel_task event with no in-flight task");
                 }
                 Ok(SwarmEvent::Registered { node_id }) => {
                     tracing::info!(node_id = %node_id, "registration confirmed via SSE");
@@ -582,11 +648,17 @@ impl SwarmController {
 // ---------------------------------------------------------------------------
 
 /// Execute a single swarm task: fetch payloads, run agent, collect result files.
+///
+/// The `cancel` token is polled concurrently with `agent.run` so a
+/// `swarm_task_cancel` MCP call can abort work in progress.  On
+/// cancellation the agent future is dropped, any text emitted so far
+/// is preserved, and a `TaskStatus::Cancelled` result is returned.
 async fn execute_task(
     agent: &mut crate::agent::Agent,
     conn: &SwarmConnection,
     task: &SwarmTask,
     output: &mut SwarmCaptureOutput,
+    cancel: CancellationToken,
 ) -> SwarmResult {
     let start = Instant::now();
 
@@ -613,31 +685,50 @@ async fn execute_task(
         format!("{}\n\n{}", task.prompt, payload_context)
     };
 
-    // Run the agent with a timeout if specified.
-    let agent_result = if let Some(timeout_secs) = task.timeout_secs {
-        tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            agent.run(&prompt, output),
-        )
-        .await
-    } else {
-        Ok(agent.run(&prompt, output).await)
+    // Split the agent future so it can be raced against the cancel
+    // token and an optional timeout.  The agent future borrows
+    // `output`, so we scope it tightly and drop it before touching
+    // `output` again.
+    enum Outcome {
+        Done(crate::error::Result<String>),
+        Cancelled,
+        Timeout,
+    }
+
+    let outcome = {
+        let agent_fut = agent.run(&prompt, output);
+        tokio::pin!(agent_fut);
+        if let Some(timeout_secs) = task.timeout_secs {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Outcome::Cancelled,
+                r = &mut agent_fut => Outcome::Done(r),
+                _ = tokio::time::sleep(Duration::from_secs(timeout_secs)) => Outcome::Timeout,
+            }
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Outcome::Cancelled,
+                r = &mut agent_fut => Outcome::Done(r),
+            }
+        }
     };
 
-    let (text, task_status) = match agent_result {
-        Ok(Ok(text)) => (text, TaskStatus::Completed),
-        Ok(Err(e)) => (
+    let (text, task_status) = match outcome {
+        Outcome::Done(Ok(text)) => (text, TaskStatus::Completed),
+        Outcome::Done(Err(e)) => (
             String::new(),
             TaskStatus::Failed {
                 error: format!("agent error: {e}"),
             },
         ),
-        Err(_) => (
+        Outcome::Timeout => (
             output.text().to_string(),
             TaskStatus::Failed {
                 error: "task timed out".into(),
             },
         ),
+        Outcome::Cancelled => (output.text().to_string(), TaskStatus::Cancelled),
     };
 
     // Collect result files and upload large ones.

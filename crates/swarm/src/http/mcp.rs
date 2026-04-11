@@ -258,6 +258,22 @@ fn tools_list_response() -> Value {
                 }
             },
             {
+                "name": "swarm_task_cancel",
+                "description": "Request cancellation of a running task. The hub marks the \
+                    task as cancelled and pushes a cancel_task event to the owning node, \
+                    which drops the in-flight agent run. Bash subprocesses spawned by \
+                    the node may continue until their current tool call yields, so \
+                    cancellation is cooperative rather than instant.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string" }
+                    },
+                    "required": ["task_id"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "swarm_task_list",
                 "description": "List recent tasks on the hub, newest first, bounded by limit.",
                 "inputSchema": {
@@ -273,6 +289,11 @@ fn tools_list_response() -> Value {
 }
 
 /// Shared implementation for the `tools/call` dispatcher.
+///
+/// Every tool handler returns a `Result<Value, String>`.  Ok values are
+/// rendered as pretty-printed JSON text content; Err strings become
+/// error text content with `isError: true`.  This keeps the match arms
+/// trivial one-liners.
 async fn handle_tools_call(
     hub: &Arc<Hub>,
     caller: Option<&str>,
@@ -285,64 +306,45 @@ async fn handle_tools_call(
         .ok_or_else(|| McpError::invalid_params("params.name is required"))?;
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    match name {
-        "list_nodes" => Ok(tool_result_text(
-            serde_json::to_string_pretty(&list_nodes(hub, caller).await).unwrap(),
-            false,
-        )),
-        "swarm_status" => Ok(tool_result_text(
-            serde_json::to_string_pretty(&swarm_status(hub).await).unwrap(),
-            false,
-        )),
-        "swarm_dispatch" => match swarm_dispatch(hub, arguments).await {
-            Ok(result) => Ok(tool_result_text(
-                serde_json::to_string_pretty(&result).unwrap(),
-                false,
-            )),
-            Err(e) => Ok(tool_result_text(format!("dispatch failed: {e}"), true)),
-        },
-        "swarm_submit" => match swarm_submit(hub, arguments).await {
-            Ok(v) => Ok(tool_result_text(
-                serde_json::to_string_pretty(&v).unwrap(),
-                false,
-            )),
-            Err(e) => Ok(tool_result_text(format!("submit failed: {e}"), true)),
-        },
-        "swarm_task_status" => match swarm_task_status(hub, arguments).await {
-            Ok(v) => Ok(tool_result_text(
-                serde_json::to_string_pretty(&v).unwrap(),
-                false,
-            )),
-            Err(e) => Ok(tool_result_text(e, true)),
-        },
-        "swarm_task_checkpoints" => match swarm_task_checkpoints(hub, arguments).await {
-            Ok(v) => Ok(tool_result_text(
-                serde_json::to_string_pretty(&v).unwrap(),
-                false,
-            )),
-            Err(e) => Ok(tool_result_text(e, true)),
-        },
-        "swarm_task_result" => match swarm_task_result(hub, arguments).await {
-            Ok(v) => Ok(tool_result_text(
-                serde_json::to_string_pretty(&v).unwrap(),
-                false,
-            )),
-            Err(e) => Ok(tool_result_text(e, true)),
-        },
-        "swarm_task_list" => Ok(tool_result_text(
-            serde_json::to_string_pretty(&swarm_task_list(hub, arguments).await).unwrap(),
-            false,
-        )),
-        other => Err(McpError::invalid_params(format!("unknown tool: {other}"))),
-    }
+    let outcome: Result<Value, String> = match name {
+        "list_nodes" => Ok(list_nodes(hub, caller).await),
+        "swarm_status" => Ok(swarm_status(hub).await),
+        "swarm_dispatch" => swarm_dispatch(hub, arguments)
+            .await
+            .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+            .map_err(|e| format!("dispatch failed: {e}")),
+        "swarm_submit" => swarm_submit(hub, arguments)
+            .await
+            .map_err(|e| format!("submit failed: {e}")),
+        "swarm_task_status" => swarm_task_status(hub, arguments).await,
+        "swarm_task_checkpoints" => swarm_task_checkpoints(hub, arguments).await,
+        "swarm_task_result" => swarm_task_result(hub, arguments).await,
+        "swarm_task_cancel" => swarm_task_cancel(hub, arguments).await,
+        "swarm_task_list" => Ok(swarm_task_list(hub, arguments).await),
+        other => {
+            return Err(McpError::invalid_params(format!("unknown tool: {other}")));
+        }
+    };
+
+    Ok(tool_result(outcome))
 }
 
-/// Build an MCP `tools/call` result.  A single text content block.
-fn tool_result_text(text: String, is_error: bool) -> Value {
-    json!({
-        "content": [{ "type": "text", "text": text }],
-        "isError": is_error
-    })
+/// Render a handler outcome as an MCP `tools/call` result block.
+fn tool_result(outcome: Result<Value, String>) -> Value {
+    match outcome {
+        Ok(v) => {
+            let text =
+                serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
+            json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": false,
+            })
+        }
+        Err(e) => json!({
+            "content": [{ "type": "text", "text": e }],
+            "isError": true,
+        }),
+    }
 }
 
 /// `list_nodes` — registered nodes, excluding `caller` if set.
@@ -654,6 +656,55 @@ async fn swarm_task_checkpoints(hub: &Arc<Hub>, arguments: Value) -> Result<Valu
         "task_id": task_id,
         "since_sequence": since,
         "checkpoints": cps,
+    }))
+}
+
+/// `swarm_task_cancel` — mark a running task Cancelled and push a
+/// cancel_task SSE event to the owning node.
+async fn swarm_task_cancel(hub: &Arc<Hub>, arguments: Value) -> Result<Value, String> {
+    let task_id = required_task_id(&arguments)?;
+
+    let Some((node_id, waiter)) = hub.tasks.cancel(&task_id).await else {
+        return Err(format!(
+            "task '{task_id}' is unknown or already terminal"
+        ));
+    };
+
+    // Wake any sync dispatcher that's still blocked on this task so
+    // swarm_dispatch returns promptly with a Cancelled result.
+    if let Some(tx) = waiter {
+        let cancelled = dyson_swarm_protocol::types::SwarmResult {
+            task_id: task_id.clone(),
+            text: String::new(),
+            payloads: vec![],
+            status: dyson_swarm_protocol::types::TaskStatus::Cancelled,
+            duration_secs: 0,
+        };
+        let _ = tx.send(cancelled);
+    }
+
+    // Flip the node back to Idle optimistically — it will confirm via
+    // its next heartbeat.  The cancel event below tells the node to
+    // drop the in-flight work.
+    hub.registry.set_status(&node_id, NodeStatus::Idle).await;
+
+    let pushed = hub
+        .registry
+        .push_event(&node_id, SseEvent::CancelTask(task_id.clone()))
+        .await;
+
+    tracing::info!(
+        task_id = %task_id,
+        node_id = %node_id,
+        pushed,
+        "cancelled task"
+    );
+
+    Ok(json!({
+        "task_id": task_id,
+        "node_id": node_id,
+        "state": "cancelled",
+        "event_delivered": pushed,
     }))
 }
 
