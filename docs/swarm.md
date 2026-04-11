@@ -77,6 +77,58 @@ Two protocols:
 
 ---
 
+## Routing: the caller decides
+
+The hub holds the Ed25519 signing key, tracks nodes, and carries blobs.
+Those are its irreducible responsibilities. What it deliberately does
+**not** do is decide *which* node should run a given task. That
+decision is pushed to the caller — the LLM using the MCP tools — for
+one simple reason: any JSON schema the hub could invent to describe a
+"good fit" is strictly weaker than the caller's own reasoning. An LLM
+that has just watched a conversation about "fine-tune this on the
+dataset we cached yesterday" knows things about node affinity, loaded
+tools, OS preferences, and pipeline continuity that a three-field
+filter never will.
+
+The flow:
+
+1. The calling agent calls `list_nodes`. This returns every peer's
+   full CPU list, GPU list (model + VRAM + driver), total RAM, free
+   disk, OS, capabilities (loaded MCP tools), current status, the
+   `busy_task_id` if busy, and the last heartbeat timestamp.
+2. The agent reasons about which node best fits the task and calls
+   `swarm_dispatch` / `swarm_submit` with `target_node_id` set to that
+   node's id.
+3. The hub validates the target (exists, idle) and dispatches. On
+   `NodeNotFound` or `NodeNotIdle`, the caller re-lists and retries
+   with a different node.
+
+For callers that genuinely don't care which node runs it ("any idle
+node with a GPU and 64G RAM is fine"), the legacy `constraints` path
+stays as a shortcut. Exactly one of `target_node_id` or `constraints`
+must be provided on every dispatch — a bare `{prompt}`-only call is
+rejected with `NoTargetOrConstraints`, because "I didn't think about
+where this should run" is rarely what the caller actually means.
+
+Constraint filter rules (when the shortcut is used):
+
+1. Idle nodes only (busy and draining are dropped).
+2. Optional `needs_gpu` / `needs_capability` / `min_ram_gb` filter.
+3. Prefer the most free RAM, ties broken by lowest `node_id`.
+
+Dispatch errors surfaced to the caller:
+
+| Error | When |
+|-------|------|
+| `NodeNotFound` | `target_node_id` unknown to the hub |
+| `NodeNotIdle` | target exists but is busy or draining |
+| `NoTargetOrConstraints` | dispatch call had neither field set |
+| `NoEligibleNode` | constraint filter matched nothing |
+| `Timeout` | sync `swarm_dispatch` exceeded its timeout |
+| `Cancelled` | task was cancelled or SSE push failed |
+
+---
+
 ## The Hub (Server)
 
 The hub lives at [`crates/swarm/`](../crates/swarm/) and ships as a binary
@@ -85,10 +137,13 @@ named `swarm`.  It is an in-memory, tokio-based HTTP server responsible for:
 1. **Node registry** — Accepting `POST /swarm/register` with a `NodeManifest`,
    assigning a `node_id` and auth token.
 
-2. **Constraint matching** — When a task is submitted (via MCP `swarm_dispatch`
-   or `swarm_submit`), the hub selects the best node based on hardware
-   (GPU, RAM), capabilities (loaded tools), and current status (idle vs
-   busy).
+2. **Node selection** — When a task is submitted (via MCP `swarm_dispatch`
+   or `swarm_submit`), the hub either validates an explicit
+   `target_node_id` from the caller (preferred — see
+   [Routing: the caller decides](#routing-the-caller-decides)) or
+   falls back to a simple constraint filter (GPU / capability / RAM)
+   when the caller uses the shortcut path. Exactly one of the two
+   must be provided on every dispatch.
 
 3. **Task dispatch + lifecycle tracking** — Signing the `SwarmTask` with its
    Ed25519 private key, pushing it to the selected node via SSE
@@ -537,15 +592,16 @@ Verification:
 
 ## Node Manifest
 
-Sent during registration. The hub uses this for routing decisions.
+Sent during registration. The hub stores this and surfaces it via
+`list_nodes` so callers can reason about target selection.
 
 ```json
 {
   "node_name": "gpu-workstation-01",
   "os": "linux",
   "hardware": {
-    "cpus": [{ "model": "AMD Ryzen 9 7950X", "cores": 32 }],
-    "gpus": [{ "model": "NVIDIA RTX 4090", "vram_bytes": 25769803776, "driver": "560.35" }],
+    "cpus": [{ "model": "AMD Ryzen 9 7950X", "cores": 32, "physical_cores": 16 }],
+    "gpus": [{ "model": "NVIDIA RTX 4090", "vram_bytes": 25769803776, "driver": "560.35", "cores": null }],
     "ram_bytes": 68719476736,
     "disk_free_bytes": 500000000000
   },
@@ -555,8 +611,35 @@ Sent during registration. The hub uses this for routing decisions.
 ```
 
 Hardware detection is conditional-compiled per OS. Capabilities are the
-agent's loaded tool names — the hub can route "needs bash" or "needs
-web_search" tasks to nodes that have those tools.
+agent's loaded tool names.
+
+### `list_nodes` output
+
+Each row in `list_nodes` surfaces the full manifest plus runtime
+state. The enriched shape is deliberately verbose so the LLM caller
+has enough detail to reason about a `target_node_id`:
+
+```json
+{
+  "node_id": "uuid",
+  "node_name": "gpu-workstation-01",
+  "os": "linux",
+  "status": "busy",
+  "busy_task_id": "uuid",
+  "capabilities": ["bash", "web_search"],
+  "hardware": {
+    "ram_bytes": 68719476736,
+    "disk_free_bytes": 500000000000,
+    "cpus": [{ "model": "AMD Ryzen 9 7950X", "cores": 32, "physical_cores": 16 }],
+    "gpus": [{ "model": "NVIDIA RTX 4090", "vram_bytes": 25769803776, "driver": "560.35", "cores": null }]
+  },
+  "last_heartbeat_unix": 1744387200
+}
+```
+
+`busy_task_id` only appears when `status` is `"busy"`.
+`last_heartbeat_unix` is the wall-clock time of the node's most recent
+heartbeat (0 if the clock error path triggers).
 
 ---
 

@@ -266,7 +266,10 @@ async fn mcp_dispatch_no_nodes_is_error() {
             "method": "tools/call",
             "params": {
                 "name": "swarm_dispatch",
-                "arguments": { "prompt": "do the thing" }
+                "arguments": {
+                    "prompt": "do the thing",
+                    "constraints": {}
+                }
             }
         }))
         .send()
@@ -279,6 +282,142 @@ async fn mcp_dispatch_no_nodes_is_error() {
     assert_eq!(resp["result"]["isError"], Value::Bool(true));
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("no eligible node"));
+}
+
+#[tokio::test]
+async fn mcp_dispatch_without_target_or_constraints_is_error() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "swarm_dispatch",
+                "arguments": { "prompt": "do the thing" }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(resp["result"]["isError"], Value::Bool(true));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("target_node_id") || text.contains("constraints"),
+        "expected target/constraints hint in error, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_dispatch_with_unknown_target_node_id_is_error() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "swarm_submit",
+                "arguments": {
+                    "prompt": "do the thing",
+                    "target_node_id": "00000000-0000-0000-0000-000000000000"
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(resp["result"]["isError"], Value::Bool(true));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("target node not found"),
+        "expected NodeNotFound message, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_list_nodes_exposes_full_hardware_and_heartbeat() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    // Register with a richer manifest so we can verify full CPU/GPU
+    // detail comes through, plus disk_free_bytes and os.
+    let manifest = NodeManifest {
+        node_name: "rich".into(),
+        os: "linux".into(),
+        hardware: HardwareInfo {
+            cpus: vec![dyson_swarm_protocol::types::CpuInfo {
+                model: "Ryzen 9 7950X".into(),
+                cores: 32,
+                physical_cores: Some(16),
+            }],
+            gpus: vec![dyson_swarm_protocol::types::GpuInfo {
+                model: "RTX 4090".into(),
+                vram_bytes: 24 * 1024 * 1024 * 1024,
+                driver: "560.35".into(),
+                cores: None,
+            }],
+            ram_bytes: 128 * 1024 * 1024 * 1024,
+            disk_free_bytes: 500 * 1024 * 1024 * 1024,
+        },
+        capabilities: vec!["bash".into()],
+        status: NodeStatus::Idle,
+    };
+    client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&manifest)
+        .send()
+        .await
+        .unwrap();
+
+    let resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_nodes", "arguments": {} }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    let rows = parsed.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row["node_name"], "rich");
+    assert_eq!(row["os"], "linux");
+    assert_eq!(row["status"], "idle");
+    assert!(row["last_heartbeat_unix"].as_u64().unwrap() > 0);
+    assert_eq!(row["hardware"]["disk_free_bytes"], 500u64 * 1024 * 1024 * 1024);
+    assert_eq!(row["hardware"]["cpus"][0]["model"], "Ryzen 9 7950X");
+    assert_eq!(row["hardware"]["cpus"][0]["cores"], 32);
+    assert_eq!(row["hardware"]["gpus"][0]["model"], "RTX 4090");
+    assert_eq!(
+        row["hardware"]["gpus"][0]["vram_bytes"],
+        24u64 * 1024 * 1024 * 1024
+    );
+    // Idle node should NOT carry busy_task_id.
+    assert!(row.get("busy_task_id").is_none());
 }
 
 #[tokio::test]
@@ -394,7 +533,8 @@ async fn end_to_end_dispatch_and_result() {
                     "name": "swarm_dispatch",
                     "arguments": {
                         "prompt": "compute 2 + 2",
-                        "timeout_secs": 30
+                        "timeout_secs": 30,
+                        "constraints": {}
                     }
                 }
             }))
@@ -505,7 +645,8 @@ async fn dispatch_preserves_inline_payload() {
                             name: "config.yaml".into(),
                             data: b"key: value".to_vec(),
                         } ],
-                        "timeout_secs": 30
+                        "timeout_secs": 30,
+                        "constraints": {}
                     }
                 }
             }))
@@ -621,7 +762,7 @@ async fn async_dispatch_can_be_cancelled() {
         &client,
         &h.base_url,
         "swarm_submit",
-        json!({ "prompt": "run forever" }),
+        json!({ "prompt": "run forever", "constraints": {} }),
     )
     .await;
     let task_id = submit["task_id"].as_str().unwrap().to_string();
@@ -760,7 +901,8 @@ async fn async_dispatch_with_checkpoints_end_to_end() {
             "params": {
                 "name": "swarm_submit",
                 "arguments": {
-                    "prompt": "fine tune a tiny model"
+                    "prompt": "fine tune a tiny model",
+                    "constraints": {}
                 }
             }
         }))
@@ -1020,6 +1162,157 @@ async fn checkpoint_for_unknown_task_is_not_found() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+/// End-to-end: a caller picks a specific node by `target_node_id` and
+/// the task is dispatched to that exact node (bypassing the constraint
+/// router entirely).
+#[tokio::test]
+async fn explicit_target_node_id_routes_to_that_node() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    // Register two nodes. We'll only open an SSE stream for the second
+    // one and target it explicitly; if the router were picking by
+    // constraints it might route to either.
+    let _alpha: Value = client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("alpha"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let beta: Value = client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("beta"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let beta_node_id = beta["node_id"].as_str().unwrap().to_string();
+    let beta_token = beta["token"].as_str().unwrap().to_string();
+
+    // Open SSE for beta only.
+    let sse_resp = client
+        .get(format!("{}/swarm/events", h.base_url))
+        .bearer_auth(&beta_token)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    let mut stream = sse_resp.bytes_stream();
+    let mut buffer = Vec::new();
+    let _ = read_one_event(&mut stream, &mut buffer).await; // registered
+
+    // Submit targeting beta.
+    let submit = mcp_call_tool(
+        &client,
+        &h.base_url,
+        "swarm_submit",
+        json!({
+            "prompt": "compute",
+            "target_node_id": beta_node_id,
+        }),
+    )
+    .await;
+    assert_eq!(submit["node_id"], beta_node_id);
+    assert_eq!(submit["state"], "running");
+
+    // beta's SSE stream should receive the task.
+    let task_event = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_one_event(&mut stream, &mut buffer),
+    )
+    .await
+    .expect("beta did not receive task event");
+    assert!(task_event.contains("event: task"));
+}
+
+/// End-to-end: once a node is busy with a task, submitting a second
+/// task with the same `target_node_id` returns NodeNotIdle.
+#[tokio::test]
+async fn explicit_target_on_busy_node_is_error() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let reg: Value = client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("solo"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let node_id = reg["node_id"].as_str().unwrap().to_string();
+    let token = reg["token"].as_str().unwrap().to_string();
+
+    // Open SSE so the hub can push the first task.
+    let sse_resp = client
+        .get(format!("{}/swarm/events", h.base_url))
+        .bearer_auth(&token)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    let mut stream = sse_resp.bytes_stream();
+    let mut buffer = Vec::new();
+    let _ = read_one_event(&mut stream, &mut buffer).await; // registered
+
+    // Submit a first task — flips the node to Busy.
+    let first = mcp_call_tool(
+        &client,
+        &h.base_url,
+        "swarm_submit",
+        json!({
+            "prompt": "first",
+            "target_node_id": node_id,
+        }),
+    )
+    .await;
+    assert_eq!(first["state"], "running");
+
+    // Drain the task event so the hub's push path has settled.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_one_event(&mut stream, &mut buffer),
+    )
+    .await
+    .expect("first task event did not arrive");
+
+    // Try a second submission targeting the same node — should fail
+    // with NodeNotIdle.
+    let resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "swarm_submit",
+                "arguments": {
+                    "prompt": "second",
+                    "target_node_id": node_id,
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(resp["result"]["isError"], Value::Bool(true));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("not idle") && text.contains("busy"),
+        "expected NodeNotIdle/busy message, got: {text}"
+    );
 }
 
 /// Pull one complete SSE event out of a byte stream.

@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use dyson_swarm_protocol::types::{NodeManifest, NodeStatus};
 use tokio::sync::{RwLock, mpsc};
@@ -48,7 +48,13 @@ pub struct NodeEntry {
     pub token: String,
     pub manifest: NodeManifest,
     pub status: NodeStatus,
+    /// Monotonic timestamp, used by the reaper for stale-node eviction.
     pub last_heartbeat: Instant,
+    /// Wall-clock timestamp, stamped alongside `last_heartbeat` so MCP
+    /// callers can see "when did this node last check in" as a Unix
+    /// second value. `Instant` cannot be converted to Unix time, so we
+    /// carry both.
+    pub last_heartbeat_at: SystemTime,
     /// None until the node opens its SSE stream.
     pub sse_tx: Option<mpsc::Sender<SseEvent>>,
 }
@@ -86,6 +92,7 @@ impl NodeRegistry {
             status: manifest.status.clone(),
             manifest,
             last_heartbeat: Instant::now(),
+            last_heartbeat_at: SystemTime::now(),
             sse_tx: None,
         };
 
@@ -155,6 +162,7 @@ impl NodeRegistry {
         let mut inner = self.inner.write().await;
         if let Some(entry) = inner.by_id.get_mut(node_id) {
             entry.last_heartbeat = Instant::now();
+            entry.last_heartbeat_at = SystemTime::now();
             entry.status = status;
             true
         } else {
@@ -209,6 +217,20 @@ impl NodeRegistry {
     pub async fn with_entries<R>(&self, f: impl FnOnce(&HashMap<NodeId, NodeEntry>) -> R) -> R {
         let inner = self.inner.read().await;
         f(&inner.by_id)
+    }
+
+    /// Run a read-only closure against a single entry keyed by `node_id`.
+    ///
+    /// Returns `None` if the node doesn't exist. Used by the
+    /// caller-directed dispatch path to validate `target_node_id`
+    /// without cloning the entry.
+    pub async fn with_entry<R>(
+        &self,
+        node_id: &str,
+        f: impl FnOnce(&NodeEntry) -> R,
+    ) -> Option<R> {
+        let inner = self.inner.read().await;
+        inner.by_id.get(node_id).map(f)
     }
 
     /// Test-only: grab a write lock on the inner map for direct manipulation.

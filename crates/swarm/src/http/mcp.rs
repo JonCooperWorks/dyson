@@ -31,8 +31,8 @@ use tokio::sync::oneshot;
 
 use crate::Hub;
 use crate::queue::DispatchError;
-use crate::registry::SseEvent;
-use crate::router::{RoutingConstraints, select_node};
+use crate::registry::{NodeId, SseEvent};
+use crate::router::{RoutingConstraints, select_node, select_node_by_id};
 use crate::tasks::{TaskRecord, TaskSnapshot, TaskState};
 
 /// Default timeout for a `swarm_dispatch` call when none is supplied.
@@ -142,7 +142,12 @@ fn tools_list_response() -> Value {
         "tools": [
             {
                 "name": "list_nodes",
-                "description": "List every node registered with the swarm hub.",
+                "description": "List every node registered with the swarm hub, with \
+                    full hardware (CPU/GPU/RAM/disk), OS, capabilities, status, busy \
+                    task_id (when busy), and last heartbeat timestamp. Call this \
+                    BEFORE swarm_dispatch/swarm_submit so you can pick a target \
+                    node_id that genuinely fits the task — the LLM caller has much \
+                    more context than the hub's blunt constraint filter.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -160,17 +165,34 @@ fn tools_list_response() -> Value {
             },
             {
                 "name": "swarm_dispatch",
-                "description": "Dispatch a task to an eligible node and block on the result. \
+                "description": "Dispatch a task to a specific node and block on the result. \
                     Best for short tasks (under the dispatch timeout). For long-running work \
-                    like model fine-tuning, prefer swarm_submit.",
+                    like model fine-tuning, prefer swarm_submit.\n\
+                    \n\
+                    PREFERRED FLOW: call list_nodes, reason about which node best fits \
+                    this task (hardware, capabilities, OS, current status, whether it \
+                    recently ran a related task), and pass its `node_id` as \
+                    `target_node_id`. If you genuinely don't care which node runs it, \
+                    pass `constraints` instead as a shortcut. Exactly one of \
+                    `target_node_id` or `constraints` must be provided. On \
+                    `NodeNotIdle` or `NodeNotFound`, re-call list_nodes and try another.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "prompt": { "type": "string" },
                         "payloads": { "type": "array" },
                         "timeout_secs": { "type": "integer" },
+                        "target_node_id": {
+                            "type": "string",
+                            "description": "Preferred path. Explicit node_id from list_nodes. \
+                                Fails with NodeNotFound if unknown or NodeNotIdle if the \
+                                target is busy/draining."
+                        },
                         "constraints": {
                             "type": "object",
+                            "description": "Shortcut path. Hub picks an idle node matching \
+                                these filters (most-free-RAM first). Use only when any \
+                                matching node is fine.",
                             "properties": {
                                 "needs_gpu": { "type": "boolean" },
                                 "needs_capability": { "type": "string" },
@@ -185,12 +207,18 @@ fn tools_list_response() -> Value {
             },
             {
                 "name": "swarm_submit",
-                "description": "Dispatch a long-running task to an eligible node and return \
+                "description": "Dispatch a long-running task to a specific node and return \
                     a task_id immediately. Use this for model fine-tuning, large batch jobs, \
                     or anything that may run for minutes to hours. Poll swarm_task_status and \
                     swarm_task_checkpoints for progress, and swarm_task_result for the final \
-                    SwarmResult once the task reaches a terminal state. Cancellation is not \
-                    supported in v1.",
+                    SwarmResult once the task reaches a terminal state.\n\
+                    \n\
+                    PREFERRED FLOW: call list_nodes, reason about which node best fits \
+                    this task (hardware, capabilities, OS, current status), and pass its \
+                    `node_id` as `target_node_id`. If you genuinely don't care which node \
+                    runs it, pass `constraints` instead as a shortcut. Exactly one of \
+                    `target_node_id` or `constraints` must be provided. On `NodeNotIdle` \
+                    or `NodeNotFound`, re-call list_nodes and try another.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -201,8 +229,17 @@ fn tools_list_response() -> Value {
                             "description": "Optional wall-clock timeout enforced by the node. \
                                 Omit to let the task run as long as it needs."
                         },
+                        "target_node_id": {
+                            "type": "string",
+                            "description": "Preferred path. Explicit node_id from list_nodes. \
+                                Fails with NodeNotFound if unknown or NodeNotIdle if the \
+                                target is busy/draining."
+                        },
                         "constraints": {
                             "type": "object",
+                            "description": "Shortcut path. Hub picks an idle node matching \
+                                these filters (most-free-RAM first). Use only when any \
+                                matching node is fine.",
                             "properties": {
                                 "needs_gpu": { "type": "boolean" },
                                 "needs_capability": { "type": "string" },
@@ -348,6 +385,12 @@ fn tool_result(outcome: Result<Value, String>) -> Value {
 }
 
 /// `list_nodes` — registered nodes, excluding `caller` if set.
+///
+/// Output is deliberately verbose so an LLM caller has enough context
+/// to pick a target node for `swarm_dispatch` / `swarm_submit` without
+/// guessing. Full CPU/GPU lists, disk_free_bytes, OS, the in-flight
+/// `task_id` (when busy), and a Unix heartbeat timestamp are all
+/// included.
 async fn list_nodes(hub: &Arc<Hub>, caller: Option<&str>) -> Value {
     hub.registry
         .with_entries(|entries| {
@@ -355,17 +398,36 @@ async fn list_nodes(hub: &Arc<Hub>, caller: Option<&str>) -> Value {
                 .values()
                 .filter(|entry| caller.is_none_or(|c| entry.manifest.node_name != c))
                 .map(|entry| {
-                    json!({
+                    let hw = &entry.manifest.hardware;
+                    let busy_task_id = match &entry.status {
+                        NodeStatus::Busy { task_id } => Some(task_id.clone()),
+                        _ => None,
+                    };
+                    let last_heartbeat_unix = entry
+                        .last_heartbeat_at
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let mut row = json!({
                         "node_id": entry.node_id,
                         "node_name": entry.manifest.node_name,
+                        "os": entry.manifest.os,
                         "status": status_label(&entry.status),
                         "capabilities": entry.manifest.capabilities,
                         "hardware": {
-                            "ram_bytes": entry.manifest.hardware.ram_bytes,
-                            "cpus": entry.manifest.hardware.cpus.len(),
-                            "gpus": entry.manifest.hardware.gpus.len(),
-                        }
-                    })
+                            "ram_bytes": hw.ram_bytes,
+                            "disk_free_bytes": hw.disk_free_bytes,
+                            "cpus": hw.cpus,
+                            "gpus": hw.gpus,
+                        },
+                        "last_heartbeat_unix": last_heartbeat_unix,
+                    });
+                    if let Some(task_id) = busy_task_id {
+                        row.as_object_mut()
+                            .unwrap()
+                            .insert("busy_task_id".into(), Value::String(task_id));
+                    }
+                    row
                 })
                 .collect();
             rows.sort_by(|a, b| {
@@ -404,12 +466,25 @@ async fn swarm_status(hub: &Arc<Hub>) -> Value {
 // Dispatch plumbing shared by swarm_dispatch and swarm_submit
 // ---------------------------------------------------------------------------
 
+/// How a dispatch caller selected the target node.
+///
+/// This is the heart of the "caller-directed routing" refactor:
+/// dispatch tools now take either `target_node_id` (preferred — the
+/// LLM has reasoned over `list_nodes` and picked) or `constraints`
+/// (the legacy three-field filter, kept as a shortcut for callers
+/// that genuinely don't care which node runs the task). Exactly one
+/// must be provided.
+enum DispatchTarget {
+    Explicit(NodeId),
+    Constraints(RoutingConstraints),
+}
+
 /// Fields parsed out of a dispatch/submit tool-call's arguments.
 struct DispatchArgs {
     prompt: String,
     payloads: Vec<Payload>,
     timeout_secs: Option<u64>,
-    constraints: RoutingConstraints,
+    target: DispatchTarget,
 }
 
 fn parse_dispatch_args(arguments: Value) -> Result<DispatchArgs, DispatchError> {
@@ -427,14 +502,42 @@ fn parse_dispatch_args(arguments: Value) -> Result<DispatchArgs, DispatchError> 
 
     let timeout_secs = arguments.get("timeout_secs").and_then(|v| v.as_u64());
 
-    let constraints = parse_constraints(&arguments)?;
+    let target = parse_target(&arguments)?;
 
     Ok(DispatchArgs {
         prompt,
         payloads,
         timeout_secs,
-        constraints,
+        target,
     })
+}
+
+/// Pick the `DispatchTarget` out of a tool-call's arguments.
+///
+/// Rules:
+/// - `target_node_id` (non-empty string) → `Explicit`.
+/// - `constraints` object present (even empty `{}`) → `Constraints`.
+/// - Both present → error (mutually exclusive).
+/// - Neither present → `NoTargetOrConstraints`.
+fn parse_target(arguments: &Value) -> Result<DispatchTarget, DispatchError> {
+    let explicit = arguments
+        .get("target_node_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let constraints_present = arguments
+        .get("constraints")
+        .is_some_and(|v| !v.is_null());
+
+    match (explicit, constraints_present) {
+        (Some(_), true) => Err(DispatchError::Cancelled(
+            "target_node_id and constraints are mutually exclusive".into(),
+        )),
+        (Some(id), false) => Ok(DispatchTarget::Explicit(id)),
+        (None, true) => Ok(DispatchTarget::Constraints(parse_constraints(arguments)?)),
+        (None, false) => Err(DispatchError::NoTargetOrConstraints),
+    }
 }
 
 /// Outcome of placing a task on a node.  Shared by sync and async paths.
@@ -455,9 +558,12 @@ async fn place_task(
     args: &DispatchArgs,
     waiter: Option<oneshot::Sender<SwarmResult>>,
 ) -> Result<PlacedTask, DispatchError> {
-    let node_id = select_node(&hub.registry, &args.constraints)
-        .await
-        .ok_or(DispatchError::NoEligibleNode)?;
+    let node_id = match &args.target {
+        DispatchTarget::Explicit(id) => select_node_by_id(&hub.registry, id).await?,
+        DispatchTarget::Constraints(c) => select_node(&hub.registry, c)
+            .await
+            .ok_or(DispatchError::NoEligibleNode)?,
+    };
 
     let task = SwarmTask {
         task_id: uuid::Uuid::new_v4().to_string(),
@@ -855,8 +961,83 @@ mod tests {
         let args = json!({
             "prompt": "hi",
             "payloads": null,
+            "constraints": {},
         });
         let parsed = parse_dispatch_args(args).unwrap();
         assert!(parsed.payloads.is_empty());
+    }
+
+    #[test]
+    fn parse_target_explicit_node_id() {
+        let args = json!({
+            "prompt": "hi",
+            "target_node_id": "abc-123",
+        });
+        let parsed = parse_dispatch_args(args).unwrap();
+        match parsed.target {
+            DispatchTarget::Explicit(id) => assert_eq!(id, "abc-123"),
+            DispatchTarget::Constraints(_) => panic!("expected Explicit target"),
+        }
+    }
+
+    #[test]
+    fn parse_target_empty_constraints_is_allowed_shortcut() {
+        let args = json!({
+            "prompt": "hi",
+            "constraints": {},
+        });
+        let parsed = parse_dispatch_args(args).unwrap();
+        match parsed.target {
+            DispatchTarget::Constraints(c) => {
+                assert!(!c.needs_gpu);
+                assert!(c.needs_capability.is_none());
+                assert!(c.min_ram_gb.is_none());
+            }
+            DispatchTarget::Explicit(_) => panic!("expected Constraints target"),
+        }
+    }
+
+    #[test]
+    fn parse_target_both_is_rejected_as_mutually_exclusive() {
+        let args = json!({
+            "prompt": "hi",
+            "target_node_id": "abc-123",
+            "constraints": { "needs_gpu": true },
+        });
+        match parse_dispatch_args(args) {
+            Err(DispatchError::Cancelled(m)) => {
+                assert!(
+                    m.contains("mutually exclusive"),
+                    "wrong Cancelled message: {m}"
+                );
+            }
+            Err(other) => panic!("expected Cancelled, got {other:?}"),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn parse_target_neither_is_rejected() {
+        let args = json!({ "prompt": "hi" });
+        match parse_dispatch_args(args) {
+            Err(DispatchError::NoTargetOrConstraints) => {}
+            Err(other) => panic!("expected NoTargetOrConstraints, got {other:?}"),
+            Ok(_) => panic!("expected error"),
+        }
+    }
+
+    #[test]
+    fn parse_target_empty_string_falls_back_to_constraints_rule() {
+        // target_node_id of "" is treated as absent; with no constraints
+        // key present either, we expect NoTargetOrConstraints.
+        let args = json!({
+            "prompt": "hi",
+            "target_node_id": "",
+        });
+        match parse_dispatch_args(args) {
+            Err(DispatchError::NoTargetOrConstraints) => {}
+            Err(other) => panic!("expected NoTargetOrConstraints, got {other:?}"),
+            Ok(_) => panic!("expected error"),
+        }
     }
 }
