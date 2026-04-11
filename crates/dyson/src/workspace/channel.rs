@@ -252,6 +252,10 @@ impl Workspace for ChannelWorkspace {
         self.inner.char_limit(file)
     }
 
+    fn char_ceiling(&self, file: &str) -> Option<usize> {
+        self.inner.char_ceiling(file)
+    }
+
     fn nudge_interval(&self) -> usize {
         self.inner.nudge_interval()
     }

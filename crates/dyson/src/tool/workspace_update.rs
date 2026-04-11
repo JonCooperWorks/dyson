@@ -24,9 +24,11 @@ impl Tool for WorkspaceUpdateTool {
     fn description(&self) -> &str {
         "Update a file in the agent's workspace. Use mode 'set' to replace content, \
          or 'append' to add to it. Changes are persisted immediately. \
-         MEMORY.md and USER.md have character limits — the tool will report \
-         current usage and reject writes that exceed the limit. Move overflow \
-         to memory/notes/ (searchable via memory_search)."
+         MEMORY.md and USER.md have a fuzzy soft character target plus a hard \
+         ceiling — writes between the two land with an 'over soft target' \
+         warning (allowed when the extra chars are signal), writes above the \
+         ceiling are rejected. Move overflow to memory/notes/ (searchable via \
+         memory_search) when even the ceiling is tight."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -70,8 +72,13 @@ impl Tool for WorkspaceUpdateTool {
 
         let mut ws = ws.write().await;
 
-        // Check character limits before writing.
-        if let Some(limit) = ws.char_limit(&file) {
+        // Fuzzy size check: reject only above the hard ceiling, not the
+        // soft target.  Writes between soft target and ceiling land with
+        // an "over soft target" note in the success message so the
+        // curator knows it's using overflow headroom.
+        let soft_target = ws.char_limit(&file);
+        let ceiling = ws.char_ceiling(&file);
+        if let Some(ceil) = ceiling {
             let existing = ws.get(&file).unwrap_or_default();
             let existing_char_count = existing.chars().count();
             let would_be_len = match mode {
@@ -87,11 +94,14 @@ impl Tool for WorkspaceUpdateTool {
                 _ => 0,
             };
 
-            if would_be_len > limit {
+            if would_be_len > ceil {
+                let target = soft_target.unwrap_or(ceil);
                 return Ok(ToolOutput::error(format!(
-                    "Would exceed character limit for '{file}': {would_be_len}/{limit} chars. \
-                     Current usage: {existing_char_count}/{limit}. Consolidate content or move overflow \
-                     to memory/notes/ (searchable via memory_search)."
+                    "Would exceed hard ceiling for '{file}': {would_be_len} chars \
+                     (soft target {target}, ceiling {ceil}). Current usage: \
+                     {existing_char_count}. Apply the Keep/Refine/Discard judgment \
+                     to prune noise, or move overflow to memory/notes/ \
+                     (searchable via memory_search)."
                 )));
             }
         }
@@ -108,11 +118,14 @@ impl Tool for WorkspaceUpdateTool {
 
         ws.save()?;
 
-        // Report usage stats for files with limits.
+        // Report usage stats for files with a soft target.
         let final_len = ws.get(&file).map(|c| c.chars().count()).unwrap_or(0);
-        let usage = match ws.char_limit(&file) {
-            Some(limit) => format!(" [{final_len}/{limit} chars]"),
-            None => String::new(),
+        let usage = match (soft_target, ceiling) {
+            (Some(target), Some(ceil)) if final_len > target => {
+                format!(" [{final_len}/{target} chars — over soft target, within ceiling {ceil}]")
+            }
+            (Some(target), _) => format!(" [{final_len}/{target} chars]"),
+            _ => String::new(),
         };
         Ok(ToolOutput::success(format!(
             "Updated '{file}' (mode: {mode}).{usage}"
@@ -130,7 +143,7 @@ mod tests {
     use crate::workspace::InMemoryWorkspace;
 
     #[tokio::test]
-    async fn set_under_limit_succeeds_with_usage() {
+    async fn set_under_soft_target_succeeds_with_usage() {
         let ws = InMemoryWorkspace::new().with_limit("MEMORY.md", 100);
         let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = WorkspaceUpdateTool;
@@ -149,11 +162,44 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(result.content.contains("/100 chars]"));
+        assert!(!result.content.contains("over soft target"));
     }
 
     #[tokio::test]
-    async fn set_over_limit_errors() {
-        let ws = InMemoryWorkspace::new().with_limit("MEMORY.md", 10);
+    async fn set_in_overflow_band_succeeds_with_warning() {
+        // target 100, factor 1.35 → ceiling 135.  120 chars should land
+        // with an "over soft target" warning but still succeed.
+        let ws = InMemoryWorkspace::new()
+            .with_overflow_factor(1.35)
+            .with_limit("MEMORY.md", 100);
+        let ctx = ToolContext::for_test_with_workspace(ws);
+        let tool = WorkspaceUpdateTool;
+
+        let payload = "x".repeat(120);
+        let result = tool
+            .run(
+                &serde_json::json!({
+                    "file": "MEMORY.md",
+                    "content": payload,
+                    "mode": "set"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error, "overflow band should succeed");
+        assert!(result.content.contains("over soft target"));
+        assert!(result.content.contains("ceiling 135"));
+    }
+
+    #[tokio::test]
+    async fn set_over_ceiling_errors() {
+        // target 10, factor 1.35 → ceiling 14.  Content of 43 chars is
+        // well above the ceiling.
+        let ws = InMemoryWorkspace::new()
+            .with_overflow_factor(1.35)
+            .with_limit("MEMORY.md", 10);
         let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = WorkspaceUpdateTool;
 
@@ -170,13 +216,14 @@ mod tests {
             .unwrap();
 
         assert!(result.is_error);
-        assert!(result.content.contains("Would exceed character limit"));
+        assert!(result.content.contains("hard ceiling"));
     }
 
     #[tokio::test]
-    async fn append_over_limit_errors() {
+    async fn append_over_ceiling_errors() {
         let ws = InMemoryWorkspace::new()
             .with_file("MEMORY.md", "existing content")
+            .with_overflow_factor(1.35)
             .with_limit("MEMORY.md", 20);
         let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = WorkspaceUpdateTool;
@@ -194,7 +241,7 @@ mod tests {
             .unwrap();
 
         assert!(result.is_error);
-        assert!(result.content.contains("Would exceed character limit"));
+        assert!(result.content.contains("hard ceiling"));
     }
 
     #[tokio::test]

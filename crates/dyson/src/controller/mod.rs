@@ -374,7 +374,7 @@ pub async fn build_agent(
             let is_same_model = settings
                 .providers
                 .get(provider_name)
-                .map_or(false, |pc| {
+                .is_some_and(|pc| {
                     pc.provider_type == settings.agent.provider
                         && advisor_model == settings.agent.model
                 });

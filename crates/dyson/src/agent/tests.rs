@@ -176,10 +176,11 @@ async fn internal_tools_provider_skips_tool_execution() {
 }
 
 #[tokio::test]
-async fn memory_system_prompt_contains_usage_stats() {
+async fn memory_system_prompt_contains_usage_stats_and_curation_rules() {
     let ws = crate::workspace::InMemoryWorkspace::new()
+        .with_overflow_factor(1.35)
         .with_file("MEMORY.md", "some memories here")
-        .with_limit("MEMORY.md", 2200)
+        .with_limit("MEMORY.md", 2500)
         .with_file("USER.md", "user info")
         .with_limit("USER.md", 1375);
 
@@ -194,12 +195,22 @@ async fn memory_system_prompt_contains_usage_stats() {
     };
 
     let prompt = reflection::build_memory_system_prompt(&ctx).await;
+    // Soft target + hard ceiling both reported.
     assert!(prompt.contains("MEMORY.md"));
-    assert!(prompt.contains("/2200 chars"));
+    assert!(prompt.contains("soft target 2500"));
+    // 2500 * 1.35 = 3375.
+    assert!(prompt.contains("hard ceiling 3375"));
     assert!(prompt.contains("USER.md"));
-    assert!(prompt.contains("/1375 chars"));
+    assert!(prompt.contains("soft target 1375"));
     assert!(prompt.contains("memory_search"));
     assert!(prompt.contains("workspace_update"));
+    // Curation rules must be embedded.
+    assert!(prompt.contains("KEEP"));
+    assert!(prompt.contains("DISCARD"));
+    assert!(
+        prompt.contains("anti-timestamp rule"),
+        "night work must be protected"
+    );
 }
 
 #[tokio::test]

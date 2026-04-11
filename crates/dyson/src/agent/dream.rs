@@ -447,28 +447,28 @@ mod tests {
     fn every_n_turns_trigger() {
         let trigger = DreamTrigger::EveryNTurns(5);
 
-        assert!(!should_activate(trigger.clone(), &DreamEvent::TurnComplete { turn_count: 1 }));
-        assert!(!should_activate(trigger.clone(), &DreamEvent::TurnComplete { turn_count: 4 }));
-        assert!(should_activate(trigger.clone(), &DreamEvent::TurnComplete { turn_count: 5 }));
-        assert!(should_activate(trigger.clone(), &DreamEvent::TurnComplete { turn_count: 10 }));
-        assert!(!should_activate(trigger.clone(), &DreamEvent::Compaction));
+        assert!(!should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 1 }));
+        assert!(!should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 4 }));
+        assert!(should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 5 }));
+        assert!(should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 10 }));
+        assert!(!should_activate(trigger, &DreamEvent::Compaction));
     }
 
     #[test]
     fn after_compaction_trigger() {
         let trigger = DreamTrigger::AfterCompaction;
 
-        assert!(should_activate(trigger.clone(), &DreamEvent::Compaction));
-        assert!(!should_activate(trigger.clone(), &DreamEvent::TurnComplete { turn_count: 5 }));
+        assert!(should_activate(trigger, &DreamEvent::Compaction));
+        assert!(!should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 5 }));
     }
 
     #[test]
     fn on_session_end_trigger() {
         let trigger = DreamTrigger::OnSessionEnd;
 
-        assert!(should_activate(trigger.clone(), &DreamEvent::SessionEnd));
-        assert!(!should_activate(trigger.clone(), &DreamEvent::TurnComplete { turn_count: 1 }));
-        assert!(!should_activate(trigger.clone(), &DreamEvent::Compaction));
+        assert!(should_activate(trigger, &DreamEvent::SessionEnd));
+        assert!(!should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 1 }));
+        assert!(!should_activate(trigger, &DreamEvent::Compaction));
     }
 
     #[test]
@@ -498,8 +498,8 @@ mod tests {
     fn every_n_turns_zero_never_fires() {
         let trigger = DreamTrigger::EveryNTurns(0);
 
-        assert!(!should_activate(trigger.clone(), &DreamEvent::TurnComplete { turn_count: 0 }));
-        assert!(!should_activate(trigger.clone(), &DreamEvent::TurnComplete { turn_count: 1 }));
+        assert!(!should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 0 }));
+        assert!(!should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 1 }));
     }
 
     #[test]

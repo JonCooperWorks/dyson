@@ -329,13 +329,21 @@ struct JsonWorkspace {
 /// The `"memory"` object inside `"workspace"`.
 ///
 /// ```json
-/// { "memory": { "limits": { "MEMORY.md": 2200 }, "nudge_interval": 5 } }
+/// {
+///   "memory": {
+///     "limits": { "MEMORY.md": 2500 },
+///     "overflow_factor": 1.35,
+///     "nudge_interval": 5
+///   }
+/// }
 /// ```
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JsonMemory {
-    /// Per-file character limits.
+    /// Per-file soft character targets.
     limits: Option<std::collections::HashMap<String, usize>>,
+    /// Multiplier that turns a soft target into a hard ceiling.
+    overflow_factor: Option<f32>,
     /// Nudge interval in turns (0 = disabled).
     nudge_interval: Option<usize>,
 }
@@ -948,6 +956,9 @@ fn parse_workspace(
             for (file, limit) in limits {
                 settings.workspace.memory.limits.insert(file, limit);
             }
+        }
+        if let Some(factor) = mem.overflow_factor {
+            settings.workspace.memory.overflow_factor = factor;
         }
         if let Some(interval) = mem.nudge_interval {
             settings.workspace.memory.nudge_interval = interval;

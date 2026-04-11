@@ -290,11 +290,10 @@ impl super::Controller for SwarmController {
         // results so the agent never sees its own node.
         let mut local_settings = settings.clone();
         for skill in &mut local_settings.skills {
-            if let crate::config::SkillConfig::Mcp(mcp) = skill {
-                if mcp.name.starts_with("swarm_") {
+            if let crate::config::SkillConfig::Mcp(mcp) = skill
+                && mcp.name.starts_with("swarm_") {
                     mcp.exclude_tools.push("swarm_dispatch".to_string());
                 }
-            }
         }
 
         let node_name = self.config.node_name_or_default();

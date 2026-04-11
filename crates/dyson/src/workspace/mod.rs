@@ -95,9 +95,24 @@ pub trait Workspace: Send + Sync {
     /// Append to today's journal.
     fn journal(&mut self, entry: &str);
 
-    /// Character limit for a given file, or None if unlimited.
+    /// Soft character target for a given file, or None if unlimited.
+    ///
+    /// This is a **soft** target — curation aims here but is allowed to
+    /// overflow up to `char_ceiling()` when the extra chars carry signal.
     fn char_limit(&self, _file: &str) -> Option<usize> {
         None
+    }
+
+    /// Hard character ceiling for a given file, or None if unlimited.
+    ///
+    /// Writes up to this number of characters are accepted (with a warning
+    /// in the overflow band between `char_limit` and `char_ceiling`).
+    /// Writes above the ceiling are rejected outright.
+    ///
+    /// Default implementation returns `char_limit()` — backends that
+    /// support fuzzy limits override this to return the ceiling.
+    fn char_ceiling(&self, file: &str) -> Option<usize> {
+        self.char_limit(file)
     }
 
     /// How often (in turns) to inject a memory maintenance nudge.  0 = disabled.
@@ -253,8 +268,8 @@ pub fn create_channel_workspace(
     for file in ["SOUL.md", "IDENTITY.md"] {
         let target = channel_path.join(file);
         let source = main_path.join(file);
-        if !target.exists() && source.exists() {
-            if let Err(e) = std::os::unix::fs::symlink(&source, &target) {
+        if !target.exists() && source.exists()
+            && let Err(e) = std::os::unix::fs::symlink(&source, &target) {
                 tracing::warn!(
                     file,
                     source = %source.display(),
@@ -263,7 +278,6 @@ pub fn create_channel_workspace(
                     "failed to symlink identity file into channel workspace"
                 );
             }
-        }
     }
 
     let ws = OpenClawWorkspace::load(&channel_path, config.memory.clone())?;

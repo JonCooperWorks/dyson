@@ -121,9 +121,17 @@ All in `src/agent/reflection.rs`.
 
 | Dream                      | Trigger                        | What it does                                           |
 |----------------------------|--------------------------------|--------------------------------------------------------|
-| `LearningSynthesisDream`   | `AfterCompaction`              | Single LLM call to merge learnings into `MEMORY.md`   |
-| `MemoryMaintenanceDream`   | `EveryNTurns(nudge_interval)`  | Mini agent loop (5 iters) updating memory files        |
-| `SelfImprovementDream`     | `EveryNTurns(nudge_interval*2)`| Mini agent loop (3 iters) creating skills / exporting  |
+| `LearningSynthesisDream`   | `AfterCompaction`              | Single LLM call that curates `MEMORY.md` (Keep / Refine / Discard) and folds in new signal |
+| `MemoryMaintenanceDream`   | `EveryNTurns(nudge_interval)`  | Mini agent loop (5 iters) curating memory files and writing an audit log to `improvement/{epoch}.json` |
+| `SelfImprovementDream`     | `EveryNTurns(nudge_interval*2)`| Mini agent loop (3 iters) creating skills / exporting |
+
+Curation (not merging) is the verb for dreams 1 and 2: they walk the
+existing file and actively **delete** low-value entries rather than only
+appending new ones. The judgment rules are shared between both prompts
+via `CURATION_RULES` in `src/agent/reflection.rs`, and they explicitly
+forbid time-of-day or entry-age heuristics so night sessions are never
+penalised. See [`docs/memory.md`](memory.md) for the fuzzy soft target
+and hard ceiling that the curator aims for.
 
 ## Implementing a Custom Dream
 

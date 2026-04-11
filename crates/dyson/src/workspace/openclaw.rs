@@ -474,6 +474,10 @@ impl Workspace for OpenClawWorkspace {
         self.memory_config.limits.get(file).copied()
     }
 
+    fn char_ceiling(&self, file: &str) -> Option<usize> {
+        self.memory_config.ceiling_for(file)
+    }
+
     fn nudge_interval(&self) -> usize {
         self.memory_config.nudge_interval
     }
@@ -759,9 +763,25 @@ mod tests {
     #[test]
     fn char_limit_returns_configured_limits() {
         let (dir, ws) = temp_workspace();
-        assert_eq!(ws.char_limit("MEMORY.md"), Some(2200));
+        assert_eq!(ws.char_limit("MEMORY.md"), Some(2500));
         assert_eq!(ws.char_limit("USER.md"), Some(1375));
         assert_eq!(ws.char_limit("SOUL.md"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn char_ceiling_is_above_soft_target() {
+        let (dir, ws) = temp_workspace();
+        // Default overflow factor is 1.35.  2500 * 1.35 = 3375.
+        let target = ws.char_limit("MEMORY.md").unwrap();
+        let ceiling = ws.char_ceiling("MEMORY.md").unwrap();
+        assert!(
+            ceiling > target,
+            "ceiling must exceed soft target for fuzzy limits"
+        );
+        assert_eq!(ceiling, 3375);
+        // Files with no soft target have no ceiling.
+        assert_eq!(ws.char_ceiling("SOUL.md"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

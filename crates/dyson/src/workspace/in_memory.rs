@@ -17,6 +17,7 @@ use crate::workspace::openclaw::chrono_today;
 pub struct InMemoryWorkspace {
     files: HashMap<String, String>,
     limits: HashMap<String, usize>,
+    overflow_factor: f32,
     nudge_interval: usize,
 }
 
@@ -25,6 +26,7 @@ impl InMemoryWorkspace {
         Self {
             files: HashMap::new(),
             limits: HashMap::new(),
+            overflow_factor: 1.35,
             nudge_interval: 5,
         }
     }
@@ -35,9 +37,15 @@ impl InMemoryWorkspace {
         self
     }
 
-    /// Builder: set a character limit for a file.
-    pub fn with_limit(mut self, file: &str, max_chars: usize) -> Self {
-        self.limits.insert(file.to_string(), max_chars);
+    /// Builder: set a soft character target for a file.
+    pub fn with_limit(mut self, file: &str, soft_target: usize) -> Self {
+        self.limits.insert(file.to_string(), soft_target);
+        self
+    }
+
+    /// Builder: override the overflow factor (hard ceiling = target * factor).
+    pub fn with_overflow_factor(mut self, factor: f32) -> Self {
+        self.overflow_factor = factor;
         self
     }
 }
@@ -129,6 +137,12 @@ impl Workspace for InMemoryWorkspace {
 
     fn char_limit(&self, file: &str) -> Option<usize> {
         self.limits.get(file).copied()
+    }
+
+    fn char_ceiling(&self, file: &str) -> Option<usize> {
+        let target = *self.limits.get(file)?;
+        let ceiling = (target as f32 * self.overflow_factor).round() as usize;
+        Some(ceiling.max(target))
     }
 
     fn nudge_interval(&self) -> usize {

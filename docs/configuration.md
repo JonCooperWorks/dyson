@@ -142,7 +142,8 @@ Dyson's native config format.  Example:
     "backend": "openclaw",
     "connection_string": "~/.dyson",
     "memory": {
-      "limits": { "MEMORY.md": 2200, "USER.md": 1375 },
+      "limits": { "MEMORY.md": 2500, "USER.md": 1375 },
+      "overflow_factor": 1.35,
       "nudge_interval": 7
     }
   }
@@ -536,7 +537,8 @@ See [Sandbox](sandbox.md) for the full capability model and policy system.
     "backend": "openclaw",
     "connection_string": "~/.dyson",
     "memory": {
-      "limits": { "MEMORY.md": 2200, "USER.md": 1375 },
+      "limits": { "MEMORY.md": 2500, "USER.md": 1375 },
+      "overflow_factor": 1.35,
       "nudge_interval": 7
     }
   }
@@ -553,7 +555,8 @@ Legacy shorthand (still supported):
 |-------|---------|-------------|
 | `backend` | `"openclaw"` | Workspace backend type |
 | `connection_string` | `"~/.dyson"` | Path (supports secret resolver) |
-| `memory.limits` | `{ "MEMORY.md": 2200, "USER.md": 1375 }` | Per-file character limits |
+| `memory.limits` | `{ "MEMORY.md": 2500, "USER.md": 1375 }` | Per-file **soft** character targets (curator aims here) |
+| `memory.overflow_factor` | `1.35` | Multiplier — hard ceiling = soft target × factor. Writes between the two succeed with a warning. |
 | `memory.nudge_interval` | `7` | Inject memory maintenance nudge every N turns (0 = disabled) |
 
 ---
