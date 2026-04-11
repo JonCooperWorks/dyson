@@ -36,43 +36,43 @@ Participation is symmetric: you use the swarm because you are part of it.
 |-------|----------|---------|-------------|
 | `url` | yes | — | Base URL of the swarm hub |
 | `public_key` | yes | — | Versioned Ed25519 public key for task verification (`v1:base64...`) |
-| `node_name` | no | derived from URL | Human-readable name for this node in the registry |
+| `node_name` | no | `dyson-node-{hash}` | Human-readable name for this node (defaults to a deterministic hash of the hub URL) |
 
 ---
 
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────┐
-│                     SWARM HUB                          │
-│                                                        │
-│  /mcp             ← MCP server (tool discovery)        │
-│  /swarm/register  ← POST (node registration)           │
-│  /swarm/events    ← SSE (push tasks to nodes)          │
-│  /swarm/heartbeat ← POST (node status updates)         │
-│  /swarm/result    ← POST (task results from nodes)     │
-│  /swarm/blob/{sha256} ← GET/PUT (large payloads)       │
-│                                                        │
-└──────┬──────────┬──────────────────────┬───────────────┘
-       │ SSE      │ SSE                  │ MCP
-       ▼          ▼                      ▼
-   ┌────────┐ ┌────────┐          ┌────────────┐
-   │ Node A │ │ Node B │          │ Any Dyson  │
-   │ (GPU)  │ │ (CPU)  │          │ (client)   │
-   │        │ │        │          │            │
-   │ Swarm  │ │ Swarm  │          │ LLM calls: │
-   │ Ctrl   │ │ Ctrl   │          │ swarm_     │
-   │        │ │        │          │ dispatch   │
-   └────────┘ └────────┘          └────────────┘
++--------------------------------------------------------+
+|                     SWARM HUB                          |
+|                                                        |
+|  /mcp             <- MCP server (tool discovery)       |
+|  /swarm/register  <- POST (node registration)          |
+|  /swarm/events    <- SSE (push tasks to nodes)         |
+|  /swarm/heartbeat <- POST (node status updates)        |
+|  /swarm/result    <- POST (task results from nodes)    |
+|  /swarm/blob/{sha256} <- GET/PUT (large payloads)      |
+|                                                        |
++------+----------+----------------------+---------------+
+       | SSE      | SSE                  | MCP
+       v          v                      v
+   +--------+ +--------+          +------------+
+   | Node A | | Node B |          | Any Dyson  |
+   | (GPU)  | | (CPU)  |          | (client)   |
+   |        | |        |          |            |
+   | Swarm  | | Swarm  |          | LLM calls: |
+   | Ctrl   | | Ctrl   |          | swarm_     |
+   |        | |        |          | dispatch   |
+   +--------+ +--------+          +------------+
     Workers                        Task submitter
     (receive + execute)            (via auto-wired MCP)
 ```
 
 Two protocols:
 
-- **SSE** (hub → node): The hub pushes signed tasks to connected nodes.
-- **POST** (node → hub): Nodes send registration, heartbeats, and results.
-- **MCP** (any agent → hub): Auto-wired so all agents get `swarm_dispatch` and other hub-defined tools.
+- **SSE** (hub -> node): The hub pushes signed tasks to connected nodes.
+- **POST** (node -> hub): Nodes send registration, heartbeats, and results.
+- **MCP** (any agent -> hub): Auto-wired so agents get `swarm_dispatch` and other hub-defined tools.
 
 ---
 
@@ -98,31 +98,61 @@ named `swarm`.  It is an in-memory, tokio-based HTTP server responsible for:
 
 ### Running the hub
 
+Generate a signing key first, then start the hub:
+
 ```bash
-# First run: generates a fresh signing key and prints the public key
-# string you drop into node dyson.json configs.
-cargo run -p swarm -- --bind 0.0.0.0:8080 --data-dir ./hub-data
+# Generate a signing key (one-time)
+swarm-keygen --out ./hub-data/hub.key
+
+# Start the hub (localhost — no TLS needed)
+swarm --bind 127.0.0.1:8080 --data-dir ./hub-data
+
+# Start on an external interface (TLS required)
+swarm --bind 0.0.0.0:443 --data-dir ./hub-data \
+      --cert cert.pem --private-key key.pem
+
+# Or with Let's Encrypt
+swarm --bind 0.0.0.0:443 --data-dir ./hub-data \
+      --letsencrypt --domain hub.example.com
 ```
 
-CLI flags:
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--bind` | `127.0.0.1:8080` | HTTP listen address |
-| `--data-dir` | `./hub-data` | Where `hub.key` and `blobs/` live |
-| `--heartbeat-timeout-secs` | `90` | Reap nodes whose last heartbeat is older than this |
-| `--log-level` | `info` | `tracing` env filter |
-
-On first run the hub generates a fresh PKCS#8 Ed25519 keypair under
-`data_dir/hub.key` (chmod `0600`) and prints the public key in the
-`"v1:..."` format node operators need:
+The hub prints the public key on startup:
 
 ```
 Hub public key (add to node config): v1:K2dYr0base64encodedkey...
 ```
 
-Subsequent runs load the existing key silently.  State is ephemeral: a
-hub restart forgets every registered node and every in-flight task.
+State is ephemeral: a hub restart forgets every registered node and
+every in-flight task.
+
+### CLI flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--bind` | `127.0.0.1:8080` | HTTP(S) listen address |
+| `--data-dir` | `./hub-data` | Where `hub.key` and `blobs/` live |
+| `--heartbeat-timeout-secs` | `90` | Reap nodes whose last heartbeat is older than this |
+| `--log-level` | `info` | `tracing` env filter |
+| `--cert` | — | TLS certificate chain (PEM). Requires `--private-key` |
+| `--private-key` | — | TLS private key (PEM). Requires `--cert` |
+| `--letsencrypt` | — | Enable Let's Encrypt automatic TLS. Requires `--domain` |
+| `--domain` | — | Domain name for Let's Encrypt |
+| `--letsencrypt-email` | — | Contact email for Let's Encrypt registration |
+| `--cert-cache-dir` | `.swarm-certs` | Directory to cache Let's Encrypt certificates |
+| `--dangerous-no-tls` | — | Allow plain HTTP on non-localhost interfaces |
+
+### TLS
+
+TLS is **mandatory** when binding to a non-localhost address.  Localhost
+(`127.0.0.1`, `::1`) skips TLS automatically.  Two TLS modes:
+
+- **Manual**: provide `--cert` and `--private-key` PEM files.
+- **Let's Encrypt**: provide `--letsencrypt` and `--domain`. Certificates
+  are automatically provisioned via TLS-ALPN-01 (same port, no port 80
+  needed) and cached in `--cert-cache-dir`.
+
+Pass `--dangerous-no-tls` to explicitly serve plain HTTP on external
+interfaces (not recommended).
 
 ### Hub endpoints
 
@@ -135,6 +165,10 @@ hub restart forgets every registered node and every in-flight task.
 | `/swarm/result` | POST | Task result from a node |
 | `/swarm/blob/{sha256}` | GET | Download a payload blob by hash |
 | `/swarm/blob/{sha256}` | PUT | Upload a result payload blob |
+
+The `/mcp` endpoint accepts an optional `?caller=<node_name>` query
+parameter.  When set, `list_nodes` results exclude the calling node so
+it only sees its peers.
 
 ### SSE event types
 
@@ -169,31 +203,36 @@ The controller lifecycle:
 
 ```
 SwarmController::run()
-  ├── build_agent() with shared ClientRegistry
-  ├── HardwareProbe::run() → NodeManifest
-  │     ├── OS detection (compile-time)
-  │     ├── GPU: nvidia-smi (Linux/macOS), system_profiler (macOS)
-  │     ├── CPU: /proc/cpuinfo (Linux), sysctl (macOS)
-  │     ├── RAM: /proc/meminfo (Linux), sysctl (macOS)
-  │     ├── Disk: statvfs (Unix)
-  │     └── Capabilities: agent.tool_names()
-  │
-  ├── POST /swarm/register → { node_id, token }
-  ├── GET /swarm/events → open SSE stream
-  ├── Spawn heartbeat task (POST every 30s)
-  │
-  └── Loop:
-        ├── SSE "task" event received
-        │     ├── Verify Ed25519 signature against public_key
-        │     ├── Parse SwarmTask from JSON
-        │     ├── Fetch ref payloads (GET /swarm/blob/{sha256})
-        │     ├── Verify SHA-256 hash of each blob
-        │     ├── agent.run(prompt) with optional timeout
-        │     ├── POST /swarm/result
-        │     └── agent.clear() (reset for next task)
-        │
-        ├── SSE "shutdown" → break
-        └── SSE error → break (TODO: reconnect with backoff)
+  |-- build_agent() with shared ClientRegistry
+  |     Excludes swarm_dispatch from MCP tools (prevents recursion)
+  |     Injects controller prompt (instructs agent to use tools)
+  |     Wraps list_nodes via ?caller= so agent only sees peers
+  |
+  |-- HardwareProbe::run() -> NodeManifest
+  |     |-- OS detection (compile-time)
+  |     |-- GPU: nvidia-smi (Linux/macOS), system_profiler (macOS)
+  |     |-- CPU: /proc/cpuinfo (Linux), sysctl (macOS)
+  |     |-- RAM: /proc/meminfo (Linux), sysctl (macOS)
+  |     |-- Disk: statvfs (Unix)
+  |     +-- Capabilities: agent.tool_names()
+  |
+  |-- POST /swarm/register -> { node_id, token }
+  |-- GET /swarm/events -> open SSE stream
+  |-- Spawn heartbeat task (POST every 15s)
+  |
+  +-- Loop:
+        |-- SSE "task" event received
+        |     |-- Verify Ed25519 signature against public_key
+        |     |-- Parse SwarmTask from JSON
+        |     |-- Fetch ref payloads (GET /swarm/blob/{sha256})
+        |     |-- Verify SHA-256 hash of each blob
+        |     |-- agent.run(prompt) with optional timeout
+        |     |-- POST /swarm/result
+        |     +-- agent.clear() (reset for next task)
+        |
+        |-- SSE "shutdown" -> break
+        +-- SSE disconnect -> reconnect with exponential backoff
+              (base 2s, capped at 60s, max 10 attempts)
 ```
 
 ### 2. Auto-wires the hub as an MCP skill (client)
@@ -202,17 +241,28 @@ The hub URL is injected into `settings.skills` as an MCP server:
 
 ```rust
 // listen.rs — when "swarm" controller is created:
-settings.skills.push(SkillConfig::Mcp(McpConfig {
-    name: "swarm_<node_name>",
+let node_name = swarm_config.node_name_or_default();
+let hub_base = swarm_config.url.trim_end_matches('/');
+
+settings.skills.push(SkillConfig::Mcp(Box::new(McpConfig {
+    name: format!("swarm_{node_name}"),
     transport: McpTransportConfig::Http {
-        url: "{hub_url}/mcp",
+        url: format!("{hub_base}/mcp?caller={node_name}"),
+        ..
     },
-}));
+    exclude_tools: vec![],
+})));
 ```
 
 This means **every** agent on this Dyson (terminal, telegram, swarm) gets
-the hub's MCP tools — typically `swarm_dispatch`, `swarm_status`,
-`list_nodes`. The LLM uses them like any other tool.
+the hub's MCP tools — `swarm_dispatch`, `swarm_status`, `list_nodes`.
+
+The swarm controller's own agent is special:
+- `swarm_dispatch` is excluded (prevents recursive task loops)
+- `list_nodes` results are filtered by the hub (via `?caller=`) so the
+  agent never sees its own node — only peers
+- A controller prompt instructs the agent to use tools (especially bash)
+  and never guess at system details
 
 ---
 
@@ -251,7 +301,7 @@ The public key in config encodes the version:
 
 ```
 "public_key": "v1:K2dYr0base64encodedkey..."
-              ───  ─────────────────────────
+              ---  -------------------------
               version    32 bytes, base64
 ```
 
@@ -292,72 +342,43 @@ web_search" tasks to nodes that have those tools.
 
 ## Network Security
 
-The hub exposes unauthenticated HTTP endpoints. **Do not expose it on an
-untrusted network.** Run it only over a secure transport — SSH port
-forwarding or a Tailscale/WireGuard mesh are the recommended options.
+TLS is enforced for non-localhost binds. The hub refuses to start on an
+external interface without `--cert`/`--private-key`, `--letsencrypt`, or
+`--dangerous-no-tls`.
+
+For additional network-level isolation, consider running behind a secure
+overlay:
 
 ### SSH port forwarding
 
-Run the hub on a remote machine bound to localhost, then forward the port
-to each node:
-
 ```bash
 # On the hub machine — bind to localhost only (the default)
-cargo run -p swarm -- --bind 127.0.0.1:8080 --data-dir ./hub-data
+swarm --bind 127.0.0.1:8080 --data-dir ./hub-data
 
 # On each node machine — forward local 8080 to the hub
 ssh -L 8080:127.0.0.1:8080 user@hub-host -N
 ```
 
-Node configs point at `http://127.0.0.1:8080` — traffic travels encrypted
-through the SSH tunnel.
-
 ### Tailscale
 
-With [Tailscale](https://tailscale.com) installed on both the hub and
-every node, bind the hub to its Tailscale IP:
-
 ```bash
-# On the hub machine — bind to the Tailscale address
-cargo run -p swarm -- --bind 100.x.y.z:8080 --data-dir ./hub-data
+# On the hub machine — bind to the Tailscale address with TLS
+swarm --bind 100.x.y.z:8080 --data-dir ./hub-data \
+      --cert cert.pem --private-key key.pem
 ```
 
-Node configs use the Tailscale address directly:
-
-```json
-{
-  "controllers": [
-    {
-      "type": "swarm",
-      "url": "http://100.x.y.z:8080",
-      "public_key": "v1:K2dYr0base64encodedkey...",
-      "node_name": "gpu-workstation-01"
-    }
-  ]
-}
-```
-
-All traffic between nodes stays within the Tailscale mesh — encrypted,
-authenticated, and invisible to the public internet. No firewall rules or
-port forwarding needed.
-
-### What NOT to do
-
-Do not bind the hub to `0.0.0.0` on a machine with a public IP without a
-secure overlay network in front of it. The hub endpoints have no
-authentication beyond Ed25519 task signing — anyone who can reach the HTTP
-port can register fake nodes, submit tasks, or read blob payloads.
+All traffic between nodes stays within the Tailscale mesh.
 
 ---
 
 ## Testing
 
 ```bash
-# All swarm tests (41 tests)
-cargo test --lib swarm
+# All swarm tests (28 tests)
+cargo test --lib -p dyson swarm
 
-# Controller tests (5 tests)
-cargo test --lib controller::swarm
+# Controller tests (9 tests)
+cargo test --lib -p dyson controller::swarm
 ```
 
 Tests cover:
