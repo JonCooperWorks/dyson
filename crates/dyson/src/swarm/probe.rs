@@ -208,12 +208,11 @@ fn lspci_split_fields(line: &str) -> Option<Vec<String>> {
 /// controller [0300]` or `3D controller [0302]`.
 #[cfg(target_os = "linux")]
 fn lspci_is_display_class(class: &str) -> bool {
-    if let (Some(start), Some(end)) = (class.rfind('['), class.rfind(']')) {
-        if end > start + 1 {
+    if let (Some(start), Some(end)) = (class.rfind('['), class.rfind(']'))
+        && end > start + 1 {
             let code = &class[start + 1..end];
             return code.starts_with("03");
         }
-    }
     // Fall back to string match if the class code isn't bracketed.
     let lower = class.to_ascii_lowercase();
     lower.contains("vga") || lower.contains("3d controller") || lower.contains("display")
@@ -492,11 +491,10 @@ fn parse_proc_meminfo(content: &str) -> u64 {
     for line in content.lines() {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
             let rest = rest.trim();
-            if let Some(kb_str) = rest.strip_suffix("kB").or(rest.strip_suffix("KB")) {
-                if let Ok(kb) = kb_str.trim().parse::<u64>() {
+            if let Some(kb_str) = rest.strip_suffix("kB").or(rest.strip_suffix("KB"))
+                && let Ok(kb) = kb_str.trim().parse::<u64>() {
                     return kb * 1024;
                 }
-            }
         }
     }
     0
@@ -604,7 +602,7 @@ fn disk_free_statvfs(path: &str) -> u64 {
     }
 
     let stat = unsafe { stat.assume_init() };
-    stat.f_bavail as u64 * stat.f_frsize as u64
+    stat.f_bavail * stat.f_frsize
 }
 
 // ---------------------------------------------------------------------------

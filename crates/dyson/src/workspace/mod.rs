@@ -268,8 +268,8 @@ pub fn create_channel_workspace(
     for file in ["SOUL.md", "IDENTITY.md"] {
         let target = channel_path.join(file);
         let source = main_path.join(file);
-        if !target.exists() && source.exists() {
-            if let Err(e) = std::os::unix::fs::symlink(&source, &target) {
+        if !target.exists() && source.exists()
+            && let Err(e) = std::os::unix::fs::symlink(&source, &target) {
                 tracing::warn!(
                     file,
                     source = %source.display(),
@@ -278,7 +278,6 @@ pub fn create_channel_workspace(
                     "failed to symlink identity file into channel workspace"
                 );
             }
-        }
     }
 
     let ws = OpenClawWorkspace::load(&channel_path, config.memory.clone())?;

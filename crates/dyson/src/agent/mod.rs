@@ -501,6 +501,10 @@ impl Agent {
     ///
     /// Does not panic.  Duplicate tool names are handled by last-writer-wins
     /// (later skills override earlier ones), with a warning logged.
+    // Eight parameters is intentional for this constructor: each is a distinct
+    // collaborator (client, sandbox, skills, settings, workspace, ...) and
+    // grouping them into a struct would just reshuffle the cost to callers.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: rate_limiter::RateLimitedHandle<Box<dyn LlmClient>>,
         sandbox: Arc<dyn Sandbox>,
