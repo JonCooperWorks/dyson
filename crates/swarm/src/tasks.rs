@@ -73,6 +73,10 @@ impl TaskState {
 pub struct TaskRecord {
     pub task_id: String,
     pub node_id: String,
+    /// Verified identity of the MCP caller that submitted this task.
+    /// Set from the bearer-token → node_id lookup.  `None` for tasks
+    /// submitted without authentication (admin / legacy callers).
+    pub owner: Option<String>,
     pub prompt_preview: String,
     pub submitted_at: SystemTime,
     pub last_update: SystemTime,
@@ -95,6 +99,7 @@ pub struct TaskRecord {
 pub struct TaskSnapshot {
     pub task_id: String,
     pub node_id: String,
+    pub owner: Option<String>,
     pub prompt_preview: String,
     pub submitted_at_unix: u64,
     pub last_update_unix: u64,
@@ -112,6 +117,7 @@ impl TaskSnapshot {
         Self {
             task_id: r.task_id.clone(),
             node_id: r.node_id.clone(),
+            owner: r.owner.clone(),
             prompt_preview: r.prompt_preview.clone(),
             submitted_at_unix: unix_secs(r.submitted_at),
             last_update_unix: unix_secs(r.last_update),
@@ -274,6 +280,83 @@ impl TaskStore {
         snaps
     }
 
+    // -----------------------------------------------------------------------
+    // Owner-scoped queries — topology obfuscation: non-owned tasks are
+    // invisible (same as nonexistent) so callers cannot distinguish
+    // "task belongs to someone else" from "task does not exist".
+    // -----------------------------------------------------------------------
+
+    /// Return a snapshot only if the task is owned by `owner`.
+    pub async fn get_owned(&self, task_id: &str, owner: &str) -> Option<TaskSnapshot> {
+        let inner = self.inner.read().await;
+        inner
+            .get(task_id)
+            .filter(|r| r.owner.as_deref() == Some(owner))
+            .map(TaskSnapshot::from_record)
+    }
+
+    /// List tasks owned by `owner`, newest-first, up to `limit`.
+    pub async fn list_owned(&self, owner: &str, limit: usize) -> Vec<TaskSnapshot> {
+        let inner = self.inner.read().await;
+        let mut snaps: Vec<TaskSnapshot> = inner
+            .values()
+            .filter(|r| r.owner.as_deref() == Some(owner))
+            .map(TaskSnapshot::from_record)
+            .collect();
+        snaps.sort_by(|a, b| b.submitted_at_unix.cmp(&a.submitted_at_unix));
+        snaps.truncate(limit);
+        snaps
+    }
+
+    /// Return checkpoints for a task only if owned by `owner`.
+    pub async fn checkpoints_since_owned(
+        &self,
+        task_id: &str,
+        since: u32,
+        owner: &str,
+    ) -> Option<Vec<TaskCheckpoint>> {
+        let inner = self.inner.read().await;
+        let record = inner.get(task_id)?;
+        if record.owner.as_deref() != Some(owner) {
+            return None;
+        }
+        Some(
+            record
+                .checkpoints
+                .iter()
+                .filter(|c| c.sequence > since)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// Cancel a task only if owned by `owner`.  Returns `None` for
+    /// unknown, non-owned, or already-terminal tasks.
+    pub async fn cancel_owned(
+        &self,
+        task_id: &str,
+        owner: &str,
+    ) -> Option<(String, Option<oneshot::Sender<SwarmResult>>)> {
+        let mut inner = self.inner.write().await;
+        let record = inner.get_mut(task_id)?;
+        if record.owner.as_deref() != Some(owner) {
+            return None;
+        }
+        if record.state.is_terminal() {
+            return None;
+        }
+        record.state = TaskState::Cancelled;
+        record.last_update = SystemTime::now();
+        record.result = Some(SwarmResult {
+            task_id: task_id.to_string(),
+            text: String::new(),
+            payloads: vec![],
+            status: TaskStatus::Cancelled,
+            duration_secs: 0,
+        });
+        Some((record.node_id.clone(), record.waiter.take()))
+    }
+
     /// How many tasks are in the store.
     pub async fn len(&self) -> usize {
         self.inner.read().await.len()
@@ -325,6 +408,7 @@ mod tests {
         TaskRecord {
             task_id: task_id.into(),
             node_id: "node-a".into(),
+            owner: None,
             prompt_preview: "do a thing".into(),
             submitted_at: SystemTime::now(),
             last_update: SystemTime::now(),
@@ -332,6 +416,13 @@ mod tests {
             checkpoints: Vec::new(),
             result: None,
             waiter: None,
+        }
+    }
+
+    fn owned_record(task_id: &str, owner: &str) -> TaskRecord {
+        TaskRecord {
+            owner: Some(owner.into()),
+            ..blank_record(task_id)
         }
     }
 
@@ -542,6 +633,90 @@ mod tests {
         assert_eq!(snaps[0].task_id, "t4");
         assert_eq!(snaps[1].task_id, "t3");
         assert_eq!(snaps[2].task_id, "t2");
+    }
+
+    // -----------------------------------------------------------------------
+    // Ownership-scoped query tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_owned_returns_none_for_wrong_owner() {
+        let store = TaskStore::new();
+        store.insert(owned_record("t1", "alice")).await;
+        assert!(store.get_owned("t1", "bob").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_owned_returns_snapshot_for_correct_owner() {
+        let store = TaskStore::new();
+        store.insert(owned_record("t1", "alice")).await;
+        let snap = store.get_owned("t1", "alice").await.unwrap();
+        assert_eq!(snap.task_id, "t1");
+    }
+
+    #[tokio::test]
+    async fn get_owned_returns_none_for_unowned_task() {
+        let store = TaskStore::new();
+        store.insert(blank_record("t1")).await; // owner: None
+        assert!(store.get_owned("t1", "alice").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_owned_filters_by_owner() {
+        let store = TaskStore::new();
+        let base = SystemTime::now();
+        for i in 0..3 {
+            let mut rec = owned_record(&format!("a{i}"), "alice");
+            rec.submitted_at = base + Duration::from_secs(i);
+            store.insert(rec).await;
+        }
+        for i in 0..2 {
+            let mut rec = owned_record(&format!("b{i}"), "bob");
+            rec.submitted_at = base + Duration::from_secs(10 + i);
+            store.insert(rec).await;
+        }
+        store.insert(blank_record("unowned")).await;
+
+        let alice_tasks = store.list_owned("alice", 50).await;
+        assert_eq!(alice_tasks.len(), 3);
+        assert!(alice_tasks.iter().all(|t| t.owner.as_deref() == Some("alice")));
+
+        let bob_tasks = store.list_owned("bob", 50).await;
+        assert_eq!(bob_tasks.len(), 2);
+
+        let nobody_tasks = store.list_owned("nobody", 50).await;
+        assert!(nobody_tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn checkpoints_since_owned_rejects_wrong_owner() {
+        let store = TaskStore::new();
+        store.insert(owned_record("t1", "alice")).await;
+        store
+            .append_checkpoint(TaskCheckpoint {
+                task_id: "t1".into(),
+                sequence: 1,
+                message: "hi".into(),
+                progress: None,
+                emitted_at_secs: 0,
+            })
+            .await;
+        assert!(store.checkpoints_since_owned("t1", 0, "bob").await.is_none());
+        let cps = store.checkpoints_since_owned("t1", 0, "alice").await.unwrap();
+        assert_eq!(cps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancel_owned_rejects_wrong_owner() {
+        let store = TaskStore::new();
+        store.insert(owned_record("t1", "alice")).await;
+        assert!(store.cancel_owned("t1", "bob").await.is_none());
+        // Task should still be running.
+        let snap = store.get("t1").await.unwrap();
+        assert!(matches!(snap.state, TaskState::Running));
+        // Correct owner can cancel.
+        let (node_id, _) = store.cancel_owned("t1", "alice").await.unwrap();
+        assert_eq!(node_id, "node-a");
     }
 
     #[tokio::test]

@@ -43,6 +43,7 @@ pub mod api_key;
 pub mod bearer;
 pub mod composite;
 pub mod credential;
+pub mod deferred_bearer;
 #[cfg(test)]
 pub mod no_auth;
 pub mod oauth;
@@ -53,6 +54,7 @@ pub use api_key::ApiKeyAuth;
 pub use bearer::BearerTokenAuth;
 pub use composite::CompositeAuth;
 pub use credential::Credential;
+pub use deferred_bearer::DeferredBearerAuth;
 #[cfg(test)]
 pub use no_auth::NoAuth;
 pub use oauth::OAuth;
@@ -175,6 +177,30 @@ pub trait Auth: Send + Sync {
 pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     use subtle::ConstantTimeEq;
     a.len() == b.len() && bool::from(a.ct_eq(b))
+}
+
+/// Thin wrapper that implements `Auth` by delegating to an `Arc<dyn Auth>`.
+///
+/// Needed when you have a shared `Arc<dyn Auth>` (e.g. from config) and
+/// need to pass it where a `Box<dyn Auth>` is expected.
+pub struct ArcAuth(pub std::sync::Arc<dyn Auth>);
+
+#[async_trait]
+impl Auth for ArcAuth {
+    async fn apply_to_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder> {
+        self.0.apply_to_request(request).await
+    }
+
+    async fn validate_request(&self, headers: &hyper::HeaderMap) -> Result<AuthInfo> {
+        self.0.validate_request(headers).await
+    }
+
+    async fn on_unauthorized(&self) -> Result<()> {
+        self.0.on_unauthorized().await
+    }
 }
 
 // ===========================================================================

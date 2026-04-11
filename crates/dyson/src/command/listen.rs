@@ -80,7 +80,7 @@ pub async fn run(
                     }
                 }
                 "swarm" => {
-                    if let Some(ctrl) =
+                    if let Some(mut ctrl) =
                         dyson::controller::swarm::SwarmController::from_config(config)
                     {
                         // Auto-inject the hub as an MCP skill so ALL agents
@@ -98,6 +98,15 @@ pub async fn run(
                         let node_name = swarm_config.node_name_or_default();
                         let hub_base = swarm_config.url.trim_end_matches('/');
 
+                        // Wire a deferred bearer auth: the controller will
+                        // publish the registration token after connecting to
+                        // the hub, and the MCP skill will read it on each
+                        // request for cryptographic caller verification.
+                        let (token_tx, token_rx) = tokio::sync::watch::channel(None);
+                        ctrl.set_token_channel(token_tx);
+                        let deferred_auth: std::sync::Arc<dyn dyson::auth::Auth> =
+                            std::sync::Arc::new(dyson::auth::DeferredBearerAuth::new(token_rx));
+
                         settings.skills.push(dyson::config::SkillConfig::Mcp(
                             Box::new(dyson::config::McpConfig {
                                 name: format!("swarm_{node_name}"),
@@ -107,6 +116,7 @@ pub async fn run(
                                     auth: None,
                                 },
                                 exclude_tools: vec![],
+                                custom_auth: Some(deferred_auth),
                             }),
                         ));
 

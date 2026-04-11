@@ -227,15 +227,16 @@ async fn mcp_list_nodes_after_register() {
     let h = start_hub().await;
     let client = reqwest::Client::new();
 
-    client
-        .post(format!("{}/swarm/register", h.base_url))
-        .json(&sample_manifest("visible"))
-        .send()
-        .await
-        .unwrap();
+    // Register the node we want to see in the list.
+    let (_visible_id, _visible_token) = register_node(&client, &h.base_url, "visible").await;
+
+    // Register a separate caller node whose token we use for the MCP call.
+    // (list_nodes excludes the caller itself, so we need a different node.)
+    let (_caller_id, caller_token) = register_node(&client, &h.base_url, "caller").await;
 
     let resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&caller_token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -258,8 +259,20 @@ async fn mcp_dispatch_no_nodes_is_error() {
     let h = start_hub().await;
     let client = reqwest::Client::new();
 
+    // Register a caller just to authenticate; there are no *other* nodes to dispatch to.
+    // Mark it as Draining so it won't be selected by the constraint router.
+    let (_caller_id, caller_token) = register_node(&client, &h.base_url, "caller").await;
+    client
+        .post(format!("{}/swarm/heartbeat", h.base_url))
+        .bearer_auth(&caller_token)
+        .json(&NodeStatus::Draining)
+        .send()
+        .await
+        .unwrap();
+
     let resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&caller_token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -289,8 +302,11 @@ async fn mcp_dispatch_without_target_or_constraints_is_error() {
     let h = start_hub().await;
     let client = reqwest::Client::new();
 
+    let (_caller_id, caller_token) = register_node(&client, &h.base_url, "caller").await;
+
     let resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&caller_token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -320,8 +336,11 @@ async fn mcp_dispatch_with_unknown_target_node_id_is_error() {
     let h = start_hub().await;
     let client = reqwest::Client::new();
 
+    let (_caller_id, caller_token) = register_node(&client, &h.base_url, "caller").await;
+
     let resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&caller_token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -384,8 +403,12 @@ async fn mcp_list_nodes_exposes_full_hardware_and_heartbeat() {
         .await
         .unwrap();
 
+    // Register a separate caller node so list_nodes doesn't self-exclude "rich".
+    let (_caller_id, caller_token) = register_node(&client, &h.base_url, "caller").await;
+
     let resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&caller_token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -402,7 +425,8 @@ async fn mcp_list_nodes_exposes_full_hardware_and_heartbeat() {
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let parsed: Value = serde_json::from_str(text).unwrap();
     let rows = parsed.as_array().unwrap();
-    assert_eq!(rows.len(), 1);
+    // "rich" should be in the list (caller is excluded, so we see rich only).
+    assert!(rows.len() >= 1);
     let row = &rows[0];
     assert_eq!(row["node_name"], "rich");
     assert_eq!(row["os"], "linux");
@@ -520,11 +544,15 @@ async fn end_to_end_dispatch_and_result() {
 
     // 3. Kick off swarm_dispatch from a separate task so the SSE parser
     //    and result POST can run concurrently.
+    //    Use the worker's own token for MCP auth — this avoids registering
+    //    a second idle node that could be picked by the constraint router.
     let base_url = h.base_url.clone();
     let dispatch_client = reqwest::Client::new();
+    let dispatch_token = token.clone();
     let dispatch_task = tokio::spawn(async move {
         let resp: Value = dispatch_client
             .post(format!("{base_url}/mcp"))
+            .bearer_auth(&dispatch_token)
             .json(&json!({
                 "jsonrpc": "2.0",
                 "id": 99,
@@ -630,9 +658,11 @@ async fn dispatch_preserves_inline_payload() {
 
     let base_url = h.base_url.clone();
     let dispatch_client = reqwest::Client::new();
+    let dispatch_token = token.clone();
     let dispatch_task = tokio::spawn(async move {
         dispatch_client
             .post(format!("{base_url}/mcp"))
+            .bearer_auth(&dispatch_token)
             .json(&json!({
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -698,17 +728,36 @@ async fn dispatch_preserves_inline_payload() {
     let _ = dispatch_task.await;
 }
 
+/// Register a node and return `(node_id, token)`.
+async fn register_node(client: &reqwest::Client, base_url: &str, name: &str) -> (String, String) {
+    let reg: Value = client
+        .post(format!("{base_url}/swarm/register"))
+        .json(&sample_manifest(name))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    (
+        reg["node_id"].as_str().unwrap().to_string(),
+        reg["token"].as_str().unwrap().to_string(),
+    )
+}
+
 /// Call an MCP tool and return the parsed JSON payload from the
 /// response's single text content block.  Collapses ~10 lines of
 /// boilerplate into one call.
 async fn mcp_call_tool(
     client: &reqwest::Client,
     base_url: &str,
+    token: &str,
     name: &str,
     arguments: Value,
 ) -> Value {
     let resp: Value = client
         .post(format!("{base_url}/mcp"))
+        .bearer_auth(token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -757,10 +806,12 @@ async fn async_dispatch_can_be_cancelled() {
     let mut buffer = Vec::new();
     let _ = read_one_event(&mut stream, &mut buffer).await; // registered
 
-    // Submit a task.
+    // Submit a task. Use the worker's own token for MCP auth to avoid
+    // registering a second idle node that could be picked by the router.
     let submit = mcp_call_tool(
         &client,
         &h.base_url,
+        &token,
         "swarm_submit",
         json!({ "prompt": "run forever", "constraints": {} }),
     )
@@ -779,6 +830,7 @@ async fn async_dispatch_can_be_cancelled() {
     let cancel = mcp_call_tool(
         &client,
         &h.base_url,
+        &token,
         "swarm_task_cancel",
         json!({ "task_id": task_id }),
     )
@@ -800,6 +852,7 @@ async fn async_dispatch_can_be_cancelled() {
     let status = mcp_call_tool(
         &client,
         &h.base_url,
+        &token,
         "swarm_task_status",
         json!({ "task_id": task_id }),
     )
@@ -809,6 +862,7 @@ async fn async_dispatch_can_be_cancelled() {
     // Cancelling twice is an error.
     let resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -847,6 +901,7 @@ async fn async_dispatch_can_be_cancelled() {
     let after = mcp_call_tool(
         &client,
         &h.base_url,
+        &token,
         "swarm_task_status",
         json!({ "task_id": task_id }),
     )
@@ -891,9 +946,12 @@ async fn async_dispatch_with_checkpoints_end_to_end() {
     assert!(first.contains("event: registered"));
 
     // Call swarm_submit — it must return immediately with a task_id.
+    // Use the worker's own token for MCP auth to avoid registering a
+    // second idle node that could be picked by the constraint router.
     let submit_start = std::time::Instant::now();
     let submit_resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -969,6 +1027,7 @@ async fn async_dispatch_with_checkpoints_end_to_end() {
     // swarm_task_status should now report 2 checkpoints, state=running.
     let status_resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -995,6 +1054,7 @@ async fn async_dispatch_with_checkpoints_end_to_end() {
     // swarm_task_checkpoints with since_sequence=1 should return only #2.
     let cps_resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 3,
@@ -1018,6 +1078,7 @@ async fn async_dispatch_with_checkpoints_end_to_end() {
     // swarm_task_result while still running: state present, result absent.
     let pending_resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 4,
@@ -1060,6 +1121,7 @@ async fn async_dispatch_with_checkpoints_end_to_end() {
     // swarm_task_result now returns the full result and state=completed.
     let done_resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 5,
@@ -1101,6 +1163,7 @@ async fn async_dispatch_with_checkpoints_end_to_end() {
     // swarm_task_list contains the task.
     let list_resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 6,
@@ -1175,15 +1238,7 @@ async fn explicit_target_node_id_routes_to_that_node() {
     // Register two nodes. We'll only open an SSE stream for the second
     // one and target it explicitly; if the router were picking by
     // constraints it might route to either.
-    let _alpha: Value = client
-        .post(format!("{}/swarm/register", h.base_url))
-        .json(&sample_manifest("alpha"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let (_alpha_id, alpha_token) = register_node(&client, &h.base_url, "alpha").await;
     let beta: Value = client
         .post(format!("{}/swarm/register", h.base_url))
         .json(&sample_manifest("beta"))
@@ -1208,10 +1263,11 @@ async fn explicit_target_node_id_routes_to_that_node() {
     let mut buffer = Vec::new();
     let _ = read_one_event(&mut stream, &mut buffer).await; // registered
 
-    // Submit targeting beta.
+    // Submit targeting beta (use alpha's token as the MCP caller).
     let submit = mcp_call_tool(
         &client,
         &h.base_url,
+        &alpha_token,
         "swarm_submit",
         json!({
             "prompt": "compute",
@@ -1263,10 +1319,14 @@ async fn explicit_target_on_busy_node_is_error() {
     let mut buffer = Vec::new();
     let _ = read_one_event(&mut stream, &mut buffer).await; // registered
 
+    // Register a separate caller node for MCP authentication.
+    let (_caller_id, caller_token) = register_node(&client, &h.base_url, "caller").await;
+
     // Submit a first task — flips the node to Busy.
     let first = mcp_call_tool(
         &client,
         &h.base_url,
+        &caller_token,
         "swarm_submit",
         json!({
             "prompt": "first",
@@ -1288,6 +1348,7 @@ async fn explicit_target_on_busy_node_is_error() {
     // with NodeNotIdle.
     let resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&caller_token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 2,

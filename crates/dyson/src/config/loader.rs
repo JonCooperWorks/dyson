@@ -865,6 +865,7 @@ fn parse_mcp_servers(
             name: name.clone(),
             transport,
             exclude_tools: vec![],
+            custom_auth: None,
         })));
     }
 }

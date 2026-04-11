@@ -25,6 +25,7 @@ use std::time::{Duration, SystemTime};
 
 use axum::Json;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use dyson_swarm_protocol::types::{NodeStatus, Payload, SwarmResult, SwarmTask, TaskStatus};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
@@ -34,6 +35,18 @@ use crate::queue::DispatchError;
 use crate::registry::{NodeId, SseEvent};
 use crate::router::{RoutingConstraints, select_node, select_node_by_id};
 use crate::tasks::{TaskRecord, TaskSnapshot, TaskState};
+
+/// Verified identity of the MCP caller.
+///
+/// Built from a valid bearer token (cryptographically random, assigned
+/// at registration).  All `tools/call` requests require authentication;
+/// unauthenticated callers are rejected before reaching any tool handler.
+struct McpCaller {
+    /// Hub-assigned node_id, resolved from bearer token.
+    node_id: String,
+    /// Node name for `list_nodes` self-exclusion.
+    node_name: Option<String>,
+}
 
 /// Default timeout for a `swarm_dispatch` call when none is supplied.
 const DEFAULT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(600);
@@ -46,10 +59,12 @@ const PROMPT_PREVIEW_CHARS: usize = 200;
 
 /// Optional query parameters on the MCP endpoint.
 ///
-/// `?caller=<node_name>` identifies the calling node so `list_nodes`
-/// can exclude it from results (the node shouldn't see itself).
+/// Retained for backward compatibility — existing URLs with
+/// `?caller=<node_name>` won't fail deserialization — but all
+/// caller identity now comes from the bearer token.
 #[derive(serde::Deserialize, Default)]
 pub struct McpQuery {
+    #[allow(dead_code)]
     caller: Option<String>,
 }
 
@@ -60,7 +75,8 @@ pub struct McpQuery {
 /// notifications, and we want to be forgiving.
 pub async fn mcp_handler(
     State(hub): State<Arc<Hub>>,
-    axum::extract::Query(query): axum::extract::Query<McpQuery>,
+    axum::extract::Query(_query): axum::extract::Query<McpQuery>,
+    headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Json<Value> {
     let id = request.get("id").cloned();
@@ -73,6 +89,22 @@ pub async fn mcp_handler(
 
     tracing::debug!(method = %method, ?id, "MCP request");
 
+    // Resolve caller identity from bearer token.  Protocol methods
+    // (initialize, tools/list) are open; tools/call requires auth.
+    let caller = match crate::auth::extract_bearer(&headers) {
+        Some(token) => match hub.registry.node_id_for_token(&token).await {
+            Some(node_id) => {
+                let node_name = hub
+                    .registry
+                    .with_entry(&node_id, |e| e.manifest.node_name.clone())
+                    .await;
+                Some(McpCaller { node_id, node_name })
+            }
+            None => None, // token present but unknown
+        },
+        None => None,
+    };
+
     let result = match method.as_str() {
         "initialize" => Ok(json!({
             "protocolVersion": "2024-11-05",
@@ -84,7 +116,10 @@ pub async fn mcp_handler(
         })),
         "notifications/initialized" => Ok(json!({})),
         "tools/list" => Ok(tools_list_response()),
-        "tools/call" => handle_tools_call(&hub, query.caller.as_deref(), params).await,
+        "tools/call" => match caller {
+            Some(ref c) => handle_tools_call(&hub, c, params).await,
+            None => Err(McpError::unauthorized()),
+        },
         other => Err(McpError::method_not_found(other)),
     };
 
@@ -132,6 +167,14 @@ impl McpError {
         Self {
             code: -32602,
             message: msg.into(),
+        }
+    }
+
+    /// Returned when `tools/call` is invoked without a valid bearer token.
+    fn unauthorized() -> Self {
+        Self {
+            code: -32600, // Invalid Request
+            message: "unauthorized: valid bearer token required for tools/call".into(),
         }
     }
 }
@@ -312,7 +355,7 @@ fn tools_list_response() -> Value {
             },
             {
                 "name": "swarm_task_list",
-                "description": "List recent tasks on the hub, newest first, bounded by limit.",
+                "description": "List your recent tasks, newest first, bounded by limit.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -333,7 +376,7 @@ fn tools_list_response() -> Value {
 /// trivial one-liners.
 async fn handle_tools_call(
     hub: &Arc<Hub>,
-    caller: Option<&str>,
+    caller: &McpCaller,
     params: Option<Value>,
 ) -> Result<Value, McpError> {
     let params = params.ok_or_else(|| McpError::invalid_params("missing params"))?;
@@ -346,18 +389,18 @@ async fn handle_tools_call(
     let outcome: Result<Value, String> = match name {
         "list_nodes" => Ok(list_nodes(hub, caller).await),
         "swarm_status" => Ok(swarm_status(hub).await),
-        "swarm_dispatch" => swarm_dispatch(hub, arguments)
+        "swarm_dispatch" => swarm_dispatch(hub, caller, arguments)
             .await
             .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
             .map_err(|e| format!("dispatch failed: {e}")),
-        "swarm_submit" => swarm_submit(hub, arguments)
+        "swarm_submit" => swarm_submit(hub, caller, arguments)
             .await
             .map_err(|e| format!("submit failed: {e}")),
-        "swarm_task_status" => swarm_task_status(hub, arguments).await,
-        "swarm_task_checkpoints" => swarm_task_checkpoints(hub, arguments).await,
-        "swarm_task_result" => swarm_task_result(hub, arguments).await,
-        "swarm_task_cancel" => swarm_task_cancel(hub, arguments).await,
-        "swarm_task_list" => Ok(swarm_task_list(hub, arguments).await),
+        "swarm_task_status" => swarm_task_status(hub, caller, arguments).await,
+        "swarm_task_checkpoints" => swarm_task_checkpoints(hub, caller, arguments).await,
+        "swarm_task_result" => swarm_task_result(hub, caller, arguments).await,
+        "swarm_task_cancel" => swarm_task_cancel(hub, caller, arguments).await,
+        "swarm_task_list" => Ok(swarm_task_list(hub, caller, arguments).await),
         other => {
             return Err(McpError::invalid_params(format!("unknown tool: {other}")));
         }
@@ -391,12 +434,13 @@ fn tool_result(outcome: Result<Value, String>) -> Value {
 /// guessing. Full CPU/GPU lists, disk_free_bytes, OS, the in-flight
 /// `task_id` (when busy), and a Unix heartbeat timestamp are all
 /// included.
-async fn list_nodes(hub: &Arc<Hub>, caller: Option<&str>) -> Value {
+async fn list_nodes(hub: &Arc<Hub>, caller: &McpCaller) -> Value {
+    let exclude = caller.node_name.as_deref();
     hub.registry
         .with_entries(|entries| {
             let mut rows: Vec<Value> = entries
                 .values()
-                .filter(|entry| caller.is_none_or(|c| entry.manifest.node_name != c))
+                .filter(|entry| exclude.is_none_or(|c| entry.manifest.node_name != c))
                 .map(|entry| {
                     let hw = &entry.manifest.hardware;
                     let busy_task_id = match &entry.status {
@@ -556,6 +600,7 @@ struct PlacedTask {
 async fn place_task(
     hub: &Arc<Hub>,
     args: &DispatchArgs,
+    owner: Option<&str>,
     waiter: Option<oneshot::Sender<SwarmResult>>,
 ) -> Result<PlacedTask, DispatchError> {
     let node_id = match &args.target {
@@ -580,6 +625,7 @@ async fn place_task(
     let record = TaskRecord {
         task_id: task.task_id.clone(),
         node_id: node_id.clone(),
+        owner: owner.map(str::to_string),
         prompt_preview: truncate_prompt(&args.prompt),
         submitted_at,
         last_update: submitted_at,
@@ -655,7 +701,11 @@ fn truncate_prompt(prompt: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// `swarm_dispatch` — sign a task, push it, wait for the result.
-async fn swarm_dispatch(hub: &Arc<Hub>, arguments: Value) -> Result<SwarmResult, DispatchError> {
+async fn swarm_dispatch(
+    hub: &Arc<Hub>,
+    caller: &McpCaller,
+    arguments: Value,
+) -> Result<SwarmResult, DispatchError> {
     let args = parse_dispatch_args(arguments)?;
     let timeout = args
         .timeout_secs
@@ -663,7 +713,7 @@ async fn swarm_dispatch(hub: &Arc<Hub>, arguments: Value) -> Result<SwarmResult,
         .unwrap_or(DEFAULT_DISPATCH_TIMEOUT);
 
     let (tx, rx) = oneshot::channel::<SwarmResult>();
-    let placed = place_task(hub, &args, Some(tx)).await?;
+    let placed = place_task(hub, &args, Some(&caller.node_id), Some(tx)).await?;
 
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(result)) => {
@@ -693,9 +743,13 @@ async fn swarm_dispatch(hub: &Arc<Hub>, arguments: Value) -> Result<SwarmResult,
 // ---------------------------------------------------------------------------
 
 /// `swarm_submit` — dispatch and return a task_id immediately.
-async fn swarm_submit(hub: &Arc<Hub>, arguments: Value) -> Result<Value, DispatchError> {
+async fn swarm_submit(
+    hub: &Arc<Hub>,
+    caller: &McpCaller,
+    arguments: Value,
+) -> Result<Value, DispatchError> {
     let args = parse_dispatch_args(arguments)?;
-    let placed = place_task(hub, &args, None).await?;
+    let placed = place_task(hub, &args, Some(&caller.node_id), None).await?;
 
     Ok(json!({
         "task_id": placed.task_id,
@@ -721,13 +775,27 @@ fn required_task_id(arguments: &Value) -> Result<String, String> {
         .ok_or_else(|| "task_id is required".to_string())
 }
 
-async fn swarm_task_status(hub: &Arc<Hub>, arguments: Value) -> Result<Value, String> {
-    let task_id = required_task_id(&arguments)?;
-    let snap = hub
-        .tasks
-        .get(&task_id)
+/// Fetch a task snapshot, scoped to the caller's verified identity.
+/// Returns "unknown task_id" for both nonexistent and non-owned tasks
+/// (topology obfuscation).
+async fn scoped_get(
+    hub: &Arc<Hub>,
+    caller: &McpCaller,
+    task_id: &str,
+) -> Result<TaskSnapshot, String> {
+    hub.tasks
+        .get_owned(task_id, &caller.node_id)
         .await
-        .ok_or_else(|| format!("unknown task_id: {task_id}"))?;
+        .ok_or_else(|| format!("unknown task_id: {task_id}"))
+}
+
+async fn swarm_task_status(
+    hub: &Arc<Hub>,
+    caller: &McpCaller,
+    arguments: Value,
+) -> Result<Value, String> {
+    let task_id = required_task_id(&arguments)?;
+    let snap = scoped_get(hub, caller, &task_id).await?;
     Ok(status_json(&snap))
 }
 
@@ -746,7 +814,11 @@ fn status_json(snap: &TaskSnapshot) -> Value {
     })
 }
 
-async fn swarm_task_checkpoints(hub: &Arc<Hub>, arguments: Value) -> Result<Value, String> {
+async fn swarm_task_checkpoints(
+    hub: &Arc<Hub>,
+    caller: &McpCaller,
+    arguments: Value,
+) -> Result<Value, String> {
     let task_id = required_task_id(&arguments)?;
     let since = arguments
         .get("since_sequence")
@@ -755,7 +827,7 @@ async fn swarm_task_checkpoints(hub: &Arc<Hub>, arguments: Value) -> Result<Valu
         .unwrap_or(0);
     let cps = hub
         .tasks
-        .checkpoints_since(&task_id, since)
+        .checkpoints_since_owned(&task_id, since, &caller.node_id)
         .await
         .ok_or_else(|| format!("unknown task_id: {task_id}"))?;
     Ok(json!({
@@ -767,10 +839,14 @@ async fn swarm_task_checkpoints(hub: &Arc<Hub>, arguments: Value) -> Result<Valu
 
 /// `swarm_task_cancel` — mark a running task Cancelled and push a
 /// cancel_task SSE event to the owning node.
-async fn swarm_task_cancel(hub: &Arc<Hub>, arguments: Value) -> Result<Value, String> {
+async fn swarm_task_cancel(
+    hub: &Arc<Hub>,
+    caller: &McpCaller,
+    arguments: Value,
+) -> Result<Value, String> {
     let task_id = required_task_id(&arguments)?;
 
-    let Some((node_id, waiter)) = hub.tasks.cancel(&task_id).await else {
+    let Some((node_id, waiter)) = hub.tasks.cancel_owned(&task_id, &caller.node_id).await else {
         return Err(format!(
             "task '{task_id}' is unknown or already terminal"
         ));
@@ -814,13 +890,13 @@ async fn swarm_task_cancel(hub: &Arc<Hub>, arguments: Value) -> Result<Value, St
     }))
 }
 
-async fn swarm_task_result(hub: &Arc<Hub>, arguments: Value) -> Result<Value, String> {
+async fn swarm_task_result(
+    hub: &Arc<Hub>,
+    caller: &McpCaller,
+    arguments: Value,
+) -> Result<Value, String> {
     let task_id = required_task_id(&arguments)?;
-    let snap = hub
-        .tasks
-        .get(&task_id)
-        .await
-        .ok_or_else(|| format!("unknown task_id: {task_id}"))?;
+    let snap = scoped_get(hub, caller, &task_id).await?;
     let state_value = serde_json::to_value(&snap.state).unwrap_or(Value::Null);
     Ok(match snap.result {
         Some(r) => json!({
@@ -835,13 +911,13 @@ async fn swarm_task_result(hub: &Arc<Hub>, arguments: Value) -> Result<Value, St
     })
 }
 
-async fn swarm_task_list(hub: &Arc<Hub>, arguments: Value) -> Value {
+async fn swarm_task_list(hub: &Arc<Hub>, caller: &McpCaller, arguments: Value) -> Value {
     let limit = arguments
         .get("limit")
         .and_then(|v| v.as_u64())
         .map(|n| n as usize)
         .unwrap_or(DEFAULT_LIST_LIMIT);
-    let snaps = hub.tasks.list(limit).await;
+    let snaps = hub.tasks.list_owned(&caller.node_id, limit).await;
     let rows: Vec<Value> = snaps.iter().map(status_json).collect();
     json!({
         "tasks": rows,
@@ -929,6 +1005,7 @@ mod tests {
             .insert(crate::tasks::TaskRecord {
                 task_id: "t1".into(),
                 node_id: "node-a".into(),
+                owner: None,
                 prompt_preview: "do a thing".into(),
                 submitted_at: SystemTime::now(),
                 last_update: SystemTime::now(),

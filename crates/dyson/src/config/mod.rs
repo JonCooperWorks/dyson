@@ -397,13 +397,31 @@ pub enum SkillConfig {
     Subagent(SubagentSkillConfig),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct McpConfig {
     pub name: String,
     pub transport: McpTransportConfig,
     /// Tool names to exclude after MCP discovery.
     /// Used to selectively hide tools (e.g., prevent recursive swarm dispatch).
     pub exclude_tools: Vec<String>,
+    /// Optional programmatic auth override for Http transports.
+    ///
+    /// When set on an Http transport with `auth: None`, this takes
+    /// precedence over the default `StaticHeadersAuth`.  Used by the
+    /// swarm auto-wiring to inject a `DeferredBearerAuth` whose token
+    /// arrives after controller registration.
+    pub custom_auth: Option<std::sync::Arc<dyn crate::auth::Auth>>,
+}
+
+impl std::fmt::Debug for McpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpConfig")
+            .field("name", &self.name)
+            .field("transport", &self.transport)
+            .field("exclude_tools", &self.exclude_tools)
+            .field("custom_auth", &self.custom_auth.as_ref().map(|_| ".."))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]

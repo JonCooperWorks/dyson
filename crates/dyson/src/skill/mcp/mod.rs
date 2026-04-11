@@ -260,7 +260,15 @@ impl Skill for McpSkill {
                 Some(Arc::new(StdioTransport::spawn(&command, &args, &env).await?))
             }
             crate::config::McpTransportConfig::Http { url, headers, auth: None } => {
-                Some(Arc::new(HttpTransport::new(&url, Box::new(crate::auth::StaticHeadersAuth::new(headers)))))
+                let auth: Box<dyn crate::auth::Auth> =
+                    if let Some(ref custom) = self.config.custom_auth {
+                        // Programmatic auth (e.g. DeferredBearerAuth for swarm).
+                        // Wrap the Arc<dyn Auth> so it can be used as Box<dyn Auth>.
+                        Box::new(crate::auth::ArcAuth(custom.clone()))
+                    } else {
+                        Box::new(crate::auth::StaticHeadersAuth::new(headers))
+                    };
+                Some(Arc::new(HttpTransport::new(&url, auth)))
             }
             crate::config::McpTransportConfig::Http { url, auth: Some(oauth_config), .. } => {
                 match Self::load_oauth_credential(&server_name).await? {

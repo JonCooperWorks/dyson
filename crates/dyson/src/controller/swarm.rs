@@ -224,6 +224,9 @@ impl Output for SwarmCaptureOutput {
 pub struct SwarmController {
     config: SwarmControllerConfig,
     public_key: SwarmPublicKey,
+    /// Sends the registration bearer token to the MCP skill's
+    /// `DeferredBearerAuth` so requests to the hub are authenticated.
+    token_tx: Option<tokio::sync::watch::Sender<Option<String>>>,
 }
 
 impl SwarmController {
@@ -253,7 +256,14 @@ impl SwarmController {
         Some(Self {
             config: swarm_config,
             public_key,
+            token_tx: None,
         })
+    }
+
+    /// Set the watch channel for publishing the bearer token after
+    /// registration.  Called by `listen.rs` before the controller runs.
+    pub fn set_token_channel(&mut self, tx: tokio::sync::watch::Sender<Option<String>>) {
+        self.token_tx = Some(tx);
     }
 }
 
@@ -397,6 +407,12 @@ impl SwarmController {
         };
 
         tracing::info!(node_id = %reg.node_id, "registered with swarm hub");
+
+        // Publish the bearer token so the MCP skill's DeferredBearerAuth
+        // can authenticate requests to the hub.
+        if let Some(ref tx) = self.token_tx {
+            let _ = tx.send(Some(reg.token.clone()));
+        }
 
         // Open SSE stream.
         let mut events = match conn.open_event_stream().await {
