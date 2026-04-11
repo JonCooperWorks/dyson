@@ -142,7 +142,7 @@ The hub lives at [`crates/swarm/`](../crates/swarm/) and ships as a binary named
 6. **Blob storage** — `GET/PUT /swarm/blob/{sha256}` for large payloads.
 7. **Health monitoring** — heartbeats, stale-node reaping, terminal-task reaping (24 h, same 15 s ticker).
 
-State is ephemeral: a hub restart forgets every registered node and every in-flight task.
+Task state is durable: every mutation writes through to `data_dir/tasks.db` (SQLite/WAL), and `Hub::new` rehydrates records on startup. Tasks still in the `Running` state after a restart are orphaned — their node lost its SSE session and `node_id` when the old process died — so the hub reconciles them to `Failed { error: "hub restarted mid-task" }` up-front. The node registry itself is still in-memory in v1: nodes have to re-register after a hub restart. Blobs live on disk under `data_dir/blobs/`.
 
 ### Running the hub
 
@@ -548,7 +548,7 @@ Tests cover:
 
 ## What v1 doesn't do
 
-- **Persistence**: hub restart loses all in-flight and recent task state.
+- **Node registry persistence**: the node registry is in-memory; nodes must re-register after a hub restart. (Task records and blobs *are* durable — see above.) Running tasks at the moment of a restart are flipped to `Failed { error: "hub restarted mid-task" }` since their owning node has been disconnected and re-identified.
 - **Queueing**: if no node is eligible, both dispatch paths fail fast with `no eligible node`.
 - **Automatic progress**: checkpoints are explicitly emitted by the agent calling `swarm_checkpoint`. No automatic scraping of bash stdout.
 - **Hard kill of bash subprocesses on cancel**: tools that don't check `ctx.cancellation` keep running until their next async yield point.

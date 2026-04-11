@@ -484,6 +484,56 @@ impl TaskStore {
 }
 
 // ---------------------------------------------------------------------------
+// Startup recovery helpers
+// ---------------------------------------------------------------------------
+
+/// Error string used when a task is found in `Running` state after a hub
+/// restart.  Exposed so tests and operators can grep for it.
+pub const ORPHANED_RUNNING_ERROR: &str = "hub restarted mid-task";
+
+/// Reconcile tasks recovered from persistence after a hub restart.
+///
+/// Any task still in `Running` state belongs to a node whose SSE session
+/// died with the old process and which has lost its `node_id`/token — the
+/// hub cannot talk to it anymore.  Such tasks are marked `Failed` with a
+/// stable error string, both in the caller-owned in-memory slice *and* in
+/// the durable store, so `swarm_task_result` reports a terminal state
+/// instead of lying that the task is still running.
+///
+/// Returns the number of records that were flipped.
+pub async fn reconcile_orphaned_running(
+    persistence: &dyn TaskPersistence,
+    recovered: &mut [TaskRecord],
+) -> Result<usize, sqlx::Error> {
+    let mut count = 0;
+    for record in recovered.iter_mut() {
+        if !matches!(record.state, TaskState::Running) {
+            continue;
+        }
+        let result = SwarmResult {
+            task_id: record.task_id.clone(),
+            text: String::new(),
+            payloads: vec![],
+            status: TaskStatus::Failed {
+                error: ORPHANED_RUNNING_ERROR.to_string(),
+            },
+            duration_secs: 0,
+        };
+        let new_state = TaskState::Failed {
+            error: ORPHANED_RUNNING_ERROR.to_string(),
+        };
+        persistence
+            .finalize(&record.task_id, &result, &new_state)
+            .await?;
+        record.state = new_state;
+        record.result = Some(result);
+        record.last_update = SystemTime::now();
+        count += 1;
+    }
+    Ok(count)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -832,5 +882,68 @@ mod tests {
         assert!(store.get("old").await.is_none());
         assert!(store.get("fresh").await.is_some());
         assert!(store.get("running").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn reconcile_orphaned_running_flips_running_to_failed_and_persists() {
+        use crate::tasks::persistence::SqliteTaskPersistence;
+
+        let persistence = Arc::new(SqliteTaskPersistence::open_in_memory().await.unwrap());
+
+        // Seed three records: one Running (should be reconciled), one
+        // already Completed (should be untouched), and one already
+        // Failed with a different error (should be untouched).
+        let running = blank_record("running-1");
+        let mut completed = blank_record("completed-1");
+        completed.state = TaskState::Completed;
+        let mut failed = blank_record("failed-1");
+        failed.state = TaskState::Failed {
+            error: "original boom".into(),
+        };
+
+        for r in [&running, &completed, &failed] {
+            persistence.insert(r).await.unwrap();
+        }
+
+        // Simulate a fresh load_all() after restart.
+        let mut recovered = persistence.load_all().await.unwrap();
+        let flipped = reconcile_orphaned_running(persistence.as_ref(), &mut recovered)
+            .await
+            .unwrap();
+        assert_eq!(flipped, 1);
+
+        // In-memory view is consistent.
+        let mut by_id: std::collections::HashMap<String, &TaskRecord> = Default::default();
+        for r in &recovered {
+            by_id.insert(r.task_id.clone(), r);
+        }
+        match &by_id["running-1"].state {
+            TaskState::Failed { error } => assert_eq!(error, ORPHANED_RUNNING_ERROR),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(by_id["running-1"].result.is_some());
+        assert!(matches!(by_id["completed-1"].state, TaskState::Completed));
+        match &by_id["failed-1"].state {
+            TaskState::Failed { error } => assert_eq!(error, "original boom"),
+            other => panic!("expected Failed(original boom), got {other:?}"),
+        }
+
+        // Durable store reflects the same flip (reload to be sure).
+        let reloaded = persistence.load_all().await.unwrap();
+        let reloaded_running = reloaded
+            .iter()
+            .find(|r| r.task_id == "running-1")
+            .expect("running-1 present");
+        match &reloaded_running.state {
+            TaskState::Failed { error } => assert_eq!(error, ORPHANED_RUNNING_ERROR),
+            other => panic!("expected persisted Failed, got {other:?}"),
+        }
+
+        // Second reconcile pass is a no-op.
+        let mut recovered2 = persistence.load_all().await.unwrap();
+        let flipped2 = reconcile_orphaned_running(persistence.as_ref(), &mut recovered2)
+            .await
+            .unwrap();
+        assert_eq!(flipped2, 0);
     }
 }
