@@ -22,7 +22,7 @@ use futures_util::StreamExt;
 use reqwest::StatusCode;
 
 use crate::error::{DysonError, Result};
-use crate::swarm::types::{NodeManifest, NodeStatus, SwarmResult};
+use crate::swarm::types::{NodeManifest, NodeStatus, SwarmResult, TaskCheckpoint};
 
 // ---------------------------------------------------------------------------
 // SSE event types
@@ -128,6 +128,18 @@ impl SwarmConnection {
         let req = self.authed(self.client.post(&url).json(result));
         let resp = req.send().await?;
         Self::check(resp, "result submission failed").await?;
+        Ok(())
+    }
+
+    /// POST a progress checkpoint for an in-flight task.
+    ///
+    /// Non-fatal for the task if it fails — the checkpoint is best-effort
+    /// metadata.  Callers should log send failures and continue executing.
+    pub async fn send_checkpoint(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
+        let url = format!("{}/swarm/checkpoint", self.base_url);
+        let req = self.authed(self.client.post(&url).json(checkpoint));
+        let resp = req.send().await?;
+        Self::check(resp, "checkpoint submission failed").await?;
         Ok(())
     }
 

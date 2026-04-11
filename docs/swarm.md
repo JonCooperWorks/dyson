@@ -46,12 +46,13 @@ Participation is symmetric: you use the swarm because you are part of it.
 +--------------------------------------------------------+
 |                     SWARM HUB                          |
 |                                                        |
-|  /mcp             <- MCP server (tool discovery)       |
-|  /swarm/register  <- POST (node registration)          |
-|  /swarm/events    <- SSE (push tasks to nodes)         |
-|  /swarm/heartbeat <- POST (node status updates)        |
-|  /swarm/result    <- POST (task results from nodes)    |
-|  /swarm/blob/{sha256} <- GET/PUT (large payloads)      |
+|  /mcp               <- MCP server (tool discovery)     |
+|  /swarm/register    <- POST (node registration)        |
+|  /swarm/events      <- SSE  (push tasks to nodes)      |
+|  /swarm/heartbeat   <- POST (node status updates)      |
+|  /swarm/result      <- POST (task results from nodes)  |
+|  /swarm/checkpoint  <- POST (progress events from task)|
+|  /swarm/blob/{sha}  <- GET/PUT (large payloads)        |
 |                                                        |
 +------+----------+----------------------+---------------+
        | SSE      | SSE                  | MCP
@@ -256,7 +257,8 @@ settings.skills.push(SkillConfig::Mcp(Box::new(McpConfig {
 ```
 
 This means **every** agent on this Dyson (terminal, telegram, swarm) gets
-the hub's MCP tools — `swarm_dispatch`, `swarm_status`, `list_nodes`.
+the hub's MCP tools — `swarm_dispatch`, `swarm_submit`, `swarm_status`,
+`list_nodes`, and the task-query tools below.
 
 The swarm controller's own agent is special:
 - `swarm_dispatch` is excluded (prevents recursive task loops)
@@ -264,6 +266,108 @@ The swarm controller's own agent is special:
   agent never sees its own node — only peers
 - A controller prompt instructs the agent to use tools (especially bash)
   and never guess at system details
+
+---
+
+## Long-running tasks and checkpoints
+
+`swarm_dispatch` is a **synchronous** tool — it blocks the caller until
+the node finishes (capped by the hub's dispatch timeout, default 600 s).
+That's fine for quick commands but unusable for work measured in hours,
+like fine-tuning a model, crunching a dataset, or running a batch job.
+
+For long-running work, use the **async dispatch path** instead:
+
+### `swarm_submit` — fire and acknowledge
+
+```
+swarm_submit { prompt, payloads?, timeout_secs?, constraints? }
+  → { task_id, node_id, submitted_at_unix, state: "running" }
+```
+
+Returns in a few milliseconds.  The task is signed, pushed to the
+selected node over SSE, and tracked in the hub's in-memory `TaskStore`.
+No oneshot waiter is registered; the caller discovers progress and the
+final result by polling.
+
+### `swarm_checkpoint` — progress from inside the task
+
+A built-in tool the swarm controller's agent can call during execution:
+
+```
+swarm_checkpoint { message, progress? }
+```
+
+Each call attaches a `CheckpointEvent` to the tool's `ToolOutput` as a
+side-channel (the same pattern `send_file` uses for file delivery).
+The swarm controller's `Output::checkpoint` hook routes the event to a
+per-task mpsc channel whose forwarder task POSTs it to
+`POST /swarm/checkpoint` on the hub.  The hub appends the event to the
+task's record, bumping a monotonic sequence number.  Outside of a
+running swarm task the default `Output::checkpoint` impl drops the
+event, so the tool is a harmless no-op for terminal / telegram agents.
+
+The agent is encouraged (via the controller prompt) to emit checkpoints
+at natural milestones — once per epoch during training, once per batch
+during processing, once per stage of a pipeline.
+
+### Polling MCP tools
+
+| Tool | Purpose |
+|------|---------|
+| `swarm_task_status { task_id }` | Lightweight state: `state`, `checkpoint_count`, `last_sequence`, timestamps |
+| `swarm_task_checkpoints { task_id, since_sequence? }` | Ordered checkpoint list with sequence strictly greater than `since_sequence` (default 0) — tail progress incrementally |
+| `swarm_task_result { task_id }` | `{ state, result? }`.  `result` is absent while running, present once terminal |
+| `swarm_task_list { limit? }` | Recent tasks newest-first, bounded by `limit` (default 50). Includes sync dispatches too — every task flows through the same store |
+
+`swarm_task_result` uses a single shape: while running, only `state`
+appears; once the task is terminal (`completed` / `failed` / `cancelled`)
+the full `SwarmResult` is attached.  Callers can't confuse "still
+running" with "completed successfully" because `result` is only present
+in the terminal case.
+
+### Storage and lifetime
+
+`TaskRecord`s are kept in-memory on the hub only — there is **no
+persistence across hub restart**.  The same reaper task that culls stale
+nodes also drops terminal tasks older than 24 hours.  Long-running
+callers should retrieve their results before the hub is restarted.
+
+### What v1 doesn't do yet
+
+- **Cancellation**: a submitted task cannot be stopped mid-flight.
+  Document this to your agent if it matters.
+- **Persistence**: hub restart loses all in-flight and recent task state.
+- **Queueing**: if no node is eligible, both `swarm_dispatch` and
+  `swarm_submit` fail fast with `no eligible node`.
+- **Automatic progress**: checkpoints are explicitly emitted by the
+  agent calling `swarm_checkpoint`.  There's no automatic scraping of
+  bash stdout.
+
+### Example flow — fine-tune a model
+
+```
+1. Caller:  swarm_submit { prompt: "fine-tune meta-llama/Llama-3.1-8B on data.jsonl ...",
+                           constraints: { needs_gpu: true, min_ram_gb: 64 } }
+            → { task_id: "abc-123", node_id: "gpu-02", state: "running" }
+
+2. Node agent during execution:
+   - loads dataset
+   - calls swarm_checkpoint { message: "dataset loaded", progress: 0.05 }
+   - starts training
+   - per epoch: swarm_checkpoint { message: "epoch N/10 loss=...", progress: N/10 }
+   - saves weights to ./model.safetensors (picked up via send_file)
+   - finishes
+
+3. Caller polls every minute:
+   - swarm_task_status { task_id: "abc-123" }
+     → { state: "running", checkpoint_count: 4, last_sequence: 4, ... }
+   - swarm_task_checkpoints { task_id: "abc-123", since_sequence: 0 }
+     → all four progress lines so far
+
+4. Eventually: swarm_task_result { task_id: "abc-123" }
+   → { state: "completed", result: { text: "...", payloads: [...] } }
+```
 
 ---
 

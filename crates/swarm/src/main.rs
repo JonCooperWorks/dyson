@@ -119,9 +119,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn the heartbeat reaper.  It exits when the hub broadcasts
     // shutdown so tokio's runtime can terminate cleanly on Ctrl-C.
+    //
+    // The same ticker also reaps terminal TaskRecords older than 24h
+    // from the TaskStore — no separate background task needed.
     {
         let registry = hub.registry.clone();
+        let tasks = hub.tasks.clone();
         let timeout = config.heartbeat_timeout;
+        let task_ttl = Duration::from_secs(24 * 60 * 60);
         let shutdown_fut = hub.shutdown_notified();
         tokio::spawn(async move {
             tokio::pin!(shutdown_fut);
@@ -132,6 +137,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let reaped = registry.reap_stale(timeout).await;
                         for id in reaped {
                             tracing::warn!(node_id = %id, "reaped stale node");
+                        }
+                        let reaped_tasks = tasks.reap(task_ttl).await;
+                        if reaped_tasks > 0 {
+                            tracing::info!(reaped_tasks, "reaped terminal tasks past TTL");
                         }
                     }
                     _ = &mut shutdown_fut => {

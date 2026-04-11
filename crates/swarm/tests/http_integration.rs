@@ -305,7 +305,7 @@ async fn mcp_initialize_returns_protocol_version() {
 }
 
 #[tokio::test]
-async fn mcp_tools_list_has_three_tools() {
+async fn mcp_tools_list_has_expected_tools() {
     let h = start_hub().await;
     let client = reqwest::Client::new();
 
@@ -328,9 +328,18 @@ async fn mcp_tools_list_has_three_tools() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert!(names.contains(&"list_nodes"));
-    assert!(names.contains(&"swarm_status"));
-    assert!(names.contains(&"swarm_dispatch"));
+    for expected in [
+        "list_nodes",
+        "swarm_status",
+        "swarm_dispatch",
+        "swarm_submit",
+        "swarm_task_status",
+        "swarm_task_checkpoints",
+        "swarm_task_result",
+        "swarm_task_list",
+    ] {
+        assert!(names.contains(&expected), "missing tool: {expected}");
+    }
 }
 
 /// End-to-end: register, dispatch via MCP, fake the node consuming the
@@ -545,6 +554,315 @@ async fn dispatch_preserves_inline_payload() {
         .send()
         .await;
     let _ = dispatch_task.await;
+}
+
+/// End-to-end: swarm_submit returns fast, node posts checkpoints, MCP
+/// callers can poll status / checkpoints / result.
+#[tokio::test]
+async fn async_dispatch_with_checkpoints_end_to_end() {
+    use dyson_swarm_protocol::types::TaskCheckpoint;
+
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    // Register a fake node and open its SSE stream.
+    let reg: Value = client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("long-runner"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = reg["token"].as_str().unwrap().to_string();
+
+    let sse_resp = client
+        .get(format!("{}/swarm/events", h.base_url))
+        .bearer_auth(&token)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse_resp.status(), 200);
+    let mut stream = sse_resp.bytes_stream();
+    let mut buffer = Vec::new();
+
+    // Swallow the initial `registered` event.
+    let first = read_one_event(&mut stream, &mut buffer).await;
+    assert!(first.contains("event: registered"));
+
+    // Call swarm_submit — it must return immediately with a task_id.
+    let submit_start = std::time::Instant::now();
+    let submit_resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "swarm_submit",
+                "arguments": {
+                    "prompt": "fine tune a tiny model"
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let elapsed = submit_start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "swarm_submit should return fast, took {:?}",
+        elapsed
+    );
+
+    let submit_text = submit_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    let submit_payload: Value = serde_json::from_str(submit_text).unwrap();
+    let task_id = submit_payload["task_id"].as_str().unwrap().to_string();
+    assert!(!task_id.is_empty());
+    assert_eq!(submit_payload["state"], "running");
+
+    // The hub should have pushed a task event to our SSE stream.
+    let task_event = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_one_event(&mut stream, &mut buffer),
+    )
+    .await
+    .expect("task event did not arrive");
+    assert!(task_event.contains("event: task"));
+
+    let data_b64 = task_event
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .unwrap()
+        .trim();
+    let wire_bytes = STANDARD.decode(data_b64).unwrap();
+    let pk = SwarmPublicKey::from_config(&h.public_key_config).unwrap();
+    let payload = verify_signed_payload(&wire_bytes, &pk).unwrap();
+    let task: SwarmTask = serde_json::from_slice(payload).unwrap();
+    assert_eq!(task.task_id, task_id);
+
+    // POST two checkpoints as the node.
+    for seq in 1..=2u32 {
+        let cp = TaskCheckpoint {
+            task_id: task_id.clone(),
+            sequence: seq,
+            message: format!("epoch {seq}"),
+            progress: Some(seq as f32 * 0.3),
+            emitted_at_secs: seq as u64 * 10,
+        };
+        let resp = client
+            .post(format!("{}/swarm/checkpoint", h.base_url))
+            .bearer_auth(&token)
+            .json(&cp)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // swarm_task_status should now report 2 checkpoints, state=running.
+    let status_resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "swarm_task_status",
+                "arguments": { "task_id": task_id }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let status_text = status_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    let status: Value = serde_json::from_str(status_text).unwrap();
+    assert_eq!(status["checkpoint_count"], json!(2));
+    assert_eq!(status["last_sequence"], json!(2));
+    assert_eq!(status["state"]["state"], "running");
+
+    // swarm_task_checkpoints with since_sequence=1 should return only #2.
+    let cps_resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "swarm_task_checkpoints",
+                "arguments": { "task_id": task_id, "since_sequence": 1 }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let cps_text = cps_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let cps: Value = serde_json::from_str(cps_text).unwrap();
+    assert_eq!(cps["checkpoints"].as_array().unwrap().len(), 1);
+    assert_eq!(cps["checkpoints"][0]["sequence"], json!(2));
+
+    // swarm_task_result while still running: state present, result absent.
+    let pending_resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "swarm_task_result",
+                "arguments": { "task_id": task_id }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pending_text = pending_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    let pending: Value = serde_json::from_str(pending_text).unwrap();
+    assert_eq!(pending["state"]["state"], "running");
+    assert!(pending.get("result").is_none());
+
+    // POST the final result.
+    let final_result = SwarmResult {
+        task_id: task_id.clone(),
+        text: "done".into(),
+        payloads: vec![],
+        status: TaskStatus::Completed,
+        duration_secs: 42,
+    };
+    let fin = client
+        .post(format!("{}/swarm/result", h.base_url))
+        .bearer_auth(&token)
+        .json(&final_result)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fin.status(), 200);
+
+    // swarm_task_result now returns the full result and state=completed.
+    let done_resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "swarm_task_result",
+                "arguments": { "task_id": task_id }
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let done_text = done_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let done: Value = serde_json::from_str(done_text).unwrap();
+    assert_eq!(done["state"]["state"], "completed");
+    assert_eq!(done["result"]["text"], "done");
+    assert_eq!(done["result"]["duration_secs"], json!(42));
+
+    // Late checkpoint after completion is rejected.
+    let late_cp = TaskCheckpoint {
+        task_id: task_id.clone(),
+        sequence: 3,
+        message: "too late".into(),
+        progress: None,
+        emitted_at_secs: 99,
+    };
+    let late_resp = client
+        .post(format!("{}/swarm/checkpoint", h.base_url))
+        .bearer_auth(&token)
+        .json(&late_cp)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(late_resp.status(), 404);
+
+    // swarm_task_list contains the task.
+    let list_resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "swarm_task_list",
+                "arguments": {}
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let list_text = list_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let list: Value = serde_json::from_str(list_text).unwrap();
+    assert!(list["count"].as_u64().unwrap() >= 1);
+    let task_ids: Vec<&str> = list["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["task_id"].as_str())
+        .collect();
+    assert!(task_ids.contains(&task_id.as_str()));
+}
+
+/// Checkpoints with unknown task_id get a 404.
+#[tokio::test]
+async fn checkpoint_for_unknown_task_is_not_found() {
+    use dyson_swarm_protocol::types::TaskCheckpoint;
+
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let reg: Value = client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&sample_manifest("probe"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = reg["token"].as_str().unwrap().to_string();
+
+    let cp = TaskCheckpoint {
+        task_id: "no-such-task".into(),
+        sequence: 1,
+        message: "should 404".into(),
+        progress: None,
+        emitted_at_secs: 0,
+    };
+    let resp = client
+        .post(format!("{}/swarm/checkpoint", h.base_url))
+        .bearer_auth(&token)
+        .json(&cp)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
 }
 
 /// Pull one complete SSE event out of a byte stream.

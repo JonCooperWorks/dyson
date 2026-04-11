@@ -39,7 +39,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 
 use crate::config::{Settings, SwarmControllerConfig};
 use crate::controller::{ClientRegistry, Output};
@@ -47,10 +47,10 @@ use crate::error::DysonError;
 use crate::swarm::connection::{SwarmConnection, SwarmEvent};
 use crate::swarm::probe::HardwareProbe;
 use crate::swarm::types::{
-    BlobRef, NodeManifest, NodeStatus, Payload, SwarmResult, SwarmTask, TaskStatus,
+    BlobRef, NodeManifest, NodeStatus, Payload, SwarmResult, SwarmTask, TaskCheckpoint, TaskStatus,
 };
 use crate::swarm::verify::{SwarmPublicKey, verify_signed_payload};
-use crate::tool::ToolOutput;
+use crate::tool::{CheckpointEvent, ToolOutput};
 
 /// Delay between heartbeats.
 ///
@@ -75,17 +75,37 @@ const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(2);
 /// Maximum size for inline result payloads (64 KiB).
 const INLINE_THRESHOLD: usize = 64 * 1024;
 
+/// Capacity of the per-task checkpoint forwarder channel.  Large enough
+/// that an agent calling `swarm_checkpoint` in a tight loop won't stall,
+/// small enough that a runaway producer is noticed via `try_send` errors.
+const CHECKPOINT_CHANNEL_CAPACITY: usize = 32;
+
 // ---------------------------------------------------------------------------
-// SwarmCaptureOutput — collects text + file paths from the agent
+// SwarmCaptureOutput — collects text + file paths + checkpoints from the agent
 // ---------------------------------------------------------------------------
 
-/// Output implementation that captures text and file paths.
+/// Per-task context threaded into `SwarmCaptureOutput` so the
+/// `checkpoint` hook can build fully-formed `TaskCheckpoint`s and push
+/// them to the forwarder task.
+struct CheckpointContext {
+    task_id: String,
+    task_start: Instant,
+    sequence: u32,
+    tx: mpsc::Sender<TaskCheckpoint>,
+}
+
+/// Output implementation that captures text, file paths, and progress
+/// checkpoints.
 ///
-/// Like `CaptureOutput` from subagents, but also records file paths
-/// so swarm results can include them as payloads.
+/// Like `CaptureOutput` from subagents, but also records file paths so
+/// swarm results can include them as payloads, and funnels
+/// `CheckpointEvent`s from the `swarm_checkpoint` builtin tool into a
+/// per-task mpsc channel that a background forwarder task POSTs to the
+/// hub's `/swarm/checkpoint` endpoint.
 struct SwarmCaptureOutput {
     text: String,
     files: Vec<PathBuf>,
+    checkpoint_ctx: Option<CheckpointContext>,
 }
 
 impl SwarmCaptureOutput {
@@ -93,6 +113,7 @@ impl SwarmCaptureOutput {
         Self {
             text: String::new(),
             files: Vec::new(),
+            checkpoint_ctx: None,
         }
     }
 
@@ -107,6 +128,23 @@ impl SwarmCaptureOutput {
     fn clear(&mut self) {
         self.text.clear();
         self.files.clear();
+        self.checkpoint_ctx = None;
+    }
+
+    /// Install a per-task checkpoint context so `Output::checkpoint`
+    /// events can be routed to the hub.  Called before each task.
+    fn attach_checkpoint_ctx(
+        &mut self,
+        task_id: String,
+        task_start: Instant,
+        tx: mpsc::Sender<TaskCheckpoint>,
+    ) {
+        self.checkpoint_ctx = Some(CheckpointContext {
+            task_id,
+            task_start,
+            sequence: 0,
+            tx,
+        });
     }
 }
 
@@ -130,6 +168,40 @@ impl Output for SwarmCaptureOutput {
 
     fn send_file(&mut self, path: &std::path::Path) -> Result<(), DysonError> {
         self.files.push(path.to_path_buf());
+        Ok(())
+    }
+
+    fn checkpoint(&mut self, event: &CheckpointEvent) -> Result<(), DysonError> {
+        let Some(ctx) = self.checkpoint_ctx.as_mut() else {
+            // No active swarm task — drop the event (e.g. a stray
+            // swarm_checkpoint call between tasks).
+            tracing::debug!(
+                message = %event.message,
+                "ignoring swarm_checkpoint outside of a task"
+            );
+            return Ok(());
+        };
+
+        ctx.sequence = ctx.sequence.saturating_add(1);
+        let cp = TaskCheckpoint {
+            task_id: ctx.task_id.clone(),
+            sequence: ctx.sequence,
+            message: event.message.clone(),
+            progress: event.progress,
+            emitted_at_secs: ctx.task_start.elapsed().as_secs(),
+        };
+
+        // Non-blocking try_send: if the forwarder is backed up we don't
+        // want to stall the agent, just log and drop the oldest behaviour
+        // (the full channel case is reported as an error).
+        if let Err(e) = ctx.tx.try_send(cp) {
+            tracing::warn!(
+                task_id = %ctx.task_id,
+                sequence = ctx.sequence,
+                error = %e,
+                "dropping checkpoint: forwarder channel full or closed"
+            );
+        }
         Ok(())
     }
 
@@ -431,8 +503,44 @@ impl SwarmController {
                         task_id: task.task_id.clone(),
                     };
 
+                    // Spawn a per-task forwarder that POSTs every
+                    // checkpoint emitted by `swarm_checkpoint` tool
+                    // calls to the hub.  The channel is scoped to this
+                    // task so stray events between tasks can't land on
+                    // the wrong record.
+                    let (cp_tx, mut cp_rx) =
+                        mpsc::channel::<TaskCheckpoint>(CHECKPOINT_CHANNEL_CAPACITY);
+                    let forwarder_conn = conn.clone();
+                    let forwarder_task_id = task.task_id.clone();
+                    let forwarder = tokio::spawn(async move {
+                        while let Some(cp) = cp_rx.recv().await {
+                            if let Err(e) = forwarder_conn.send_checkpoint(&cp).await {
+                                tracing::warn!(
+                                    task_id = %forwarder_task_id,
+                                    sequence = cp.sequence,
+                                    error = %e,
+                                    "failed to POST checkpoint to hub"
+                                );
+                            }
+                        }
+                    });
+
+                    output.attach_checkpoint_ctx(
+                        task.task_id.clone(),
+                        Instant::now(),
+                        cp_tx,
+                    );
+
                     // Execute.
                     let result = execute_task(agent, &conn, &task, output).await;
+
+                    // Drop the sender so the forwarder drains and
+                    // exits cleanly.  `clear()` below also clears the
+                    // checkpoint context, but we explicitly wait on the
+                    // forwarder here to avoid racing with the final
+                    // result POST.
+                    output.checkpoint_ctx = None;
+                    let _ = tokio::time::timeout(Duration::from_secs(5), forwarder).await;
 
                     // Send result.
                     if let Err(e) = conn.send_result(&result).await {

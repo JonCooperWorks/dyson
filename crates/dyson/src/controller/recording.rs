@@ -225,6 +225,7 @@ mod tests {
             is_error,
             metadata: None,
             files: Vec::new(),
+            checkpoints: Vec::new(),
         }
     }
 

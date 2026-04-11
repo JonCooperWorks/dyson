@@ -202,6 +202,39 @@ pub enum TaskStatus {
 }
 
 // ---------------------------------------------------------------------------
+// TaskCheckpoint — mid-task progress event emitted by a node
+// ---------------------------------------------------------------------------
+
+/// A progress/checkpoint event emitted by a node while a task is still running.
+///
+/// Long-running tasks (model fine-tuning, data crunching, etc.) send these
+/// to the hub via `POST /swarm/checkpoint` so callers polling
+/// `swarm_task_status` / `swarm_task_checkpoints` can observe progress
+/// without waiting for the final `SwarmResult`.
+///
+/// Checkpoints carry metadata only — no payloads.  If a task needs to
+/// deliver intermediate artifacts, it should emit them via the final
+/// `SwarmResult.payloads` when the task completes, or (in a future
+/// revision) a dedicated artifact event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskCheckpoint {
+    /// The task this checkpoint belongs to.
+    pub task_id: String,
+    /// Monotonic sequence number, per task.  Starts at 1, incremented on
+    /// each emit.  Callers use this with `swarm_task_checkpoints`'s
+    /// `since_sequence` to fetch only new events.
+    pub sequence: u32,
+    /// Human-readable progress note.
+    pub message: String,
+    /// Optional fractional progress (0.0..=1.0).  Absent when the task
+    /// can't estimate a percentage.
+    #[serde(default)]
+    pub progress: Option<f32>,
+    /// Seconds elapsed on the node since task execution started.
+    pub emitted_at_secs: u64,
+}
+
+// ---------------------------------------------------------------------------
 // Base64 serde helper — encode Vec<u8> as base64 in JSON
 // ---------------------------------------------------------------------------
 
@@ -276,6 +309,31 @@ mod tests {
         let parsed: SwarmTask = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.task_id, "test-123");
         assert_eq!(parsed.timeout_secs, Some(3600));
+    }
+
+    #[test]
+    fn task_checkpoint_roundtrip() {
+        let cp = TaskCheckpoint {
+            task_id: "task-abc".into(),
+            sequence: 7,
+            message: "epoch 3/10 complete".into(),
+            progress: Some(0.3),
+            emitted_at_secs: 420,
+        };
+        let json = serde_json::to_string(&cp).unwrap();
+        let parsed: TaskCheckpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.task_id, "task-abc");
+        assert_eq!(parsed.sequence, 7);
+        assert_eq!(parsed.message, "epoch 3/10 complete");
+        assert_eq!(parsed.progress, Some(0.3));
+        assert_eq!(parsed.emitted_at_secs, 420);
+    }
+
+    #[test]
+    fn task_checkpoint_progress_optional() {
+        let json = r#"{"task_id":"t","sequence":1,"message":"hi","emitted_at_secs":0}"#;
+        let parsed: TaskCheckpoint = serde_json::from_str(json).unwrap();
+        assert!(parsed.progress.is_none());
     }
 
     #[test]

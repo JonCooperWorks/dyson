@@ -1,5 +1,10 @@
 //! `POST /swarm/result` — delivery of task results from nodes back to the
 //! MCP caller that dispatched them.
+//!
+//! Every result flows through `TaskStore::finalize`, which updates the
+//! stored record and returns any waiting oneshot sender (only set for
+//! sync `swarm_dispatch` callers).  Async `swarm_submit` callers don't
+//! block — they discover the result by polling `swarm_task_result`.
 
 use std::sync::Arc;
 
@@ -23,24 +28,31 @@ pub async fn result_handler(
     );
 
     // Flip the node back to Idle so the router will pick it again.
-    hub.registry
-        .set_status(&node_id, NodeStatus::Idle)
-        .await;
+    hub.registry.set_status(&node_id, NodeStatus::Idle).await;
 
-    // Hand the result off to whoever is awaiting it.
-    let tx_opt = {
-        let mut pending = hub.pending_dispatches.lock().await;
-        pending.remove(&result.task_id)
-    };
+    // Record the terminal state and retrieve any sync waiter.  The
+    // TaskStore returns `None` for async submissions, for unknown tasks,
+    // and for tasks whose waiter was previously abandoned on timeout.
+    let waiter = hub.tasks.finalize(&result.task_id, result.clone()).await;
 
-    if let Some(tx) = tx_opt {
-        // If send fails, the MCP caller hung up — log but still 200.
-        let _ = tx.send(result);
-    } else {
-        tracing::warn!(
-            task_id = %result.task_id,
-            "result for unknown task — dropping"
-        );
+    match waiter {
+        Some(tx) => {
+            // Fire the oneshot outside any lock.  Send failure just
+            // means the MCP caller already hung up — log but still 200.
+            if tx.send(result).is_err() {
+                tracing::debug!("sync dispatcher already hung up");
+            }
+        }
+        None => {
+            // Async task, or sync task whose waiter was cleared, or
+            // truly unknown.  `TaskStore::finalize` already logged the
+            // unknown case implicitly by returning None for a missing
+            // record; surface it here for operator visibility.
+            tracing::debug!(
+                task_id = %result.task_id,
+                "no waiter for result (async submission or unknown task)"
+            );
+        }
     }
 
     StatusCode::OK
