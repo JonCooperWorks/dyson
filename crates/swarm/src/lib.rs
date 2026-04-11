@@ -22,8 +22,8 @@ use tokio::sync::broadcast;
 use crate::blob::BlobStore;
 use crate::key::HubKeyPair;
 use crate::registry::NodeRegistry;
-use crate::tasks::TaskStore;
 use crate::tasks::persistence::{SqliteTaskPersistence, TaskPersistence};
+use crate::tasks::{TaskStore, reconcile_orphaned_running};
 
 /// Pre-validated static API key for MCP authentication.
 ///
@@ -114,14 +114,25 @@ impl Hub {
                 .await
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
         );
-        let recovered = persistence
+        let mut recovered = persistence
             .load_all()
             .await
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         let recovered_count = recovered.len();
+        // Any task still marked Running after a restart is orphaned: its
+        // node lost its SSE session and its node_id/token when the old
+        // process died.  Flip them to Failed up-front so `swarm_task_*`
+        // tools report a terminal state instead of lying.
+        let orphaned_count = reconcile_orphaned_running(&*persistence, &mut recovered)
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         let tasks = TaskStore::with_persistence(persistence, recovered);
         if recovered_count > 0 {
-            tracing::info!(recovered = recovered_count, "recovered tasks from disk");
+            tracing::info!(
+                recovered = recovered_count,
+                orphaned = orphaned_count,
+                "recovered tasks from disk"
+            );
         }
 
         // capacity = 1: we only ever broadcast once (on shutdown), and a
