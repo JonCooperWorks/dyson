@@ -23,6 +23,7 @@ use crate::blob::BlobStore;
 use crate::key::HubKeyPair;
 use crate::registry::NodeRegistry;
 use crate::tasks::TaskStore;
+use crate::tasks::persistence::{SqliteTaskPersistence, TaskPersistence};
 
 /// Pre-validated static API key for MCP authentication.
 ///
@@ -97,12 +98,32 @@ pub struct Hub {
 
 impl Hub {
     /// Build a new hub from an already-loaded key and data directory.
-    pub fn new(
+    ///
+    /// Opens the SQLite task persistence store at `data_dir/tasks.db`
+    /// and rehydrates any previously-persisted tasks into memory.
+    pub async fn new(
         key: HubKeyPair,
         data_dir: &std::path::Path,
         mcp_api_key: Option<McpApiKey>,
     ) -> std::io::Result<Arc<Self>> {
         let blobs = BlobStore::new(data_dir.join("blobs"))?;
+
+        let db_path = data_dir.join("tasks.db");
+        let persistence: Arc<dyn TaskPersistence> = Arc::new(
+            SqliteTaskPersistence::open(&db_path)
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+        );
+        let recovered = persistence
+            .load_all()
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let recovered_count = recovered.len();
+        let tasks = TaskStore::with_persistence(persistence, recovered);
+        if recovered_count > 0 {
+            tracing::info!(recovered = recovered_count, "recovered tasks from disk");
+        }
+
         // capacity = 1: we only ever broadcast once (on shutdown), and a
         // late subscriber will just see a "lagged" error that we ignore.
         let (shutdown, _) = broadcast::channel(1);
@@ -110,7 +131,7 @@ impl Hub {
             registry: NodeRegistry::new(),
             blobs,
             key,
-            tasks: TaskStore::new(),
+            tasks,
             mcp_api_key,
             shutdown,
         }))

@@ -15,6 +15,8 @@
 //! map that could race with the result handler; consolidating everything
 //! behind one lock eliminates that race.
 
+pub mod persistence;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -22,6 +24,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use dyson_swarm_protocol::types::{SwarmResult, TaskCheckpoint, TaskStatus};
 use serde::Serialize;
 use tokio::sync::{RwLock, oneshot};
+
+use crate::tasks::persistence::TaskPersistence;
 
 // ---------------------------------------------------------------------------
 // TaskState — hub-internal lifecycle for a task
@@ -136,37 +140,86 @@ impl TaskSnapshot {
 ///
 /// Single `RwLock` over the whole map.  Fine for v1 (expect <100 concurrent
 /// tasks); shard per-task_id if it becomes a hot spot.
-#[derive(Clone, Default)]
+///
+/// Every mutation writes through to a `TaskPersistence` backend so tasks
+/// survive hub restarts.  The in-memory map is the hot read path; the
+/// persistence layer is the durable ledger.
+#[derive(Clone)]
 pub struct TaskStore {
     inner: Arc<RwLock<HashMap<String, TaskRecord>>>,
+    persistence: Arc<dyn TaskPersistence>,
 }
 
 impl TaskStore {
-    pub fn new() -> Self {
-        Self::default()
+    /// Build a new task store backed by the given persistence layer.
+    ///
+    /// `recovered` should be the result of `persistence.load_all()` —
+    /// these records are loaded into the in-memory map without being
+    /// re-persisted.
+    pub fn with_persistence(
+        persistence: Arc<dyn TaskPersistence>,
+        recovered: Vec<TaskRecord>,
+    ) -> Self {
+        let mut map = HashMap::with_capacity(recovered.len());
+        for record in recovered {
+            map.insert(record.task_id.clone(), record);
+        }
+        Self {
+            inner: Arc::new(RwLock::new(map)),
+            persistence,
+        }
+    }
+
+    /// Create a task store backed by an in-memory SQLite database.
+    /// Used by tests.
+    pub async fn new_for_test() -> Self {
+        let p = persistence::SqliteTaskPersistence::open_in_memory()
+            .await
+            .expect("failed to open in-memory SQLite for test");
+        Self::with_persistence(Arc::new(p), Vec::new())
     }
 
     /// Insert a new task record.  Overwrites any existing entry for the
     /// same task_id — unique IDs are the caller's responsibility (we use
     /// UUIDv4 in `mcp.rs`).
     pub async fn insert(&self, record: TaskRecord) {
-        let mut inner = self.inner.write().await;
-        inner.insert(record.task_id.clone(), record);
+        let task_id = record.task_id.clone();
+        {
+            let mut inner = self.inner.write().await;
+            inner.insert(record.task_id.clone(), record);
+        }
+        // Persist outside the write lock.  Re-read under a read lock
+        // since record was moved into the map.
+        let inner = self.inner.read().await;
+        if let Some(record) = inner.get(&task_id) {
+            if let Err(e) = self.persistence.insert(record).await {
+                tracing::error!(task_id = %task_id, error = %e, "failed to persist task insert");
+            }
+        }
     }
 
     /// Append a checkpoint to the named task.  Returns `false` if the
     /// task is unknown or already terminal (late checkpoints after a
     /// final result are dropped).
     pub async fn append_checkpoint(&self, cp: TaskCheckpoint) -> bool {
-        let mut inner = self.inner.write().await;
-        match inner.get_mut(&cp.task_id) {
-            Some(record) if !record.state.is_terminal() => {
-                record.last_update = SystemTime::now();
-                record.checkpoints.push(cp);
-                true
+        let task_id = cp.task_id.clone();
+        let accepted = {
+            let mut inner = self.inner.write().await;
+            match inner.get_mut(&cp.task_id) {
+                Some(record) if !record.state.is_terminal() => {
+                    record.last_update = SystemTime::now();
+                    record.checkpoints.push(cp.clone());
+                    true
+                }
+                _ => false,
             }
-            _ => false,
+        };
+        if accepted {
+            if let Err(e) = self.persistence.append_checkpoint(&task_id, &cp).await {
+                tracing::error!(task_id = %task_id, error = %e, "failed to persist checkpoint");
+            }
         }
+        accepted
     }
 
     /// Finalize a task with the given result.
@@ -186,14 +239,20 @@ impl TaskStore {
         task_id: &str,
         result: SwarmResult,
     ) -> Option<oneshot::Sender<SwarmResult>> {
-        let mut inner = self.inner.write().await;
-        let record = inner.get_mut(task_id)?;
-        if !record.state.is_terminal() {
-            record.state = TaskState::from_task_status(&result.status);
+        let (waiter, state) = {
+            let mut inner = self.inner.write().await;
+            let record = inner.get_mut(task_id)?;
+            if !record.state.is_terminal() {
+                record.state = TaskState::from_task_status(&result.status);
+            }
+            record.last_update = SystemTime::now();
+            record.result = Some(result.clone());
+            (record.waiter.take(), record.state.clone())
+        };
+        if let Err(e) = self.persistence.finalize(task_id, &result, &state).await {
+            tracing::error!(task_id = %task_id, error = %e, "failed to persist task finalize");
         }
-        record.last_update = SystemTime::now();
-        record.result = Some(result);
-        record.waiter.take()
+        waiter
     }
 
     /// Clear the waiter without touching state/result.  Used when the
@@ -228,21 +287,28 @@ impl TaskStore {
         &self,
         task_id: &str,
     ) -> Option<(String, Option<oneshot::Sender<SwarmResult>>)> {
-        let mut inner = self.inner.write().await;
-        let record = inner.get_mut(task_id)?;
-        if record.state.is_terminal() {
-            return None;
-        }
-        record.state = TaskState::Cancelled;
-        record.last_update = SystemTime::now();
-        record.result = Some(SwarmResult {
+        let synthetic_result = SwarmResult {
             task_id: task_id.to_string(),
             text: String::new(),
             payloads: vec![],
             status: TaskStatus::Cancelled,
             duration_secs: 0,
-        });
-        Some((record.node_id.clone(), record.waiter.take()))
+        };
+        let ret = {
+            let mut inner = self.inner.write().await;
+            let record = inner.get_mut(task_id)?;
+            if record.state.is_terminal() {
+                return None;
+            }
+            record.state = TaskState::Cancelled;
+            record.last_update = SystemTime::now();
+            record.result = Some(synthetic_result.clone());
+            Some((record.node_id.clone(), record.waiter.take()))
+        };
+        if let Err(e) = self.persistence.cancel(task_id, &synthetic_result).await {
+            tracing::error!(task_id = %task_id, error = %e, "failed to persist task cancel");
+        }
+        ret
     }
 
     /// Return a snapshot of one task if it exists.
@@ -337,24 +403,33 @@ impl TaskStore {
         task_id: &str,
         owner: &str,
     ) -> Option<(String, Option<oneshot::Sender<SwarmResult>>)> {
-        let mut inner = self.inner.write().await;
-        let record = inner.get_mut(task_id)?;
-        if record.owner.as_deref() != Some(owner) {
-            return None;
-        }
-        if record.state.is_terminal() {
-            return None;
-        }
-        record.state = TaskState::Cancelled;
-        record.last_update = SystemTime::now();
-        record.result = Some(SwarmResult {
+        let synthetic_result = SwarmResult {
             task_id: task_id.to_string(),
             text: String::new(),
             payloads: vec![],
             status: TaskStatus::Cancelled,
             duration_secs: 0,
-        });
-        Some((record.node_id.clone(), record.waiter.take()))
+        };
+        let ret = {
+            let mut inner = self.inner.write().await;
+            let record = inner.get_mut(task_id)?;
+            if record.owner.as_deref() != Some(owner) {
+                return None;
+            }
+            if record.state.is_terminal() {
+                return None;
+            }
+            record.state = TaskState::Cancelled;
+            record.last_update = SystemTime::now();
+            record.result = Some(synthetic_result.clone());
+            Some((record.node_id.clone(), record.waiter.take()))
+        };
+        if ret.is_some() {
+            if let Err(e) = self.persistence.cancel(task_id, &synthetic_result).await {
+                tracing::error!(task_id = %task_id, error = %e, "failed to persist task cancel");
+            }
+        }
+        ret
     }
 
     /// How many tasks are in the store.
@@ -371,25 +446,38 @@ impl TaskStore {
     /// Returns the number reaped.
     pub async fn reap(&self, ttl: Duration) -> usize {
         let now = SystemTime::now();
-        let mut inner = self.inner.write().await;
-        let to_remove: Vec<String> = inner
-            .iter()
-            .filter_map(|(id, record)| {
-                if record.state.is_terminal()
-                    && now
-                        .duration_since(record.last_update)
-                        .map(|d| d > ttl)
-                        .unwrap_or(false)
-                {
-                    Some(id.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let to_remove: Vec<String> = {
+            let inner = self.inner.read().await;
+            inner
+                .iter()
+                .filter_map(|(id, record)| {
+                    if record.state.is_terminal()
+                        && now
+                            .duration_since(record.last_update)
+                            .map(|d| d > ttl)
+                            .unwrap_or(false)
+                    {
+                        Some(id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        if to_remove.is_empty() {
+            return 0;
+        }
         let n = to_remove.len();
-        for id in to_remove {
-            inner.remove(&id);
+        {
+            let mut inner = self.inner.write().await;
+            for id in &to_remove {
+                inner.remove(id);
+            }
+        }
+        for id in &to_remove {
+            if let Err(e) = self.persistence.remove(id).await {
+                tracing::error!(task_id = %id, error = %e, "failed to persist task removal");
+            }
         }
         n
     }
@@ -438,7 +526,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_then_get_roundtrip() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         store.insert(blank_record("t1")).await;
         let snap = store.get("t1").await.unwrap();
         assert_eq!(snap.task_id, "t1");
@@ -448,7 +536,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_checkpoint_preserves_order_and_is_filtered_by_since() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         store.insert(blank_record("t1")).await;
         for seq in 1..=3 {
             store
@@ -473,7 +561,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoints_on_unknown_task_returns_false() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         let ok = store
             .append_checkpoint(TaskCheckpoint {
                 task_id: "nope".into(),
@@ -488,7 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_returns_waiter_and_stores_result() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         let (tx, rx) = oneshot::channel::<SwarmResult>();
         let mut rec = blank_record("t1");
         rec.waiter = Some(tx);
@@ -509,7 +597,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_without_waiter_still_stores_result() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         store.insert(blank_record("t1")).await;
 
         let waiter = store
@@ -524,7 +612,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_task_state_carries_error() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         store.insert(blank_record("t1")).await;
         store
             .finalize(
@@ -546,7 +634,7 @@ mod tests {
 
     #[tokio::test]
     async fn abandon_waiter_clears_it_without_finalizing() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         let (tx, _rx) = oneshot::channel::<SwarmResult>();
         let mut rec = blank_record("t1");
         rec.waiter = Some(tx);
@@ -563,7 +651,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_running_task_sets_cancelled_and_returns_waiter() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         let (tx, rx) = oneshot::channel::<SwarmResult>();
         let mut rec = blank_record("t1");
         rec.waiter = Some(tx);
@@ -589,7 +677,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_unknown_or_terminal_returns_none() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         assert!(store.cancel("nope").await.is_none());
 
         store.insert(blank_record("t1")).await;
@@ -601,7 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn late_checkpoint_after_terminal_is_dropped() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         store.insert(blank_record("t1")).await;
         store
             .finalize("t1", sample_result("t1", TaskStatus::Completed))
@@ -621,7 +709,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_sorts_newest_first_and_respects_limit() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         let base = SystemTime::now();
         for i in 0..5 {
             let mut rec = blank_record(&format!("t{i}"));
@@ -641,14 +729,14 @@ mod tests {
 
     #[tokio::test]
     async fn get_owned_returns_none_for_wrong_owner() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         store.insert(owned_record("t1", "alice")).await;
         assert!(store.get_owned("t1", "bob").await.is_none());
     }
 
     #[tokio::test]
     async fn get_owned_returns_snapshot_for_correct_owner() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         store.insert(owned_record("t1", "alice")).await;
         let snap = store.get_owned("t1", "alice").await.unwrap();
         assert_eq!(snap.task_id, "t1");
@@ -656,14 +744,14 @@ mod tests {
 
     #[tokio::test]
     async fn get_owned_returns_none_for_unowned_task() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         store.insert(blank_record("t1")).await; // owner: None
         assert!(store.get_owned("t1", "alice").await.is_none());
     }
 
     #[tokio::test]
     async fn list_owned_filters_by_owner() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         let base = SystemTime::now();
         for i in 0..3 {
             let mut rec = owned_record(&format!("a{i}"), "alice");
@@ -690,7 +778,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoints_since_owned_rejects_wrong_owner() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         store.insert(owned_record("t1", "alice")).await;
         store
             .append_checkpoint(TaskCheckpoint {
@@ -708,7 +796,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_owned_rejects_wrong_owner() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
         store.insert(owned_record("t1", "alice")).await;
         assert!(store.cancel_owned("t1", "bob").await.is_none());
         // Task should still be running.
@@ -721,7 +809,7 @@ mod tests {
 
     #[tokio::test]
     async fn reap_removes_only_terminal_tasks_past_ttl() {
-        let store = TaskStore::new();
+        let store = TaskStore::new_for_test().await;
 
         // terminal, old → reaped
         let mut old = blank_record("old");

@@ -48,6 +48,10 @@ thiserror = { workspace = true }
 # Auth
 argon2 = "0.5"
 
+# Persistence
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
+async-trait = "0.1"
+
 # Utilities
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"

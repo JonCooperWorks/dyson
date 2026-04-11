@@ -1015,7 +1015,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_json_reports_checkpoint_count_and_last_sequence() {
-        let store = crate::tasks::TaskStore::new();
+        let store = crate::tasks::TaskStore::new_for_test().await;
         store
             .insert(crate::tasks::TaskRecord {
                 task_id: "t1".into(),

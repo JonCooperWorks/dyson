@@ -129,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?;
 
     // Build shared state.
-    let hub = Hub::new(key, &config.data_dir, mcp_api_key)?;
+    let hub = Hub::new(key, &config.data_dir, mcp_api_key).await?;
 
     // Spawn the heartbeat reaper.  It exits when the hub broadcasts
     // shutdown so tokio's runtime can terminate cleanly on Ctrl-C.

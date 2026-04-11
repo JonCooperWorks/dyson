@@ -1400,7 +1400,7 @@ async fn start_hub_with_api_key(hash: Option<&str>) -> Harness {
     let public_key_config = key.public_key_config();
 
     let api_key = hash.map(|h| McpApiKey::new(h.to_string()).unwrap());
-    let hub = Hub::new(key, tempdir.path(), api_key).unwrap();
+    let hub = Hub::new(key, tempdir.path(), api_key).await.unwrap();
     let app = build_router(Arc::clone(&hub));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
