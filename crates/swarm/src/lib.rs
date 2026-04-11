@@ -8,24 +8,31 @@ pub mod auth;
 pub mod blob;
 pub mod config;
 pub mod http;
+pub mod identity;
 pub mod key;
+pub mod notifier;
 pub mod queue;
 pub mod registry;
 pub mod router;
+pub mod scheduler;
 pub mod tls;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, broadcast};
 
 use crate::blob::BlobStore;
 use crate::key::HubKeyPair;
+use crate::notifier::Notifier;
 use crate::registry::NodeRegistry;
+use crate::scheduler::TaskStore;
 
 /// A handle to the running hub shared across axum handlers.
 ///
 /// Every HTTP handler takes `State<Arc<Hub>>` so it can reach the registry,
-/// the blob store, and the signing key.
+/// the blob store, the signing key, and the long-running task subsystem
+/// (scheduler + notifier).
 pub struct Hub {
     /// In-memory node registry.
     pub registry: NodeRegistry,
@@ -33,12 +40,20 @@ pub struct Hub {
     pub blobs: BlobStore,
     /// The hub's signing key pair.  Used to sign dispatched tasks.
     pub key: HubKeyPair,
+    /// SQLite-backed task store. The scheduler service writes to it; MCP
+    /// reads from it via `swarm_status` / `swarm_results` / `swarm_logs`.
+    pub tasks: TaskStore,
+    /// Notifier worker for `swarm_submit { notify: [...] }` channels.
+    pub notifier: Arc<Notifier>,
     /// Pending dispatches awaiting results.
     ///
     /// When the MCP endpoint signs and dispatches a task, it inserts a
     /// oneshot sender keyed on the task_id.  When `POST /swarm/result`
     /// arrives, the result is pushed through that sender and the MCP
     /// caller wakes up.
+    ///
+    /// Used by both the legacy `swarm_dispatch` flow (synchronous) and
+    /// the new `swarm_await` tool (synchronous fast-path).
     pub pending_dispatches: Mutex<
         std::collections::HashMap<
             String,
@@ -56,8 +71,13 @@ pub struct Hub {
 
 impl Hub {
     /// Build a new hub from an already-loaded key and data directory.
-    pub fn new(key: HubKeyPair, data_dir: &std::path::Path) -> std::io::Result<Arc<Self>> {
+    pub fn new(key: HubKeyPair, data_dir: &Path) -> std::io::Result<Arc<Self>> {
         let blobs = BlobStore::new(data_dir.join("blobs"))?;
+        let task_db = data_dir.join("tasks.sqlite");
+        let tasks = TaskStore::open(&task_db).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("task store: {e}"))
+        })?;
+        let notifier = Arc::new(Notifier::spawn(tasks.clone()));
         // capacity = 1: we only ever broadcast once (on shutdown), and a
         // late subscriber will just see a "lagged" error that we ignore.
         let (shutdown, _) = broadcast::channel(1);
@@ -65,6 +85,8 @@ impl Hub {
             registry: NodeRegistry::new(),
             blobs,
             key,
+            tasks,
+            notifier,
             pending_dispatches: Mutex::new(std::collections::HashMap::new()),
             shutdown,
         }))

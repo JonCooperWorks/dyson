@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/dyson-swarm-protocol",
+    "crates/dyson-mesh",
     "crates/dyson",
     "crates/swarm",
 ]

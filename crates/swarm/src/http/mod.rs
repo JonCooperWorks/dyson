@@ -13,6 +13,7 @@ pub mod blob;
 pub mod events;
 pub mod heartbeat;
 pub mod mcp;
+pub mod progress;
 pub mod register;
 pub mod result;
 
@@ -31,6 +32,10 @@ pub fn build_router(hub: Arc<Hub>) -> Router {
         .route("/swarm/events", get(events::events_handler))
         .route("/swarm/heartbeat", post(heartbeat::heartbeat_handler))
         .route("/swarm/result", post(result::result_handler))
+        .route(
+            "/swarm/task/:task_id/progress",
+            post(progress::progress_handler),
+        )
         .route(
             "/swarm/blob/:sha256",
             get(blob::get_blob_handler).put(blob::put_blob_handler),

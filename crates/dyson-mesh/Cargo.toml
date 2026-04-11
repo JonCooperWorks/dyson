@@ -1,0 +1,27 @@
+[package]
+name = "dyson-mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mesh primitives for the Dyson swarm — peer addressing, signed envelopes, and the MeshClient trait"
+
+[dependencies]
+# Shared workspace deps
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+ring = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+# Crate-local
+async-trait = "0.1"
+futures-util = "0.3"
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "v7"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "time", "sync"] }
+tempfile = "3"

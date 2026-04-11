@@ -37,6 +37,10 @@ pub enum SwarmEvent {
     Task(Vec<u8>),
     /// Hub acknowledged a heartbeat.
     HeartbeatAck,
+    /// Hub is requesting cancellation of an in-flight task. The worker
+    /// should checkpoint and exit gracefully (see the cancellation token
+    /// plumbed into [`crate::controller::swarm`]).
+    Cancel { task_id: String },
     /// Hub is requesting graceful shutdown.
     Shutdown,
 }
@@ -128,6 +132,32 @@ impl SwarmConnection {
         let req = self.authed(self.client.post(&url).json(result));
         let resp = req.send().await?;
         Self::check(resp, "result submission failed").await?;
+        Ok(())
+    }
+
+    /// Send a per-task progress heartbeat for a long-running task.
+    ///
+    /// `progress` is an optional 0.0-1.0 fraction. `message` is a free-form
+    /// status line. `log` is an optional log chunk to append. None of the
+    /// fields are required — sending an empty body still slides the task
+    /// past the stall detector.
+    pub async fn send_progress(
+        &self,
+        task_id: &str,
+        progress: Option<f32>,
+        message: Option<&str>,
+        log: Option<&str>,
+    ) -> Result<()> {
+        let url = format!("{}/swarm/task/{task_id}/progress", self.base_url);
+        let body = serde_json::json!({
+            "task_id": task_id,
+            "progress": progress,
+            "message": message,
+            "log": log,
+        });
+        let req = self.authed(self.client.post(&url).json(&body));
+        let resp = req.send().await?;
+        Self::check(resp, "progress report failed").await?;
         Ok(())
     }
 
@@ -257,6 +287,11 @@ fn parse_sse_event(event_type: &str, data: &str) -> Option<SwarmEvent> {
             Some(SwarmEvent::Task(wire_bytes))
         }
         "heartbeat_ack" => Some(SwarmEvent::HeartbeatAck),
+        "cancel" => {
+            let parsed: serde_json::Value = serde_json::from_str(data).ok()?;
+            let task_id = parsed["task_id"].as_str()?.to_string();
+            Some(SwarmEvent::Cancel { task_id })
+        }
         "shutdown" => Some(SwarmEvent::Shutdown),
         _ => {
             tracing::debug!(event_type, "unknown SSE event type");

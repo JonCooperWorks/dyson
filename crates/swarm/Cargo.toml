@@ -19,6 +19,7 @@ path = "src/lib.rs"
 
 [dependencies]
 dyson-swarm-protocol = { path = "../dyson-swarm-protocol" }
+dyson-mesh = { path = "../dyson-mesh" }
 
 # Runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "signal", "sync", "time"] }
@@ -49,10 +50,13 @@ thiserror = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 futures-util = "0.3"
 tokio-stream = "0.1"
 bytes = "1"
+rusqlite = { version = "0.39", features = ["bundled"] }
+async-trait = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 [dev-dependencies]
 tempfile = "3"

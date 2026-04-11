@@ -34,6 +34,10 @@ pub enum SseEvent {
     Task(Vec<u8>),
     /// Heartbeat acknowledgement.
     HeartbeatAck,
+    /// Cancellation request for an in-flight task. The worker is asked
+    /// to checkpoint and exit gracefully (see `Skill::cancel()` on the
+    /// worker side).
+    Cancel { task_id: String },
     /// Graceful shutdown request.
     Shutdown,
 }

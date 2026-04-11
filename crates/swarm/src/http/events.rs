@@ -106,6 +106,10 @@ pub fn encode_event(event: &SseEvent) -> bytes::Bytes {
             format!("event: task\ndata: {b64}\n\n")
         }
         SseEvent::HeartbeatAck => "event: heartbeat_ack\ndata: {}\n\n".to_string(),
+        SseEvent::Cancel { task_id } => {
+            let json = serde_json::json!({ "task_id": task_id });
+            format!("event: cancel\ndata: {json}\n\n")
+        }
         SseEvent::Shutdown => "event: shutdown\ndata: {}\n\n".to_string(),
     };
     bytes::Bytes::from(text)

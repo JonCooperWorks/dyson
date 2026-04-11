@@ -3,8 +3,17 @@
 //! Tools exposed:
 //!
 //! - `list_nodes`    — enumerate registered nodes
-//! - `swarm_status`  — counts (total, idle, busy, in-flight)
-//! - `swarm_dispatch`— sign a task, push it over SSE, block on the result
+//! - `swarm_status`  — counts (total, idle, busy, in-flight) — with an
+//!                     optional `task_id` filter for one-task lookup
+//! - `swarm_dispatch`— legacy synchronous dispatch (deprecated; use
+//!                     `swarm_submit` + `swarm_await` instead)
+//! - `swarm_submit`  — submit a long-running task and return the task_id
+//!                     immediately (non-blocking, fire-and-forget)
+//! - `swarm_await`   — block on a task_id with a configurable deadline
+//! - `swarm_logs`    — tail captured logs / progress messages
+//! - `swarm_cancel`  — request cancellation; worker checkpoints and exits
+//! - `swarm_results` — list recent terminal tasks ("what happened
+//!                     overnight?" reachback for agents)
 //!
 //! The envelope matches `crates/dyson/src/skill/mcp/protocol.rs` — that is
 //! how Dyson's MCP client talks to us.
@@ -22,6 +31,7 @@ use crate::Hub;
 use crate::queue::DispatchError;
 use crate::registry::SseEvent;
 use crate::router::{RoutingConstraints, select_node};
+use crate::scheduler::{NotifyChannel, SubmitRequest, TaskState, TerminalStatus};
 
 /// Default timeout for a `swarm_dispatch` call when none is supplied.
 const DEFAULT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(600);
@@ -120,46 +130,129 @@ impl McpError {
 
 /// Definitions for `tools/list`.
 fn tools_list_response() -> Value {
+    let constraints_schema = json!({
+        "type": "object",
+        "properties": {
+            "needs_gpu": { "type": "boolean" },
+            "needs_capability": { "type": "string" },
+            "min_ram_gb": { "type": "integer" }
+        },
+        "additionalProperties": false
+    });
+
+    let notify_schema = json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "enum": ["stdout", "webhook", "telegram"] },
+                "url": { "type": "string" },
+                "bot_token": { "type": "string" },
+                "chat_id": { "type": "string" },
+                "template": { "type": "string" }
+            },
+            "additionalProperties": true
+        }
+    });
+
     json!({
         "tools": [
             {
                 "name": "list_nodes",
                 "description": "List every node registered with the swarm hub.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                }
+                "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
             },
             {
                 "name": "swarm_status",
-                "description": "Return counts of registered, idle, busy, and in-flight nodes/tasks.",
+                "description": "Return swarm-wide counts. Pass task_id to get the state of one task instead.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": { "task_id": { "type": "string" } },
                     "additionalProperties": false
                 }
             },
             {
                 "name": "swarm_dispatch",
-                "description": "Dispatch a task to an eligible node and return the result.",
+                "description": "DEPRECATED: synchronous dispatch. Use swarm_submit + swarm_await for new code.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "prompt": { "type": "string" },
                         "payloads": { "type": "array" },
                         "timeout_secs": { "type": "integer" },
-                        "constraints": {
-                            "type": "object",
-                            "properties": {
-                                "needs_gpu": { "type": "boolean" },
-                                "needs_capability": { "type": "string" },
-                                "min_ram_gb": { "type": "integer" }
-                            },
-                            "additionalProperties": false
-                        }
+                        "constraints": constraints_schema
                     },
                     "required": ["prompt"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "swarm_submit",
+                "description": "Submit a (potentially long-running) task and return its task_id immediately. Use swarm_status / swarm_results to track it; use the notify field to get a Telegram or webhook ping when it finishes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "prompt": { "type": "string" },
+                        "skill": { "type": "string", "description": "Hint: route to a node that advertises this capability." },
+                        "payloads": { "type": "array" },
+                        "timeout_secs": { "type": "integer" },
+                        "constraints": constraints_schema,
+                        "notify": notify_schema
+                    },
+                    "required": ["prompt"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "swarm_await",
+                "description": "Block on a task_id for up to wait_secs seconds. Returns the same shape as swarm_dispatch when the task finishes; returns the current state if the deadline expires.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "wait_secs": { "type": "integer", "default": 60 }
+                    },
+                    "required": ["task_id"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "swarm_logs",
+                "description": "Tail logs and progress messages for a task.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": { "type": "string" },
+                        "since_seq": { "type": "integer", "default": -1 },
+                        "limit": { "type": "integer", "default": 100 }
+                    },
+                    "required": ["task_id"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "swarm_cancel",
+                "description": "Request cancellation. The worker is asked to checkpoint and exit; final state lands as 'cancelled' (with optional checkpoint blob in the result).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "task_id": { "type": "string" } },
+                    "required": ["task_id"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "swarm_results",
+                "description": "List recent terminal tasks (done / failed / cancelled). Use this on agent startup to catch up on what happened while you were gone.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "since_ms": { "type": "integer" },
+                        "limit": { "type": "integer", "default": 25 },
+                        "states": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["done", "failed", "cancelled"] }
+                        }
+                    },
                     "additionalProperties": false
                 }
             }
@@ -181,16 +274,36 @@ async fn handle_tools_call(hub: &Arc<Hub>, caller: Option<&str>, params: Option<
             serde_json::to_string_pretty(&list_nodes(hub, caller).await).unwrap(),
             false,
         )),
-        "swarm_status" => Ok(tool_result_text(
-            serde_json::to_string_pretty(&swarm_status(hub).await).unwrap(),
-            false,
-        )),
+        "swarm_status" => match swarm_status_tool(hub, &arguments).await {
+            Ok(v) => Ok(tool_result_text(serde_json::to_string_pretty(&v).unwrap(), false)),
+            Err(e) => Ok(tool_result_text(format!("swarm_status failed: {e}"), true)),
+        },
         "swarm_dispatch" => match swarm_dispatch(hub, arguments).await {
             Ok(result) => Ok(tool_result_text(
                 serde_json::to_string_pretty(&result).unwrap(),
                 false,
             )),
             Err(e) => Ok(tool_result_text(format!("dispatch failed: {e}"), true)),
+        },
+        "swarm_submit" => match swarm_submit_tool(hub, arguments).await {
+            Ok(v) => Ok(tool_result_text(serde_json::to_string_pretty(&v).unwrap(), false)),
+            Err(e) => Ok(tool_result_text(format!("swarm_submit failed: {e}"), true)),
+        },
+        "swarm_await" => match swarm_await_tool(hub, arguments).await {
+            Ok(v) => Ok(tool_result_text(serde_json::to_string_pretty(&v).unwrap(), false)),
+            Err(e) => Ok(tool_result_text(format!("swarm_await failed: {e}"), true)),
+        },
+        "swarm_logs" => match swarm_logs_tool(hub, arguments).await {
+            Ok(v) => Ok(tool_result_text(serde_json::to_string_pretty(&v).unwrap(), false)),
+            Err(e) => Ok(tool_result_text(format!("swarm_logs failed: {e}"), true)),
+        },
+        "swarm_cancel" => match swarm_cancel_tool(hub, arguments).await {
+            Ok(v) => Ok(tool_result_text(serde_json::to_string_pretty(&v).unwrap(), false)),
+            Err(e) => Ok(tool_result_text(format!("swarm_cancel failed: {e}"), true)),
+        },
+        "swarm_results" => match swarm_results_tool(hub, arguments).await {
+            Ok(v) => Ok(tool_result_text(serde_json::to_string_pretty(&v).unwrap(), false)),
+            Err(e) => Ok(tool_result_text(format!("swarm_results failed: {e}"), true)),
         },
         other => Err(McpError::invalid_params(format!(
             "unknown tool: {other}"
@@ -243,17 +356,280 @@ fn status_label(status: &NodeStatus) -> &'static str {
     }
 }
 
-/// `swarm_status` — aggregate counts.
-async fn swarm_status(hub: &Arc<Hub>) -> Value {
+/// `swarm_status` — aggregate counts (no args), or one task's state if
+/// `task_id` is supplied.
+async fn swarm_status_tool(hub: &Arc<Hub>, arguments: &Value) -> Result<Value, String> {
+    if let Some(task_id) = arguments.get("task_id").and_then(|v| v.as_str()) {
+        return match hub.tasks.get(task_id).await {
+            Ok(Some(row)) => Ok(task_row_json(&row)),
+            Ok(None) => Err(format!("task not found: {task_id}")),
+            Err(e) => Err(format!("task store: {e}")),
+        };
+    }
+
     let counts = hub.registry.counts().await;
     let in_flight = hub.pending_dispatches.lock().await.len();
-    json!({
+    Ok(json!({
         "nodes_total": counts.total,
         "nodes_idle": counts.idle,
         "nodes_busy": counts.busy,
-        "tasks_pending": 0,
         "tasks_in_flight": in_flight,
+    }))
+}
+
+/// Compact JSON view of one task row.
+fn task_row_json(row: &crate::scheduler::TaskRow) -> Value {
+    json!({
+        "task_id": row.task_id,
+        "state": row.state.as_str(),
+        "skill": row.skill,
+        "prompt": row.prompt,
+        "assigned_node": row.assigned_node,
+        "submitted_at_ms": st_to_ms(row.submitted_at),
+        "started_at_ms": row.started_at.map(st_to_ms),
+        "finished_at_ms": row.finished_at.map(st_to_ms),
+        "last_progress_at_ms": row.last_progress_at.map(st_to_ms),
+        "progress_pct": row.progress_pct,
+        "progress_message": row.progress_message,
+        "result_text": row.result_text,
+        "error": row.error,
+        "duration_secs": row.duration_secs,
+        "notification_delivered": row.notification_delivered,
     })
+}
+
+fn st_to_ms(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// New tools: swarm_submit / swarm_await / swarm_logs / swarm_cancel /
+// swarm_results — the long-running task surface.
+// ---------------------------------------------------------------------------
+
+/// `swarm_submit` — non-blocking submission. Inserts a row in the
+/// scheduler's task store and (if a worker is idle) immediately
+/// dispatches; returns the task_id either way. Notification channels
+/// from the request body are persisted on the row and fired when the
+/// task reaches a terminal state.
+async fn swarm_submit_tool(hub: &Arc<Hub>, arguments: Value) -> Result<Value, String> {
+    let req: SubmitRequest = serde_json::from_value(arguments)
+        .map_err(|e| format!("invalid swarm_submit body: {e}"))?;
+
+    let constraints = req
+        .constraints
+        .clone()
+        .unwrap_or_default()
+        .into_routing(req.skill.clone());
+    let constraints_json = serde_json::json!({
+        "needs_gpu": constraints.needs_gpu,
+        "needs_capability": constraints.needs_capability,
+        "min_ram_gb": constraints.min_ram_gb,
+    });
+
+    let task_id = hub
+        .tasks
+        .submit(
+            req.skill.clone(),
+            req.prompt.clone(),
+            req.payloads.clone(),
+            req.timeout_secs,
+            constraints_json,
+            req.notify.clone(),
+        )
+        .await
+        .map_err(|e| format!("task store: {e}"))?;
+
+    // Try to dispatch right now if a worker is idle. If nothing matches,
+    // the task stays Pending; the caller can poll, or the next
+    // sweep / heartbeat path can pick it up.
+    let dispatched = try_dispatch_pending(hub, &task_id, &req, &constraints).await;
+    Ok(json!({
+        "task_id": task_id,
+        "state": if dispatched { "assigned" } else { "pending" },
+        "dispatched_immediately": dispatched,
+    }))
+}
+
+/// Build + sign a SwarmTask for an existing task_id and push it over SSE
+/// to a chosen worker. Updates the scheduler row to `assigned` on success.
+async fn try_dispatch_pending(
+    hub: &Arc<Hub>,
+    task_id: &str,
+    req: &SubmitRequest,
+    constraints: &RoutingConstraints,
+) -> bool {
+    let Some(node_id) = select_node(&hub.registry, constraints).await else {
+        return false;
+    };
+
+    let swarm_task = SwarmTask {
+        task_id: task_id.to_string(),
+        prompt: req.prompt.clone(),
+        payloads: req.payloads.clone(),
+        timeout_secs: req.timeout_secs,
+    };
+    let canonical = match serde_json::to_vec(&swarm_task) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "swarm_submit: serialize failed");
+            return false;
+        }
+    };
+    let wire = hub.key.sign_task(&canonical);
+
+    hub.registry
+        .set_status(
+            &node_id,
+            NodeStatus::Busy {
+                task_id: task_id.to_string(),
+            },
+        )
+        .await;
+    let pushed = hub
+        .registry
+        .push_event(&node_id, SseEvent::Task(wire))
+        .await;
+    if !pushed {
+        hub.registry.set_status(&node_id, NodeStatus::Idle).await;
+        return false;
+    }
+    if let Err(e) = hub.tasks.mark_assigned(task_id, &node_id).await {
+        tracing::warn!(error = %e, "swarm_submit: mark_assigned failed");
+    }
+    true
+}
+
+/// `swarm_await` — block on a task_id for up to `wait_secs` seconds.
+async fn swarm_await_tool(hub: &Arc<Hub>, arguments: Value) -> Result<Value, String> {
+    let task_id = arguments
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or("task_id required")?
+        .to_string();
+    let wait_secs = arguments
+        .get("wait_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(60);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(wait_secs);
+    loop {
+        let row = hub
+            .tasks
+            .get(&task_id)
+            .await
+            .map_err(|e| format!("task store: {e}"))?
+            .ok_or_else(|| format!("task not found: {task_id}"))?;
+
+        if row.is_terminal() || std::time::Instant::now() >= deadline {
+            return Ok(task_row_json(&row));
+        }
+        // Short polling interval — submit/poll model means we don't
+        // need to worry about subscription churn.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// `swarm_logs` — paginated log tail.
+async fn swarm_logs_tool(hub: &Arc<Hub>, arguments: Value) -> Result<Value, String> {
+    let task_id = arguments
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or("task_id required")?;
+    let since_seq = arguments.get("since_seq").and_then(|v| v.as_i64()).unwrap_or(-1);
+    let limit = arguments.get("limit").and_then(|v| v.as_i64()).unwrap_or(100);
+    let rows = hub
+        .tasks
+        .read_logs(task_id, since_seq, limit)
+        .await
+        .map_err(|e| format!("task store: {e}"))?;
+    let entries: Vec<Value> = rows
+        .into_iter()
+        .map(|(seq, ts_ms, chunk)| json!({"seq": seq, "ts_ms": ts_ms, "chunk": chunk}))
+        .collect();
+    Ok(json!({"task_id": task_id, "entries": entries}))
+}
+
+/// `swarm_cancel` — request cancellation, push a cancel SSE event to
+/// the assigned worker.
+async fn swarm_cancel_tool(hub: &Arc<Hub>, arguments: Value) -> Result<Value, String> {
+    let task_id = arguments
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or("task_id required")?
+        .to_string();
+
+    let row = hub
+        .tasks
+        .get(&task_id)
+        .await
+        .map_err(|e| format!("task store: {e}"))?
+        .ok_or_else(|| format!("task not found: {task_id}"))?;
+    if row.is_terminal() {
+        return Ok(json!({
+            "task_id": task_id,
+            "state": row.state.as_str(),
+            "noop": true,
+        }));
+    }
+
+    let transitioned = hub
+        .tasks
+        .request_cancel(&task_id)
+        .await
+        .map_err(|e| format!("task store: {e}"))?;
+    if !transitioned {
+        // Already cancelling.
+        return Ok(json!({"task_id": task_id, "state": "cancelling", "noop": true}));
+    }
+
+    if let Some(node_id) = row.assigned_node.as_ref() {
+        let pushed = hub
+            .registry
+            .push_event(node_id, SseEvent::Cancel { task_id: task_id.clone() })
+            .await;
+        if !pushed {
+            tracing::warn!(%task_id, %node_id, "cancel SSE push failed (worker offline)");
+        }
+    }
+
+    Ok(json!({"task_id": task_id, "state": "cancelling"}))
+}
+
+/// `swarm_results` — list recent terminal tasks.
+async fn swarm_results_tool(hub: &Arc<Hub>, arguments: Value) -> Result<Value, String> {
+    let since_ms = arguments.get("since_ms").and_then(|v| v.as_u64());
+    let limit = arguments.get("limit").and_then(|v| v.as_i64()).unwrap_or(25);
+    let states_owned: Option<Vec<String>> = arguments
+        .get("states")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                .collect()
+        });
+    let states_refs: Option<Vec<&str>> = states_owned
+        .as_ref()
+        .map(|v| v.iter().map(|s| s.as_str()).collect());
+
+    let rows = hub
+        .tasks
+        .recent_results(since_ms, limit, states_refs.as_deref())
+        .await
+        .map_err(|e| format!("task store: {e}"))?;
+    Ok(json!({"results": rows}))
+}
+
+// Keep linter happy: NotifyChannel / TaskState / TerminalStatus are
+// pulled in for documentation linkage in docs/swarm.md and to keep the
+// re-export surface explicit.
+#[allow(dead_code)]
+fn _imports_kept() {
+    let _ = std::mem::size_of::<NotifyChannel>();
+    let _ = std::mem::size_of::<TaskState>();
+    let _ = std::mem::size_of::<TerminalStatus>();
 }
 
 /// `swarm_dispatch` — sign a task, push it, wait for the result.
