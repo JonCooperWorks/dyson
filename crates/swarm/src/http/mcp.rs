@@ -38,14 +38,25 @@ use crate::tasks::{TaskRecord, TaskSnapshot, TaskState};
 
 /// Verified identity of the MCP caller.
 ///
-/// Built from a valid bearer token (cryptographically random, assigned
-/// at registration).  All `tools/call` requests require authentication;
-/// unauthenticated callers are rejected before reaching any tool handler.
+/// Resolved from a bearer token — either a node registration token
+/// or a static API key.  All `tools/call` requests require a valid
+/// caller; unauthenticated requests are rejected.
 struct McpCaller {
-    /// Hub-assigned node_id, resolved from bearer token.
+    /// Node ID (registration token) or synthetic owner ID (API key).
     node_id: String,
-    /// Node name for `list_nodes` self-exclusion.
+    /// Node name for `list_nodes` self-exclusion (absent for API keys).
     node_name: Option<String>,
+}
+
+/// Verify the bearer token as a static API key against the configured
+/// argon2id hash.  Returns `Some(McpCaller)` with the pre-computed
+/// owner ID on success.
+fn try_api_key_auth(hub: &Hub, token: &str) -> Option<McpCaller> {
+    let key = hub.mcp_api_key.as_ref()?;
+    key.verify(token).then(|| McpCaller {
+        node_id: key.owner_id.clone(),
+        node_name: None,
+    })
 }
 
 /// Default timeout for a `swarm_dispatch` call when none is supplied.
@@ -92,16 +103,20 @@ pub async fn mcp_handler(
     // Resolve caller identity from bearer token.  Protocol methods
     // (initialize, tools/list) are open; tools/call requires auth.
     let caller = match crate::auth::extract_bearer(&headers) {
-        Some(token) => match hub.registry.node_id_for_token(&token).await {
-            Some(node_id) => {
-                let node_name = hub
-                    .registry
-                    .with_entry(&node_id, |e| e.manifest.node_name.clone())
-                    .await;
-                Some(McpCaller { node_id, node_name })
+        Some(token) => {
+            // Fast path: node registration token (O(1) HashMap lookup).
+            match hub.registry.node_id_for_token(&token).await {
+                Some(node_id) => {
+                    let node_name = hub
+                        .registry
+                        .with_entry(&node_id, |e| e.manifest.node_name.clone())
+                        .await;
+                    Some(McpCaller { node_id, node_name })
+                }
+                // Slow path: try static API key (argon2id, ~30-50ms).
+                None => try_api_key_auth(&hub, &token),
             }
-            None => None, // token present but unknown
-        },
+        }
         None => None,
     };
 

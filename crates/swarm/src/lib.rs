@@ -24,6 +24,44 @@ use crate::key::HubKeyPair;
 use crate::registry::NodeRegistry;
 use crate::tasks::TaskStore;
 
+/// Pre-validated static API key for MCP authentication.
+///
+/// Built once at startup from the `--mcp-api-key-hash` CLI arg.
+/// The owner ID is derived from the hash so it stays stable across
+/// requests without per-request allocation.
+pub struct McpApiKey {
+    /// The argon2id PHC string (e.g. `$argon2id$v=19$...`).
+    pub hash: String,
+    /// Stable synthetic owner ID (`apikey:<first-8-chars-of-hash-output>`).
+    pub owner_id: String,
+}
+
+impl McpApiKey {
+    /// Parse and validate a PHC hash string, pre-computing the owner ID.
+    pub fn new(hash: String) -> Result<Self, argon2::password_hash::Error> {
+        use argon2::password_hash::PasswordHash;
+        PasswordHash::new(&hash)?;
+        // Last $-segment is the hash output (base64, always ASCII).
+        let tail = hash.rsplit('$').next().unwrap_or("apikey");
+        let prefix = &tail[..tail.len().min(8)];
+        let mut owner_id = String::with_capacity(7 + prefix.len());
+        owner_id.push_str("apikey:");
+        owner_id.push_str(prefix);
+        Ok(Self { hash, owner_id })
+    }
+
+    /// Verify a plaintext token against the stored hash.
+    pub fn verify(&self, token: &str) -> bool {
+        use argon2::password_hash::PasswordHash;
+        use argon2::{Argon2, PasswordVerifier};
+        // Safe: hash was validated in new().
+        let hash = PasswordHash::new(&self.hash).unwrap();
+        Argon2::default()
+            .verify_password(token.as_bytes(), &hash)
+            .is_ok()
+    }
+}
+
 /// A handle to the running hub shared across axum handlers.
 ///
 /// Every HTTP handler takes `State<Arc<Hub>>` so it can reach the registry,
@@ -44,6 +82,10 @@ pub struct Hub {
     /// `POST /swarm/result` drives both paths through
     /// `TaskStore::finalize`, guaranteeing one lock and one ordering.
     pub tasks: TaskStore,
+    /// Static API key auth for the MCP endpoint.  When set, bearer
+    /// tokens that don't match a registered node are verified against
+    /// an argon2id hash as a fallback.
+    pub mcp_api_key: Option<McpApiKey>,
     /// Broadcast channel used to tell long-lived handlers (specifically
     /// the SSE event stream) that the server is shutting down.
     ///
@@ -55,7 +97,11 @@ pub struct Hub {
 
 impl Hub {
     /// Build a new hub from an already-loaded key and data directory.
-    pub fn new(key: HubKeyPair, data_dir: &std::path::Path) -> std::io::Result<Arc<Self>> {
+    pub fn new(
+        key: HubKeyPair,
+        data_dir: &std::path::Path,
+        mcp_api_key: Option<McpApiKey>,
+    ) -> std::io::Result<Arc<Self>> {
         let blobs = BlobStore::new(data_dir.join("blobs"))?;
         // capacity = 1: we only ever broadcast once (on shutdown), and a
         // late subscriber will just see a "lagged" error that we ignore.
@@ -65,6 +111,7 @@ impl Hub {
             blobs,
             key,
             tasks: TaskStore::new(),
+            mcp_api_key,
             shutdown,
         }))
     }

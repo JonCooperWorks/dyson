@@ -178,6 +178,7 @@ The hub prints the public key on startup: `Hub public key (add to node config): 
 | `--domain` | — | Domain name for Let's Encrypt |
 | `--letsencrypt-email` | — | Contact email for Let's Encrypt registration |
 | `--cert-cache-dir` | `.swarm-certs` | Directory to cache Let's Encrypt certificates |
+| `--mcp-api-key-hash` | — | Argon2id PHC hash for static MCP API key authentication |
 | `--dangerous-no-tls` | — | Allow plain HTTP on non-localhost interfaces |
 | `--dangerous-no-auth` | — | Allow running without authentication on non-localhost interfaces |
 
@@ -464,12 +465,29 @@ Pass `--dangerous-no-tls` to serve plain HTTP on external interfaces (not recomm
 
 ### Authentication
 
-Bearer tokens for node-level auth. On `POST /swarm/register` the hub generates a random 32-byte token; all subsequent node requests must include `Authorization: Bearer <token>`.
+**Node tokens** — On `POST /swarm/register` the hub generates a random 32-byte bearer token; all subsequent node requests must include `Authorization: Bearer <token>`.
 
-- **Protected:** `/swarm/events`, `/swarm/heartbeat`, `/swarm/result`, `/swarm/blob`
-- **Unprotected:** `/swarm/register` (to obtain a token), `/mcp` (serves tool calls from any Dyson agent)
+- **Protected:** `/swarm/events`, `/swarm/heartbeat`, `/swarm/result`, `/swarm/blob`, `/mcp` `tools/call`
+- **Unprotected:** `/swarm/register` (to obtain a token), `/mcp` `initialize` / `tools/list` (MCP handshake)
 
-There is no pluggable auth system yet — `--dangerous-no-auth` exists to make the lack of caller-level authentication explicit. Ed25519 signing provides integrity for dispatched work, but the MCP endpoint has no auth gate.
+**Static API key** — For external MCP clients (e.g., Dyson agents on non-swarm nodes), the hub supports a static API key verified against an argon2id hash. The plaintext key never touches disk.
+
+```bash
+# Generate a hash (argon2 CLI)
+echo -n "my-secret-key" | argon2 $(openssl rand -hex 16) -id -e
+
+# Or with Python
+python3 -c "from argon2 import PasswordHasher; print(PasswordHasher().hash('my-secret-key'))"
+
+# Start the hub with the hash
+swarm --bind 0.0.0.0:443 --data-dir ./hub-data \
+      --cert cert.pem --private-key key.pem \
+      --mcp-api-key-hash '$argon2id$v=19$m=19456,t=2,p=1$SALT$HASH'
+```
+
+MCP clients authenticate with `Authorization: Bearer <plaintext-key>`. The hub tries the fast node-token lookup first (O(1)), then falls back to argon2id verification (~30-50ms) if the token doesn't match any registered node.
+
+API key callers get a synthetic owner ID (`apikey:<hash-prefix>`) so task ownership scoping works — their tasks are invisible to node-token callers and vice versa.
 
 ### Deployment patterns
 

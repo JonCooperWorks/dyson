@@ -17,7 +17,7 @@ use dyson_swarm_protocol::verify::{SwarmPublicKey, verify_signed_payload};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use swarm::Hub;
+use swarm::{Hub, McpApiKey};
 use swarm::http::build_router;
 use swarm::key::HubKeyPair;
 
@@ -29,27 +29,7 @@ struct Harness {
 }
 
 async fn start_hub() -> Harness {
-    let tempdir = tempfile::tempdir().unwrap();
-    let key = HubKeyPair::generate(&tempdir.path().join("hub.key")).unwrap();
-    let public_key_config = key.public_key_config();
-
-    let hub = Hub::new(key, tempdir.path()).unwrap();
-    let app = build_router(Arc::clone(&hub));
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    let base_url = format!("http://{addr}");
-
-    let task = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-
-    Harness {
-        base_url,
-        public_key_config,
-        _task: task,
-        _tempdir: tempdir,
-    }
+    start_hub_with_api_key(None).await
 }
 
 fn sample_manifest(name: &str) -> NodeManifest {
@@ -1397,4 +1377,200 @@ async fn read_one_event(
 
 fn find_subseq(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+// ---------------------------------------------------------------------------
+// Static API key auth tests
+// ---------------------------------------------------------------------------
+
+/// Hash a plaintext API key for use in tests.
+fn test_hash(plaintext: &str) -> String {
+    use argon2::password_hash::SaltString;
+    use argon2::{Argon2, PasswordHasher};
+    let salt = SaltString::from_b64("dGVzdHNhbHR0ZXN0c2FsdA").unwrap();
+    Argon2::default()
+        .hash_password(plaintext.as_bytes(), &salt)
+        .unwrap()
+        .to_string()
+}
+
+async fn start_hub_with_api_key(hash: Option<&str>) -> Harness {
+    let tempdir = tempfile::tempdir().unwrap();
+    let key = HubKeyPair::generate(&tempdir.path().join("hub.key")).unwrap();
+    let public_key_config = key.public_key_config();
+
+    let api_key = hash.map(|h| McpApiKey::new(h.to_string()).unwrap());
+    let hub = Hub::new(key, tempdir.path(), api_key).unwrap();
+    let app = build_router(Arc::clone(&hub));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+
+    let task = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    Harness {
+        base_url,
+        public_key_config,
+        _task: task,
+        _tempdir: tempdir,
+    }
+}
+
+/// Raw MCP request that returns the full JSON-RPC response (not just the
+/// tool result).  Useful for asserting error envelopes.
+async fn mcp_raw(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: Option<&str>,
+    method: &str,
+    params: Option<Value>,
+) -> Value {
+    let mut body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+    });
+    if let Some(p) = params {
+        body["params"] = p;
+    }
+    let mut req = client.post(format!("{base_url}/mcp"));
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    req.json(&body).send().await.unwrap().json().await.unwrap()
+}
+
+#[tokio::test]
+async fn mcp_api_key_auth_accepts_valid_key() {
+    let plaintext = "test-secret-key-12345";
+    let hash = test_hash(plaintext);
+    let h = start_hub_with_api_key(Some(&hash)).await;
+    let client = reqwest::Client::new();
+
+    let resp = mcp_raw(
+        &client,
+        &h.base_url,
+        Some(plaintext),
+        "tools/call",
+        Some(json!({ "name": "swarm_status", "arguments": {} })),
+    )
+    .await;
+
+    assert!(
+        resp.get("result").is_some(),
+        "expected success result, got: {resp}"
+    );
+    assert!(resp.get("error").is_none(), "unexpected error: {resp}");
+}
+
+#[tokio::test]
+async fn mcp_api_key_auth_rejects_wrong_key() {
+    let hash = test_hash("correct-key");
+    let h = start_hub_with_api_key(Some(&hash)).await;
+    let client = reqwest::Client::new();
+
+    let resp = mcp_raw(
+        &client,
+        &h.base_url,
+        Some("wrong-key"),
+        "tools/call",
+        Some(json!({ "name": "swarm_status", "arguments": {} })),
+    )
+    .await;
+
+    assert!(
+        resp.get("error").is_some(),
+        "expected error for wrong key, got: {resp}"
+    );
+    let msg = resp["error"]["message"].as_str().unwrap_or("");
+    assert!(msg.contains("unauthorized"), "expected unauthorized, got: {msg}");
+}
+
+#[tokio::test]
+async fn mcp_api_key_auth_rejects_no_auth() {
+    let hash = test_hash("some-key");
+    let h = start_hub_with_api_key(Some(&hash)).await;
+    let client = reqwest::Client::new();
+
+    let resp = mcp_raw(
+        &client,
+        &h.base_url,
+        None,
+        "tools/call",
+        Some(json!({ "name": "swarm_status", "arguments": {} })),
+    )
+    .await;
+
+    assert!(
+        resp.get("error").is_some(),
+        "expected error for no auth, got: {resp}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_api_key_tasks_scoped_to_owner() {
+    let api_key = "api-secret";
+    let hash = test_hash(api_key);
+    let h = start_hub_with_api_key(Some(&hash)).await;
+    let client = reqwest::Client::new();
+
+    // Register a node so there's a worker to accept tasks.
+    let (_node_id, node_token) = register_node(&client, &h.base_url, "worker").await;
+
+    // Open SSE stream so the node is considered alive and idle.
+    let sse_resp = client
+        .get(format!("{}/swarm/events", h.base_url))
+        .bearer_auth(&node_token)
+        .header("Accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    let mut stream = sse_resp.bytes_stream();
+    let mut buffer = Vec::new();
+    let _ = read_one_event(&mut stream, &mut buffer).await; // registered
+
+    // API key caller submits a task.
+    let submit_resp = mcp_raw(
+        &client,
+        &h.base_url,
+        Some(api_key),
+        "tools/call",
+        Some(json!({ "name": "swarm_submit", "arguments": { "prompt": "api task", "constraints": {} } })),
+    )
+    .await;
+    assert!(
+        submit_resp.get("result").is_some(),
+        "api key submit failed: {submit_resp}"
+    );
+
+    // API key caller lists tasks — should see its own.
+    let api_list = mcp_call_tool(
+        &client,
+        &h.base_url,
+        api_key,
+        "swarm_task_list",
+        json!({}),
+    )
+    .await;
+    let api_tasks = api_list["tasks"].as_array().unwrap();
+    assert_eq!(api_tasks.len(), 1, "api key should see exactly 1 task");
+
+    // Node-token caller lists tasks — should see none (it owns none).
+    let node_list = mcp_call_tool(
+        &client,
+        &h.base_url,
+        &node_token,
+        "swarm_task_list",
+        json!({}),
+    )
+    .await;
+    let node_tasks = node_list["tasks"].as_array().unwrap();
+    assert_eq!(
+        node_tasks.len(),
+        0,
+        "node caller should see 0 tasks owned by api key"
+    );
 }

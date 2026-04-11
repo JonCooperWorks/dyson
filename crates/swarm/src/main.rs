@@ -11,7 +11,7 @@ use std::time::Duration;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use swarm::Hub;
+use swarm::{Hub, McpApiKey};
 use swarm::config::SwarmConfig;
 use swarm::http::build_router;
 use swarm::key::HubKeyPair;
@@ -72,6 +72,10 @@ struct Args {
     /// Not required for localhost/127.0.0.1/::1 — those skip the check automatically.
     #[arg(long)]
     dangerous_no_auth: bool,
+
+    /// Argon2id PHC hash of a static API key for MCP authentication.
+    #[arg(long)]
+    mcp_api_key_hash: Option<String>,
 }
 
 #[tokio::main]
@@ -114,8 +118,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         key.public_key_config()
     );
 
+    // Validate TLS and auth configuration before consuming args.
+    let tls_mode = validate_tls(&args)?;
+    validate_auth(&args)?;
+
+    // Parse + validate the API key hash if provided (fail fast).
+    let mcp_api_key = args
+        .mcp_api_key_hash
+        .map(|h| McpApiKey::new(h).map_err(|e| format!("--mcp-api-key-hash: {e}")))
+        .transpose()?;
+
     // Build shared state.
-    let hub = Hub::new(key, &config.data_dir)?;
+    let hub = Hub::new(key, &config.data_dir, mcp_api_key)?;
 
     // Spawn the heartbeat reaper.  It exits when the hub broadcasts
     // shutdown so tokio's runtime can terminate cleanly on Ctrl-C.
@@ -151,10 +165,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-
-    // Validate TLS and auth configuration.
-    let tls_mode = validate_tls(&args)?;
-    validate_auth(&args)?;
 
     // Build the axum router.
     let app = build_router(hub.clone());
@@ -232,14 +242,15 @@ fn validate_tls(args: &Args) -> Result<tls::TlsMode, Box<dyn std::error::Error>>
 }
 
 fn validate_auth(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    if is_loopback(&args.bind) || args.dangerous_no_auth {
+    if is_loopback(&args.bind) || args.dangerous_no_auth || args.mcp_api_key_hash.is_some() {
         return Ok(());
     }
 
     Err(format!(
         "No authentication configured for non-localhost address ({}).\n\n\
-         The hub's MCP and registration endpoints are open. \
-         Pass --dangerous-no-auth to acknowledge this risk.",
+         The hub's MCP and registration endpoints are open. Either:\n  \
+           --mcp-api-key-hash <PHC_STRING>\n  \
+           --dangerous-no-auth",
         args.bind
     ).into())
 }
