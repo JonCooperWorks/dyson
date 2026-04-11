@@ -1,17 +1,24 @@
 //! Routing logic — pick a node to run a task.
 //!
-//! v1 rules:
+//! Two paths:
 //!
-//! 1. Filter to `NodeStatus::Idle` nodes.
-//! 2. Drop nodes missing any required capability.
-//! 3. Drop nodes that don't satisfy GPU or RAM constraints.
-//! 4. Prefer the one with the most free RAM (ties: lowest node_id lex).
-//! 5. If nothing survives, return `None`.
+//! 1. **Caller-directed** (`select_node_by_id`) — the caller (LLM) has
+//!    already reasoned over `list_nodes` and picked a target. The hub
+//!    just validates that the node exists and is idle. This is the
+//!    preferred path because the calling agent has strictly more
+//!    context than any filter we could invent.
+//!
+//! 2. **Constraint filter** (`select_node`) — the legacy shortcut for
+//!    callers that don't care which node runs the task. Filters to
+//!    `NodeStatus::Idle`, enforces optional GPU / capability / RAM
+//!    requirements, then prefers the node with the most free RAM (ties
+//!    broken by lowest `node_id` lexicographically).
 //!
 //! No priority queues, no preemption, no affinity.
 
 use dyson_swarm_protocol::types::NodeStatus;
 
+use crate::queue::DispatchError;
 use crate::registry::{NodeEntry, NodeId, NodeRegistry};
 
 /// Constraints the caller provides via `swarm_dispatch`.
@@ -76,6 +83,34 @@ pub async fn select_node(
         .await
 }
 
+/// Validate an explicit `target_node_id` and return it if the node is
+/// idle. Used by the caller-directed dispatch path.
+///
+/// Errors:
+/// - `DispatchError::NodeNotFound` if no node with this id exists.
+/// - `DispatchError::NodeNotIdle { reason: "busy" | "draining" }` if
+///   the node exists but is unavailable.
+pub async fn select_node_by_id(
+    registry: &NodeRegistry,
+    node_id: &str,
+) -> Result<NodeId, DispatchError> {
+    let outcome = registry
+        .with_entry(node_id, |entry| match &entry.status {
+            NodeStatus::Idle => Ok(entry.node_id.clone()),
+            NodeStatus::Busy { .. } => Err(DispatchError::NodeNotIdle {
+                node_id: entry.node_id.clone(),
+                reason: "busy".into(),
+            }),
+            NodeStatus::Draining => Err(DispatchError::NodeNotIdle {
+                node_id: entry.node_id.clone(),
+                reason: "draining".into(),
+            }),
+        })
+        .await;
+
+    outcome.unwrap_or_else(|| Err(DispatchError::NodeNotFound(node_id.to_string())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,6 +147,7 @@ mod tests {
             },
             status,
             last_heartbeat: std::time::Instant::now(),
+            last_heartbeat_at: std::time::SystemTime::now(),
             sse_tx: None,
         }
     }
@@ -219,5 +255,71 @@ mod tests {
         }
         let pick = select_node(&reg, &RoutingConstraints::default()).await;
         assert_eq!(pick.as_deref(), Some("a"));
+    }
+
+    #[tokio::test]
+    async fn select_node_by_id_returns_idle_node() {
+        let reg = NodeRegistry::new();
+        let e = entry("a", 16, 0, &[], NodeStatus::Idle);
+        {
+            let mut inner = reg.inner_for_test().await;
+            inner.by_id.insert("a".into(), e);
+        }
+        let pick = select_node_by_id(&reg, "a").await.unwrap();
+        assert_eq!(pick, "a");
+    }
+
+    #[tokio::test]
+    async fn select_node_by_id_rejects_busy() {
+        let reg = NodeRegistry::new();
+        let e = entry(
+            "a",
+            16,
+            0,
+            &[],
+            NodeStatus::Busy {
+                task_id: "t".into(),
+            },
+        );
+        {
+            let mut inner = reg.inner_for_test().await;
+            inner.by_id.insert("a".into(), e);
+        }
+        let err = select_node_by_id(&reg, "a").await.unwrap_err();
+        match err {
+            DispatchError::NodeNotIdle { node_id, reason } => {
+                assert_eq!(node_id, "a");
+                assert_eq!(reason, "busy");
+            }
+            other => panic!("expected NodeNotIdle, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn select_node_by_id_rejects_draining() {
+        let reg = NodeRegistry::new();
+        let e = entry("a", 16, 0, &[], NodeStatus::Draining);
+        {
+            let mut inner = reg.inner_for_test().await;
+            inner.by_id.insert("a".into(), e);
+        }
+        let err = select_node_by_id(&reg, "a").await.unwrap_err();
+        match err {
+            DispatchError::NodeNotIdle { node_id, reason } => {
+                assert_eq!(node_id, "a");
+                assert_eq!(reason, "draining");
+            }
+            other => panic!("expected NodeNotIdle, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn select_node_by_id_rejects_unknown() {
+        let reg = NodeRegistry::new();
+        let err = select_node_by_id(&reg, "missing").await.unwrap_err();
+        match err {
+            DispatchError::NodeNotFound(id) => assert_eq!(id, "missing"),
+            other => panic!("expected NodeNotFound, got {other:?}"),
+        }
     }
 }

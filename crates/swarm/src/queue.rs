@@ -15,4 +15,17 @@ pub enum DispatchError {
     Timeout,
     #[error("dispatch cancelled: {0}")]
     Cancelled(String),
+    /// The caller passed a `target_node_id` that isn't in the registry.
+    #[error("target node not found: {0}")]
+    NodeNotFound(String),
+    /// The caller passed a `target_node_id` that exists but isn't idle.
+    /// `reason` is a short label like "busy" or "draining" so callers
+    /// can decide whether to retry or pick another node.
+    #[error("target node {node_id} is not idle: {reason}")]
+    NodeNotIdle { node_id: String, reason: String },
+    /// The caller provided neither `target_node_id` nor `constraints`.
+    /// Exactly one of the two must be set — this is the refactor that
+    /// pushes routing decisions onto the (LLM) caller.
+    #[error("dispatch requires exactly one of `target_node_id` or `constraints`")]
+    NoTargetOrConstraints,
 }
