@@ -67,6 +67,11 @@ struct Args {
     /// Not required for localhost/127.0.0.1/::1 — those skip TLS automatically.
     #[arg(long)]
     dangerous_no_tls: bool,
+
+    /// Allow running without authentication on external interfaces.
+    /// Not required for localhost/127.0.0.1/::1 — those skip the check automatically.
+    #[arg(long)]
+    dangerous_no_auth: bool,
 }
 
 #[tokio::main]
@@ -138,8 +143,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Validate TLS configuration.
+    // Validate TLS and auth configuration.
     let tls_mode = validate_tls(&args)?;
+    validate_auth(&args)?;
 
     // Build the axum router.
     let app = build_router(hub.clone());
@@ -212,6 +218,19 @@ fn validate_tls(args: &Args) -> Result<tls::TlsMode, Box<dyn std::error::Error>>
            --letsencrypt --domain <domain>\n\n\
          Or explicitly disable TLS (not recommended):\n  \
            --dangerous-no-tls",
+        args.bind
+    ).into())
+}
+
+fn validate_auth(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    if is_loopback(&args.bind) || args.dangerous_no_auth {
+        return Ok(());
+    }
+
+    Err(format!(
+        "No authentication configured for non-localhost address ({}).\n\n\
+         The hub's MCP and registration endpoints are open. \
+         Pass --dangerous-no-auth to acknowledge this risk.",
         args.bind
     ).into())
 }

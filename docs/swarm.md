@@ -140,6 +140,7 @@ every in-flight task.
 | `--letsencrypt-email` | — | Contact email for Let's Encrypt registration |
 | `--cert-cache-dir` | `.swarm-certs` | Directory to cache Let's Encrypt certificates |
 | `--dangerous-no-tls` | — | Allow plain HTTP on non-localhost interfaces |
+| `--dangerous-no-auth` | — | Allow running without authentication on non-localhost interfaces |
 
 ### TLS
 
@@ -346,26 +347,24 @@ The hub has two security layers that are enforced by default on
 non-localhost interfaces.  Both must be explicitly disabled if you
 want to run without them.
 
+Binding to an external interface requires **both** `--dangerous-no-tls`
+and `--dangerous-no-auth` if you don't have TLS configured:
+
+```bash
+# This will fail — two separate checks must pass:
+swarm --bind 0.0.0.0:8080 --data-dir ./hub-data
+
+# This works — both risks explicitly acknowledged:
+swarm --bind 0.0.0.0:8080 --data-dir ./hub-data \
+      --dangerous-no-tls --dangerous-no-auth
+```
+
+Localhost (`127.0.0.1`, `::1`) skips both checks automatically.
+
 ### TLS (transport encryption)
 
 TLS is **mandatory** when binding to a non-localhost address.  The hub
-refuses to start without it:
-
-```
-$ swarm --bind 0.0.0.0:8080 --data-dir ./hub-data
-Error: TLS is required when binding to a non-localhost address (0.0.0.0:8080).
-
-Provide TLS certificates:
-  --cert <path> --private-key <path>
-
-Or use Let's Encrypt:
-  --letsencrypt --domain <domain>
-
-Or explicitly disable TLS (not recommended):
-  --dangerous-no-tls
-```
-
-Localhost (`127.0.0.1`, `::1`) skips TLS automatically — no flags needed.
+refuses to start without it.
 
 **Manual TLS:**
 
@@ -394,7 +393,11 @@ swarm --bind 0.0.0.0:8080 --data-dir ./hub-data --dangerous-no-tls
 
 ### Authentication
 
-The hub uses bearer tokens for node authentication.  When a node
+The hub requires `--dangerous-no-auth` when binding to a non-localhost
+address.  There is no pluggable auth system yet — this flag exists to
+make the lack of authentication explicit and intentional.
+
+The hub uses bearer tokens for node-level authentication.  When a node
 registers via `POST /swarm/register`, the hub generates a random
 32-byte token and returns it.  All subsequent requests from that node
 must include `Authorization: Bearer <token>`.
