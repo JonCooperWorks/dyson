@@ -941,3 +941,150 @@ async fn token_budget_halts_agent_after_limit() {
         output.errors()
     );
 }
+
+// ===========================================================================
+// 17. Empty LLM response (no text, no tool calls) produces fallback
+// ===========================================================================
+
+#[tokio::test]
+async fn empty_response_sends_fallback_text() {
+    // The LLM returns a MessageComplete with no text and no tool calls.
+    // The user should still get a visible response.
+    let llm = MockLlm::new(vec![vec![StreamEvent::MessageComplete {
+        stop_reason: StopReason::EndTurn,
+        output_tokens: None,
+    }]]);
+
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let mut agent = Agent::new(
+        RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        builtin_skills(),
+        &default_settings(),
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut output = RecordingOutput::new();
+
+    let result = agent.run("hello", &mut output).await.unwrap();
+
+    assert!(
+        !result.is_empty(),
+        "empty LLM response should produce a non-empty fallback"
+    );
+    assert!(
+        !output.text().is_empty(),
+        "output should contain fallback text sent to user"
+    );
+}
+
+// ===========================================================================
+// 18. Tool calls followed by empty response still produces fallback
+// ===========================================================================
+
+#[tokio::test]
+async fn tool_calls_then_empty_response_sends_fallback() {
+    // Reproduces the exact scenario from the logs: the LLM makes tool calls
+    // that fail, then on the next iteration returns nothing (no text, no
+    // tool calls). The user should still get a visible response.
+    let llm = MockLlm::new(vec![
+        // Iteration 0: LLM calls a tool.
+        tool_call_events(
+            "call_1",
+            "bash",
+            serde_json::json!({"command": "echo hi"}),
+        ),
+        // Iteration 1: LLM returns empty (no text, no tools).
+        vec![StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        }],
+    ]);
+
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let mut agent = Agent::new(
+        RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        builtin_skills(),
+        &default_settings(),
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut output = RecordingOutput::new();
+
+    let result = agent.run("search for something", &mut output).await.unwrap();
+
+    assert!(
+        !result.is_empty(),
+        "tool calls followed by empty response should produce fallback"
+    );
+    assert!(
+        !output.text().is_empty(),
+        "output should contain fallback text sent to user"
+    );
+}
+
+// ===========================================================================
+// 19. Tool calls with text then empty response does NOT send fallback
+// ===========================================================================
+
+#[tokio::test]
+async fn text_streamed_before_empty_final_response_no_fallback() {
+    // If the LLM streamed text in a previous iteration (alongside tool calls),
+    // then the final empty response should NOT add fallback text — the user
+    // already saw content.
+    let llm = MockLlm::new(vec![
+        // Iteration 0: LLM sends text AND a tool call.
+        vec![
+            StreamEvent::TextDelta("Working on it...".into()),
+            StreamEvent::ToolUseStart {
+                id: "call_1".into(),
+                name: "bash".into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "call_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "echo hi"}),
+            },
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::ToolUse,
+                output_tokens: None,
+            },
+        ],
+        // Iteration 1: empty response.
+        vec![StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        }],
+    ]);
+
+    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
+    let mut agent = Agent::new(
+        RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        builtin_skills(),
+        &default_settings(),
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut output = RecordingOutput::new();
+
+    let _result = agent.run("do something", &mut output).await.unwrap();
+
+    // The output text should only be "Working on it..." (from iteration 0).
+    // No fallback should be appended.
+    assert_eq!(
+        output.text(),
+        "Working on it...",
+        "should not append fallback when text was already streamed"
+    );
+}
