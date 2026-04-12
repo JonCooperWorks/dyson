@@ -602,6 +602,7 @@ fn disk_free_statvfs(path: &str) -> u64 {
     }
 
     let stat = unsafe { stat.assume_init() };
+    // On macOS these fields are u32; cast to u64 to match the return type and avoid overflow.
     stat.f_bavail as u64 * stat.f_frsize as u64
 }
 
