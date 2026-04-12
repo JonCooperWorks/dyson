@@ -55,6 +55,7 @@
 pub mod bash;
 pub mod edit_file;
 pub mod export_conversation;
+pub mod image_generate;
 pub mod kb_search;
 pub mod kb_status;
 pub mod list_files;

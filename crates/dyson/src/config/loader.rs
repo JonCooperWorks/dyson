@@ -174,6 +174,8 @@ struct JsonAgent {
     provider: Option<String>,
     /// Advisor model for the advisor pattern.
     smartest_model: Option<String>,
+    /// Name of a provider from the `"providers"` map to use for image generation.
+    image_generation_provider: Option<String>,
     /// Context compaction configuration.  Accepts either:
     /// - an integer: shorthand for `{ "context_window": <value> }` with defaults
     /// - an object: full `CompactionConfig` with optional fields
@@ -692,6 +694,9 @@ fn parse_agent_settings(agent: Option<JsonAgent>, settings: &mut Settings) {
     }
     if agent.smartest_model.is_some() {
         settings.agent.smartest_model = agent.smartest_model;
+    }
+    if agent.image_generation_provider.is_some() {
+        settings.agent.image_generation_provider = agent.image_generation_provider;
     }
 }
 

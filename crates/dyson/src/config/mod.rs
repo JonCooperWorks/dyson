@@ -268,6 +268,20 @@ pub struct AgentSettings {
     /// Skipped when the advisor resolves to the currently loaded model.
     pub smartest_model: Option<String>,
 
+    /// Name of a provider from the `"providers"` map to use for image
+    /// generation.
+    ///
+    /// When set, the `image_generate` built-in tool is registered using
+    /// the referenced provider's API key and model.  The provider must
+    /// support image generation (currently: Gemini).
+    ///
+    /// ```json
+    /// {
+    ///   "agent": { "image_generation_provider": "gemini" }
+    /// }
+    /// ```
+    pub image_generation_provider: Option<String>,
+
     /// Context compaction configuration.
     ///
     /// Controls automatic conversation compaction.  When the estimated context
@@ -330,6 +344,8 @@ pub enum LlmProvider {
     Codex,
     /// Ollama Cloud API (cloud-hosted models via ollama.com).
     OllamaCloud,
+    /// Google Gemini API (Nano Banana image generation, future: chat).
+    Gemini,
 }
 
 // ---------------------------------------------------------------------------
@@ -894,6 +910,7 @@ impl Default for AgentSettings {
             provider: LlmProvider::Anthropic,
             base_url: None,
             smartest_model: None,
+            image_generation_provider: None,
             compaction: CompactionConfig::default(),
             rate_limit: None,
         }

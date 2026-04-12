@@ -73,7 +73,7 @@ async fn simple_text_response() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
     let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     let mut output = RecordingOutput::new();
@@ -119,7 +119,7 @@ async fn tool_call_loop() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
     let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     let mut output = RecordingOutput::new();
@@ -162,7 +162,7 @@ async fn internal_tools_provider_skips_tool_execution() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
     let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     let mut output = RecordingOutput::new();
@@ -467,7 +467,7 @@ async fn token_budget_stops_agent_loop() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
     let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     agent.conversation.token_budget.max_output_tokens = Some(150);
@@ -646,7 +646,7 @@ async fn tool_output_no_files_means_no_send_file() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
     let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     let mut output = RecordingOutput::new();
@@ -718,7 +718,7 @@ fn make_agent_with_history(
         compaction,
         ..Default::default()
     };
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
     let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     agent.conversation.messages = messages;
@@ -1284,7 +1284,7 @@ async fn auto_compaction_triggers_on_threshold() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
     let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
     let mut output = RecordingOutput::new();
@@ -1643,7 +1643,7 @@ mod test_tool_calling_integration {
             ..Default::default()
         };
         let llm = MockLlm::new(vec![]);
-        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
         agent.set_messages(messages.clone());
@@ -1665,7 +1665,7 @@ mod test_tool_calling_integration {
             ..Default::default()
         };
         let llm = MockLlm::new(vec![]);
-        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
 
@@ -1679,7 +1679,7 @@ mod test_tool_calling_integration {
             ..Default::default()
         };
         let llm = MockLlm::new(vec![]);
-        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
 
@@ -1730,7 +1730,7 @@ mod test_tool_calling_integration {
             ..Default::default()
         };
         let llm = MockLlm::new(vec![]);
-        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
         let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
 
@@ -2065,7 +2065,7 @@ fn generic_advisor_inherits_parent_tools() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
 
     // Count the tools from skills (before advisor).
@@ -2147,7 +2147,7 @@ fn native_anthropic_advisor_injects_api_tool() {
         ..Default::default()
     };
 
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None))];
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None))];
     let skill_tool_count: usize = skills.iter().map(|s| s.tools().len()).sum();
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
 

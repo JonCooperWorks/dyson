@@ -180,7 +180,7 @@ fn default_settings() -> AgentSettings {
 }
 
 fn builtin_skills() -> Vec<Box<dyn Skill>> {
-    vec![Box::new(BuiltinSkill::new(None))]
+    vec![Box::new(BuiltinSkill::new(None, None))]
 }
 
 /// Build an agent with the no-sandbox default for the common case.
