@@ -326,6 +326,8 @@ impl super::Controller for TelegramController {
 
         let (config_path, mut reloader) = super::create_hot_reloader(settings);
 
+        let bg_registry = std::sync::Arc::new(super::background::BackgroundAgentRegistry::new());
+
         let agents: Arc<tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>> =
             Arc::new(tokio::sync::RwLock::new(HashMap::new()));
 
@@ -543,6 +545,7 @@ impl super::Controller for TelegramController {
                         config_path.as_deref(),
                         &*chat_store,
                         registry,
+                        &bg_registry,
                     )
                     .await;
                     continue;
@@ -854,6 +857,7 @@ async fn handle_per_chat_command(
     config_path: Option<&std::path::Path>,
     chat_store: &dyn crate::chat_history::ChatHistory,
     registry: &super::ClientRegistry,
+    bg_registry: &std::sync::Arc<super::background::BackgroundAgentRegistry>,
 ) {
     // Extract agent from the mutex so execute_command (which may do an LLM
     // call for /compact) runs without holding the lock.  This prevents other
@@ -884,6 +888,7 @@ async fn handle_per_chat_command(
         &mut model,
         config_path,
         registry,
+        bg_registry,
     )
     .await;
 
@@ -962,6 +967,45 @@ async fn handle_per_chat_command(
                     "Usage: /model <provider> [model]  or  /model <model>",
                 )
                 .await;
+        }
+        super::CommandResult::LoopStarted {
+            id,
+            prompt_preview: _,
+            log_path,
+        } => {
+            let _ = bot
+                .send_message(
+                    chat_id,
+                    &format!("Agent #{id} started — log: {}", log_path.display()),
+                )
+                .await;
+        }
+        super::CommandResult::LoopError(e) => {
+            let _ = bot.send_message(chat_id, &format!("Loop error: {e}")).await;
+        }
+        super::CommandResult::AgentList { agents } => {
+            if agents.is_empty() {
+                let _ = bot.send_message(chat_id, "No background agents running.").await;
+            } else {
+                let mut msg = String::from("Background agents:\n");
+                for a in &agents {
+                    msg.push_str(&format!(
+                        "  [{}] {} ({:.0}s)\n",
+                        a.id,
+                        a.prompt_preview,
+                        a.elapsed.as_secs_f64(),
+                    ));
+                }
+                let _ = bot.send_message(chat_id, &msg).await;
+            }
+        }
+        super::CommandResult::AgentStopped { id } => {
+            let _ = bot
+                .send_message(chat_id, &format!("Agent #{id} stopped."))
+                .await;
+        }
+        super::CommandResult::StopError(e) => {
+            let _ = bot.send_message(chat_id, &format!("Stop error: {e}")).await;
         }
         _ => {}
     }

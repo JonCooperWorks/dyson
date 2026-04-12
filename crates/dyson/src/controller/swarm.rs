@@ -296,6 +296,10 @@ impl super::Controller for SwarmController {
                 }
         }
 
+        // Swarm tasks loop by default — they run until the task is complete
+        // or explicitly cancelled, not capped by the interactive iteration limit.
+        local_settings.agent.max_iterations = usize::MAX;
+
         let node_name = self.config.node_name_or_default();
 
         let controller_prompt = format!(
