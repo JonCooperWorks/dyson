@@ -37,6 +37,7 @@ use crate::tool::read_file::ReadFileTool;
 use crate::tool::search_files::SearchFilesTool;
 use crate::tool::send_file::SendFileTool;
 use crate::tool::swarm_checkpoint::SwarmCheckpointTool;
+use crate::tool::image_generate;
 use crate::tool::web_fetch::WebFetchTool;
 use crate::tool::web_search;
 use crate::tool::workspace_search::WorkspaceSearchTool;
@@ -84,6 +85,8 @@ impl BuiltinSkill {
     /// the tool is simply absent.
     pub fn new_filtered(
         web_search_config: Option<&crate::config::WebSearchConfig>,
+        image_provider_config: Option<&crate::config::ProviderConfig>,
+        image_model_override: Option<&str>,
         filter: &[String],
     ) -> Self {
         let mut tools: Vec<Arc<dyn Tool>> = vec![
@@ -119,6 +122,20 @@ impl BuiltinSkill {
             }
         }
 
+        if let Some(ig_cfg) = image_provider_config {
+            match image_generate::create_provider(ig_cfg, image_model_override) {
+                Ok(provider) => {
+                    tools.push(Arc::new(image_generate::ImageGenerateTool::new(provider)));
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "failed to create image generation provider — skipping image_generate tool"
+                    );
+                }
+            }
+        }
+
         // Apply tool filter if specified.
         if !filter.is_empty() {
             tools.retain(|t| filter.iter().any(|name| name == t.name()));
@@ -147,14 +164,18 @@ impl BuiltinSkill {
 
 impl BuiltinSkill {
     /// Create a new BuiltinSkill with all default tools (no filter).
-    pub fn new(web_search_config: Option<&crate::config::WebSearchConfig>) -> Self {
-        Self::new_filtered(web_search_config, &[])
+    pub fn new(
+        web_search_config: Option<&crate::config::WebSearchConfig>,
+        image_provider_config: Option<&crate::config::ProviderConfig>,
+        image_model_override: Option<&str>,
+    ) -> Self {
+        Self::new_filtered(web_search_config, image_provider_config, image_model_override, &[])
     }
 }
 
 impl Default for BuiltinSkill {
     fn default() -> Self {
-        Self::new(None)
+        Self::new(None, None, None)
     }
 }
 
@@ -210,7 +231,7 @@ mod tests {
 
     #[test]
     fn has_builtin_tools() {
-        let skill = BuiltinSkill::new(None);
+        let skill = BuiltinSkill::new(None, None, None);
         let tools = skill.tools();
         assert_eq!(tools.len(), 16);
         assert_eq!(tools[0].name(), "bash");
@@ -235,6 +256,8 @@ mod tests {
     fn filter_restricts_tools() {
         let skill = BuiltinSkill::new_filtered(
             None,
+            None,
+            None,
             &["bash".to_string(), "read_file".to_string()],
         );
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
@@ -243,14 +266,14 @@ mod tests {
 
     #[test]
     fn empty_filter_includes_all() {
-        let all = BuiltinSkill::new(None);
-        let filtered = BuiltinSkill::new_filtered(None, &[]);
+        let all = BuiltinSkill::new(None, None, None);
+        let filtered = BuiltinSkill::new_filtered(None, None, None, &[]);
         assert_eq!(all.tools().len(), filtered.tools().len());
     }
 
     #[test]
     fn has_system_prompt() {
-        let skill = BuiltinSkill::new(None);
+        let skill = BuiltinSkill::new(None, None, None);
         let prompt = skill.system_prompt().unwrap();
         assert!(prompt.contains("bash"));
         assert!(!prompt.is_empty());
@@ -258,13 +281,41 @@ mod tests {
 
     #[test]
     fn skill_name() {
-        let skill = BuiltinSkill::new(None);
+        let skill = BuiltinSkill::new(None, None, None);
         assert_eq!(skill.name(), "builtin");
+    }
+
+    #[test]
+    fn image_generate_tool_registered_when_configured() {
+        let config = crate::config::ProviderConfig {
+            provider_type: crate::config::LlmProvider::Gemini,
+            models: vec!["gemini-3.1-flash-image-preview".into()],
+            api_key: crate::auth::Credential::new("test-key".into()),
+            base_url: None,
+        };
+        let skill = BuiltinSkill::new(None, Some(&config), None);
+        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"image_generate"));
+        assert_eq!(skill.tools().len(), 17);
+    }
+
+    #[test]
+    fn image_model_override_respected() {
+        let config = crate::config::ProviderConfig {
+            provider_type: crate::config::LlmProvider::Gemini,
+            models: vec!["gemini-2.5-flash".into()],
+            api_key: crate::auth::Credential::new("test-key".into()),
+            base_url: None,
+        };
+        // With override, should still register the tool successfully.
+        let skill = BuiltinSkill::new(None, Some(&config), Some("gemini-3.1-flash-image-preview"));
+        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"image_generate"));
     }
 
     #[tokio::test]
     async fn before_turn_injects_datetime() {
-        let skill = BuiltinSkill::new(None);
+        let skill = BuiltinSkill::new(None, None, None);
         let fragment = skill.before_turn().await.unwrap();
         assert!(fragment.is_some(), "before_turn should return Some");
         let text = fragment.unwrap();

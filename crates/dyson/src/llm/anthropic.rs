@@ -374,17 +374,10 @@ impl LlmClient for AnthropicClient {
             });
         }
 
-        // -- Transform the SSE byte stream into StreamEvents --
-        let event_stream = crate::llm::sse_event_stream(
+        Ok(crate::llm::build_stream_response(
             response,
             BaseSseParser::new(AnthropicJsonParser),
-        );
-
-        Ok(crate::llm::StreamResponse {
-            stream: event_stream,
-            tool_mode: crate::llm::ToolMode::Execute,
-            input_tokens: None,
-        })
+        ))
     }
 }
 

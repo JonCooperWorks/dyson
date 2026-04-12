@@ -189,8 +189,15 @@ pub async fn create_skills(
     for config in &settings.skills {
         match config {
             crate::config::SkillConfig::Builtin(cfg) => {
+                let ig_provider = settings
+                    .agent
+                    .image_generation_provider
+                    .as_ref()
+                    .and_then(|name| settings.providers.get(name));
                 skills.push(Box::new(builtin::BuiltinSkill::new_filtered(
                     settings.web_search.as_ref(),
+                    ig_provider,
+                    settings.agent.image_generation_model.as_deref(),
                     &cfg.tools,
                 )));
             }

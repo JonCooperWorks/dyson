@@ -57,7 +57,7 @@ use crate::auth::Auth;
 use crate::error::{DysonError, Result};
 use crate::llm::sse_parser::{BaseSseParser, SseJsonParser, ToolBufferContext};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
+use crate::llm::{CompletionConfig, LlmClient, ToolDefinition, concat_system_prompt};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -131,11 +131,7 @@ impl LlmClient for OpenAiClient {
 
         // System message first.  Concatenate stable prefix and ephemeral suffix
         // (OpenAI doesn't support prompt caching breakpoints, so one block is fine).
-        let full_system = if system_suffix.is_empty() {
-            system.to_string()
-        } else {
-            format!("{system}\n\n{system_suffix}")
-        };
+        let full_system = concat_system_prompt(system, system_suffix);
         messages_json.push(serde_json::json!({
             "role": "system",
             "content": full_system,
@@ -197,29 +193,13 @@ impl LlmClient for OpenAiClient {
         let response = self.auth.apply_to_request(req).await?.send().await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "failed to read error body".into());
-            return Err(match status.as_u16() {
-                429 => DysonError::LlmRateLimit(format!("OpenAI API rate limited: {body}")),
-                502 | 503 | 529 => DysonError::LlmOverloaded(format!("OpenAI API returned {status}: {body}")),
-                _ => DysonError::Llm(format!("OpenAI API returned {status}: {body}")),
-            });
+            return Err(crate::llm::map_http_error(response, "OpenAI").await);
         }
 
-        // -- Parse SSE stream --
-        let event_stream = crate::llm::sse_event_stream(
+        Ok(crate::llm::build_stream_response(
             response,
             BaseSseParser::new(OpenAiJsonParser::new()),
-        );
-
-        Ok(crate::llm::StreamResponse {
-            stream: event_stream,
-            tool_mode: crate::llm::ToolMode::Execute,
-            input_tokens: None,
-        })
+        ))
     }
 }
 
