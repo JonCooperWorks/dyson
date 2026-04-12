@@ -282,6 +282,19 @@ pub struct AgentSettings {
     /// ```
     pub image_generation_provider: Option<String>,
 
+    /// Model override for image generation.
+    ///
+    /// When set, the `image_generate` tool uses this model instead of the
+    /// image generation provider's default model.  Useful when the provider
+    /// is also used for chat with a different default model.
+    ///
+    /// ```json
+    /// {
+    ///   "agent": { "image_generation_model": "gemini-3.1-flash-image-preview" }
+    /// }
+    /// ```
+    pub image_generation_model: Option<String>,
+
     /// Context compaction configuration.
     ///
     /// Controls automatic conversation compaction.  When the estimated context
@@ -911,6 +924,7 @@ impl Default for AgentSettings {
             base_url: None,
             smartest_model: None,
             image_generation_provider: None,
+            image_generation_model: None,
             compaction: CompactionConfig::default(),
             rate_limit: None,
         }

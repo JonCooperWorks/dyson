@@ -170,7 +170,7 @@ pub struct ClientConfig<'a> {
 /// One entry per `LlmProvider` variant.  The unit test
 /// `registry_covers_all_variants` ensures nothing is missing.
 pub fn registry() -> &'static [ProviderEntry] {
-    use super::{anthropic, claude_code, codex, gemini_stub, ollama_cloud, openai, openai_compat, openrouter};
+    use super::{anthropic, claude_code, codex, gemini, ollama_cloud, openai, openai_compat, openrouter};
 
     static ENTRIES: std::sync::LazyLock<Vec<ProviderEntry>> = std::sync::LazyLock::new(|| {
         vec![
@@ -256,10 +256,12 @@ pub fn registry() -> &'static [ProviderEntry] {
                 provider: LlmProvider::Gemini,
                 canonical_name: "gemini",
                 aliases: &["gemini", "google"],
-                default_model: "gemini-3.1-flash-image-preview",
+                default_model: "gemini-2.5-flash",
                 env_var: Some("GEMINI_API_KEY"),
                 requires_api_key: true,
-                create_client: |_| Box::new(gemini_stub::GeminiStubClient),
+                create_client: |c| {
+                    Box::new(gemini::GeminiClient::new(c.api_key, c.base_url))
+                },
             },
         ]
     });

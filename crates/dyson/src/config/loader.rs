@@ -176,6 +176,8 @@ struct JsonAgent {
     smartest_model: Option<String>,
     /// Name of a provider from the `"providers"` map to use for image generation.
     image_generation_provider: Option<String>,
+    /// Model override for image generation (e.g. "gemini-3.1-flash-image-preview").
+    image_generation_model: Option<String>,
     /// Context compaction configuration.  Accepts either:
     /// - an integer: shorthand for `{ "context_window": <value> }` with defaults
     /// - an object: full `CompactionConfig` with optional fields
@@ -697,6 +699,9 @@ fn parse_agent_settings(agent: Option<JsonAgent>, settings: &mut Settings) {
     }
     if agent.image_generation_provider.is_some() {
         settings.agent.image_generation_provider = agent.image_generation_provider;
+    }
+    if agent.image_generation_model.is_some() {
+        settings.agent.image_generation_model = agent.image_generation_model;
     }
 }
 

@@ -39,7 +39,7 @@ pub mod claude_code;
 pub(crate) mod cli_subprocess;
 pub mod codex;
 pub mod dialects;
-pub mod gemini_stub;
+pub mod gemini;
 pub mod ollama_cloud;
 pub mod openai;
 pub mod openai_compat;

@@ -197,6 +197,7 @@ pub async fn create_skills(
                 skills.push(Box::new(builtin::BuiltinSkill::new_filtered(
                     settings.web_search.as_ref(),
                     ig_provider,
+                    settings.agent.image_generation_model.as_deref(),
                     &cfg.tools,
                 )));
             }

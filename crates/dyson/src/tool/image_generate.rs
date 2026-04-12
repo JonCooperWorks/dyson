@@ -188,11 +188,21 @@ impl ImageGenerationProvider for GeminiImageProvider {
 ///
 /// Dispatches on `provider_type` to select the right backend.
 /// Currently supported: `Gemini`.
-pub fn create_provider(config: &ProviderConfig) -> Result<Arc<dyn ImageGenerationProvider>> {
+///
+/// When `model_override` is set, it takes precedence over the provider's
+/// default model.  This lets users configure a chat model as the provider
+/// default while using a different model for image generation.
+pub fn create_provider(
+    config: &ProviderConfig,
+    model_override: Option<&str>,
+) -> Result<Arc<dyn ImageGenerationProvider>> {
+    let model = model_override
+        .unwrap_or_else(|| config.default_model())
+        .to_string();
     match config.provider_type {
         LlmProvider::Gemini => Ok(Arc::new(GeminiImageProvider::new(
             config.api_key.clone(),
-            config.default_model().to_string(),
+            model,
         ))),
         ref other => Err(DysonError::Config(format!(
             "provider type {other:?} does not support image generation (supported: gemini)"
