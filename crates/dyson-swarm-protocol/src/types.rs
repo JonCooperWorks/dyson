@@ -89,6 +89,9 @@ pub struct NodeManifest {
     pub hardware: HardwareInfo,
     /// Tool/skill names loaded on this node's agent.
     pub capabilities: Vec<String>,
+    /// Optional plain-text description of this node's specialisations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Current node status.
     pub status: NodeStatus,
 }
@@ -347,5 +350,58 @@ mod tests {
         };
         let json = serde_json::to_string(&busy).unwrap();
         assert!(json.contains("\"task_id\":\"abc\""));
+    }
+
+    #[test]
+    fn node_manifest_description_roundtrip() {
+        let manifest = NodeManifest {
+            node_name: "gpu-node".into(),
+            os: "linux".into(),
+            hardware: HardwareInfo {
+                cpus: vec![],
+                gpus: vec![],
+                ram_bytes: 0,
+                disk_free_bytes: 0,
+            },
+            capabilities: vec![],
+            description: Some("Specialises in fine-tuning LLMs".into()),
+            status: NodeStatus::Idle,
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(json.contains("\"description\":\"Specialises in fine-tuning LLMs\""));
+        let parsed: NodeManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.description.as_deref(), Some("Specialises in fine-tuning LLMs"));
+    }
+
+    #[test]
+    fn node_manifest_description_defaults_to_none() {
+        let json = r#"{
+            "node_name": "n",
+            "os": "linux",
+            "hardware": {"cpus":[],"gpus":[],"ram_bytes":0,"disk_free_bytes":0},
+            "capabilities": [],
+            "status": {"status":"idle"}
+        }"#;
+        let parsed: NodeManifest = serde_json::from_str(json).unwrap();
+        assert!(parsed.description.is_none());
+    }
+
+    #[test]
+    fn node_manifest_description_none_omitted_from_json() {
+        let manifest = NodeManifest {
+            node_name: "n".into(),
+            os: "linux".into(),
+            hardware: HardwareInfo {
+                cpus: vec![],
+                gpus: vec![],
+                ram_bytes: 0,
+                disk_free_bytes: 0,
+            },
+            capabilities: vec![],
+            description: None,
+            status: NodeStatus::Idle,
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(!json.contains("description"));
     }
 }

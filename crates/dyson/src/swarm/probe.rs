@@ -36,7 +36,7 @@ pub struct HardwareProbe;
 
 impl HardwareProbe {
     /// Run a full hardware probe and build a manifest.
-    pub async fn run(node_name: &str, tool_names: Vec<String>) -> NodeManifest {
+    pub async fn run(node_name: &str, tool_names: Vec<String>, description: Option<String>) -> NodeManifest {
         let (gpus, cpus, ram_bytes, disk_free_bytes) = tokio::join!(
             detect_gpus(),
             detect_cpus(),
@@ -54,6 +54,7 @@ impl HardwareProbe {
                 disk_free_bytes,
             },
             capabilities: tool_names,
+            description,
             status: NodeStatus::Idle,
         }
     }

@@ -143,6 +143,7 @@ mod tests {
                     disk_free_bytes: 0,
                 },
                 capabilities: caps.iter().map(|s| s.to_string()).collect(),
+                description: None,
                 status: status.clone(),
             },
             status,

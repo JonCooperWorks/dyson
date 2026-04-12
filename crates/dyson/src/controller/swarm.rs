@@ -322,7 +322,7 @@ impl super::Controller for SwarmController {
 
         // ── 2. PROBE HARDWARE ──
         let tool_names = agent.tool_names();
-        let manifest = HardwareProbe::run(&node_name, tool_names).await;
+        let manifest = HardwareProbe::run(&node_name, tool_names, self.config.description.clone()).await;
 
         tracing::info!(
             node = %manifest.node_name,

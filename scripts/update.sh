@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 git pull origin master
-echo "=== Running tests ==="
-cargo test
-echo "=== Building dyson ==="
-cargo build --release
+echo "=== Running tests in release mode ==="
+cargo test --release
 
 echo "=== Stopping dyson service ==="
 systemctl --user stop dyson 2>/dev/null || true

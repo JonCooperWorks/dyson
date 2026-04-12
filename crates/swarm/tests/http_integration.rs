@@ -43,6 +43,7 @@ fn sample_manifest(name: &str) -> NodeManifest {
             disk_free_bytes: 0,
         },
         capabilities: vec!["bash".into()],
+        description: None,
         status: NodeStatus::Idle,
     }
 }
@@ -374,6 +375,7 @@ async fn mcp_list_nodes_exposes_full_hardware_and_heartbeat() {
             disk_free_bytes: 500 * 1024 * 1024 * 1024,
         },
         capabilities: vec!["bash".into()],
+        description: None,
         status: NodeStatus::Idle,
     };
     client
@@ -422,6 +424,65 @@ async fn mcp_list_nodes_exposes_full_hardware_and_heartbeat() {
     );
     // Idle node should NOT carry busy_task_id.
     assert!(row.get("busy_task_id").is_none());
+    // No description was set, so key should be absent.
+    assert!(row.get("description").is_none());
+}
+
+#[tokio::test]
+async fn mcp_list_nodes_includes_description_when_set() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let manifest = NodeManifest {
+        node_name: "specialist".into(),
+        os: "linux".into(),
+        hardware: HardwareInfo {
+            cpus: vec![],
+            gpus: vec![],
+            ram_bytes: 16 * 1024 * 1024 * 1024,
+            disk_free_bytes: 0,
+        },
+        capabilities: vec!["bash".into()],
+        description: Some("Fine-tuning and inference on large language models".into()),
+        status: NodeStatus::Idle,
+    };
+    client
+        .post(format!("{}/swarm/register", h.base_url))
+        .json(&manifest)
+        .send()
+        .await
+        .unwrap();
+
+    let (_caller_id, caller_token) = register_node(&client, &h.base_url, "caller").await;
+
+    let resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&caller_token)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_nodes", "arguments": {} }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let parsed: Value = serde_json::from_str(text).unwrap();
+    let specialist = parsed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["node_name"] == "specialist")
+        .expect("specialist node should be listed");
+    assert_eq!(
+        specialist["description"],
+        "Fine-tuning and inference on large language models"
+    );
 }
 
 #[tokio::test]

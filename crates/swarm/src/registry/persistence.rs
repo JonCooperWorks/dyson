@@ -249,6 +249,7 @@ mod tests {
                     disk_free_bytes: 0,
                 },
                 capabilities: vec!["bash".into()],
+                description: None,
                 status: NodeStatus::Idle,
             },
             status: NodeStatus::Idle,
