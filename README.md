@@ -60,9 +60,6 @@ The swarm distributes tasks across Dyson nodes. A central hub signs work with Ed
 
 See [docs/swarm.md](docs/swarm.md) for the full architecture, configuration, and task lifecycle.
 
-## Footprint
-
-**6.4 MB** on macOS, **8.3 MB** on Linux, **~12.7 MB RSS** at idle, ~30 direct dependencies. The dependency tree is small enough to audit by hand — fewer crates, less supply-chain surface, and a codebase one person can read end to end.
 
 ## Architecture
 
