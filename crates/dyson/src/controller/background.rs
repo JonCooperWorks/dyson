@@ -24,7 +24,6 @@
 // ===========================================================================
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
@@ -43,7 +42,7 @@ pub struct BackgroundAgentListEntry {
     pub id: u64,
     pub prompt_preview: String,
     pub elapsed: Duration,
-    pub log_path: PathBuf,
+    pub chat_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -55,7 +54,7 @@ struct BackgroundAgentInfo {
     prompt_preview: String,
     started_at: Instant,
     cancel: CancellationToken,
-    log_path: PathBuf,
+    chat_id: String,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -96,20 +95,16 @@ impl BackgroundAgentRegistry {
         }
     }
 
-    /// Reserve an ID, register a background agent, and compute its log path.
+    /// Reserve an ID and register a background agent.
     ///
-    /// `log_path_fn` receives the allocated ID and returns the log path.
-    /// This avoids a chicken-and-egg problem: the caller needs the ID to
-    /// compute the path, and the registry needs the path at registration.
-    ///
+    /// Returns the assigned ID on success, or an error string if at capacity.
     /// Call [`set_handle()`] immediately after `tokio::spawn` to attach
     /// the task handle.
     pub fn allocate(
         &self,
         prompt_preview: String,
         cancel: CancellationToken,
-        log_path_fn: impl FnOnce(u64) -> PathBuf,
-    ) -> Result<(u64, PathBuf), String> {
+    ) -> Result<u64, String> {
         let mut inner = self.inner.lock().expect("BackgroundAgentRegistry poisoned");
         inner.prune();
 
@@ -121,7 +116,6 @@ impl BackgroundAgentRegistry {
 
         let id = inner.next_id;
         inner.next_id += 1;
-        let log_path = log_path_fn(id);
 
         inner.agents.insert(
             id,
@@ -129,12 +123,12 @@ impl BackgroundAgentRegistry {
                 prompt_preview,
                 started_at: Instant::now(),
                 cancel,
-                log_path: log_path.clone(),
+                chat_id: format!("bg-{id}"),
                 handle: None,
             },
         );
 
-        Ok((id, log_path))
+        Ok(id)
     }
 
     /// Attach the `JoinHandle` for a previously allocated agent.
@@ -163,7 +157,7 @@ impl BackgroundAgentRegistry {
                 id,
                 prompt_preview: info.prompt_preview.clone(),
                 elapsed: info.started_at.elapsed(),
-                log_path: info.log_path.clone(),
+                chat_id: info.chat_id.clone(),
             })
             .collect();
 
@@ -212,32 +206,23 @@ impl Default for BackgroundAgentRegistry {
 mod tests {
     use super::*;
 
-    fn log_path(id: u64) -> PathBuf {
-        PathBuf::from(format!("/tmp/{id}.log"))
-    }
-
     #[test]
     fn allocate_and_list() {
         let reg = BackgroundAgentRegistry::new();
-        let cancel = CancellationToken::new();
-        let (id, path) = reg
-            .allocate("test prompt".into(), cancel, log_path)
-            .unwrap();
+        let id = reg.allocate("test prompt".into(), CancellationToken::new()).unwrap();
         assert_eq!(id, 1);
-        assert_eq!(path, PathBuf::from("/tmp/1.log"));
 
         let entries = reg.list();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, 1);
         assert_eq!(entries[0].prompt_preview, "test prompt");
-        assert_eq!(entries[0].log_path, PathBuf::from("/tmp/1.log"));
+        assert_eq!(entries[0].chat_id, "bg-1");
     }
 
     #[test]
     fn remove_clears_entry() {
         let reg = BackgroundAgentRegistry::new();
-        let (id, _) = reg.allocate("test".into(), CancellationToken::new(), log_path).unwrap();
-
+        let id = reg.allocate("test".into(), CancellationToken::new()).unwrap();
         reg.remove(id);
         assert!(reg.list().is_empty());
     }
@@ -247,7 +232,7 @@ mod tests {
         let reg = BackgroundAgentRegistry::new();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
-        let (id, _) = reg.allocate("test".into(), cancel, log_path).unwrap();
+        let id = reg.allocate("test".into(), cancel).unwrap();
 
         assert!(!cancel_clone.is_cancelled());
         reg.stop(id).unwrap();
@@ -264,64 +249,49 @@ mod tests {
     fn capacity_limit() {
         let reg = BackgroundAgentRegistry::new();
         for _ in 0..MAX_BACKGROUND_AGENTS {
-            reg.allocate("test".into(), CancellationToken::new(), log_path).unwrap();
+            reg.allocate("test".into(), CancellationToken::new()).unwrap();
         }
-        let result = reg.allocate("overflow".into(), CancellationToken::new(), log_path);
-        assert!(result.is_err());
+        assert!(reg.allocate("overflow".into(), CancellationToken::new()).is_err());
     }
 
     #[test]
     fn ids_are_monotonic() {
         let reg = BackgroundAgentRegistry::new();
-        let (id1, _) = reg.allocate("a".into(), CancellationToken::new(), log_path).unwrap();
-        let (id2, _) = reg.allocate("b".into(), CancellationToken::new(), log_path).unwrap();
+        let id1 = reg.allocate("a".into(), CancellationToken::new()).unwrap();
+        let id2 = reg.allocate("b".into(), CancellationToken::new()).unwrap();
         assert!(id2 > id1);
     }
 
     #[tokio::test]
     async fn prune_removes_finished_tasks() {
         let reg = BackgroundAgentRegistry::new();
-        let (id, _) = reg.allocate("done".into(), CancellationToken::new(), log_path).unwrap();
+        let id = reg.allocate("done".into(), CancellationToken::new()).unwrap();
 
-        // Spawn a task that completes immediately.
-        let handle = tokio::spawn(async {});
-        handle.await.unwrap(); // Wait for it to finish.
-
-        // Manually set a finished handle.
-        let finished_handle = tokio::spawn(async {});
-        finished_handle.await.unwrap();
+        // Attach a handle that completes immediately.
         reg.set_handle(id, tokio::spawn(async {}));
-
-        // Give the runtime a moment to mark it finished.
         tokio::task::yield_now().await;
 
         // list() should prune the finished task.
-        let entries = reg.list();
-        assert!(entries.is_empty(), "finished task should be pruned");
+        assert!(reg.list().is_empty(), "finished task should be pruned");
     }
 
     #[test]
     fn prune_frees_capacity() {
         let reg = BackgroundAgentRegistry::new();
-
-        // Fill to capacity with handle-less entries (no handle = never pruned
-        // by is_finished, but remove() works).
         for _ in 0..MAX_BACKGROUND_AGENTS {
-            reg.allocate("x".into(), CancellationToken::new(), log_path).unwrap();
+            reg.allocate("x".into(), CancellationToken::new()).unwrap();
         }
-        assert!(reg.allocate("overflow".into(), CancellationToken::new(), log_path).is_err());
+        assert!(reg.allocate("overflow".into(), CancellationToken::new()).is_err());
 
-        // Remove one manually — simulates the spawned task calling remove().
+        // Remove one — simulates the spawned task calling remove().
         reg.remove(1);
-
-        // Now there's room for one more.
-        assert!(reg.allocate("fits".into(), CancellationToken::new(), log_path).is_ok());
+        assert!(reg.allocate("fits".into(), CancellationToken::new()).is_ok());
     }
 
     #[test]
     fn stop_after_remove_errors() {
         let reg = BackgroundAgentRegistry::new();
-        let (id, _) = reg.allocate("test".into(), CancellationToken::new(), log_path).unwrap();
+        let id = reg.allocate("test".into(), CancellationToken::new()).unwrap();
         reg.remove(id);
         assert!(reg.stop(id).is_err());
     }

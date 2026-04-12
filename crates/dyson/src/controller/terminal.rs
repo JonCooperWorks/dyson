@@ -202,9 +202,9 @@ impl super::Controller for TerminalController {
                 CommandResult::LoopStarted {
                     id,
                     prompt_preview: _,
-                    log_path,
+                    chat_id,
                 } => {
-                    eprintln!("[agent #{id} started — log: {}]", log_path.display());
+                    eprintln!("[agent #{id} started — chat: {chat_id}]");
                     continue;
                 }
                 CommandResult::LoopError(e) => {
@@ -218,11 +218,10 @@ impl super::Controller for TerminalController {
                         eprintln!("Background agents:");
                         for a in &agents {
                             eprintln!(
-                                "  [{}] {} ({:.0}s) — {}",
+                                "  [{}] {} ({:.0}s)",
                                 a.id,
                                 a.prompt_preview,
                                 a.elapsed.as_secs_f64(),
-                                a.log_path.display(),
                             );
                         }
                     }

@@ -52,7 +52,6 @@
 // ===========================================================================
 
 pub mod background;
-pub mod log_output;
 pub mod recording;
 pub mod swarm;
 pub mod telegram;
@@ -716,7 +715,7 @@ pub enum CommandResult {
     LoopStarted {
         id: u64,
         prompt_preview: String,
-        log_path: std::path::PathBuf,
+        chat_id: String,
     },
     /// `/loop` failed.
     LoopError(String),
@@ -889,8 +888,10 @@ pub async fn execute_command(
 /// Spawn a background agent with unlimited iterations.
 ///
 /// Constructs a fresh agent from the current settings, wires up a
-/// `CancellationToken` for `/stop`, and runs it in a `tokio::spawn` task
-/// with output going to a log file.
+/// `CancellationToken` for `/stop`, and runs it in a `tokio::spawn` task.
+/// The agent's conversation is persisted through the existing chat history
+/// system under chat ID `bg-<id>`, reusing the same storage and media
+/// externalization as regular conversations.
 async fn spawn_background_agent(
     prompt: &str,
     settings: &Settings,
@@ -908,14 +909,12 @@ async fn spawn_background_agent(
         prompt.to_string()
     };
 
-    let (id, log_path) = match bg_registry.allocate(
-        prompt_preview.clone(),
-        cancel.clone(),
-        log_output::LogFileOutput::log_path_for,
-    ) {
-        Ok(pair) => pair,
+    let id = match bg_registry.allocate(prompt_preview.clone(), cancel.clone()) {
+        Ok(id) => id,
         Err(e) => return CommandResult::LoopError(e),
     };
+
+    let chat_id = format!("bg-{id}");
 
     // Build the background agent with unlimited iterations and Background priority.
     let bg_client = registry.get_default().with_priority(Priority::Background);
@@ -942,20 +941,20 @@ async fn spawn_background_agent(
 
     bg_agent.set_cancellation_token(cancel);
 
-    let mut log = match log_output::LogFileOutput::create(&log_path) {
-        Ok(log) => log,
-        Err(e) => {
-            bg_registry.remove(id);
-            return CommandResult::LoopError(format!("failed to create log file: {e}"));
-        }
-    };
+    // Attach chat history so the conversation is persisted through the
+    // existing chat store (same backend as Telegram / other controllers).
+    if let Ok(store) = crate::chat_history::create_chat_history(&settings.chat_history) {
+        let store: std::sync::Arc<dyn crate::chat_history::ChatHistory> = std::sync::Arc::from(store);
+        bg_agent.set_chat_history(store, chat_id.clone());
+    }
 
     let prompt_owned = prompt.to_string();
     let bg_reg = std::sync::Arc::clone(bg_registry);
+    let mut output = crate::agent::SilentOutput;
 
     let handle = tokio::spawn(async move {
         tracing::info!(id, prompt = %prompt_owned, "background agent starting");
-        match bg_agent.run(&prompt_owned, &mut log).await {
+        match bg_agent.run(&prompt_owned, &mut output).await {
             Ok(text) => {
                 tracing::info!(
                     id,
@@ -969,9 +968,6 @@ async fn spawn_background_agent(
                     error = %e,
                     "background agent failed"
                 );
-                // Best-effort: write error to log.
-                let _ = log.error(&e);
-                let _ = log.flush();
             }
         }
         bg_reg.remove(id);
@@ -982,7 +978,7 @@ async fn spawn_background_agent(
     CommandResult::LoopStarted {
         id,
         prompt_preview,
-        log_path,
+        chat_id,
     }
 }
 

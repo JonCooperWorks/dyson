@@ -971,12 +971,12 @@ async fn handle_per_chat_command(
         super::CommandResult::LoopStarted {
             id,
             prompt_preview: _,
-            log_path,
+            chat_id: bg_chat_id,
         } => {
             let _ = bot
                 .send_message(
                     chat_id,
-                    &format!("Agent #{id} started — log: {}", log_path.display()),
+                    &format!("Agent #{id} started — chat: {bg_chat_id}"),
                 )
                 .await;
         }
