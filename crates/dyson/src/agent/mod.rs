@@ -1009,6 +1009,7 @@ impl Agent {
 
         let mut final_text = String::new();
         let mut hit_max_iterations = false;
+        let mut any_text_streamed = false;
 
         let skill_fragments = self.collect_skill_context().await;
 
@@ -1065,6 +1066,10 @@ impl Agent {
                 break;
             }
 
+            if assistant_msg.last_text().is_some() {
+                any_text_streamed = true;
+            }
+
             self.log_response(&assistant_msg, &tool_calls);
 
             // If no tool calls, we're done.  If the provider set Observe mode,
@@ -1075,6 +1080,14 @@ impl Agent {
             if tool_calls.is_empty() || tool_mode == crate::llm::ToolMode::Observe {
                 if let Some(text) = assistant_msg.last_text() {
                     final_text = text.to_string();
+                } else if !any_text_streamed {
+                    tracing::warn!(
+                        "LLM returned no text and no tool calls — sending fallback"
+                    );
+                    let fallback =
+                        "I wasn't able to generate a response. Please try again.";
+                    output.text_delta(fallback)?;
+                    final_text = fallback.to_string();
                 }
                 self.conversation.messages.push(assistant_msg);
                 output.flush()?;

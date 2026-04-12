@@ -169,9 +169,6 @@ impl Sandbox for SelectiveDenySandbox {
 }
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -184,6 +181,26 @@ fn default_settings() -> AgentSettings {
 
 fn builtin_skills() -> Vec<Box<dyn Skill>> {
     vec![Box::new(BuiltinSkill::new(None))]
+}
+
+/// Build an agent with the no-sandbox default for the common case.
+fn test_agent(llm: MockLlm) -> Agent {
+    test_agent_with_sandbox(llm, Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox))
+}
+
+/// Build an agent with a custom sandbox.
+fn test_agent_with_sandbox(llm: MockLlm, sandbox: Arc<dyn Sandbox>) -> Agent {
+    Agent::new(
+        RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        builtin_skills(),
+        &default_settings(),
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap()
 }
 
 fn tool_call_events(id: &str, name: &str, input: serde_json::Value) -> Vec<StreamEvent> {
@@ -214,6 +231,13 @@ fn text_response_events(text: &str) -> Vec<StreamEvent> {
     ]
 }
 
+fn empty_response_events() -> Vec<StreamEvent> {
+    vec![StreamEvent::MessageComplete {
+        stop_reason: StopReason::EndTurn,
+        output_tokens: None,
+    }]
+}
+
 // ===========================================================================
 // 1. Sandbox deny flow
 // ===========================================================================
@@ -228,18 +252,7 @@ async fn sandbox_deny_returns_error_to_llm() {
         text_response_events("I can't do that."),
     ]);
 
-    let sandbox = DenySandbox::new("dangerous command blocked");
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(sandbox),
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent_with_sandbox(llm, Arc::new(DenySandbox::new("dangerous command blocked")));
     let mut output = RecordingOutput::new();
 
     let result = agent.run("delete everything", &mut output).await.unwrap();
@@ -270,18 +283,7 @@ async fn sandbox_redirect_routes_to_different_tool() {
         text_response_events("Redirected successfully."),
     ]);
 
-    let sandbox = RedirectSandbox::new("workspace_view");
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(sandbox),
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent_with_sandbox(llm, Arc::new(RedirectSandbox::new("workspace_view")));
     let mut output = RecordingOutput::new();
 
     let result = agent.run("read soul file", &mut output).await.unwrap();
@@ -312,12 +314,20 @@ async fn agent_stops_at_max_iterations() {
     responses.push(text_response_events("Here is a summary of progress."));
 
     let llm = MockLlm::new(responses);
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut settings = default_settings();
     settings.max_iterations = 3;
 
-    let mut agent =
-        Agent::new(RateLimitedHandle::unlimited(Box::new(llm)), sandbox, builtin_skills(), &settings, None, 0, None, None).unwrap();
+    let mut agent = Agent::new(
+        RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        builtin_skills(),
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent.run("loop forever", &mut output).await.unwrap();
@@ -342,18 +352,7 @@ async fn conversation_persists_across_runs() {
         text_response_events("Second response."),
     ]);
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm);
 
     let mut output1 = RecordingOutput::new();
     agent.run("first question", &mut output1).await.unwrap();
@@ -403,18 +402,7 @@ async fn multiple_tool_calls_in_one_turn() {
         text_response_events("Both commands ran."),
     ]);
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm);
     let mut output = RecordingOutput::new();
 
     let result = agent.run("run both", &mut output).await.unwrap();
@@ -444,18 +432,7 @@ async fn unknown_tool_returns_error() {
         text_response_events("Tool not found, sorry."),
     ]);
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm);
     let mut output = RecordingOutput::new();
 
     let result = agent
@@ -502,18 +479,7 @@ async fn multi_turn_builds_correct_history() {
         text_response_events("Here are the files."),
     ]);
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm);
 
     let mut out1 = RecordingOutput::new();
     agent.run("hello", &mut out1).await.unwrap();
@@ -538,18 +504,7 @@ async fn clear_resets_conversation_history() {
         text_response_events("After clear."),
     ]);
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm);
 
     let mut out1 = RecordingOutput::new();
     agent.run("hello", &mut out1).await.unwrap();
@@ -583,18 +538,7 @@ async fn tool_error_is_reported_back() {
         text_response_events("Command failed."),
     ]);
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm);
     let mut output = RecordingOutput::new();
 
     let result = agent.run("run bad command", &mut output).await.unwrap();
@@ -622,18 +566,7 @@ async fn selective_sandbox_denies_specific_tools() {
         text_response_events("Bash was denied, I'll answer directly."),
     ]);
 
-    let sandbox = SelectiveDenySandbox::new(&["bash"]);
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(sandbox),
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent_with_sandbox(llm, Arc::new(SelectiveDenySandbox::new(&["bash"])));
     let mut output = RecordingOutput::new();
 
     let result = agent.run("list things", &mut output).await.unwrap();
@@ -658,18 +591,7 @@ async fn selective_sandbox_denies_specific_tools() {
 async fn simple_text_response_no_tools() {
     let llm = MockLlm::new(vec![text_response_events("Hello, world!")]);
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm);
     let mut output = RecordingOutput::new();
 
     let result = agent.run("hi", &mut output).await.unwrap();
@@ -688,18 +610,7 @@ async fn simple_text_response_no_tools() {
 async fn set_messages_restores_conversation() {
     let llm = MockLlm::new(vec![text_response_events("Continuing.")]);
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm);
 
     // Inject a pre-existing conversation.
     let history = vec![
@@ -730,18 +641,7 @@ async fn redirect_to_unknown_tool_is_handled_gracefully() {
     ]);
 
     // Redirect all calls to a tool that doesn't exist.
-    let sandbox = RedirectSandbox::new("tool_that_does_not_exist");
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(sandbox),
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent_with_sandbox(llm, Arc::new(RedirectSandbox::new("tool_that_does_not_exist")));
     let mut output = RecordingOutput::new();
 
     // The agent catches the unknown-tool error and sends it back to the LLM
@@ -785,18 +685,7 @@ async fn streaming_text_accumulates_correctly() {
         },
     ]]);
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm);
     let mut output = RecordingOutput::new();
 
     let result = agent.run("say hello world", &mut output).await.unwrap();
@@ -849,18 +738,7 @@ async fn concurrent_tool_calls_produce_all_results() {
         text_response_events("All three done."),
     ]);
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm);
     let mut output = RecordingOutput::new();
 
     let result = agent.run("run three", &mut output).await.unwrap();
@@ -911,18 +789,7 @@ async fn token_budget_halts_agent_after_limit() {
         ],
     ]);
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(
-        RateLimitedHandle::unlimited(Box::new(llm)),
-        sandbox,
-        builtin_skills(),
-        &default_settings(),
-        None,
-        0,
-        None,
-        None,
-    )
-    .unwrap();
+    let mut agent = test_agent(llm);
     agent.token_budget_mut().max_output_tokens = Some(50);
     let mut output = RecordingOutput::new();
 
@@ -939,5 +806,113 @@ async fn token_budget_halts_agent_after_limit() {
         output.errors().iter().any(|e| e.contains("token budget")),
         "should surface token budget error, got: {:?}",
         output.errors()
+    );
+}
+
+// ===========================================================================
+// 17. Empty LLM response (no text, no tool calls) produces fallback
+// ===========================================================================
+
+#[tokio::test]
+async fn empty_response_sends_fallback_text() {
+    // The LLM returns a MessageComplete with no text and no tool calls.
+    // The user should still get a visible response.
+    let llm = MockLlm::new(vec![empty_response_events()]);
+
+    let mut agent = test_agent(llm);
+    let mut output = RecordingOutput::new();
+
+    let result = agent.run("hello", &mut output).await.unwrap();
+
+    assert!(
+        !result.is_empty(),
+        "empty LLM response should produce a non-empty fallback"
+    );
+    assert!(
+        !output.text().is_empty(),
+        "output should contain fallback text sent to user"
+    );
+}
+
+// ===========================================================================
+// 18. Tool calls followed by empty response still produces fallback
+// ===========================================================================
+
+#[tokio::test]
+async fn tool_calls_then_empty_response_sends_fallback() {
+    // Reproduces the exact scenario from the logs: the LLM makes tool calls
+    // that fail, then on the next iteration returns nothing (no text, no
+    // tool calls). The user should still get a visible response.
+    let llm = MockLlm::new(vec![
+        // Iteration 0: LLM calls a tool.
+        tool_call_events(
+            "call_1",
+            "bash",
+            serde_json::json!({"command": "echo hi"}),
+        ),
+        // Iteration 1: LLM returns empty (no text, no tools).
+        empty_response_events(),
+    ]);
+
+    let mut agent = test_agent(llm);
+    let mut output = RecordingOutput::new();
+
+    let result = agent.run("search for something", &mut output).await.unwrap();
+
+    assert!(
+        !result.is_empty(),
+        "tool calls followed by empty response should produce fallback"
+    );
+    assert!(
+        !output.text().is_empty(),
+        "output should contain fallback text sent to user"
+    );
+}
+
+// ===========================================================================
+// 19. Tool calls with text then empty response does NOT send fallback
+// ===========================================================================
+
+#[tokio::test]
+async fn text_streamed_before_empty_final_response_no_fallback() {
+    // If the LLM streamed text in a previous iteration (alongside tool calls),
+    // then the final empty response should NOT add fallback text — the user
+    // already saw content.
+    let llm = MockLlm::new(vec![
+        // Iteration 0: LLM sends text AND a tool call.
+        vec![
+            StreamEvent::TextDelta("Working on it...".into()),
+            StreamEvent::ToolUseStart {
+                id: "call_1".into(),
+                name: "bash".into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "call_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "echo hi"}),
+            },
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::ToolUse,
+                output_tokens: None,
+            },
+        ],
+        // Iteration 1: empty response.
+        vec![StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        }],
+    ]);
+
+    let mut agent = test_agent(llm);
+    let mut output = RecordingOutput::new();
+
+    let _result = agent.run("do something", &mut output).await.unwrap();
+
+    // The output text should only be "Working on it..." (from iteration 0).
+    // No fallback should be appended.
+    assert_eq!(
+        output.text(),
+        "Working on it...",
+        "should not append fallback when text was already streamed"
     );
 }
