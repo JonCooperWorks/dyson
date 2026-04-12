@@ -289,7 +289,7 @@ mod tests {
     fn image_generate_tool_registered_when_configured() {
         let config = crate::config::ProviderConfig {
             provider_type: crate::config::LlmProvider::Gemini,
-            models: vec!["gemini-3.1-flash-image-preview".into()],
+            models: vec!["gemini-3-pro-image-preview".into()],
             api_key: crate::auth::Credential::new("test-key".into()),
             base_url: None,
         };
@@ -308,7 +308,7 @@ mod tests {
             base_url: None,
         };
         // With override, should still register the tool successfully.
-        let skill = BuiltinSkill::new(None, Some(&config), Some("gemini-3.1-flash-image-preview"));
+        let skill = BuiltinSkill::new(None, Some(&config), Some("gemini-3-pro-image-preview"));
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert!(names.contains(&"image_generate"));
     }

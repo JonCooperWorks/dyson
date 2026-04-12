@@ -51,8 +51,14 @@ pub trait ImageGenerationProvider: Send + Sync {
     /// Generate images from a text prompt.
     ///
     /// Returns one or more generated images.  `count` is the number of
-    /// images to produce (providers may clamp this).
-    async fn generate(&self, prompt: &str, count: usize) -> Result<Vec<GeneratedImage>>;
+    /// images to produce (providers may clamp this).  `resolution` is one
+    /// of `"1K"`, `"2K"`, or `"4K"` (providers may ignore it).
+    async fn generate(
+        &self,
+        prompt: &str,
+        count: usize,
+        resolution: &str,
+    ) -> Result<Vec<GeneratedImage>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -62,7 +68,7 @@ pub trait ImageGenerationProvider: Send + Sync {
 /// Google Gemini image generation provider.
 ///
 /// Uses the Gemini `generateContent` API with `responseModalities: ["TEXT", "IMAGE"]`
-/// to generate images.  Default model: `gemini-3.1-flash-image-preview` (Nano Banana 2).
+/// and `imageConfig` to generate images.  Default model: `gemini-3-pro-image-preview`.
 ///
 /// API: `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`
 /// Auth: `x-goog-api-key` header.
@@ -84,7 +90,12 @@ impl GeminiImageProvider {
 
 #[async_trait]
 impl ImageGenerationProvider for GeminiImageProvider {
-    async fn generate(&self, prompt: &str, count: usize) -> Result<Vec<GeneratedImage>> {
+    async fn generate(
+        &self,
+        prompt: &str,
+        count: usize,
+        resolution: &str,
+    ) -> Result<Vec<GeneratedImage>> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
             self.model
@@ -97,7 +108,10 @@ impl ImageGenerationProvider for GeminiImageProvider {
                 }]
             }],
             "generationConfig": {
-                "responseModalities": ["TEXT", "IMAGE"]
+                "responseModalities": ["TEXT", "IMAGE"],
+                "imageConfig": {
+                    "imageSize": resolution
+                }
             }
         });
 
@@ -256,6 +270,12 @@ impl Tool for ImageGenerateTool {
                     "minimum": 1,
                     "maximum": 4,
                     "default": 1
+                },
+                "resolution": {
+                    "type": "string",
+                    "enum": ["1K", "2K", "4K"],
+                    "description": "Output image resolution (default 1K)",
+                    "default": "1K"
                 }
             },
             "required": ["prompt"]
@@ -279,10 +299,15 @@ impl Tool for ImageGenerateTool {
         tracing::info!(prompt = prompt.as_str(), "image generation request");
 
         let count = input["count"].as_u64().unwrap_or(1).clamp(1, 4) as usize;
+        let resolution = match input["resolution"].as_str() {
+            Some("2K") => "2K",
+            Some("4K") => "4K",
+            _ => "1K",
+        };
 
         // Race the generation against cancellation (Ctrl-C).
         let images = tokio::select! {
-            res = self.provider.generate(&prompt, count) => res?,
+            res = self.provider.generate(&prompt, count, resolution) => res?,
             _ = ctx.cancellation.cancelled() => {
                 return Ok(ToolOutput::error("image generation cancelled"));
             }
@@ -342,7 +367,12 @@ mod tests {
 
     #[async_trait]
     impl ImageGenerationProvider for MockImageProvider {
-        async fn generate(&self, _prompt: &str, count: usize) -> Result<Vec<GeneratedImage>> {
+        async fn generate(
+            &self,
+            _prompt: &str,
+            count: usize,
+            _resolution: &str,
+        ) -> Result<Vec<GeneratedImage>> {
             Ok(self
                 .images
                 .iter()

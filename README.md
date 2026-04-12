@@ -112,7 +112,7 @@ Configure it by pointing `image_generation_provider` at any provider that suppor
   "agent": {
     "provider": "anthropic",
     "image_generation_provider": "gemini",
-    "image_generation_model": "gemini-3.1-flash-image-preview"
+    "image_generation_model": "gemini-3-pro-image-preview"
   }
 }
 ```
@@ -122,7 +122,7 @@ Configure it by pointing `image_generation_provider` at any provider that suppor
 | `image_generation_provider` | Yes | Name of a provider from the `"providers"` map |
 | `image_generation_model` | No | Model override (defaults to the provider's default model) |
 
-When `image_generation_provider` is not set, the `image_generate` tool is simply absent — no errors. The provider must support image generation (currently: Gemini via the Nano Banana 2 / `gemini-3.1-flash-image-preview` model).
+When `image_generation_provider` is not set, the `image_generate` tool is simply absent — no errors. The provider must support image generation (currently: Gemini via the `gemini-3-pro-image-preview` model).
 
 A single Gemini provider can serve both chat and image generation:
 
@@ -134,7 +134,7 @@ A single Gemini provider can serve both chat and image generation:
   "agent": {
     "provider": "gemini",
     "image_generation_provider": "gemini",
-    "image_generation_model": "gemini-3.1-flash-image-preview"
+    "image_generation_model": "gemini-3-pro-image-preview"
   }
 }
 ```

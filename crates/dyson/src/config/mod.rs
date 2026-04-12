@@ -290,7 +290,7 @@ pub struct AgentSettings {
     ///
     /// ```json
     /// {
-    ///   "agent": { "image_generation_model": "gemini-3.1-flash-image-preview" }
+    ///   "agent": { "image_generation_model": "gemini-3-pro-image-preview" }
     /// }
     /// ```
     pub image_generation_model: Option<String>,
