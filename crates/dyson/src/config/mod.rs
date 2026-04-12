@@ -204,7 +204,8 @@ pub struct ControllerConfig {
 ///   "type": "swarm",
 ///   "url": "https://hub.example.com",
 ///   "public_key": "v1:base64...",
-///   "node_name": "gpu-workstation-01"
+///   "node_name": "gpu-workstation-01",
+///   "description": "GPU workstation specialised in model fine-tuning and inference"
 /// }
 /// ```
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -218,6 +219,9 @@ pub struct SwarmControllerConfig {
 
     /// Human-readable node name.  Defaults to the system hostname.
     pub node_name: Option<String>,
+
+    /// Optional plain-text description of this node's specialisations.
+    pub description: Option<String>,
 }
 
 impl SwarmControllerConfig {

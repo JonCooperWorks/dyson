@@ -89,6 +89,9 @@ pub struct NodeManifest {
     pub hardware: HardwareInfo,
     /// Tool/skill names loaded on this node's agent.
     pub capabilities: Vec<String>,
+    /// Optional plain-text description of this node's specialisations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Current node status.
     pub status: NodeStatus,
 }

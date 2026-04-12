@@ -441,6 +441,7 @@ mod tests {
                 disk_free_bytes: 0,
             },
             capabilities: vec![],
+            description: None,
             status: NodeStatus::Idle,
         }
     }

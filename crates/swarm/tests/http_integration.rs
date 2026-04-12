@@ -43,6 +43,7 @@ fn sample_manifest(name: &str) -> NodeManifest {
             disk_free_bytes: 0,
         },
         capabilities: vec!["bash".into()],
+        description: None,
         status: NodeStatus::Idle,
     }
 }
@@ -374,6 +375,7 @@ async fn mcp_list_nodes_exposes_full_hardware_and_heartbeat() {
             disk_free_bytes: 500 * 1024 * 1024 * 1024,
         },
         capabilities: vec!["bash".into()],
+        description: None,
         status: NodeStatus::Idle,
     };
     client

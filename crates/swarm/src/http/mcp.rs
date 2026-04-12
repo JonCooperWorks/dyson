@@ -481,6 +481,11 @@ async fn list_nodes(hub: &Arc<Hub>, caller: &McpCaller) -> Value {
                         },
                         "last_heartbeat_unix": last_heartbeat_unix,
                     });
+                    if let Some(desc) = &entry.manifest.description {
+                        row.as_object_mut()
+                            .unwrap()
+                            .insert("description".into(), Value::String(desc.clone()));
+                    }
                     if let Some(task_id) = busy_task_id {
                         row.as_object_mut()
                             .unwrap()
