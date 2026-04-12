@@ -274,8 +274,8 @@ impl Tool for ImageGenerateTool {
                 "resolution": {
                     "type": "string",
                     "enum": ["1K", "2K", "4K"],
-                    "description": "Output image resolution (default 1K)",
-                    "default": "1K"
+                    "description": "Output image resolution (default 4K)",
+                    "default": "4K"
                 }
             },
             "required": ["prompt"]
@@ -300,9 +300,9 @@ impl Tool for ImageGenerateTool {
 
         let count = input["count"].as_u64().unwrap_or(1).clamp(1, 4) as usize;
         let resolution = match input["resolution"].as_str() {
+            Some("1K") => "1K",
             Some("2K") => "2K",
-            Some("4K") => "4K",
-            _ => "1K",
+            _ => "4K",
         };
 
         // Race the generation against cancellation (Ctrl-C).
