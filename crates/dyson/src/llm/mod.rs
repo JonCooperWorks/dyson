@@ -452,6 +452,61 @@ pub(crate) fn sse_event_stream<P: SseStreamParser + Send + 'static>(
     })
 }
 
+/// Map an HTTP error response to a `DysonError`.
+///
+/// Shared by all API-based LLM providers (Anthropic, OpenAI, Gemini).
+/// Reads the response body and maps status codes to error variants:
+/// - 429 → `LlmRateLimit`
+/// - 502/503/529 → `LlmOverloaded`
+/// - Everything else → `Llm`
+pub(crate) async fn map_http_error(
+    response: reqwest::Response,
+    provider: &str,
+) -> DysonError {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|_| "failed to read error body".into());
+
+    match status.as_u16() {
+        429 => DysonError::LlmRateLimit(format!("{provider} API rate limited: {body}")),
+        502 | 503 | 529 => {
+            DysonError::LlmOverloaded(format!("{provider} API returned {status}: {body}"))
+        }
+        _ => DysonError::Llm(format!("{provider} API returned {status}: {body}")),
+    }
+}
+
+/// Build a `StreamResponse` from an HTTP response and SSE parser.
+///
+/// Shared by all SSE-based LLM providers.  Each provider just passes its
+/// own parser type — the wrapping is identical.
+pub(crate) fn build_stream_response<P: SseStreamParser + Send + 'static>(
+    response: reqwest::Response,
+    parser: P,
+) -> StreamResponse {
+    StreamResponse {
+        stream: sse_event_stream(response, parser),
+        tool_mode: ToolMode::Execute,
+        input_tokens: None,
+    }
+}
+
+/// Concatenate a stable system prompt with an ephemeral per-turn suffix.
+///
+/// Returns the stable prompt as-is when the suffix is empty, avoiding
+/// a needless allocation.  Used by providers that pass the system prompt
+/// as a single string (OpenAI, Gemini).  Anthropic handles this
+/// differently with separate cache-control blocks.
+pub(crate) fn concat_system_prompt(system: &str, suffix: &str) -> String {
+    if suffix.is_empty() {
+        system.to_string()
+    } else {
+        format!("{system}\n\n{suffix}")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared utilities for CLI-subprocess-based clients
 // ---------------------------------------------------------------------------

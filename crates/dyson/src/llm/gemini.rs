@@ -34,7 +34,7 @@ use async_trait::async_trait;
 use crate::error::{DysonError, Result};
 use crate::llm::sse_parser::{BaseSseParser, SseJsonParser, ToolBufferContext};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
+use crate::llm::{CompletionConfig, LlmClient, ToolDefinition, concat_system_prompt};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -89,11 +89,7 @@ impl LlmClient for GeminiClient {
         });
 
         // System instruction.
-        let full_system = if system_suffix.is_empty() {
-            system.to_string()
-        } else {
-            format!("{system}\n\n{system_suffix}")
-        };
+        let full_system = concat_system_prompt(system, system_suffix);
         if !full_system.is_empty() {
             body["system_instruction"] = serde_json::json!({
                 "parts": [{ "text": full_system }]
@@ -143,30 +139,13 @@ impl LlmClient for GeminiClient {
             .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "failed to read error body".into());
-            return Err(match status.as_u16() {
-                429 => DysonError::LlmRateLimit(format!("Gemini API rate limited: {body}")),
-                502 | 503 | 529 => {
-                    DysonError::LlmOverloaded(format!("Gemini API returned {status}: {body}"))
-                }
-                _ => DysonError::Llm(format!("Gemini API returned {status}: {body}")),
-            });
+            return Err(crate::llm::map_http_error(response, "Gemini").await);
         }
 
-        let event_stream = crate::llm::sse_event_stream(
+        Ok(crate::llm::build_stream_response(
             response,
             BaseSseParser::new(GeminiJsonParser::new()),
-        );
-
-        Ok(crate::llm::StreamResponse {
-            stream: event_stream,
-            tool_mode: crate::llm::ToolMode::Execute,
-            input_tokens: None,
-        })
+        ))
     }
 }
 
