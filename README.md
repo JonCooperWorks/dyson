@@ -14,7 +14,7 @@ A streaming AI agent loop in Rust, built to understand how these things actually
 - **Tool calling** — `tool_use` blocks, execution, result messages back to the LLM
 - **Security boundaries** — every tool call passes through a `Sandbox`
 - **MCP** — MCP servers are just another skill; the agent loop doesn't know they exist
-- **Provider differences** — Anthropic and OpenAI have different SSE formats, schemas, and tool conventions
+- **Provider differences** — Anthropic, OpenAI, and Gemini have different SSE formats, schemas, and tool conventions
 
 ## What it does
 
@@ -27,6 +27,7 @@ Dyson is a fully functional agent — not just a learning exercise.
 - **Subagents** — child agents with different models and tool sets, inheriting parent tools
 - **Multi-channel** — terminal REPL and Telegram bot concurrently; add channels via the `Controller` trait
 - **Dependency analysis** — tool calls grouped by resource dependencies, executed in parallel when safe
+- **Image generation** — pluggable image generation via the `image_generate` tool; reuses existing providers
 - **MCP server mode** — expose Dyson as an MCP server over HTTP with bearer token auth
 - **Swarm** — distribute tasks across Dyson nodes; see [Swarm (trusted-network only)](#swarm-trusted-network-only)
 
@@ -80,11 +81,12 @@ Everything is a trait: `LlmClient`, `Tool`, `Skill`, `Sandbox`, `Controller`, `S
 
 ## Providers
 
-Six LLM backends, selectable via `--provider` or config:
+Seven LLM backends, selectable via `--provider` or config:
 
 | Provider | Config value | API key | Notes |
 |----------|-------------|---------|-------|
 | Anthropic | `"anthropic"` | `ANTHROPIC_API_KEY` | Default. Full streaming + structured tool calling |
+| Gemini | `"gemini"` | `GEMINI_API_KEY` | Google Gemini. Chat + image generation (Nano Banana 2) |
 | OpenAI | `"openai"` | `OPENAI_API_KEY` | Also works with vLLM, Together, rLLM, etc. via `base_url` |
 | OpenRouter | `"openrouter"` | `OPENROUTER_API_KEY` | 200+ models via OpenAI-compatible API |
 | Ollama Cloud | `"ollama-cloud"` | `OLLAMA_API_KEY` | Cloud-hosted models on ollama.com |
@@ -92,6 +94,50 @@ Six LLM backends, selectable via `--provider` or config:
 | Codex | `"codex"` | None (uses stored creds) | Spawns the `codex` CLI. OpenAI Codex agent loop |
 
 Adding a new provider is a 3-step process — see [Adding a Provider](docs/adding-a-provider.md).
+
+## Image generation
+
+The `image_generate` tool lets the agent create images from text descriptions. Generated images are delivered to the user as files via the controller (printed as paths in terminal, sent as documents in Telegram).
+
+Configure it by pointing `image_generation_provider` at any provider that supports image generation:
+
+```json
+{
+  "providers": {
+    "gemini": {
+      "type": "gemini",
+      "api_key": { "resolver": "insecure_env", "name": "GEMINI_API_KEY" }
+    }
+  },
+  "agent": {
+    "provider": "anthropic",
+    "image_generation_provider": "gemini",
+    "image_generation_model": "gemini-3.1-flash-image-preview"
+  }
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `image_generation_provider` | Yes | Name of a provider from the `"providers"` map |
+| `image_generation_model` | No | Model override (defaults to the provider's default model) |
+
+When `image_generation_provider` is not set, the `image_generate` tool is simply absent — no errors. The provider must support image generation (currently: Gemini via the Nano Banana 2 / `gemini-3.1-flash-image-preview` model).
+
+A single Gemini provider can serve both chat and image generation:
+
+```json
+{
+  "providers": {
+    "gemini": { "type": "gemini", "api_key": "..." }
+  },
+  "agent": {
+    "provider": "gemini",
+    "image_generation_provider": "gemini",
+    "image_generation_model": "gemini-3.1-flash-image-preview"
+  }
+}
+```
 
 ## Quick start
 
@@ -171,7 +217,7 @@ Secrets can be literal strings or resolver references (`{ "resolver": "insecure_
 cargo test
 ```
 
-700+ tests covering the full stack — SSE parsing, sandbox decisions, config loading, workspace persistence, and the agent loop with mock LLM clients.
+1100+ tests covering the full stack — SSE parsing, sandbox decisions, config loading, workspace persistence, and the agent loop with mock LLM clients.
 
 ## Inspired by
 

@@ -294,10 +294,7 @@ impl SseJsonParser for GeminiJsonParser {
                         let id = fc["id"]
                             .as_str()
                             .map(|s| s.to_string())
-                            .unwrap_or_else(|| {
-                                let id = format!("gemini_call_{}", self.tool_index);
-                                id
-                            });
+                            .unwrap_or_else(|| format!("gemini_call_{}", self.tool_index));
 
                         let args = &fc["args"];
                         let index = self.tool_index;
@@ -338,30 +335,16 @@ impl SseJsonParser for GeminiJsonParser {
                     .as_u64()
                     .map(|n| n as usize);
 
-                match reason {
-                    "STOP" => {
-                        // Drain any remaining tool buffers before completing.
-                        events.extend(ctx.drain_all());
-                        events.push(Ok(StreamEvent::MessageComplete {
-                            stop_reason: StopReason::EndTurn,
-                            output_tokens,
-                        }));
-                    }
-                    "MAX_TOKENS" => {
-                        events.push(Ok(StreamEvent::MessageComplete {
-                            stop_reason: StopReason::MaxTokens,
-                            output_tokens,
-                        }));
-                    }
-                    _ => {
-                        // Covers SAFETY, RECITATION, OTHER, and any future reasons.
-                        events.extend(ctx.drain_all());
-                        events.push(Ok(StreamEvent::MessageComplete {
-                            stop_reason: StopReason::EndTurn,
-                            output_tokens,
-                        }));
-                    }
-                }
+                let stop_reason = match reason {
+                    "MAX_TOKENS" => StopReason::MaxTokens,
+                    _ => StopReason::EndTurn,
+                };
+
+                events.extend(ctx.drain_all());
+                events.push(Ok(StreamEvent::MessageComplete {
+                    stop_reason,
+                    output_tokens,
+                }));
             }
         }
 
