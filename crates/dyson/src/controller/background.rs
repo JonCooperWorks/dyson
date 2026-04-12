@@ -64,6 +64,15 @@ struct Inner {
     next_id: u64,
 }
 
+impl Inner {
+    /// Remove entries whose tasks have finished.
+    fn prune(&mut self) {
+        self.agents.retain(|_, info| {
+            info.handle.as_ref().is_none_or(|h| !h.is_finished())
+        });
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BackgroundAgentRegistry
 // ---------------------------------------------------------------------------
@@ -87,27 +96,22 @@ impl BackgroundAgentRegistry {
         }
     }
 
-    /// Reserve an ID and register a background agent.
+    /// Reserve an ID, register a background agent, and compute its log path.
     ///
-    /// Returns the assigned ID on success, or an error string if the registry
-    /// is at capacity.
+    /// `log_path_fn` receives the allocated ID and returns the log path.
+    /// This avoids a chicken-and-egg problem: the caller needs the ID to
+    /// compute the path, and the registry needs the path at registration.
     ///
-    /// The caller should use the returned ID to compute the log path, then
-    /// call [`set_log_path()`] and [`set_handle()`] to complete registration.
-    /// This two-phase approach avoids a chicken-and-egg problem: the spawned
-    /// task needs the ID (for `remove()`), but `register` needs the
-    /// `JoinHandle`.
-    pub fn allocate_id(
+    /// Call [`set_handle()`] immediately after `tokio::spawn` to attach
+    /// the task handle.
+    pub fn allocate(
         &self,
         prompt_preview: String,
         cancel: CancellationToken,
-    ) -> Result<u64, String> {
+        log_path_fn: impl FnOnce(u64) -> PathBuf,
+    ) -> Result<(u64, PathBuf), String> {
         let mut inner = self.inner.lock().expect("BackgroundAgentRegistry poisoned");
-
-        // Prune finished agents before checking capacity.
-        inner.agents.retain(|_, info| {
-            info.handle.as_ref().is_none_or(|h| !h.is_finished())
-        });
+        inner.prune();
 
         if inner.agents.len() >= MAX_BACKGROUND_AGENTS {
             return Err(format!(
@@ -117,6 +121,7 @@ impl BackgroundAgentRegistry {
 
         let id = inner.next_id;
         inner.next_id += 1;
+        let log_path = log_path_fn(id);
 
         inner.agents.insert(
             id,
@@ -124,20 +129,12 @@ impl BackgroundAgentRegistry {
                 prompt_preview,
                 started_at: Instant::now(),
                 cancel,
-                log_path: PathBuf::new(),
+                log_path: log_path.clone(),
                 handle: None,
             },
         );
 
-        Ok(id)
-    }
-
-    /// Set the log file path for a previously allocated agent.
-    pub fn set_log_path(&self, id: u64, path: PathBuf) {
-        let mut inner = self.inner.lock().expect("BackgroundAgentRegistry poisoned");
-        if let Some(info) = inner.agents.get_mut(&id) {
-            info.log_path = path;
-        }
+        Ok((id, log_path))
     }
 
     /// Attach the `JoinHandle` for a previously allocated agent.
@@ -157,11 +154,7 @@ impl BackgroundAgentRegistry {
     /// completed without calling `remove()`).
     pub fn list(&self) -> Vec<BackgroundAgentListEntry> {
         let mut inner = self.inner.lock().expect("BackgroundAgentRegistry poisoned");
-
-        // Prune finished agents.
-        inner.agents.retain(|_, info| {
-            info.handle.as_ref().is_none_or(|h| !h.is_finished())
-        });
+        inner.prune();
 
         let mut entries: Vec<BackgroundAgentListEntry> = inner
             .agents
@@ -219,15 +212,19 @@ impl Default for BackgroundAgentRegistry {
 mod tests {
     use super::*;
 
+    fn log_path(id: u64) -> PathBuf {
+        PathBuf::from(format!("/tmp/{id}.log"))
+    }
+
     #[test]
     fn allocate_and_list() {
         let reg = BackgroundAgentRegistry::new();
         let cancel = CancellationToken::new();
-        let id = reg
-            .allocate_id("test prompt".into(), cancel)
+        let (id, path) = reg
+            .allocate("test prompt".into(), cancel, log_path)
             .unwrap();
-        reg.set_log_path(id, PathBuf::from("/tmp/1.log"));
         assert_eq!(id, 1);
+        assert_eq!(path, PathBuf::from("/tmp/1.log"));
 
         let entries = reg.list();
         assert_eq!(entries.len(), 1);
@@ -239,8 +236,7 @@ mod tests {
     #[test]
     fn remove_clears_entry() {
         let reg = BackgroundAgentRegistry::new();
-        let cancel = CancellationToken::new();
-        let id = reg.allocate_id("test".into(), cancel).unwrap();
+        let (id, _) = reg.allocate("test".into(), CancellationToken::new(), log_path).unwrap();
 
         reg.remove(id);
         assert!(reg.list().is_empty());
@@ -251,7 +247,7 @@ mod tests {
         let reg = BackgroundAgentRegistry::new();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
-        let id = reg.allocate_id("test".into(), cancel).unwrap();
+        let (id, _) = reg.allocate("test".into(), cancel, log_path).unwrap();
 
         assert!(!cancel_clone.is_cancelled());
         reg.stop(id).unwrap();
@@ -268,17 +264,17 @@ mod tests {
     fn capacity_limit() {
         let reg = BackgroundAgentRegistry::new();
         for _ in 0..MAX_BACKGROUND_AGENTS {
-            reg.allocate_id("test".into(), CancellationToken::new()).unwrap();
+            reg.allocate("test".into(), CancellationToken::new(), log_path).unwrap();
         }
-        let result = reg.allocate_id("overflow".into(), CancellationToken::new());
+        let result = reg.allocate("overflow".into(), CancellationToken::new(), log_path);
         assert!(result.is_err());
     }
 
     #[test]
     fn ids_are_monotonic() {
         let reg = BackgroundAgentRegistry::new();
-        let id1 = reg.allocate_id("a".into(), CancellationToken::new()).unwrap();
-        let id2 = reg.allocate_id("b".into(), CancellationToken::new()).unwrap();
+        let (id1, _) = reg.allocate("a".into(), CancellationToken::new(), log_path).unwrap();
+        let (id2, _) = reg.allocate("b".into(), CancellationToken::new(), log_path).unwrap();
         assert!(id2 > id1);
     }
 }

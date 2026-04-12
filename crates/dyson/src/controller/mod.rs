@@ -908,15 +908,14 @@ async fn spawn_background_agent(
         prompt.to_string()
     };
 
-    // Two-phase registration: allocate the ID first, then compute the log
-    // path from it and attach it.
-    let id = match bg_registry.allocate_id(prompt_preview.clone(), cancel.clone()) {
-        Ok(id) => id,
+    let (id, log_path) = match bg_registry.allocate(
+        prompt_preview.clone(),
+        cancel.clone(),
+        log_output::LogFileOutput::log_path_for,
+    ) {
+        Ok(pair) => pair,
         Err(e) => return CommandResult::LoopError(e),
     };
-
-    let log_path = log_output::LogFileOutput::log_path_for(id);
-    bg_registry.set_log_path(id, log_path.clone());
 
     // Build the background agent with unlimited iterations and Background priority.
     let bg_client = registry.get_default().with_priority(Priority::Background);

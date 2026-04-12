@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::controller::Output;
 use crate::error::DysonError;
-use crate::tool::{CheckpointEvent, ToolOutput};
+use crate::tool::ToolOutput;
 
 /// An `Output` implementation that appends to a log file.
 ///
@@ -43,7 +43,7 @@ impl LogFileOutput {
     }
 
     /// Return the default log directory (`~/.dyson/agents/`).
-    pub fn default_log_dir() -> PathBuf {
+    fn default_log_dir() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         PathBuf::from(home).join(".dyson").join("agents")
     }
@@ -70,25 +70,23 @@ impl Output for LogFileOutput {
     }
 
     fn tool_result(&mut self, output: &ToolOutput) -> Result<(), DysonError> {
-        // Log a brief summary of the tool result.
         if !output.content.is_empty() {
-            let preview = if output.content.len() > 500 {
-                format!("{}... ({} bytes)", &output.content[..500], output.content.len())
+            if output.content.len() > 500 {
+                writeln!(
+                    self.file,
+                    "[Result: {}... ({} bytes)]",
+                    &output.content[..500],
+                    output.content.len(),
+                )?;
             } else {
-                output.content.clone()
-            };
-            writeln!(self.file, "[Result: {preview}]")?;
+                writeln!(self.file, "[Result: {}]", output.content)?;
+            }
         }
         Ok(())
     }
 
     fn send_file(&mut self, path: &Path) -> Result<(), DysonError> {
         writeln!(self.file, "[File: {}]", path.display())?;
-        Ok(())
-    }
-
-    fn checkpoint(&mut self, event: &CheckpointEvent) -> Result<(), DysonError> {
-        let _ = event;
         Ok(())
     }
 
