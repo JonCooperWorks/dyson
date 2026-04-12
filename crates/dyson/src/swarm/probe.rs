@@ -602,7 +602,7 @@ fn disk_free_statvfs(path: &str) -> u64 {
     }
 
     let stat = unsafe { stat.assume_init() };
-    stat.f_bavail * stat.f_frsize
+    stat.f_bavail as u64 * stat.f_frsize as u64
 }
 
 // ---------------------------------------------------------------------------
