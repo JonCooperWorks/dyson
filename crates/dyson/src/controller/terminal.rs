@@ -91,6 +91,8 @@ impl super::Controller for TerminalController {
 
         let (config_path, mut reloader) = super::create_hot_reloader(settings);
 
+        let bg_registry = std::sync::Arc::new(super::background::BackgroundAgentRegistry::new());
+
         eprintln!("Dyson v{} — type /exit to quit", env!("CARGO_PKG_VERSION"));
         eprintln!();
 
@@ -144,6 +146,7 @@ impl super::Controller for TerminalController {
                 &mut current_model,
                 config_path.as_deref(),
                 registry,
+                &bg_registry,
             )
             .await
             {
@@ -194,6 +197,42 @@ impl super::Controller for TerminalController {
                 }
                 CommandResult::LogsError(e) => {
                     eprintln!("[logs error: {e}]");
+                    continue;
+                }
+                CommandResult::LoopStarted {
+                    id,
+                    prompt_preview: _,
+                    chat_id,
+                } => {
+                    eprintln!("[agent #{id} started — chat: {chat_id}]");
+                    continue;
+                }
+                CommandResult::LoopError(e) => {
+                    eprintln!("[loop error: {e}]");
+                    continue;
+                }
+                CommandResult::AgentList { agents } => {
+                    if agents.is_empty() {
+                        eprintln!("No background agents running.");
+                    } else {
+                        eprintln!("Background agents:");
+                        for a in &agents {
+                            eprintln!(
+                                "  [{}] {} ({:.0}s)",
+                                a.id,
+                                a.prompt_preview,
+                                a.elapsed.as_secs_f64(),
+                            );
+                        }
+                    }
+                    continue;
+                }
+                CommandResult::AgentStopped { id } => {
+                    eprintln!("[agent #{id} stopped]");
+                    continue;
+                }
+                CommandResult::StopError(e) => {
+                    eprintln!("[stop error: {e}]");
                     continue;
                 }
             }

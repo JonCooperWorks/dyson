@@ -85,6 +85,7 @@ pub mod rate_limiter;
 mod reflection;
 mod result_formatter;
 mod silent_output;
+pub use silent_output::SilentOutput;
 pub mod stream_handler;
 pub mod token_budget;
 mod tool_limiter;
@@ -1027,6 +1028,12 @@ impl Agent {
         let mut recovered_this_turn = false;
 
         for iteration in 0..self.max_iterations {
+            // Check for cooperative cancellation (used by /stop, swarm abort).
+            if self.tool_context.cancellation.is_cancelled() {
+                tracing::info!("agent cancelled — breaking loop");
+                break;
+            }
+
             self.auto_compact_if_needed(&turn_system_prompt, output).await;
             self.log_iteration(iteration);
 

@@ -8,7 +8,7 @@ use crate::tool::ToolOutput;
 
 /// A no-op output sink used for side-channel LLM calls where we want
 /// tool execution but don't need to stream text to the user.
-pub(super) struct SilentOutput;
+pub struct SilentOutput;
 
 impl Output for SilentOutput {
     fn text_delta(&mut self, _: &str) -> Result<()> {

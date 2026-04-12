@@ -51,6 +51,7 @@
 //   controller creates an Output instance and passes it to the agent.
 // ===========================================================================
 
+pub mod background;
 pub mod recording;
 pub mod swarm;
 pub mod telegram;
@@ -710,13 +711,29 @@ pub enum CommandResult {
     Logs(String),
     /// `/logs` failed — could not read log file.
     LogsError(String),
+    /// `/loop` succeeded — background agent spawned.
+    LoopStarted {
+        id: u64,
+        prompt_preview: String,
+        chat_id: String,
+    },
+    /// `/loop` failed.
+    LoopError(String),
+    /// `/agents` — list of running background agents.
+    AgentList {
+        agents: Vec<background::BackgroundAgentListEntry>,
+    },
+    /// `/stop` succeeded — agent cancellation requested.
+    AgentStopped { id: u64 },
+    /// `/stop` failed — invalid ID or agent not found.
+    StopError(String),
     /// Input was not a shared command — controller should handle it.
     NotHandled,
 }
 
 /// Execute a shared command, returning a result for the controller to render.
 ///
-/// Handles: `/clear`, `/compact`, `/models`, `/model`.
+/// Handles: `/clear`, `/compact`, `/models`, `/model`, `/loop`, `/agents`, `/stop`.
 /// Returns `NotHandled` for everything else, so controllers can check
 /// their own commands before or after calling this.
 #[allow(clippy::too_many_arguments)]
@@ -729,6 +746,7 @@ pub async fn execute_command(
     current_model: &mut String,
     config_path: Option<&Path>,
     registry: &ClientRegistry,
+    bg_registry: &std::sync::Arc<background::BackgroundAgentRegistry>,
 ) -> CommandResult {
     if input == "/clear" {
         agent.clear();
@@ -830,7 +848,138 @@ pub async fn execute_command(
         };
     }
 
+    // --- Background agent commands ---
+
+    if input == "/agents" {
+        return CommandResult::AgentList {
+            agents: bg_registry.list(),
+        };
+    }
+
+    if let Some(args) = input.strip_prefix("/loop ").map(str::trim) {
+        if args.is_empty() {
+            return CommandResult::LoopError("usage: /loop <prompt>".to_string());
+        }
+        return spawn_background_agent(args, settings, registry, bg_registry).await;
+    }
+
+    if input == "/loop" {
+        return CommandResult::LoopError("usage: /loop <prompt>".to_string());
+    }
+
+    if let Some(args) = input.strip_prefix("/stop ").map(str::trim) {
+        let id: u64 = match args.parse() {
+            Ok(id) => id,
+            Err(_) => return CommandResult::StopError("invalid agent ID".to_string()),
+        };
+        return match bg_registry.stop(id) {
+            Ok(()) => CommandResult::AgentStopped { id },
+            Err(e) => CommandResult::StopError(e),
+        };
+    }
+
+    if input == "/stop" {
+        return CommandResult::StopError("usage: /stop <id>".to_string());
+    }
+
     CommandResult::NotHandled
+}
+
+/// Spawn a background agent with unlimited iterations.
+///
+/// Constructs a fresh agent from the current settings, wires up a
+/// `CancellationToken` for `/stop`, and runs it in a `tokio::spawn` task.
+/// The agent's conversation is persisted through the existing chat history
+/// system under chat ID `bg-<id>`, reusing the same storage and media
+/// externalization as regular conversations.
+async fn spawn_background_agent(
+    prompt: &str,
+    settings: &Settings,
+    registry: &ClientRegistry,
+    bg_registry: &std::sync::Arc<background::BackgroundAgentRegistry>,
+) -> CommandResult {
+    use crate::agent::rate_limiter::Priority;
+    use tokio_util::sync::CancellationToken;
+
+    let cancel = CancellationToken::new();
+
+    let prompt_preview = if prompt.len() > 100 {
+        format!("{}...", &prompt[..97])
+    } else {
+        prompt.to_string()
+    };
+
+    let id = match bg_registry.allocate(prompt_preview.clone(), cancel.clone()) {
+        Ok(id) => id,
+        Err(e) => return CommandResult::LoopError(e),
+    };
+
+    let chat_id = format!("bg-{id}");
+
+    // Build the background agent with unlimited iterations and Background priority.
+    let bg_client = registry.get_default().with_priority(Priority::Background);
+
+    let mut bg_settings = settings.clone();
+    bg_settings.agent.max_iterations = usize::MAX;
+
+    let mut bg_agent = match build_agent(
+        &bg_settings,
+        None,
+        AgentMode::Private,
+        bg_client,
+        registry,
+        None,
+    )
+    .await
+    {
+        Ok(agent) => agent,
+        Err(e) => {
+            bg_registry.remove(id);
+            return CommandResult::LoopError(format!("failed to build agent: {e}"));
+        }
+    };
+
+    bg_agent.set_cancellation_token(cancel);
+
+    // Attach chat history so the conversation is persisted through the
+    // existing chat store (same backend as Telegram / other controllers).
+    if let Ok(store) = crate::chat_history::create_chat_history(&settings.chat_history) {
+        let store: std::sync::Arc<dyn crate::chat_history::ChatHistory> = std::sync::Arc::from(store);
+        bg_agent.set_chat_history(store, chat_id.clone());
+    }
+
+    let prompt_owned = prompt.to_string();
+    let bg_reg = std::sync::Arc::clone(bg_registry);
+    let mut output = crate::agent::SilentOutput;
+
+    let handle = tokio::spawn(async move {
+        tracing::info!(id, prompt = %prompt_owned, "background agent starting");
+        match bg_agent.run(&prompt_owned, &mut output).await {
+            Ok(text) => {
+                tracing::info!(
+                    id,
+                    text_len = text.len(),
+                    "background agent completed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    id,
+                    error = %e,
+                    "background agent failed"
+                );
+            }
+        }
+        bg_reg.remove(id);
+    });
+
+    bg_registry.set_handle(id, handle);
+
+    CommandResult::LoopStarted {
+        id,
+        prompt_preview,
+        chat_id,
+    }
 }
 
 /// Read the last `n` lines from the most recent `~/.dyson/dyson.log.*` file.
