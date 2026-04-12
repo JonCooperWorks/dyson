@@ -277,4 +277,52 @@ mod tests {
         let (id2, _) = reg.allocate("b".into(), CancellationToken::new(), log_path).unwrap();
         assert!(id2 > id1);
     }
+
+    #[tokio::test]
+    async fn prune_removes_finished_tasks() {
+        let reg = BackgroundAgentRegistry::new();
+        let (id, _) = reg.allocate("done".into(), CancellationToken::new(), log_path).unwrap();
+
+        // Spawn a task that completes immediately.
+        let handle = tokio::spawn(async {});
+        handle.await.unwrap(); // Wait for it to finish.
+
+        // Manually set a finished handle.
+        let finished_handle = tokio::spawn(async {});
+        finished_handle.await.unwrap();
+        reg.set_handle(id, tokio::spawn(async {}));
+
+        // Give the runtime a moment to mark it finished.
+        tokio::task::yield_now().await;
+
+        // list() should prune the finished task.
+        let entries = reg.list();
+        assert!(entries.is_empty(), "finished task should be pruned");
+    }
+
+    #[test]
+    fn prune_frees_capacity() {
+        let reg = BackgroundAgentRegistry::new();
+
+        // Fill to capacity with handle-less entries (no handle = never pruned
+        // by is_finished, but remove() works).
+        for _ in 0..MAX_BACKGROUND_AGENTS {
+            reg.allocate("x".into(), CancellationToken::new(), log_path).unwrap();
+        }
+        assert!(reg.allocate("overflow".into(), CancellationToken::new(), log_path).is_err());
+
+        // Remove one manually — simulates the spawned task calling remove().
+        reg.remove(1);
+
+        // Now there's room for one more.
+        assert!(reg.allocate("fits".into(), CancellationToken::new(), log_path).is_ok());
+    }
+
+    #[test]
+    fn stop_after_remove_errors() {
+        let reg = BackgroundAgentRegistry::new();
+        let (id, _) = reg.allocate("test".into(), CancellationToken::new(), log_path).unwrap();
+        reg.remove(id);
+        assert!(reg.stop(id).is_err());
+    }
 }
