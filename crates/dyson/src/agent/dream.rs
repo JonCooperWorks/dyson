@@ -42,6 +42,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::error::Result;
+use crate::feedback::FeedbackEntry;
 use crate::llm::{CompletionConfig, LlmClient};
 use crate::message::Message;
 use crate::tool::ToolContext;
@@ -316,6 +317,8 @@ struct DreamRequest {
     /// for summarisation.
     messages: Arc<[Message]>,
     turn_count: usize,
+    /// User feedback ratings for this conversation, if available.
+    feedback_entries: Option<Vec<FeedbackEntry>>,
 }
 
 /// Channel-based handle to the persistent dream thread.
@@ -369,7 +372,13 @@ impl DreamHandle {
                     );
 
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let summary = reflection::summarize_for_reflection(&req.messages);
+                        let mut summary = reflection::summarize_for_reflection(&req.messages);
+                        if let Some(ref entries) = req.feedback_entries {
+                            summary.push_str(&reflection::format_feedback_summary(
+                                entries,
+                                req.messages.len(),
+                            ));
+                        }
                         tracing::debug!(summary_len = summary.len(), "conversation summarised for dreams");
                         runner.fire(&req.event, || DreamContext {
                             client: req.client.clone(),
@@ -424,6 +433,7 @@ impl DreamHandle {
         tool_context: ToolContext,
         messages: Arc<[Message]>,
         turn_count: usize,
+        feedback_entries: Option<Vec<FeedbackEntry>>,
     ) {
         let req = DreamRequest {
             event,
@@ -432,6 +442,7 @@ impl DreamHandle {
             tool_context,
             messages,
             turn_count,
+            feedback_entries,
         };
         if self.tx.send(req).is_err() {
             tracing::warn!("dream thread disconnected, dropping request");

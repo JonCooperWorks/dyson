@@ -371,6 +371,13 @@ pub struct Agent {
     /// Optional persistence backend for rotating pre-compaction snapshots.
     history_backend: Option<HistoryBackend>,
 
+    /// Optional feedback store for per-turn quality ratings.
+    ///
+    /// When set, dreams incorporate user ratings into their decisions:
+    /// memory curation prioritises insights from well-rated interactions,
+    /// and self-improvement uses ratings to guide skill creation.
+    feedback_store: Option<crate::feedback::FeedbackStore>,
+
     /// Optional audio transcriber for resolving media attachments.
     ///
     /// Created from `Settings::transcriber` config at agent construction time.
@@ -587,6 +594,7 @@ impl Agent {
             tool_hooks: Vec::new(),
             dream_handle,
             history_backend: None,
+            feedback_store: None,
             transcriber,
             advisor_prompt,
         })
@@ -655,7 +663,7 @@ impl Agent {
                     reflection::MemoryMaintenanceDream::new(nudge_interval),
                 ));
 
-                // Self-improvement: create skills / export data every 2N turns.
+                // Self-improvement: create skills every 2N turns.
                 dreams.push(Arc::new(
                     reflection::SelfImprovementDream::new(nudge_interval),
                 ));
@@ -728,6 +736,21 @@ impl Agent {
 
         let messages: Arc<[Message]> = self.conversation.messages.clone().into();
 
+        let feedback_entries = self
+            .feedback_store
+            .as_ref()
+            .zip(self.history_backend.as_ref())
+            .and_then(|(store, backend)| {
+                match store.load(&backend.chat_id) {
+                    Ok(entries) if !entries.is_empty() => Some(entries),
+                    Ok(_) => None,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to load feedback for dreams");
+                        None
+                    }
+                }
+            });
+
         self.dream_handle.fire(
             event,
             self.client.with_priority(rate_limiter::Priority::Background),
@@ -735,6 +758,7 @@ impl Agent {
             self.tool_context.clone(),
             messages,
             self.conversation.turn_count,
+            feedback_entries,
         );
     }
 
@@ -765,6 +789,43 @@ impl Agent {
     /// summarising.  This preserves the full verbatim history.
     pub fn set_chat_history(&mut self, store: Arc<dyn ChatHistory>, chat_id: String) {
         self.history_backend = Some(HistoryBackend { store, chat_id });
+    }
+
+    /// Attach a feedback store so dreams can incorporate user ratings.
+    pub fn set_feedback_store(&mut self, store: crate::feedback::FeedbackStore) {
+        self.feedback_store = Some(store);
+    }
+
+    /// Record a user's quality rating for a specific assistant turn.
+    pub fn record_feedback(
+        &self,
+        turn_index: usize,
+        rating: crate::feedback::FeedbackRating,
+    ) -> crate::error::Result<()> {
+        let (Some(store), Some(backend)) = (&self.feedback_store, &self.history_backend) else {
+            return Ok(());
+        };
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        store.upsert(
+            &backend.chat_id,
+            crate::feedback::FeedbackEntry {
+                turn_index,
+                rating,
+                score: rating.score(),
+                timestamp,
+            },
+        )
+    }
+
+    /// Remove a previously recorded rating for a specific turn.
+    pub fn remove_feedback(&self, turn_index: usize) -> crate::error::Result<()> {
+        let (Some(store), Some(backend)) = (&self.feedback_store, &self.history_backend) else {
+            return Ok(());
+        };
+        store.remove(&backend.chat_id, turn_index)
     }
 
     /// Remove and return the last message in the conversation history.

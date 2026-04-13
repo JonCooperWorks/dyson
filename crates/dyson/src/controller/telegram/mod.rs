@@ -336,10 +336,10 @@ impl super::Controller for TelegramController {
             Arc::from(store)
         };
 
-        // Feedback store for emoji reactions — lives alongside chat history.
-        let feedback_store = Arc::new(crate::feedback::FeedbackStore::new(
-            crate::workspace::openclaw::resolve_tilde(settings.chat_history.connection_string.expose()),
-        ));
+        // Feedback directory — lives alongside chat history.  Each agent gets
+        // its own FeedbackStore instance via set_feedback_store().
+        let feedback_dir =
+            crate::workspace::openclaw::resolve_tilde(settings.chat_history.connection_string.expose());
 
         let mut offset: i64 = 0;
         let mut consecutive_failures: u64 = 0;
@@ -358,6 +358,7 @@ impl super::Controller for TelegramController {
                     &current_settings,
                     controller_prompt.as_deref(),
                     &chat_store,
+                    &feedback_dir,
                     registry,
                 )
                 .await;
@@ -406,7 +407,7 @@ impl super::Controller for TelegramController {
 
                 // Handle emoji reactions for feedback/RLHF signal.
                 if let Some(reaction) = &update.message_reaction {
-                    handle_reaction(reaction, &agents, &feedback_store).await;
+                    handle_reaction(reaction, &agents).await;
                     continue;
                 }
 
@@ -526,6 +527,7 @@ impl super::Controller for TelegramController {
                         &current_settings,
                         controller_prompt.as_deref(),
                         &chat_store,
+                        &feedback_dir,
                         registry,
                     )
                     .await
@@ -560,6 +562,7 @@ impl super::Controller for TelegramController {
                     &current_settings,
                     controller_prompt.as_deref(),
                     &chat_store,
+                    &feedback_dir,
                     registry,
                 )
                 .await
@@ -599,6 +602,7 @@ async fn rebuild_agents_on_reload(
     settings: &Settings,
     controller_prompt: Option<&str>,
     chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
+    feedback_dir: &std::path::Path,
     registry: &super::ClientRegistry,
 ) {
     let mut agents_map = agents.write().await;
@@ -642,6 +646,9 @@ async fn rebuild_agents_on_reload(
                 new_agent.set_chat_history(
                     Arc::clone(chat_store),
                     chat_id.to_string(),
+                );
+                new_agent.set_feedback_store(
+                    crate::feedback::FeedbackStore::new(feedback_dir.to_path_buf()),
                 );
                 let sys_prompt = new_agent.system_prompt().to_string();
                 let cfg = new_agent.config().clone();
@@ -743,10 +750,8 @@ async fn handle_callback_query(
 async fn handle_reaction(
     reaction: &types::MessageReactionUpdated,
     agents: &tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>,
-    feedback_store: &crate::feedback::FeedbackStore,
 ) {
     let chat_id = reaction.chat.id;
-    let chat_key = chat_id.to_string();
     let message_id = reaction.message_id;
 
     // Look up the chat entry to find the message_id → turn_index mapping.
@@ -770,9 +775,16 @@ async fn handle_reaction(
     };
     drop(id_map);
 
+    // Lock the agent to record feedback.
+    let ca = entry.agent.lock().await;
+    let Some(ref agent) = ca.agent else {
+        tracing::debug!(chat_id, "agent not available for feedback");
+        return;
+    };
+
     // Empty new_reaction means the user removed their reaction.
     if reaction.new_reaction.is_empty() {
-        if let Err(e) = feedback_store.remove(&chat_key, turn_index) {
+        if let Err(e) = agent.remove_feedback(turn_index) {
             tracing::warn!(error = %e, chat_id, turn_index, "failed to remove feedback");
         } else {
             tracing::info!(chat_id, turn_index, "feedback removed (reaction cleared)");
@@ -803,19 +815,7 @@ async fn handle_reaction(
         return;
     };
 
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let entry = crate::feedback::FeedbackEntry {
-        turn_index,
-        rating,
-        score: rating.score(),
-        timestamp,
-    };
-
-    if let Err(e) = feedback_store.upsert(&chat_key, entry) {
+    if let Err(e) = agent.record_feedback(turn_index, rating) {
         tracing::warn!(error = %e, chat_id, turn_index, "failed to save feedback");
     } else {
         tracing::info!(chat_id, turn_index, emoji, "feedback recorded");
@@ -1313,6 +1313,7 @@ async fn get_or_create_entry(
     settings: &Settings,
     controller_prompt: Option<&str>,
     chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
+    feedback_dir: &std::path::Path,
     registry: &super::ClientRegistry,
 ) -> crate::Result<Arc<ChatEntry>> {
     // Fast path: entry already exists.
@@ -1337,6 +1338,7 @@ async fn get_or_create_entry(
 
     // Attach chat history so compaction can rotate pre-compaction snapshots.
     agent.set_chat_history(Arc::clone(chat_store), chat_key.clone());
+    agent.set_feedback_store(crate::feedback::FeedbackStore::new(feedback_dir.to_path_buf()));
 
     let mut restored_messages = Vec::new();
     if let Ok(messages) = chat_store.load(&chat_key)

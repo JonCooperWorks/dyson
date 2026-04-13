@@ -225,9 +225,10 @@ async fn reflection_system_prompt_lists_tools() {
     };
     let prompt = reflection::build_reflection_system_prompt(&ctx).await;
     assert!(prompt.contains("skill_create"));
-    assert!(prompt.contains("export_conversation"));
+    assert!(!prompt.contains("export_conversation"));
     assert!(prompt.contains("When to create a skill"));
     assert!(prompt.contains("When to do nothing"));
+    assert!(prompt.contains("Rating-informed decisions"));
 }
 
 #[test]
@@ -301,6 +302,46 @@ fn summarize_for_reflection_handles_multibyte_utf8() {
 
     let summary = reflection::summarize_for_reflection(&messages_with_result);
     assert!(summary.contains("[Tool result:"));
+}
+
+// -----------------------------------------------------------------------
+// Feedback summary formatting tests
+// -----------------------------------------------------------------------
+
+fn fb(turn_index: usize, rating: crate::feedback::FeedbackRating) -> crate::feedback::FeedbackEntry {
+    crate::feedback::FeedbackEntry {
+        turn_index,
+        rating,
+        score: rating.score(),
+        timestamp: 0,
+    }
+}
+
+#[test]
+fn format_feedback_summary_empty_returns_empty() {
+    assert!(reflection::format_feedback_summary(&[], 10).is_empty());
+}
+
+#[test]
+fn format_feedback_summary_mixed_ratings() {
+    use crate::feedback::FeedbackRating::*;
+
+    let entries = vec![fb(3, Excellent), fb(5, Bad), fb(7, VeryGood), fb(9, Good)];
+    let summary = reflection::format_feedback_summary(&entries, 20);
+    assert!(summary.contains("4 rated turns out of 20 messages"));
+    assert!(summary.contains("Highly rated (score >= +2): turns 3, 7"));
+    assert!(summary.contains("Poorly rated (score <= -1): turns 5"));
+    assert!(summary.contains("Score distribution:"));
+}
+
+#[test]
+fn format_feedback_summary_all_positive() {
+    use crate::feedback::FeedbackRating::*;
+
+    let entries = vec![fb(1, Good), fb(3, Good)];
+    let summary = reflection::format_feedback_summary(&entries, 8);
+    assert!(summary.contains("+1.0"));
+    assert!(!summary.contains("Poorly rated"));
 }
 
 // -----------------------------------------------------------------------
