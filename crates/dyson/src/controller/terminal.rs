@@ -37,6 +37,54 @@ use crate::controller::{CommandResult, Output, ProviderInfo, ReloadOutcome};
 use crate::error::DysonError;
 use crate::tool::ToolOutput;
 
+/// Render a `CommandResult` for the terminal.
+fn render_command_result_terminal(result: &CommandResult) {
+    match result {
+        CommandResult::Cleared => eprintln!("[context cleared]"),
+        CommandResult::Compacted => eprintln!("[context compacted]"),
+        CommandResult::CompactError(e) => eprintln!("[compaction failed: {e}]"),
+        CommandResult::ModelList { providers } => {
+            if providers.is_empty() {
+                eprintln!("No providers configured.");
+            } else {
+                eprint!("{}", format_provider_list(providers));
+            }
+        }
+        CommandResult::ModelSwitched {
+            provider_name,
+            provider_type,
+            model,
+        } => eprintln!("[switched to '{provider_name}' — {provider_type} ({model})]"),
+        CommandResult::ModelSwitchError(e) => eprintln!("[switch error: {e}]"),
+        CommandResult::ModelParseError(e) => eprintln!("[{e}]"),
+        CommandResult::ModelUsage => {
+            eprintln!("Usage: /model <provider> [model]  or  /model <model>")
+        }
+        CommandResult::Logs(lines) => println!("{lines}"),
+        CommandResult::LogsError(e) => eprintln!("[logs error: {e}]"),
+        CommandResult::LoopStarted { id, chat_id, .. } => {
+            eprintln!("[agent #{id} started — chat: {chat_id}]")
+        }
+        CommandResult::LoopError(e) => eprintln!("[loop error: {e}]"),
+        CommandResult::AgentList { agents } => {
+            if agents.is_empty() {
+                eprintln!("No background agents running.");
+            } else {
+                eprintln!("Background agents:");
+                for a in agents {
+                    eprintln!(
+                        "  [{}] {} ({:.0}s)",
+                        a.id, a.prompt_preview, a.elapsed.as_secs_f64(),
+                    );
+                }
+            }
+        }
+        CommandResult::AgentStopped { id } => eprintln!("[agent #{id} stopped]"),
+        CommandResult::StopError(e) => eprintln!("[stop error: {e}]"),
+        CommandResult::NotHandled => {}
+    }
+}
+
 /// Format a `ProviderInfo` list for terminal display, marking the active model with `*`.
 fn format_provider_list(providers: &[ProviderInfo]) -> String {
     let mut out = String::from("Available providers:\n");
@@ -136,8 +184,24 @@ impl super::Controller for TerminalController {
                 break;
             }
 
-            // Shared commands.
-            match super::execute_command(
+            // Lock-free commands first (no agent needed).
+            match super::execute_lockfree_command(
+                input,
+                &current_settings,
+                registry,
+                &bg_registry,
+            )
+            .await
+            {
+                CommandResult::NotHandled => {}
+                result => {
+                    render_command_result_terminal(&result);
+                    continue;
+                }
+            }
+
+            // Commands that need the agent.
+            match super::execute_agent_command(
                 input,
                 &mut agent,
                 &mut output,
@@ -146,93 +210,12 @@ impl super::Controller for TerminalController {
                 &mut current_model,
                 config_path.as_deref(),
                 registry,
-                &bg_registry,
             )
             .await
             {
                 CommandResult::NotHandled => {}
-                CommandResult::Cleared => {
-                    eprintln!("[context cleared]");
-                    continue;
-                }
-                CommandResult::Compacted => {
-                    eprintln!("[context compacted]");
-                    continue;
-                }
-                CommandResult::CompactError(e) => {
-                    eprintln!("[compaction failed: {e}]");
-                    continue;
-                }
-                CommandResult::ModelList { providers } => {
-                    if providers.is_empty() {
-                        eprintln!("No providers configured.");
-                    } else {
-                        eprint!("{}", format_provider_list(&providers));
-                    }
-                    continue;
-                }
-                CommandResult::ModelSwitched {
-                    provider_name,
-                    provider_type,
-                    model,
-                } => {
-                    eprintln!("[switched to '{provider_name}' — {provider_type} ({model})]");
-                    continue;
-                }
-                CommandResult::ModelSwitchError(e) => {
-                    eprintln!("[switch error: {e}]");
-                    continue;
-                }
-                CommandResult::ModelParseError(e) => {
-                    eprintln!("[{e}]");
-                    continue;
-                }
-                CommandResult::ModelUsage => {
-                    eprintln!("Usage: /model <provider> [model]  or  /model <model>");
-                    continue;
-                }
-                CommandResult::Logs(lines) => {
-                    println!("{lines}");
-                    continue;
-                }
-                CommandResult::LogsError(e) => {
-                    eprintln!("[logs error: {e}]");
-                    continue;
-                }
-                CommandResult::LoopStarted {
-                    id,
-                    prompt_preview: _,
-                    chat_id,
-                } => {
-                    eprintln!("[agent #{id} started — chat: {chat_id}]");
-                    continue;
-                }
-                CommandResult::LoopError(e) => {
-                    eprintln!("[loop error: {e}]");
-                    continue;
-                }
-                CommandResult::AgentList { agents } => {
-                    if agents.is_empty() {
-                        eprintln!("No background agents running.");
-                    } else {
-                        eprintln!("Background agents:");
-                        for a in &agents {
-                            eprintln!(
-                                "  [{}] {} ({:.0}s)",
-                                a.id,
-                                a.prompt_preview,
-                                a.elapsed.as_secs_f64(),
-                            );
-                        }
-                    }
-                    continue;
-                }
-                CommandResult::AgentStopped { id } => {
-                    eprintln!("[agent #{id} stopped]");
-                    continue;
-                }
-                CommandResult::StopError(e) => {
-                    eprintln!("[stop error: {e}]");
+                result => {
+                    render_command_result_terminal(&result);
                     continue;
                 }
             }
