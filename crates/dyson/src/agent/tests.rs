@@ -225,9 +225,10 @@ async fn reflection_system_prompt_lists_tools() {
     };
     let prompt = reflection::build_reflection_system_prompt(&ctx).await;
     assert!(prompt.contains("skill_create"));
-    assert!(prompt.contains("export_conversation"));
+    assert!(!prompt.contains("export_conversation"));
     assert!(prompt.contains("When to create a skill"));
     assert!(prompt.contains("When to do nothing"));
+    assert!(prompt.contains("Rating-informed decisions"));
 }
 
 #[test]
@@ -301,6 +302,80 @@ fn summarize_for_reflection_handles_multibyte_utf8() {
 
     let summary = reflection::summarize_for_reflection(&messages_with_result);
     assert!(summary.contains("[Tool result:"));
+}
+
+// -----------------------------------------------------------------------
+// Feedback summary formatting tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn format_feedback_summary_empty_returns_empty() {
+    let result = reflection::format_feedback_summary(&[], 10);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn format_feedback_summary_mixed_ratings() {
+    use crate::feedback::{FeedbackEntry, FeedbackRating};
+
+    let entries = vec![
+        FeedbackEntry {
+            turn_index: 3,
+            rating: FeedbackRating::Excellent,
+            score: 3,
+            timestamp: 0,
+        },
+        FeedbackEntry {
+            turn_index: 5,
+            rating: FeedbackRating::Bad,
+            score: -2,
+            timestamp: 0,
+        },
+        FeedbackEntry {
+            turn_index: 7,
+            rating: FeedbackRating::VeryGood,
+            score: 2,
+            timestamp: 0,
+        },
+        FeedbackEntry {
+            turn_index: 9,
+            rating: FeedbackRating::Good,
+            score: 1,
+            timestamp: 0,
+        },
+    ];
+
+    let summary = reflection::format_feedback_summary(&entries, 20);
+    assert!(summary.contains("User feedback ratings"));
+    assert!(summary.contains("4 rated turns out of 20 messages"));
+    assert!(summary.contains("Highly rated (score >= +2): turns 3, 7"));
+    assert!(summary.contains("Poorly rated (score <= -1): turns 5"));
+    assert!(summary.contains("Score distribution:"));
+}
+
+#[test]
+fn format_feedback_summary_all_positive() {
+    use crate::feedback::{FeedbackEntry, FeedbackRating};
+
+    let entries = vec![
+        FeedbackEntry {
+            turn_index: 1,
+            rating: FeedbackRating::Good,
+            score: 1,
+            timestamp: 0,
+        },
+        FeedbackEntry {
+            turn_index: 3,
+            rating: FeedbackRating::Good,
+            score: 1,
+            timestamp: 0,
+        },
+    ];
+
+    let summary = reflection::format_feedback_summary(&entries, 8);
+    assert!(summary.contains("+1.0"));
+    // No poorly rated section when all scores are positive.
+    assert!(!summary.contains("Poorly rated"));
 }
 
 // -----------------------------------------------------------------------

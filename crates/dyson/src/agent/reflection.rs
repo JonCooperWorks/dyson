@@ -13,7 +13,7 @@
 //      improvement/{epoch}.json.  Fires every N user turns.
 //
 //   3. SelfImprovementDream    — mini agent loop that creates skills
-//      or exports training data.  Fires every 2N turns.
+//      based on patterns and user feedback.  Fires every 2N turns.
 //
 // Curation (not merging) is the key verb for dreams 1 and 2: they walk
 // the existing file and actively delete low-value entries rather than
@@ -63,6 +63,7 @@ line by line and apply this judgment to every block:\n\
 - User preferences, workflow patterns, communication style\n\
 - Technical constraints future sessions must respect\n\
 - References to active skills or tools\n\
+- Context and approaches from interactions the user rated highly (+2 or +3)\n\
 \n\
 ### REFINE (compress, preserve meaning)\n\
 - Verbose entries restating the same fact — collapse to one bullet\n\
@@ -76,6 +77,8 @@ line by line and apply this judgment to every block:\n\
 - Duplicates of entries already present elsewhere in the file\n\
 - Raw tool output (summarise the insight, not the data)\n\
 - One-off session state: temp paths, ephemeral task IDs, scratch values\n\
+- Approaches from poorly-rated interactions (-2 or -3) where the method was \
+clearly wrong (but preserve the lesson if one was learned)\n\
 \n\
 ### CRITICAL — the anti-timestamp rule\n\
 NEVER use time-of-day, day-of-week, date, or apparent entry age as a \
@@ -83,6 +86,15 @@ pruning signal.  We work heavily at night.  An entry written at 3 AM is \
 as valuable as one written at 3 PM.  Judge purely on content value.  If \
 you cannot justify a DISCARD decision without referencing *when* an \
 entry was made, you must KEEP it.\n\
+\n\
+### Rating-informed priority\n\
+When feedback ratings appear in the conversation summary, treat them as \
+strong signal.  Highly-rated interactions (+2 to +3) indicate approaches, \
+patterns, and preferences confirmed valuable by the user — prioritise \
+preserving that context.  Poorly-rated interactions (-2 to -3) indicate \
+dissatisfaction — look for what went wrong and preserve the lesson, but \
+discard the failed approach itself.  Unrated interactions should be \
+judged purely on content value as usual.\n\
 \n\
 ### Fuzzy sizing\n\
 Aim for the soft target but do not truncate valuable signal to hit it.  \
@@ -266,6 +278,77 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
     ));
 
     summary
+}
+
+/// Format feedback entries into a textual summary for dream prompts.
+///
+/// When user ratings are available, this produces a section that dreams can
+/// use to weight their decisions — e.g., skills should encode patterns from
+/// highly-rated interactions, memory should preserve context around what
+/// worked well.
+pub(super) fn format_feedback_summary(
+    entries: &[crate::feedback::FeedbackEntry],
+    message_count: usize,
+) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+
+    let total_rated = entries.len();
+    let avg_score: f64 =
+        entries.iter().map(|e| e.score as f64).sum::<f64>() / total_rated as f64;
+
+    let high_rated: Vec<usize> = entries
+        .iter()
+        .filter(|e| e.score >= 2)
+        .map(|e| e.turn_index)
+        .collect();
+    let low_rated: Vec<usize> = entries
+        .iter()
+        .filter(|e| e.score <= -1)
+        .map(|e| e.turn_index)
+        .collect();
+
+    // Score distribution: indices 0..7 map to scores -3..+3.
+    let mut dist = [0u32; 7];
+    for e in entries {
+        let idx = (e.score + 3) as usize;
+        if idx < 7 {
+            dist[idx] += 1;
+        }
+    }
+
+    let mut out = format!(
+        "\n\n## User feedback ratings\n\
+         Average score: {avg_score:+.1} ({total_rated} rated turns out of {message_count} messages)\n"
+    );
+
+    if !high_rated.is_empty() {
+        out.push_str(&format!(
+            "Highly rated (score >= +2): turns {}\n",
+            high_rated
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !low_rated.is_empty() {
+        out.push_str(&format!(
+            "Poorly rated (score <= -1): turns {}\n",
+            low_rated
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    out.push_str(&format!(
+        "Score distribution: [-3:{}, -2:{}, -1:{}, 0:{}, +1:{}, +2:{}, +3:{}]\n",
+        dist[0], dist[1], dist[2], dist[3], dist[4], dist[5], dist[6]
+    ));
+
+    out
 }
 
 // ===========================================================================
@@ -547,9 +630,9 @@ pub(super) async fn build_memory_system_prompt(ctx: &ToolContext) -> String {
 // 3. SelfImprovementDream
 // ===========================================================================
 
-/// Reviews conversation and creates skills or exports training data.
+/// Reviews conversation and creates skills based on patterns and user feedback.
 ///
-/// Runs a mini agent loop with skill_create and export_conversation tools.
+/// Runs a mini agent loop with the skill_create tool.
 /// Fires at half the frequency of memory maintenance (every 2N turns)
 /// and only after a minimum number of turns have elapsed.
 pub struct SelfImprovementDream {
@@ -591,7 +674,6 @@ impl Dream for SelfImprovementDream {
 
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(crate::tool::skill_create::SkillCreateTool),
-            Arc::new(crate::tool::export_conversation::ExportConversationTool),
         ];
 
         let (actions_taken, artifacts) = run_mini_loop(
@@ -642,31 +724,40 @@ pub(super) async fn build_reflection_system_prompt(ctx: &ToolContext) -> String 
 
     format!(
         "You are a self-improvement engine for an AI agent.  Your job is to review \
-         a conversation that just happened and decide whether to take action.\n\n\
-         You have two tools:\n\
+         a conversation that just happened and decide whether to create or improve \
+         a skill.\n\n\
+         You have one tool:\n\
          - **skill_create**: Create or improve a SKILL.md file in the workspace.  \
            Skills are system prompt fragments that auto-load on startup, teaching \
-           the agent reusable procedures.\n\
-         - **export_conversation**: Export the conversation as ShareGPT-format \
-           training data for fine-tuning tool-calling models.\n\n\
+           the agent reusable procedures.\n\n\
          ## When to create a skill\n\
          - The agent solved a complex, multi-step task that it might encounter again\n\
          - The agent discovered a non-obvious procedure or debugging pattern\n\
-         - The agent found a domain-specific workflow worth encoding\n\n\
+         - The agent found a domain-specific workflow worth encoding\n\
+         - The conversation contains highly-rated interactions (+2 or +3) that \
+           demonstrate a pattern worth codifying\n\n\
          ## When to improve a skill\n\
          - An existing skill's instructions were insufficient and the agent had to \
            improvise — capture what worked\n\
-         - The agent found a better approach than what the skill describes\n\n\
-         ## When to export\n\
-         - The conversation contains substantial, high-quality tool use (3+ tool \
-           calls with successful outcomes)\n\
-         - The conversation demonstrates a complete problem-solving trajectory\n\n\
+         - The agent found a better approach than what the skill describes\n\
+         - Poorly-rated interactions suggest an existing skill gives bad advice\n\n\
+         ## Rating-informed decisions\n\
+         When feedback ratings are present in the conversation summary, use them \
+         as strong signal for skill decisions:\n\
+         - Highly-rated turns (+2, +3) suggest the approach is worth encoding \
+           as a skill\n\
+         - Poorly-rated turns (-2, -3) suggest an existing skill may need \
+           correction, or that a new skill should capture a better approach\n\
+         - If overall ratings are low, consider whether a skill could prevent \
+           the issues that led to poor ratings\n\n\
          ## When to do nothing\n\
          - The conversation was trivial (simple Q&A, one-step tasks)\n\
          - A matching skill already exists and doesn't need improvement\n\
-         - The conversation was mostly errors or failed attempts\n\n\
+         - The conversation was mostly errors or failed attempts with no \
+           transferable lesson\n\
+         - Ratings are neutral or absent and no notable pattern emerged\n\n\
          Doing nothing is the right choice most of the time.  Only act when there's \
-         genuine value in persisting knowledge or exporting data.\n\n\
+         genuine value in persisting knowledge.\n\n\
          {existing_skills}"
     )
 }
