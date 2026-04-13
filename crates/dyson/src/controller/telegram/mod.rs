@@ -22,8 +22,10 @@
 //     ├── polling loop (getUpdates):
 //     │     ├── receive Message from Telegram
 //     │     ├── check allowed_chat_ids (access control)
-//     │     ├── lock-free commands (/models, /logs) → respond instantly
-//     │     ├── per-chat commands (/clear, /model) → per-chat lock
+//     │     ├── lock-free commands → respond instantly (no agent lock):
+//     │     │     /logs, /models, /agents, /loop, /stop, /memory
+//     │     ├── per-chat commands → acquire agent lock:
+//     │     │     /clear, /compact, /model
 //     │     └── agent messages → spawn background task:
 //     │           ├── if agent busy → quick_response (no tools, fast)
 //     │           └── if agent free → agent.run(text, &mut output)
@@ -513,6 +515,7 @@ impl super::Controller for TelegramController {
 
                 if let Some(handled) = handle_instant_command(
                     &bot, &text, chat_id, &current_settings,
+                    registry, &bg_registry,
                 ).await
                     && handled
                 {
@@ -522,11 +525,6 @@ impl super::Controller for TelegramController {
                 if text == "/clear"
                     || text == "/compact"
                     || text.starts_with("/model ")
-                    || text == "/agents"
-                    || text.starts_with("/loop ")
-                    || text == "/loop"
-                    || text.starts_with("/stop ")
-                    || text == "/stop"
                 {
                     let entry = match get_or_create_entry(
                         &agents,
@@ -555,7 +553,6 @@ impl super::Controller for TelegramController {
                         config_path.as_deref(),
                         &*chat_store,
                         registry,
-                        &bg_registry,
                     )
                     .await;
                     continue;
@@ -865,15 +862,11 @@ async fn handle_per_chat_command(
     config_path: Option<&std::path::Path>,
     chat_store: &dyn crate::chat_history::ChatHistory,
     registry: &super::ClientRegistry,
-    bg_registry: &std::sync::Arc<super::background::BackgroundAgentRegistry>,
 ) {
-    // Extract agent from the mutex so execute_command (which may do an LLM
-    // call for /compact) runs without holding the lock.  This prevents other
-    // operations on this chat from being blocked for the duration.
+    // Extract agent from the mutex so execute_agent_command (which may do an
+    // LLM call for /compact) runs without holding the lock.
     //
-    // AgentGuard ensures the agent is put back even if a panic occurs between
-    // take() and the explicit put-back — without it a panic would leave the
-    // chat permanently agent-less.
+    // AgentGuard ensures the agent is put back even if a panic occurs.
     let mut ca = entry.agent.lock().await;
     let agent = ca.agent.take().expect("agent not available");
     let mut provider_name = ca.provider_name.clone();
@@ -887,7 +880,7 @@ async fn handle_per_chat_command(
     let agent = guard.agent.as_mut().expect("just set");
 
     let mut output = TelegramOutput::new(bot.clone(), chat_id, true);
-    let result = super::execute_command(
+    let result = super::execute_agent_command(
         text,
         agent,
         &mut output,
@@ -896,13 +889,10 @@ async fn handle_per_chat_command(
         &mut model,
         config_path,
         registry,
-        bg_registry,
     )
     .await;
 
     // Snapshot state from the agent while we still own it (no lock needed).
-    // CompletionConfig contains a String (model name) so it can't be Copy —
-    // .clone() is required to extract owned values.
     let agent = guard.agent.as_ref().expect("still held");
     let (snapshot_msgs, snapshot_prompt, snapshot_config) = match &result {
         super::CommandResult::Compacted => {
@@ -915,7 +905,6 @@ async fn handle_per_chat_command(
     };
 
     // Put the agent back and update provider/model if changed.
-    // take() from the guard so Drop becomes a no-op.
     {
         let agent = guard.agent.take().expect("still held");
         let mut ca = entry.agent.lock().await;
@@ -924,99 +913,33 @@ async fn handle_per_chat_command(
         ca.model = model;
     }
 
-    match result {
+    // Side effects that need entry/chat_store access.
+    match &result {
         super::CommandResult::Cleared => {
             *entry.messages_snapshot.write().await = Vec::new();
             let _ = chat_store.rotate(&chat_id.0.to_string());
-            let _ = bot.send_message(chat_id, "Context cleared.").await;
             tracing::info!(chat_id = chat_id.0, "conversation rotated and cleared");
         }
         super::CommandResult::Compacted => {
-            let chat_key = chat_id.0.to_string();
             let msgs = snapshot_msgs.expect("set above for Compacted");
-            if let Err(e) = chat_store.save(&chat_key, &msgs) {
+            if let Err(e) = chat_store.save(&chat_id.0.to_string(), &msgs) {
                 tracing::error!(error = %e, "failed to save chat history");
             }
             *entry.messages_snapshot.write().await = msgs;
-            let _ = bot.send_message(chat_id, "Context compacted.").await;
             tracing::info!(chat_id = chat_id.0, "conversation compacted");
         }
-        super::CommandResult::CompactError(e) => {
-            let _ = bot.send_message(chat_id, &format!("Compaction failed: {e}")).await;
-        }
-        super::CommandResult::ModelSwitched {
-            provider_name,
-            provider_type,
-            model,
-        } => {
+        super::CommandResult::ModelSwitched { .. } => {
             if let Some(prompt) = snapshot_prompt {
                 *entry.system_prompt.write().await = prompt;
             }
             if let Some(config) = snapshot_config {
                 *entry.config.write().await = config;
             }
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    &format!("Switched to '{provider_name}' — {provider_type} ({model})"),
-                )
-                .await;
-        }
-        super::CommandResult::ModelSwitchError(e) => {
-            let _ = bot.send_message(chat_id, &format!("Switch error: {e}")).await;
-        }
-        super::CommandResult::ModelParseError(e) => {
-            let _ = bot.send_message(chat_id, &e).await;
-        }
-        super::CommandResult::ModelUsage => {
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    "Usage: /model <provider> [model]  or  /model <model>",
-                )
-                .await;
-        }
-        super::CommandResult::LoopStarted {
-            id,
-            prompt_preview: _,
-            chat_id: bg_chat_id,
-        } => {
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    &format!("Agent #{id} started — chat: {bg_chat_id}"),
-                )
-                .await;
-        }
-        super::CommandResult::LoopError(e) => {
-            let _ = bot.send_message(chat_id, &format!("Loop error: {e}")).await;
-        }
-        super::CommandResult::AgentList { agents } => {
-            if agents.is_empty() {
-                let _ = bot.send_message(chat_id, "No background agents running.").await;
-            } else {
-                let mut msg = String::from("Background agents:\n");
-                for a in &agents {
-                    msg.push_str(&format!(
-                        "  [{}] {} ({:.0}s)\n",
-                        a.id,
-                        a.prompt_preview,
-                        a.elapsed.as_secs_f64(),
-                    ));
-                }
-                let _ = bot.send_message(chat_id, &msg).await;
-            }
-        }
-        super::CommandResult::AgentStopped { id } => {
-            let _ = bot
-                .send_message(chat_id, &format!("Agent #{id} stopped."))
-                .await;
-        }
-        super::CommandResult::StopError(e) => {
-            let _ = bot.send_message(chat_id, &format!("Stop error: {e}")).await;
         }
         _ => {}
     }
+
+    render_command_result_telegram(bot, chat_id, &result).await;
 }
 
 /// Run the agent for a message in a background task, with quick-response fallback.
@@ -1152,26 +1075,10 @@ async fn handle_instant_command(
     text: &str,
     chat_id: ChatId,
     settings: &Settings,
+    registry: &super::ClientRegistry,
+    bg_registry: &std::sync::Arc<super::background::BackgroundAgentRegistry>,
 ) -> Option<bool> {
-    if text == "/logs" || text.starts_with("/logs ") {
-        let n: usize = text
-            .strip_prefix("/logs")
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap_or(20);
-        let result = tokio::task::spawn_blocking(move || super::read_log_tail(n)).await;
-        let reply = match result {
-            Ok(Ok(lines)) => format_logs_for_telegram(&lines),
-            Ok(Err(e)) => vec![format!("Logs error: {e}")],
-            Err(e) => vec![format!("Logs error: {e}")],
-        };
-        for part in reply {
-            let _ = bot.send_message_html(chat_id, &part).await;
-        }
-        return Some(true);
-    }
-
+    // Telegram-only commands not in the shared dispatcher.
     if text == "/memory" {
         let _ = bot.send_message(chat_id, "Usage: /memory <note>").await;
         return Some(true);
@@ -1195,11 +1102,11 @@ async fn handle_instant_command(
         return Some(true);
     }
 
+    // /models gets special treatment in Telegram (inline keyboard).
     if text == "/models" {
         handle_models_command(bot, chat_id, settings).await;
         return Some(true);
     }
-
     if text == "/model" {
         let _ = bot
             .send_message(
@@ -1210,7 +1117,95 @@ async fn handle_instant_command(
         return Some(true);
     }
 
-    None
+    // Shared lock-free commands.
+    let result = super::execute_lockfree_command(text, settings, registry, bg_registry).await;
+    if matches!(result, super::CommandResult::NotHandled) {
+        return None;
+    }
+    render_command_result_telegram(bot, chat_id, &result).await;
+    Some(true)
+}
+
+/// Render a `CommandResult` as a Telegram message.
+async fn render_command_result_telegram(
+    bot: &BotApi,
+    chat_id: ChatId,
+    result: &super::CommandResult,
+) {
+    match result {
+        super::CommandResult::Cleared => {
+            let _ = bot.send_message(chat_id, "Context cleared.").await;
+        }
+        super::CommandResult::Compacted => {
+            let _ = bot.send_message(chat_id, "Context compacted.").await;
+        }
+        super::CommandResult::CompactError(e) => {
+            let _ = bot.send_message(chat_id, &format!("Compaction failed: {e}")).await;
+        }
+        super::CommandResult::ModelSwitched {
+            provider_name,
+            provider_type,
+            model,
+        } => {
+            let _ = bot
+                .send_message(
+                    chat_id,
+                    &format!("Switched to '{provider_name}' — {provider_type} ({model})"),
+                )
+                .await;
+        }
+        super::CommandResult::ModelSwitchError(e) => {
+            let _ = bot.send_message(chat_id, &format!("Switch error: {e}")).await;
+        }
+        super::CommandResult::ModelParseError(e) => {
+            let _ = bot.send_message(chat_id, &e).await;
+        }
+        super::CommandResult::ModelUsage => {
+            let _ = bot
+                .send_message(
+                    chat_id,
+                    "Usage: /model <provider> [model]  or  /model <model>",
+                )
+                .await;
+        }
+        super::CommandResult::Logs(lines) => {
+            for part in format_logs_for_telegram(lines) {
+                let _ = bot.send_message_html(chat_id, &part).await;
+            }
+        }
+        super::CommandResult::LogsError(e) => {
+            let _ = bot.send_message(chat_id, &format!("Logs error: {e}")).await;
+        }
+        super::CommandResult::LoopStarted { id, chat_id: bg_chat_id, .. } => {
+            let _ = bot
+                .send_message(chat_id, &format!("Agent #{id} started — chat: {bg_chat_id}"))
+                .await;
+        }
+        super::CommandResult::LoopError(e) => {
+            let _ = bot.send_message(chat_id, &format!("Loop error: {e}")).await;
+        }
+        super::CommandResult::AgentList { agents } => {
+            if agents.is_empty() {
+                let _ = bot.send_message(chat_id, "No background agents running.").await;
+            } else {
+                let mut msg = String::from("Background agents:\n");
+                for a in agents {
+                    msg.push_str(&format!(
+                        "  [{}] {} ({:.0}s)\n",
+                        a.id, a.prompt_preview, a.elapsed.as_secs_f64(),
+                    ));
+                }
+                let _ = bot.send_message(chat_id, &msg).await;
+            }
+        }
+        super::CommandResult::AgentStopped { id } => {
+            let _ = bot.send_message(chat_id, &format!("Agent #{id} stopped.")).await;
+        }
+        super::CommandResult::StopError(e) => {
+            let _ = bot.send_message(chat_id, &format!("Stop error: {e}")).await;
+        }
+        super::CommandResult::ModelList { .. } | super::CommandResult::NotHandled => {}
+    }
 }
 
 /// Handle the /models command — show an inline keyboard with all providers/models.

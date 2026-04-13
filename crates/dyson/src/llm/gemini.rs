@@ -109,7 +109,7 @@ impl LlmClient for GeminiClient {
                     serde_json::json!({
                         "name": t.name,
                         "description": t.description,
-                        "parameters": t.input_schema,
+                        "parameters": sanitize_schema_for_gemini(&t.input_schema),
                     })
                 })
                 .collect();
@@ -146,6 +146,60 @@ impl LlmClient for GeminiClient {
             response,
             BaseSseParser::new(GeminiJsonParser::new()),
         ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Schema sanitization — strip fields unsupported by Gemini.
+// ---------------------------------------------------------------------------
+
+/// Recursively remove JSON Schema fields that Gemini's function declaration
+/// parameters don't support.
+///
+/// Gemini's Schema proto (v1beta) supports: `type`, `format`, `title`,
+/// `description`, `nullable`, `enum`, `items`, `maxItems`, `minItems`,
+/// `properties`, `required`, `minProperties`, `maxProperties`, `minimum`,
+/// `maximum`, `minLength`, `maxLength`, `pattern`, `example` (singular),
+/// `anyOf`, `propertyOrdering`, and `default`.
+///
+/// Standard JSON Schema fields like `additionalProperties`, `$schema`,
+/// `$ref`, `allOf`, `oneOf`, and `not` are NOT in the proto and cause
+/// 400 Bad Request errors.
+///
+/// This function strips those unsupported fields so tool schemas authored
+/// for OpenAI/Anthropic work with Gemini without modification.
+fn sanitize_schema_for_gemini(schema: &serde_json::Value) -> serde_json::Value {
+    const UNSUPPORTED: &[&str] = &[
+        "additionalProperties",
+        "$schema",
+        "$ref",
+        "$defs",
+        "$id",
+        "examples", // note: singular "example" IS supported
+        "allOf",
+        "oneOf",
+        "not",
+        "readOnly",
+        "writeOnly",
+        "const",
+    ];
+
+    match schema {
+        serde_json::Value::Object(map) => {
+            let mut cleaned = serde_json::Map::new();
+            for (key, value) in map {
+                if UNSUPPORTED.contains(&key.as_str()) {
+                    continue;
+                }
+                // Recurse into nested schemas (properties values, items).
+                cleaned.insert(key.clone(), sanitize_schema_for_gemini(value));
+            }
+            serde_json::Value::Object(cleaned)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(sanitize_schema_for_gemini).collect())
+        }
+        other => other.clone(),
     }
 }
 
@@ -464,5 +518,74 @@ mod tests {
         assert_eq!(json["parts"][0]["text"], "What is this?");
         assert_eq!(json["parts"][1]["inlineData"]["mimeType"], "image/jpeg");
         assert_eq!(json["parts"][1]["inlineData"]["data"], "abc123");
+    }
+
+    // -----------------------------------------------------------------------
+    // sanitize_schema_for_gemini tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sanitize_strips_additional_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+        });
+        let cleaned = sanitize_schema_for_gemini(&schema);
+        assert!(cleaned.get("additionalProperties").is_none());
+        assert_eq!(cleaned["type"], "object");
+        assert_eq!(cleaned["required"][0], "name");
+        assert_eq!(cleaned["properties"]["name"]["type"], "string");
+    }
+
+    #[test]
+    fn sanitize_strips_nested_unsupported_fields() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "config": {
+                    "type": "object",
+                    "properties": {
+                        "verbose": { "type": "boolean", "const": true }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "additionalProperties": false
+        });
+        let cleaned = sanitize_schema_for_gemini(&schema);
+        assert!(cleaned.get("additionalProperties").is_none());
+        let config = &cleaned["properties"]["config"];
+        assert!(config.get("additionalProperties").is_none());
+        assert!(config["properties"]["verbose"].get("const").is_none());
+        assert_eq!(config["properties"]["verbose"]["type"], "boolean");
+    }
+
+    #[test]
+    fn sanitize_preserves_supported_fields() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "number",
+                    "description": "Item count",
+                    "minimum": 0,
+                    "maximum": 100
+                }
+            },
+            "required": ["count"]
+        });
+        let cleaned = sanitize_schema_for_gemini(&schema);
+        assert_eq!(cleaned, schema);
+    }
+
+    #[test]
+    fn sanitize_handles_non_object_schema() {
+        let schema = serde_json::json!("string");
+        let cleaned = sanitize_schema_for_gemini(&schema);
+        assert_eq!(cleaned, schema);
     }
 }

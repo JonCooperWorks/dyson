@@ -731,13 +731,95 @@ pub enum CommandResult {
     NotHandled,
 }
 
-/// Execute a shared command, returning a result for the controller to render.
+/// Execute a lock-free command that doesn't need the agent.
 ///
-/// Handles: `/clear`, `/compact`, `/models`, `/model`, `/loop`, `/agents`, `/stop`.
-/// Returns `NotHandled` for everything else, so controllers can check
-/// their own commands before or after calling this.
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_command(
+/// Handles: `/logs`, `/agents`, `/loop`, `/stop`, `/models`.
+/// Returns `NotHandled` for commands that require the agent lock.
+pub async fn execute_lockfree_command(
+    input: &str,
+    settings: &Settings,
+    registry: &ClientRegistry,
+    bg_registry: &std::sync::Arc<background::BackgroundAgentRegistry>,
+) -> CommandResult {
+    if input == "/logs" || input.starts_with("/logs ") {
+        let n: usize = input
+            .strip_prefix("/logs")
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap_or(20);
+        return match tokio::task::spawn_blocking(move || read_log_tail(n)).await {
+            Ok(Ok(lines)) => CommandResult::Logs(lines),
+            Ok(Err(e)) => CommandResult::LogsError(e),
+            Err(e) => CommandResult::LogsError(format!("task failed: {e}")),
+        };
+    }
+
+    if input == "/models" {
+        if settings.providers.is_empty() {
+            return CommandResult::ModelList {
+                providers: Vec::new(),
+            };
+        }
+        // Note: active-model highlighting requires provider/model state that
+        // lives in the agent.  For the lock-free path we omit it — /models
+        // is informational and the inline keyboard handles selection.
+        let providers = list_providers(settings)
+            .into_iter()
+            .map(|(name, pc)| ProviderInfo {
+                name: name.to_string(),
+                provider_type: format!("{:?}", pc.provider_type),
+                models: pc
+                    .models
+                    .iter()
+                    .map(|m| ModelInfo {
+                        name: m.clone(),
+                        active: false,
+                    })
+                    .collect(),
+            })
+            .collect();
+        return CommandResult::ModelList { providers };
+    }
+
+    if input == "/agents" {
+        return CommandResult::AgentList {
+            agents: bg_registry.list(),
+        };
+    }
+
+    if input == "/loop" {
+        return CommandResult::LoopError("usage: /loop <prompt>".to_string());
+    }
+    if let Some(args) = input.strip_prefix("/loop ").map(str::trim) {
+        if args.is_empty() {
+            return CommandResult::LoopError("usage: /loop <prompt>".to_string());
+        }
+        return spawn_background_agent(args, settings, registry, bg_registry).await;
+    }
+
+    if input == "/stop" {
+        return CommandResult::StopError("usage: /stop <id>".to_string());
+    }
+    if let Some(args) = input.strip_prefix("/stop ").map(str::trim) {
+        let id: u64 = match args.parse() {
+            Ok(id) => id,
+            Err(_) => return CommandResult::StopError("invalid agent ID".to_string()),
+        };
+        return match bg_registry.stop(id) {
+            Ok(()) => CommandResult::AgentStopped { id },
+            Err(e) => CommandResult::StopError(e),
+        };
+    }
+
+    CommandResult::NotHandled
+}
+
+/// Execute a command that requires the agent lock.
+///
+/// Handles: `/clear`, `/compact`, `/model`.
+/// Returns `NotHandled` for everything else.
+pub async fn execute_agent_command(
     input: &str,
     agent: &mut crate::agent::Agent,
     output: &mut dyn Output,
@@ -746,7 +828,6 @@ pub async fn execute_command(
     current_model: &mut String,
     config_path: Option<&Path>,
     registry: &ClientRegistry,
-    bg_registry: &std::sync::Arc<background::BackgroundAgentRegistry>,
 ) -> CommandResult {
     if input == "/clear" {
         agent.clear();
@@ -758,30 +839,6 @@ pub async fn execute_command(
             Ok(()) => CommandResult::Compacted,
             Err(e) => CommandResult::CompactError(e.to_string()),
         };
-    }
-
-    if input == "/models" {
-        if settings.providers.is_empty() {
-            return CommandResult::ModelList {
-                providers: Vec::new(),
-            };
-        }
-        let providers = list_providers(settings)
-            .into_iter()
-            .map(|(name, pc)| ProviderInfo {
-                name: name.to_string(),
-                provider_type: format!("{:?}", pc.provider_type),
-                models: pc
-                    .models
-                    .iter()
-                    .map(|m| ModelInfo {
-                        name: m.clone(),
-                        active: name == current_provider.as_str() && m == current_model,
-                    })
-                    .collect(),
-            })
-            .collect();
-        return CommandResult::ModelList { providers };
     }
 
     if input == "/model" {
@@ -834,54 +891,6 @@ pub async fn execute_command(
         }
     }
 
-    if input == "/logs" || input.starts_with("/logs ") {
-        let n: usize = input
-            .strip_prefix("/logs")
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap_or(20);
-        return match tokio::task::spawn_blocking(move || read_log_tail(n)).await {
-            Ok(Ok(lines)) => CommandResult::Logs(lines),
-            Ok(Err(e)) => CommandResult::LogsError(e),
-            Err(e) => CommandResult::LogsError(format!("task failed: {e}")),
-        };
-    }
-
-    // --- Background agent commands ---
-
-    if input == "/agents" {
-        return CommandResult::AgentList {
-            agents: bg_registry.list(),
-        };
-    }
-
-    if let Some(args) = input.strip_prefix("/loop ").map(str::trim) {
-        if args.is_empty() {
-            return CommandResult::LoopError("usage: /loop <prompt>".to_string());
-        }
-        return spawn_background_agent(args, settings, registry, bg_registry).await;
-    }
-
-    if input == "/loop" {
-        return CommandResult::LoopError("usage: /loop <prompt>".to_string());
-    }
-
-    if let Some(args) = input.strip_prefix("/stop ").map(str::trim) {
-        let id: u64 = match args.parse() {
-            Ok(id) => id,
-            Err(_) => return CommandResult::StopError("invalid agent ID".to_string()),
-        };
-        return match bg_registry.stop(id) {
-            Ok(()) => CommandResult::AgentStopped { id },
-            Err(e) => CommandResult::StopError(e),
-        };
-    }
-
-    if input == "/stop" {
-        return CommandResult::StopError("usage: /stop <id>".to_string());
-    }
-
     CommandResult::NotHandled
 }
 
@@ -892,7 +901,7 @@ pub async fn execute_command(
 /// The agent's conversation is persisted through the existing chat history
 /// system under chat ID `bg-<id>`, reusing the same storage and media
 /// externalization as regular conversations.
-async fn spawn_background_agent(
+pub(crate) async fn spawn_background_agent(
     prompt: &str,
     settings: &Settings,
     registry: &ClientRegistry,
