@@ -318,6 +318,10 @@ impl Tool for ImageGenerateTool {
             }
         };
 
+        // Cap to the requested count — a provider may return extra images
+        // (e.g. Gemini returning multiple inlineData parts per response).
+        let images: Vec<_> = images.into_iter().take(count).collect();
+
         // Save generated images to temp files and attach them to the output.
         let random_suffix: u64 = rand::random();
         let mut output = ToolOutput::success(format!(
@@ -390,8 +394,37 @@ mod tests {
         }
     }
 
+    /// A provider that ignores `count` and always returns all images —
+    /// simulates the Gemini API returning extra inlineData parts.
+    struct GreedyImageProvider {
+        images: Vec<GeneratedImage>,
+    }
+
+    #[async_trait]
+    impl ImageGenerationProvider for GreedyImageProvider {
+        async fn generate(
+            &self,
+            _prompt: &str,
+            _count: usize,
+            _resolution: &str,
+        ) -> Result<Vec<GeneratedImage>> {
+            Ok(self
+                .images
+                .iter()
+                .map(|img| GeneratedImage {
+                    data: img.data.clone(),
+                    mime_type: img.mime_type.clone(),
+                })
+                .collect())
+        }
+    }
+
     fn mock_tool(images: Vec<GeneratedImage>) -> ImageGenerateTool {
         ImageGenerateTool::new(Arc::new(MockImageProvider { images }))
+    }
+
+    fn greedy_mock_tool(images: Vec<GeneratedImage>) -> ImageGenerateTool {
+        ImageGenerateTool::new(Arc::new(GreedyImageProvider { images }))
     }
 
     /// Create minimal valid PNG bytes for testing.
@@ -485,5 +518,28 @@ mod tests {
     fn tool_name_is_image_generate() {
         let tool = mock_tool(vec![]);
         assert_eq!(tool.name(), "image_generate");
+    }
+
+    #[tokio::test]
+    async fn provider_returning_extra_images_is_capped_to_count() {
+        // Simulate a provider (like Gemini) that returns 3 images even
+        // though only 1 was requested — the tool should cap to count.
+        let tool = greedy_mock_tool(vec![
+            GeneratedImage { data: tiny_png(), mime_type: "image/png".into() },
+            GeneratedImage { data: tiny_png(), mime_type: "image/png".into() },
+            GeneratedImage { data: tiny_png(), mime_type: "image/png".into() },
+        ]);
+        let ctx = ToolContext::from_cwd().unwrap();
+        let result = tool
+            .run(&json!({"prompt": "a robot"}), &ctx)
+            .await
+            .unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.files.len(), 1, "should only send 1 image, not 3");
+        assert!(result.content.contains("Generated 1 image(s)"));
+        // Clean up.
+        for f in &result.files {
+            let _ = std::fs::remove_file(f);
+        }
     }
 }
