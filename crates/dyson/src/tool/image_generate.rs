@@ -183,6 +183,11 @@ impl ImageGenerationProvider for GeminiImageProvider {
             }
         }
 
+        // Gemini may return multiple image parts per response (e.g. duplicate
+        // candidates or extra inlineData parts).  Cap to the requested count
+        // so the user doesn't receive duplicate images.
+        images.truncate(count);
+
         if images.is_empty() {
             return Err(DysonError::tool(
                 "image_generate",
