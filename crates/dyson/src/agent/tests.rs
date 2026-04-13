@@ -308,45 +308,26 @@ fn summarize_for_reflection_handles_multibyte_utf8() {
 // Feedback summary formatting tests
 // -----------------------------------------------------------------------
 
+fn fb(turn_index: usize, rating: crate::feedback::FeedbackRating) -> crate::feedback::FeedbackEntry {
+    crate::feedback::FeedbackEntry {
+        turn_index,
+        rating,
+        score: rating.score(),
+        timestamp: 0,
+    }
+}
+
 #[test]
 fn format_feedback_summary_empty_returns_empty() {
-    let result = reflection::format_feedback_summary(&[], 10);
-    assert!(result.is_empty());
+    assert!(reflection::format_feedback_summary(&[], 10).is_empty());
 }
 
 #[test]
 fn format_feedback_summary_mixed_ratings() {
-    use crate::feedback::{FeedbackEntry, FeedbackRating};
+    use crate::feedback::FeedbackRating::*;
 
-    let entries = vec![
-        FeedbackEntry {
-            turn_index: 3,
-            rating: FeedbackRating::Excellent,
-            score: 3,
-            timestamp: 0,
-        },
-        FeedbackEntry {
-            turn_index: 5,
-            rating: FeedbackRating::Bad,
-            score: -2,
-            timestamp: 0,
-        },
-        FeedbackEntry {
-            turn_index: 7,
-            rating: FeedbackRating::VeryGood,
-            score: 2,
-            timestamp: 0,
-        },
-        FeedbackEntry {
-            turn_index: 9,
-            rating: FeedbackRating::Good,
-            score: 1,
-            timestamp: 0,
-        },
-    ];
-
+    let entries = vec![fb(3, Excellent), fb(5, Bad), fb(7, VeryGood), fb(9, Good)];
     let summary = reflection::format_feedback_summary(&entries, 20);
-    assert!(summary.contains("User feedback ratings"));
     assert!(summary.contains("4 rated turns out of 20 messages"));
     assert!(summary.contains("Highly rated (score >= +2): turns 3, 7"));
     assert!(summary.contains("Poorly rated (score <= -1): turns 5"));
@@ -355,26 +336,11 @@ fn format_feedback_summary_mixed_ratings() {
 
 #[test]
 fn format_feedback_summary_all_positive() {
-    use crate::feedback::{FeedbackEntry, FeedbackRating};
+    use crate::feedback::FeedbackRating::*;
 
-    let entries = vec![
-        FeedbackEntry {
-            turn_index: 1,
-            rating: FeedbackRating::Good,
-            score: 1,
-            timestamp: 0,
-        },
-        FeedbackEntry {
-            turn_index: 3,
-            rating: FeedbackRating::Good,
-            score: 1,
-            timestamp: 0,
-        },
-    ];
-
+    let entries = vec![fb(1, Good), fb(3, Good)];
     let summary = reflection::format_feedback_summary(&entries, 8);
     assert!(summary.contains("+1.0"));
-    // No poorly rated section when all scores are positive.
     assert!(!summary.contains("Poorly rated"));
 }
 

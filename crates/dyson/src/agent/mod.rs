@@ -792,18 +792,11 @@ impl Agent {
     }
 
     /// Attach a feedback store so dreams can incorporate user ratings.
-    ///
-    /// The store is used by `fire_dreams()` to load ratings into the
-    /// conversation summary that dreams see.  Controllers call
-    /// `record_feedback` / `remove_feedback` to write ratings.
     pub fn set_feedback_store(&mut self, store: crate::feedback::FeedbackStore) {
         self.feedback_store = Some(store);
     }
 
     /// Record a user's quality rating for a specific assistant turn.
-    ///
-    /// Controllers translate their input mechanism (emoji reactions,
-    /// thumbs up/down, etc.) into a `FeedbackRating` and call this.
     pub fn record_feedback(
         &self,
         turn_index: usize,

@@ -281,11 +281,6 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
 }
 
 /// Format feedback entries into a textual summary for dream prompts.
-///
-/// When user ratings are available, this produces a section that dreams can
-/// use to weight their decisions — e.g., skills should encode patterns from
-/// highly-rated interactions, memory should preserve context around what
-/// worked well.
 pub(super) fn format_feedback_summary(
     entries: &[crate::feedback::FeedbackEntry],
     message_count: usize,
@@ -298,17 +293,6 @@ pub(super) fn format_feedback_summary(
     let avg_score: f64 =
         entries.iter().map(|e| e.score as f64).sum::<f64>() / total_rated as f64;
 
-    let high_rated: Vec<usize> = entries
-        .iter()
-        .filter(|e| e.score >= 2)
-        .map(|e| e.turn_index)
-        .collect();
-    let low_rated: Vec<usize> = entries
-        .iter()
-        .filter(|e| e.score <= -1)
-        .map(|e| e.turn_index)
-        .collect();
-
     // Score distribution: indices 0..7 map to scores -3..+3.
     let mut dist = [0u32; 7];
     for e in entries {
@@ -318,35 +302,37 @@ pub(super) fn format_feedback_summary(
         }
     }
 
+    use std::fmt::Write;
     let mut out = format!(
         "\n\n## User feedback ratings\n\
          Average score: {avg_score:+.1} ({total_rated} rated turns out of {message_count} messages)\n"
     );
 
-    if !high_rated.is_empty() {
-        out.push_str(&format!(
-            "Highly rated (score >= +2): turns {}\n",
-            high_rated
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    if !low_rated.is_empty() {
-        out.push_str(&format!(
-            "Poorly rated (score <= -1): turns {}\n",
-            low_rated
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    out.push_str(&format!(
-        "Score distribution: [-3:{}, -2:{}, -1:{}, 0:{}, +1:{}, +2:{}, +3:{}]\n",
+    let mut fmt_turns = |label: &str, pred: fn(i8) -> bool| {
+        let mut first = true;
+        for e in entries {
+            if pred(e.score) {
+                if first {
+                    let _ = write!(out, "{label}: turns {}", e.turn_index);
+                    first = false;
+                } else {
+                    let _ = write!(out, ", {}", e.turn_index);
+                }
+            }
+        }
+        if !first {
+            out.push('\n');
+        }
+    };
+
+    fmt_turns("Highly rated (score >= +2)", |s| s >= 2);
+    fmt_turns("Poorly rated (score <= -1)", |s| s <= -1);
+
+    let _ = writeln!(
+        out,
+        "Score distribution: [-3:{}, -2:{}, -1:{}, 0:{}, +1:{}, +2:{}, +3:{}]",
         dist[0], dist[1], dist[2], dist[3], dist[4], dist[5], dist[6]
-    ));
+    );
 
     out
 }
@@ -743,13 +729,9 @@ pub(super) async fn build_reflection_system_prompt(ctx: &ToolContext) -> String 
          - Poorly-rated interactions suggest an existing skill gives bad advice\n\n\
          ## Rating-informed decisions\n\
          When feedback ratings are present in the conversation summary, use them \
-         as strong signal for skill decisions:\n\
-         - Highly-rated turns (+2, +3) suggest the approach is worth encoding \
-           as a skill\n\
-         - Poorly-rated turns (-2, -3) suggest an existing skill may need \
-           correction, or that a new skill should capture a better approach\n\
-         - If overall ratings are low, consider whether a skill could prevent \
-           the issues that led to poor ratings\n\n\
+         as strong signal: highly-rated turns (+2, +3) suggest patterns worth \
+         encoding; poorly-rated turns (-2, -3) suggest a skill needs correction \
+         or a new skill should capture a better approach.\n\n\
          ## When to do nothing\n\
          - The conversation was trivial (simple Q&A, one-step tasks)\n\
          - A matching skill already exists and doesn't need improvement\n\
