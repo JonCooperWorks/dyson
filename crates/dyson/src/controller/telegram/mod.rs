@@ -519,7 +519,15 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                if text == "/clear" || text == "/compact" || text.starts_with("/model ") {
+                if text == "/clear"
+                    || text == "/compact"
+                    || text.starts_with("/model ")
+                    || text == "/agents"
+                    || text.starts_with("/loop ")
+                    || text == "/loop"
+                    || text.starts_with("/stop ")
+                    || text == "/stop"
+                {
                     let entry = match get_or_create_entry(
                         &agents,
                         chat_id.0,
