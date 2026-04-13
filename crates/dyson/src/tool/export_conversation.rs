@@ -230,7 +230,7 @@ impl ExportConversationTool {
                     let chat_id = entry
                         .path()
                         .file_stem()
-                        .map(|s| s.to_string_lossy().to_string());
+                        .map(|s| s.to_string_lossy().into_owned());
                     return Ok((messages, Some(dir.clone()), chat_id));
                 }
             }

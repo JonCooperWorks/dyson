@@ -1009,7 +1009,7 @@ fn read_log_tail_from_dir(log_dir: &std::path::Path, n: usize) -> Result<String,
         .map_err(|e| format!("cannot read {}: {e}", log_dir.display()))?
         .filter_map(|entry| {
             let entry = entry.ok()?;
-            let name = entry.file_name().to_string_lossy().to_string();
+            let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with("dyson.log") {
                 Some(entry.path())
             } else {

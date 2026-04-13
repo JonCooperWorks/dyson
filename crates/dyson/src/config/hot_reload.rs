@@ -264,7 +264,7 @@ impl HotReloader {
         // Watch top-level .md files.
         if let Ok(entries) = std::fs::read_dir(ws_path) {
             for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
+                let name = entry.file_name().to_string_lossy().into_owned();
                 if name.ends_with(".md") {
                     let p = entry.path();
                     let mtime = Self::get_mtime(&p);
@@ -277,7 +277,7 @@ impl HotReloader {
         let memory_dir = ws_path.join("memory");
         if let Ok(entries) = std::fs::read_dir(&memory_dir) {
             for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
+                let name = entry.file_name().to_string_lossy().into_owned();
                 if name.ends_with(".md") {
                     let p = entry.path();
                     let mtime = Self::get_mtime(&p);

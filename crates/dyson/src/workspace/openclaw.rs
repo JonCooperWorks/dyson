@@ -98,7 +98,7 @@ impl OpenClawWorkspace {
             .map_err(|e| DysonError::Config(format!("cannot read workspace dir: {e}")))?
         {
             let entry = entry.map_err(DysonError::Io)?;
-            let name = entry.file_name().to_string_lossy().to_string();
+            let name = entry.file_name().to_string_lossy().into_owned();
             // Use path().is_file() instead of file_type().is_file() so that
             // symlinks to .md files are followed (used by channel workspaces
             // that symlink SOUL.md/IDENTITY.md from the main workspace).
@@ -117,7 +117,7 @@ impl OpenClawWorkspace {
         if memory_dir.exists() {
             for entry in std::fs::read_dir(&memory_dir)? {
                 let entry = entry?;
-                let name = entry.file_name().to_string_lossy().to_string();
+                let name = entry.file_name().to_string_lossy().into_owned();
                 if name.ends_with(".md") {
                     if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_WORKSPACE_FILE_SIZE {
                         tracing::warn!(file = %format!("memory/{name}"), "skipping workspace file — exceeds 10 MB size limit");
@@ -140,7 +140,7 @@ impl OpenClawWorkspace {
         if skills_dir.exists() {
             for entry in std::fs::read_dir(&skills_dir)? {
                 let entry = entry?;
-                let dir_name = entry.file_name().to_string_lossy().to_string();
+                let dir_name = entry.file_name().to_string_lossy().into_owned();
                 let skill_md = entry.path().join("SKILL.md");
                 if entry.path().is_dir() && skill_md.is_file() {
                     let content = std::fs::read_to_string(&skill_md)?;
@@ -547,7 +547,7 @@ fn read_dir_recursive(dir: &Path, prefix: &str, files: &mut HashMap<String, Stri
             continue;
         }
 
-        let name = entry.file_name().to_string_lossy().to_string();
+        let name = entry.file_name().to_string_lossy().into_owned();
 
         if path.is_dir() {
             read_dir_recursive(&path, &format!("{prefix}/{name}"), files);
@@ -861,7 +861,7 @@ mod tests {
         assert_eq!(dirs.len(), 2, "should find exactly 2 skill directories");
         let names: Vec<String> = dirs
             .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert!(names.contains(&"code-review".to_string()));
         assert!(names.contains(&"writing".to_string()));

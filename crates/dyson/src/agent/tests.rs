@@ -1400,7 +1400,7 @@ async fn compact_rotates_pre_compaction_history() {
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
+            let name = e.file_name().to_string_lossy().into_owned();
             name.starts_with("test_chat.") && name.ends_with(".json")
         })
         .collect();

@@ -532,7 +532,7 @@ pub(crate) struct McpServerInfo {
 pub(crate) async fn start_mcp_server(
     workspace: &std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
     dangerous_no_sandbox: bool,
-    extra_tools: &std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
+    extra_tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
 ) -> Result<McpServerInfo> {
     use crate::skill::mcp::serve::McpHttpServer;
     use std::sync::Arc;
@@ -540,7 +540,7 @@ pub(crate) async fn start_mcp_server(
     let server = Arc::new(McpHttpServer::new(
         Arc::clone(workspace),
         dangerous_no_sandbox,
-        extra_tools.clone(),
+        extra_tools,
     ));
 
     let (port, handle, token) = server.start().await.map_err(|e| {

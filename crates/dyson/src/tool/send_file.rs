@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
-use crate::tool::{Tool, ToolContext, ToolOutput, resolve_and_validate_path};
+use crate::tool::{Tool, ToolContext, ToolOutput, path_err, resolve_and_validate_path};
 
 pub struct SendFileTool;
 
@@ -60,9 +60,7 @@ impl Tool for SendFileTool {
             };
             match candidate.canonicalize() {
                 Ok(p) => p,
-                Err(e) => return Ok(ToolOutput::error(format!(
-                    "cannot resolve path '{}': {e}", candidate.display()
-                ))),
+                Err(e) => return Ok(ToolOutput::error(path_err("resolve path", &candidate, e))),
             }
         } else {
             match resolve_and_validate_path(&ctx.working_dir, file_path) {

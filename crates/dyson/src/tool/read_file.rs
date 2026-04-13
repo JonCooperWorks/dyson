@@ -76,10 +76,7 @@ impl Tool for ReadFileTool {
                 )));
             }
             Err(e) => {
-                return Ok(ToolOutput::error(format!(
-                    "cannot stat '{}': {e}",
-                    path.display()
-                )));
+                return Ok(ToolOutput::error(super::path_err("stat", &path, e)));
             }
             _ => {}
         }
@@ -89,10 +86,7 @@ impl Tool for ReadFileTool {
             let data = match tokio::fs::read(&path).await {
                 Ok(d) => d,
                 Err(e) => {
-                    return Ok(ToolOutput::error(format!(
-                        "cannot read '{}': {e}",
-                        path.display()
-                    )));
+                    return Ok(ToolOutput::error(super::path_err("read", &path, e)));
                 }
             };
 
@@ -138,10 +132,7 @@ impl Tool for ReadFileTool {
                 Ok(Some(_)) => {}
                 Ok(None) => break,
                 Err(e) => {
-                    return Ok(ToolOutput::error(format!(
-                        "cannot read '{}': {e}",
-                        path.display()
-                    )));
+                    return Ok(ToolOutput::error(super::path_err("read", &path, e)));
                 }
             }
         }
@@ -159,10 +150,7 @@ impl Tool for ReadFileTool {
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    return Ok(ToolOutput::error(format!(
-                        "cannot read '{}': {e}",
-                        path.display()
-                    )));
+                    return Ok(ToolOutput::error(super::path_err("read", &path, e)));
                 }
             }
         }

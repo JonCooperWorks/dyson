@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
-use crate::tool::{Tool, ToolContext, ToolOutput, resolve_and_validate_path};
+use crate::tool::{Tool, ToolContext, ToolOutput, path_err, resolve_and_validate_path};
 
 pub struct WriteFileTool;
 
@@ -59,18 +59,12 @@ impl Tool for WriteFileTool {
             && !parent.exists()
             && let Err(e) = tokio::fs::create_dir_all(parent).await
         {
-            return Ok(ToolOutput::error(format!(
-                "cannot create directories for '{}': {e}",
-                path.display()
-            )));
+            return Ok(ToolOutput::error(path_err("create directories for", &path, e)));
         }
 
         let bytes = content.len();
         if let Err(e) = tokio::fs::write(&path, content).await {
-            return Ok(ToolOutput::error(format!(
-                "cannot write '{}': {e}",
-                path.display()
-            )));
+            return Ok(ToolOutput::error(path_err("write", &path, e)));
         }
 
         Ok(ToolOutput::success(format!(

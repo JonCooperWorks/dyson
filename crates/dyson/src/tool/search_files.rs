@@ -129,8 +129,8 @@ impl Tool for SearchFilesTool {
                 // a pure memory operation.
                 let rel_path = path
                     .strip_prefix(&working_dir_canon)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| path.to_string_lossy().to_string());
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| path.to_string_lossy().into_owned());
 
                 let reader = BufReader::new(file);
                 for (line_num, line_result) in reader.lines().enumerate() {

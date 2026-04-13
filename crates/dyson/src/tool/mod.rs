@@ -437,19 +437,13 @@ pub fn resolve_and_validate_path(
                         continue; // ancestor doesn't exist either, keep popping
                     }
                     Err(inner) => {
-                        return Err(format!(
-                            "cannot resolve ancestor '{}': {inner}",
-                            ancestor.display()
-                        ));
+                        return Err(path_err("resolve ancestor", &ancestor, inner));
                     }
                 }
             }
         }
         Err(e) => {
-            return Err(format!(
-                "cannot resolve path '{}': {e}",
-                candidate.display()
-            ))
+            return Err(path_err("resolve path", &candidate, e))
         }
     };
 
@@ -462,6 +456,11 @@ pub fn resolve_and_validate_path(
     }
 
     Ok(resolved)
+}
+
+/// Format a path-related error message: `"cannot {verb} '{path}': {err}"`.
+pub(crate) fn path_err(verb: &str, path: &std::path::Path, err: impl std::fmt::Display) -> String {
+    format!("cannot {verb} '{}': {err}", path.display())
 }
 
 impl ToolOutput {

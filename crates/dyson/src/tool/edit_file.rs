@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
-use crate::tool::{Tool, ToolContext, ToolOutput, resolve_and_validate_path};
+use crate::tool::{Tool, ToolContext, ToolOutput, path_err, resolve_and_validate_path};
 
 /// Maximum file size we'll load into memory for editing (10 MB).
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
@@ -73,10 +73,7 @@ impl Tool for EditFileTool {
         let metadata = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
             Err(e) => {
-                return Ok(ToolOutput::error(format!(
-                    "cannot read '{}': {e}",
-                    path.display()
-                )));
+                return Ok(ToolOutput::error(path_err("read", &path, e)));
             }
         };
         if metadata.len() > MAX_FILE_SIZE {
@@ -89,10 +86,7 @@ impl Tool for EditFileTool {
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(e) => {
-                return Ok(ToolOutput::error(format!(
-                    "cannot read '{}': {e}",
-                    path.display()
-                )));
+                return Ok(ToolOutput::error(path_err("read", &path, e)));
             }
         };
 
@@ -113,10 +107,7 @@ impl Tool for EditFileTool {
         let new_content = content.replacen(old_string, new_string, 1);
 
         if let Err(e) = tokio::fs::write(&path, &new_content).await {
-            return Ok(ToolOutput::error(format!(
-                "cannot write '{}': {e}",
-                path.display()
-            )));
+            return Ok(ToolOutput::error(path_err("write", &path, e)));
         }
 
         Ok(ToolOutput::success(format!("Applied edit to {file_path}")))

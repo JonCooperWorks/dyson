@@ -163,7 +163,7 @@ fn import_openclaw_workspace(source: &Path, dest: &Path) -> dyson::error::Result
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         if entry.file_type()?.is_file() {
-            let name = entry.file_name().to_string_lossy().to_string();
+            let name = entry.file_name().to_string_lossy().into_owned();
             if name.ends_with(".md") {
                 std::fs::copy(entry.path(), dest.join(&name))?;
                 count += 1;
@@ -179,7 +179,7 @@ fn import_openclaw_workspace(source: &Path, dest: &Path) -> dyson::error::Result
         for entry in std::fs::read_dir(&source_memory)? {
             let entry = entry?;
             if entry.file_type()?.is_file() {
-                let name = entry.file_name().to_string_lossy().to_string();
+                let name = entry.file_name().to_string_lossy().into_owned();
                 if name.ends_with(".md") {
                     std::fs::copy(entry.path(), dest_memory.join(&name))?;
                     count += 1;

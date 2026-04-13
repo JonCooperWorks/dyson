@@ -361,7 +361,7 @@ impl LlmClient for ClaudeCodeClient {
 
         if let Some(ref workspace) = self.workspace {
             let extra = self.mcp_tools.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox, &extra).await?;
+            let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox, extra).await?;
 
             // Build MCP config JSON for Claude Code's --mcp-config flag.
             let config = serde_json::json!({

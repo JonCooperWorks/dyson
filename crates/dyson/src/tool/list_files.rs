@@ -99,7 +99,7 @@ impl Tool for ListFilesTool {
                                 .map(|p| p.to_path_buf())
                                 .unwrap_or(path)
                         });
-                    results.push(rel.to_string_lossy().to_string());
+                    results.push(rel.to_string_lossy().into_owned());
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, "glob entry error — skipping");

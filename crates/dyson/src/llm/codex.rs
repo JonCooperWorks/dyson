@@ -243,7 +243,7 @@ impl LlmClient for CodexClient {
 
         if let Some(ref workspace) = self.workspace {
             let extra = self.mcp_tools.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox, &extra).await?;
+            let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox, extra).await?;
             tracing::info!(port = info.port, "MCP server started for Codex");
             mcp_url = Some(info.url);
             mcp_token = Some(info.token);

@@ -147,7 +147,7 @@ impl BotApi {
     ) -> Result<Message, DysonError> {
         let file_name = path
             .file_name()
-            .map(|n| n.to_string_lossy().to_string())
+            .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "file".to_string());
 
         let file_bytes = tokio::fs::read(path).await.map_err(DysonError::Io)?;
