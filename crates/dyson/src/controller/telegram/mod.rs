@@ -113,8 +113,10 @@ struct ChatEntry {
     is_group: bool,
     /// Maps Telegram message IDs (sent by the bot) → conversation turn index.
     /// Used to associate emoji reactions with the correct assistant response.
-    /// In-memory only — rebuilt each session.
+    /// In-memory only — rebuilt each session.  Cleared on `/clear`.
     message_id_map: tokio::sync::RwLock<HashMap<i32, usize>>,
+    /// When this chat last received a message.  Used for LRU eviction.
+    last_active: std::sync::atomic::AtomicI64,
 }
 
 /// Minimum interval between message edits (milliseconds).
@@ -122,6 +124,19 @@ const EDIT_INTERVAL_MS: u128 = 500;
 
 /// Maximum message length for Telegram (UTF-8 characters).
 const MAX_MESSAGE_LEN: usize = 4000;
+
+/// Maximum number of concurrent chat entries kept in memory.
+/// When exceeded, the least-recently-active entry is evicted (its
+/// conversation is already persisted to chat_store on every turn).
+const MAX_CHAT_ENTRIES: usize = 200;
+
+/// Current Unix timestamp in seconds (for `last_active` bookkeeping).
+fn epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
 
 // ---------------------------------------------------------------------------
 // TelegramController
@@ -676,6 +691,7 @@ async fn rebuild_agents_on_reload(
                         config: tokio::sync::RwLock::new(cfg),
                         is_group,
                         message_id_map: tokio::sync::RwLock::new(HashMap::new()),
+                        last_active: std::sync::atomic::AtomicI64::new(epoch_secs()),
                     }),
                 );
             }
@@ -925,6 +941,7 @@ async fn handle_per_chat_command(
     match &result {
         super::CommandResult::Cleared => {
             *entry.messages_snapshot.write().await = Vec::new();
+            entry.message_id_map.write().await.clear();
             let _ = chat_store.rotate(&chat_id.0.to_string());
             tracing::info!(chat_id = chat_id.0, "conversation rotated and cleared");
         }
@@ -1336,6 +1353,7 @@ async fn get_or_create_entry(
     {
         let map = agents.read().await;
         if let Some(entry) = map.get(&chat_id) {
+            entry.last_active.store(epoch_secs(), std::sync::atomic::Ordering::Relaxed);
             return Ok(Arc::clone(entry));
         }
     }
@@ -1386,11 +1404,26 @@ async fn get_or_create_entry(
         config: tokio::sync::RwLock::new(config),
         is_group,
         message_id_map: tokio::sync::RwLock::new(HashMap::new()),
+        last_active: std::sync::atomic::AtomicI64::new(epoch_secs()),
     });
 
-    // Insert under write lock.  Another task may have raced us, so use
-    // entry API to avoid overwriting.
+    // Evict the least-recently-active entry if we're at capacity.
+    // Conversation history is already persisted to chat_store on every
+    // turn, so the evicted chat can be fully restored on next message.
     let mut map = agents.write().await;
+    if map.len() >= MAX_CHAT_ENTRIES && !map.contains_key(&chat_id) {
+        if let Some((&victim_id, _)) = map
+            .iter()
+            .min_by_key(|(_, e)| e.last_active.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            tracing::info!(
+                evicted_chat_id = victim_id,
+                active_chats = map.len(),
+                "evicting least-recently-active chat entry"
+            );
+            map.remove(&victim_id);
+        }
+    }
     let entry = Arc::clone(
         map.entry(chat_id).or_insert_with(|| Arc::clone(&entry)),
     );
