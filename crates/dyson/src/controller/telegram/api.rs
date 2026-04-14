@@ -105,6 +105,11 @@ impl BotApi {
     }
 
     /// Edit an existing message's text (HTML mode).
+    ///
+    /// Returns an error if the Bot API rejects the edit (for example,
+    /// "can't parse entities" when the HTML split cut mid-tag).  The
+    /// benign `message is not modified` response is swallowed so callers
+    /// can retry edits idempotently.
     pub async fn edit_message_text(
         &self,
         chat_id: ChatId,
@@ -117,10 +122,8 @@ impl BotApi {
             "text": text,
             "parse_mode": "HTML",
         });
-        // edit_message_text returns the edited Message on success, but we
-        // don't need it.  Ignore non-critical errors (message not modified).
-        let _: Result<ApiResponse<serde_json::Value>, _> = self.post("editMessageText", &body).await;
-        Ok(())
+        let resp: ApiResponse<serde_json::Value> = self.post("editMessageText", &body).await?;
+        check_edit_ok(resp, "editMessageText")
     }
 
     /// Edit an existing message's text (plain text, no parse mode).
@@ -135,8 +138,8 @@ impl BotApi {
             "message_id": message_id.0,
             "text": text,
         });
-        let _: Result<ApiResponse<serde_json::Value>, _> = self.post("editMessageText", &body).await;
-        Ok(())
+        let resp: ApiResponse<serde_json::Value> = self.post("editMessageText", &body).await?;
+        check_edit_ok(resp, "editMessageText")
     }
 
     /// Send a document (file) by path.
@@ -285,5 +288,62 @@ impl BotApi {
                 resp.description.unwrap_or_default()
             ))
         })
+    }
+}
+
+/// Validate an `editMessageText` response.
+///
+/// The benign `message is not modified` error is swallowed — it just means
+/// the text we sent was identical to the current message content.  Any other
+/// failure (parse errors, length errors, etc.) becomes a `DysonError::Llm`
+/// so callers can fall back to an alternate render (e.g. plain text).
+fn check_edit_ok(resp: ApiResponse<serde_json::Value>, method: &str) -> Result<(), DysonError> {
+    if resp.result.is_some() {
+        return Ok(());
+    }
+    let description = resp.description.unwrap_or_default();
+    if description.contains("message is not modified") {
+        return Ok(());
+    }
+    Err(DysonError::Llm(format!(
+        "Telegram {method} failed: {description}"
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_edit_ok_success_passes() {
+        let resp = ApiResponse {
+            ok: true,
+            result: Some(serde_json::json!({"message_id": 1})),
+            description: None,
+        };
+        assert!(check_edit_ok(resp, "editMessageText").is_ok());
+    }
+
+    #[test]
+    fn check_edit_ok_not_modified_is_benign() {
+        let resp = ApiResponse::<serde_json::Value> {
+            ok: false,
+            result: None,
+            description: Some("Bad Request: message is not modified".to_string()),
+        };
+        assert!(check_edit_ok(resp, "editMessageText").is_ok());
+    }
+
+    #[test]
+    fn check_edit_ok_parse_entities_propagates() {
+        let resp = ApiResponse::<serde_json::Value> {
+            ok: false,
+            result: None,
+            description: Some(
+                "Bad Request: can't parse entities: Unexpected end tag".to_string(),
+            ),
+        };
+        let err = check_edit_ok(resp, "editMessageText").unwrap_err();
+        assert!(err.to_string().contains("can't parse entities"));
     }
 }

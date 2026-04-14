@@ -33,6 +33,11 @@ pub struct TelegramOutput {
     /// All Telegram message IDs sent during this output session.
     /// Used to map reactions back to conversation turns.
     sent_message_ids: Vec<MessageId>,
+    /// Number of parts (from `split_for_telegram`) already finalized as
+    /// their own Telegram messages.  Once a part is finalized, it won't
+    /// be edited again — the next streaming update goes into a fresh
+    /// message for `parts[committed_count]`.
+    committed_count: usize,
 }
 
 impl TelegramOutput {
@@ -47,6 +52,7 @@ impl TelegramOutput {
             rt: tokio::runtime::Handle::current(),
             typing_handle: None,
             sent_message_ids: Vec::new(),
+            committed_count: 0,
         }
     }
 
@@ -121,19 +127,24 @@ impl TelegramOutput {
 
         let html = markdown_to_telegram_html(&self.text_buffer);
         let parts = split_for_telegram(&html);
-        let text = &parts[0];
 
-        if text.is_empty() {
-            return Ok(());
+        // Once the buffer crosses `MAX_MESSAGE_LEN`, the content of
+        // `parts[0..parts.len() - 1]` is stable — appending more text only
+        // extends the final part.  So we can safely finalize any newly
+        // stabilized parts mid-stream and advance `current_message_id` to
+        // a fresh message for the still-growing tail.  This means splits
+        // actually happen as soon as the overflow occurs, instead of
+        // being deferred entirely to `force_flush_text`.
+        let last_idx = parts.len() - 1;
+        while self.committed_count < last_idx {
+            self.write_part(&parts[self.committed_count])?;
+            self.committed_count += 1;
+            // Next part begins a new message.
+            self.current_message_id = None;
         }
 
-        match self.current_message_id {
-            Some(msg_id) => self.edit_message(msg_id, text),
-            None => {
-                let msg_id = self.send_message(text)?;
-                self.current_message_id = Some(msg_id);
-            }
-        }
+        // Show the still-growing tail in the current (non-finalized) message.
+        self.write_part(&parts[self.committed_count])?;
 
         self.last_edit = Instant::now();
         Ok(())
@@ -147,23 +158,37 @@ impl TelegramOutput {
         let html = markdown_to_telegram_html(&self.text_buffer);
         let parts = split_for_telegram(&html);
 
-        for (i, part) in parts.iter().enumerate() {
-            if part.is_empty() {
-                continue;
-            }
-            if i == 0 {
-                match self.current_message_id {
-                    Some(msg_id) => self.edit_message(msg_id, part),
-                    None => {
-                        let msg_id = self.send_message(part)?;
-                        self.current_message_id = Some(msg_id);
-                    }
-                }
-            } else {
-                self.send_message(part)?;
-            }
+        // Finalize every remaining part, including the tail that was
+        // previously treated as still-growing.
+        while self.committed_count < parts.len() {
+            self.write_part(&parts[self.committed_count])?;
+            self.committed_count += 1;
+            self.current_message_id = None;
         }
 
+        // Reset state so a subsequent `flush()` on the same output is a
+        // no-op instead of re-sending everything.
+        self.text_buffer.clear();
+        self.committed_count = 0;
+        self.current_message_id = None;
+
+        Ok(())
+    }
+
+    /// Render `part` into the current message — editing if one already
+    /// exists for this part, otherwise sending a new message.  Empty
+    /// parts are skipped (Telegram rejects empty text).
+    fn write_part(&mut self, part: &str) -> Result<(), DysonError> {
+        if part.is_empty() {
+            return Ok(());
+        }
+        match self.current_message_id {
+            Some(msg_id) => self.edit_message(msg_id, part),
+            None => {
+                let msg_id = self.send_message(part)?;
+                self.current_message_id = Some(msg_id);
+            }
+        }
         Ok(())
     }
 }
