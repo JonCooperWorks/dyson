@@ -15,11 +15,13 @@ A streaming AI agent loop in Rust, built to understand how these things actually
 - **Security boundaries** — every tool call passes through a `Sandbox`
 - **MCP** — MCP servers are just another skill; the agent loop doesn't know they exist
 - **Provider differences** — Anthropic, OpenAI, and Gemini have different SSE formats, schemas, and tool conventions
+- **AST tooling** — statically-linked tree-sitter grammars, identifier-node rewriting, graceful word-boundary text fallback
 
 ## What it does
 
-Dyson is a fully functional agent — not just a learning exercise.
+Dyson is a fully functional agent — not just a learning exercise.  It can hold its own on real engineering work.
 
+- **Dyson can code** — the `bulk_edit` tool parses 19 languages with tree-sitter before it touches anything, so renaming `Config` doesn't also rewrite `ConfigManager`, strings, or comments.  Files outside the grammar set (Markdown, YAML, Dockerfiles, shell) fall back to a word-boundary text replace, so a single rename sweeps source, docs, and config in one pass.  See [AST-Aware Code Editing](docs/ast.md).
 - **Self-improvement** — background "dream" tasks distill completed work into `SKILL.md` files that hot-reload via mtime watching
 - **Sandboxed tool execution** — every tool call passes through a `Sandbox` that can allow, deny, or redirect; the default `PolicySandbox` wraps bash in OS-level sandboxes (macOS Apple Containers / Linux bubblewrap)
 - **Workspace persistence** — conversations, memory, and a knowledge base in SQLite with tiered memory and FTS5 search
@@ -196,6 +198,7 @@ Secrets can be literal strings or resolver references (`{ "resolver": "insecure_
 | [Sandbox](docs/sandbox.md) | Allow/Deny/Redirect, PolicySandbox, Apple Containers, bubblewrap |
 | [Secrets](docs/secrets.md) | Per-secret resolver routing, InsecureEnvironmentVariable |
 | [Tool Execution Pipeline](docs/tool-execution-pipeline.md) | Rate limiting, dependency analysis, result formatting, lifecycle hooks |
+| [AST-Aware Code Editing](docs/ast.md) | `bulk_edit` tool — tree-sitter rename_symbol, find_replace, list_definitions across 19 languages |
 | [Configuration](docs/configuration.md) | dyson.json format, provider selection |
 | [Adding a Provider](docs/adding-a-provider.md) | 3-step process to add a new LLM provider |
 | [Memory](docs/memory.md) | Tiered memory system, FTS5 search, journals |

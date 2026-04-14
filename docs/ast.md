@@ -1,11 +1,18 @@
 # AST-Aware Code Editing
 
-Dyson's `bulk_edit` tool uses [tree-sitter](https://tree-sitter.github.io/)
-to parse source code into ASTs before making changes.  This lets the agent
-rename identifiers across an entire project without accidentally modifying
-strings, comments, or substrings of longer names.  Non-grammar files
-(e.g. `.md`, `.yaml`) fall back to word-boundary text replacement, so a
-single rename can sweep source code, docs, and config together.
+Renaming a symbol with a plain text search-and-replace is a good way to corrupt
+a codebase.  `Config` appears inside `ConfigManager`, inside string literals,
+inside comments, and inside doc examples that were never meant to change.  The
+fix is to parse the file first and only rewrite the nodes that the language
+actually considers identifiers.
+
+Dyson's `bulk_edit` tool does exactly that.  It uses
+[tree-sitter](https://tree-sitter.github.io/) to parse source into an AST, then
+walks that AST to find identifier nodes matching the target name.  Strings,
+comments, and substrings of longer names are left alone.  Files that have no
+grammar registered fall through to a narrower text-replacement path (see
+["Why the text fallback exists"](#why-the-text-fallback-exists) below), so a
+single rename can sweep source, docs, and config in one pass.
 
 **Key files:**
 - `src/tool/bulk_edit/mod.rs` -- `BulkEditTool` (agent-only), dispatches operations
@@ -18,9 +25,18 @@ single rename can sweep source code, docs, and config together.
 
 ## Supported Languages
 
-20 tree-sitter grammars covering 19 languages are **statically linked** --
-no dynamic loading or network calls.  Each grammar is behind a `LazyLock`
-so it only initialises on first use.
+The grammar set was picked to cover the working set of codebases Dyson is
+likely to be dropped into -- systems work (Rust, C, C++, Zig), mainstream
+backend (Go, Java, Kotlin, C#, Ruby), the scripting trio
+(Python, JavaScript/TypeScript), functional languages
+(OCaml, Haskell, Elixir, Erlang), and the config layer (Nix, JSON).  Every
+grammar is **statically linked** into the binary.  There is no runtime
+download, no plugin directory, no ABI-versioned `.so` files to keep in sync
+with the parser, and therefore no third attack surface to secure.
+
+Each grammar is guarded by a `LazyLock` so its `LanguageConfig` only
+initialises the first time that language is touched.  The parse tables
+themselves live in `.rodata` and are always present.
 
 | Language   | Extensions                  | AST rename | Definitions |
 |------------|-----------------------------|------------|-------------|
@@ -45,8 +61,37 @@ so it only initialises on first use.
 | Nix        | `.nix`                      | Yes        | Yes         |
 | JSON       | `.json`                     | No         | Yes         |
 
-Any other file extension (`.md`, `.yaml`, `.toml`, `.txt`, `.html`, ...)
-is handled by `rename_symbol`'s text fallback -- see below.
+Anything outside this list -- `.md`, `.yaml`, `.toml`, `.txt`, `.html`,
+Dockerfiles, shell scripts -- is handled by `rename_symbol`'s text fallback.
+
+---
+
+## Why the text fallback exists
+
+A real refactor rarely stops at source files.  Rename a public type and you
+also need to touch:
+
+- Markdown docs and README sections that mention the symbol by name
+- YAML, TOML, and Nix config keys that reference it
+- Makefiles, shell scripts, and Dockerfiles that invoke it
+- Generated or hand-written `.txt`, `.html`, or fixture files that embed it
+
+Shipping a tree-sitter grammar for each of those is impractical.  Grammars are
+heavy, some of these formats (Markdown, plain text) have no notion of an
+"identifier" in the AST sense, and the overlap in binary size would be
+significant for very little gain.
+
+The text fallback closes that gap with one rule: a match only counts if the
+characters on both sides are non-alphanumeric and non-underscore.  That
+word-boundary check is enough to keep `Config` inside `ConfigManager`
+untouched in a Markdown file while still catching `Config` in prose, a YAML
+key, a `docker build --build-arg Config=...` line, or a `.env` template.
+
+The result is that `rename_symbol` is a single-shot, cross-cutting refactor
+rather than "AST for code, manual `sed` for everything else."  Source is
+rewritten with AST precision; text is rewritten with word-boundary safety;
+binary and non-UTF-8 files are skipped; and the tool's output tells you
+exactly which path ran for each file.
 
 ---
 
@@ -60,10 +105,8 @@ directory tree.  For each file:
 - If the extension has a tree-sitter grammar with identifier nodes, only
   identifier AST nodes matching `old_name` exactly are renamed.  Strings,
   comments, doc-comments, and substrings are never touched.
-- Otherwise, the file is rewritten with a word-boundary text replace:
-  the chars on each side of the match must be non-alphanumeric and
-  non-underscore.  This prevents `Config` from matching inside
-  `ConfigManager` in text mode.
+- Otherwise, the file is rewritten with the word-boundary text replace
+  described above.
 
 ```json
 {
@@ -179,15 +222,21 @@ walks respect `.gitignore` via the `ignore` crate.
 
 ## Memory Cost
 
-All 20 grammars are statically linked into the binary.  Their parse
-tables live in `.rodata` and add roughly 13 MB to the binary's
-memory-mapped footprint.  The `LazyLock` wrappers defer the
-`LanguageConfig` initialisation, but the underlying grammar data
-(e.g. `tree_sitter_cpp::LANGUAGE`) is a constant baked into the
-binary at compile time.
+Carrying 20 grammars for 19 languages is not free.  The parse tables are
+baked into the binary at compile time and add roughly **35 MB** to its
+memory-mapped footprint -- they sit in `.rodata` and are always present
+whether or not a given language is used in a session.  The `LazyLock`
+wrappers only defer the per-language `LanguageConfig` setup; the
+underlying grammar constants (e.g. `tree_sitter_cpp::LANGUAGE`) are
+unconditionally linked.
 
-Tree-sitter parsers themselves are lightweight -- each `Parser::new()`
-call allocates a small working buffer that is freed when the parser
-is dropped at the end of each `try_parse_file()` call.  There is no
-per-grammar singleton parser; parsers are created and destroyed
-per-file.
+The tradeoff is deliberate.  35 MB of static data buys correctness-
+preserving renames across every language a user is realistically going
+to hand Dyson, with no plugin download step, no grammar ABI version skew
+to track, no supply-chain surface beyond the crates already audited at
+build time, and no startup cost past the first parse per language.
+
+Parsers themselves are cheap.  `Parser::new()` allocates a small working
+buffer that is freed when the parser is dropped at the end of each
+`try_parse_file()` call.  There is no per-grammar singleton parser --
+parsers are created and destroyed per-file.

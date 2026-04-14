@@ -1,7 +1,12 @@
 # Dyson Documentation
 
 Technical documentation for Dyson's internals.  Start with the architecture
-overview, then dive into the component that interests you.
+overview for the big picture, then follow the data flow outward: the agent
+loop and LLM clients handle streaming, tools and skills handle side effects,
+the sandbox polices them, memory and the knowledge base give the agent long-
+term state, and controllers plug it into channels like the terminal and
+Telegram.  Everything after that — subagents, advisor, dreaming, swarm —
+layers on top of those primitives.
 
 | Document | Covers |
 |----------|--------|
@@ -10,6 +15,7 @@ overview, then dive into the component that interests you.
 | [LLM Clients](llm-clients.md) | Anthropic, OpenAI, and Claude Code streaming. SSE parsing, thinking tokens, provider abstraction |
 | [Tools & Skills](tools-and-skills.md) | Tool trait, Skill trait, BuiltinSkill, LocalSkill, adding new tools |
 | [Tool Execution Pipeline](tool-execution-pipeline.md) | Rate limiting, dependency analysis, result formatting, lifecycle hooks |
+| [AST-Aware Code Editing](ast.md) | `bulk_edit` tool — tree-sitter rename_symbol, find_replace, list_definitions across 19 languages |
 | [Sandbox](sandbox.md) | OS sandbox (Seatbelt/bubblewrap), Allow/Deny/Redirect, composition, MCP result sandboxing |
 | [Memory](memory.md) | Tiered memory (always-in-context, FTS5 search, journals), nudges, character limits |
 | [Knowledge Base](knowledge-base.md) | Document storage + FTS5 search: kb/raw (source material), kb/wiki (articles), INDEX.md (system prompt index) |
@@ -25,7 +31,6 @@ overview, then dive into the component that interests you.
 | [MCP OAuth](mcp-oauth.md) | OAuth 2.0 Authorization Code + PKCE for MCP servers |
 | [Dreaming](dreaming.md) | Background cognitive tasks (memory maintenance, learning synthesis, self-improvement) |
 | [Swarm](swarm.md) | Distributed task routing across Dyson nodes — hub, workers, constraint matching, Ed25519 signing |
-| [AST-Aware Code Editing](ast.md) | tree-sitter grammars, `bulk_edit` tool (rename_symbol / find_replace / list_definitions), supported languages |
 | [Comparison: Hermes Agent](comparison-hermes-agent.md) | Side-by-side with Hermes Agent (Nous Research) |
 
 **Key source files:**
