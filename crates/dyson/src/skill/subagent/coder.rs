@@ -163,20 +163,8 @@ impl Tool for CoderTool {
             .ok_or_else(|| DysonError::tool("coder", "missing required 'task' field"))?;
 
         // -- Resolve and validate path --
-        let scoped_dir = if ctx.dangerous_no_sandbox {
-            // Skip validation — trust the path as-is.
-            let candidate = if std::path::Path::new(path_str).is_absolute() {
-                std::path::PathBuf::from(path_str)
-            } else {
-                ctx.working_dir.join(path_str)
-            };
-            candidate
-                .canonicalize()
-                .map_err(|e| DysonError::tool("coder", format!("cannot resolve path '{path_str}': {e}")))?
-        } else {
-            crate::tool::resolve_and_validate_path(&ctx.working_dir, path_str)
-                .map_err(|e| DysonError::tool("coder", e))?
-        };
+        let scoped_dir = crate::tool::resolve_and_validate_path(&ctx.working_dir, path_str)
+            .map_err(|e| DysonError::tool("coder", e))?;
 
         // Ensure the resolved path is a directory.
         if !scoped_dir.is_dir() {
