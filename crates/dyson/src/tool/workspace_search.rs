@@ -5,6 +5,8 @@
 // Returns matching filenames and their matching lines.
 // ===========================================================================
 
+use std::fmt::Write;
+
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -45,17 +47,16 @@ impl Tool for WorkspaceSearchTool {
             return Ok(ToolOutput::error("pattern is required"));
         }
 
-        let ws = ws.read().await;
-        let results = ws.search(&pattern);
+        let results = ws.read().await.search(&pattern);
 
         if results.is_empty() {
             Ok(ToolOutput::success(format!("No matches for '{pattern}'.")))
         } else {
             let mut output = String::new();
             for (file, lines) in &results {
-                output.push_str(&format!("### {file}\n"));
+                writeln!(&mut output, "### {file}").unwrap();
                 for line in lines {
-                    output.push_str(&format!("  {line}\n"));
+                    writeln!(&mut output, "  {line}").unwrap();
                 }
                 output.push('\n');
             }

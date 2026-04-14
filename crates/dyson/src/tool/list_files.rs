@@ -2,6 +2,8 @@
 // ListFiles tool — glob-based file discovery.
 // ===========================================================================
 
+use std::fmt::Write;
+
 use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
@@ -93,10 +95,10 @@ impl Tool for ListFilesTool {
                     // canonicalize() syscall.
                     let rel = path
                         .strip_prefix(&working_dir_canon)
-                        .map(|p| p.to_path_buf())
+                        .map(std::path::Path::to_path_buf)
                         .unwrap_or_else(|_| {
                             path.strip_prefix(&ctx.working_dir)
-                                .map(|p| p.to_path_buf())
+                                .map(std::path::Path::to_path_buf)
                                 .unwrap_or(path)
                         });
                     results.push(rel.to_string_lossy().into_owned());
@@ -113,7 +115,7 @@ impl Tool for ListFilesTool {
 
         let mut output = results.join("\n");
         if results.len() >= MAX_RESULTS {
-            output.push_str(&format!("\n\n... (truncated at {MAX_RESULTS} results)"));
+            write!(&mut output, "\n\n... (truncated at {MAX_RESULTS} results)").unwrap();
         }
 
         Ok(ToolOutput::success(output))

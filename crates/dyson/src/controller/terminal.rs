@@ -89,10 +89,11 @@ fn render_command_result_terminal(result: &CommandResult) {
 fn format_provider_list(providers: &[ProviderInfo]) -> String {
     let mut out = String::from("Available providers:\n");
     for provider in providers {
-        out.push_str(&format!("  {} — {}\n", provider.name, provider.provider_type));
+        use std::fmt::Write as _;
+        writeln!(&mut out, "  {} — {}", provider.name, provider.provider_type).unwrap();
         for model in &provider.models {
             let marker = if model.active { " *" } else { "" };
-            out.push_str(&format!("    {}{marker}\n", model.name));
+            writeln!(&mut out, "    {}{marker}", model.name).unwrap();
         }
     }
     out

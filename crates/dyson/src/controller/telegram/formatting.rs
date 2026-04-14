@@ -2,6 +2,8 @@
 // Telegram formatting helpers — markdown-to-HTML conversion and message splitting.
 // ===========================================================================
 
+use std::fmt::Write;
+
 use super::MAX_MESSAGE_LEN;
 
 pub fn split_for_telegram(text: &str) -> Vec<String> {
@@ -205,7 +207,7 @@ fn convert_links(s: &str) -> String {
                     .replace("&amp;", "&")
                     .replace("&lt;", "<")
                     .replace("&gt;", ">");
-                out.push_str(&format!("<a href=\"{}\">{}</a>", raw_url, link_text));
+                write!(&mut out, "<a href=\"{raw_url}\">{link_text}</a>").unwrap();
                 rest = &after_bracket[paren_end + 1..];
                 continue;
             }

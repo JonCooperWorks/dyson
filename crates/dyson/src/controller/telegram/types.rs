@@ -53,7 +53,7 @@ pub struct Message {
     #[serde(default)]
     pub entities: Option<Vec<MessageEntity>>,
     #[serde(default)]
-    pub reply_to_message: Option<Box<Message>>,
+    pub reply_to_message: Option<Box<Self>>,
     #[serde(default)]
     pub photo: Option<Vec<PhotoSize>>,
     #[serde(default)]
@@ -63,7 +63,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn id(&self) -> MessageId {
+    pub const fn id(&self) -> MessageId {
         MessageId(self.message_id)
     }
 }
@@ -89,7 +89,7 @@ pub struct Chat {
 
 impl Chat {
     /// Returns true if this is a group or supergroup chat.
-    pub fn is_group(&self) -> bool {
+    pub const fn is_group(&self) -> bool {
         matches!(self.chat_type, ChatType::Group | ChatType::Supergroup)
     }
 }
@@ -188,7 +188,7 @@ pub struct InlineKeyboardMarkup {
 }
 
 impl InlineKeyboardMarkup {
-    pub fn new(rows: Vec<Vec<InlineKeyboardButton>>) -> Self {
+    pub const fn new(rows: Vec<Vec<InlineKeyboardButton>>) -> Self {
         Self {
             inline_keyboard: rows,
         }

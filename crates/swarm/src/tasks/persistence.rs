@@ -129,7 +129,7 @@ fn unix_secs(t: SystemTime) -> i64 {
         .unwrap_or(0)
 }
 
-fn state_to_str(state: &TaskState) -> &'static str {
+const fn state_to_str(state: &TaskState) -> &'static str {
     match state {
         TaskState::Running => "running",
         TaskState::Completed => "completed",
@@ -138,7 +138,7 @@ fn state_to_str(state: &TaskState) -> &'static str {
     }
 }
 
-fn state_error(state: &TaskState) -> Option<&str> {
+const fn state_error(state: &TaskState) -> Option<&str> {
     match state {
         TaskState::Failed { error } => Some(error.as_str()),
         _ => None,

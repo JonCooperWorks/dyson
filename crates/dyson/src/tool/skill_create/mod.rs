@@ -33,6 +33,8 @@
 // than a separate subsystem.
 // ===========================================================================
 
+use std::fmt::Write;
+
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -237,7 +239,7 @@ fn append_improvements(existing: &str, new_description: &str, new_instructions: 
         for line in frontmatter.lines() {
             let line_trimmed = line.trim();
             if line_trimmed.starts_with("description:") {
-                new_frontmatter.push_str(&format!("description: {new_description}\n"));
+                writeln!(&mut new_frontmatter, "description: {new_description}").unwrap();
                 found_desc = true;
             } else {
                 new_frontmatter.push_str(line);
@@ -245,7 +247,7 @@ fn append_improvements(existing: &str, new_description: &str, new_instructions: 
             }
         }
         if !found_desc {
-            new_frontmatter.push_str(&format!("description: {new_description}\n"));
+            writeln!(&mut new_frontmatter, "description: {new_description}").unwrap();
         }
 
         format!("---\n{new_frontmatter}---\n\n{body}\n\n## Improvements\n\n{new_instructions}\n")
@@ -265,7 +267,7 @@ fn append_improvements(existing: &str, new_description: &str, new_instructions: 
             for line in after_open[..fm_end].trim_end().lines() {
                 let line_trimmed = line.trim();
                 if line_trimmed.starts_with("description:") {
-                    new_frontmatter.push_str(&format!("description: {new_description}\n"));
+                    writeln!(&mut new_frontmatter, "description: {new_description}").unwrap();
                     found_desc = true;
                 } else {
                     new_frontmatter.push_str(line);
@@ -273,7 +275,7 @@ fn append_improvements(existing: &str, new_description: &str, new_instructions: 
                 }
             }
             if !found_desc {
-                new_frontmatter.push_str(&format!("description: {new_description}\n"));
+                writeln!(&mut new_frontmatter, "description: {new_description}").unwrap();
             }
             let body = after_open[fm_end..].trim();
             format!(

@@ -289,7 +289,7 @@ impl DreamRunner {
 }
 
 /// Check whether a dream's trigger matches an incoming event.
-fn should_activate(trigger: DreamTrigger, event: &DreamEvent) -> bool {
+const fn should_activate(trigger: DreamTrigger, event: &DreamEvent) -> bool {
     match (trigger, event) {
         (DreamTrigger::EveryNTurns(n), DreamEvent::TurnComplete { turn_count }) => {
             n > 0 && turn_count.is_multiple_of(n)
@@ -393,7 +393,7 @@ impl DreamHandle {
                         let msg = panic
                             .downcast_ref::<&str>()
                             .copied()
-                            .or_else(|| panic.downcast_ref::<String>().map(|s| s.as_str()))
+                            .or_else(|| panic.downcast_ref::<String>().map(std::string::String::as_str))
                             .unwrap_or("unknown panic");
                         tracing::error!(reason = msg, "dream thread caught panic, continuing");
                     }

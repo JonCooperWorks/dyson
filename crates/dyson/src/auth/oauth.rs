@@ -217,7 +217,7 @@ impl OAuth {
 
         let response = refresh_token(
             &guard.token_url, refresh_tok.expose(), &guard.client_id,
-            guard.client_secret.as_ref().map(|c| c.expose()), client,
+            guard.client_secret.as_ref().map(super::credential::Credential::expose), client,
         ).await?;
 
         guard.access_token = Credential::new(response.access_token);
@@ -359,7 +359,7 @@ pub async fn persist_tokens(
         expires_at_epoch,
         token_url: token_url.to_string(),
         client_id: client_id.to_string(),
-        client_secret: client_secret.map(|s| s.to_string()),
+        client_secret: client_secret.map(std::string::ToString::to_string),
     })?;
 
     let dir = token_dir()?;

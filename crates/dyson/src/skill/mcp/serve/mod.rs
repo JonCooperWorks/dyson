@@ -520,7 +520,7 @@ impl McpHttpServer {
         //   it through so the response matches the request.
         // - `method`: The MCP method name (e.g., "initialize", "tools/call")
         // - `params`: Method-specific parameters (optional)
-        let id = json.get("id").and_then(|v| v.as_u64());
+        let id = json.get("id").and_then(serde_json::Value::as_u64);
         let method = json["method"].as_str().unwrap_or("");
         let params = json.get("params").cloned();
 

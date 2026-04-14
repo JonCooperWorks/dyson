@@ -349,7 +349,7 @@ enum ThinkTagState {
 }
 
 impl ThinkTagParser {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             state: ThinkTagState::Start,
             pending: String::new(),

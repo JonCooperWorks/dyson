@@ -236,7 +236,7 @@ pub fn to_sharegpt_json(conversations: &[ShareGptConversation]) -> crate::Result
     Ok(serde_json::to_string_pretty(conversations)?)
 }
 
-fn role_to_sharegpt(role: &Role) -> &'static str {
+const fn role_to_sharegpt(role: &Role) -> &'static str {
     match role {
         Role::User => "human",
         Role::Assistant => "gpt",

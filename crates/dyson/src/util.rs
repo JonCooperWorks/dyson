@@ -7,13 +7,13 @@
 /// 100KB is generous enough for most tool calls (file listings, test output,
 /// grep results) but small enough to leave room in the LLM's context window
 /// for the conversation history and system prompt.
-pub(crate) const MAX_OUTPUT_BYTES: usize = 100 * 1024;
+pub const MAX_OUTPUT_BYTES: usize = 100 * 1024;
 
 /// Truncate a string to at most `max_bytes`, snapping to a UTF-8 char boundary.
 ///
 /// Returns the longest prefix of `s` that is at most `max_bytes` and ends on
 /// a valid char boundary.  Returns `s` unchanged if it's already short enough.
-pub(crate) fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
+pub fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }
@@ -29,7 +29,7 @@ pub(crate) fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
 /// Returns a `Cow::Borrowed` when no truncation is needed (the common case),
 /// avoiding a heap allocation.  Only allocates when the output exceeds the
 /// limit and needs the truncation notice appended.
-pub(crate) fn truncate_output(output: &str) -> std::borrow::Cow<'_, str> {
+pub fn truncate_output(output: &str) -> std::borrow::Cow<'_, str> {
     if output.len() <= MAX_OUTPUT_BYTES {
         return std::borrow::Cow::Borrowed(output);
     }
@@ -47,7 +47,7 @@ pub(crate) fn truncate_output(output: &str) -> std::borrow::Cow<'_, str> {
 ///
 /// Uses a civil-date algorithm derived from Howard Hinnant's `chrono`-compatible
 /// formulas.  No external dependencies — pure arithmetic.
-pub(crate) fn unix_to_ymd(secs: u64) -> (i64, u64, u64) {
+pub const fn unix_to_ymd(secs: u64) -> (i64, u64, u64) {
     let z = (secs / 86400) as i64 + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u64;
@@ -70,7 +70,7 @@ pub(crate) fn unix_to_ymd(secs: u64) -> (i64, u64, u64) {
 ///   3. Starts a new single-quoted string
 ///
 /// Example: `it's here` → `it'\''s here`
-pub(crate) fn escape_single_quotes(s: &str) -> String {
+pub fn escape_single_quotes(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
@@ -78,7 +78,7 @@ pub(crate) fn escape_single_quotes(s: &str) -> String {
 ///
 /// Used to create deterministic-but-readable identifiers from URLs, paths,
 /// etc.  Not cryptographic — just a short fingerprint for display.
-pub(crate) fn short_hash(s: &str) -> String {
+pub fn short_hash(s: &str) -> String {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(s.as_bytes());
     format!("{:x}", hash)[..8].to_string()

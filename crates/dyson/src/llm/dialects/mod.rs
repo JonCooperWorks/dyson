@@ -37,7 +37,7 @@ use crate::llm::ToolDefinition;
 /// A tool call extracted from model text output.
 ///
 /// Used by [`TextToolHandler`] implementations to return parsed tool calls.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedToolCall {
     pub name: String,
     pub input: serde_json::Value,

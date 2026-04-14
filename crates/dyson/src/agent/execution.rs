@@ -123,7 +123,7 @@ impl Agent {
     }
 
     /// Check if an LLM error is retryable (rate limit, overloaded, network).
-    pub(super) fn is_retryable(err: &DysonError) -> bool {
+    pub(super) const fn is_retryable(err: &DysonError) -> bool {
         matches!(
             err,
             DysonError::LlmRateLimit(_)

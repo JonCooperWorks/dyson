@@ -82,7 +82,7 @@ pub enum Role {
 /// ```
 /// This is handy for debug logging.  For actual API serialization, see
 /// `message_to_anthropic()` in `llm/anthropic.rs`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     /// Plain text content (user input or LLM output).
@@ -187,29 +187,29 @@ impl ContentBlock {
     /// entire `serde_json::Value` tree on every call.
     pub fn estimate_tokens(&self) -> usize {
         match self {
-            ContentBlock::Text { text } => text.split_whitespace().count().max(1),
-            ContentBlock::ToolUse { id, name, input } => {
+            Self::Text { text } => text.split_whitespace().count().max(1),
+            Self::ToolUse { id, name, input } => {
                 let input_token_estimate = estimate_json_tokens(input);
                 name.len() / 4 + 1
                     + id.len() / 4 + 1
                     + input_token_estimate
                     + 10 // JSON structure overhead
             }
-            ContentBlock::ToolResult {
+            Self::ToolResult {
                 tool_use_id,
                 content,
                 ..
             } => {
                 tool_use_id.split_whitespace().count() + content.split_whitespace().count() + 5 // JSON structure overhead
             }
-            ContentBlock::Thinking { thinking } => thinking.split_whitespace().count().max(1),
-            ContentBlock::Image { data, .. } => {
+            Self::Thinking { thinking } => thinking.split_whitespace().count().max(1),
+            Self::Image { data, .. } => {
                 // Anthropic charges ~1600 tokens for a 1568x1568 image.
                 // Rough heuristic based on base64 data size.
                 let decoded_bytes = data.len() * 3 / 4;
                 (decoded_bytes / 750).max(100)
             }
-            ContentBlock::Document { extracted_text, .. } => {
+            Self::Document { extracted_text, .. } => {
                 // Use the extracted text for token estimation since that's
                 // what most providers will actually consume.
                 extracted_text.split_whitespace().count().max(1)
@@ -243,7 +243,7 @@ pub(crate) fn estimate_json_tokens(value: &serde_json::Value) -> usize {
 impl Message {
     /// Rough offline token estimate for this entire message.
     pub fn estimate_tokens(&self) -> usize {
-        let content_tokens: usize = self.content.iter().map(|b| b.estimate_tokens()).sum();
+        let content_tokens: usize = self.content.iter().map(ContentBlock::estimate_tokens).sum();
         content_tokens + 4 // role + message framing overhead
     }
 
@@ -253,7 +253,7 @@ impl Message {
     /// let msg = Message::user("What files are in the current directory?");
     /// ```
     pub fn user(text: &str) -> Self {
-        Message {
+        Self {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
@@ -266,8 +266,8 @@ impl Message {
     /// Called by the stream handler after processing all `StreamEvent`s for
     /// a single LLM turn.  The blocks typically include `Text` and
     /// optionally `ToolUse` blocks.
-    pub fn assistant(content: Vec<ContentBlock>) -> Self {
-        Message {
+    pub const fn assistant(content: Vec<ContentBlock>) -> Self {
+        Self {
             role: Role::Assistant,
             content,
         }
@@ -282,8 +282,8 @@ impl Message {
     ///     ContentBlock::Image { data: base64_data, media_type: "image/jpeg".into() },
     /// ]);
     /// ```
-    pub fn user_multimodal(content: Vec<ContentBlock>) -> Self {
-        Message {
+    pub const fn user_multimodal(content: Vec<ContentBlock>) -> Self {
+        Self {
             role: Role::User,
             content,
         }
@@ -307,7 +307,7 @@ impl Message {
     /// The `ToolResult` content block carries the `tool_use_id` to link
     /// it back to the original `ToolUse`.
     pub fn tool_result(tool_use_id: &str, content: &str, is_error: bool) -> Self {
-        Message {
+        Self {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.to_string(),

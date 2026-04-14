@@ -26,7 +26,7 @@ use crate::llm::{StreamResponse, ToolDefinition, ToolMode};
 /// Each CLI client implements this for its specific event format.
 /// The shared `cli_event_stream()` function calls `parse_line()` for
 /// each line and `finalize()` at EOF.
-pub(crate) trait CliLineParser: Send + 'static {
+pub trait CliLineParser: Send + 'static {
     /// Parse one JSONL line. Returns events to yield (may be empty).
     fn parse_line(&mut self, line: &str) -> Vec<Result<StreamEvent>>;
 
@@ -48,7 +48,7 @@ pub(crate) trait CliLineParser: Send + 'static {
 /// that need to live for the stream's duration (e.g. the child process
 /// handle, MCP server task handle).  They're moved into the async closure
 /// and dropped when the stream ends.
-pub(crate) fn cli_event_stream<P: CliLineParser>(
+pub fn cli_event_stream<P: CliLineParser>(
     stdout: ChildStdout,
     parser: P,
     _keep_alive: Vec<Box<dyn std::any::Any + Send>>,
@@ -89,7 +89,7 @@ pub(crate) fn cli_event_stream<P: CliLineParser>(
 
 /// Build a `StreamResponse` for CLI clients that observe tool execution
 /// (the subprocess handles tools internally, Dyson doesn't execute them).
-pub(crate) fn build_observe_response(
+pub fn build_observe_response(
     stream: std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<StreamEvent>> + Send>>,
 ) -> StreamResponse {
     StreamResponse {
@@ -104,7 +104,7 @@ pub(crate) fn build_observe_response(
 /// When a workspace is available, tools are served to the subprocess via
 /// MCP — return an empty list so the text prompt doesn't duplicate them.
 /// Otherwise, include non-agent-only tools for text-based tool descriptions.
-pub(crate) fn filter_tools_for_cli(
+pub fn filter_tools_for_cli(
     tools: &[ToolDefinition],
     has_workspace: bool,
 ) -> Vec<&ToolDefinition> {

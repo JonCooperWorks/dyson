@@ -154,7 +154,7 @@ pub struct McpToolResult {
 
 impl JsonRpcResponse {
     /// Build a success response with an arbitrary JSON result.
-    pub fn success(id: Option<u64>, result: serde_json::Value) -> Self {
+    pub const fn success(id: Option<u64>, result: serde_json::Value) -> Self {
         Self {
             id,
             result: Some(result),

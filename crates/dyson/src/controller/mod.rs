@@ -527,7 +527,7 @@ fn parse_model_command(
 
     // Case 1: first word is a known provider name.
     if providers.contains_key(first) {
-        return Ok((first.to_string(), second.map(|s| s.to_string())));
+        return Ok((first.to_string(), second.map(std::string::ToString::to_string)));
     }
 
     // Case 2: not a provider — try as a model in the current provider.
@@ -1442,9 +1442,10 @@ mod tests {
     #[test]
     fn tail_large_file_spanning_chunks() {
         // Create a file larger than the 8192-byte chunk size.
+        use std::fmt::Write as _;
         let mut content = String::new();
         for i in 0..500 {
-            content.push_str(&format!("log line number {i:04}\n"));
+            writeln!(&mut content, "log line number {i:04}").unwrap();
         }
         let dir = make_log_dir(&content);
         let result = read_log_tail_from_dir(dir.path(), 5).unwrap();

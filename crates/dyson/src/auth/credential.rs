@@ -37,7 +37,7 @@ pub struct Credential {
 
 impl Credential {
     /// Create a new credential from a secret string.
-    pub fn new(value: String) -> Self {
+    pub const fn new(value: String) -> Self {
         Self { value }
     }
 
@@ -50,7 +50,7 @@ impl Credential {
     }
 
     /// Returns true if the credential is empty.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.value.is_empty()
     }
 }

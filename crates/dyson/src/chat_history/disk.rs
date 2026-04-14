@@ -336,7 +336,7 @@ mod tests {
         // A rotated file should exist in the directory.
         let files: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.file_name().to_string_lossy().starts_with("chat_1."))
             .collect();
         assert_eq!(files.len(), 1);
@@ -390,7 +390,7 @@ mod tests {
         assert!(media_dir.exists(), "media dir should exist");
         let media_files: Vec<_> = std::fs::read_dir(&media_dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
         assert_eq!(media_files.len(), 1, "should have one media file");
 
@@ -426,7 +426,7 @@ mod tests {
         // Two files: current + one rotated.
         let files: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.file_name().to_string_lossy().starts_with("chat_1"))
             .collect();
         assert_eq!(files.len(), 2);

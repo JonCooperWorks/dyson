@@ -52,11 +52,11 @@ pub enum Priority {
 
 impl Priority {
     /// Effective capacity as a fraction of `max_calls` for this priority.
-    fn effective_limit(self, max_calls: usize) -> usize {
+    const fn effective_limit(self, max_calls: usize) -> usize {
         match self {
-            Priority::UserFacing => max_calls,
-            Priority::Background => max_calls * 2 / 3,
-            Priority::Scheduled => max_calls / 3,
+            Self::UserFacing => max_calls,
+            Self::Background => max_calls * 2 / 3,
+            Self::Scheduled => max_calls / 3,
         }
     }
 }
@@ -82,7 +82,7 @@ impl RateLimiterState {
 
         let effective_limit = priority.effective_limit(self.max_calls);
         let now = Instant::now();
-        let mut timestamps = self.timestamps.lock().unwrap_or_else(|e| e.into_inner());
+        let mut timestamps = self.timestamps.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Prune expired timestamps from the front (O(k) where k = expired,
         // instead of O(n) retain over the entire vec).  Timestamps are always
@@ -255,7 +255,7 @@ impl<T> RateLimitedHandle<T> {
     }
 
     /// The priority this handle operates at.
-    pub fn priority(&self) -> Priority {
+    pub const fn priority(&self) -> Priority {
         self.priority
     }
 
@@ -265,8 +265,8 @@ impl<T> RateLimitedHandle<T> {
     /// This is how dreams get a `Background`-priority handle from the
     /// agent's `UserFacing` handle without needing access to the
     /// original `RateLimited`.
-    pub fn with_priority(&self, priority: Priority) -> RateLimitedHandle<T> {
-        RateLimitedHandle {
+    pub fn with_priority(&self, priority: Priority) -> Self {
+        Self {
             inner: Arc::clone(&self.inner),
             state: Arc::clone(&self.state),
             priority,

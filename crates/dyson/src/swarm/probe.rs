@@ -407,7 +407,7 @@ fn parse_nvidia_smi_output(output: &str) -> Vec<GpuInfo> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(3, ',').map(|s| s.trim()).collect();
+            let parts: Vec<&str> = line.splitn(3, ',').map(str::trim).collect();
             if parts.len() < 3 {
                 return None;
             }

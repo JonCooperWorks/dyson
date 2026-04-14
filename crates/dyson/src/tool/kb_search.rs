@@ -5,6 +5,8 @@
 // articles).  Supports scoping to raw/, wiki/, or all KB files.
 // ===========================================================================
 
+use std::fmt::Write;
+
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -58,8 +60,7 @@ impl Tool for KbSearchTool {
             _ => "kb/",
         };
 
-        let ws = ws.read().await;
-        let results = ws.memory_search(&query);
+        let results = ws.read().await.memory_search(&query);
 
         // Filter to KB files matching the requested scope.
         let filtered: Vec<_> = results
@@ -73,9 +74,9 @@ impl Tool for KbSearchTool {
 
         let mut output = String::new();
         for (key, snippet) in &filtered {
-            output.push_str(&format!("### {key}\n{snippet}\n\n"));
+            writeln!(&mut output, "### {key}\n{snippet}\n").unwrap();
         }
-        output.push_str(&format!("({} result(s))", filtered.len()));
+        write!(&mut output, "({} result(s))", filtered.len()).unwrap();
 
         Ok(ToolOutput::success(output))
     }

@@ -40,7 +40,7 @@ pub enum FeedbackRating {
 
 impl FeedbackRating {
     /// Numeric score for this rating (-3 to +3).
-    pub fn score(self) -> i8 {
+    pub const fn score(self) -> i8 {
         match self {
             Self::Terrible => -3,
             Self::Bad => -2,
@@ -84,7 +84,7 @@ pub struct FeedbackStore {
 
 impl FeedbackStore {
     /// Create a new feedback store rooted at the given directory.
-    pub fn new(dir: PathBuf) -> Self {
+    pub const fn new(dir: PathBuf) -> Self {
         Self { dir }
     }
 

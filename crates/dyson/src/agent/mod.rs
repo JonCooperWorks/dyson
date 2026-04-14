@@ -94,6 +94,7 @@ mod tool_limiter;
 mod tests;
 
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -259,7 +260,7 @@ impl ToolRegistry {
     }
 
     /// Mark tools as disabled — subsequent LLM calls will omit definitions.
-    fn disable(&mut self) {
+    const fn disable(&mut self) {
         self.disabled = true;
     }
 }
@@ -441,7 +442,7 @@ impl AgentBuilder {
     }
 
     /// Set the dream nudge interval (0 = no dreams).
-    pub fn nudge_interval(mut self, n: usize) -> Self {
+    pub const fn nudge_interval(mut self, n: usize) -> Self {
         self.nudge_interval = n;
         self
     }
@@ -606,10 +607,12 @@ impl Agent {
 
         // Inject model/provider info so the model can answer "what model
         // are you running?" accurately.
-        system_prompt.push_str(&format!(
+        write!(
+            &mut system_prompt,
             "\n\nYou are running on model '{}' via the {:?} provider.",
             settings.model, settings.provider,
-        ));
+        )
+        .unwrap();
 
         for skill in skills {
             if let Some(fragment) = skill.system_prompt() {
@@ -693,7 +696,7 @@ impl Agent {
     ///
     /// Called by `SubagentTool` after construction to propagate the depth
     /// counter.  The child runs at `parent_depth + 1`.
-    pub fn set_depth(&mut self, depth: u8) {
+    pub const fn set_depth(&mut self, depth: u8) {
         self.tool_context.depth = depth;
     }
 
@@ -859,7 +862,7 @@ impl Agent {
 
     /// Mark the agent as unable to use tools.  Subsequent LLM calls will
     /// omit tool definitions from the request.
-    fn disable_tools(&mut self) {
+    const fn disable_tools(&mut self) {
         self.tool_registry.disable();
     }
 
@@ -920,9 +923,11 @@ impl Agent {
                 .unwrap_or(self.system_prompt.len());
             let mut new_prompt = String::with_capacity(self.system_prompt.len());
             new_prompt.push_str(&self.system_prompt[..pos]);
-            new_prompt.push_str(&format!(
+            write!(
+                &mut new_prompt,
                 "\n\nYou are running on model '{model}' via the {provider:?} provider.",
-            ));
+            )
+            .unwrap();
             new_prompt.push_str(&self.system_prompt[end..]);
             self.system_prompt = Arc::from(new_prompt);
         }
@@ -962,7 +967,7 @@ impl Agent {
     }
 
     /// Get the completion config (for quick response context).
-    pub fn config(&self) -> &CompletionConfig {
+    pub const fn config(&self) -> &CompletionConfig {
         &self.config
     }
 
@@ -980,12 +985,12 @@ impl Agent {
     /// assistant message without tool calls), or an error if something
     /// went wrong.
     /// Provide direct access to the token budget for external inspection.
-    pub fn token_budget(&self) -> &TokenBudget {
+    pub const fn token_budget(&self) -> &TokenBudget {
         &self.conversation.token_budget
     }
 
     /// Provide mutable access to the token budget for external configuration.
-    pub fn token_budget_mut(&mut self) -> &mut TokenBudget {
+    pub const fn token_budget_mut(&mut self) -> &mut TokenBudget {
         &mut self.conversation.token_budget
     }
 

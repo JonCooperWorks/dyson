@@ -16,6 +16,7 @@
 // ===========================================================================
 
 use regex::Regex;
+use std::fmt::Write;
 use std::sync::LazyLock;
 
 use super::{ExtractedToolCall, TextToolHandler};
@@ -69,8 +70,8 @@ fn format_tools_for_prompt(tools: &[ToolDefinition]) -> String {
     );
 
     for tool in tools {
-        prompt.push_str(&format!("\n## {}\n", tool.name));
-        prompt.push_str(&format!("{}\n", tool.description));
+        writeln!(&mut prompt, "\n## {}", tool.name).unwrap();
+        writeln!(&mut prompt, "{}", tool.description).unwrap();
 
         if let Some(props) = tool.input_schema.get("properties")
             && let Some(obj) = props.as_object()
@@ -97,7 +98,7 @@ fn format_tools_for_prompt(tools: &[ToolDefinition]) -> String {
                 } else {
                     " (optional)"
                 };
-                prompt.push_str(&format!("  - {name}: {typ}{req} — {desc}\n"));
+                writeln!(&mut prompt, "  - {name}: {typ}{req} — {desc}").unwrap();
             }
         }
     }

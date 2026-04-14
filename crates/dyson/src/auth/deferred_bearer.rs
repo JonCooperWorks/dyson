@@ -31,7 +31,7 @@ impl DeferredBearerAuth {
     ///
     /// The sending end should be held by the component that obtains
     /// the token (e.g. `SwarmController` after registration).
-    pub fn new(rx: watch::Receiver<Option<String>>) -> Self {
+    pub const fn new(rx: watch::Receiver<Option<String>>) -> Self {
         Self { rx }
     }
 }

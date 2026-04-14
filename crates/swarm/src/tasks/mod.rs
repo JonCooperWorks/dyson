@@ -51,17 +51,17 @@ pub enum TaskState {
 
 impl TaskState {
     /// True for Completed, Failed, and Cancelled.
-    pub fn is_terminal(&self) -> bool {
-        !matches!(self, TaskState::Running)
+    pub const fn is_terminal(&self) -> bool {
+        !matches!(self, Self::Running)
     }
 
     fn from_task_status(status: &TaskStatus) -> Self {
         match status {
-            TaskStatus::Completed => TaskState::Completed,
-            TaskStatus::Failed { error } => TaskState::Failed {
+            TaskStatus::Completed => Self::Completed,
+            TaskStatus::Failed { error } => Self::Failed {
                 error: error.clone(),
             },
-            TaskStatus::Cancelled => TaskState::Cancelled,
+            TaskStatus::Cancelled => Self::Cancelled,
         }
     }
 }

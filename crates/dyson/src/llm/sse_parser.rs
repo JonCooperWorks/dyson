@@ -26,7 +26,7 @@ use crate::llm::{
 ///
 /// Implementors receive the parsed JSON payload and a mutable reference
 /// to the shared tool buffer state.  They return zero or more `StreamEvent`s.
-pub(crate) trait SseJsonParser {
+pub trait SseJsonParser {
     /// Parse a single SSE JSON payload into zero or more StreamEvents.
     ///
     /// The parser has access to the shared tool buffers via the `ctx`
@@ -47,7 +47,7 @@ pub(crate) trait SseJsonParser {
 /// - Track thinking block indices
 ///
 /// This struct provides those operations with built-in size guards.
-pub(crate) struct ToolBufferContext {
+pub struct ToolBufferContext {
     /// Active tool_use blocks being accumulated (keyed by content block index).
     pub(crate) tool_buffers: HashMap<usize, ToolCallBuffer>,
     /// Content block indices that are "thinking" blocks.
@@ -129,7 +129,7 @@ impl ToolBufferContext {
 /// provider-specific JSON parser.
 ///
 /// Implements `SseStreamParser` so it can be used with `sse_event_stream()`.
-pub(crate) struct BaseSseParser<P: SseJsonParser> {
+pub struct BaseSseParser<P: SseJsonParser> {
     line_buffer: SseLineBuffer,
     pub(crate) ctx: ToolBufferContext,
     parser: P,

@@ -131,7 +131,7 @@ pub struct SandboxPolicy {
 
 impl SandboxPolicy {
     /// A policy that denies everything — the safe default for unknown tools.
-    pub fn deny_all() -> Self {
+    pub const fn deny_all() -> Self {
         Self {
             network: Access::Deny,
             file_read: PathAccess::Deny,
@@ -428,9 +428,9 @@ impl PathAccess {
     /// Check if a given resolved path is allowed by this policy.
     pub fn allows_path(&self, path: &Path) -> bool {
         match self {
-            PathAccess::Allow => true,
-            PathAccess::Deny => false,
-            PathAccess::RestrictTo(allowed) => {
+            Self::Allow => true,
+            Self::Deny => false,
+            Self::RestrictTo(allowed) => {
                 allowed.iter().any(|prefix| path.starts_with(prefix))
             }
         }

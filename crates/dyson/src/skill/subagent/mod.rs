@@ -104,7 +104,7 @@ pub struct CaptureOutput {
 
 impl CaptureOutput {
     /// Create a new empty capture buffer.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             text: String::new(),
         }

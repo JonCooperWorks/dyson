@@ -105,7 +105,7 @@ impl SwarmPublicKey {
     }
 
     /// The version of this key.
-    pub fn version(&self) -> u8 {
+    pub const fn version(&self) -> u8 {
         self.version
     }
 }

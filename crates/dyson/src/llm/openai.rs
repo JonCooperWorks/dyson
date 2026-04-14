@@ -352,7 +352,7 @@ struct OpenAiJsonParser {
 }
 
 impl OpenAiJsonParser {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self { completed: false }
     }
 }
@@ -662,7 +662,7 @@ mod tests {
             );
             let events = parser.feed(sse.as_bytes());
             if i == MAX_ACTIVE_TOOL_BUFFERS {
-                let has_error = events.iter().any(|e| e.is_err());
+                let has_error = events.iter().any(std::result::Result::is_err);
                 assert!(has_error, "expected error on tool buffer #{i}");
             }
         }

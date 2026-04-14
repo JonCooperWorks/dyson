@@ -142,7 +142,7 @@ mod tests {
                     ram_bytes: ram_gb * 1024 * 1024 * 1024,
                     disk_free_bytes: 0,
                 },
-                capabilities: caps.iter().map(|s| s.to_string()).collect(),
+                capabilities: caps.iter().map(std::string::ToString::to_string).collect(),
                 description: None,
                 status: status.clone(),
             },

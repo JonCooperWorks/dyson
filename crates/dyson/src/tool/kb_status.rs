@@ -5,6 +5,8 @@
 // Lightweight — no LLM calls, just workspace enumeration.
 // ===========================================================================
 
+use std::fmt::Write;
+
 use async_trait::async_trait;
 use serde_json::json;
 
@@ -62,32 +64,38 @@ impl Tool for KbStatusTool {
 
         let mut output = String::from("## Knowledge Base Status\n\n");
 
-        output.push_str(&format!(
-            "- **Raw sources:** {} file(s), {}\n",
+        writeln!(
+            &mut output,
+            "- **Raw sources:** {} file(s), {}",
             raw_files.len(),
             format_bytes(raw_bytes)
-        ));
-        output.push_str(&format!(
-            "- **Wiki articles:** {} file(s), {}\n",
+        )
+        .unwrap();
+        writeln!(
+            &mut output,
+            "- **Wiki articles:** {} file(s), {}",
             wiki_files.len(),
             format_bytes(wiki_bytes)
-        ));
-        output.push_str(&format!(
-            "- **INDEX.md:** {}\n",
+        )
+        .unwrap();
+        writeln!(
+            &mut output,
+            "- **INDEX.md:** {}",
             if has_index { "present" } else { "not yet created" }
-        ));
+        )
+        .unwrap();
 
         if !raw_files.is_empty() {
             output.push_str("\n### Raw Sources\n");
             for f in &raw_files {
-                output.push_str(&format!("- {f}\n"));
+                writeln!(&mut output, "- {f}").unwrap();
             }
         }
 
         if !wiki_files.is_empty() {
             output.push_str("\n### Wiki Articles\n");
             for f in &wiki_files {
-                output.push_str(&format!("- {f}\n"));
+                writeln!(&mut output, "- {f}").unwrap();
             }
         }
 

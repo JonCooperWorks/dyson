@@ -289,7 +289,7 @@ struct GeminiJsonParser {
 }
 
 impl GeminiJsonParser {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             completed: false,
             tool_index: 0,
@@ -326,7 +326,7 @@ impl SseJsonParser for GeminiJsonParser {
                         // Gemini may provide an "id" field; fall back to generated ID.
                         let id = fc["id"]
                             .as_str()
-                            .map(|s| s.to_string())
+                            .map(std::string::ToString::to_string)
                             .unwrap_or_else(|| format!("gemini_call_{}", self.tool_index));
 
                         let args = &fc["args"];

@@ -339,7 +339,7 @@ impl super::Controller for TelegramController {
         let allowed_ids = self.allowed_chat_ids.clone();
         let download_limits = Arc::clone(&self.download_limits);
         let mut current_settings = settings.clone();
-        let controller_prompt = self.system_prompt().map(|s| s.to_string());
+        let controller_prompt = self.system_prompt().map(std::string::ToString::to_string);
 
         let (config_path, mut reloader) = super::create_hot_reloader(settings);
 
@@ -431,7 +431,7 @@ impl super::Controller for TelegramController {
                 if let Some(cb) = &update.callback_query {
                     let cb_chat = cb.message.as_ref().map(|m| &m.chat);
                     let cb_chat_id = cb_chat.map(|c| ChatId(c.id));
-                    let cb_is_group = cb_chat.is_some_and(|c| c.is_group());
+                    let cb_is_group = cb_chat.is_some_and(types::Chat::is_group);
                     let cb_data = cb.data.clone().unwrap_or_default();
                     let _ = bot.answer_callback_query(&cb.id).await;
 
@@ -466,7 +466,7 @@ impl super::Controller for TelegramController {
                     .as_deref()
                     .or(msg.caption.as_deref())
                     .filter(|t| !t.is_empty())
-                    .map(|t| t.to_string());
+                    .map(std::string::ToString::to_string);
 
                 let has_media = msg.photo.is_some()
                     || msg.voice.is_some()
@@ -1297,12 +1297,15 @@ async fn render_command_result_telegram(
             if agents.is_empty() {
                 let _ = bot.send_message(chat_id, "No background agents running.").await;
             } else {
+                use std::fmt::Write as _;
                 let mut msg = String::from("Background agents:\n");
                 for a in agents {
-                    msg.push_str(&format!(
-                        "  [{}] {} ({:.0}s)\n",
+                    writeln!(
+                        &mut msg,
+                        "  [{}] {} ({:.0}s)",
                         a.id, a.prompt_preview, a.elapsed.as_secs_f64(),
-                    ));
+                    )
+                    .unwrap();
                 }
                 let _ = bot.send_message(chat_id, &msg).await;
             }
@@ -2100,7 +2103,7 @@ mod tests {
                 is_bot: false,
                 username: Some(u.to_string()),
             }),
-            text: text.map(|t| t.to_string()),
+            text: text.map(std::string::ToString::to_string),
             caption: None,
             entities: None,
             reply_to_message: None,

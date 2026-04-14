@@ -115,7 +115,7 @@ struct Migration {
 /// 1. Bump `CURRENT_VERSION` above.
 /// 2. Add a `Migration` here with `from_version` = old CURRENT_VERSION.
 /// 3. Define the steps using the Step enum.
-fn migrations() -> &'static [Migration] {
+const fn migrations() -> &'static [Migration] {
     &[
         // v0 → v1: Move inline provider fields into "providers" map.
         //
@@ -167,7 +167,7 @@ fn migrations() -> &'static [Migration] {
 pub fn migrate(root: &mut Value) -> Result<bool> {
     let version = root
         .get("config_version")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
     if version > CURRENT_VERSION {
@@ -306,7 +306,7 @@ fn set_path(root: &mut Value, path: &str, value: Value) {
     let mut current = root;
 
     for &key in &parts[..parts.len() - 1] {
-        if !current.get(key).is_some_and(|v| v.is_object()) {
+        if !current.get(key).is_some_and(serde_json::Value::is_object) {
             current[key] = Value::Object(serde_json::Map::new());
         }
         current = current.get_mut(key).unwrap();

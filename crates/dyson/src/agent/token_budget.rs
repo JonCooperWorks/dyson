@@ -51,7 +51,7 @@ impl TokenBudget {
     }
 
     /// Check if there's budget remaining (without recording).
-    pub fn has_budget(&self) -> bool {
+    pub const fn has_budget(&self) -> bool {
         match self.max_output_tokens {
             Some(max) => self.output_tokens_used < max,
             None => true,
@@ -59,12 +59,12 @@ impl TokenBudget {
     }
 
     /// Record input tokens from a completed LLM turn (informational only).
-    pub fn record_input(&mut self, input_tokens: usize) {
+    pub const fn record_input(&mut self, input_tokens: usize) {
         self.input_tokens_used += input_tokens;
     }
 
     /// Reset the budget counters (e.g., on `clear()`).
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.output_tokens_used = 0;
         self.input_tokens_used = 0;
         self.llm_calls = 0;

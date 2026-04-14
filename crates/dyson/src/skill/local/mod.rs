@@ -32,6 +32,7 @@
 // Frontmatter `name:` is accepted but ignored in favor of the directory.
 // ===========================================================================
 
+use std::fmt::Write;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -349,7 +350,7 @@ impl SkillListSkill {
         } else {
             let mut lines = String::from("<available_skills>\n");
             for (name, desc) in skills {
-                lines.push_str(&format!("- {name}: {desc}\n"));
+                writeln!(&mut lines, "- {name}: {desc}").unwrap();
             }
             lines.push_str(
                 "</available_skills>\n\n\

@@ -145,10 +145,10 @@ pub enum SecretValue {
 
 impl SecretValue {
     /// Returns true if this is an empty literal (no value configured).
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         match self {
-            SecretValue::Literal(s) => s.is_empty(),
-            SecretValue::Reference { name, .. } => name.is_empty(),
+            Self::Literal(s) => s.is_empty(),
+            Self::Reference { name, .. } => name.is_empty(),
         }
     }
 }
@@ -208,7 +208,7 @@ impl SecretRegistry {
             SecretValue::Literal(s) => s.clone(),
             SecretValue::Reference { resolver, name } => {
                 let r = self.resolvers.get(resolver.as_str()).ok_or_else(|| {
-                    let available: Vec<&str> = self.resolvers.keys().map(|s| s.as_str()).collect();
+                    let available: Vec<&str> = self.resolvers.keys().map(std::string::String::as_str).collect();
                     DysonError::Config(format!(
                         "unknown secret resolver '{resolver}'.  \
                          Available: [{}].",

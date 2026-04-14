@@ -45,7 +45,7 @@ struct MockLlm {
 }
 
 impl MockLlm {
-    fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
+    const fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
         Self {
             responses: Mutex::new(responses),
         }
@@ -143,7 +143,7 @@ struct SelectiveDenySandbox {
 impl SelectiveDenySandbox {
     fn new(denied: &[&str]) -> Self {
         Self {
-            denied_tools: denied.iter().map(|s| s.to_string()).collect(),
+            denied_tools: denied.iter().map(std::string::ToString::to_string).collect(),
         }
     }
 }

@@ -107,7 +107,7 @@ impl HubKeyPair {
     }
 
     /// The 32-byte Ed25519 public key.
-    pub fn public_bytes(&self) -> &[u8; 32] {
+    pub const fn public_bytes(&self) -> &[u8; 32] {
         &self.public_bytes
     }
 

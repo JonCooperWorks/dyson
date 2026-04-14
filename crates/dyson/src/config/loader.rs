@@ -894,24 +894,24 @@ fn parse_mcp_oauth(auth_json: &serde_json::Value) -> Option<McpAuthConfig> {
         return None;
     }
     Some(McpAuthConfig {
-        client_id: auth_json["client_id"].as_str().map(|s| s.to_string()),
-        client_secret: auth_json["client_secret"].as_str().map(|s| s.to_string()),
+        client_id: auth_json["client_id"].as_str().map(std::string::ToString::to_string),
+        client_secret: auth_json["client_secret"].as_str().map(std::string::ToString::to_string),
         scopes: auth_json["scopes"]
             .as_array()
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
                     .collect()
             })
             .unwrap_or_default(),
-        redirect_uri: auth_json["redirect_uri"].as_str().map(|s| s.to_string()),
+        redirect_uri: auth_json["redirect_uri"].as_str().map(std::string::ToString::to_string),
         authorization_url: auth_json["authorization_url"]
             .as_str()
-            .map(|s| s.to_string()),
-        token_url: auth_json["token_url"].as_str().map(|s| s.to_string()),
+            .map(std::string::ToString::to_string),
+        token_url: auth_json["token_url"].as_str().map(std::string::ToString::to_string),
         registration_url: auth_json["registration_url"]
             .as_str()
-            .map(|s| s.to_string()),
+            .map(std::string::ToString::to_string),
     })
 }
 

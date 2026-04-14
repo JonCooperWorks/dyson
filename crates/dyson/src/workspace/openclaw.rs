@@ -333,7 +333,7 @@ impl Workspace for OpenClawWorkspace {
 
     fn set(&mut self, name: &str, content: &str) {
         self.files.insert(name.to_string(), content.to_string());
-        self.dirty.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string());
+        self.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(name.to_string());
         if name.starts_with("memory/") || name.starts_with("kb/") {
             self.memory_store.index(name, content);
         }
@@ -345,14 +345,14 @@ impl Workspace for OpenClawWorkspace {
             entry.push('\n');
         }
         entry.push_str(content);
-        self.dirty.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string());
+        self.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(name.to_string());
         if name.starts_with("memory/") || name.starts_with("kb/") {
             self.memory_store.index(name, entry);
         }
     }
 
     fn save(&self) -> Result<()> {
-        let mut dirty = self.dirty.lock().unwrap_or_else(|e| e.into_inner());
+        let mut dirty = self.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
         if dirty.is_empty() {
             tracing::debug!("workspace save skipped — no dirty files");
@@ -410,7 +410,7 @@ impl Workspace for OpenClawWorkspace {
                         .to_lowercase()
                         .contains(pattern_lower.as_deref().unwrap_or(pattern)),
                 })
-                .map(|line| line.to_string())
+                .map(std::string::ToString::to_string)
                 .collect();
 
             if !matching_lines.is_empty() {

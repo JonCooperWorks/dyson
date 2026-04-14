@@ -2,6 +2,7 @@
 // SearchFiles tool — regex content search across files.
 // ===========================================================================
 
+use std::fmt::Write;
 use std::io::{BufRead, BufReader};
 
 use async_trait::async_trait;
@@ -162,7 +163,7 @@ impl Tool for SearchFilesTool {
 
         let mut output = results.join("\n");
         if results.len() >= MAX_MATCHES {
-            output.push_str(&format!("\n\n... (truncated at {MAX_MATCHES} matches)"));
+            write!(&mut output, "\n\n... (truncated at {MAX_MATCHES} matches)").unwrap();
         }
 
         Ok(ToolOutput::success(output))
@@ -236,9 +237,10 @@ mod tests {
     async fn search_truncates_at_max_matches() {
         let tmp = tempfile::tempdir().unwrap();
         // Create a file with more than MAX_MATCHES lines that all match.
-        let content: String = (0..600)
-            .map(|i| format!("match_line_{i}\n"))
-            .collect();
+        let mut content = String::with_capacity(600 * 16);
+        for i in 0..600 {
+            writeln!(&mut content, "match_line_{i}").unwrap();
+        }
         std::fs::write(tmp.path().join("big.txt"), &content).unwrap();
 
         let tool = SearchFilesTool;

@@ -155,7 +155,7 @@ pub fn classify_llm_error(err: &str) -> LlmErrorKind {
 
 impl From<dyson_swarm_protocol::ProtocolError> for DysonError {
     fn from(e: dyson_swarm_protocol::ProtocolError) -> Self {
-        DysonError::Swarm(e.to_string())
+        Self::Swarm(e.to_string())
     }
 }
 
@@ -173,7 +173,7 @@ pub type Result<T> = std::result::Result<T, DysonError>;
 impl DysonError {
     /// Convenience constructor for tool errors.
     pub fn tool(tool: impl Into<String>, message: impl Into<String>) -> Self {
-        DysonError::Tool {
+        Self::Tool {
             tool: tool.into(),
             message: message.into(),
         }
@@ -181,7 +181,7 @@ impl DysonError {
 
     /// Convenience constructor for MCP errors.
     pub fn mcp(server: impl Into<String>, message: impl Into<String>) -> Self {
-        DysonError::Mcp {
+        Self::Mcp {
             server: server.into(),
             message: message.into(),
         }
@@ -189,7 +189,7 @@ impl DysonError {
 
     /// Convenience constructor for OAuth errors.
     pub fn oauth(server: impl Into<String>, message: impl Into<String>) -> Self {
-        DysonError::OAuth {
+        Self::OAuth {
             server: server.into(),
             message: message.into(),
         }

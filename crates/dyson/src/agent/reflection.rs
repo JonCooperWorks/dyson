@@ -27,6 +27,7 @@
 // ===========================================================================
 
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -235,14 +236,14 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
                         crate::message::Role::Assistant => "Assistant",
                     };
                     let truncated = truncate_str(text, 500);
-                    summary.push_str(&format!("{role}: {truncated}\n\n"));
+                    writeln!(&mut summary, "{role}: {truncated}\n").unwrap();
                 }
                 ContentBlock::ToolUse { name, .. } => {
                     tool_call_count += 1;
                     if !tools_used.contains(name) {
                         tools_used.push(name.clone());
                     }
-                    summary.push_str(&format!("[Tool call: {name}]\n"));
+                    writeln!(&mut summary, "[Tool call: {name}]").unwrap();
                 }
                 ContentBlock::ToolResult {
                     is_error, content, ..
@@ -250,32 +251,38 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
                     if *is_error {
                         tool_error_count += 1;
                     }
-                    summary.push_str(&format!(
-                        "[Tool {}: {}]\n",
+                    writeln!(
+                        &mut summary,
+                        "[Tool {}: {}]",
                         if *is_error { "error" } else { "result" },
                         truncate_str(content, 200)
-                    ));
+                    )
+                    .unwrap();
                 }
                 ContentBlock::Image { media_type, .. } => {
-                    summary.push_str(&format!("[Image: {media_type}]\n"));
+                    writeln!(&mut summary, "[Image: {media_type}]").unwrap();
                 }
                 ContentBlock::Document { extracted_text, .. } => {
-                    summary.push_str(&format!(
-                        "[PDF: {} chars extracted]\n",
+                    writeln!(
+                        &mut summary,
+                        "[PDF: {} chars extracted]",
                         extracted_text.len()
-                    ));
+                    )
+                    .unwrap();
                 }
                 ContentBlock::Thinking { .. } => {}
             }
         }
     }
 
-    summary.push_str(&format!(
+    write!(
+        &mut summary,
         "\n---\nStats: {tool_call_count} tool calls ({tool_error_count} errors), \
          tools used: [{}], {} messages total.",
         tools_used.join(", "),
         messages.len(),
-    ));
+    )
+    .unwrap();
 
     summary
 }
@@ -414,7 +421,7 @@ pub struct MemoryMaintenanceDream {
 }
 
 impl MemoryMaintenanceDream {
-    pub fn new(nudge_interval: usize) -> Self {
+    pub const fn new(nudge_interval: usize) -> Self {
         Self { nudge_interval }
     }
 }
@@ -627,7 +634,7 @@ pub struct SelfImprovementDream {
 }
 
 impl SelfImprovementDream {
-    pub fn new(nudge_interval: usize) -> Self {
+    pub const fn new(nudge_interval: usize) -> Self {
         Self { nudge_interval }
     }
 }

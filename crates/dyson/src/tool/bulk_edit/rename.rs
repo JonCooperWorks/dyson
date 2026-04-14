@@ -31,10 +31,10 @@ enum Method {
 }
 
 impl Method {
-    fn as_str(&self) -> &'static str {
+    const fn as_str(&self) -> &'static str {
         match self {
-            Method::Ast => "ast",
-            Method::Text => "text",
+            Self::Ast => "ast",
+            Self::Text => "text",
         }
     }
 }
@@ -266,7 +266,7 @@ fn find_word_boundary_matches(haystack: &str, needle: &str) -> Vec<(usize, usize
 /// For non-ASCII bytes (UTF-8 continuation / multi-byte sequences) we treat
 /// them as identifier chars — this is conservative: a match adjacent to a
 /// multi-byte codepoint won't be replaced, which is the safe default.
-fn is_ident_byte(b: u8) -> bool {
+const fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || !b.is_ascii()
 }
 

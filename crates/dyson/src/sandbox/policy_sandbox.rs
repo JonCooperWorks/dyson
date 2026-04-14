@@ -35,6 +35,7 @@
 // ===========================================================================
 
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -158,9 +159,11 @@ impl Sandbox for PolicySandbox {
                 .unwrap_or(MAX_OUTPUT_CHARS);
 
             output.content.truncate(truncate_at);
-            output.content.push_str(&format!(
+            write!(
+                &mut output.content,
                 "\n\n[output truncated by sandbox: {original_len} chars → {truncate_at} chars]"
-            ));
+            )
+            .unwrap();
 
             tracing::warn!(
                 tool = tool_name,
@@ -482,7 +485,7 @@ fn check_ip_not_internal(ip: std::net::IpAddr, original_host: &str) -> std::resu
 ///
 /// Reconstructs the embedded IPv4 address and delegates to the same std library
 /// checks used by `check_ip_not_internal` for native IPv4 — single source of truth.
-fn is_v4_mapped_private(hi: u16, lo: u16) -> bool {
+const fn is_v4_mapped_private(hi: u16, lo: u16) -> bool {
     let v4 = std::net::Ipv4Addr::new(
         (hi >> 8) as u8,
         (hi & 0xff) as u8,

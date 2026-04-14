@@ -12,6 +12,7 @@
 // The SearchProvider trait handles the HTTP call and response parsing.
 // ===========================================================================
 
+use std::fmt::Write;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -299,13 +300,15 @@ impl Tool for WebSearchTool {
 
         let mut output = format!("Found {} result(s) for \"{}\":\n", results.len(), query);
         for (i, r) in results.iter().enumerate() {
-            output.push_str(&format!(
-                "\n### {}. {}\n{}\n{}\n",
+            writeln!(
+                &mut output,
+                "\n### {}. {}\n{}\n{}",
                 i + 1,
                 r.title,
                 r.url,
                 r.snippet,
-            ));
+            )
+            .unwrap();
         }
 
         Ok(ToolOutput::success(output))

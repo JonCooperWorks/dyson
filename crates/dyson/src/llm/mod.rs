@@ -366,7 +366,7 @@ pub(crate) struct SseLineBuffer {
 }
 
 impl SseLineBuffer {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { buffer: Vec::new() }
     }
 
@@ -389,7 +389,7 @@ impl SseLineBuffer {
             // Decode the line in-place from the buffer without allocating a
             // separate Vec — just borrow the slice and drain afterward.
             let line = std::str::from_utf8(&self.buffer[..newline_pos])
-                .map(|s| s.trim())
+                .map(str::trim)
                 .unwrap_or_else(|_| {
                     // Fallback for invalid UTF-8: use lossy conversion.
                     // This path is rare for SSE streams.

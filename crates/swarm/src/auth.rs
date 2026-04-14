@@ -76,7 +76,7 @@ impl FromRequestParts<Arc<Hub>> for AuthedNode {
             .await
             .ok_or((StatusCode::UNAUTHORIZED, "unknown bearer token"))?;
 
-        Ok(AuthedNode(node_id))
+        Ok(Self(node_id))
     }
 }
 

@@ -117,7 +117,7 @@ pub fn encode_event(event: &SseEvent) -> bytes::Bytes {
 
 // Suppress the "unused" warning when the function is only reached via trait bounds.
 #[allow(dead_code)]
-fn _assert_stream<S: Stream>() {}
+const fn _assert_stream<S: Stream>() {}
 
 #[cfg(test)]
 mod tests {

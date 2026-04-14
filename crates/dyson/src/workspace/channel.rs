@@ -86,7 +86,7 @@ impl ChannelWorkspace {
 
     /// Set the maximum journal age.  Journals older than this are pruned
     /// when [`expire_journals`] is called.
-    pub fn max_journal_age_days(mut self, days: u32) -> Self {
+    pub const fn max_journal_age_days(mut self, days: u32) -> Self {
         self.max_journal_age_days = days;
         self
     }
@@ -164,7 +164,7 @@ fn utc_now_iso() -> String {
 }
 
 /// Convert UNIX timestamp to (year, month, day, hour, minute, second).
-fn unix_to_datetime(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
+const fn unix_to_datetime(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
     let s = (secs % 86400) as u32;
     let h = s / 3600;
     let min = (s % 3600) / 60;
@@ -275,7 +275,7 @@ impl Workspace for ChannelWorkspace {
     }
 
     fn set_attribution(&mut self, user: Option<&str>) {
-        self.attribution = user.map(|s| s.to_string());
+        self.attribution = user.map(std::string::ToString::to_string);
     }
 }
 

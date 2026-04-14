@@ -204,7 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn is_loopback(addr: &SocketAddr) -> bool {
+const fn is_loopback(addr: &SocketAddr) -> bool {
     addr.ip().is_loopback()
 }
 

@@ -44,7 +44,7 @@ impl InMemoryWorkspace {
     }
 
     /// Builder: override the overflow factor (hard ceiling = target * factor).
-    pub fn with_overflow_factor(mut self, factor: f32) -> Self {
+    pub const fn with_overflow_factor(mut self, factor: f32) -> Self {
         self.overflow_factor = factor;
         self
     }
@@ -98,7 +98,7 @@ impl Workspace for InMemoryWorkspace {
                     Ok(re) => re.is_match(line),
                     Err(_) => line.to_lowercase().contains(&pattern.to_lowercase()),
                 })
-                .map(|line| line.to_string())
+                .map(std::string::ToString::to_string)
                 .collect();
 
             if !matching_lines.is_empty() {

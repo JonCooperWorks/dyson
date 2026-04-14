@@ -9,6 +9,8 @@
 //   5. Fix orphaned tool_use/tool_result pairs.
 // ===========================================================================
 
+use std::fmt::Write;
+
 use crate::config::CompactionConfig;
 use crate::controller::Output;
 use crate::error::Result;
@@ -245,12 +247,14 @@ impl super::Agent {
         );
 
         if let Some(prev) = previous_summary {
-            prompt.push_str(&format!(
+            write!(
+                &mut prompt,
                 "\n\n---\n\n\
                  ## Previous context summary\n\n\
                  The following is a summary from a previous compaction.  Merge it \
                  with the new conversation into a single updated summary:\n\n{prev}"
-            ));
+            )
+            .unwrap();
         }
 
         prompt
@@ -290,7 +294,7 @@ impl super::Agent {
             .collect();
 
         let tool_use_ids: HashSet<&str> =
-            tool_use_positions.keys().map(|s| s.as_str()).collect();
+            tool_use_positions.keys().map(std::string::String::as_str).collect();
         let orphaned_results: HashSet<String> = tool_result_ids
             .iter()
             .filter(|id| !tool_use_ids.contains(id.as_str()))
@@ -326,7 +330,7 @@ impl super::Agent {
     pub(super) fn estimate_context_tokens(&self, system_prompt: &str) -> usize {
         let system_tokens = system_prompt.split_whitespace().count();
 
-        let message_tokens: usize = self.conversation.messages.iter().map(|m| m.estimate_tokens()).sum();
+        let message_tokens: usize = self.conversation.messages.iter().map(super::super::message::Message::estimate_tokens).sum();
 
         system_tokens + message_tokens + self.tool_registry.cached_tokens
     }

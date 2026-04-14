@@ -34,7 +34,7 @@ pub struct StaticHeadersAuth {
 }
 
 impl StaticHeadersAuth {
-    pub fn new(headers: HashMap<String, String>) -> Self {
+    pub const fn new(headers: HashMap<String, String>) -> Self {
         Self { headers }
     }
 }

@@ -84,7 +84,7 @@ impl Tool for SwarmCheckpointTool {
             }
         };
 
-        let progress = input.get("progress").and_then(|v| v.as_f64()).map(|f| {
+        let progress = input.get("progress").and_then(serde_json::Value::as_f64).map(|f| {
             // Clamp to the documented range so a misbehaving call can't
             // produce nonsense values downstream.
             (f.clamp(0.0, 1.0)) as f32

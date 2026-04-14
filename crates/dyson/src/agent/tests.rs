@@ -1398,7 +1398,7 @@ async fn compact_rotates_pre_compaction_history() {
     // A rotated file should exist with the pre-compaction messages.
     let files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             name.starts_with("test_chat.") && name.ends_with(".json")

@@ -48,7 +48,7 @@ impl Workspace for MockWorkspace {
                 let matches: Vec<String> = content
                     .lines()
                     .filter(|line| line.to_lowercase().contains(&pattern_lower))
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect();
                 if matches.is_empty() {
                     None

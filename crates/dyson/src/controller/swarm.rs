@@ -110,7 +110,7 @@ struct SwarmCaptureOutput {
 }
 
 impl SwarmCaptureOutput {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             text: String::new(),
             files: Vec::new(),

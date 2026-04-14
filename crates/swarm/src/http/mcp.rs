@@ -505,7 +505,7 @@ async fn list_nodes(hub: &Arc<Hub>, caller: &McpCaller) -> Value {
         .await
 }
 
-fn status_label(status: &NodeStatus) -> &'static str {
+const fn status_label(status: &NodeStatus) -> &'static str {
     match status {
         NodeStatus::Idle => "idle",
         NodeStatus::Busy { .. } => "busy",
@@ -564,7 +564,7 @@ fn parse_dispatch_args(arguments: Value) -> Result<DispatchArgs, DispatchError> 
         _ => vec![],
     };
 
-    let timeout_secs = arguments.get("timeout_secs").and_then(|v| v.as_u64());
+    let timeout_secs = arguments.get("timeout_secs").and_then(serde_json::Value::as_u64);
 
     let target = parse_target(&arguments)?;
 
@@ -588,7 +588,7 @@ fn parse_target(arguments: &Value) -> Result<DispatchTarget, DispatchError> {
         .get("target_node_id")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     let constraints_present = arguments
         .get("constraints")
@@ -791,7 +791,7 @@ fn required_task_id(arguments: &Value) -> Result<String, String> {
     arguments
         .get("task_id")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .ok_or_else(|| "task_id is required".to_string())
 }
 
@@ -842,7 +842,7 @@ async fn swarm_task_checkpoints(
     let task_id = required_task_id(&arguments)?;
     let since = arguments
         .get("since_sequence")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .map(|n| n as u32)
         .unwrap_or(0);
     let cps = hub
@@ -934,7 +934,7 @@ async fn swarm_task_result(
 async fn swarm_task_list(hub: &Arc<Hub>, caller: &McpCaller, arguments: Value) -> Value {
     let limit = arguments
         .get("limit")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or(DEFAULT_LIST_LIMIT);
     let snaps = hub.tasks.list_owned(&caller.node_id, limit).await;
@@ -956,13 +956,13 @@ fn parse_constraints(arguments: &Value) -> Result<RoutingConstraints, DispatchEr
 
     let needs_gpu = obj
         .get("needs_gpu")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let needs_capability = obj
         .get("needs_capability")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let min_ram_gb = obj.get("min_ram_gb").and_then(|v| v.as_u64());
+    let min_ram_gb = obj.get("min_ram_gb").and_then(serde_json::Value::as_u64);
 
     Ok(RoutingConstraints {
         needs_gpu,

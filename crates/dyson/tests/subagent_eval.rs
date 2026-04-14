@@ -35,7 +35,7 @@ struct MockLlm {
 }
 
 impl MockLlm {
-    fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
+    const fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
         Self {
             responses: Mutex::new(responses),
         }
@@ -69,7 +69,7 @@ struct RecordingSandbox {
 }
 
 impl RecordingSandbox {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
         }

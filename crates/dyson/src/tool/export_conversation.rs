@@ -203,7 +203,7 @@ impl ExportConversationTool {
             // Find the most recently modified JSON file.
             let mut entries: Vec<_> = std::fs::read_dir(dir)
                 .map_err(DysonError::Io)?
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
                 .filter(|e| {
                     let path = e.path();
                     // Only consider non-feedback, non-rotated JSON files.

@@ -106,7 +106,7 @@ struct Migration {
 /// 1. Bump `CURRENT_WORKSPACE_VERSION` above.
 /// 2. Add a `Migration` here with `from_version` = old CURRENT_WORKSPACE_VERSION.
 /// 3. Define the steps using the Step enum.
-fn migrations() -> &'static [Migration] {
+const fn migrations() -> &'static [Migration] {
     &[
         // v0 → v1: OpenClaw format → Dyson workspace.
         //
@@ -279,7 +279,7 @@ fn apply_steps(workspace_path: &Path, steps: &[Step]) -> Result<()> {
                             full_dir.display()
                         ))
                     })?
-                    .filter_map(|e| e.ok())
+                    .filter_map(std::result::Result::ok)
                     .collect();
 
                 for entry in entries {

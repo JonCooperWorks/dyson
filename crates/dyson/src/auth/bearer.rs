@@ -31,7 +31,7 @@ pub struct BearerTokenAuth {
 
 impl BearerTokenAuth {
     /// Create from an existing token string.
-    pub fn new(token: String) -> Self {
+    pub const fn new(token: String) -> Self {
         Self {
             token: Credential::new(token),
         }
@@ -42,9 +42,13 @@ impl BearerTokenAuth {
     /// Used by the MCP server to create a per-session token that Claude Code
     /// includes in its requests.
     pub fn generate() -> Self {
+        use std::fmt::Write as _;
         let mut bytes = [0u8; 32];
         rand::rng().fill(&mut bytes);
-        let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let mut token = String::with_capacity(64);
+        for b in &bytes {
+            write!(&mut token, "{b:02x}").unwrap();
+        }
         Self {
             token: Credential::new(token),
         }

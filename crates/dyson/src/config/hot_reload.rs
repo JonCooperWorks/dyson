@@ -97,7 +97,7 @@ impl HotReloader {
 
         Self {
             watched,
-            config_path: config_path.map(|p| p.to_path_buf()),
+            config_path: config_path.map(std::path::Path::to_path_buf),
             pending_change: None,
         }
     }
