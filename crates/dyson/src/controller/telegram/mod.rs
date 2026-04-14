@@ -1495,8 +1495,8 @@ async fn get_or_create_entry(
     // Conversation history is already persisted to chat_store on every
     // turn, so the evicted chat can be fully restored on next message.
     let mut map = agents.write().await;
-    if map.len() >= MAX_CHAT_ENTRIES && !map.contains_key(&chat_id) {
-        if let Some((&victim_id, _)) = map
+    if map.len() >= MAX_CHAT_ENTRIES && !map.contains_key(&chat_id)
+        && let Some((&victim_id, _)) = map
             .iter()
             .min_by_key(|(_, e)| e.last_active.load(std::sync::atomic::Ordering::Relaxed))
         {
@@ -1507,7 +1507,6 @@ async fn get_or_create_entry(
             );
             map.remove(&victim_id);
         }
-    }
     let entry = Arc::clone(
         map.entry(chat_id).or_insert_with(|| Arc::clone(&entry)),
     );

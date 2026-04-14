@@ -408,7 +408,7 @@ async fn mcp_list_nodes_exposes_full_hardware_and_heartbeat() {
     let parsed: Value = serde_json::from_str(text).unwrap();
     let rows = parsed.as_array().unwrap();
     // "rich" should be in the list (caller is excluded, so we see rich only).
-    assert!(rows.len() >= 1);
+    assert!(!rows.is_empty());
     let row = &rows[0];
     assert_eq!(row["node_name"], "rich");
     assert_eq!(row["os"], "linux");

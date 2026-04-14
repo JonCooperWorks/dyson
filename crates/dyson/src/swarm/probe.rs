@@ -516,7 +516,7 @@ fn parse_macos_gpu_json(json_str: &str) -> Vec<GpuInfo> {
 
     displays
         .iter()
-        .filter_map(|gpu| {
+        .map(|gpu| {
             let model = gpu
                 .get("sppci_model")
                 .and_then(|v| v.as_str())
@@ -527,12 +527,12 @@ fn parse_macos_gpu_json(json_str: &str) -> Vec<GpuInfo> {
             let vram_bytes = extract_macos_vram(gpu);
             let cores = extract_macos_gpu_cores(gpu);
 
-            Some(GpuInfo {
+            GpuInfo {
                 model,
                 vram_bytes,
                 driver: "Apple".into(),
                 cores,
-            })
+            }
         })
         .collect()
 }

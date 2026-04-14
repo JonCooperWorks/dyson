@@ -1266,6 +1266,8 @@ mod tests {
     use crate::tool::Tool;
     use std::io::Write;
 
+    type BgReceived = std::sync::Arc<std::sync::Mutex<Option<(u64, Result<String, String>)>>>;
+
     fn make_log_dir(content: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("dyson.log.2026-04-03");
@@ -1319,8 +1321,7 @@ mod tests {
             .allocate("test".into(), CancellationToken::new())
             .unwrap();
 
-        let received: Arc<Mutex<Option<(u64, Result<String, String>)>>> =
-            Arc::new(Mutex::new(None));
+        let received: BgReceived = Arc::new(Mutex::new(None));
         let received_clone = Arc::clone(&received);
         let cb: BackgroundCompletion = Arc::new(move |id, r| {
             *received_clone.lock().unwrap() = Some((id, r));
@@ -1343,8 +1344,7 @@ mod tests {
             .allocate("test".into(), CancellationToken::new())
             .unwrap();
 
-        let received: Arc<Mutex<Option<(u64, Result<String, String>)>>> =
-            Arc::new(Mutex::new(None));
+        let received: BgReceived = Arc::new(Mutex::new(None));
         let received_clone = Arc::clone(&received);
         let cb: BackgroundCompletion = Arc::new(move |id, r| {
             *received_clone.lock().unwrap() = Some((id, r));

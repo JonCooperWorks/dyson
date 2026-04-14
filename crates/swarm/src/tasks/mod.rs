@@ -191,11 +191,10 @@ impl TaskStore {
         // Persist outside the write lock.  Re-read under a read lock
         // since record was moved into the map.
         let inner = self.inner.read().await;
-        if let Some(record) = inner.get(&task_id) {
-            if let Err(e) = self.persistence.insert(record).await {
+        if let Some(record) = inner.get(&task_id)
+            && let Err(e) = self.persistence.insert(record).await {
                 tracing::error!(task_id = %task_id, error = %e, "failed to persist task insert");
             }
-        }
     }
 
     /// Append a checkpoint to the named task.  Returns `false` if the
@@ -214,11 +213,10 @@ impl TaskStore {
                 _ => false,
             }
         };
-        if accepted {
-            if let Err(e) = self.persistence.append_checkpoint(&task_id, &cp).await {
+        if accepted
+            && let Err(e) = self.persistence.append_checkpoint(&task_id, &cp).await {
                 tracing::error!(task_id = %task_id, error = %e, "failed to persist checkpoint");
             }
-        }
         accepted
     }
 
@@ -424,11 +422,10 @@ impl TaskStore {
             record.result = Some(synthetic_result.clone());
             Some((record.node_id.clone(), record.waiter.take()))
         };
-        if ret.is_some() {
-            if let Err(e) = self.persistence.cancel(task_id, &synthetic_result).await {
+        if ret.is_some()
+            && let Err(e) = self.persistence.cancel(task_id, &synthetic_result).await {
                 tracing::error!(task_id = %task_id, error = %e, "failed to persist task cancel");
             }
-        }
         ret
     }
 

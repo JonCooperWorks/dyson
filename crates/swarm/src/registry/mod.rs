@@ -222,11 +222,10 @@ impl NodeRegistry {
                 false
             }
         };
-        if existed {
-            if let Err(e) = self.persistence.remove(node_id).await {
+        if existed
+            && let Err(e) = self.persistence.remove(node_id).await {
                 tracing::error!(node_id = %node_id, error = %e, "failed to persist node removal");
             }
-        }
         existed
     }
 

@@ -147,7 +147,7 @@ impl TextToolExtractorStream {
 
             // Emit synthetic tool call events.
             static COUNTER: AtomicU64 = AtomicU64::new(0);
-            for call in &calls {
+            for call in calls {
                 let n = COUNTER.fetch_add(1, Ordering::Relaxed);
                 let id = format!("text_call_{}_{}", call.name, n);
                 self.pending_events
@@ -158,8 +158,8 @@ impl TextToolExtractorStream {
                 self.pending_events
                     .push_back(Ok(StreamEvent::ToolUseComplete {
                         id,
-                        name: call.name.clone(),
-                        input: call.input.clone(),
+                        name: call.name,
+                        input: call.input,
                     }));
             }
 

@@ -177,22 +177,20 @@ impl Tool for BashTool {
                 // Read captured output after the process exits.
                 let mut stdout_bytes = Vec::new();
                 let mut stderr_bytes = Vec::new();
-                if let Some(ref mut h) = stdout_handle {
-                    if let Err(e) = tokio::io::AsyncReadExt::read_to_end(
+                if let Some(ref mut h) = stdout_handle
+                    && let Err(e) = tokio::io::AsyncReadExt::read_to_end(
                         &mut tokio::io::AsyncReadExt::take(h, MAX_READ_BYTES),
                         &mut stdout_bytes,
                     ).await {
                         tracing::warn!(error = %e, "failed to read bash stdout");
                     }
-                }
-                if let Some(ref mut h) = stderr_handle {
-                    if let Err(e) = tokio::io::AsyncReadExt::read_to_end(
+                if let Some(ref mut h) = stderr_handle
+                    && let Err(e) = tokio::io::AsyncReadExt::read_to_end(
                         &mut tokio::io::AsyncReadExt::take(h, MAX_READ_BYTES),
                         &mut stderr_bytes,
                     ).await {
                         tracing::warn!(error = %e, "failed to read bash stderr");
                     }
-                }
                 Some((status, stdout_bytes, stderr_bytes))
             }
             _ = tokio::time::sleep(self.timeout) => {

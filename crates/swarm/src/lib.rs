@@ -114,12 +114,12 @@ impl Hub {
         let task_persistence: Arc<dyn TaskPersistence> = Arc::new(
             SqliteTaskPersistence::open(&tasks_db_path)
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+                .map_err(std::io::Error::other)?,
         );
         let mut recovered_tasks = task_persistence
             .load_all()
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         let recovered_task_count = recovered_tasks.len();
         // Any task still marked Running after a restart is orphaned: its
         // node lost its SSE session and its node_id/token when the old
@@ -127,7 +127,7 @@ impl Hub {
         // tools report a terminal state instead of lying.
         let orphaned_count = reconcile_orphaned_running(&*task_persistence, &mut recovered_tasks)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         let tasks = TaskStore::with_persistence(task_persistence, recovered_tasks);
         if recovered_task_count > 0 {
             tracing::info!(
@@ -141,12 +141,12 @@ impl Hub {
         let node_persistence: Arc<dyn NodePersistence> = Arc::new(
             SqliteNodePersistence::open(&nodes_db_path)
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+                .map_err(std::io::Error::other)?,
         );
         let mut recovered_nodes = node_persistence
             .load_all()
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         let recovered_node_count = recovered_nodes.len();
         // Every recovered node lost its SSE channel when the old
         // process died.  Until it reconnects and heartbeats, flip it
