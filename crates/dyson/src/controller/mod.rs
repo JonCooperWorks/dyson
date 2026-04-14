@@ -735,11 +735,20 @@ pub enum CommandResult {
 ///
 /// Handles: `/logs`, `/agents`, `/loop`, `/stop`, `/models`.
 /// Returns `NotHandled` for commands that require the agent lock.
+/// Callback invoked when a background agent finishes.
+///
+/// Receives the agent ID and either the final response text (`Ok`) or a
+/// human-readable failure message (`Err`).  Controllers use this to surface
+/// background agent results to the user who spawned them.
+pub type BackgroundCompletion =
+    std::sync::Arc<dyn Fn(u64, Result<String, String>) + Send + Sync>;
+
 pub async fn execute_lockfree_command(
     input: &str,
     settings: &Settings,
     registry: &ClientRegistry,
     bg_registry: &std::sync::Arc<background::BackgroundAgentRegistry>,
+    on_complete: Option<BackgroundCompletion>,
 ) -> CommandResult {
     if input == "/logs" || input.starts_with("/logs ") {
         let n: usize = input
@@ -795,7 +804,7 @@ pub async fn execute_lockfree_command(
         if args.is_empty() {
             return CommandResult::LoopError("usage: /loop <prompt>".to_string());
         }
-        return spawn_background_agent(args, settings, registry, bg_registry).await;
+        return spawn_background_agent(args, settings, registry, bg_registry, on_complete).await;
     }
 
     if input == "/stop" {
@@ -906,11 +915,27 @@ pub async fn execute_agent_command(
 /// The agent's conversation is persisted through the existing chat history
 /// system under chat ID `bg-<id>`, reusing the same storage and media
 /// externalization as regular conversations.
+/// Finalise a background agent run: invoke the completion callback (if any)
+/// and remove the registry entry.  Extracted so it can be unit-tested without
+/// spinning up a real agent / LLM client.
+pub(crate) fn finish_background_agent(
+    id: u64,
+    result: Result<String, String>,
+    bg_registry: &std::sync::Arc<background::BackgroundAgentRegistry>,
+    on_complete: &Option<BackgroundCompletion>,
+) {
+    if let Some(cb) = on_complete.as_ref() {
+        cb(id, result);
+    }
+    bg_registry.remove(id);
+}
+
 pub(crate) async fn spawn_background_agent(
     prompt: &str,
     settings: &Settings,
     registry: &ClientRegistry,
     bg_registry: &std::sync::Arc<background::BackgroundAgentRegistry>,
+    on_complete: Option<BackgroundCompletion>,
 ) -> CommandResult {
     use crate::agent::rate_limiter::Priority;
     use tokio_util::sync::CancellationToken;
@@ -968,13 +993,14 @@ pub(crate) async fn spawn_background_agent(
 
     let handle = tokio::spawn(async move {
         tracing::info!(id, prompt = %prompt_owned, "background agent starting");
-        match bg_agent.run(&prompt_owned, &mut output).await {
+        let result: Result<String, String> = match bg_agent.run(&prompt_owned, &mut output).await {
             Ok(text) => {
                 tracing::info!(
                     id,
                     text_len = text.len(),
                     "background agent completed"
                 );
+                Ok(text)
             }
             Err(e) => {
                 tracing::warn!(
@@ -982,9 +1008,10 @@ pub(crate) async fn spawn_background_agent(
                     error = %e,
                     "background agent failed"
                 );
+                Err(e.to_string())
             }
-        }
-        bg_reg.remove(id);
+        };
+        finish_background_agent(id, result, &bg_reg, &on_complete);
     });
 
     bg_registry.set_handle(id, handle);
@@ -1248,6 +1275,68 @@ mod tests {
         let dir = make_log_dir("line1\nline2\nline3");
         let result = read_log_tail_from_dir(dir.path(), 2).unwrap();
         assert_eq!(result, "line2\nline3");
+    }
+
+    #[test]
+    fn background_agent_delivers_result_to_callback() {
+        use std::sync::{Arc, Mutex};
+        use tokio_util::sync::CancellationToken;
+
+        let bg_reg = Arc::new(background::BackgroundAgentRegistry::new());
+        let id = bg_reg
+            .allocate("test".into(), CancellationToken::new())
+            .unwrap();
+
+        let received: Arc<Mutex<Option<(u64, Result<String, String>)>>> =
+            Arc::new(Mutex::new(None));
+        let received_clone = Arc::clone(&received);
+        let cb: BackgroundCompletion = Arc::new(move |id, r| {
+            *received_clone.lock().unwrap() = Some((id, r));
+        });
+
+        finish_background_agent(id, Ok("hello".into()), &bg_reg, &Some(cb));
+
+        let got = received.lock().unwrap().clone();
+        assert_eq!(got, Some((id, Ok("hello".to_string()))));
+        assert!(bg_reg.list().is_empty(), "registry entry removed");
+    }
+
+    #[test]
+    fn background_agent_delivers_error_to_callback() {
+        use std::sync::{Arc, Mutex};
+        use tokio_util::sync::CancellationToken;
+
+        let bg_reg = Arc::new(background::BackgroundAgentRegistry::new());
+        let id = bg_reg
+            .allocate("test".into(), CancellationToken::new())
+            .unwrap();
+
+        let received: Arc<Mutex<Option<(u64, Result<String, String>)>>> =
+            Arc::new(Mutex::new(None));
+        let received_clone = Arc::clone(&received);
+        let cb: BackgroundCompletion = Arc::new(move |id, r| {
+            *received_clone.lock().unwrap() = Some((id, r));
+        });
+
+        finish_background_agent(id, Err("boom".into()), &bg_reg, &Some(cb));
+
+        let got = received.lock().unwrap().clone();
+        assert_eq!(got, Some((id, Err("boom".to_string()))));
+        assert!(bg_reg.list().is_empty());
+    }
+
+    #[test]
+    fn background_agent_finish_without_callback_still_prunes() {
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let bg_reg = Arc::new(background::BackgroundAgentRegistry::new());
+        let id = bg_reg
+            .allocate("test".into(), CancellationToken::new())
+            .unwrap();
+
+        finish_background_agent(id, Ok("x".into()), &bg_reg, &None);
+        assert!(bg_reg.list().is_empty());
     }
 
     #[test]

@@ -1142,8 +1142,47 @@ async fn handle_instant_command(
         return Some(true);
     }
 
-    // Shared lock-free commands.
-    let result = super::execute_lockfree_command(text, settings, registry, bg_registry).await;
+    // Shared lock-free commands.  Background agents deliver their final
+    // response back to the originating Telegram chat via the on_complete
+    // callback.
+    let bot_clone = bot.clone();
+    let origin_chat = chat_id;
+    let on_complete: super::BackgroundCompletion = std::sync::Arc::new(move |id, result| {
+        let bot = bot_clone.clone();
+        tokio::spawn(async move {
+            match result {
+                Ok(text) => {
+                    if text.trim().is_empty() {
+                        let _ = bot
+                            .send_message(
+                                origin_chat,
+                                &format!("Agent #{id} finished with no response."),
+                            )
+                            .await;
+                        return;
+                    }
+                    let header = format!("Agent #{id} result:");
+                    let _ = bot.send_message(origin_chat, &header).await;
+                    for part in self::formatting::split_for_telegram(&text) {
+                        let _ = bot.send_message(origin_chat, &part).await;
+                    }
+                }
+                Err(e) => {
+                    let _ = bot
+                        .send_message(origin_chat, &format!("Agent #{id} failed: {e}"))
+                        .await;
+                }
+            }
+        });
+    });
+    let result = super::execute_lockfree_command(
+        text,
+        settings,
+        registry,
+        bg_registry,
+        Some(on_complete),
+    )
+    .await;
     if matches!(result, super::CommandResult::NotHandled) {
         return None;
     }
