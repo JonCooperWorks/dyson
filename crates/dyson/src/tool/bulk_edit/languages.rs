@@ -3,7 +3,7 @@
 //
 // Each language gets a static LanguageConfig with:
 //   - The tree-sitter Language (from the grammar crate)
-//   - Identifier node types (for rename_symbol)
+//   - Identifier node types (for rename_symbol AST path)
 //   - Definition node types (for list_definitions)
 //   - A human-readable display name
 //
@@ -358,9 +358,9 @@ pub fn try_parse_file(
     };
 
     let mut parser = tree_sitter::Parser::new();
-    parser.set_language(&config.language).map_err(|e| {
-        crate::error::DysonError::tool("ast_edit", format!("parser setup: {e}"))
-    })?;
+    parser
+        .set_language(&config.language)
+        .map_err(|e| crate::error::DysonError::tool("bulk_edit", format!("parser setup: {e}")))?;
 
     let tree = match parser.parse(&source, None) {
         Some(t) => t,
@@ -372,7 +372,14 @@ pub fn try_parse_file(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-    Ok(Some((config, ParsedFile { tree, source, rel_path })))
+    Ok(Some((
+        config,
+        ParsedFile {
+            tree,
+            source,
+            rel_path,
+        },
+    )))
 }
 
 /// Create a directory walker with standard settings (.gitignore, etc.).
@@ -390,7 +397,8 @@ pub fn walk_dir(dir: &std::path::Path) -> ignore::Walk {
 
 /// Map a file extension (without the leading dot) to a language config.
 ///
-/// Returns `None` for unrecognized extensions — callers should skip silently.
+/// Returns `None` for unrecognized extensions — callers should skip silently
+/// (or use a text fallback).
 pub fn config_for_extension(ext: &str) -> Option<&'static LanguageConfig> {
     match ext {
         "rs" => Some(&RUST),
@@ -424,9 +432,9 @@ mod tests {
     #[test]
     fn all_extensions_resolve() {
         let extensions = [
-            "rs", "py", "pyi", "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "go",
-            "java", "c", "h", "cpp", "cc", "cxx", "hpp", "hxx", "cs", "rb", "kt", "kts",
-            "swift", "zig", "ex", "exs", "erl", "hrl", "ml", "mli", "hs", "nix", "json",
+            "rs", "py", "pyi", "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "go", "java",
+            "c", "h", "cpp", "cc", "cxx", "hpp", "hxx", "cs", "rb", "kt", "kts", "swift", "zig",
+            "ex", "exs", "erl", "hrl", "ml", "mli", "hs", "nix", "json",
         ];
         for ext in extensions {
             assert!(
@@ -448,7 +456,10 @@ mod tests {
     fn display_names_correct() {
         assert_eq!(config_for_extension("rs").unwrap().display_name, "Rust");
         assert_eq!(config_for_extension("py").unwrap().display_name, "Python");
-        assert_eq!(config_for_extension("ts").unwrap().display_name, "TypeScript");
+        assert_eq!(
+            config_for_extension("ts").unwrap().display_name,
+            "TypeScript"
+        );
         assert_eq!(config_for_extension("tsx").unwrap().display_name, "TSX");
         assert_eq!(config_for_extension("cs").unwrap().display_name, "C#");
         assert_eq!(config_for_extension("kt").unwrap().display_name, "Kotlin");
