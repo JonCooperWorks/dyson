@@ -12,6 +12,8 @@ extensibility layer that lets you plug arbitrary capabilities into the agent.
 - `src/skill/mod.rs` — `Skill` trait, `create_skills()` factory
 - `src/skill/builtin.rs` — `BuiltinSkill` (wraps built-in tools)
 - `src/skill/local.rs` — `LocalSkill` (SKILL.md parser, workspace discovery)
+- `src/tool/ast_edit/` — `AstEditTool` (AST-aware rename/definitions via tree-sitter; see [AST docs](ast.md))
+- `src/tool/bulk_edit.rs` — `BulkEditTool` (glob-based multi-file find-and-replace)
 
 ---
 
