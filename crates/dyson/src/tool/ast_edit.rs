@@ -6,7 +6,8 @@
 // nodes, so renames don't accidentally modify strings, comments, or
 // partial matches.
 //
-// Supported languages: Rust, Python, JavaScript, TypeScript, Go, JSON.
+// Supported languages (11): Rust, Python, JavaScript, TypeScript, Go,
+// JSON, C, C++, Java, Ruby, Bash.
 //
 // Operations:
 //   - rename_symbol: Rename all occurrences of an identifier in a file.
@@ -36,7 +37,7 @@ impl Tool for AstEditTool {
         "AST-aware code editing via tree-sitter. Operations:\n\
          - rename_symbol: Rename identifiers without affecting strings/comments.\n\
          - list_definitions: Show top-level definitions with line numbers.\n\
-         Supports: Rust, Python, JavaScript, TypeScript, Go, JSON."
+         Supports: Rust, Python, JavaScript, TypeScript, Go, JSON, C, C++, Java, Ruby, Bash."
     }
 
     fn agent_only(&self) -> bool {
@@ -120,7 +121,7 @@ impl Tool for AstEditTool {
             None => {
                 return Ok(ToolOutput::error(format!(
                     "unsupported file type '.{ext}' — supported: .rs, .py, .js, .jsx, \
-                     .ts, .tsx, .go, .json"
+                     .ts, .tsx, .go, .json, .c, .h, .cpp, .cc, .java, .rb, .sh"
                 )));
             }
         };
@@ -201,6 +202,11 @@ fn language_for_extension(ext: &str) -> Option<tree_sitter::Language> {
         "tsx" => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
         "go" => Some(tree_sitter_go::LANGUAGE.into()),
         "json" => Some(tree_sitter_json::LANGUAGE.into()),
+        "c" | "h" => Some(tree_sitter_c::LANGUAGE.into()),
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => Some(tree_sitter_cpp::LANGUAGE.into()),
+        "java" => Some(tree_sitter_java::LANGUAGE.into()),
+        "rb" => Some(tree_sitter_ruby::LANGUAGE.into()),
+        "sh" | "bash" => Some(tree_sitter_bash::LANGUAGE.into()),
         _ => None,
     }
 }
@@ -230,6 +236,16 @@ fn identifier_node_types(ext: &str) -> &'static [&'static str] {
             "type_identifier",
         ],
         "go" => &["identifier", "type_identifier", "field_identifier"],
+        "c" | "h" => &["identifier", "type_identifier", "field_identifier"],
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => &[
+            "identifier",
+            "type_identifier",
+            "field_identifier",
+            "namespace_identifier",
+        ],
+        "java" => &["identifier", "type_identifier"],
+        "rb" => &["identifier", "constant"],
+        "sh" | "bash" => &["variable_name", "command_name"],
         _ => &[],
     }
 }
@@ -269,6 +285,30 @@ fn definition_node_types(ext: &str) -> &'static [&'static str] {
             "const_declaration",
             "var_declaration",
         ],
+        "c" | "h" => &[
+            "function_definition",
+            "struct_specifier",
+            "enum_specifier",
+            "type_definition",
+        ],
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => &[
+            "function_definition",
+            "class_specifier",
+            "struct_specifier",
+            "enum_specifier",
+            "namespace_definition",
+            "type_definition",
+            "template_declaration",
+        ],
+        "java" => &[
+            "class_declaration",
+            "method_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "constructor_declaration",
+        ],
+        "rb" => &["method", "singleton_method", "class", "module"],
+        "sh" | "bash" => &["function_definition"],
         _ => &[],
     }
 }
@@ -406,7 +446,13 @@ fn collect_definitions_recursive(
         // For impl blocks, classes, etc., also list their children.
         if matches!(
             node.kind(),
-            "impl_item" | "class_definition" | "class_declaration"
+            "impl_item"
+                | "class_definition"
+                | "class_declaration"
+                | "class_specifier"
+                | "namespace_definition"
+                | "class"
+                | "module"
         ) {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
@@ -609,6 +655,7 @@ mod tests {
 
     #[test]
     fn language_detection() {
+        // Original 6 + TSX
         assert!(language_for_extension("rs").is_some());
         assert!(language_for_extension("py").is_some());
         assert!(language_for_extension("js").is_some());
@@ -616,6 +663,16 @@ mod tests {
         assert!(language_for_extension("tsx").is_some());
         assert!(language_for_extension("go").is_some());
         assert!(language_for_extension("json").is_some());
+        // New 5
+        assert!(language_for_extension("c").is_some());
+        assert!(language_for_extension("h").is_some());
+        assert!(language_for_extension("cpp").is_some());
+        assert!(language_for_extension("cc").is_some());
+        assert!(language_for_extension("java").is_some());
+        assert!(language_for_extension("rb").is_some());
+        assert!(language_for_extension("sh").is_some());
+        assert!(language_for_extension("bash").is_some());
+        // Unsupported
         assert!(language_for_extension("csv").is_none());
         assert!(language_for_extension("").is_none());
     }

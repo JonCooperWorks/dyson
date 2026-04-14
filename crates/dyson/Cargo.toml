@@ -46,14 +46,20 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 nanohtml2text = "0.1"
 pdf-extract = "0.10"
 
-# AST-aware editing
-tree-sitter = "0.24"
-tree-sitter-rust = "0.23"
-tree-sitter-python = "0.23"
+# AST-aware editing — all 11 grammars ship by default.
+# Tokens cost more than megabytes.
+tree-sitter            = "0.24"
+tree-sitter-rust       = "0.23"
+tree-sitter-python     = "0.23"
 tree-sitter-javascript = "0.23"
 tree-sitter-typescript = "0.23"
-tree-sitter-go = "0.23"
-tree-sitter-json = "0.24"
+tree-sitter-go         = "0.23"
+tree-sitter-json       = "0.24"
+tree-sitter-c          = "0.23"
+tree-sitter-cpp        = "0.23"
+tree-sitter-java       = "0.23"
+tree-sitter-ruby       = "0.23"
+tree-sitter-bash       = "0.23"
 
 # Crypto + misc
 rand = "0.10"
