@@ -5,7 +5,7 @@
 // module, and other definition nodes.  Returns structured JSON output
 // with kind, name, line number, and file path.
 //
-// Supports single files and recursive directory walks (with .gitignore).
+// AST only: files without a registered grammar are silently skipped.
 // ===========================================================================
 
 use std::path::Path;
@@ -19,7 +19,7 @@ use super::languages::{self, LanguageConfig, MAX_FILES};
 
 /// List definitions in the given path (file or directory).
 ///
-/// Returns a JSON array of definitions with kind, name, line, and path.
+/// Returns a JSON object with a `definitions` array.
 pub fn list_definitions(resolved_path: &Path, working_dir: &Path) -> Result<ToolOutput> {
     let working_dir_canon = working_dir
         .canonicalize()
@@ -61,16 +61,22 @@ fn process_file(
     working_dir_canon: &Path,
     defs: &mut Vec<serde_json::Value>,
 ) -> Result<bool> {
-    let (config, parsed) =
-        match languages::try_parse_file(path, working_dir_canon, false)? {
-            Some(pair) => pair,
-            None => return Ok(false),
-        };
+    let (config, parsed) = match languages::try_parse_file(path, working_dir_canon, false)? {
+        Some(pair) => pair,
+        None => return Ok(false),
+    };
 
     let root = parsed.tree.root_node();
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
-        collect_definitions(child, parsed.source.as_bytes(), config, &parsed.rel_path, defs, 0);
+        collect_definitions(
+            child,
+            parsed.source.as_bytes(),
+            config,
+            &parsed.rel_path,
+            defs,
+            0,
+        );
     }
 
     Ok(true)
@@ -95,15 +101,12 @@ fn collect_definitions(
 
     // Elixir represents definitions as `call` nodes wrapping def/defmodule.
     // Skip call nodes that aren't actual definitions.
-    if config.definitions_are_calls
-        && node.kind() == "call"
-        && !is_elixir_definition(&node, source)
+    if config.definitions_are_calls && node.kind() == "call" && !is_elixir_definition(&node, source)
     {
         return;
     }
 
-    let name = extract_definition_name(&node, source)
-        .unwrap_or_else(|| "<anonymous>".to_string());
+    let name = extract_definition_name(&node, source).unwrap_or_else(|| "<anonymous>".to_string());
     let line = node.start_position().row + 1;
     let kind = clean_kind(node.kind());
 
@@ -128,7 +131,10 @@ fn is_elixir_definition(node: &Node<'_>, source: &[u8]) -> bool {
     if let Some(target) = node.child(0)
         && let Ok(text) = std::str::from_utf8(&source[target.start_byte()..target.end_byte()])
     {
-        return matches!(text, "def" | "defp" | "defmodule" | "defmacro" | "defprotocol" | "defimpl");
+        return matches!(
+            text,
+            "def" | "defp" | "defmodule" | "defmacro" | "defprotocol" | "defimpl"
+        );
     }
     false
 }
@@ -231,4 +237,80 @@ fn clean_kind(kind: &str) -> String {
         .replace("_definition", "")
         .replace("_specifier", "")
         .replace("_clause", "")
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn list_definitions_python() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("app.py"),
+            "def hello():\n    pass\n\n\
+             class MyClass:\n    def method(self):\n        pass\n\n\
+             def goodbye():\n    pass\n",
+        )
+        .unwrap();
+
+        let output = list_definitions(&tmp.path().join("app.py"), tmp.path()).unwrap();
+        assert!(!output.is_error, "error: {}", output.content);
+
+        let json: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+        let defs = json["definitions"].as_array().unwrap();
+        assert!(
+            defs.len() >= 3,
+            "expected at least 3 definitions, got {}",
+            defs.len()
+        );
+
+        let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+        assert!(names.contains(&"hello"));
+        assert!(names.contains(&"MyClass"));
+        assert!(names.contains(&"goodbye"));
+    }
+
+    #[tokio::test]
+    async fn list_definitions_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn foo() {}\nstruct Bar;\n").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "fn baz() {}\n").unwrap();
+
+        let output = list_definitions(tmp.path(), tmp.path()).unwrap();
+        assert!(!output.is_error, "error: {}", output.content);
+
+        let json: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+        let defs = json["definitions"].as_array().unwrap();
+        assert!(
+            defs.len() >= 3,
+            "expected at least 3 defs, got {}",
+            defs.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_definitions_skips_non_ast_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn foo() {}\n").unwrap();
+        std::fs::write(
+            tmp.path().join("README.md"),
+            "# My Project\n\n## Getting Started\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("config.yaml"), "name: thing\nversion: 1\n").unwrap();
+
+        let output = list_definitions(tmp.path(), tmp.path()).unwrap();
+        assert!(!output.is_error, "error: {}", output.content);
+
+        let json: serde_json::Value = serde_json::from_str(&output.content).unwrap();
+        let defs = json["definitions"].as_array().unwrap();
+        // Only the .rs file contributes definitions.
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0]["name"], "foo");
+    }
 }

@@ -25,7 +25,7 @@ overview, then dive into the component that interests you.
 | [MCP OAuth](mcp-oauth.md) | OAuth 2.0 Authorization Code + PKCE for MCP servers |
 | [Dreaming](dreaming.md) | Background cognitive tasks (memory maintenance, learning synthesis, self-improvement) |
 | [Swarm](swarm.md) | Distributed task routing across Dyson nodes — hub, workers, constraint matching, Ed25519 signing |
-| [AST-Aware Code Editing](ast.md) | tree-sitter grammars, `ast_edit` tool (rename/list_definitions), `bulk_edit`, supported languages |
+| [AST-Aware Code Editing](ast.md) | tree-sitter grammars, `bulk_edit` tool (rename_symbol / find_replace / list_definitions), supported languages |
 | [Comparison: Hermes Agent](comparison-hermes-agent.md) | Side-by-side with Hermes Agent (Nous Research) |
 
 **Key source files:**
@@ -49,8 +49,7 @@ src/
     edit_file.rs          Pattern-based find-and-replace editing
     list_files.rs         Glob-based file discovery
     search_files.rs       Regex content search across files
-    ast_edit/             AST-aware code editing (tree-sitter, 19 languages)
-    bulk_edit.rs          Multi-file find-and-replace with glob patterns
+    bulk_edit/            Multi-file edit: AST rename_symbol, find_replace, list_definitions (tree-sitter, 19 languages)
     workspace_view.rs     View workspace files
     workspace_search.rs   Search workspace files by pattern
     workspace_update.rs   Write/append workspace files

@@ -6,7 +6,7 @@
 // the path, and scopes the child agent's working_dir to that directory.
 //
 // The child agent gets a constrained toolset (bash, read_file, edit_file,
-// search_files, list_files, ast_edit) and a coding-focused system prompt.
+// search_files, list_files, bulk_edit) and a coding-focused system prompt.
 // ===========================================================================
 
 use std::sync::Arc;
@@ -33,7 +33,7 @@ const CODER_TOOLS: &[&str] = &[
     "edit_file",
     "search_files",
     "list_files",
-    "ast_edit",
+    "bulk_edit",
 ];
 
 /// System prompt for the coder subagent.
@@ -44,7 +44,7 @@ the tools available to you.\n\n\
 Rules:\n\
 1. Only modify files within your scoped directory.\n\
 2. Read files before editing to understand context.\n\
-3. Use ast_edit for structural refactors, edit_file for targeted changes.\n\
+3. Use bulk_edit for structural refactors and multi-file find/replace, edit_file for targeted changes.\n\
 4. After making changes, verify them (search for old references, read modified files).\n\
 5. Report a concise summary of what you changed when done.";
 

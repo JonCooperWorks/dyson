@@ -658,7 +658,7 @@ fn coder_filters_to_correct_tools() {
         Arc::new(crate::tool::list_files::ListFilesTool),
         Arc::new(crate::tool::search_files::SearchFilesTool),
         Arc::new(crate::tool::send_file::SendFileTool),
-        Arc::new(crate::tool::ast_edit::AstEditTool),
+        Arc::new(crate::tool::bulk_edit::BulkEditTool),
     ];
 
     let tool = CoderTool::new(
@@ -678,7 +678,7 @@ fn coder_filters_to_correct_tools() {
     assert!(names.contains(&"edit_file"));
     assert!(names.contains(&"list_files"));
     assert!(names.contains(&"search_files"));
-    assert!(names.contains(&"ast_edit"));
+    assert!(names.contains(&"bulk_edit"));
     // write_file and send_file should be excluded.
     assert!(!names.contains(&"write_file"));
     assert!(!names.contains(&"send_file"));

@@ -1,19 +1,18 @@
 # AST-Aware Code Editing
 
-Dyson includes an `ast_edit` tool that uses [tree-sitter](https://tree-sitter.github.io/)
+Dyson's `bulk_edit` tool uses [tree-sitter](https://tree-sitter.github.io/)
 to parse source code into ASTs before making changes.  This lets the agent
 rename identifiers across an entire project without accidentally modifying
-strings, comments, or substrings of longer names.
-
-A companion `bulk_edit` tool provides simpler glob-based find-and-replace
-for cases where AST precision isn't needed.
+strings, comments, or substrings of longer names.  Non-grammar files
+(e.g. `.md`, `.yaml`) fall back to word-boundary text replacement, so a
+single rename can sweep source code, docs, and config together.
 
 **Key files:**
-- `src/tool/ast_edit/mod.rs` -- `AstEditTool` (agent-only)
-- `src/tool/ast_edit/languages.rs` -- Language registry and file parsing
-- `src/tool/ast_edit/rename.rs` -- `rename_symbol` implementation
-- `src/tool/ast_edit/definitions.rs` -- `list_definitions` implementation
-- `src/tool/bulk_edit.rs` -- `BulkEditTool` (agent-only)
+- `src/tool/bulk_edit/mod.rs` -- `BulkEditTool` (agent-only), dispatches operations
+- `src/tool/bulk_edit/languages.rs` -- Language registry and file parsing
+- `src/tool/bulk_edit/rename.rs` -- `rename_symbol` (AST + text fallback)
+- `src/tool/bulk_edit/find_replace.rs` -- `find_replace` (plain text / regex)
+- `src/tool/bulk_edit/definitions.rs` -- `list_definitions` (AST only)
 
 ---
 
@@ -23,31 +22,31 @@ for cases where AST precision isn't needed.
 no dynamic loading or network calls.  Each grammar is behind a `LazyLock`
 so it only initialises on first use.
 
-| Language   | Extensions                  | Rename | Definitions |
-|------------|-----------------------------|--------|-------------|
-| Rust       | `.rs`                       | Yes    | Yes         |
-| Python     | `.py`, `.pyi`               | Yes    | Yes         |
-| JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx` | Yes  | Yes         |
-| TypeScript | `.ts`, `.mts`, `.cts`       | Yes    | Yes         |
-| TSX        | `.tsx`                      | Yes    | Yes         |
-| Go         | `.go`                       | Yes    | Yes         |
-| Java       | `.java`                     | Yes    | Yes         |
-| C          | `.c`, `.h`                  | Yes    | Yes         |
-| C++        | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx` | Yes | Yes   |
-| C#         | `.cs`                       | Yes    | Yes         |
-| Ruby       | `.rb`                       | Yes    | Yes         |
-| Kotlin     | `.kt`, `.kts`               | Yes    | Yes         |
-| Swift      | `.swift`                    | Yes    | Yes         |
-| Zig        | `.zig`                      | Yes    | Yes         |
-| Elixir     | `.ex`, `.exs`               | Yes    | Yes         |
-| Erlang     | `.erl`, `.hrl`              | Yes    | Yes         |
-| OCaml      | `.ml`, `.mli`               | Yes    | Yes         |
-| Haskell    | `.hs`                       | Yes    | Yes         |
-| Nix        | `.nix`                      | Yes    | Yes         |
-| JSON       | `.json`                     | No     | Yes         |
+| Language   | Extensions                  | AST rename | Definitions |
+|------------|-----------------------------|------------|-------------|
+| Rust       | `.rs`                       | Yes        | Yes         |
+| Python     | `.py`, `.pyi`               | Yes        | Yes         |
+| JavaScript | `.js`, `.mjs`, `.cjs`, `.jsx` | Yes      | Yes         |
+| TypeScript | `.ts`, `.mts`, `.cts`       | Yes        | Yes         |
+| TSX        | `.tsx`                      | Yes        | Yes         |
+| Go         | `.go`                       | Yes        | Yes         |
+| Java       | `.java`                     | Yes        | Yes         |
+| C          | `.c`, `.h`                  | Yes        | Yes         |
+| C++        | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx` | Yes | Yes    |
+| C#         | `.cs`                       | Yes        | Yes         |
+| Ruby       | `.rb`                       | Yes        | Yes         |
+| Kotlin     | `.kt`, `.kts`               | Yes        | Yes         |
+| Swift      | `.swift`                    | Yes        | Yes         |
+| Zig        | `.zig`                      | Yes        | Yes         |
+| Elixir     | `.ex`, `.exs`               | Yes        | Yes         |
+| Erlang     | `.erl`, `.hrl`              | Yes        | Yes         |
+| OCaml      | `.ml`, `.mli`               | Yes        | Yes         |
+| Haskell    | `.hs`                       | Yes        | Yes         |
+| Nix        | `.nix`                      | Yes        | Yes         |
+| JSON       | `.json`                     | No         | Yes         |
 
-JSON supports `list_definitions` (enumerates top-level keys) but not
-`rename_symbol` since JSON has no identifiers.
+Any other file extension (`.md`, `.yaml`, `.toml`, `.txt`, `.html`, ...)
+is handled by `rename_symbol`'s text fallback -- see below.
 
 ---
 
@@ -56,50 +55,95 @@ JSON supports `list_definitions` (enumerates top-level keys) but not
 ### `rename_symbol`
 
 Renames all occurrences of an identifier across one file or an entire
-directory tree.  Only tree-sitter identifier nodes are matched --
-strings, comments, and substrings of longer names are never touched.
+directory tree.  For each file:
+
+- If the extension has a tree-sitter grammar with identifier nodes, only
+  identifier AST nodes matching `old_name` exactly are renamed.  Strings,
+  comments, doc-comments, and substrings are never touched.
+- Otherwise, the file is rewritten with a word-boundary text replace:
+  the chars on each side of the match must be non-alphanumeric and
+  non-underscore.  This prevents `Config` from matching inside
+  `ConfigManager` in text mode.
 
 ```json
 {
-  "path": "src",
   "operation": "rename_symbol",
+  "path": "src",
   "old_name": "Config",
   "new_name": "AppConfig"
 }
 ```
 
-Returns:
+Optional: `"dry_run": true` previews matches without writing.
+
+Returns (per-file `method` shows which path was taken):
 
 ```json
 {
   "files_modified": 3,
   "occurrences_renamed": 7,
+  "dry_run": false,
   "files": [
-    { "path": "src/config.rs", "occurrences": 4 },
-    { "path": "src/main.rs",   "occurrences": 2 },
-    { "path": "src/lib.rs",    "occurrences": 1 }
+    { "path": "src/config.rs",     "count": 4, "method": "ast" },
+    { "path": "src/main.rs",       "count": 2, "method": "ast" },
+    { "path": "docs/config.md",    "count": 1, "method": "text" }
   ]
 }
 ```
 
-How it works:
+### `find_replace`
 
-1. Walk the directory (respecting `.gitignore`), or parse the single file.
-2. For each file with a recognised extension, build a tree-sitter AST.
-3. Recursively collect identifier nodes whose text matches `old_name` exactly.
-4. Sort matches by byte offset descending and replace from end to start
-   so earlier offsets stay valid.
-5. Write the modified source back to disk.
+Plain text (or regex) find-and-replace across files.  No AST, no word
+boundary -- exact substring match.  Use this for URL changes, import
+path rewrites, license headers, or any non-symbol replacement.
+
+```json
+{
+  "operation": "find_replace",
+  "path": ".",
+  "pattern": "http://",
+  "replacement": "https://"
+}
+```
+
+With regex (capture groups via `$1`, `$2`, ...):
+
+```json
+{
+  "operation": "find_replace",
+  "path": "src",
+  "pattern": "(\\w+)_old",
+  "replacement": "${1}_new",
+  "regex": true
+}
+```
+
+Optional: `"dry_run": true` previews without writing.
+
+Returns:
+
+```json
+{
+  "files_modified": 4,
+  "occurrences_replaced": 12,
+  "dry_run": false,
+  "files": [
+    { "path": "src/main.rs", "count": 3 },
+    { "path": "README.md",   "count": 2 }
+  ]
+}
+```
 
 ### `list_definitions`
 
 Lists functions, classes, structs, enums, traits, modules, and other
-top-level definitions with line numbers.
+top-level definitions with line numbers.  AST-only -- files without a
+registered grammar are silently skipped.
 
 ```json
 {
-  "path": "src/agent",
-  "operation": "list_definitions"
+  "operation": "list_definitions",
+  "path": "src/agent"
 }
 ```
 
@@ -120,35 +164,16 @@ up to depth 2 to find nested definitions.
 
 ---
 
-## `bulk_edit` Tool
-
-A simpler complement to `ast_edit` -- plain string find-and-replace
-across files matching a glob pattern.  No AST parsing, no language
-awareness.  Useful for renaming configuration keys, updating import
-paths, or other textual changes.
-
-```json
-{
-  "pattern": "src/**/*.rs",
-  "old_string": "use crate::old_module",
-  "new_string": "use crate::new_module",
-  "dry_run": false
-}
-```
-
-- Defaults to `dry_run: true` so the agent must explicitly opt in to writes.
-- Respects `.gitignore` via the `ignore` crate.
-- Capped at 200 files and 10 MB per file.
-
----
-
 ## Limits
 
-| Limit              | Value  | Rationale                          |
-|---------------------|--------|------------------------------------|
-| Max file size       | 10 MB  | Prevents OOM on generated files    |
-| Max files per op    | 500    | Bounds wall-clock time             |
-| Max bulk_edit files | 200    | Tighter bound for text replacement |
+| Limit                | Value  | Rationale                                       |
+|----------------------|--------|-------------------------------------------------|
+| Max file size        | 10 MB  | Prevents OOM on generated files                 |
+| Max files (AST ops)  | 500    | Bounds wall-clock time for rename/definitions   |
+| Max files (find_replace) | 200 | Tighter bound: text replace can touch many more files |
+
+Binary / non-UTF-8 files are always skipped silently.  All directory
+walks respect `.gitignore` via the `ignore` crate.
 
 ---
 
