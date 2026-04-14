@@ -10,18 +10,12 @@
 
 use std::path::Path;
 
-use tree_sitter::{Node, Parser};
+use tree_sitter::Node;
 
 use crate::error::Result;
 use crate::tool::ToolOutput;
 
-use super::languages::{self, LanguageConfig};
-
-/// Maximum file size for AST parsing (10 MB).
-const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
-
-/// Maximum number of files to scan.
-const MAX_FILES: usize = 500;
+use super::languages::{self, LanguageConfig, MAX_FILES};
 
 /// List definitions in the given path (file or directory).
 ///
@@ -37,21 +31,14 @@ pub fn list_definitions(resolved_path: &Path, working_dir: &Path) -> Result<Tool
     if resolved_path.is_file() {
         process_file(resolved_path, &working_dir_canon, &mut all_defs)?;
     } else if resolved_path.is_dir() {
-        let mut builder = ignore::WalkBuilder::new(resolved_path);
-        builder.hidden(false);
-        builder.git_ignore(true);
-        builder.git_global(true);
-
-        for entry in builder.build().flatten() {
+        for entry in languages::walk_dir(resolved_path).flatten() {
             if files_scanned >= MAX_FILES {
                 break;
             }
-
             let path = entry.path();
             if !path.is_file() {
                 continue;
             }
-
             if process_file(path, &working_dir_canon, &mut all_defs)? {
                 files_scanned += 1;
             }
@@ -68,65 +55,29 @@ pub fn list_definitions(resolved_path: &Path, working_dir: &Path) -> Result<Tool
 }
 
 /// Process a single file, appending definitions to `defs`.
-/// Returns `true` if the file was actually processed (had a supported extension).
+/// Returns `true` if the file was actually processed.
 fn process_file(
     path: &Path,
     working_dir_canon: &Path,
     defs: &mut Vec<serde_json::Value>,
 ) -> Result<bool> {
-    let ext = match path.extension().and_then(|e| e.to_str()) {
-        Some(e) => e,
-        None => return Ok(false),
-    };
-    let config = match languages::config_for_extension(ext) {
-        Some(c) => c,
-        None => return Ok(false),
-    };
-    if config.definition_types.is_empty() {
-        return Ok(false);
-    }
+    let (config, parsed) =
+        match languages::try_parse_file(path, working_dir_canon, false)? {
+            Some(pair) => pair,
+            None => return Ok(false),
+        };
 
-    let metadata = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(_) => return Ok(false),
-    };
-    if metadata.len() > MAX_FILE_SIZE {
-        return Ok(false);
-    }
-
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return Ok(false),
-    };
-
-    let mut parser = Parser::new();
-    parser
-        .set_language(&config.language)
-        .map_err(|e| crate::error::DysonError::tool("ast_edit", format!("parser setup: {e}")))?;
-
-    let tree = match parser.parse(&source, None) {
-        Some(t) => t,
-        None => return Ok(false),
-    };
-
-    let rel_path = path
-        .strip_prefix(working_dir_canon)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string_lossy().to_string());
-
-    let source_bytes = source.as_bytes();
-    let root = tree.root_node();
+    let root = parsed.tree.root_node();
     let mut cursor = root.walk();
-
     for child in root.children(&mut cursor) {
-        collect_definitions_recursive(child, source_bytes, config, &rel_path, defs, 0);
+        collect_definitions(child, parsed.source.as_bytes(), config, &parsed.rel_path, defs, 0);
     }
 
     Ok(true)
 }
 
-/// Collect definitions, recursing into impl/class/module blocks up to `depth` 2.
-fn collect_definitions_recursive(
+/// Collect definitions, recursing into impl/class/module blocks up to depth 2.
+fn collect_definitions(
     node: Node<'_>,
     source: &[u8],
     config: &LanguageConfig,
@@ -142,9 +93,9 @@ fn collect_definitions_recursive(
         return;
     }
 
-    // For Elixir, only treat `call` nodes as definitions when they are
-    // def/defp/defmodule/defmacro.
-    if config.display_name == "Elixir"
+    // Elixir represents definitions as `call` nodes wrapping def/defmodule.
+    // Skip call nodes that aren't actual definitions.
+    if config.definitions_are_calls
         && node.kind() == "call"
         && !is_elixir_definition(&node, source)
     {
@@ -167,14 +118,13 @@ fn collect_definitions_recursive(
     if is_container_node(node.kind()) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            collect_definitions_recursive(child, source, config, rel_path, results, depth + 1);
+            collect_definitions(child, source, config, rel_path, results, depth + 1);
         }
     }
 }
 
 /// Check if an Elixir `call` node is a definition (def/defp/defmodule/defmacro).
 fn is_elixir_definition(node: &Node<'_>, source: &[u8]) -> bool {
-    // The first child of a call is the function being called.
     if let Some(target) = node.child(0)
         && let Ok(text) = std::str::from_utf8(&source[target.start_byte()..target.end_byte()])
     {
@@ -217,7 +167,7 @@ fn extract_definition_name(node: &Node<'_>, source: &[u8]) -> Option<String> {
         return Some(format!("impl {}", String::from_utf8_lossy(text)));
     }
 
-    // For Elixir call nodes (def/defmodule), extract the second argument.
+    // For Elixir call nodes (def/defmodule), extract from arguments.
     if node.kind() == "call" {
         return extract_elixir_def_name(node, source);
     }
@@ -228,24 +178,24 @@ fn extract_definition_name(node: &Node<'_>, source: &[u8]) -> Option<String> {
     {
         let text = &source[key_node.start_byte()..key_node.end_byte()];
         let key = String::from_utf8_lossy(text).to_string();
-        // Strip surrounding quotes.
         return Some(key.trim_matches('"').to_string());
     }
 
     // Fallback: first identifier-like child.
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        let kind = child.kind();
-        if kind == "identifier"
-            || kind == "type_identifier"
-            || kind == "property_identifier"
-            || kind == "simple_identifier"
-            || kind == "constant"
-            || kind == "value_name"
-            || kind == "constructor_name"
-            || kind == "variable"
-            || kind == "atom"
-        {
+        if matches!(
+            child.kind(),
+            "identifier"
+                | "type_identifier"
+                | "property_identifier"
+                | "simple_identifier"
+                | "constant"
+                | "value_name"
+                | "constructor_name"
+                | "variable"
+                | "atom"
+        ) {
             let text = &source[child.start_byte()..child.end_byte()];
             return Some(String::from_utf8_lossy(text).to_string());
         }
@@ -256,30 +206,25 @@ fn extract_definition_name(node: &Node<'_>, source: &[u8]) -> Option<String> {
 
 /// Extract definition name from an Elixir def/defmodule call.
 fn extract_elixir_def_name(node: &Node<'_>, source: &[u8]) -> Option<String> {
-    // In Elixir tree-sitter: call has arguments child which contains
-    // the function/module name as the first argument.
     if let Some(args) = node.child_by_field_name("arguments") {
         let mut cursor = args.walk();
         for child in args.children(&mut cursor) {
-            let kind = child.kind();
-            if kind == "identifier" || kind == "atom" || kind == "alias" {
+            if matches!(child.kind(), "identifier" | "atom" | "alias") {
                 let text = &source[child.start_byte()..child.end_byte()];
                 return Some(String::from_utf8_lossy(text).to_string());
             }
-            // For defmodule, the first argument is often an alias (e.g., MyModule).
-            if kind == "call" {
-                // Nested call — try its first child.
-                if let Some(first) = child.child(0) {
-                    let text = &source[first.start_byte()..first.end_byte()];
-                    return Some(String::from_utf8_lossy(text).to_string());
-                }
+            if child.kind() == "call"
+                && let Some(first) = child.child(0)
+            {
+                let text = &source[first.start_byte()..first.end_byte()];
+                return Some(String::from_utf8_lossy(text).to_string());
             }
         }
     }
     None
 }
 
-/// Clean up node kind for display (e.g., "function_item" → "function").
+/// Clean up node kind for display (e.g., "function_item" -> "function").
 fn clean_kind(kind: &str) -> String {
     kind.replace("_item", "")
         .replace("_declaration", "")

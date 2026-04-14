@@ -17,7 +17,11 @@ pub struct LanguageConfig {
     pub language: tree_sitter::Language,
     pub identifier_types: &'static [&'static str],
     pub definition_types: &'static [&'static str],
+    #[cfg_attr(not(test), allow(dead_code))]
     pub display_name: &'static str,
+    /// Whether definitions require special extraction logic (e.g., Elixir
+    /// where `call` nodes wrap def/defmodule).
+    pub definitions_are_calls: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -40,6 +44,7 @@ static RUST: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "macro_definition",
     ],
     display_name: "Rust",
+    definitions_are_calls: false,
 });
 
 static PYTHON: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -47,6 +52,7 @@ static PYTHON: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     identifier_types: &["identifier"],
     definition_types: &["function_definition", "class_definition"],
     display_name: "Python",
+    definitions_are_calls: false,
 });
 
 static JAVASCRIPT: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -63,6 +69,7 @@ static JAVASCRIPT: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "variable_declaration",
     ],
     display_name: "JavaScript",
+    definitions_are_calls: false,
 });
 
 static TYPESCRIPT: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -82,6 +89,7 @@ static TYPESCRIPT: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "enum_declaration",
     ],
     display_name: "TypeScript",
+    definitions_are_calls: false,
 });
 
 static TSX: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -101,6 +109,7 @@ static TSX: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "enum_declaration",
     ],
     display_name: "TSX",
+    definitions_are_calls: false,
 });
 
 static GO: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -114,6 +123,7 @@ static GO: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "var_declaration",
     ],
     display_name: "Go",
+    definitions_are_calls: false,
 });
 
 static JAVA: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -128,6 +138,7 @@ static JAVA: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "record_declaration",
     ],
     display_name: "Java",
+    definitions_are_calls: false,
 });
 
 static C: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -140,6 +151,7 @@ static C: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "type_definition",
     ],
     display_name: "C",
+    definitions_are_calls: false,
 });
 
 static CPP: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -160,6 +172,7 @@ static CPP: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "template_declaration",
     ],
     display_name: "C++",
+    definitions_are_calls: false,
 });
 
 static CSHARP: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -175,6 +188,7 @@ static CSHARP: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "record_declaration",
     ],
     display_name: "C#",
+    definitions_are_calls: false,
 });
 
 static RUBY: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -182,6 +196,7 @@ static RUBY: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     identifier_types: &["identifier", "constant"],
     definition_types: &["method", "singleton_method", "class", "module"],
     display_name: "Ruby",
+    definitions_are_calls: false,
 });
 
 static KOTLIN: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -195,6 +210,7 @@ static KOTLIN: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "type_alias",
     ],
     display_name: "Kotlin",
+    definitions_are_calls: false,
 });
 
 static SWIFT: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -209,6 +225,7 @@ static SWIFT: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "typealias_declaration",
     ],
     display_name: "Swift",
+    definitions_are_calls: false,
 });
 
 static ZIG: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -216,6 +233,7 @@ static ZIG: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     identifier_types: &["identifier"],
     definition_types: &["fn_decl", "var_decl", "container_decl"],
     display_name: "Zig",
+    definitions_are_calls: false,
 });
 
 static ELIXIR: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -223,6 +241,7 @@ static ELIXIR: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     identifier_types: &["identifier", "atom"],
     definition_types: &["call"],
     display_name: "Elixir",
+    definitions_are_calls: true,
 });
 
 static ERLANG: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -235,6 +254,7 @@ static ERLANG: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "macro_definition",
     ],
     display_name: "Erlang",
+    definitions_are_calls: false,
 });
 
 static OCAML: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -252,6 +272,7 @@ static OCAML: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "module_type_definition",
     ],
     display_name: "OCaml",
+    definitions_are_calls: false,
 });
 
 static HASKELL: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -266,6 +287,7 @@ static HASKELL: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "instance_declaration",
     ],
     display_name: "Haskell",
+    definitions_are_calls: false,
 });
 
 static NIX: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -273,6 +295,7 @@ static NIX: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     identifier_types: &["identifier", "attrpath"],
     definition_types: &["binding", "inherit"],
     display_name: "Nix",
+    definitions_are_calls: false,
 });
 
 static JSON: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
@@ -280,7 +303,86 @@ static JSON: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     identifier_types: &[], // rename not supported for JSON
     definition_types: &["pair"],
     display_name: "JSON",
+    definitions_are_calls: false,
 });
+
+// ---------------------------------------------------------------------------
+// Shared constants and helpers
+// ---------------------------------------------------------------------------
+
+/// Maximum file size for AST parsing (10 MB).
+pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
+/// Maximum number of files to process in a single operation.
+pub const MAX_FILES: usize = 500;
+
+/// Parsed file ready for AST operations.
+pub struct ParsedFile {
+    pub tree: tree_sitter::Tree,
+    pub source: String,
+    pub rel_path: String,
+}
+
+/// Try to parse a file for AST operations.
+///
+/// Returns `None` if the file should be skipped (wrong extension, binary,
+/// too large, parse failure).  Callers can pass `require_identifiers: true`
+/// to skip languages with no identifier types (e.g., JSON for rename).
+pub fn try_parse_file(
+    path: &std::path::Path,
+    working_dir_canon: &std::path::Path,
+    require_identifiers: bool,
+) -> crate::error::Result<Option<(&'static LanguageConfig, ParsedFile)>> {
+    let ext = match path.extension().and_then(|e| e.to_str()) {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+    let config = match config_for_extension(ext) {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+    if require_identifiers && config.identifier_types.is_empty() {
+        return Ok(None);
+    }
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return Ok(None),
+    };
+    if metadata.len() > MAX_FILE_SIZE {
+        return Ok(None);
+    }
+
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&config.language).map_err(|e| {
+        crate::error::DysonError::tool("ast_edit", format!("parser setup: {e}"))
+    })?;
+
+    let tree = match parser.parse(&source, None) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    let rel_path = path
+        .strip_prefix(working_dir_canon)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string_lossy().to_string());
+
+    Ok(Some((config, ParsedFile { tree, source, rel_path })))
+}
+
+/// Create a directory walker with standard settings (.gitignore, etc.).
+pub fn walk_dir(dir: &std::path::Path) -> ignore::Walk {
+    let mut builder = ignore::WalkBuilder::new(dir);
+    builder.hidden(false);
+    builder.git_ignore(true);
+    builder.git_global(true);
+    builder.build()
+}
 
 // ---------------------------------------------------------------------------
 // Extension → LanguageConfig lookup
