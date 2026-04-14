@@ -697,6 +697,14 @@ impl Agent {
         self.tool_context.depth = depth;
     }
 
+    /// Override the working directory on this agent's tool context.
+    ///
+    /// Called by `CoderTool` after construction to scope the child
+    /// agent to a specific subdirectory.
+    pub fn set_working_dir(&mut self, dir: std::path::PathBuf) {
+        self.tool_context.working_dir = dir;
+    }
+
     /// Replace the agent's tool-context cancellation token.
     ///
     /// Used by the swarm controller to install a fresh per-task
