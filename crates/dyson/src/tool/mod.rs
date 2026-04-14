@@ -52,7 +52,9 @@
 //   trivial compared to the I/O itself.
 // ===========================================================================
 
+pub mod ast_edit;
 pub mod bash;
+pub mod bulk_edit;
 pub mod edit_file;
 pub mod export_conversation;
 pub mod image_generate;

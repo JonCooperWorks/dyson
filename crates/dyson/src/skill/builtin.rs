@@ -26,7 +26,9 @@ use async_trait::async_trait;
 
 use crate::skill::Skill;
 use crate::tool::Tool;
+use crate::tool::ast_edit::AstEditTool;
 use crate::tool::bash::BashTool;
+use crate::tool::bulk_edit::BulkEditTool;
 use crate::tool::edit_file::EditFileTool;
 use crate::tool::kb_search::KbSearchTool;
 use crate::tool::kb_status::KbStatusTool;
@@ -94,6 +96,8 @@ impl BuiltinSkill {
             Arc::new(ReadFileTool),
             Arc::new(WriteFileTool),
             Arc::new(EditFileTool),
+            Arc::new(BulkEditTool),
+            Arc::new(AstEditTool),
             Arc::new(ListFilesTool),
             Arc::new(SearchFilesTool),
             Arc::new(SendFileTool),
@@ -233,23 +237,25 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new(None, None, None);
         let tools = skill.tools();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 18);
         assert_eq!(tools[0].name(), "bash");
         assert_eq!(tools[1].name(), "read_file");
         assert_eq!(tools[2].name(), "write_file");
         assert_eq!(tools[3].name(), "edit_file");
-        assert_eq!(tools[4].name(), "list_files");
-        assert_eq!(tools[5].name(), "search_files");
-        assert_eq!(tools[6].name(), "send_file");
-        assert_eq!(tools[7].name(), "memory_search");
-        assert_eq!(tools[8].name(), "workspace_view");
-        assert_eq!(tools[9].name(), "workspace_search");
-        assert_eq!(tools[10].name(), "workspace_update");
-        assert_eq!(tools[11].name(), "load_skill");
-        assert_eq!(tools[12].name(), "kb_search");
-        assert_eq!(tools[13].name(), "kb_status");
-        assert_eq!(tools[14].name(), "swarm_checkpoint");
-        assert_eq!(tools[15].name(), "web_fetch");
+        assert_eq!(tools[4].name(), "bulk_edit");
+        assert_eq!(tools[5].name(), "ast_edit");
+        assert_eq!(tools[6].name(), "list_files");
+        assert_eq!(tools[7].name(), "search_files");
+        assert_eq!(tools[8].name(), "send_file");
+        assert_eq!(tools[9].name(), "memory_search");
+        assert_eq!(tools[10].name(), "workspace_view");
+        assert_eq!(tools[11].name(), "workspace_search");
+        assert_eq!(tools[12].name(), "workspace_update");
+        assert_eq!(tools[13].name(), "load_skill");
+        assert_eq!(tools[14].name(), "kb_search");
+        assert_eq!(tools[15].name(), "kb_status");
+        assert_eq!(tools[16].name(), "swarm_checkpoint");
+        assert_eq!(tools[17].name(), "web_fetch");
     }
 
     #[test]
@@ -296,7 +302,7 @@ mod tests {
         let skill = BuiltinSkill::new(None, Some(&config), None);
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert!(names.contains(&"image_generate"));
-        assert_eq!(skill.tools().len(), 17);
+        assert_eq!(skill.tools().len(), 19);
     }
 
     #[test]
