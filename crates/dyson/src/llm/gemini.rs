@@ -221,21 +221,21 @@ fn message_to_gemini(msg: &Message) -> serde_json::Value {
         content,
         ..
     }) = msg.content.first()
+        && matches!(msg.role, Role::User)
     {
-        if matches!(msg.role, Role::User) {
-            return serde_json::json!({
-                "role": "function",
-                "parts": [{
-                    "functionResponse": {
-                        "name": tool_use_id,
-                        "response": {
-                            "content": content
-                        }
+        return serde_json::json!({
+            "role": "function",
+            "parts": [{
+                "functionResponse": {
+                    "name": tool_use_id,
+                    "response": {
+                        "content": content
                     }
-                }]
-            });
-        }
+                }
+            }]
+        });
     }
+
 
     let role = match msg.role {
         Role::User => "user",
@@ -314,10 +314,10 @@ impl SseJsonParser for GeminiJsonParser {
             if let Some(parts) = candidate["content"]["parts"].as_array() {
                 for part in parts {
                     // Text content.
-                    if let Some(text) = part["text"].as_str() {
-                        if !text.is_empty() {
-                            events.push(Ok(StreamEvent::TextDelta(text.to_string())));
-                        }
+                    if let Some(text) = part["text"].as_str()
+                        && !text.is_empty()
+                    {
+                        events.push(Ok(StreamEvent::TextDelta(text.to_string())));
                     }
 
                     // Function call.

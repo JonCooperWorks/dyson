@@ -815,6 +815,13 @@ pub async fn execute_lockfree_command(
     CommandResult::NotHandled
 }
 
+/// Mutable model-switching state threaded through agent commands.
+pub struct ModelState<'a> {
+    pub provider: &'a mut String,
+    pub model: &'a mut String,
+    pub config_path: Option<&'a Path>,
+}
+
 /// Execute a command that requires the agent lock.
 ///
 /// Handles: `/clear`, `/compact`, `/model`.
@@ -824,9 +831,7 @@ pub async fn execute_agent_command(
     agent: &mut crate::agent::Agent,
     output: &mut dyn Output,
     settings: &Settings,
-    current_provider: &mut String,
-    current_model: &mut String,
-    config_path: Option<&Path>,
+    ms: &mut ModelState<'_>,
     registry: &ClientRegistry,
 ) -> CommandResult {
     if input == "/clear" {
@@ -852,7 +857,7 @@ pub async fn execute_agent_command(
         let (target_provider, target_model) = match parse_model_command(
             args,
             &settings.providers,
-            current_provider,
+            ms.provider,
         ) {
             Ok(parsed) => parsed,
             Err(e) => return CommandResult::ModelParseError(e),
@@ -872,9 +877,9 @@ pub async fn execute_agent_command(
         match registry.get(&target_provider) {
             Ok(handle) => {
                 agent.swap_client(handle, &resolved, &pc.provider_type);
-                *current_model = resolved.clone();
-                *current_provider = target_provider.clone();
-                if let Some(cp) = config_path {
+                *ms.model = resolved.clone();
+                *ms.provider = target_provider.clone();
+                if let Some(cp) = ms.config_path {
                     crate::config::loader::persist_model_selection(
                         cp,
                         &target_provider,

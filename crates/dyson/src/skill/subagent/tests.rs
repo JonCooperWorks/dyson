@@ -313,13 +313,16 @@ fn subagent_skill_system_prompt_lists_agents() {
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry);
 
     assert_eq!(skill.name(), "subagents");
-    assert_eq!(skill.tools().len(), 1);
+    // 1 config-driven subagent + 1 built-in coder tool = 2
+    assert_eq!(skill.tools().len(), 2);
     assert_eq!(skill.tools()[0].name(), "research_agent");
+    assert_eq!(skill.tools()[1].name(), "coder");
 
     let prompt = skill.system_prompt().unwrap();
     assert!(prompt.contains("research_agent"));
     assert!(prompt.contains("Research specialist"));
     assert!(prompt.contains("subagents"));
+    assert!(prompt.contains("coder"));
 }
 
 #[test]
@@ -341,9 +344,11 @@ fn subagent_skill_skips_unknown_provider() {
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry);
 
-    // Should have skipped the subagent with unknown provider.
-    assert_eq!(skill.tools().len(), 0);
-    assert!(skill.system_prompt().is_none());
+    // Should have skipped the subagent with unknown provider,
+    // but the built-in coder tool is always present.
+    assert_eq!(skill.tools().len(), 1);
+    assert_eq!(skill.tools()[0].name(), "coder");
+    assert!(skill.system_prompt().unwrap().contains("coder"));
 }
 
 // -----------------------------------------------------------------------
@@ -530,7 +535,185 @@ fn default_provider_resolves_to_agent_settings() {
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry);
 
-    // Should have resolved successfully (1 tool, not skipped).
-    assert_eq!(skill.tools().len(), 1);
+    // Should have resolved successfully (1 config-driven + 1 coder = 2 tools).
+    assert_eq!(skill.tools().len(), 2);
     assert_eq!(skill.tools()[0].name(), "test_default");
+    assert_eq!(skill.tools()[1].name(), "coder");
+}
+
+// -----------------------------------------------------------------------
+// CoderTool tests
+// -----------------------------------------------------------------------
+
+/// Helper to create a CoderTool with no inherited tools for metadata tests.
+fn make_coder_tool() -> CoderTool {
+    CoderTool::new(
+        LlmProvider::Anthropic,
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
+        ),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+    )
+}
+
+#[test]
+fn coder_tool_name_and_description() {
+    let tool = make_coder_tool();
+    assert_eq!(tool.name(), "coder");
+    assert!(!tool.description().is_empty());
+    assert!(tool.description().contains("directory"));
+}
+
+#[test]
+fn coder_tool_input_schema_has_required_fields() {
+    let tool = make_coder_tool();
+    let schema = tool.input_schema();
+    assert_eq!(schema["properties"]["path"]["type"], "string");
+    assert_eq!(schema["properties"]["task"]["type"], "string");
+    assert_eq!(schema["required"][0], "path");
+    assert_eq!(schema["required"][1], "task");
+    // Should NOT have a "context" property (that's SubagentTool's schema).
+    assert!(schema["properties"]["context"].is_null());
+}
+
+#[tokio::test]
+async fn coder_depth_limit_prevents_recursion() {
+    let tool = make_coder_tool();
+
+    let ctx = ToolContext {
+        working_dir: std::env::current_dir().unwrap(),
+        env: std::collections::HashMap::new(),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+        workspace: None,
+        depth: MAX_SUBAGENT_DEPTH,
+        dangerous_no_sandbox: false,
+    };
+
+    let input = serde_json::json!({"path": ".", "task": "should fail"});
+    let result = tool.run(&input, &ctx).await.unwrap();
+
+    assert!(result.is_error);
+    assert!(result.content.contains("Maximum subagent nesting depth"));
+}
+
+#[tokio::test]
+async fn coder_missing_path_returns_error() {
+    let tool = make_coder_tool();
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({"task": "fix bug"});
+
+    let result = tool.run(&input, &ctx).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn coder_missing_task_returns_error() {
+    let tool = make_coder_tool();
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({"path": "."});
+
+    let result = tool.run(&input, &ctx).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn coder_nonexistent_path_returns_error() {
+    let tool = make_coder_tool();
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = ToolContext::for_test(tmp.path());
+    let input = serde_json::json!({"path": "no_such_dir", "task": "fix"});
+
+    // resolve_and_validate_path succeeds (designed for write ops), but the
+    // is_dir() check catches the non-existent path.
+    let result = tool.run(&input, &ctx).await.unwrap();
+    assert!(result.is_error);
+    assert!(result.content.contains("not a directory"));
+}
+
+#[tokio::test]
+async fn coder_path_not_directory_returns_error() {
+    let tool = make_coder_tool();
+    let tmp = tempfile::tempdir().unwrap();
+    let file_path = tmp.path().join("afile.txt");
+    std::fs::write(&file_path, "content").unwrap();
+
+    let ctx = ToolContext::for_test(tmp.path());
+    let input = serde_json::json!({"path": "afile.txt", "task": "fix"});
+
+    let result = tool.run(&input, &ctx).await.unwrap();
+    assert!(result.is_error);
+    assert!(result.content.contains("not a directory"));
+}
+
+#[test]
+fn coder_filters_to_correct_tools() {
+    // Provide a superset of tools — coder should filter to only its allowed set.
+    let parent_tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(crate::tool::bash::BashTool::default()),
+        Arc::new(crate::tool::read_file::ReadFileTool),
+        Arc::new(crate::tool::write_file::WriteFileTool),
+        Arc::new(crate::tool::edit_file::EditFileTool),
+        Arc::new(crate::tool::list_files::ListFilesTool),
+        Arc::new(crate::tool::search_files::SearchFilesTool),
+        Arc::new(crate::tool::send_file::SendFileTool),
+        Arc::new(crate::tool::ast_edit::AstEditTool),
+    ];
+
+    let tool = CoderTool::new(
+        LlmProvider::Anthropic,
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
+        ),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &parent_tools,
+    );
+
+    let names: Vec<&str> = tool.inherited_tools.iter().map(|t| t.name()).collect();
+    assert_eq!(names.len(), 6);
+    assert!(names.contains(&"bash"));
+    assert!(names.contains(&"read_file"));
+    assert!(names.contains(&"edit_file"));
+    assert!(names.contains(&"list_files"));
+    assert!(names.contains(&"search_files"));
+    assert!(names.contains(&"ast_edit"));
+    // write_file and send_file should be excluded.
+    assert!(!names.contains(&"write_file"));
+    assert!(!names.contains(&"send_file"));
+}
+
+#[tokio::test]
+async fn coder_runs_child_and_returns_result() {
+    // Build a mock LLM that returns "Changes complete." without calling tools.
+    let llm = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("Changes complete.".into()),
+        StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        },
+    ]]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sub_dir = tmp.path().join("src");
+    std::fs::create_dir(&sub_dir).unwrap();
+
+    let tool = CoderTool::new(
+        LlmProvider::Anthropic,
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+    );
+
+    let ctx = ToolContext::for_test(tmp.path());
+    let input = serde_json::json!({
+        "path": "src",
+        "task": "Rename Config to AuthConfig"
+    });
+
+    let result = tool.run(&input, &ctx).await.unwrap();
+    assert!(!result.is_error);
+    assert_eq!(result.content, "Changes complete.");
 }

@@ -697,6 +697,14 @@ impl Agent {
         self.tool_context.depth = depth;
     }
 
+    /// Override the working directory on this agent's tool context.
+    ///
+    /// Called by `CoderTool` after construction to scope the child
+    /// agent to a specific subdirectory.
+    pub fn set_working_dir(&mut self, dir: std::path::PathBuf) {
+        self.tool_context.working_dir = dir;
+    }
+
     /// Replace the agent's tool-context cancellation token.
     ///
     /// Used by the swarm controller to install a fresh per-task
@@ -751,15 +759,15 @@ impl Agent {
                 }
             });
 
-        self.dream_handle.fire(
+        self.dream_handle.fire(dream::DreamRequest {
             event,
-            self.client.with_priority(rate_limiter::Priority::Background),
-            self.config.clone(),
-            self.tool_context.clone(),
+            client: self.client.with_priority(rate_limiter::Priority::Background),
+            config: self.config.clone(),
+            tool_context: self.tool_context.clone(),
             messages,
-            self.conversation.turn_count,
+            turn_count: self.conversation.turn_count,
             feedback_entries,
-        );
+        });
     }
 
     /// Clear conversation history, firing session-end dreams in the background.

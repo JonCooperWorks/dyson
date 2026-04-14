@@ -67,6 +67,10 @@
 //   SubagentSkill    — Skill impl that bundles SubagentTool instances
 // ===========================================================================
 
+mod coder;
+
+pub use coder::CoderTool;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -494,6 +498,23 @@ impl SubagentSkill {
 
             tools.push(Arc::new(tool));
         }
+
+        // -- Coder tool (built-in, always present) --
+        //
+        // Unlike config-driven subagents, the coder has a custom struct
+        // because it accepts a `path` parameter and scopes the child
+        // agent's working_dir — behavior SubagentTool doesn't support.
+        let (coder_provider, coder_client) =
+            (settings.agent.provider.clone(), registry.get_default());
+        let coder_tool = CoderTool::new(
+            coder_provider,
+            coder_client,
+            Arc::clone(&sandbox),
+            workspace.clone(),
+            parent_tools,
+        );
+        prompt_lines.push(format!("- **{}**: {}", coder_tool.name(), coder_tool.description()));
+        tools.push(Arc::new(coder_tool));
 
         let has_verifier = configs.iter().any(|c| c.name == "verifier");
 
