@@ -930,6 +930,38 @@ pub(crate) fn finish_background_agent(
     bg_registry.remove(id);
 }
 
+/// Render a background agent's final outcome as transcript text.
+///
+/// Shared by the Telegram notification path and by the chat-history append
+/// so the user sees identical wording in both places.
+pub fn format_background_result(id: u64, result: &std::result::Result<String, String>) -> String {
+    match result {
+        Ok(text) if !text.trim().is_empty() => format!("Background agent #{id} result:\n{text}"),
+        Ok(_) => format!("Background agent #{id} finished with no response."),
+        Err(e) => format!("Background agent #{id} failed: {e}"),
+    }
+}
+
+/// Append a background agent's result to a chat's persisted history.
+///
+/// Loads the stored conversation, pushes a single user message containing
+/// the formatted outcome, and writes it back.  Returns the full updated
+/// vector so callers with a live in-memory agent can refresh its state in
+/// lock-step with the on-disk copy.
+pub fn persist_background_result(
+    store: &dyn crate::chat_history::ChatHistory,
+    chat_key: &str,
+    id: u64,
+    result: &std::result::Result<String, String>,
+) -> crate::error::Result<Vec<crate::message::Message>> {
+    let mut msgs = store.load(chat_key)?;
+    msgs.push(crate::message::Message::user(&format_background_result(
+        id, result,
+    )));
+    store.save(chat_key, &msgs)?;
+    Ok(msgs)
+}
+
 pub(crate) async fn spawn_background_agent(
     prompt: &str,
     settings: &Settings,
@@ -1323,6 +1355,49 @@ mod tests {
         let got = received.lock().unwrap().clone();
         assert_eq!(got, Some((id, Err("boom".to_string()))));
         assert!(bg_reg.list().is_empty());
+    }
+
+    #[test]
+    fn format_background_result_variants() {
+        assert_eq!(
+            format_background_result(7, &Ok("done".into())),
+            "Background agent #7 result:\ndone",
+        );
+        assert_eq!(
+            format_background_result(7, &Ok("   ".into())),
+            "Background agent #7 finished with no response.",
+        );
+        assert_eq!(
+            format_background_result(9, &Err("boom".into())),
+            "Background agent #9 failed: boom",
+        );
+    }
+
+    #[test]
+    fn persist_background_result_appends_to_chat_history() {
+        use crate::chat_history::{ChatHistory, DiskChatHistory};
+        use crate::message::{ContentBlock, Message, Role};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = DiskChatHistory::new(dir.path().to_path_buf()).unwrap();
+        let chat_key = "123";
+        store.save(chat_key, &[Message::user("hi")]).unwrap();
+
+        let returned =
+            persist_background_result(&store, chat_key, 7, &Ok("result text".into())).unwrap();
+        assert_eq!(returned.len(), 2);
+
+        let loaded = store.load(chat_key).unwrap();
+        assert_eq!(loaded.len(), 2, "original turn + appended result");
+        let last = loaded.last().unwrap();
+        assert_eq!(last.role, Role::User);
+        match &last.content[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("Background agent #7"), "got: {text}");
+                assert!(text.contains("result text"), "got: {text}");
+            }
+            other => panic!("expected text block, got {other:?}"),
+        }
     }
 
     #[test]

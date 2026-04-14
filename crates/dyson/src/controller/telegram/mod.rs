@@ -530,7 +530,7 @@ impl super::Controller for TelegramController {
 
                 if let Some(handled) = handle_instant_command(
                     &bot, &text, chat_id, &current_settings,
-                    registry, &bg_registry,
+                    registry, &bg_registry, &agents, &chat_store,
                 ).await
                     && handled
                 {
@@ -1095,6 +1095,7 @@ async fn send_quick_response(
 /// Returns `Some(true)` if the command was handled (caller should `continue`),
 /// `Some(false)` if recognized but not fully handled, and `None` if the text
 /// is not an instant command.
+#[allow(clippy::too_many_arguments)]
 async fn handle_instant_command(
     bot: &BotApi,
     text: &str,
@@ -1102,6 +1103,8 @@ async fn handle_instant_command(
     settings: &Settings,
     registry: &super::ClientRegistry,
     bg_registry: &std::sync::Arc<super::background::BackgroundAgentRegistry>,
+    agents: &Arc<tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>>,
+    chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
 ) -> Option<bool> {
     // Telegram-only commands not in the shared dispatcher.
     if text == "/memory" {
@@ -1144,34 +1147,30 @@ async fn handle_instant_command(
 
     // Shared lock-free commands.  Background agents deliver their final
     // response back to the originating Telegram chat via the on_complete
-    // callback.
+    // callback — both as a visible message and as an appended turn in the
+    // chat's persisted conversation history so the next user turn sees it.
     let bot_clone = bot.clone();
+    let agents_clone = Arc::clone(agents);
+    let store_clone = Arc::clone(chat_store);
     let origin_chat = chat_id;
     let on_complete: super::BackgroundCompletion = std::sync::Arc::new(move |id, result| {
         let bot = bot_clone.clone();
+        let agents = Arc::clone(&agents_clone);
+        let store = Arc::clone(&store_clone);
         tokio::spawn(async move {
-            match result {
-                Ok(text) => {
-                    if text.trim().is_empty() {
-                        let _ = bot
-                            .send_message(
-                                origin_chat,
-                                &format!("Agent #{id} finished with no response."),
-                            )
-                            .await;
-                        return;
-                    }
-                    let header = format!("Agent #{id} result:");
-                    let _ = bot.send_message(origin_chat, &header).await;
-                    for part in self::formatting::split_for_telegram(&text) {
-                        let _ = bot.send_message(origin_chat, &part).await;
-                    }
-                }
-                Err(e) => {
-                    let _ = bot
-                        .send_message(origin_chat, &format!("Agent #{id} failed: {e}"))
-                        .await;
-                }
+            let formatted = super::format_background_result(id, &result);
+            for part in self::formatting::split_for_telegram(&formatted) {
+                let _ = bot.send_message(origin_chat, &part).await;
+            }
+            if let Err(e) =
+                append_background_result_to_chat(&agents, &*store, origin_chat, id, &result).await
+            {
+                tracing::warn!(
+                    chat_id = origin_chat.0,
+                    agent_id = id,
+                    error = %e,
+                    "failed to append background result to chat history",
+                );
             }
         });
     });
@@ -1188,6 +1187,52 @@ async fn handle_instant_command(
     }
     render_command_result_telegram(bot, chat_id, &result).await;
     Some(true)
+}
+
+/// Append a finished background agent's result to the originating chat.
+///
+/// When the chat has a live in-memory agent, we mutate its conversation in
+/// place (under the per-chat mutex) so the next user turn sees the result
+/// without a reload.  The on-disk copy and the quick-response snapshot are
+/// refreshed from the same message vector.
+///
+/// When no entry exists yet (e.g. the user's first message in this session
+/// was `/loop`), we fall back to persisting via `chat_store` only — the
+/// entry will restore from disk when it's lazily created.
+async fn append_background_result_to_chat(
+    agents: &tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>,
+    chat_store: &dyn crate::chat_history::ChatHistory,
+    chat_id: ChatId,
+    id: u64,
+    result: &std::result::Result<String, String>,
+) -> crate::Result<()> {
+    let chat_key = chat_id.0.to_string();
+    let entry = agents.read().await.get(&chat_id.0).cloned();
+    let Some(entry) = entry else {
+        super::persist_background_result(chat_store, &chat_key, id, result)?;
+        return Ok(());
+    };
+
+    let mut ca = entry.agent.lock().await;
+    let msgs = if let Some(agent) = ca.agent.as_mut() {
+        let mut msgs = agent.messages().to_vec();
+        msgs.push(crate::message::Message::user(
+            &super::format_background_result(id, result),
+        ));
+        agent.set_messages(msgs.clone());
+        msgs
+    } else {
+        // Agent temporarily extracted (e.g. during /compact) — persist via
+        // chat_store and let the rebuild pick it up.
+        drop(ca);
+        super::persist_background_result(chat_store, &chat_key, id, result)?;
+        return Ok(());
+    };
+    drop(ca);
+
+    chat_store.save(&chat_key, &msgs)?;
+    *entry.messages_snapshot.write().await = msgs;
+    Ok(())
 }
 
 /// Render a `CommandResult` as a Telegram message.

@@ -186,11 +186,9 @@ impl super::Controller for TerminalController {
 
             // Lock-free commands first (no agent needed).  Background agent
             // completions are reported to stderr.
-            let on_complete: super::BackgroundCompletion =
-                std::sync::Arc::new(|id, result| match result {
-                    Ok(text) => eprintln!("\n[agent #{id} result]\n{text}\n"),
-                    Err(e) => eprintln!("\n[agent #{id} failed: {e}]\n"),
-                });
+            let on_complete: super::BackgroundCompletion = std::sync::Arc::new(|id, result| {
+                eprintln!("\n{}\n", super::format_background_result(id, &result));
+            });
             match super::execute_lockfree_command(
                 input,
                 &current_settings,
