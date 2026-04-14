@@ -526,15 +526,18 @@ impl super::Controller for TelegramController {
                     || text == "/compact"
                     || text.starts_with("/model ")
                 {
+                    let chat_cx = ChatContext {
+                        settings: &current_settings,
+                        controller_prompt: controller_prompt.as_deref(),
+                        chat_store: &chat_store,
+                        feedback_dir: &feedback_dir,
+                        registry,
+                    };
                     let entry = match get_or_create_entry(
                         &agents,
                         chat_id.0,
                         is_group,
-                        &current_settings,
-                        controller_prompt.as_deref(),
-                        &chat_store,
-                        &feedback_dir,
-                        registry,
+                        &chat_cx,
                     )
                     .await
                     {
@@ -560,15 +563,18 @@ impl super::Controller for TelegramController {
 
                 tracing::info!(chat_id = chat_id.0, is_group, "telegram message received");
 
+                let chat_cx = ChatContext {
+                    settings: &current_settings,
+                    controller_prompt: controller_prompt.as_deref(),
+                    chat_store: &chat_store,
+                    feedback_dir: &feedback_dir,
+                    registry,
+                };
                 let entry = match get_or_create_entry(
                     &agents,
                     chat_id.0,
                     is_group,
-                    &current_settings,
-                    controller_prompt.as_deref(),
-                    &chat_store,
-                    &feedback_dir,
-                    registry,
+                    &chat_cx,
                 )
                 .await
                 {
@@ -885,9 +891,11 @@ async fn handle_per_chat_command(
         agent,
         &mut output,
         settings,
-        &mut provider_name,
-        &mut model,
-        config_path,
+        &mut super::ModelState {
+            provider: &mut provider_name,
+            model: &mut model,
+            config_path,
+        },
         registry,
     )
     .await;
@@ -1158,7 +1166,7 @@ async fn render_command_result_telegram(
             let _ = bot.send_message(chat_id, &format!("Switch error: {e}")).await;
         }
         super::CommandResult::ModelParseError(e) => {
-            let _ = bot.send_message(chat_id, &e).await;
+            let _ = bot.send_message(chat_id, e).await;
         }
         super::CommandResult::ModelUsage => {
             let _ = bot
@@ -1309,15 +1317,20 @@ pub fn is_operator(sender_id: Option<i64>, allowed_ids: &[i64]) -> bool {
 /// lock if the entry doesn't exist yet.  This means existing chats never
 /// contend on the map lock — only the first message in a new chat takes the
 /// write lock briefly.
+/// Shared context for creating new chat entries.
+struct ChatContext<'a> {
+    settings: &'a Settings,
+    controller_prompt: Option<&'a str>,
+    chat_store: &'a Arc<dyn crate::chat_history::ChatHistory>,
+    feedback_dir: &'a std::path::Path,
+    registry: &'a super::ClientRegistry,
+}
+
 async fn get_or_create_entry(
     agents: &tokio::sync::RwLock<HashMap<i64, Arc<ChatEntry>>>,
     chat_id: i64,
     is_group: bool,
-    settings: &Settings,
-    controller_prompt: Option<&str>,
-    chat_store: &Arc<dyn crate::chat_history::ChatHistory>,
-    feedback_dir: &std::path::Path,
-    registry: &super::ClientRegistry,
+    cx: &ChatContext<'_>,
 ) -> crate::Result<Arc<ChatEntry>> {
     // Fast path: entry already exists.
     {
@@ -1333,18 +1346,18 @@ async fn get_or_create_entry(
     } else {
         crate::controller::AgentMode::Private
     };
-    let client = registry.get_default();
+    let client = cx.registry.get_default();
     let chat_key = chat_id.to_string();
     let ch = if is_group { Some(chat_key.as_str()) } else { None };
     let mut agent =
-        crate::controller::build_agent(settings, controller_prompt, mode, client, registry, ch).await?;
+        crate::controller::build_agent(cx.settings, cx.controller_prompt, mode, client, cx.registry, ch).await?;
 
     // Attach chat history so compaction can rotate pre-compaction snapshots.
-    agent.set_chat_history(Arc::clone(chat_store), chat_key.clone());
-    agent.set_feedback_store(crate::feedback::FeedbackStore::new(feedback_dir.to_path_buf()));
+    agent.set_chat_history(Arc::clone(cx.chat_store), chat_key.clone());
+    agent.set_feedback_store(crate::feedback::FeedbackStore::new(cx.feedback_dir.to_path_buf()));
 
     let mut restored_messages = Vec::new();
-    if let Ok(messages) = chat_store.load(&chat_key)
+    if let Ok(messages) = cx.chat_store.load(&chat_key)
         && !messages.is_empty()
     {
         tracing::info!(
@@ -1357,8 +1370,8 @@ async fn get_or_create_entry(
     }
 
     let provider_name =
-        super::active_provider_name(settings).unwrap_or_default();
-    let model = settings.agent.model.clone();
+        super::active_provider_name(cx.settings).unwrap_or_default();
+    let model = cx.settings.agent.model.clone();
     let sys_prompt = agent.system_prompt().to_string();
     let config = agent.config().clone();
 

@@ -307,18 +307,18 @@ fn should_activate(trigger: DreamTrigger, event: &DreamEvent) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Payload sent from the main loop to the dream thread.
-struct DreamRequest {
-    event: DreamEvent,
-    client: RateLimitedHandle<Box<dyn LlmClient>>,
-    config: CompletionConfig,
-    tool_context: ToolContext,
+pub(crate) struct DreamRequest {
+    pub(crate) event: DreamEvent,
+    pub(crate) client: RateLimitedHandle<Box<dyn LlmClient>>,
+    pub(crate) config: CompletionConfig,
+    pub(crate) tool_context: ToolContext,
     /// Shared snapshot of the conversation — avoids cloning the entire Vec
     /// on every dream event.  The dream thread converts to a slice reference
     /// for summarisation.
-    messages: Arc<[Message]>,
-    turn_count: usize,
+    pub(crate) messages: Arc<[Message]>,
+    pub(crate) turn_count: usize,
     /// User feedback ratings for this conversation, if available.
-    feedback_entries: Option<Vec<FeedbackEntry>>,
+    pub(crate) feedback_entries: Option<Vec<FeedbackEntry>>,
 }
 
 /// Channel-based handle to the persistent dream thread.
@@ -425,25 +425,7 @@ impl DreamHandle {
     ///
     /// Returns immediately.  If the dream thread has shut down the request
     /// is silently dropped (this can only happen during process teardown).
-    pub fn fire(
-        &self,
-        event: DreamEvent,
-        client: RateLimitedHandle<Box<dyn LlmClient>>,
-        config: CompletionConfig,
-        tool_context: ToolContext,
-        messages: Arc<[Message]>,
-        turn_count: usize,
-        feedback_entries: Option<Vec<FeedbackEntry>>,
-    ) {
-        let req = DreamRequest {
-            event,
-            client,
-            config,
-            tool_context,
-            messages,
-            turn_count,
-            feedback_entries,
-        };
+    pub(crate) fn fire(&self, req: DreamRequest) {
         if self.tx.send(req).is_err() {
             tracing::warn!("dream thread disconnected, dropping request");
         }

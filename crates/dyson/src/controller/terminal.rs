@@ -206,9 +206,11 @@ impl super::Controller for TerminalController {
                 &mut agent,
                 &mut output,
                 &current_settings,
-                &mut current_provider,
-                &mut current_model,
-                config_path.as_deref(),
+                &mut super::ModelState {
+                    provider: &mut current_provider,
+                    model: &mut current_model,
+                    config_path: config_path.as_deref(),
+                },
                 registry,
             )
             .await
