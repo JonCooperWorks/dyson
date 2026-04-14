@@ -218,16 +218,28 @@ impl McpTransport for StdioTransport {
         /// Maximum time to wait for an MCP server to respond to a request.
         const MCP_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-        let response = tokio::time::timeout(MCP_RESPONSE_TIMEOUT, rx)
-            .await
-            .map_err(|_| DysonError::Mcp {
-                server: method.to_string(),
-                message: format!("response timed out after {}s", MCP_RESPONSE_TIMEOUT.as_secs()),
-            })?
-            .map_err(|_| DysonError::Mcp {
-                server: method.to_string(),
-                message: "response channel closed (server died?)".into(),
-            })?;
+        let response = match tokio::time::timeout(MCP_RESPONSE_TIMEOUT, rx).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(_)) => {
+                // Channel closed — server died. Clean up the pending entry.
+                self.pending.lock().await.remove(&id);
+                return Err(DysonError::Mcp {
+                    server: method.to_string(),
+                    message: "response channel closed (server died?)".into(),
+                });
+            }
+            Err(_) => {
+                // Timeout — clean up the orphaned pending entry.
+                self.pending.lock().await.remove(&id);
+                return Err(DysonError::Mcp {
+                    server: method.to_string(),
+                    message: format!(
+                        "response timed out after {}s",
+                        MCP_RESPONSE_TIMEOUT.as_secs()
+                    ),
+                });
+            }
+        };
 
         if let Some(err) = response.error {
             return Err(DysonError::Mcp {
