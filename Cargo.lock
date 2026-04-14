@@ -880,7 +880,6 @@ dependencies = [
  "rand 0.10.0",
  "regex",
  "reqwest",
- "ring",
  "rusqlite",
  "rustls",
  "serde",
@@ -927,7 +926,6 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
- "sha2",
  "thiserror 2.0.18",
 ]
 
@@ -3333,7 +3331,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-stream",
- "tower",
  "tower-http",
  "tower-service",
  "tracing",
