@@ -1,23 +1,23 @@
 // ===========================================================================
-// Shared tree-sitter node helpers used by AST-walking operations.
+// Shared tree-sitter node helpers used by AST-walking tools.
 //
-// Every operation that recurses into a parsed AST (`list_definitions`,
-// `extract_definition`, ...) needs the same four bits of logic:
+// Every tool that recurses into a parsed AST needs the same bits of logic:
 //   - decide whether a node can contain nested definitions
 //   - pull a human-readable name out of a definition node
 //   - recognise the Elixir `def/defmodule` call convention
 //   - clean up the raw tree-sitter kind for display
 //
-// Keeping the logic in one place ensures `list_definitions` and
-// `extract_definition` agree on what counts as a definition and what its
-// name is — drift between the two would be a silent bug.
+// Centralising them here keeps `bulk_edit::list_definitions`,
+// `read_file`'s symbol extraction, and anything else that walks definitions
+// in agreement about what counts and what it's called — drift between
+// consumers would be a silent bug.
 // ===========================================================================
 
 use tree_sitter::Node;
 
 /// Return `true` if an Elixir `call` node is a definition
 /// (`def`, `defp`, `defmodule`, `defmacro`, `defprotocol`, `defimpl`).
-pub(super) fn is_elixir_definition(node: &Node<'_>, source: &[u8]) -> bool {
+pub fn is_elixir_definition(node: &Node<'_>, source: &[u8]) -> bool {
     if let Some(target) = node.child(0)
         && let Ok(text) = std::str::from_utf8(&source[target.start_byte()..target.end_byte()])
     {
@@ -31,7 +31,7 @@ pub(super) fn is_elixir_definition(node: &Node<'_>, source: &[u8]) -> bool {
 
 /// Whether a definition node can contain nested definitions.  Used by AST
 /// walkers to decide when to recurse beyond the top level.
-pub(super) fn is_container_node(kind: &str) -> bool {
+pub fn is_container_node(kind: &str) -> bool {
     matches!(
         kind,
         "impl_item"
@@ -50,7 +50,7 @@ pub(super) fn is_container_node(kind: &str) -> bool {
 
 /// Extract the display name from a definition node, using field names where
 /// possible and falling back to the first identifier-like child.
-pub(super) fn extract_definition_name(node: &Node<'_>, source: &[u8]) -> Option<String> {
+pub fn extract_definition_name(node: &Node<'_>, source: &[u8]) -> Option<String> {
     // Try the "name" field first — most languages use this.
     if let Some(name_node) = node.child_by_field_name("name") {
         let text = &source[name_node.start_byte()..name_node.end_byte()];
@@ -124,7 +124,7 @@ fn extract_elixir_def_name(node: &Node<'_>, source: &[u8]) -> Option<String> {
 
 /// Clean up a raw tree-sitter node kind for display
 /// (`function_item` → `function`, `class_declaration` → `class`).
-pub(super) fn clean_kind(kind: &str) -> String {
+pub fn clean_kind(kind: &str) -> String {
     kind.replace("_item", "")
         .replace("_declaration", "")
         .replace("_definition", "")

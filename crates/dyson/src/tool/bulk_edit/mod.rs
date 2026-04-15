@@ -12,10 +12,8 @@
 // Haskell, Nix, JSON.  All grammars are statically linked.
 // ===========================================================================
 
-mod ast;
 mod definitions;
 mod find_replace;
-mod languages;
 mod rename;
 
 use async_trait::async_trait;

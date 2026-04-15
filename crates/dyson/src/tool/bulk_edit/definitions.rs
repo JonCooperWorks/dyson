@@ -15,8 +15,10 @@ use tree_sitter::Node;
 use crate::error::Result;
 use crate::tool::ToolOutput;
 
-use super::ast::{clean_kind, extract_definition_name, is_container_node, is_elixir_definition};
-use super::languages::{self, LanguageConfig, MAX_FILES};
+use crate::tool::ast::nodes::{
+    clean_kind, extract_definition_name, is_container_node, is_elixir_definition,
+};
+use crate::tool::ast::{self, LanguageConfig, MAX_FILES};
 
 /// List definitions in the given path (file or directory).
 ///
@@ -32,7 +34,7 @@ pub fn list_definitions(resolved_path: &Path, working_dir: &Path) -> Result<Tool
     if resolved_path.is_file() {
         process_file(resolved_path, &working_dir_canon, &mut all_defs)?;
     } else if resolved_path.is_dir() {
-        for entry in languages::walk_dir(resolved_path).flatten() {
+        for entry in ast::walk_dir(resolved_path).flatten() {
             if files_scanned >= MAX_FILES {
                 break;
             }
@@ -62,7 +64,7 @@ fn process_file(
     working_dir_canon: &Path,
     defs: &mut Vec<serde_json::Value>,
 ) -> Result<bool> {
-    let (config, parsed) = match languages::try_parse_file(path, working_dir_canon, false)? {
+    let (config, parsed) = match ast::try_parse_file(path, working_dir_canon, false)? {
         Some(pair) => pair,
         None => return Ok(false),
     };

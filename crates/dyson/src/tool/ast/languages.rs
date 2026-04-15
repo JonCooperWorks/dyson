@@ -360,7 +360,7 @@ pub fn try_parse_file(
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&config.language)
-        .map_err(|e| crate::error::DysonError::tool("bulk_edit", format!("parser setup: {e}")))?;
+        .map_err(|e| crate::error::DysonError::tool("ast", format!("parser setup: {e}")))?;
 
     let tree = match parser.parse(&source, None) {
         Some(t) => t,

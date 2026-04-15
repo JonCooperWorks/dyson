@@ -16,7 +16,7 @@ use regex::Regex;
 use crate::error::Result;
 use crate::tool::ToolOutput;
 
-use super::languages::{self, MAX_FILE_SIZE};
+use crate::tool::ast::{self, MAX_FILE_SIZE};
 
 /// Maximum number of files to process in a single find_replace.
 ///
@@ -74,7 +74,7 @@ pub fn find_replace(
             }
         }
     } else if resolved_path.is_dir() {
-        for entry in languages::walk_dir(resolved_path).flatten() {
+        for entry in ast::walk_dir(resolved_path).flatten() {
             if edits.len() >= MAX_FILES {
                 break;
             }
