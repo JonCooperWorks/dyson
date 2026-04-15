@@ -190,11 +190,20 @@ fn test_agent(llm: MockLlm) -> Agent {
 
 /// Build an agent with a custom sandbox.
 fn test_agent_with_sandbox(llm: MockLlm, sandbox: Arc<dyn Sandbox>) -> Agent {
+    test_agent_with_settings(llm, sandbox, default_settings())
+}
+
+/// Build an agent with custom settings (useful for tuning `max_retries`).
+fn test_agent_with_settings(
+    llm: MockLlm,
+    sandbox: Arc<dyn Sandbox>,
+    settings: AgentSettings,
+) -> Agent {
     Agent::new(
         RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
         builtin_skills(),
-        &default_settings(),
+        &settings,
         None,
         0,
         None,
@@ -816,10 +825,18 @@ async fn token_budget_halts_agent_after_limit() {
 #[tokio::test]
 async fn empty_response_sends_fallback_text() {
     // The LLM returns a MessageComplete with no text and no tool calls.
-    // The user should still get a visible response.
+    // With retries disabled, the user should still get a visible fallback.
     let llm = MockLlm::new(vec![empty_response_events()]);
 
-    let mut agent = test_agent(llm);
+    let settings = AgentSettings {
+        max_retries: 0,
+        ..default_settings()
+    };
+    let mut agent = test_agent_with_settings(
+        llm,
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        settings,
+    );
     let mut output = RecordingOutput::new();
 
     let result = agent.run("hello", &mut output).await.unwrap();
@@ -827,6 +844,73 @@ async fn empty_response_sends_fallback_text() {
     assert!(
         !result.is_empty(),
         "empty LLM response should produce a non-empty fallback"
+    );
+    assert!(
+        !output.text().is_empty(),
+        "output should contain fallback text sent to user"
+    );
+}
+
+#[tokio::test]
+async fn empty_response_retries_then_recovers() {
+    // If the LLM returns empty once, then returns text, the agent should
+    // retry silently and return the text — without advancing the iteration
+    // counter or appending a fallback.
+    let llm = MockLlm::new(vec![
+        empty_response_events(),
+        text_response_events("recovered"),
+    ]);
+
+    // max_retries=1 is enough to cover a single empty response.
+    let settings = AgentSettings {
+        max_retries: 1,
+        ..default_settings()
+    };
+    let mut agent = test_agent_with_settings(
+        llm,
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        settings,
+    );
+    let mut output = RecordingOutput::new();
+
+    let result = agent.run("hello", &mut output).await.unwrap();
+
+    assert_eq!(
+        result, "recovered",
+        "agent should return text from the retried request, not a fallback"
+    );
+    assert_eq!(
+        output.text(),
+        "recovered",
+        "no fallback text should be emitted when a retry succeeds"
+    );
+}
+
+#[tokio::test]
+async fn empty_response_retries_exhaust_then_fallback() {
+    // If every retry also comes back empty, fall through to the fallback.
+    let llm = MockLlm::new(vec![
+        empty_response_events(),
+        empty_response_events(),
+    ]);
+
+    // max_retries=1 → one initial call + one retry, both empty.
+    let settings = AgentSettings {
+        max_retries: 1,
+        ..default_settings()
+    };
+    let mut agent = test_agent_with_settings(
+        llm,
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        settings,
+    );
+    let mut output = RecordingOutput::new();
+
+    let result = agent.run("hello", &mut output).await.unwrap();
+
+    assert!(
+        !result.is_empty(),
+        "exhausted retries should fall through to fallback"
     );
     assert!(
         !output.text().is_empty(),
@@ -854,7 +938,17 @@ async fn tool_calls_then_empty_response_sends_fallback() {
         empty_response_events(),
     ]);
 
-    let mut agent = test_agent(llm);
+    // Disable empty-response retries so the single empty response immediately
+    // falls through to the fallback path this test exercises.
+    let settings = AgentSettings {
+        max_retries: 0,
+        ..default_settings()
+    };
+    let mut agent = test_agent_with_settings(
+        llm,
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        settings,
+    );
     let mut output = RecordingOutput::new();
 
     let result = agent.run("search for something", &mut output).await.unwrap();
@@ -903,10 +997,20 @@ async fn text_streamed_before_empty_final_response_no_fallback() {
         }],
     ]);
 
-    let mut agent = test_agent(llm);
+    // Disable empty-response retries so iteration 1's empty message ends the
+    // turn without consuming extra mock responses.
+    let settings = AgentSettings {
+        max_retries: 0,
+        ..default_settings()
+    };
+    let mut agent = test_agent_with_settings(
+        llm,
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        settings,
+    );
     let mut output = RecordingOutput::new();
 
-    let _result = agent.run("do something", &mut output).await.unwrap();
+    let result = agent.run("do something", &mut output).await.unwrap();
 
     // The output text should only be "Working on it..." (from iteration 0).
     // No fallback should be appended.
@@ -914,5 +1018,11 @@ async fn text_streamed_before_empty_final_response_no_fallback() {
         output.text(),
         "Working on it...",
         "should not append fallback when text was already streamed"
+    );
+    // The return value should surface the last streamed text rather than
+    // being silently empty — callers (subagents, controllers) rely on it.
+    assert_eq!(
+        result, "Working on it...",
+        "empty final iteration should fall back to last streamed text"
     );
 }
