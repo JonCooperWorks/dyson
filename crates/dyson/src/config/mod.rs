@@ -622,6 +622,12 @@ pub struct SubagentAgentConfig {
     ///
     /// Tool names that don't match any parent tool are silently ignored.
     pub tools: Option<Vec<String>>,
+
+    /// Optional system-prompt fragment appended to the parent's subagent
+    /// prompt whenever this subagent is present.  Used by built-ins like
+    /// `verifier` to describe when/how they should be invoked.  Not
+    /// currently deserialized from `dyson.json`.
+    pub injects_protocol: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
