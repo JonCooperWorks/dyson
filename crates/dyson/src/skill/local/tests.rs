@@ -60,14 +60,21 @@ Do something.
 }
 
 #[test]
-fn parse_frontmatter_empty_body_rejected() {
+fn parse_frontmatter_empty_body_falls_back_to_whole_file() {
+    // Freeform skills never fail for non-empty content.  A frontmatter-
+    // only file is loaded with the whole content as the body so the skill
+    // remains usable — the author may rely on the description alone, or
+    // add a body later without re-running validation.
     let content = "\
 ---
 name: empty-body
+description: has just metadata
 ---
 ";
-    let err = LocalSkill::parse(content, "empty-body", &test_path()).unwrap_err();
-    assert!(err.to_string().contains("body (system prompt) must not be empty"));
+    let skill = LocalSkill::parse(content, "empty-body", &test_path()).unwrap();
+    assert_eq!(skill.name, "empty-body");
+    assert_eq!(skill.description, "has just metadata");
+    assert!(skill.body.contains("name: empty-body"));
 }
 
 #[test]
@@ -130,12 +137,19 @@ When asked to share text:
 }
 
 #[test]
-fn parse_malformed_frontmatter_only_no_body() {
-    // All frontmatter, no body — error.
+fn parse_malformed_frontmatter_only_falls_back_to_whole_file() {
+    // All frontmatter, no closing `---`, no body — previously rejected,
+    // now loads with the raw file as the body so the author doesn't lose
+    // their skill to a syntax nit.
     let content =
         "---\nname: pastebin\ndescription: Posts things. No auth, no API key.";
-    let err = LocalSkill::parse(content, "pastebin", &test_path()).unwrap_err();
-    assert!(err.to_string().contains("body (system prompt) must not be empty"));
+    let skill = LocalSkill::parse(content, "pastebin", &test_path()).unwrap();
+    assert_eq!(skill.name, "pastebin");
+    assert_eq!(
+        skill.description,
+        "Posts things. No auth, no API key."
+    );
+    assert!(skill.body.contains("name: pastebin"));
 }
 
 // -------------------------------------------------------------------
@@ -180,6 +194,106 @@ fn parse_empty_file_rejected() {
 fn parse_whitespace_only_rejected() {
     let err = LocalSkill::parse("   \n\n  ", "blank", &test_path()).unwrap_err();
     assert!(err.to_string().contains("file is empty"));
+}
+
+// -------------------------------------------------------------------
+// Freeform / robustness tests — skills are text, not a strict schema.
+// -------------------------------------------------------------------
+
+#[test]
+fn parse_markdown_starting_with_horizontal_rule_is_not_frontmatter() {
+    // `---` on its own line followed by markdown is a horizontal rule in
+    // many markdown dialects.  We should NOT misinterpret it as an empty
+    // frontmatter block and strip it.
+    let content = "\
+---
+
+# My Skill
+
+Do the thing.
+";
+    let skill = LocalSkill::parse(content, "my-skill", &test_path()).unwrap();
+    assert_eq!(skill.name, "my-skill");
+    // The full content (including the leading rule) should survive as body.
+    assert!(skill.body.contains("# My Skill"));
+    assert!(skill.body.contains("Do the thing."));
+}
+
+#[test]
+fn parse_line_starting_with_dashes_not_frontmatter() {
+    // `---foo` is not a frontmatter opener (no newline after the dashes).
+    let content = "---foo bar\n\nRest of the skill.\n";
+    let skill = LocalSkill::parse(content, "dashes", &test_path()).unwrap();
+    assert!(skill.body.contains("---foo bar") || skill.body.contains("Rest of the skill"));
+}
+
+#[test]
+fn parse_four_dashes_not_frontmatter_close() {
+    // A line of `----` inside frontmatter is not a close — it has an
+    // extra char.  We keep searching for a real `\n---\n` close.
+    let content = "\
+---
+name: dashes
+description: four dashes in body
+----
+body starts here
+---
+
+Real body text.
+";
+    let skill = LocalSkill::parse(content, "dashes", &test_path()).unwrap();
+    assert_eq!(skill.description, "four dashes in body");
+    assert!(skill.body.contains("Real body text."));
+}
+
+#[test]
+fn parse_body_with_embedded_horizontal_rules_preserved() {
+    // A body that uses `---` as a section separator must not be truncated.
+    let content = "\
+---
+name: multi
+description: has sections
+---
+
+Section A.
+
+---
+
+Section B.
+";
+    let skill = LocalSkill::parse(content, "multi", &test_path()).unwrap();
+    assert!(skill.body.contains("Section A."));
+    assert!(skill.body.contains("Section B."));
+    assert!(skill.body.contains("---"));
+}
+
+#[test]
+fn parse_single_line_skill_loads() {
+    // Absolute minimum: one line of text, no structure at all.
+    let skill = LocalSkill::parse("Just do the thing.", "quick", &test_path()).unwrap();
+    assert_eq!(skill.name, "quick");
+    assert_eq!(skill.body, "Just do the thing.");
+}
+
+#[test]
+fn parse_never_errors_on_non_empty_content() {
+    // Property-style check: a bunch of weird-but-non-empty inputs should
+    // all parse successfully.
+    let cases = [
+        "---",
+        "---\n",
+        "---\n---",
+        "just text",
+        "---\nnot: real: frontmatter",
+        "#!/bin/bash\necho hi",
+        "{\"json\": \"object\"}",
+        "<!-- comment -->\nskill body",
+    ];
+    for content in cases {
+        let skill = LocalSkill::parse(content, "weird", &test_path())
+            .unwrap_or_else(|e| panic!("failed to parse {content:?}: {e}"));
+        assert!(!skill.body.is_empty(), "body empty for {content:?}");
+    }
 }
 
 // -------------------------------------------------------------------
