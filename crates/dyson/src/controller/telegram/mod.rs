@@ -462,6 +462,7 @@ impl super::Controller for TelegramController {
                             &current_settings,
                             config_path.as_deref(),
                             registry,
+                            &bg_registry,
                         )
                         .await;
                     }
@@ -744,7 +745,11 @@ async fn rebuild_agents_on_reload(
     tracing::info!("config/workspace reloaded — agents rebuilt");
 }
 
-/// Handle a callback query (inline keyboard button press) for model switching.
+/// Handle a callback query (inline keyboard button press).
+///
+/// Dispatches on the callback data prefix:
+///   - `model:{provider}:{model}` — hot-swap to the selected model.
+///   - `stop_agent:{id}` — cancel the selected background agent.
 #[allow(clippy::too_many_arguments)]
 async fn handle_callback_query(
     bot: &BotApi,
@@ -754,7 +759,29 @@ async fn handle_callback_query(
     settings: &Settings,
     config_path: Option<&std::path::Path>,
     registry: &super::ClientRegistry,
+    bg_registry: &std::sync::Arc<super::background::BackgroundAgentRegistry>,
 ) {
+    if let Some(rest) = cb_data.strip_prefix("stop_agent:") {
+        let id: u64 = match rest.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                let _ = bot.send_message(chat_id, "Invalid agent ID").await;
+                return;
+            }
+        };
+        match bg_registry.stop(id) {
+            Ok(()) => {
+                let _ = bot
+                    .send_message(chat_id, &format!("Agent #{id} stopped."))
+                    .await;
+            }
+            Err(e) => {
+                let _ = bot.send_message(chat_id, &format!("Stop error: {e}")).await;
+            }
+        }
+        return;
+    }
+
     let Some(rest) = cb_data.strip_prefix("model:") else {
         return;
     };
@@ -1330,17 +1357,14 @@ async fn render_command_result_telegram(
             if agents.is_empty() {
                 let _ = bot.send_message(chat_id, "No background agents running.").await;
             } else {
-                use std::fmt::Write as _;
-                let mut msg = String::from("Background agents:\n");
-                for a in agents {
-                    writeln!(
-                        &mut msg,
-                        "  [{}] {} ({:.0}s)",
-                        a.id, a.prompt_preview, a.elapsed.as_secs_f64(),
+                let keyboard = build_agents_keyboard(agents);
+                let _ = bot
+                    .send_message_with_keyboard(
+                        chat_id,
+                        "Background agents — tap to stop:",
+                        &keyboard,
                     )
-                    .unwrap();
-                }
-                let _ = bot.send_message(chat_id, &msg).await;
+                    .await;
             }
         }
         super::CommandResult::AgentStopped { id } => {
@@ -1574,6 +1598,41 @@ fn build_model_keyboard(providers: &[super::ProviderInfo]) -> InlineKeyboardMark
     }
 
     InlineKeyboardMarkup::new(rows)
+}
+
+/// Build an inline keyboard listing all running background agents as
+/// tap-to-stop buttons.
+///
+/// Each button shows `⏹ Stop #{id}: {preview} ({elapsed}s)`.  The callback
+/// data encodes `stop_agent:{id}` so the handler can cancel the selected
+/// agent via the `BackgroundAgentRegistry`.
+fn build_agents_keyboard(
+    agents: &[super::background::BackgroundAgentListEntry],
+) -> InlineKeyboardMarkup {
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+    for a in agents {
+        // Telegram inline buttons cap at ~64 chars — keep the preview short
+        // so the "Stop" label stays visible.
+        let preview = truncate_chars(&a.prompt_preview, 32);
+        let display = format!(
+            "⏹ Stop #{id}: {preview} ({elapsed:.0}s)",
+            id = a.id,
+            elapsed = a.elapsed.as_secs_f64(),
+        );
+        let data = format!("stop_agent:{}", a.id);
+        rows.push(vec![InlineKeyboardButton::callback(display, data)]);
+    }
+    InlineKeyboardMarkup::new(rows)
+}
+
+/// Truncate a string to at most `max` chars, appending `…` if truncated.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// Save a note to the workspace MEMORY.md file.
@@ -2210,5 +2269,63 @@ mod tests {
         let result = prepend_reply_context(&msg, String::new());
         assert!(result.contains("\"original\""));
         assert!(result.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn truncate_chars_short_string_unchanged() {
+        assert_eq!(truncate_chars("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_long_string_shortened_with_ellipsis() {
+        let out = truncate_chars("abcdefghij", 5);
+        assert_eq!(out, "abcd…");
+        assert_eq!(out.chars().count(), 5);
+    }
+
+    #[test]
+    fn truncate_chars_handles_multibyte() {
+        // Each of these is multi-byte in UTF-8 but one char.
+        let out = truncate_chars("αβγδεζηθ", 4);
+        assert_eq!(out.chars().count(), 4);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn agents_keyboard_has_stop_button_per_agent() {
+        use std::time::Duration;
+        let agents = vec![
+            super::super::background::BackgroundAgentListEntry {
+                id: 1,
+                prompt_preview: "fix bug".into(),
+                elapsed: Duration::from_secs(5),
+                chat_id: "bg-1".into(),
+            },
+            super::super::background::BackgroundAgentListEntry {
+                id: 2,
+                prompt_preview: "write docs".into(),
+                elapsed: Duration::from_secs(30),
+                chat_id: "bg-2".into(),
+            },
+        ];
+        let keyboard = build_agents_keyboard(&agents);
+        assert_eq!(keyboard.inline_keyboard.len(), 2);
+        for (i, row) in keyboard.inline_keyboard.iter().enumerate() {
+            assert_eq!(row.len(), 1);
+            let btn = &row[0];
+            // The word "Stop" must be visible so the action is obvious.
+            assert!(btn.text.contains("Stop"), "button text: {}", btn.text);
+            assert!(btn.text.contains(&format!("#{}", agents[i].id)));
+            assert_eq!(
+                btn.callback_data.as_deref(),
+                Some(format!("stop_agent:{}", agents[i].id).as_str()),
+            );
+        }
+    }
+
+    #[test]
+    fn agents_keyboard_empty_when_no_agents() {
+        let keyboard = build_agents_keyboard(&[]);
+        assert!(keyboard.inline_keyboard.is_empty());
     }
 }
