@@ -48,6 +48,9 @@ pub struct Attachment {
     pub data: Vec<u8>,
     /// MIME type (e.g. `"image/jpeg"`, `"audio/ogg"`, `"application/pdf"`).
     pub mime_type: String,
+    /// Original filename, if available.  Used to label text attachments in
+    /// the prompt so the model knows which file it is looking at.
+    pub file_name: Option<String>,
 }
 
 /// Resolve a raw attachment into ContentBlocks for the LLM.
@@ -84,11 +87,43 @@ pub async fn resolve_attachment(
             .await
             .map_err(|e| crate::DysonError::Config(format!("PDF task panicked: {e}")))??;
         Ok(vec![block])
+    } else if is_text_like_mime(mime) {
+        let text = std::str::from_utf8(&attachment.data).map_err(|_| {
+            crate::DysonError::Config(format!(
+                "attachment {} is labelled as text but is not valid UTF-8",
+                attachment.file_name.as_deref().unwrap_or("<unnamed>")
+            ))
+        })?;
+        let label = attachment.file_name.as_deref().unwrap_or("attachment");
+        let wrapped = format!("=== file: {label} ({mime}) ===\n{text}");
+        Ok(vec![ContentBlock::Text { text: wrapped }])
     } else {
         Err(crate::DysonError::Config(format!(
             "unsupported media type: {mime}"
         )))
     }
+}
+
+/// True if a MIME type is one we treat as inline UTF-8 text.
+///
+/// Accepts anything under `text/*` and a curated list of text-shaped
+/// `application/*` types.  Callers should normalize empty/unknown MIME
+/// strings to a sensible default (e.g. `text/plain`) before calling.
+pub fn is_text_like_mime(mime: &str) -> bool {
+    if mime.starts_with("text/") {
+        return true;
+    }
+    matches!(
+        mime,
+        "application/json"
+            | "application/xml"
+            | "application/javascript"
+            | "application/x-yaml"
+            | "application/yaml"
+            | "application/toml"
+            | "application/x-sh"
+            | "application/x-shellscript"
+    )
 }
 
 // ---------------------------------------------------------------------------

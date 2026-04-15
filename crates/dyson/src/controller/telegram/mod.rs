@@ -187,6 +187,9 @@ struct DownloadLimits {
     audio_max_bytes: u64,
     /// Maximum bytes for other document types.
     document_max_bytes: u64,
+    /// Maximum bytes for text-like document types inlined into the prompt.
+    /// Kept small because these go straight into the model context.
+    text_max_bytes: u64,
 }
 
 impl Default for DownloadLimits {
@@ -195,6 +198,7 @@ impl Default for DownloadLimits {
             image_max_bytes: 50 * 1024 * 1024,    // 50 MB
             audio_max_bytes: 50 * 1024 * 1024,     // 50 MB
             document_max_bytes: 200 * 1024 * 1024,  // 200 MB
+            text_max_bytes: 1024 * 1024,           // 1 MiB
         }
     }
 }
@@ -481,13 +485,11 @@ impl super::Controller for TelegramController {
                     .filter(|t| !t.is_empty())
                     .map(std::string::ToString::to_string);
 
-                let has_media = msg.photo.is_some()
-                    || msg.voice.is_some()
-                    || msg.document.as_ref().is_some_and(|d| {
-                        d.mime_type
-                            .as_ref()
-                            .is_some_and(|m| m.starts_with("image/") || m == "application/pdf")
-                    });
+                // Any document counts as media here, even unsupported ones:
+                // we want to send the user a "skipped" reply rather than
+                // silently dropping the message.
+                let has_media =
+                    msg.photo.is_some() || msg.voice.is_some() || msg.document.is_some();
 
                 if text.is_none() && !has_media {
                     continue;
@@ -1054,7 +1056,24 @@ async fn run_agent_for_message(
         }
     };
 
-    let attachments = extract_attachments(&bot, &msg, &download_limits).await;
+    let (attachments, skip_reasons) = extract_attachments(&bot, &msg, &download_limits).await;
+
+    // If the user only sent unsupported content (e.g. a binary document with
+    // no caption) and nothing else to work with, reply with the skip reasons
+    // and bail out before invoking the agent.
+    if attachments.is_empty() && text.trim().is_empty() && !skip_reasons.is_empty() {
+        let body = skip_reasons.join("\n");
+        let _ = bot.send_message(chat_id, &body).await;
+        return;
+    }
+
+    // If we did successfully attach something (or have text to respond to),
+    // still surface any skip reasons up-front so the user knows their binary
+    // was ignored.  One short message, then the agent runs as normal.
+    if !skip_reasons.is_empty() {
+        let body = skip_reasons.join("\n");
+        let _ = bot.send_message(chat_id, &body).await;
+    }
 
     let agent = ca.agent.as_mut().expect("checked above");
 
@@ -1662,8 +1681,9 @@ async fn extract_attachments(
     bot: &BotApi,
     msg: &types::Message,
     limits: &DownloadLimits,
-) -> Vec<media::Attachment> {
+) -> (Vec<media::Attachment>, Vec<String>) {
     let mut attachments = Vec::new();
+    let mut skip_reasons: Vec<String> = Vec::new();
 
     // Photos: pick the largest resolution (last in the array).
     if let Some(photos) = &msg.photo
@@ -1680,6 +1700,7 @@ async fn extract_attachments(
                 attachments.push(media::Attachment {
                     data,
                     mime_type: "image/jpeg".into(),
+                    file_name: None,
                 });
             }
             Err(e) => tracing::warn!(error = %e, "failed to download photo"),
@@ -1702,36 +1723,236 @@ async fn extract_attachments(
                 attachments.push(media::Attachment {
                     data,
                     mime_type: mime,
+                    file_name: None,
                 });
             }
             Err(e) => tracing::warn!(error = %e, "failed to download voice note"),
         }
     }
 
-    // Documents: images and PDFs.
+    // Documents: images, PDFs, and text-like files.  Binaries are rejected
+    // here without being downloaded at all.
     if let Some(doc) = &msg.document {
         let mime = doc.mime_type.as_deref().unwrap_or("").to_string();
-        let is_supported = mime.starts_with("image/") || mime == "application/pdf";
-        if is_supported {
-            tracing::info!(
-                file_id = doc.file_id.as_str(),
-                file_name = doc.file_name.as_deref().unwrap_or("unknown"),
-                mime_type = mime.as_str(),
-                "downloading document from Telegram"
-            );
-            match bot.download_file(&doc.file_id, limits.document_max_bytes).await {
-                Ok(data) => {
-                    attachments.push(media::Attachment {
-                        data,
-                        mime_type: mime,
-                    });
+        let file_name = doc.file_name.clone();
+        let display_name = file_name.as_deref().unwrap_or("file").to_string();
+
+        let kind = classify_document(&mime, file_name.as_deref());
+        match kind {
+            DocumentKind::Image | DocumentKind::Pdf => {
+                let limit = if matches!(kind, DocumentKind::Image) {
+                    limits.image_max_bytes
+                } else {
+                    limits.document_max_bytes
+                };
+                tracing::info!(
+                    file_id = doc.file_id.as_str(),
+                    file_name = display_name.as_str(),
+                    mime_type = mime.as_str(),
+                    "downloading document from Telegram"
+                );
+                match bot.download_file(&doc.file_id, limit).await {
+                    Ok(data) => {
+                        attachments.push(media::Attachment {
+                            data,
+                            mime_type: mime,
+                            file_name,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to download document");
+                        skip_reasons.push(format!("Couldn't download `{display_name}`: {e}"));
+                    }
                 }
-                Err(e) => tracing::warn!(error = %e, "failed to download document"),
+            }
+            DocumentKind::Text => {
+                tracing::info!(
+                    file_id = doc.file_id.as_str(),
+                    file_name = display_name.as_str(),
+                    mime_type = mime.as_str(),
+                    "downloading text document from Telegram"
+                );
+                match bot.download_file(&doc.file_id, limits.text_max_bytes).await {
+                    Ok(data) => {
+                        if std::str::from_utf8(&data).is_ok() {
+                            let effective_mime = if mime.is_empty()
+                                || mime == "application/octet-stream"
+                                || !crate::media::is_text_like_mime(&mime)
+                            {
+                                "text/plain".to_string()
+                            } else {
+                                mime
+                            };
+                            attachments.push(media::Attachment {
+                                data,
+                                mime_type: effective_mime,
+                                file_name,
+                            });
+                        } else {
+                            tracing::warn!(
+                                file_name = display_name.as_str(),
+                                "text attachment is not valid UTF-8 — dropping"
+                            );
+                            skip_reasons.push(format!(
+                                "Skipped `{display_name}` — looked like text but isn't valid UTF-8."
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to download text document");
+                        skip_reasons.push(format!(
+                            "Skipped `{display_name}` — {e}."
+                        ));
+                    }
+                }
+            }
+            DocumentKind::Binary => {
+                tracing::info!(
+                    file_name = display_name.as_str(),
+                    mime_type = mime.as_str(),
+                    "skipping binary document (not downloaded)"
+                );
+                skip_reasons.push(format!(
+                    "Skipped `{display_name}` — I can only read text files, PDFs, and images."
+                ));
             }
         }
     }
 
-    attachments
+    (attachments, skip_reasons)
+}
+
+/// What kind of Telegram document we're looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocumentKind {
+    Image,
+    Pdf,
+    Text,
+    Binary,
+}
+
+/// Classify a document by its MIME type, falling back to the filename
+/// extension when the MIME is missing or generic (`application/octet-stream`).
+fn classify_document(mime: &str, file_name: Option<&str>) -> DocumentKind {
+    if mime.starts_with("image/") {
+        return DocumentKind::Image;
+    }
+    if mime == "application/pdf" {
+        return DocumentKind::Pdf;
+    }
+    if crate::media::is_text_like_mime(mime) {
+        return DocumentKind::Text;
+    }
+    // Fall back to extension when MIME is empty / octet-stream / unknown.
+    // Telegram often labels source files as application/octet-stream.
+    if matches!(mime, "" | "application/octet-stream")
+        && file_name
+            .and_then(extension_of)
+            .is_some_and(is_text_extension)
+    {
+        return DocumentKind::Text;
+    }
+    DocumentKind::Binary
+}
+
+/// Lowercase extension (without the dot) of a filename, if any.
+fn extension_of(name: &str) -> Option<String> {
+    let dot = name.rfind('.')?;
+    let ext = &name[dot + 1..];
+    if ext.is_empty() {
+        None
+    } else {
+        Some(ext.to_ascii_lowercase())
+    }
+}
+
+/// Whitelist of file extensions we treat as UTF-8 text.
+fn is_text_extension(ext: String) -> bool {
+    matches!(
+        ext.as_str(),
+        "md" | "markdown"
+            | "txt"
+            | "rst"
+            | "log"
+            | "csv"
+            | "tsv"
+            | "json"
+            | "jsonl"
+            | "ndjson"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "ini"
+            | "cfg"
+            | "conf"
+            | "env"
+            | "rs"
+            | "go"
+            | "py"
+            | "pyi"
+            | "js"
+            | "mjs"
+            | "cjs"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "rb"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "cc"
+            | "hh"
+            | "cxx"
+            | "hxx"
+            | "java"
+            | "kt"
+            | "kts"
+            | "swift"
+            | "m"
+            | "mm"
+            | "php"
+            | "pl"
+            | "lua"
+            | "sql"
+            | "html"
+            | "htm"
+            | "css"
+            | "scss"
+            | "sass"
+            | "less"
+            | "xml"
+            | "svg"
+            | "dockerfile"
+            | "makefile"
+            | "mk"
+            | "lock"
+            | "sum"
+            | "mod"
+            | "gitignore"
+            | "gitattributes"
+            | "editorconfig"
+            | "r"
+            | "scala"
+            | "clj"
+            | "ex"
+            | "exs"
+            | "erl"
+            | "hs"
+            | "elm"
+            | "dart"
+            | "vue"
+            | "svelte"
+            | "tf"
+            | "hcl"
+            | "proto"
+            | "graphql"
+            | "gql"
+    )
 }
 
 // TelegramOutput and formatting helpers are in submodules:
@@ -1764,6 +1985,95 @@ mod tests {
 
     fn make_group_msg(text: &str) -> Message {
         make_msg(text, ChatType::Supergroup)
+    }
+
+    #[test]
+    fn classify_image_mime() {
+        assert_eq!(
+            classify_document("image/png", Some("a.png")),
+            DocumentKind::Image
+        );
+        assert_eq!(
+            classify_document("image/jpeg", None),
+            DocumentKind::Image
+        );
+    }
+
+    #[test]
+    fn classify_pdf() {
+        assert_eq!(
+            classify_document("application/pdf", Some("paper.pdf")),
+            DocumentKind::Pdf
+        );
+    }
+
+    #[test]
+    fn classify_text_mime() {
+        assert_eq!(
+            classify_document("text/plain", Some("note.txt")),
+            DocumentKind::Text
+        );
+        assert_eq!(
+            classify_document("text/markdown", Some("README.md")),
+            DocumentKind::Text
+        );
+        assert_eq!(
+            classify_document("application/json", Some("pkg.json")),
+            DocumentKind::Text
+        );
+        assert_eq!(
+            classify_document("application/x-yaml", Some("c.yaml")),
+            DocumentKind::Text
+        );
+    }
+
+    #[test]
+    fn classify_octet_stream_by_extension() {
+        assert_eq!(
+            classify_document("application/octet-stream", Some("main.rs")),
+            DocumentKind::Text
+        );
+        assert_eq!(
+            classify_document("", Some("Cargo.toml")),
+            DocumentKind::Text
+        );
+        assert_eq!(
+            classify_document("application/octet-stream", Some("x.py")),
+            DocumentKind::Text
+        );
+        assert_eq!(
+            classify_document("application/octet-stream", Some("deploy.sh")),
+            DocumentKind::Text
+        );
+    }
+
+    #[test]
+    fn classify_binary_defaults() {
+        assert_eq!(
+            classify_document("application/zip", Some("a.zip")),
+            DocumentKind::Binary
+        );
+        assert_eq!(
+            classify_document("video/mp4", Some("clip.mp4")),
+            DocumentKind::Binary
+        );
+        assert_eq!(
+            classify_document("application/octet-stream", Some("thing.bin")),
+            DocumentKind::Binary
+        );
+        assert_eq!(classify_document("", None), DocumentKind::Binary);
+        assert_eq!(
+            classify_document("application/octet-stream", None),
+            DocumentKind::Binary
+        );
+    }
+
+    #[test]
+    fn extension_extraction() {
+        assert_eq!(extension_of("README.md"), Some("md".into()));
+        assert_eq!(extension_of("foo.TAR.GZ"), Some("gz".into()));
+        assert_eq!(extension_of("nodot"), None);
+        assert_eq!(extension_of("trailing."), None);
     }
 
     #[test]
