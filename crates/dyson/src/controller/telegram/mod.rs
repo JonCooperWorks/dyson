@@ -1739,11 +1739,11 @@ async fn extract_attachments(
 
         let kind = classify_document(&mime, file_name.as_deref());
         match kind {
-            DocumentKind::Image | DocumentKind::Pdf => {
-                let limit = if matches!(kind, DocumentKind::Image) {
-                    limits.image_max_bytes
-                } else {
-                    limits.document_max_bytes
+            DocumentKind::Image | DocumentKind::Pdf | DocumentKind::Office => {
+                let limit = match kind {
+                    DocumentKind::Image => limits.image_max_bytes,
+                    DocumentKind::Office => limits.document_max_bytes,
+                    _ => limits.document_max_bytes,
                 };
                 tracing::info!(
                     file_id = doc.file_id.as_str(),
@@ -1753,9 +1753,20 @@ async fn extract_attachments(
                 );
                 match bot.download_file(&doc.file_id, limit).await {
                     Ok(data) => {
+                        // When Telegram sent octet-stream but we classified as
+                        // Office by extension, resolve to a real Office MIME so
+                        // the media resolver routes correctly.
+                        let effective_mime = if matches!(kind, DocumentKind::Office)
+                            && !crate::media::is_office_mime(&mime)
+                        {
+                            office_mime_from_extension(file_name.as_deref())
+                                .unwrap_or(mime)
+                        } else {
+                            mime
+                        };
                         attachments.push(media::Attachment {
                             data,
-                            mime_type: mime,
+                            mime_type: effective_mime,
                             file_name,
                         });
                     }
@@ -1827,6 +1838,7 @@ async fn extract_attachments(
 enum DocumentKind {
     Image,
     Pdf,
+    Office,
     Text,
     Binary,
 }
@@ -1840,17 +1852,23 @@ fn classify_document(mime: &str, file_name: Option<&str>) -> DocumentKind {
     if mime == "application/pdf" {
         return DocumentKind::Pdf;
     }
+    if crate::media::is_office_mime(mime) {
+        return DocumentKind::Office;
+    }
     if crate::media::is_text_like_mime(mime) {
         return DocumentKind::Text;
     }
     // Fall back to extension when MIME is empty / octet-stream / unknown.
     // Telegram often labels source files as application/octet-stream.
     if matches!(mime, "" | "application/octet-stream")
-        && file_name
-            .and_then(extension_of)
-            .is_some_and(is_text_extension)
+        && let Some(ext) = file_name.and_then(extension_of)
     {
-        return DocumentKind::Text;
+        if is_office_extension(&ext) {
+            return DocumentKind::Office;
+        }
+        if is_text_extension(ext) {
+            return DocumentKind::Text;
+        }
     }
     DocumentKind::Binary
 }
@@ -1864,6 +1882,26 @@ fn extension_of(name: &str) -> Option<String> {
     } else {
         Some(ext.to_ascii_lowercase())
     }
+}
+
+/// Whitelist of Office file extensions.
+fn is_office_extension(ext: &str) -> bool {
+    matches!(ext, "docx" | "xlsx" | "pptx" | "doc" | "xls" | "ppt")
+}
+
+/// Map a filename to the canonical Office MIME type (for extension-based fallback).
+fn office_mime_from_extension(file_name: Option<&str>) -> Option<String> {
+    let ext = file_name.and_then(extension_of)?;
+    let mime = match ext.as_str() {
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "doc" => "application/msword",
+        "xls" => "application/vnd.ms-excel",
+        "ppt" => "application/vnd.ms-powerpoint",
+        _ => return None,
+    };
+    Some(mime.to_string())
 }
 
 /// Whitelist of file extensions we treat as UTF-8 text.
@@ -2044,6 +2082,47 @@ mod tests {
         assert_eq!(
             classify_document("application/octet-stream", Some("deploy.sh")),
             DocumentKind::Text
+        );
+    }
+
+    #[test]
+    fn classify_office_mime() {
+        assert_eq!(
+            classify_document(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                Some("doc.docx")
+            ),
+            DocumentKind::Office
+        );
+        assert_eq!(
+            classify_document(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                Some("data.xlsx")
+            ),
+            DocumentKind::Office
+        );
+        assert_eq!(
+            classify_document(
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                Some("deck.pptx")
+            ),
+            DocumentKind::Office
+        );
+    }
+
+    #[test]
+    fn classify_office_by_extension() {
+        assert_eq!(
+            classify_document("application/octet-stream", Some("report.docx")),
+            DocumentKind::Office
+        );
+        assert_eq!(
+            classify_document("", Some("budget.xlsx")),
+            DocumentKind::Office
+        );
+        assert_eq!(
+            classify_document("application/octet-stream", Some("slides.pptx")),
+            DocumentKind::Office
         );
     }
 

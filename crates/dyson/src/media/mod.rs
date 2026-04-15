@@ -27,6 +27,7 @@
 
 pub mod audio;
 pub mod image;
+pub mod office;
 pub mod pdf;
 
 use std::sync::Arc;
@@ -87,6 +88,15 @@ pub async fn resolve_attachment(
             .await
             .map_err(|e| crate::DysonError::Config(format!("PDF task panicked: {e}")))??;
         Ok(vec![block])
+    } else if is_office_mime(mime) {
+        let file_name = attachment.file_name.clone();
+        let data = attachment.data;
+        let block = tokio::task::spawn_blocking(move || {
+            office::process_office(&data, file_name.as_deref())
+        })
+        .await
+        .map_err(|e| crate::DysonError::Config(format!("Office task panicked: {e}")))??;
+        Ok(vec![block])
     } else if is_text_like_mime(mime) {
         let text = std::str::from_utf8(&attachment.data).map_err(|_| {
             crate::DysonError::Config(format!(
@@ -123,6 +133,20 @@ pub fn is_text_like_mime(mime: &str) -> bool {
             | "application/toml"
             | "application/x-sh"
             | "application/x-shellscript"
+    )
+}
+
+/// True if a MIME type corresponds to a Microsoft Office format we can extract
+/// text from (docx, xlsx, pptx).
+pub fn is_office_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            | "application/msword"
+            | "application/vnd.ms-excel"
+            | "application/vnd.ms-powerpoint"
     )
 }
 
