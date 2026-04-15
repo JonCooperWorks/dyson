@@ -407,18 +407,10 @@ pub fn load_settings(path: Option<&Path>) -> Result<Settings> {
     Ok(settings)
 }
 
-/// Validate subagent configurations against the resolved `Settings`.
-///
-/// Fails fast on configuration errors that we can detect without loading
-/// tools or talking to a provider:
-///
-/// - Each subagent's `provider` must be `"default"` or a key in
-///   `settings.providers`.
-///
-/// Tool-filter name validation happens later (in `SubagentSkill::new`)
-/// because tool names are only known after all skills have loaded.  That
-/// validation degrades to a `warn!` — unknown tool names are dropped from
-/// the filter rather than aborting startup.
+/// Reject subagent configs whose `provider` is not `"default"` or a
+/// known entry in `settings.providers`.  Tool-filter names are checked
+/// later (in `SubagentSkill::new`) because tool names aren't known
+/// until skills have loaded; that path degrades to a `warn!`.
 pub fn validate_subagent_configs(settings: &Settings) -> Result<()> {
     for skill in &settings.skills {
         let SkillConfig::Subagent(cfg) = skill else {
@@ -833,9 +825,7 @@ fn parse_skills(skills: Option<JsonSkills>, settings: &mut Settings) {
                 max_iterations: sa.max_iterations,
                 max_tokens: sa.max_tokens,
                 tools: sa.tools,
-                // Not currently deserialized from dyson.json — only
-                // populated by built-in configs.
-                injects_protocol: None,
+                injects_protocol: None, // built-in only; not from dyson.json
             })
             .collect();
 
