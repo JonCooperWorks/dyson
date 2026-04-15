@@ -12,7 +12,10 @@ extensibility layer that lets you plug arbitrary capabilities into the agent.
 - `src/skill/mod.rs` — `Skill` trait, `create_skills()` factory
 - `src/skill/builtin.rs` — `BuiltinSkill` (wraps built-in tools)
 - `src/skill/local.rs` — `LocalSkill` (SKILL.md parser, workspace discovery)
-- `src/tool/bulk_edit/` — `BulkEditTool` (unified multi-file edit: AST rename, find_replace, list_definitions; see [AST docs](ast.md))
+- `src/tool/ast/` — shared tree-sitter grammars and walking helpers; consumed by `bulk_edit`, `read_file`, and `search_files` (see [AST docs](ast.md))
+- `src/tool/bulk_edit/` — `BulkEditTool` (unified multi-file edit: AST rename, find_replace, list_definitions)
+- `src/tool/read_file.rs` — `ReadFileTool`; supports `symbol` extraction for AST-aware single-definition reads
+- `src/tool/search_files.rs` — `SearchFilesTool`; supports `ast: true` for identifier-only searches
 
 ---
 

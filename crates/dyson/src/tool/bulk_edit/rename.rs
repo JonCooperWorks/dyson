@@ -16,12 +16,11 @@
 
 use std::path::Path;
 
-use tree_sitter::Node;
-
 use crate::error::Result;
 use crate::tool::ToolOutput;
-
-use super::languages::{self, MAX_FILE_SIZE, MAX_FILES};
+use crate::tool::ast::{
+    self, MAX_FILE_SIZE, MAX_FILES, find_identifier_positions, find_word_boundary_matches,
+};
 
 /// Method used to rename a given file.
 #[derive(Clone, Copy)]
@@ -69,7 +68,7 @@ pub fn rename_symbol(
             files.push((path, count, method));
         }
     } else if resolved_path.is_dir() {
-        for entry in languages::walk_dir(resolved_path).flatten() {
+        for entry in ast::walk_dir(resolved_path).flatten() {
             if files.len() >= MAX_FILES {
                 break;
             }
@@ -121,7 +120,7 @@ fn process_file(
 ) -> Result<Option<(String, usize, Method)>> {
     let ext = path.extension().and_then(|e| e.to_str());
     let ast_capable = ext
-        .and_then(languages::config_for_extension)
+        .and_then(ast::config_for_extension)
         .is_some_and(|c| !c.identifier_types.is_empty());
 
     if ast_capable {
@@ -151,18 +150,16 @@ fn process_file_ast(
     new_name: &str,
     dry_run: bool,
 ) -> Result<Option<(String, usize)>> {
-    let (config, parsed) = match languages::try_parse_file(path, working_dir_canon, true)? {
+    let (config, parsed) = match ast::try_parse_file(path, working_dir_canon, true)? {
         Some(pair) => pair,
         None => return Ok(None),
     };
 
-    let mut matches: Vec<(usize, usize)> = Vec::new();
-    collect_matching_identifiers(
-        parsed.tree.root_node(),
+    let mut matches = find_identifier_positions(
+        &parsed.tree,
         parsed.source.as_bytes(),
         old_name,
         config.identifier_types,
-        &mut matches,
     );
 
     if matches.is_empty() {
@@ -229,66 +226,6 @@ fn process_file_text(
     }
 
     Ok(Some((rel_path, matches.len())))
-}
-
-/// Find all substring matches of `needle` in `haystack` where the chars
-/// on both sides are non-identifier chars (non-alphanumeric, non-underscore)
-/// or at the start/end of the string.
-///
-/// Matches are returned as (start_byte, end_byte) in ascending order.
-fn find_word_boundary_matches(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    if needle.is_empty() {
-        return out;
-    }
-    let bytes = haystack.as_bytes();
-    let nbytes = needle.as_bytes();
-    let nlen = nbytes.len();
-
-    let mut i = 0usize;
-    while i + nlen <= bytes.len() {
-        if &bytes[i..i + nlen] == nbytes {
-            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-            let after_ok = i + nlen == bytes.len() || !is_ident_byte(bytes[i + nlen]);
-            if before_ok && after_ok {
-                out.push((i, i + nlen));
-                i += nlen;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    out
-}
-
-/// A byte that counts as part of an identifier (ASCII alphanumeric or underscore).
-///
-/// For non-ASCII bytes (UTF-8 continuation / multi-byte sequences) we treat
-/// them as identifier chars — this is conservative: a match adjacent to a
-/// multi-byte codepoint won't be replaced, which is the safe default.
-const fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || !b.is_ascii()
-}
-
-/// Recursively collect all identifier nodes matching `target_name`.
-fn collect_matching_identifiers(
-    node: Node<'_>,
-    source: &[u8],
-    target_name: &str,
-    id_types: &[&str],
-    results: &mut Vec<(usize, usize)>,
-) {
-    if id_types.contains(&node.kind())
-        && let Ok(text) = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
-        && text == target_name
-    {
-        results.push((node.start_byte(), node.end_byte()));
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_matching_identifiers(child, source, target_name, id_types, results);
-    }
 }
 
 // ===========================================================================
@@ -536,26 +473,4 @@ mod tests {
         assert!(csv.contains("renamed,value"));
     }
 
-    #[test]
-    fn find_word_boundary_matches_basic() {
-        let matches = find_word_boundary_matches("Config is ConfigManager", "Config");
-        // Only the first `Config` (before space). `ConfigManager` has an
-        // identifier char right after "Config", so it doesn't match.
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0], (0, 6));
-    }
-
-    #[test]
-    fn find_word_boundary_matches_start_end() {
-        let matches = find_word_boundary_matches("foo", "foo");
-        assert_eq!(matches, vec![(0, 3)]);
-
-        let matches = find_word_boundary_matches("_foo", "foo");
-        // Leading underscore is an identifier char — no match.
-        assert!(matches.is_empty());
-
-        let matches = find_word_boundary_matches("foo_", "foo");
-        // Trailing underscore is an identifier char — no match.
-        assert!(matches.is_empty());
-    }
 }

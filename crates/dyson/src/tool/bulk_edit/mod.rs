@@ -14,7 +14,6 @@
 
 mod definitions;
 mod find_replace;
-mod languages;
 mod rename;
 
 use async_trait::async_trait;

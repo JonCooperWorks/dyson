@@ -15,7 +15,7 @@ layers on top of those primitives.
 | [LLM Clients](llm-clients.md) | Anthropic, OpenAI, and Claude Code streaming. SSE parsing, thinking tokens, provider abstraction |
 | [Tools & Skills](tools-and-skills.md) | Tool trait, Skill trait, BuiltinSkill, LocalSkill, adding new tools |
 | [Tool Execution Pipeline](tool-execution-pipeline.md) | Rate limiting, dependency analysis, result formatting, lifecycle hooks |
-| [AST-Aware Code Editing](ast.md) | `bulk_edit` tool — tree-sitter rename_symbol, find_replace, list_definitions across 19 languages |
+| [AST-Aware Code Editing & Reading](ast.md) | Shared tree-sitter infra in `tool::ast`: `bulk_edit` rename/find_replace/list_definitions, `read_file` symbol extraction, `search_files` identifier mode, across 19 languages |
 | [Sandbox](sandbox.md) | OS sandbox (Seatbelt/bubblewrap), Allow/Deny/Redirect, composition, MCP result sandboxing |
 | [Memory](memory.md) | Tiered memory (always-in-context, FTS5 search, journals), nudges, character limits |
 | [Knowledge Base](knowledge-base.md) | Document storage + FTS5 search: kb/raw (source material), kb/wiki (articles), INDEX.md (system prompt index) |
@@ -49,12 +49,13 @@ src/
   tool/
     mod.rs                Tool trait, ToolContext, ToolOutput
     bash.rs               Shell execution with timeout
-    read_file.rs          Read workspace files with optional line range
+    read_file.rs          Read workspace files (line range, or AST symbol extraction)
     write_file.rs         Create or overwrite files
     edit_file.rs          Pattern-based find-and-replace editing
     list_files.rs         Glob-based file discovery
-    search_files.rs       Regex content search across files
+    search_files.rs       Content search (regex, or AST identifier mode)
     bulk_edit/            Multi-file edit: AST rename_symbol, find_replace, list_definitions (tree-sitter, 19 languages)
+    ast/                  Shared tree-sitter grammars and walkers used by bulk_edit, read_file, search_files
     workspace_view.rs     View workspace files
     workspace_search.rs   Search workspace files by pattern
     workspace_update.rs   Write/append workspace files

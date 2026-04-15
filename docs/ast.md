@@ -1,4 +1,4 @@
-# AST-Aware Code Editing
+# AST-Aware Code Editing and Reading
 
 Renaming a symbol with a plain text search-and-replace is a good way to corrupt
 a codebase.  `Config` appears inside `ConfigManager`, inside string literals,
@@ -6,20 +6,31 @@ inside comments, and inside doc examples that were never meant to change.  The
 fix is to parse the file first and only rewrite the nodes that the language
 actually considers identifiers.
 
-Dyson's `bulk_edit` tool does exactly that.  It uses
-[tree-sitter](https://tree-sitter.github.io/) to parse source into an AST, then
-walks that AST to find identifier nodes matching the target name.  Strings,
-comments, and substrings of longer names are left alone.  Files that have no
-grammar registered fall through to a narrower text-replacement path (see
-["Why the text fallback exists"](#why-the-text-fallback-exists) below), so a
-single rename can sweep source, docs, and config in one pass.
+Dyson uses [tree-sitter](https://tree-sitter.github.io/) to parse source into
+an AST, then walks that AST to find identifier nodes matching the target name.
+Strings, comments, and substrings of longer names are left alone.  Files that
+have no grammar registered fall through to a narrower text-replacement path
+(see ["Why the text fallback exists"](#why-the-text-fallback-exists) below),
+so a single rename can sweep source, docs, and config in one pass.
+
+The same machinery powers symbol-aware reads (`read_file` with `symbol: ...`)
+and symbol-aware searches (`search_files` with `ast: true`), so the agent can
+extract one function out of a 5k-line file or audit every usage of a symbol
+without scanning the wrong things.
 
 **Key files:**
-- `src/tool/bulk_edit/mod.rs` -- `BulkEditTool` (agent-only), dispatches operations
-- `src/tool/bulk_edit/languages.rs` -- Language registry and file parsing
+- `src/tool/ast/mod.rs` -- shared AST primitives (`find_identifier_positions`,
+  `find_word_boundary_matches`, `find_definitions_by_name`); consumed by
+  `bulk_edit`, `read_file`, and `search_files`
+- `src/tool/ast/languages.rs` -- language registry and file parsing
+- `src/tool/ast/nodes.rs` -- node-info helpers (definition name extraction,
+  container detection, kind cleanup)
+- `src/tool/bulk_edit/mod.rs` -- `BulkEditTool` (agent-only), dispatches ops
 - `src/tool/bulk_edit/rename.rs` -- `rename_symbol` (AST + text fallback)
 - `src/tool/bulk_edit/find_replace.rs` -- `find_replace` (plain text / regex)
 - `src/tool/bulk_edit/definitions.rs` -- `list_definitions` (AST only)
+- `src/tool/read_file.rs` -- adds `symbol` extraction mode
+- `src/tool/search_files.rs` -- adds `ast: true` identifier-search mode
 
 ---
 
@@ -204,6 +215,62 @@ Returns:
 
 Recurses into container nodes (impl blocks, classes, modules, namespaces)
 up to depth 2 to find nested definitions.
+
+---
+
+## Reading and Searching
+
+The same AST infrastructure also powers two read-side modes on the existing
+`read_file` and `search_files` tools.  The point is the same: when the agent
+is reading or auditing code, plain text grep is risky in the same ways that
+plain text rename is.
+
+### `read_file` symbol mode
+
+```json
+{
+  "file_path": "src/agent/mod.rs",
+  "symbol": "Agent"
+}
+```
+
+Parses the file with tree-sitter and returns the source of every definition
+named `Agent`, with kind and line annotations.  Optional `symbol_kind`
+(`"function"`, `"struct"`, `"class"`, ...) disambiguates when the same name
+has multiple definitions.
+
+Behaviour:
+
+- Walks the entire AST so methods inside `impl Foo` / `class Foo:` are reachable.
+- Returns one or more spans separated by blank lines, each prefixed with a
+  `// path:line (kind)` header.
+- AST-only -- unsupported extensions return a clear error rather than
+  silently degrading to a text grep that would hit comments and strings.
+
+Use this instead of `read_file` + `offset`/`limit` when you know the symbol
+you want.  Saves substantial context on large files.
+
+### `search_files` AST mode
+
+```json
+{
+  "pattern": "Config",
+  "ast": true
+}
+```
+
+In AST mode, `pattern` is a literal identifier name (not a regex):
+
+- Files with a grammar: only identifier AST nodes match, with the same
+  precision guarantee as `rename_symbol` -- `Config` does not match inside
+  `ConfigManager`, `"Config"`, or `// Config`.
+- Files without a grammar: word-boundary literal match (Markdown, YAML,
+  configs are still searched).
+
+Output uses the same `path:line: text` format as regex mode.  Use this to
+audit every usage of a symbol before/after a rename, or to find call sites
+that a regex grep would either miss (typed as `Self::Foo`) or over-count
+(spelled inside an unrelated docstring).
 
 ---
 
