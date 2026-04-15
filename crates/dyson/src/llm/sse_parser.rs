@@ -19,7 +19,7 @@ use crate::error::{DysonError, Result};
 use crate::llm::stream::StreamEvent;
 use crate::llm::{
     SseLineBuffer, SseStreamParser, ToolCallBuffer,
-    MAX_ACTIVE_TOOL_BUFFERS, MAX_TOOL_JSON, finalize_tool_call,
+    MAX_ACTIVE_TOOL_BUFFERS, MAX_TOOL_JSON, MAX_TOTAL_TOOL_JSON, finalize_tool_call,
 };
 
 /// Provider-specific SSE JSON parsing.
@@ -52,6 +52,14 @@ pub struct ToolBufferContext {
     pub(crate) tool_buffers: HashMap<usize, ToolCallBuffer>,
     /// Content block indices that are "thinking" blocks.
     pub(crate) thinking_blocks: HashSet<usize>,
+    /// Aggregate byte count across all tool buffers in this stream.  Used to
+    /// enforce `MAX_TOTAL_TOOL_JSON` — individual buffers are already capped
+    /// by `MAX_TOOL_JSON`, but without a cross-buffer total a stream could
+    /// hold `MAX_TOOL_JSON * MAX_ACTIVE_TOOL_BUFFERS` at once.
+    pub(crate) total_tool_bytes: usize,
+    /// Once the aggregate cap is exceeded, suppress repeated error events
+    /// and drop further appends silently.
+    pub(crate) total_exceeded: bool,
 }
 
 impl ToolBufferContext {
@@ -59,6 +67,8 @@ impl ToolBufferContext {
         Self {
             tool_buffers: HashMap::new(),
             thinking_blocks: HashSet::new(),
+            total_tool_bytes: 0,
+            total_exceeded: false,
         }
     }
 
@@ -89,22 +99,43 @@ impl ToolBufferContext {
 
     /// Append partial JSON to an existing tool buffer.
     ///
-    /// Returns `Some(error event)` if the accumulated JSON exceeds the size limit.
+    /// Returns `Some(error event)` if the accumulated JSON exceeds either the
+    /// per-buffer (`MAX_TOOL_JSON`) or per-stream aggregate
+    /// (`MAX_TOTAL_TOOL_JSON`) size limit.
     pub(crate) fn append_tool_json(
         &mut self,
         index: usize,
         partial: &str,
     ) -> Option<StreamEvent> {
+        if self.total_exceeded {
+            return None;
+        }
         if let Some(buf) = self.tool_buffers.get_mut(&index) {
             if buf.json.len() + partial.len() > MAX_TOOL_JSON {
                 // Remove the buffer to prevent repeated error events and
                 // free the accumulated memory.
-                self.tool_buffers.remove(&index);
+                let dropped = self.tool_buffers.remove(&index);
+                if let Some(d) = dropped {
+                    self.total_tool_bytes = self.total_tool_bytes.saturating_sub(d.json.len());
+                }
                 return Some(StreamEvent::TextDelta(
                     "[error: tool input exceeded 10 MB limit]".into(),
                 ));
             }
+            if self.total_tool_bytes + partial.len() > MAX_TOTAL_TOOL_JSON {
+                // Aggregate across all buffers has blown the cap — drop every
+                // buffer to free memory, mark the stream as exceeded so
+                // subsequent appends are silent no-ops, and surface one error.
+                self.tool_buffers.clear();
+                self.total_tool_bytes = 0;
+                self.total_exceeded = true;
+                return Some(StreamEvent::Error(DysonError::Llm(format!(
+                    "aggregate tool input across concurrent calls exceeded {} MB — aborting stream",
+                    MAX_TOTAL_TOOL_JSON / (1024 * 1024)
+                ))));
+            }
             buf.json.push_str(partial);
+            self.total_tool_bytes += partial.len();
         }
         None
     }
@@ -113,15 +144,21 @@ impl ToolBufferContext {
     ///
     /// Returns `Some(ToolUseComplete event)` if the index had an active buffer.
     pub(crate) fn finalize_tool(&mut self, index: usize) -> Option<Result<StreamEvent>> {
-        self.tool_buffers.remove(&index).map(finalize_tool_call)
+        self.tool_buffers.remove(&index).map(|buf| {
+            self.total_tool_bytes = self.total_tool_bytes.saturating_sub(buf.json.len());
+            finalize_tool_call(buf)
+        })
     }
 
     /// Drain all remaining tool buffers, returning ToolUseComplete events.
     pub(crate) fn drain_all(&mut self) -> Vec<Result<StreamEvent>> {
-        self.tool_buffers
+        let out: Vec<_> = self
+            .tool_buffers
             .drain()
             .map(|(_, buf)| finalize_tool_call(buf))
-            .collect()
+            .collect();
+        self.total_tool_bytes = 0;
+        out
     }
 }
 
@@ -202,5 +239,33 @@ mod tests {
         // Subsequent append to the same index should be a no-op.
         let event2 = ctx.append_tool_json(0, "more");
         assert!(event2.is_none(), "no buffer means no error event");
+    }
+
+    #[test]
+    fn aggregate_overflow_aborts_stream() {
+        let mut ctx = ToolBufferContext::new();
+        // Spread the load across many buffers so no single buffer hits
+        // MAX_TOOL_JSON, but the aggregate crosses MAX_TOTAL_TOOL_JSON.
+        let per_buffer = MAX_TOOL_JSON / 2; // 5 MB
+        let needed = MAX_TOTAL_TOOL_JSON / per_buffer + 1;
+        let chunk = "x".repeat(per_buffer);
+
+        let mut saw_error = false;
+        for i in 0..needed {
+            ctx.start_tool(i, format!("id{i}"), "name".into());
+            if let Some(StreamEvent::Error(_)) = ctx.append_tool_json(i, &chunk) {
+                saw_error = true;
+                break;
+            }
+        }
+        assert!(saw_error, "aggregate cap should trigger an Error event");
+        assert!(ctx.total_exceeded, "exceeded flag should be set");
+        assert!(ctx.tool_buffers.is_empty(), "all buffers dropped");
+        assert_eq!(ctx.total_tool_bytes, 0, "byte counter reset");
+
+        // Subsequent appends should be silent no-ops.
+        ctx.start_tool(999, "id999".into(), "name".into());
+        let event = ctx.append_tool_json(999, "more");
+        assert!(event.is_none(), "silent drop after aggregate cap");
     }
 }

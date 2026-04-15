@@ -327,8 +327,13 @@ fn flush_thinking(current_thinking: &mut String, content_blocks: &mut Vec<Conten
 /// Usage: feed every `TextDelta` through [`feed()`].  It returns a list of
 /// `(is_thinking, text)` segments.
 /// Maximum pending buffer size before forcing a flush.  Protects against
-/// unbounded memory growth when a model sends an unclosed `<think>` tag.
-const MAX_PENDING: usize = 64 * 1024; // 64 KB
+/// unbounded memory growth when a model sends a giant chunk inside an
+/// unclosed `<think>` tag.  In steady state the buffer holds at most
+/// `CLOSE.len() - 1` bytes between calls (we emit everything except the
+/// possible partial `</think>` suffix), so this cap only matters for
+/// single oversized deltas.  8 KB is more than enough headroom while
+/// keeping per-stream worst case small when many streams run concurrently.
+const MAX_PENDING: usize = 8 * 1024; // 8 KB
 
 struct ThinkTagParser {
     state: ThinkTagState,

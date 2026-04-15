@@ -117,6 +117,11 @@ struct ChatEntry {
     message_id_map: tokio::sync::RwLock<HashMap<i32, usize>>,
     /// When this chat last received a message.  Used for LRU eviction.
     last_active: std::sync::atomic::AtomicI64,
+    /// Bounds the number of in-flight tasks per chat so a single user
+    /// flooding the bot cannot spawn unlimited background LLM calls.
+    /// `try_acquire_owned` is non-blocking: if no permit is available
+    /// the message is dropped with a log line rather than queueing.
+    in_flight: Arc<tokio::sync::Semaphore>,
 }
 
 /// Minimum interval between message edits (milliseconds).
@@ -129,6 +134,13 @@ const MAX_MESSAGE_LEN: usize = 4000;
 /// When exceeded, the least-recently-active entry is evicted (its
 /// conversation is already persisted to chat_store on every turn).
 const MAX_CHAT_ENTRIES: usize = 200;
+
+/// Maximum number of in-flight tasks (agent run + quick response) per chat.
+/// One real agent run plus a couple of quick-response fallbacks is plenty;
+/// any more is a hostile or buggy client and the extra messages are dropped
+/// without spawning.  Keeps memory linear in the number of active chats
+/// instead of the number of messages received.
+const MAX_IN_FLIGHT_PER_CHAT: usize = 3;
 
 /// Current Unix timestamp in seconds (for `last_active` bookkeeping).
 fn epoch_secs() -> i64 {
@@ -600,20 +612,40 @@ impl super::Controller for TelegramController {
                     }
                 };
 
+                // Bound in-flight work per chat.  A single user flooding
+                // messages cannot spawn more than MAX_IN_FLIGHT_PER_CHAT
+                // concurrent tasks — extras are dropped (with a log) rather
+                // than queued.  The permit lives for the task's duration and
+                // is released automatically on drop.
+                let permit = match Arc::clone(&entry.in_flight).try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        tracing::warn!(
+                            chat_id = chat_id.0,
+                            "dropping telegram message: in-flight limit reached"
+                        );
+                        continue;
+                    }
+                };
+
                 let bot_clone = bot.clone();
                 let store_clone = chat_store.clone();
                 let client_for_task = registry.get_default();
                 let limits_clone = Arc::clone(&download_limits);
-                tokio::spawn(run_agent_for_message(
-                    bot_clone,
-                    chat_id,
-                    msg,
-                    text,
-                    entry,
-                    store_clone,
-                    client_for_task,
-                    limits_clone,
-                ));
+                tokio::spawn(async move {
+                    run_agent_for_message(
+                        bot_clone,
+                        chat_id,
+                        msg,
+                        text,
+                        entry,
+                        store_clone,
+                        client_for_task,
+                        limits_clone,
+                    )
+                    .await;
+                    drop(permit);
+                });
             }
         }
 
@@ -692,6 +724,7 @@ async fn rebuild_agents_on_reload(
                         is_group,
                         message_id_map: tokio::sync::RwLock::new(HashMap::new()),
                         last_active: std::sync::atomic::AtomicI64::new(epoch_secs()),
+                        in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_PER_CHAT)),
                     }),
                 );
             }
@@ -1492,6 +1525,7 @@ async fn get_or_create_entry(
         is_group,
         message_id_map: tokio::sync::RwLock::new(HashMap::new()),
         last_active: std::sync::atomic::AtomicI64::new(epoch_secs()),
+        in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_PER_CHAT)),
     });
 
     // Evict the least-recently-active entry if we're at capacity.

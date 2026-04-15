@@ -287,6 +287,12 @@ pub(crate) const MAX_LINE_BUFFER: usize = 10 * 1024 * 1024; // 10 MB
 /// tool argument accumulation.
 pub(crate) const MAX_TOOL_JSON: usize = 10 * 1024 * 1024; // 10 MB
 
+/// Maximum accumulated JSON across *all* concurrent tool call buffers in a
+/// single stream.  Without this, MAX_TOOL_JSON × MAX_ACTIVE_TOOL_BUFFERS
+/// allows ~1 GB of buffered tool input per stream.  50 MB is generous for
+/// well-behaved streams and catches pathological models before the host OOMs.
+pub(crate) const MAX_TOTAL_TOOL_JSON: usize = 50 * 1024 * 1024; // 50 MB
+
 /// Maximum number of concurrent tool call buffers the SSE parser will
 /// track.  A well-behaved stream will have at most a handful; this cap
 /// protects against malformed streams that never close content blocks.
