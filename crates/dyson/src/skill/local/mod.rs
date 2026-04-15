@@ -1,11 +1,18 @@
 // ===========================================================================
 // Local skill — loads a SKILL.md file that defines a custom system prompt.
 //
-// SKILL.md format (lenient):
+// SKILL.md format (freeform):
 //
-// The parser accepts multiple formats, from most to least structured:
+// Skills are freeform text. The parser NEVER rejects a non-empty file — it
+// only tries to extract a short description for the `<available_skills>`
+// list, then uses the remaining content as the body. If extraction fails
+// for any reason, the whole file becomes the body. The only failure case
+// is a completely empty file.
 //
-// 1. Full frontmatter (backward-compatible):
+// The parser recognises three common shapes (from most to least structured),
+// but any of them may be partial or malformed and still load:
+//
+// 1. YAML-style frontmatter:
 //
 //   ---
 //   name: code-review
@@ -14,22 +21,32 @@
 //
 //   You are a code review expert.
 //
-// 2. No frontmatter — name comes from the parent directory, first line
-//    is the description, rest is the body:
+// 2. No frontmatter, description-first: the first line is the description,
+//    everything after the first blank line is the body:
 //
 //   Reviews code for quality and security issues
 //
 //   You are a code review expert.
 //
-// 3. No frontmatter, single block — name from directory, description
-//    empty, entire file is the body:
+// 3. No frontmatter, single block — entire file is the body, no description:
 //
 //   You are a code review expert.
 //   Analyze code quality, security, and patterns.
 //
-// The `name` field is always derived from the parent directory name
-// (e.g., `skills/code-review/SKILL.md` → name = "code-review").
-// Frontmatter `name:` is accepted but ignored in favor of the directory.
+// Robustness rules:
+//
+// - The `name` field is always derived from the parent directory name
+//   (e.g., `skills/code-review/SKILL.md` → name = "code-review").
+//   Frontmatter `name:` is accepted but ignored in favor of the directory.
+// - A leading `---` is only treated as frontmatter if it's followed by a
+//   newline. Markdown documents that begin with a horizontal rule or a
+//   line like `---foo` are NOT mis-parsed.
+// - Frontmatter that lacks a closing `---` is still accepted — we salvage
+//   whatever `key: value` lines look well-formed and treat the rest as
+//   body text.
+// - If the "body" extraction produces an empty string (e.g., the file is
+//   frontmatter-only, or the split heuristic found nothing), the entire
+//   file content is used as the body so the skill is still loadable.
 // ===========================================================================
 
 use std::fmt::Write;
@@ -103,42 +120,49 @@ impl LocalSkill {
 
     /// Extract just the body (instructions) from SKILL.md content.
     ///
-    /// Returns `None` if the content is empty.  Used by `load_skill` to
-    /// return instructions without frontmatter.
+    /// Returns `None` only if the content is empty or whitespace-only.
+    /// For any other input the function succeeds — if frontmatter is
+    /// present and well-formed, it's stripped; otherwise the whole
+    /// content is returned verbatim.  Used by `load_skill` to return
+    /// instructions without frontmatter noise.
     pub fn parse_body(content: &str) -> Option<String> {
         let trimmed = content.trim();
         if trimmed.is_empty() {
             return None;
         }
 
-        // If frontmatter is present, strip it.
-        if let Some(after_prefix) = trimmed.strip_prefix("---") {
-            let after_open = &after_prefix.trim_start_matches(['\r', '\n']);
-            if let Some(close_pos) = after_open.find("\n---") {
-                let body = after_open[close_pos + 4..].trim();
-                return if body.is_empty() { None } else { Some(body.to_string()) };
+        // Only treat a leading `---` as frontmatter if it's followed by a
+        // newline — otherwise it's likely a markdown horizontal rule or
+        // part of the body text and should be preserved.
+        let looks_like_frontmatter = trimmed
+            .strip_prefix("---")
+            .map(|rest| rest.starts_with(['\r', '\n']))
+            .unwrap_or(false);
+
+        if looks_like_frontmatter {
+            let after_prefix = trimmed.strip_prefix("---").unwrap();
+            let after_open = after_prefix.trim_start_matches(['\r', '\n']);
+            if let Some((_, body_start)) = find_frontmatter_close(after_open) {
+                let body = after_open[body_start..].trim();
+                if !body.is_empty() {
+                    return Some(body.to_string());
+                }
+                // Frontmatter-only file — fall through to returning the
+                // whole file so the caller still gets something usable.
             }
-            // Malformed frontmatter — fall through and treat entire content
-            // as body (the name/description will just be part of the text).
         }
 
-        // No frontmatter — return the whole thing.
+        // No usable frontmatter split — return the whole thing.
         Some(trimmed.to_string())
     }
 
     /// Parse SKILL.md content into a LocalSkill.
     ///
-    /// Accepts three formats:
-    ///
-    /// 1. **Frontmatter** — `---` delimiters with `description:` field,
-    ///    body after closing `---`.  `name:` in frontmatter is ignored
-    ///    (we always use `dir_name`).
-    ///
-    /// 2. **No frontmatter, multi-line** — first non-empty line is the
-    ///    description, everything after the first blank line is the body.
-    ///
-    /// 3. **No frontmatter, single block** — entire content is the body,
-    ///    description is empty.
+    /// Skills are freeform text.  This function never rejects a non-empty
+    /// file.  It tries to extract a short description for the skill list
+    /// and splits out a body; if any of that fails it falls back to using
+    /// the entire file as the body.  The only failure case is an empty /
+    /// whitespace-only file, which genuinely has nothing to load.
     fn parse(content: &str, dir_name: &str, path: &Path) -> Result<Self> {
         let trimmed = content.trim();
 
@@ -149,60 +173,7 @@ impl LocalSkill {
             )));
         }
 
-        // --- Path 1: frontmatter present ---
-        if let Some(after_prefix) = trimmed.strip_prefix("---") {
-            let after_open = &after_prefix.trim_start_matches(['\r', '\n']);
-
-            if let Some(close_pos) = after_open.find("\n---") {
-                // Well-formed frontmatter.
-                let frontmatter = &after_open[..close_pos];
-                let body = after_open[close_pos + 4..].trim();
-
-                let description = extract_frontmatter_value(frontmatter, "description");
-
-                if body.is_empty() {
-                    return Err(DysonError::Config(format!(
-                        "skill file {}: body (system prompt) must not be empty",
-                        path.display()
-                    )));
-                }
-
-                return Ok(Self {
-                    name: dir_name.to_string(),
-                    description,
-                    body: body.to_string(),
-                });
-            }
-
-            // Malformed frontmatter — try to extract description from what
-            // looks like frontmatter, then treat the rest as body.
-            let (description, body) = split_malformed_frontmatter(after_open);
-
-            if body.is_empty() {
-                return Err(DysonError::Config(format!(
-                    "skill file {}: body (system prompt) must not be empty",
-                    path.display()
-                )));
-            }
-
-            return Ok(Self {
-                name: dir_name.to_string(),
-                description,
-                body,
-            });
-        }
-
-        // --- Path 2 & 3: no frontmatter ---
-        let (description, body) = split_plain_content(trimmed);
-
-        if body.is_empty() {
-            // Single block — entire content is the body, no description.
-            return Ok(Self {
-                name: dir_name.to_string(),
-                description: String::new(),
-                body: trimmed.to_string(),
-            });
-        }
+        let (description, body) = extract_description_and_body(trimmed);
 
         Ok(Self {
             name: dir_name.to_string(),
@@ -210,6 +181,101 @@ impl LocalSkill {
             body,
         })
     }
+}
+
+/// Extract `(description, body)` from a non-empty, already-trimmed skill file.
+///
+/// This is infallible: it always returns a non-empty body.  If the heuristics
+/// below can't find sensible structure, the entire file content is returned
+/// as the body with an empty description.
+fn extract_description_and_body(trimmed: &str) -> (String, String) {
+    // A leading `---` is only treated as frontmatter if it's followed by a
+    // newline.  This keeps us from mis-parsing markdown that happens to
+    // start with a horizontal rule or a line like `---foo`.
+    let looks_like_frontmatter = trimmed
+        .strip_prefix("---")
+        .map(|rest| rest.starts_with(['\r', '\n']))
+        .unwrap_or(false);
+
+    if looks_like_frontmatter {
+        // Unwrap is safe: we just confirmed the prefix above.
+        let after_prefix = trimmed.strip_prefix("---").unwrap();
+        let after_open = after_prefix.trim_start_matches(['\r', '\n']);
+
+        if let Some(close_pos) = find_frontmatter_close(after_open) {
+            // Well-formed frontmatter.
+            let frontmatter = &after_open[..close_pos.0];
+            let body = after_open[close_pos.1..].trim();
+            let description = extract_frontmatter_value(frontmatter, "description");
+
+            // If the body is empty, fall back to the full file so the skill
+            // is still usable — freeform skills may legitimately consist of
+            // just metadata, or the author may rely on the description alone.
+            let body = if body.is_empty() {
+                trimmed.to_string()
+            } else {
+                body.to_string()
+            };
+            return (description, body);
+        }
+
+        // Malformed frontmatter — try to salvage description lines, then
+        // use whatever follows as the body.  If we can't split out a body,
+        // fall back to the full file.
+        let (description, body) = split_malformed_frontmatter(after_open);
+        let body = if body.is_empty() {
+            trimmed.to_string()
+        } else {
+            body
+        };
+        return (description, body);
+    }
+
+    // No frontmatter — try the "first line is description, blank line,
+    // body" split.  If there's no blank line, treat the whole file as body.
+    let (description, body) = split_plain_content(trimmed);
+    if body.is_empty() {
+        return (String::new(), trimmed.to_string());
+    }
+    (description, body)
+}
+
+/// Locate the closing `---` of a YAML-style frontmatter block.
+///
+/// Returns `Some((body_split_start, body_start))` where `body_split_start`
+/// is the end of the frontmatter text (exclusive of the newline before
+/// `---`) and `body_start` is the index where body content begins.
+///
+/// The closing delimiter must appear on its own line — i.e., preceded by a
+/// newline and followed by a newline or end-of-string.  This avoids matching
+/// `---` that appears as inline markdown inside the frontmatter region.
+fn find_frontmatter_close(after_open: &str) -> Option<(usize, usize)> {
+    let mut search_from = 0;
+    while let Some(rel) = after_open[search_from..].find("\n---") {
+        let fm_end = search_from + rel; // index of the `\n` before `---`
+        let after_dashes = fm_end + 4; // index just past `\n---`
+        let next = after_open.as_bytes().get(after_dashes);
+        match next {
+            None => return Some((fm_end, after_dashes)),
+            Some(b'\r') | Some(b'\n') => {
+                // Skip past the newline so body doesn't start with it.
+                let body_start = if next == Some(&b'\r')
+                    && after_open.as_bytes().get(after_dashes + 1) == Some(&b'\n')
+                {
+                    after_dashes + 2
+                } else {
+                    after_dashes + 1
+                };
+                return Some((fm_end, body_start));
+            }
+            // Not a standalone `---` line (e.g. `----` or `---foo`).  Keep
+            // searching for a later match.
+            Some(_) => {
+                search_from = after_dashes;
+            }
+        }
+    }
+    None
 }
 
 /// Validate skill file content before use as a system prompt fragment.
