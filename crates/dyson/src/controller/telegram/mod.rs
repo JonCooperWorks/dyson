@@ -1730,102 +1730,57 @@ async fn extract_attachments(
         }
     }
 
-    // Documents: images, PDFs, and text-like files.  Binaries are rejected
-    // here without being downloaded at all.
+    // Documents: images, PDFs, Office, and text-like files.  Binaries are
+    // rejected here without being downloaded at all.
     if let Some(doc) = &msg.document {
         let mime = doc.mime_type.as_deref().unwrap_or("").to_string();
         let file_name = doc.file_name.clone();
         let display_name = file_name.as_deref().unwrap_or("file").to_string();
 
         let kind = classify_document(&mime, file_name.as_deref());
-        match kind {
-            DocumentKind::Image | DocumentKind::Pdf | DocumentKind::Office => {
-                let limit = match kind {
-                    DocumentKind::Image => limits.image_max_bytes,
-                    DocumentKind::Office => limits.document_max_bytes,
-                    _ => limits.document_max_bytes,
-                };
-                tracing::info!(
-                    file_id = doc.file_id.as_str(),
-                    file_name = display_name.as_str(),
-                    mime_type = mime.as_str(),
-                    "downloading document from Telegram"
-                );
-                match bot.download_file(&doc.file_id, limit).await {
-                    Ok(data) => {
-                        // When Telegram sent octet-stream but we classified as
-                        // Office by extension, resolve to a real Office MIME so
-                        // the media resolver routes correctly.
-                        let effective_mime = if matches!(kind, DocumentKind::Office)
-                            && !crate::media::is_office_mime(&mime)
-                        {
-                            office_mime_from_extension(file_name.as_deref())
-                                .unwrap_or(mime)
-                        } else {
-                            mime
-                        };
+        if matches!(kind, DocumentKind::Binary) {
+            tracing::info!(
+                file_name = display_name.as_str(),
+                mime_type = mime.as_str(),
+                "skipping binary document (not downloaded)"
+            );
+            skip_reasons.push(format!(
+                "Skipped `{display_name}` — I can only read text files, Office docs, PDFs, and images."
+            ));
+        } else {
+            let limit = match kind {
+                DocumentKind::Image => limits.image_max_bytes,
+                DocumentKind::Text => limits.text_max_bytes,
+                _ => limits.document_max_bytes,
+            };
+            tracing::info!(
+                file_id = doc.file_id.as_str(),
+                file_name = display_name.as_str(),
+                mime_type = mime.as_str(),
+                kind = ?kind,
+                "downloading document from Telegram"
+            );
+            match bot.download_file(&doc.file_id, limit).await {
+                Ok(data) => {
+                    // Text documents need UTF-8 validation; reject if invalid.
+                    if matches!(kind, DocumentKind::Text) && std::str::from_utf8(&data).is_err() {
+                        tracing::warn!(file_name = display_name.as_str(), "not valid UTF-8 — dropping");
+                        skip_reasons.push(format!(
+                            "Skipped `{display_name}` — looked like text but isn't valid UTF-8."
+                        ));
+                    } else {
+                        let effective_mime = resolve_effective_mime(&mime, kind, file_name.as_deref());
                         attachments.push(media::Attachment {
                             data,
                             mime_type: effective_mime,
                             file_name,
                         });
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to download document");
-                        skip_reasons.push(format!("Couldn't download `{display_name}`: {e}"));
-                    }
                 }
-            }
-            DocumentKind::Text => {
-                tracing::info!(
-                    file_id = doc.file_id.as_str(),
-                    file_name = display_name.as_str(),
-                    mime_type = mime.as_str(),
-                    "downloading text document from Telegram"
-                );
-                match bot.download_file(&doc.file_id, limits.text_max_bytes).await {
-                    Ok(data) => {
-                        if std::str::from_utf8(&data).is_ok() {
-                            let effective_mime = if mime.is_empty()
-                                || mime == "application/octet-stream"
-                                || !crate::media::is_text_like_mime(&mime)
-                            {
-                                "text/plain".to_string()
-                            } else {
-                                mime
-                            };
-                            attachments.push(media::Attachment {
-                                data,
-                                mime_type: effective_mime,
-                                file_name,
-                            });
-                        } else {
-                            tracing::warn!(
-                                file_name = display_name.as_str(),
-                                "text attachment is not valid UTF-8 — dropping"
-                            );
-                            skip_reasons.push(format!(
-                                "Skipped `{display_name}` — looked like text but isn't valid UTF-8."
-                            ));
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to download text document");
-                        skip_reasons.push(format!(
-                            "Skipped `{display_name}` — {e}."
-                        ));
-                    }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to download document");
+                    skip_reasons.push(format!("Couldn't download `{display_name}`: {e}"));
                 }
-            }
-            DocumentKind::Binary => {
-                tracing::info!(
-                    file_name = display_name.as_str(),
-                    mime_type = mime.as_str(),
-                    "skipping binary document (not downloaded)"
-                );
-                skip_reasons.push(format!(
-                    "Skipped `{display_name}` — I can only read text files, PDFs, and images."
-                ));
             }
         }
     }
@@ -1889,19 +1844,31 @@ fn is_office_extension(ext: &str) -> bool {
     matches!(ext, "docx" | "xlsx" | "pptx" | "doc" | "xls" | "ppt")
 }
 
-/// Map a filename to the canonical Office MIME type (for extension-based fallback).
-fn office_mime_from_extension(file_name: Option<&str>) -> Option<String> {
-    let ext = file_name.and_then(extension_of)?;
-    let mime = match ext.as_str() {
-        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "doc" => "application/msword",
-        "xls" => "application/vnd.ms-excel",
-        "ppt" => "application/vnd.ms-powerpoint",
-        _ => return None,
-    };
-    Some(mime.to_string())
+/// When Telegram's MIME type is empty / `application/octet-stream` but we
+/// classified the document by extension, resolve to the correct MIME so the
+/// media resolver can route it properly.
+fn resolve_effective_mime(original: &str, kind: DocumentKind, file_name: Option<&str>) -> String {
+    match kind {
+        DocumentKind::Office if !crate::media::is_office_mime(original) => {
+            file_name
+                .and_then(extension_of)
+                .and_then(|ext| match ext.as_str() {
+                    "docx" => Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+                    "xlsx" => Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+                    "pptx" => Some("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+                    "doc" => Some("application/msword"),
+                    "xls" => Some("application/vnd.ms-excel"),
+                    "ppt" => Some("application/vnd.ms-powerpoint"),
+                    _ => None,
+                })
+                .unwrap_or(original)
+                .to_string()
+        }
+        DocumentKind::Text if !crate::media::is_text_like_mime(original) => {
+            "text/plain".to_string()
+        }
+        _ => original.to_string(),
+    }
 }
 
 /// Whitelist of file extensions we treat as UTF-8 text.

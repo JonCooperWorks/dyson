@@ -22,7 +22,7 @@ const MAX_PDF_BYTES: usize = 32 * 1024 * 1024;
 
 /// Process raw PDF bytes into a ContentBlock::Document.
 ///
-/// Extracts text via `pdf-extract` and base64-encodes the raw PDF.
+/// Extracts text as Markdown via `unpdf` and base64-encodes the raw PDF.
 /// Both are stored in the resulting content block so each LLM provider
 /// can pick the best representation.
 pub fn process_pdf(data: &[u8]) -> crate::Result<ContentBlock> {
@@ -34,9 +34,13 @@ pub fn process_pdf(data: &[u8]) -> crate::Result<ContentBlock> {
         )));
     }
 
-    // Extract text for providers that can't handle native PDFs.
-    let extracted_text = pdf_extract::extract_text_from_mem(data)
-        .map_err(|e| crate::DysonError::Config(format!("failed to extract text from PDF: {e}")))?;
+    // Parse and extract text as Markdown for providers that can't handle
+    // native PDFs.  Markdown preserves headings, lists, and tables.
+    let doc = unpdf::parse_bytes(data)
+        .map_err(|e| crate::DysonError::Config(format!("failed to parse PDF: {e}")))?;
+    let options = unpdf::render::RenderOptions::default();
+    let extracted_text = unpdf::render::to_markdown(&doc, &options)
+        .map_err(|e| crate::DysonError::Config(format!("failed to render PDF as markdown: {e}")))?;
 
     // Base64-encode the raw PDF for providers that support native documents.
     let b64 = base64::engine::general_purpose::STANDARD.encode(data);
@@ -102,7 +106,7 @@ mod tests {
 
     /// Build a minimal valid PDF with extractable text.
     ///
-    /// Computes exact byte offsets for the xref table so pdf-extract can
+    /// Computes exact byte offsets for the xref table so the parser can
     /// properly parse the file and extract text.
     fn minimal_pdf_with_text(text: &str) -> Vec<u8> {
         let page_content = format!("BT /F1 12 Tf 100 700 Td ({text}) Tj ET");

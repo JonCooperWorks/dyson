@@ -126,33 +126,19 @@ impl Tool for ReadFileTool {
             _ => {}
         }
 
-        // PDF files: extract text instead of reading raw binary.
+        // PDF files: extract text as Markdown instead of reading raw binary.
         if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) {
-            let data = match tokio::fs::read(&path).await {
-                Ok(d) => d,
-                Err(e) => {
-                    return Ok(ToolOutput::error(super::path_err("read", &path, e)));
-                }
-            };
+            return read_document_as_markdown(&path, extract_pdf_text).await;
+        }
 
-            let text = match pdf_extract::extract_text_from_mem(&data) {
-                Ok(t) => t,
-                Err(e) => {
-                    return Ok(ToolOutput::error(format!(
-                        "failed to extract text from '{}': {e}",
-                        path.display()
-                    )));
-                }
-            };
-
-            if text.trim().is_empty() {
-                return Ok(ToolOutput::success(
-                    "(PDF contains no extractable text — may be scanned/image-only)",
-                ));
-            }
-
-            let output = truncate_output(&text);
-            return Ok(ToolOutput::success(output));
+        // Office documents (docx, xlsx, pptx): extract as Markdown.
+        if path.extension().is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().to_str().unwrap_or(""),
+                "docx" | "xlsx" | "pptx"
+            )
+        }) {
+            return read_document_as_markdown(&path, extract_office_text).await;
         }
 
         // Stream line-by-line with skip/take so that large files with small
@@ -266,6 +252,56 @@ fn extract_symbol(
 
     let truncated = truncate_output(&out);
     Ok(ToolOutput::success(truncated))
+}
+
+/// Extract PDF text as Markdown via unpdf.
+fn extract_pdf_text(data: &[u8]) -> std::result::Result<String, String> {
+    let doc = unpdf::parse_bytes(data).map_err(|e| e.to_string())?;
+    let opts = unpdf::render::RenderOptions::default();
+    unpdf::render::to_markdown(&doc, &opts).map_err(|e| e.to_string())
+}
+
+/// Extract Office document text as Markdown via undoc.
+fn extract_office_text(data: &[u8]) -> std::result::Result<String, String> {
+    let doc = undoc::parse_bytes(data).map_err(|e| e.to_string())?;
+    let opts = undoc::render::RenderOptions::default();
+    undoc::render::to_markdown(&doc, &opts).map_err(|e| e.to_string())
+}
+
+/// Read a binary document (PDF, Office, etc.) from disk, extract Markdown via
+/// the provided `extractor`, and return the result as a tool output.
+async fn read_document_as_markdown<E>(
+    path: &std::path::Path,
+    extractor: E,
+) -> crate::Result<ToolOutput>
+where
+    E: FnOnce(&[u8]) -> std::result::Result<String, String>,
+{
+    let data = match tokio::fs::read(path).await {
+        Ok(d) => d,
+        Err(e) => {
+            return Ok(ToolOutput::error(super::path_err("read", path, e)));
+        }
+    };
+
+    let text = match extractor(&data) {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(ToolOutput::error(format!(
+                "failed to extract text from '{}': {e}",
+                path.display()
+            )));
+        }
+    };
+
+    if text.trim().is_empty() {
+        return Ok(ToolOutput::success(
+            "(document contains no extractable text)",
+        ));
+    }
+
+    let output = truncate_output(&text);
+    Ok(ToolOutput::success(output))
 }
 
 #[cfg(test)]
