@@ -402,8 +402,43 @@ pub fn load_settings(path: Option<&Path>) -> Result<Settings> {
     let mut settings = build_settings(json_root, &secrets);
 
     resolve_api_keys(&mut settings, &secrets)?;
+    validate_subagent_configs(&settings)?;
 
     Ok(settings)
+}
+
+/// Validate subagent configurations against the resolved `Settings`.
+///
+/// Fails fast on configuration errors that we can detect without loading
+/// tools or talking to a provider:
+///
+/// - Each subagent's `provider` must be `"default"` or a key in
+///   `settings.providers`.
+///
+/// Tool-filter name validation happens later (in `SubagentSkill::new`)
+/// because tool names are only known after all skills have loaded.  That
+/// validation degrades to a `warn!` — unknown tool names are dropped from
+/// the filter rather than aborting startup.
+pub fn validate_subagent_configs(settings: &Settings) -> Result<()> {
+    for skill in &settings.skills {
+        let SkillConfig::Subagent(cfg) = skill else {
+            continue;
+        };
+        for agent in &cfg.agents {
+            if agent.provider != "default" && !settings.providers.contains_key(&agent.provider) {
+                let known: Vec<&str> =
+                    settings.providers.keys().map(String::as_str).collect();
+                return Err(DysonError::Config(format!(
+                    "subagent '{}' references unknown provider '{}'. \
+                     Known providers: [{}] or \"default\"",
+                    agent.name,
+                    agent.provider,
+                    known.join(", "),
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -798,6 +833,9 @@ fn parse_skills(skills: Option<JsonSkills>, settings: &mut Settings) {
                 max_iterations: sa.max_iterations,
                 max_tokens: sa.max_tokens,
                 tools: sa.tools,
+                // Not currently deserialized from dyson.json — only
+                // populated by built-in configs.
+                injects_protocol: None,
             })
             .collect();
 
@@ -1655,6 +1693,50 @@ mod tests {
         assert_eq!(agents[1].model, None);
         assert_eq!(agents[1].max_iterations, None);
         assert_eq!(agents[1].tools, None);
+    }
+
+    #[test]
+    fn validate_rejects_subagent_with_unknown_provider() {
+        let mut settings = Settings::default();
+        // Note: no providers configured — "gpt" should be unknown.
+        settings.skills.push(SkillConfig::Subagent(SubagentSkillConfig {
+            agents: vec![SubagentAgentConfig {
+                name: "bad".into(),
+                description: "d".into(),
+                system_prompt: "p".into(),
+                provider: "gpt".into(),
+                model: None,
+                max_iterations: None,
+                max_tokens: None,
+                tools: None,
+                injects_protocol: None,
+            }],
+        }));
+
+        let err = validate_subagent_configs(&settings).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("bad"));
+        assert!(msg.contains("gpt"));
+    }
+
+    #[test]
+    fn validate_accepts_default_provider() {
+        let mut settings = Settings::default();
+        settings.skills.push(SkillConfig::Subagent(SubagentSkillConfig {
+            agents: vec![SubagentAgentConfig {
+                name: "good".into(),
+                description: "d".into(),
+                system_prompt: "p".into(),
+                provider: "default".into(),
+                model: None,
+                max_iterations: None,
+                max_tokens: None,
+                tools: None,
+                injects_protocol: None,
+            }],
+        }));
+
+        validate_subagent_configs(&settings).expect("default provider should validate");
     }
 
     #[test]

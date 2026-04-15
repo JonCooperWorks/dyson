@@ -71,17 +71,22 @@ mod coder;
 
 pub use coder::CoderTool;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use tokio::sync::RwLock;
 
+use crate::agent::rate_limiter::RateLimitedHandle;
 use crate::config::{AgentSettings, LlmProvider, SubagentAgentConfig};
 use crate::controller::Output;
 use crate::error::{DysonError, Result};
+use crate::llm::LlmClient;
 use crate::sandbox::Sandbox;
 use crate::skill::Skill;
 use crate::tool::{MAX_SUBAGENT_DEPTH, Tool, ToolContext, ToolOutput};
+use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
 // CaptureOutput — collects agent output into a String.
@@ -166,8 +171,23 @@ impl Output for CaptureOutput {
 /// wraps existing `Arc<dyn Tool>` pointers.  No lifecycle hooks are
 /// needed because the tools are already initialized by the parent's
 /// skills.
-struct FilteredSkill {
+///
+/// This type is public for use in integration tests
+/// (`tests/subagent_eval.rs`) but is not part of the stable public API.
+pub struct FilteredSkill {
     tools: Vec<Arc<dyn Tool>>,
+}
+
+impl FilteredSkill {
+    /// Construct a `FilteredSkill` from pre-loaded tools.
+    ///
+    /// Exposed for integration tests that build a child agent manually;
+    /// production code goes through `SubagentSkill::new` or `CoderTool`,
+    /// both of which wrap `FilteredSkill` internally.
+    #[doc(hidden)]
+    pub fn new(tools: Vec<Arc<dyn Tool>>) -> Self {
+        Self { tools }
+    }
 }
 
 #[async_trait]
@@ -178,6 +198,108 @@ impl Skill for FilteredSkill {
 
     fn tools(&self) -> &[Arc<dyn Tool>] {
         &self.tools
+    }
+}
+
+// ---------------------------------------------------------------------------
+// spawn_child — shared helper used by SubagentTool and CoderTool.
+// ---------------------------------------------------------------------------
+
+/// Arguments for [`spawn_child`].
+///
+/// Bundles the configuration needed to construct a child agent from a
+/// parent tool call.  Both `SubagentTool` and `CoderTool` build one of
+/// these and delegate to `spawn_child`, which owns the common lifecycle
+/// (depth check, builder, workspace wiring, capture, tracing).
+pub(crate) struct ChildSpawn<'a> {
+    /// Tool name for logging and error formatting.
+    pub name: &'a str,
+    /// Resolved agent settings for the child (model, prompt, limits).
+    pub settings: AgentSettings,
+    /// Tools the child inherits — cloned into a `FilteredSkill`.
+    pub inherited_tools: Vec<Arc<dyn Tool>>,
+    /// Shared sandbox from the parent agent.
+    pub sandbox: Arc<dyn Sandbox>,
+    /// Shared workspace from the parent agent.
+    pub workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
+    /// Pre-authenticated client handle from `ClientRegistry`.
+    pub client: RateLimitedHandle<Box<dyn LlmClient>>,
+    /// Parent depth — child runs at `parent_depth + 1`.
+    pub parent_depth: u8,
+    /// Optional working-directory override (used by `CoderTool`).
+    pub working_dir: Option<PathBuf>,
+    /// First user message to the child agent.
+    pub user_message: String,
+}
+
+/// Spawn a child agent, run it to completion, and return its final text
+/// as a `ToolOutput`.
+///
+/// Consolidates the duplicate child-spawn logic that previously lived in
+/// both `SubagentTool::run` and `CoderTool::run`.  Handles the depth
+/// guard, `FilteredSkill` wrapping, `Agent::builder` construction,
+/// workspace wiring, `CaptureOutput` setup, and the success/failure
+/// tracing path.
+///
+/// Depth overflow is reported as `ToolOutput::error` (a recoverable
+/// tool failure) rather than an `Err`, matching the existing pattern.
+pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
+    // -- Safety net: enforce recursion depth --
+    //
+    // The primary recursion prevention is that subagent tools are
+    // excluded from children's tool sets.  Depth is a belt-and-suspenders
+    // check for manually constructed agents.
+    if spec.parent_depth >= MAX_SUBAGENT_DEPTH {
+        return Ok(ToolOutput::error(format!(
+            "Maximum subagent nesting depth ({MAX_SUBAGENT_DEPTH}) reached. \
+             Cannot spawn another subagent."
+        )));
+    }
+
+    tracing::info!(
+        tool = spec.name,
+        depth = spec.parent_depth + 1,
+        model = spec.settings.model.as_str(),
+        "spawning child agent"
+    );
+
+    let skills: Vec<Box<dyn Skill>> =
+        vec![Box::new(FilteredSkill::new(spec.inherited_tools))];
+
+    let mut builder = crate::agent::Agent::builder(spec.client, spec.sandbox)
+        .skills(skills)
+        .settings(&spec.settings);
+    if let Some(ws) = spec.workspace {
+        builder = builder.workspace(ws);
+    }
+    let mut child_agent = builder.build()?;
+
+    child_agent.set_depth(spec.parent_depth + 1);
+    if let Some(dir) = spec.working_dir {
+        child_agent.set_working_dir(dir);
+    }
+
+    let mut capture = CaptureOutput::new();
+    match child_agent.run(&spec.user_message, &mut capture).await {
+        Ok(final_text) => {
+            tracing::info!(
+                tool = spec.name,
+                result_len = final_text.len(),
+                "child agent completed successfully"
+            );
+            Ok(ToolOutput::success(final_text))
+        }
+        Err(e) => {
+            tracing::warn!(
+                tool = spec.name,
+                error = %e,
+                "child agent failed"
+            );
+            Ok(ToolOutput::error(format!(
+                "Subagent '{}' failed: {e}",
+                spec.name,
+            )))
+        }
     }
 }
 
@@ -298,46 +420,23 @@ impl Tool for SubagentTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        // -- Check recursion depth --
-        //
-        // This is a safety net.  The primary recursion prevention is that
-        // subagent tools are excluded from children's tool sets.  But depth
-        // checking catches edge cases (e.g., manually constructed agents).
-        if ctx.depth >= MAX_SUBAGENT_DEPTH {
-            return Ok(ToolOutput::error(format!(
-                "Maximum subagent nesting depth ({MAX_SUBAGENT_DEPTH}) reached. \
-                 Cannot spawn another subagent."
-            )));
-        }
+        let parsed: SubagentInput = serde_json::from_value(input.clone()).map_err(|e| {
+            DysonError::tool(&self.config.name, format!("invalid input: {e}"))
+        })?;
 
-        // -- Extract task and context from input --
-        let task = input["task"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool(&self.config.name, "missing required 'task' field"))?;
-
-        let context = input["context"].as_str().unwrap_or("");
-
-        let user_message = if context.is_empty() {
-            task.to_string()
+        let user_message = if parsed.context.is_empty() {
+            parsed.task
         } else {
-            format!("Context:\n{context}\n\nTask:\n{task}")
+            format!("Context:\n{}\n\nTask:\n{}", parsed.context, parsed.task)
         };
 
-        tracing::info!(
-            subagent = self.config.name,
-            depth = ctx.depth + 1,
-            model = self.config.model.as_deref().unwrap_or("default"),
-            "spawning subagent"
-        );
-
-        // -- Build the child agent's settings --
         let model = self.config.model.clone().unwrap_or_else(|| {
             crate::llm::registry::lookup(&self.provider)
                 .default_model
                 .to_string()
         });
 
-        let child_settings = AgentSettings {
+        let settings = AgentSettings {
             model,
             max_iterations: self.config.max_iterations.unwrap_or(10),
             max_tokens: self.config.max_tokens.unwrap_or(4096),
@@ -347,49 +446,31 @@ impl Tool for SubagentTool {
             ..AgentSettings::default()
         };
 
-        let client = self.client.clone();
-
-        // -- Build skills from inherited tools --
-        let skills: Vec<Box<dyn Skill>> = vec![Box::new(FilteredSkill {
-            tools: self.inherited_tools.clone(),
-        })];
-
-        // -- Create the child agent --
-        let mut builder = crate::agent::Agent::builder(client, Arc::clone(&self.sandbox))
-            .skills(skills)
-            .settings(&child_settings);
-        if let Some(ws) = &self.workspace {
-            builder = builder.workspace(Arc::clone(ws));
-        }
-        let mut child_agent = builder.build()?;
-
-        // Set the child's depth = parent's depth + 1.
-        child_agent.set_depth(ctx.depth + 1);
-
-        // -- Run with captured output --
-        let mut capture = CaptureOutput::new();
-        match child_agent.run(&user_message, &mut capture).await {
-            Ok(final_text) => {
-                tracing::info!(
-                    subagent = self.config.name,
-                    result_len = final_text.len(),
-                    "subagent completed successfully"
-                );
-                Ok(ToolOutput::success(final_text))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    subagent = self.config.name,
-                    error = %e,
-                    "subagent failed"
-                );
-                Ok(ToolOutput::error(format!(
-                    "Subagent '{}' failed: {e}",
-                    self.config.name
-                )))
-            }
-        }
+        spawn_child(ChildSpawn {
+            name: &self.config.name,
+            settings,
+            inherited_tools: self.inherited_tools.clone(),
+            sandbox: Arc::clone(&self.sandbox),
+            workspace: self.workspace.clone(),
+            client: self.client.clone(),
+            parent_depth: ctx.depth,
+            working_dir: None,
+            user_message,
+        })
+        .await
     }
+}
+
+/// Parsed input payload for `SubagentTool`.
+///
+/// Mirrors the tool's JSON input schema (`task` required, `context`
+/// optional).  Using serde here gives us field-level error messages for
+/// free and eliminates the repetitive `input["task"].as_str()` dance.
+#[derive(Debug, Deserialize)]
+struct SubagentInput {
+    task: String,
+    #[serde(default)]
+    context: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -475,7 +556,7 @@ impl SubagentSkill {
             };
 
             // Filter the parent's tools for this subagent.
-            let inherited = filter_tools(parent_tools, &cfg.tools);
+            let inherited = filter_tools_checked(&cfg.name, parent_tools, &cfg.tools);
 
             let tool = SubagentTool::new(
                 cfg.clone(),
@@ -516,7 +597,14 @@ impl SubagentSkill {
         prompt_lines.push(format!("- **{}**: {}", coder_tool.name(), coder_tool.description()));
         tools.push(Arc::new(coder_tool));
 
-        let has_verifier = configs.iter().any(|c| c.name == "verifier");
+        // Collect protocol fragments from subagents that bring their own
+        // usage instructions (e.g., `verifier` defines when it must be
+        // invoked).  This replaces the earlier magic-string check on the
+        // subagent name.
+        let protocol_fragments: Vec<&str> = configs
+            .iter()
+            .filter_map(|c| c.injects_protocol.as_deref())
+            .collect();
 
         let system_prompt = if prompt_lines.is_empty() {
             String::new()
@@ -529,8 +617,8 @@ impl SubagentSkill {
                 prompt_lines.join("\n")
             );
 
-            if has_verifier {
-                prompt.push_str(VERIFICATION_PROTOCOL);
+            for fragment in protocol_fragments {
+                prompt.push_str(fragment);
             }
 
             prompt
@@ -563,40 +651,6 @@ impl Skill for SubagentSkill {
 }
 
 // ---------------------------------------------------------------------------
-// Verification protocol — injected into the parent's system prompt when a
-// verifier subagent is available.
-// ---------------------------------------------------------------------------
-
-/// System prompt fragment that instructs the parent agent to use the
-/// adversarial verification loop for non-trivial changes.
-///
-/// This is appended to the subagent system prompt when a "verifier"
-/// subagent is present.  It defines what "non-trivial" means, when to
-/// invoke the verifier, and how to handle its verdicts.
-const VERIFICATION_PROTOCOL: &str = "\n\n\
-## Verification Protocol\n\n\
-For non-trivial changes, you MUST use the `verifier` subagent before \
-reporting completion.  A change is non-trivial if ANY of these apply:\n\
-- You edited 3 or more files.\n\
-- You changed backend, API, or infrastructure logic.\n\
-- You modified configuration or build files.\n\n\
-### Verify-Before-Report Loop\n\n\
-1. **Implement** the change.\n\
-2. **Spawn the verifier** with:\n\
-   - `task`: A description of what to verify.\n\
-   - `context`: The original user request, the list of files changed, \
-     and the approach taken.\n\
-3. **Read the verdict**:\n\
-   - **PASS** → You may report completion.  Before doing so, independently \
-     run 2–3 of the commands the verifier reported to spot-check its results.\n\
-   - **FAIL** → Fix every issue the verifier identified, then re-invoke the \
-     verifier with the updated changes.  Repeat until PASS.\n\
-   - **PARTIAL** → Fix the failing components and re-invoke the verifier.  \
-     Repeat until PASS.\n\
-4. **Never self-certify**.  Only the verifier can issue a PASS verdict for \
-   non-trivial changes.  Do not skip verification or report success without it.\n";
-
-// ---------------------------------------------------------------------------
 // Built-in subagent configurations.
 // ---------------------------------------------------------------------------
 
@@ -623,17 +677,7 @@ pub fn builtin_subagent_configs() -> Vec<SubagentAgentConfig> {
                 steps.  Reads the codebase to understand structure before planning.  \
                 Returns a numbered plan with file paths and specific changes needed."
                 .into(),
-            system_prompt: "You are a planning specialist.  Your job is to analyze a task \
-                and break it into concrete, ordered implementation steps.\n\n\
-                Rules:\n\
-                1. Read relevant files to understand the codebase structure before planning.\n\
-                2. Each step must be specific — include file paths, function names, and what \
-                   to change.\n\
-                3. Order steps by dependency — what must happen first.\n\
-                4. Identify risks or decisions that need human input.\n\
-                5. Keep the plan concise — no filler, just actionable steps.\n\
-                6. Do NOT implement anything.  Only plan."
-                .into(),
+            system_prompt: include_str!("prompts/planner.md").into(),
             provider: "default".into(),
             model: None,
             max_iterations: Some(15),
@@ -643,6 +687,7 @@ pub fn builtin_subagent_configs() -> Vec<SubagentAgentConfig> {
                 "search_files".into(),
                 "list_files".into(),
             ]),
+            injects_protocol: None,
         },
         SubagentAgentConfig {
             name: "researcher".into(),
@@ -650,17 +695,7 @@ pub fn builtin_subagent_configs() -> Vec<SubagentAgentConfig> {
                 run commands, and search the web.  Returns a concise summary of what \
                 it found.  Use for questions that need investigation."
                 .into(),
-            system_prompt: "You are a research specialist.  Your job is to thoroughly \
-                investigate a question and return a clear, concise summary.\n\n\
-                Rules:\n\
-                1. Use your tools to gather information — read files, run commands, \
-                   search the web.\n\
-                2. Be thorough — check multiple sources when possible.\n\
-                3. Cite specifics — file paths, line numbers, URLs.\n\
-                4. Summarize findings clearly — lead with the answer, then supporting \
-                   evidence.\n\
-                5. Flag uncertainty — if you're not sure, say so."
-                .into(),
+            system_prompt: include_str!("prompts/researcher.md").into(),
             provider: "default".into(),
             model: None,
             max_iterations: Some(20),
@@ -672,6 +707,7 @@ pub fn builtin_subagent_configs() -> Vec<SubagentAgentConfig> {
                 "list_files".into(),
                 "web_search".into(),
             ]),
+            injects_protocol: None,
         },
         SubagentAgentConfig {
             name: "verifier".into(),
@@ -682,43 +718,7 @@ pub fn builtin_subagent_configs() -> Vec<SubagentAgentConfig> {
                 completing non-trivial changes (3+ files, backend/API logic, or \
                 infrastructure modifications)."
                 .into(),
-            system_prompt: "You are an adversarial verification specialist.  Your sole \
-                objective is to find bugs, regressions, and spec violations in a proposed \
-                change.  You are NOT here to help — you are here to break things.\n\n\
-                ## Protocol\n\n\
-                1. Read the original request and the list of changed files.\n\
-                2. Read every changed file.  Understand what was done.\n\
-                3. Attempt to falsify the implementation:\n\
-                   - Run the project's test suite (look for Makefile, Cargo.toml, \
-                     package.json, etc.).\n\
-                   - Run linters or type checkers if available.\n\
-                   - Test edge cases by reading code paths and reasoning about inputs.\n\
-                   - Check for regressions: did the change break existing functionality?\n\
-                   - Verify the change actually satisfies the original request.\n\
-                4. For every command you run, record the exact command and its output.\n\n\
-                ## Verdict Format\n\n\
-                You MUST end your response with exactly one of these verdicts:\n\n\
-                **VERDICT: PASS**\n\
-                The implementation meets the spec and all checks pass.\n\n\
-                **VERDICT: FAIL**\n\
-                One or more checks failed.  List each failure with:\n\
-                - What failed\n\
-                - The command that demonstrated the failure\n\
-                - The relevant output\n\n\
-                **VERDICT: PARTIAL**\n\
-                Some components work, others fail.  List what passes and what fails \
-                using the same format as FAIL.\n\n\
-                ## Rules\n\n\
-                1. Your goal is to find a FAIL condition.  Only issue PASS if you \
-                   genuinely cannot break the implementation.\n\
-                2. You must provide proof of execution — exact commands and their \
-                   output — for every check.\n\
-                3. Do NOT fix anything.  Only verify and report.\n\
-                4. Do NOT be lenient.  Assume the implementation is wrong until \
-                   proven otherwise.\n\
-                5. Check compilation/build first — if it doesn't build, nothing \
-                   else matters."
-                .into(),
+            system_prompt: include_str!("prompts/verifier.md").into(),
             provider: "default".into(),
             model: None,
             max_iterations: Some(25),
@@ -729,6 +729,10 @@ pub fn builtin_subagent_configs() -> Vec<SubagentAgentConfig> {
                 "search_files".into(),
                 "list_files".into(),
             ]),
+            // When `verifier` is present, parent agents are told how to
+            // invoke it and interpret its verdict.  Data-driven so any
+            // user-defined subagent can inject its own protocol.
+            injects_protocol: Some(include_str!("prompts/verifier_protocol.md").into()),
         },
     ]
 }
@@ -758,45 +762,32 @@ fn filter_tools(
     }
 }
 
-// ===========================================================================
-// Test support — public re-exports for integration tests.
-// ===========================================================================
-
-/// Public test helpers for integration tests in `tests/subagent_eval.rs`.
-///
-/// These types are implementation details of the subagent system, but
-/// integration tests need direct access to construct child agents with
-/// FilteredSkill and CaptureOutput.  This module re-exports them under
-/// a clearly-marked test-support namespace.
-#[doc(hidden)]
-pub mod tests_support {
-    use super::*;
-
-    /// Public wrapper around `FilteredSkill` for integration tests.
-    ///
-    /// Identical to the private `FilteredSkill` — just publicly accessible.
-    pub struct FilteredSkillPublic {
-        inner: FilteredSkill,
-    }
-
-    impl FilteredSkillPublic {
-        pub fn new(tools: Vec<Arc<dyn Tool>>) -> Self {
-            Self {
-                inner: FilteredSkill { tools },
-            }
+/// Like [`filter_tools`] but also emits a `warn!` log for any filter
+/// entry that doesn't match a real parent tool.  Used during
+/// `SubagentSkill::new` so operators see why a configured tool is
+/// missing instead of silently losing it.
+fn filter_tools_checked(
+    subagent_name: &str,
+    parent_tools: &[Arc<dyn Tool>],
+    filter: &Option<Vec<String>>,
+) -> Vec<Arc<dyn Tool>> {
+    if let Some(names) = filter {
+        let known: std::collections::HashSet<&str> =
+            parent_tools.iter().map(|t| t.name()).collect();
+        let missing: Vec<&str> = names
+            .iter()
+            .map(String::as_str)
+            .filter(|n| !known.contains(n))
+            .collect();
+        if !missing.is_empty() {
+            tracing::warn!(
+                subagent = subagent_name,
+                missing = ?missing,
+                "subagent tool filter references unknown tools — they will be dropped"
+            );
         }
     }
-
-    #[async_trait]
-    impl Skill for FilteredSkillPublic {
-        fn name(&self) -> &str {
-            self.inner.name()
-        }
-
-        fn tools(&self) -> &[Arc<dyn Tool>] {
-            self.inner.tools()
-        }
-    }
+    filter_tools(parent_tools, filter)
 }
 
 #[cfg(test)]

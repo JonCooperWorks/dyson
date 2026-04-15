@@ -69,6 +69,7 @@ fn subagent_tool_name_and_description() {
         max_iterations: None,
         max_tokens: None,
         tools: None,
+        injects_protocol: None,
     };
 
     let tool = SubagentTool::new(
@@ -97,6 +98,7 @@ fn subagent_tool_input_schema_has_required_task() {
         max_iterations: None,
         max_tokens: None,
         tools: None,
+        injects_protocol: None,
     };
 
     let tool = SubagentTool::new(
@@ -199,6 +201,7 @@ async fn subagent_depth_limit_prevents_recursion() {
         max_iterations: None,
         max_tokens: None,
         tools: None,
+        injects_protocol: None,
     };
 
     let tool = SubagentTool::new(
@@ -240,6 +243,7 @@ async fn subagent_missing_task_returns_error() {
         max_iterations: None,
         max_tokens: None,
         tools: None,
+        injects_protocol: None,
     };
 
     let tool = SubagentTool::new(
@@ -306,6 +310,7 @@ fn subagent_skill_system_prompt_lists_agents() {
         max_iterations: None,
         max_tokens: None,
         tools: None,
+        injects_protocol: None,
     }];
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
@@ -338,6 +343,7 @@ fn subagent_skill_skips_unknown_provider() {
         max_iterations: None,
         max_tokens: None,
         tools: None,
+        injects_protocol: None,
     }];
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
@@ -446,7 +452,11 @@ fn verifier_system_prompt_requires_verdict() {
 }
 
 #[test]
-fn verification_protocol_injected_when_verifier_present() {
+fn injects_protocol_fragment_appended_to_system_prompt() {
+    // Protocol injection is now data-driven — any subagent whose config
+    // sets `injects_protocol: Some(...)` contributes its fragment to the
+    // parent's subagent system prompt.  The subagent's *name* no longer
+    // matters (used to be hard-coded to "verifier").
     let settings = crate::config::Settings {
         agent: AgentSettings {
             provider: LlmProvider::Anthropic,
@@ -457,14 +467,15 @@ fn verification_protocol_injected_when_verifier_present() {
     };
 
     let configs = vec![SubagentAgentConfig {
-        name: "verifier".into(),
-        description: "Test verifier".into(),
-        system_prompt: "You verify.".into(),
+        name: "checker".into(), // deliberately not "verifier"
+        description: "Test checker".into(),
+        system_prompt: "You check.".into(),
         provider: "default".into(),
         model: None,
         max_iterations: None,
         max_tokens: None,
         tools: None,
+        injects_protocol: Some("\n\n## Usage Protocol\nAlways invoke me first.".into()),
     }];
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
@@ -472,9 +483,8 @@ fn verification_protocol_injected_when_verifier_present() {
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry);
 
     let prompt = skill.system_prompt().unwrap();
-    assert!(prompt.contains("Verification Protocol"));
-    assert!(prompt.contains("Verify-Before-Report Loop"));
-    assert!(prompt.contains("Never self-certify"));
+    assert!(prompt.contains("Usage Protocol"));
+    assert!(prompt.contains("Always invoke me first."));
 }
 
 #[test]
@@ -497,6 +507,7 @@ fn verification_protocol_absent_without_verifier() {
         max_iterations: None,
         max_tokens: None,
         tools: None,
+        injects_protocol: None,
     }];
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
@@ -529,6 +540,7 @@ fn default_provider_resolves_to_agent_settings() {
         max_iterations: None,
         max_tokens: None,
         tools: None,
+        injects_protocol: None,
     }];
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);

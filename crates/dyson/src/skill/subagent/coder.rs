@@ -7,20 +7,21 @@
 //
 // The child agent gets a constrained toolset (bash, read_file, edit_file,
 // search_files, list_files, bulk_edit) and a coding-focused system prompt.
+// Both tools share the lifecycle helper `super::spawn_child`.
 // ===========================================================================
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::config::{AgentSettings, LlmProvider};
 use crate::error::{DysonError, Result};
 use crate::sandbox::Sandbox;
-use crate::skill::Skill;
-use crate::tool::{MAX_SUBAGENT_DEPTH, Tool, ToolContext, ToolOutput};
+use crate::tool::{Tool, ToolContext, ToolOutput};
 
-use super::{CaptureOutput, FilteredSkill};
+use super::{ChildSpawn, spawn_child};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -37,16 +38,7 @@ const CODER_TOOLS: &[&str] = &[
 ];
 
 /// System prompt for the coder subagent.
-const CODER_SYSTEM_PROMPT: &str = "\
-You are a focused code editor working within a specific directory.  \
-Your job is to complete the coding task described below using only \
-the tools available to you.\n\n\
-Rules:\n\
-1. Only modify files within your scoped directory.\n\
-2. Read files before editing to understand context.\n\
-3. Use bulk_edit for structural refactors and multi-file find/replace, edit_file for targeted changes.\n\
-4. After making changes, verify them (search for old references, read modified files).\n\
-5. Report a concise summary of what you changed when done.";
+const CODER_SYSTEM_PROMPT: &str = include_str!("prompts/coder.md");
 
 // ---------------------------------------------------------------------------
 // CoderTool
@@ -145,28 +137,12 @@ impl Tool for CoderTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        // -- Check recursion depth --
-        if ctx.depth >= MAX_SUBAGENT_DEPTH {
-            return Ok(ToolOutput::error(format!(
-                "Maximum subagent nesting depth ({MAX_SUBAGENT_DEPTH}) reached. \
-                 Cannot spawn coder subagent."
-            )));
-        }
+        let parsed: CoderInput = serde_json::from_value(input.clone())
+            .map_err(|e| DysonError::tool("coder", format!("invalid input: {e}")))?;
 
-        // -- Extract inputs --
-        let path_str = input["path"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("coder", "missing required 'path' field"))?;
-
-        let task = input["task"]
-            .as_str()
-            .ok_or_else(|| DysonError::tool("coder", "missing required 'task' field"))?;
-
-        // -- Resolve and validate path --
-        let scoped_dir = crate::tool::resolve_and_validate_path(&ctx.working_dir, path_str)
+        let scoped_dir = crate::tool::resolve_and_validate_path(&ctx.working_dir, &parsed.path)
             .map_err(|e| DysonError::tool("coder", e))?;
 
-        // Ensure the resolved path is a directory.
         if !scoped_dir.is_dir() {
             return Ok(ToolOutput::error(format!(
                 "path '{}' is not a directory",
@@ -174,20 +150,10 @@ impl Tool for CoderTool {
             )));
         }
 
-        tracing::info!(
-            tool = "coder",
-            depth = ctx.depth + 1,
-            path = %scoped_dir.display(),
-            "spawning coder subagent"
-        );
-
-        // -- Build child agent settings --
-        let model = crate::llm::registry::lookup(&self.provider)
-            .default_model
-            .to_string();
-
-        let child_settings = AgentSettings {
-            model,
+        let settings = AgentSettings {
+            model: crate::llm::registry::lookup(&self.provider)
+                .default_model
+                .to_string(),
             max_iterations: 30,
             max_tokens: 8192,
             system_prompt: CODER_SYSTEM_PROMPT.to_string(),
@@ -195,48 +161,35 @@ impl Tool for CoderTool {
             ..AgentSettings::default()
         };
 
-        // -- Build skills from inherited tools --
-        let skills: Vec<Box<dyn Skill>> = vec![Box::new(FilteredSkill {
-            tools: self.inherited_tools.clone(),
-        })];
-
-        // -- Create the child agent --
-        let mut builder = crate::agent::Agent::builder(self.client.clone(), Arc::clone(&self.sandbox))
-            .skills(skills)
-            .settings(&child_settings);
-        if let Some(ws) = &self.workspace {
-            builder = builder.workspace(Arc::clone(ws));
-        }
-        let mut child_agent = builder.build()?;
-
-        // Scope the child to the target directory and increment depth.
-        child_agent.set_working_dir(scoped_dir);
-        child_agent.set_depth(ctx.depth + 1);
-
-        // -- Run with captured output --
         let user_message = format!(
             "Your working directory has been set to the scoped path.  \
-             Complete the following task:\n\n{task}"
+             Complete the following task:\n\n{}",
+            parsed.task,
         );
 
-        let mut capture = CaptureOutput::new();
-        match child_agent.run(&user_message, &mut capture).await {
-            Ok(final_text) => {
-                tracing::info!(
-                    tool = "coder",
-                    result_len = final_text.len(),
-                    "coder subagent completed successfully"
-                );
-                Ok(ToolOutput::success(final_text))
-            }
-            Err(e) => {
-                tracing::warn!(
-                    tool = "coder",
-                    error = %e,
-                    "coder subagent failed"
-                );
-                Ok(ToolOutput::error(format!("Coder subagent failed: {e}")))
-            }
-        }
+        spawn_child(ChildSpawn {
+            name: "coder",
+            settings,
+            inherited_tools: self.inherited_tools.clone(),
+            sandbox: Arc::clone(&self.sandbox),
+            workspace: self.workspace.clone(),
+            client: self.client.clone(),
+            parent_depth: ctx.depth,
+            working_dir: Some(scoped_dir),
+            user_message,
+        })
+        .await
     }
+}
+
+/// Parsed input payload for `CoderTool`.
+///
+/// Both `path` and `task` are required.  Using serde lets the caller
+/// get field-level error messages (e.g., `missing field 'task'`) for
+/// free, matching the `bash.rs` idiom of `DysonError::tool(name, ...)`
+/// for malformed tool inputs.
+#[derive(Debug, Deserialize)]
+struct CoderInput {
+    path: String,
+    task: String,
 }

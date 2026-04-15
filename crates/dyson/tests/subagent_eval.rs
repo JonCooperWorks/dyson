@@ -151,7 +151,7 @@ async fn subagent_child_agent_returns_result_via_capture_output() {
 
     // Child gets no tools (just responds with text).
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(
-        dyson::skill::subagent::tests_support::FilteredSkillPublic::new(vec![]),
+        dyson::skill::subagent::FilteredSkill::new(vec![]),
     )];
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
     let mut agent = Agent::new(RateLimitedHandle::unlimited(Box::new(child_llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
