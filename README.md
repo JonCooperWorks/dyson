@@ -219,6 +219,16 @@ cargo test
 
 1100+ tests covering the full stack — SSE parsing, sandbox decisions, config loading, workspace persistence, and the agent loop with mock LLM clients.
 
+## Running in production
+
+Dyson uses [jemalloc](https://jemalloc.net) as its global allocator on non-MSVC targets (via `tikv-jemallocator`).  Jemalloc's defaults retain freed memory for up to 10 seconds before returning it to the OS, which can make `RSS` look inflated for long-lived agents.  If your deployment has tight memory budgets (cgroups, systemd `MemoryHigh`, containers), set:
+
+```bash
+export MALLOC_CONF="dirty_decay_ms:1000,muzzy_decay_ms:1000"
+```
+
+This returns freed pages to the OS within ~1 second at the cost of a little extra `madvise()` churn.  Acceptable for most workloads; leave defaults if throughput is the priority.
+
 ## Inspired by
 
 - **[OpenClaw](https://github.com/openclaw/openclaw)** — Multi-channel AI assistant. Dyson's controller architecture and workspace format come from OpenClaw.

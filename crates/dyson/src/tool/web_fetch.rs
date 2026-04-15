@@ -26,8 +26,13 @@ const DEFAULT_MAX_LENGTH: usize = 50_000;
 /// Maximum allowed `max_length` parameter value.
 const MAX_MAX_LENGTH: usize = 200_000;
 
-/// Maximum raw response body size (5 MB).
-const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
+/// Maximum raw response body size (2 MB).  Sized for the LLM context, not
+/// arbitrary downloads — a 2 MB HTML page yields several tens of thousands
+/// of tokens of extracted text, already much larger than any useful snippet
+/// and enough to cover very large news articles or documentation pages.
+/// Parallel web_fetch calls previously allowed 5 MB × N peaks; 2 MB keeps
+/// that bounded under concurrent tool execution.
+const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 
 /// Per-request timeout — web pages should respond fast; the shared client's
 /// 300 s default is for LLM streaming, not page fetches.

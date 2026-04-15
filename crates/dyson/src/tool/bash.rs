@@ -55,7 +55,13 @@ use crate::util::truncate_output;
 /// stdout) from consuming unbounded memory.  The downstream
 /// `truncate_output()` handles further truncation for the LLM context, but
 /// this cap protects the process itself from OOM.
-const MAX_READ_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
+///
+/// Halved from 10 MB to 5 MB because this applies per stream per command,
+/// and the dependency analyzer runs independent tool calls in parallel — a
+/// dozen concurrent bash invocations previously peaked at 240 MB
+/// (10 MB × 2 streams × 12 commands).  5 MB still comfortably covers large
+/// test suites and build outputs before `truncate_output()` shortens them.
+const MAX_READ_BYTES: u64 = 5 * 1024 * 1024; // 5 MB
 
 // ---------------------------------------------------------------------------
 // BashTool

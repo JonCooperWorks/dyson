@@ -92,14 +92,35 @@ impl super::Agent {
         let messages = std::mem::take(&mut self.conversation.messages);
 
         // Build a pruned copy of the middle for summarisation.
-        let mut pruned_middle: Vec<Message> = messages[head_end..tail_start].to_vec();
-        for msg in &mut pruned_middle {
-            for block in &mut msg.content {
-                if let ContentBlock::ToolResult { content, .. } = block {
-                    *content = "[tool output pruned]".to_string();
-                }
-            }
-        }
+        //
+        // Naïve `to_vec()` + in-place overwrite clones every ToolResult's
+        // full tool output (frequently 50–500 KB) only to immediately drop
+        // it.  For a long conversation that's a multi-MB transient spike at
+        // exactly the moment the agent is compacting because it's already
+        // memory-pressured.  Build the pruned blocks directly, substituting
+        // the placeholder without ever cloning the original tool output.
+        let pruned_middle: Vec<Message> = messages[head_end..tail_start]
+            .iter()
+            .map(|msg| Message {
+                role: msg.role.clone(),
+                content: msg
+                    .content
+                    .iter()
+                    .map(|block| match block {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            is_error,
+                            ..
+                        } => ContentBlock::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content: "[tool output pruned]".to_string(),
+                            is_error: *is_error,
+                        },
+                        other => other.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
 
         // Phase 3: summarise the pruned middle section.
         let summary = match self.summarise_messages(&pruned_middle, previous_summary.as_deref(), output).await {

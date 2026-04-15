@@ -457,6 +457,20 @@ pub fn resolve_and_validate_path(
         return Err(format!("path escapes working directory: '{user_path}'"));
     }
 
+    // Defense in depth against TOCTOU in the ancestor-canonicalize branch:
+    // between canonicalizing the nearest existing ancestor and this check, an
+    // attacker could create a symlink in the suffix that escapes `canon_wd`.
+    // If the resolved path now exists, re-canonicalize it and re-verify the
+    // bounds so a planted symlink is caught at this layer.
+    if resolved.exists() {
+        let re_canon = resolved
+            .canonicalize()
+            .map_err(|e| path_err("re-canonicalize path", &resolved, e))?;
+        if !re_canon.starts_with(&canon_wd) {
+            return Err(format!("path escapes working directory: '{user_path}'"));
+        }
+    }
+
     Ok(resolved)
 }
 
