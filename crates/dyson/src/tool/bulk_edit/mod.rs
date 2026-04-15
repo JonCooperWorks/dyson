@@ -12,6 +12,7 @@
 // Haskell, Nix, JSON.  All grammars are statically linked.
 // ===========================================================================
 
+mod ast;
 mod definitions;
 mod find_replace;
 mod languages;
