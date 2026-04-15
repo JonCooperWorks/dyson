@@ -247,6 +247,12 @@ pub struct AgentSettings {
     /// Maximum number of LLM turns before the agent gives up.
     pub max_iterations: usize,
 
+    /// Maximum retries on transient LLM failures: HTTP 429/529, network
+    /// errors, and empty responses (no text and no tool calls).  Each
+    /// retry uses exponential backoff with jitter and does not advance
+    /// the per-turn iteration counter.  Defaults to 3.
+    pub max_retries: usize,
+
     /// Maximum tokens the LLM can generate per turn.
     pub max_tokens: u32,
 
@@ -925,6 +931,7 @@ impl Default for AgentSettings {
         Self {
             model: "claude-sonnet-4-20250514".into(),
             max_iterations: 20,
+            max_retries: 3,
             max_tokens: 8192,
             system_prompt: "You are Dyson, a capable AI assistant. You can use tools to help \
                             answer questions and complete tasks."

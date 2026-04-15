@@ -168,6 +168,7 @@ struct JsonAgent {
     /// Optional model override — takes precedence over the provider's model.
     model: Option<String>,
     max_iterations: Option<usize>,
+    max_retries: Option<usize>,
     max_tokens: Option<u32>,
     system_prompt: Option<String>,
     /// Name of the provider from the `"providers"` map.
@@ -705,6 +706,9 @@ fn parse_agent_settings(agent: Option<JsonAgent>, settings: &mut Settings) {
     }
     if let Some(max_iter) = agent.max_iterations {
         settings.agent.max_iterations = max_iter;
+    }
+    if let Some(max_retries) = agent.max_retries {
+        settings.agent.max_retries = max_retries;
     }
     if let Some(max_tok) = agent.max_tokens {
         settings.agent.max_tokens = max_tok;

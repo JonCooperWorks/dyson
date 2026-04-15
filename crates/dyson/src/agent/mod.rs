@@ -337,7 +337,8 @@ pub struct Agent {
     /// Maximum LLM turns per `run()` call.
     max_iterations: usize,
 
-    /// Maximum retries on transient LLM errors (HTTP 429, 529, network).
+    /// Maximum retries on transient LLM failures: HTTP 429/529, network
+    /// errors, and empty responses (no text, no tool calls).
     max_retries: usize,
 
     /// Mutable conversation state (messages, turn count, token budget).
@@ -586,7 +587,7 @@ impl Agent {
             system_prompt: Arc::from(system_prompt),
             config,
             max_iterations: settings.max_iterations,
-            max_retries: 3,
+            max_retries: settings.max_retries,
             conversation: Conversation::new(),
             tool_context,
             compaction_config: settings.compaction,
@@ -1085,6 +1086,9 @@ impl Agent {
         let mut final_text = String::new();
         let mut hit_max_iterations = false;
         let mut any_text_streamed = false;
+        // Remember the most recent text the LLM streamed this turn so we can
+        // surface it if the final iteration comes back empty after retries.
+        let mut last_streamed_text = String::new();
 
         let skill_fragments = self.collect_skill_context().await;
 
@@ -1101,7 +1105,7 @@ impl Agent {
 
         let mut recovered_this_turn = false;
 
-        for iteration in 0..self.max_iterations {
+        'iter: for iteration in 0..self.max_iterations {
             // Check for cooperative cancellation (used by /stop, swarm abort).
             if self.tool_context.cancellation.is_cancelled() {
                 tracing::info!("agent cancelled — breaking loop");
@@ -1113,29 +1117,61 @@ impl Agent {
 
             output.typing_indicator(true)?;
 
-            // Stream LLM response with retry/backoff.
-            let response = match self
-                .stream_with_retry(&skill_fragments, &mut recovered_this_turn, output)
-                .await
-            {
-                StreamResult::Response(r) => r,
-                StreamResult::Recovered => continue,
-                StreamResult::Error(e) => return Err(e),
+            // Stream LLM response with retry/backoff.  If the LLM returns no
+            // text and no tool calls, retry the request per our retry policy
+            // without advancing the iteration counter.
+            let mut empty_attempts: usize = 0;
+            let (tool_mode, input_tokens, assistant_msg, tool_calls, output_tokens) = loop {
+                let response = match self
+                    .stream_with_retry(&skill_fragments, &mut recovered_this_turn, output)
+                    .await
+                {
+                    StreamResult::Response(r) => r,
+                    StreamResult::Recovered => continue 'iter,
+                    StreamResult::Error(e) => return Err(e),
+                };
+
+                let tool_mode = response.tool_mode;
+                let input_tokens = response.input_tokens;
+
+                tracing::info!(
+                    tool_mode = ?tool_mode,
+                    input_tokens = ?input_tokens,
+                    "streaming response"
+                );
+
+                let (assistant_msg, tool_calls, output_tokens) =
+                    stream_handler::process_stream(response.stream, output).await?;
+
+                // Empty responses (no text, no tool calls) can happen
+                // transiently — retry per the same policy we use for network
+                // failures.  Skip for Observe mode, where tool calls in the
+                // stream are informational and absence doesn't indicate an
+                // empty reply.
+                let is_empty = assistant_msg.last_text().is_none()
+                    && tool_calls.is_empty()
+                    && tool_mode != crate::llm::ToolMode::Observe;
+                if is_empty && empty_attempts < self.max_retries {
+                    let base_ms = 1000 * 2u64.pow(empty_attempts as u32);
+                    let jitter_ms = rand::random::<u64>() % (base_ms / 2 + 1);
+                    let delay_ms = base_ms + jitter_ms;
+                    tracing::warn!(
+                        attempt = empty_attempts + 1,
+                        max = self.max_retries,
+                        delay_ms,
+                        "LLM returned no text and no tool calls — retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    empty_attempts += 1;
+                    continue;
+                }
+
+                break (tool_mode, input_tokens, assistant_msg, tool_calls, output_tokens);
             };
 
-            let tool_mode = response.tool_mode;
-            if let Some(input_tokens) = response.input_tokens {
+            if let Some(input_tokens) = input_tokens {
                 self.conversation.token_budget.record_input(input_tokens);
             }
-
-            tracing::info!(
-                tool_mode = ?tool_mode,
-                input_tokens = ?response.input_tokens,
-                "streaming response"
-            );
-
-            let (assistant_msg, tool_calls, output_tokens) =
-                stream_handler::process_stream(response.stream, output).await?;
 
             if let Err(e) = self.conversation.token_budget.record(output_tokens) {
                 self.conversation.messages.push(assistant_msg);
@@ -1147,8 +1183,9 @@ impl Agent {
                 break;
             }
 
-            if assistant_msg.last_text().is_some() {
+            if let Some(text) = assistant_msg.last_text() {
                 any_text_streamed = true;
+                last_streamed_text = text.to_string();
             }
 
             self.log_response(&assistant_msg, &tool_calls);
@@ -1161,7 +1198,18 @@ impl Agent {
             if tool_calls.is_empty() || tool_mode == crate::llm::ToolMode::Observe {
                 if let Some(text) = assistant_msg.last_text() {
                     final_text = text.to_string();
-                } else if !any_text_streamed {
+                } else if any_text_streamed {
+                    // Retries were exhausted or disabled and this final
+                    // iteration came back empty, but the user already saw text
+                    // from an earlier iteration.  Surface that text as the
+                    // return value so callers (subagents, controllers) don't
+                    // receive an empty string.
+                    tracing::warn!(
+                        "LLM returned no text on final iteration — reusing last \
+                         streamed text as the return value"
+                    );
+                    final_text = last_streamed_text.clone();
+                } else {
                     tracing::warn!(
                         "LLM returned no text and no tool calls — sending fallback"
                     );
