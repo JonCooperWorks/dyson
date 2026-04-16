@@ -22,7 +22,6 @@
 mod coder;
 mod orchestrator;
 mod security_engineer;
-mod security_engineer_check;
 
 pub use coder::CoderTool;
 pub use orchestrator::{OrchestratorConfig, OrchestratorTool};

@@ -750,8 +750,6 @@ fn orchestrator_tool_uses_config_name_and_description() {
         max_iterations: 10,
         max_tokens: 4096,
         injects_protocol: None,
-        post_validator: None,
-        max_validator_retries: 0,
     };
     let tool = OrchestratorTool::new(
         config,
@@ -902,8 +900,6 @@ fn orchestrator_with_custom_config() {
         max_iterations: 20,
         max_tokens: 4096,
         injects_protocol: Some("\n## DevOps Protocol\nUse for infra changes."),
-        post_validator: None,
-        max_validator_retries: 0,
     };
 
     let parent_tools: Vec<Arc<dyn Tool>> = vec![

@@ -6,7 +6,6 @@
 // ===========================================================================
 
 use super::orchestrator::OrchestratorConfig;
-use super::security_engineer_check::validate_report;
 
 const DIRECT_TOOLS: &[&str] = &[
     "bash",
@@ -39,7 +38,5 @@ pub fn security_engineer_config() -> OrchestratorConfig {
         max_iterations: 40,
         max_tokens: 8192,
         injects_protocol: Some(include_str!("prompts/security_engineer_protocol.md")),
-        post_validator: Some(validate_report),
-        max_validator_retries: 2,
     }
 }

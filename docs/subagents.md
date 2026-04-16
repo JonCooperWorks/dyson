@@ -106,8 +106,6 @@ pub struct OrchestratorConfig {
     pub max_iterations: usize,
     pub max_tokens: u32,
     pub injects_protocol: Option<String>,  // appended to parent's system prompt
-    pub post_validator: Option<fn(&str) -> Vec<String>>,  // optional output sanity check
-    pub max_validator_retries: usize,  // retry budget when validator flags issues
 }
 ```
 
@@ -136,8 +134,6 @@ pub fn your_role_config() -> OrchestratorConfig {
         max_iterations: 30,
         max_tokens: 8192,
         injects_protocol: Some(include_str!("prompts/your_role_protocol.md").into()),
-        post_validator: None,
-        max_validator_retries: 0,
     }
 }
 ```
