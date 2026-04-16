@@ -492,7 +492,7 @@ impl SubagentSkill {
 
             // Protocol fragments from orchestrators.
             for orch_cfg in &orch_configs {
-                if let Some(ref fragment) = orch_cfg.injects_protocol {
+                if let Some(fragment) = orch_cfg.injects_protocol {
                     prompt.push_str(fragment);
                 }
             }

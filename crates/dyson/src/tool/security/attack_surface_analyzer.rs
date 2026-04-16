@@ -336,10 +336,10 @@ fn find_enclosing_function<'a>(
 ) -> Option<String> {
     let mut current = node.parent();
     while let Some(parent) = current {
-        if config.definition_types.contains(&parent.kind()) {
-            if let Some(name) = nodes::extract_definition_name(&parent, source) {
-                return Some(name);
-            }
+        if config.definition_types.contains(&parent.kind())
+            && let Some(name) = nodes::extract_definition_name(&parent, source)
+        {
+            return Some(name);
         }
         current = parent.parent();
     }

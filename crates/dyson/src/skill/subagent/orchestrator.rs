@@ -124,7 +124,7 @@ impl Tool for OrchestratorTool {
     }
 
     fn description(&self) -> &str {
-        &self.config.description
+        self.config.description
     }
 
     fn input_schema(&self) -> serde_json::Value {
