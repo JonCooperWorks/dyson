@@ -212,13 +212,36 @@ impl ResultFormatter {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Truncate a string to `max_len` characters, appending "..." if truncated.
+/// Truncate a string to approximately `max_len` bytes, appending "..." if
+/// truncated.  Rounds down to a char boundary so it never panics on
+/// multibyte UTF-8.
 fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        let end = floor_char_boundary(s, max_len);
+        format!("{}...", &s[..end])
     }
+}
+
+/// Find the largest byte index ≤ `index` that is a char boundary.
+/// Equivalent to `str::floor_char_boundary` (nightly-only as of 2025).
+pub(super) fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        s.len()
+    } else {
+        let mut i = index;
+        while i > 0 && !s.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    }
+}
+
+/// Return a str slice of at most `max_bytes` bytes, rounded down to a
+/// char boundary.  Used for log previews where panicking is unacceptable.
+pub(super) fn preview(s: &str, max_bytes: usize) -> &str {
+    &s[..floor_char_boundary(s, max_bytes)]
 }
 
 // ===========================================================================
@@ -292,5 +315,26 @@ mod test_result_formatter {
         );
         assert!(fmt.summary.contains("config.json"));
         assert!(fmt.summary.contains("written"));
+    }
+
+    #[test]
+    fn truncate_str_handles_multibyte_utf8() {
+        // "🦀" is 4 bytes.  Truncating at byte 2 must not panic.
+        let s = "🦀hello";
+        let result = super::truncate_str(s, 2);
+        // Should round down to byte 0 (before the emoji) and append "..."
+        assert_eq!(result, "...");
+    }
+
+    #[test]
+    fn preview_handles_multibyte_utf8() {
+        let s = "abc🌍def";
+        // "abc" = 3 bytes, "🌍" = 4 bytes (bytes 3..7), "def" = 3 bytes.
+        // preview at 5 bytes should round down to byte 3 (before the emoji).
+        assert_eq!(super::preview(s, 5), "abc");
+        // preview at 7 includes the full emoji.
+        assert_eq!(super::preview(s, 7), "abc🌍");
+        // preview at 100 returns the full string.
+        assert_eq!(super::preview(s, 100), s);
     }
 }

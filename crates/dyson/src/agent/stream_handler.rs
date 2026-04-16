@@ -219,7 +219,7 @@ pub async fn process_stream(
             StreamEvent::ToolUseComplete { id, name, input } => {
                 if tracing::enabled!(tracing::Level::INFO) {
                     let input_str = input.to_string();
-                    let input_preview = &input_str[..input_str.len().min(500)];
+                    let input_preview = super::result_formatter::preview(&input_str, 500);
                     tracing::info!(
                         tool = name,
                         id = id,

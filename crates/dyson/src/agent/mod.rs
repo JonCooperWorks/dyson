@@ -1457,7 +1457,7 @@ impl Agent {
     /// Log a summary of the assistant response.
     fn log_response(&self, assistant_msg: &Message, tool_calls: &[ToolCall]) {
         if let Some(text) = assistant_msg.last_text() {
-            let preview = &text[..text.len().min(500)];
+            let preview = result_formatter::preview(text, 500);
             tracing::info!(
                 response_len = text.len(),
                 response_preview = preview,
