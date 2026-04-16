@@ -1224,48 +1224,51 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
         settings.agent.api_key = key;
     }
 
-    // SECURITY: warn if any provider sends API keys over plain HTTP to a
-    // remote host.  Localhost is fine (Ollama, vLLM, etc.), but a remote
-    // HTTP endpoint would transmit the key in cleartext.
-    warn_http_with_api_key(
+    // SECURITY: reject any provider that would send an API key over plain
+    // HTTP to a remote host.  Localhost is fine (Ollama, vLLM, etc.), but
+    // a remote HTTP endpoint would transmit the key in cleartext.
+    reject_http_with_api_key(
         &settings.agent.base_url,
         settings.agent.api_key.expose(),
         "active agent",
-    );
+    )?;
     for (name, provider) in &settings.providers {
-        warn_http_with_api_key(&provider.base_url, provider.api_key.expose(), name);
+        reject_http_with_api_key(&provider.base_url, provider.api_key.expose(), name)?;
     }
 
     Ok(())
 }
 
-/// Emit a warning if a provider sends an API key over plain HTTP to a
-/// non-localhost endpoint.  Keys over HTTP are transmitted in cleartext
-/// and can be intercepted by anyone on the network path.
-fn warn_http_with_api_key(base_url: &Option<String>, api_key: &str, label: &str) {
+/// Return a config error if a provider would send an API key over plain
+/// HTTP to a non-localhost endpoint.  Keys over HTTP are transmitted in
+/// cleartext and can be intercepted by anyone on the network path — loading
+/// such a config is a mistake we refuse rather than warn about.
+fn reject_http_with_api_key(
+    base_url: &Option<String>,
+    api_key: &str,
+    label: &str,
+) -> Result<()> {
     let url = match base_url {
         Some(u) => u,
-        None => return, // Default endpoint — always HTTPS.
+        None => return Ok(()), // Default endpoint — always HTTPS.
     };
     if api_key.is_empty() {
-        return; // No key to leak.
+        return Ok(()); // No key to leak.
     }
     if !url.starts_with("http://") {
-        return; // HTTPS or other scheme — fine.
+        return Ok(()); // HTTPS or other scheme — fine.
     }
     // Allow localhost / 127.0.0.1 / [::1] — common for local model servers.
     let after_scheme = &url["http://".len()..];
     let host = after_scheme.split('/').next().unwrap_or("");
     let host = host.split(':').next().unwrap_or(host); // strip port
     if host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1" {
-        return;
+        return Ok(());
     }
-    tracing::warn!(
-        provider = label,
-        base_url = url,
-        "API key will be sent over plain HTTP to a remote host — \
-         this transmits the key in cleartext.  Use HTTPS or remove the api_key."
-    );
+    Err(DysonError::Config(format!(
+        "provider '{label}' would send an API key over plain HTTP to '{url}' \
+         (cleartext on the wire). Use HTTPS or remove the api_key."
+    )))
 }
 
 // ===========================================================================
@@ -1571,6 +1574,53 @@ mod tests {
             settings.agent.base_url.as_deref(),
             Some("https://my-proxy.example.com/v1")
         );
+    }
+
+    #[test]
+    fn http_with_api_key_remote_rejected() {
+        // A provider that would send an api_key over plain HTTP to a
+        // non-localhost host is a configuration error, not a warning.
+        let json = r#"{
+            "providers": {
+                "sniffable": {
+                    "type": "openai",
+                    "models": ["gpt-4o"],
+                    "api_key": "sk-should-not-leak",
+                    "base_url": "http://proxy.example.com/v1"
+                }
+            },
+            "agent": { "provider": "sniffable" }
+        }"#;
+        let root: JsonRoot = serde_json::from_str(json).unwrap();
+        let secrets = SecretRegistry::default();
+        let mut settings = build_settings(Some(root), &secrets);
+        let err = resolve_api_keys(&mut settings, &secrets).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("plain HTTP"), "unexpected error: {msg}");
+        assert!(
+            !msg.contains("sk-should-not-leak"),
+            "error message leaked the api_key: {msg}"
+        );
+    }
+
+    #[test]
+    fn http_with_api_key_localhost_allowed() {
+        // Plain HTTP to localhost is fine — common for Ollama / vLLM.
+        let json = r#"{
+            "providers": {
+                "ollama": {
+                    "type": "openai",
+                    "models": ["llama3"],
+                    "api_key": "sk-local",
+                    "base_url": "http://127.0.0.1:11434/v1"
+                }
+            },
+            "agent": { "provider": "ollama" }
+        }"#;
+        let root: JsonRoot = serde_json::from_str(json).unwrap();
+        let secrets = SecretRegistry::default();
+        let mut settings = build_settings(Some(root), &secrets);
+        assert!(resolve_api_keys(&mut settings, &secrets).is_ok());
     }
 
     #[test]
