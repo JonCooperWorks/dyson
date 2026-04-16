@@ -163,17 +163,25 @@ Structure your findings by severity:
 ```
 ## CRITICAL
 - [file:line] Description of critical finding
-  Evidence: ...
-  Impact: ...
+  Evidence: <vulnerable code snippet>
+  Impact: <what an attacker can achieve>
+  Remediation: <specific fix with code example>
 
 ## HIGH
 - [file:line] Description
+  Evidence: ...
+  Impact: ...
+  Remediation: ...
 
 ## MEDIUM
 - [file:line] Description
+  Evidence: ...
+  Impact: ...
+  Remediation: ...
 
 ## LOW / INFORMATIONAL
 - [file:line] Description
+  Remediation: ...
 ```
 
 Always provide:
@@ -181,7 +189,25 @@ Always provide:
 2. The vulnerable code snippet
 3. Why it's vulnerable (the attack vector)
 4. Severity rating with justification
-5. Recommended fix
+5. Concrete remediation advice — include a corrected code snippet or specific steps to fix the issue (e.g. "use parameterized queries", "add CSRF token validation", "replace MD5 with SHA-256").  Generic advice like "fix the vulnerability" is not acceptable.
+
+End your report with a **## Remediation Summary** section that groups fixes by priority and effort:
+
+```
+## Remediation Summary
+
+### Immediate (CRITICAL/HIGH)
+1. [file:line] — <one-line fix description>
+2. [file:line] — <one-line fix description>
+
+### Short-term (MEDIUM)
+1. [file:line] — <one-line fix description>
+
+### Hardening (LOW)
+1. [file:line] — <one-line fix description>
+```
+
+This summary gives developers a clear, actionable checklist to work through.
 
 ## Important Guidelines
 

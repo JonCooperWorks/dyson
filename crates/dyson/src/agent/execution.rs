@@ -102,7 +102,7 @@ impl Agent {
             .await
         {
             Ok(response) => {
-                let (assistant_msg, _tool_calls, _output_tokens) =
+                let (assistant_msg, _tool_calls, _output_tokens, _stop_reason) =
                     super::stream_handler::process_stream(response.stream, output).await?;
                 let text = assistant_msg
                     .last_text()
@@ -189,7 +189,7 @@ impl Agent {
     async fn execute_tool_call_timed(&self, call: &ToolCall) -> Result<(ToolOutput, std::time::Duration)> {
         if tracing::enabled!(tracing::Level::INFO) {
             let input_str = call.input.to_string();
-            let input_preview = &input_str[..input_str.len().min(500)];
+            let input_preview = super::result_formatter::preview(&input_str, 500);
             tracing::info!(
                 tool = call.name,
                 id = call.id,
@@ -250,7 +250,7 @@ impl Agent {
 
         match &result {
             Ok(out) => {
-                let output_preview = &out.content[..out.content.len().min(500)];
+                let output_preview = super::result_formatter::preview(&out.content, 500);
                 tracing::info!(
                     tool = call.name,
                     duration_ms = tool_ms,

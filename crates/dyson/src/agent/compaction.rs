@@ -236,7 +236,7 @@ impl super::Agent {
             .stream(messages, &compaction_system, "", empty_tools, &self.config)
             .await?;
 
-        let (assistant_msg, _tool_calls, _output_tokens) =
+        let (assistant_msg, _tool_calls, _output_tokens, _stop_reason) =
             stream_handler::process_stream(response.stream, output).await?;
 
         let mut result = String::new();
