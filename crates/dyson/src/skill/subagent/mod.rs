@@ -20,8 +20,12 @@
 // ===========================================================================
 
 mod coder;
+mod orchestrator;
+mod security_engineer;
 
 pub use coder::CoderTool;
+pub use orchestrator::{OrchestratorConfig, OrchestratorTool};
+pub use security_engineer::security_engineer_config;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -399,8 +403,8 @@ impl SubagentSkill {
         let (coder_provider, coder_client) =
             (settings.agent.provider.clone(), registry.get_default());
         let coder_tool = CoderTool::new(
-            coder_provider,
-            coder_client,
+            coder_provider.clone(),
+            coder_client.clone(),
             Arc::clone(&sandbox),
             workspace.clone(),
             parent_tools,
@@ -408,14 +412,66 @@ impl SubagentSkill {
         prompt_lines.push(format!("- **{}**: {}", coder_tool.name(), coder_tool.description()));
         tools.push(Arc::new(coder_tool));
 
-        // Subagents may contribute a usage-protocol fragment to the
-        // parent's system prompt (e.g., `verifier` defines when it must
-        // be invoked).
-        let protocol_fragments: Vec<&str> = configs
-            .iter()
-            .filter_map(|c| c.injects_protocol.as_deref())
-            .collect();
+        // Orchestrators: composable subagents that get direct tools + inner
+        // subagent dispatch.  Each is defined by an OrchestratorConfig.
+        let orch_configs = builtin_orchestrator_configs();
+        if !orch_configs.is_empty() {
+            // Build inner subagent tools once — shared across all orchestrators.
+            let builtin_configs = builtin_subagent_configs();
+            let mut inner_subagent_tools: Vec<Arc<dyn Tool>> = Vec::new();
 
+            for cfg in &builtin_configs {
+                let inherited = filter_tools(parent_tools, &cfg.tools);
+                let inner_tool = SubagentTool::new(
+                    cfg.clone(),
+                    settings.agent.provider.clone(),
+                    registry.get_default(),
+                    Arc::clone(&sandbox),
+                    workspace.clone(),
+                    inherited,
+                );
+                inner_subagent_tools.push(Arc::new(inner_tool));
+            }
+
+            // Inner coder shared by all orchestrators.
+            let inner_coder = CoderTool::new(
+                settings.agent.provider.clone(),
+                registry.get_default(),
+                Arc::clone(&sandbox),
+                workspace.clone(),
+                parent_tools,
+            );
+            inner_subagent_tools.push(Arc::new(inner_coder));
+
+            // Clone inner tools for all but the last orchestrator,
+            // then move the vec into the final one to avoid an extra clone.
+            let orch_count = orch_configs.len();
+            for (i, orch_cfg) in orch_configs.iter().enumerate() {
+                let inner = if i + 1 < orch_count {
+                    inner_subagent_tools.clone()
+                } else {
+                    std::mem::take(&mut inner_subagent_tools)
+                };
+                let orch_tool = OrchestratorTool::new(
+                    orch_cfg.clone(),
+                    coder_provider.clone(),
+                    coder_client.clone(),
+                    Arc::clone(&sandbox),
+                    workspace.clone(),
+                    parent_tools,
+                    inner,
+                );
+                prompt_lines.push(format!(
+                    "- **{}**: {}",
+                    orch_tool.name(),
+                    orch_tool.description()
+                ));
+                tools.push(Arc::new(orch_tool));
+            }
+        }
+
+        // Subagents and orchestrators may contribute usage-protocol
+        // fragments to the parent's system prompt.
         let system_prompt = if prompt_lines.is_empty() {
             String::new()
         } else {
@@ -427,8 +483,18 @@ impl SubagentSkill {
                 prompt_lines.join("\n")
             );
 
-            for fragment in protocol_fragments {
-                prompt.push_str(fragment);
+            // Protocol fragments from config-driven subagents.
+            for cfg in configs {
+                if let Some(ref fragment) = cfg.injects_protocol {
+                    prompt.push_str(fragment);
+                }
+            }
+
+            // Protocol fragments from orchestrators.
+            for orch_cfg in &orch_configs {
+                if let Some(fragment) = orch_cfg.injects_protocol {
+                    prompt.push_str(fragment);
+                }
             }
 
             prompt
@@ -531,6 +597,14 @@ pub fn builtin_subagent_configs() -> Vec<SubagentAgentConfig> {
             injects_protocol: Some(include_str!("prompts/verifier_protocol.md").into()),
         },
     ]
+}
+
+/// Built-in orchestrator configs.  Each is composed into an
+/// `OrchestratorTool` with inner subagent dispatch.  Add new orchestrator
+/// roles here — they automatically get planner/researcher/coder/verifier
+/// as inner subagents.
+pub fn builtin_orchestrator_configs() -> Vec<OrchestratorConfig> {
+    vec![security_engineer_config()]
 }
 
 /// Filter `parent_tools` by the subagent's optional `tools` list.

@@ -74,6 +74,7 @@ pub mod workspace_search;
 pub mod workspace_update;
 pub mod workspace_view;
 pub mod write_file;
+pub mod security;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
