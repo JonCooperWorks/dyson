@@ -45,6 +45,9 @@ use crate::tool::workspace_search::WorkspaceSearchTool;
 use crate::tool::workspace_update::WorkspaceUpdateTool;
 use crate::tool::workspace_view::WorkspaceViewTool;
 use crate::tool::write_file::WriteFileTool;
+use crate::tool::security::AstQueryTool;
+use crate::tool::security::AttackSurfaceAnalyzerTool;
+use crate::tool::security::ExploitBuilderTool;
 
 // ---------------------------------------------------------------------------
 // BuiltinSkill
@@ -108,6 +111,9 @@ impl BuiltinSkill {
             Arc::new(KbStatusTool),
             Arc::new(SwarmCheckpointTool),
             Arc::new(WebFetchTool::default()),
+            Arc::new(AstQueryTool),
+            Arc::new(AttackSurfaceAnalyzerTool),
+            Arc::new(ExploitBuilderTool),
         ];
 
         if let Some(ws_cfg) = web_search_config {
@@ -235,7 +241,7 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new(None, None, None);
         let tools = skill.tools();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 20);
         assert_eq!(tools[0].name(), "bash");
         assert_eq!(tools[1].name(), "read_file");
         assert_eq!(tools[2].name(), "write_file");
@@ -253,6 +259,9 @@ mod tests {
         assert_eq!(tools[14].name(), "kb_status");
         assert_eq!(tools[15].name(), "swarm_checkpoint");
         assert_eq!(tools[16].name(), "web_fetch");
+        assert_eq!(tools[17].name(), "ast_query");
+        assert_eq!(tools[18].name(), "attack_surface_analyzer");
+        assert_eq!(tools[19].name(), "exploit_builder");
     }
 
     #[test]
@@ -299,7 +308,7 @@ mod tests {
         let skill = BuiltinSkill::new(None, Some(&config), None);
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert!(names.contains(&"image_generate"));
-        assert_eq!(skill.tools().len(), 18);
+        assert_eq!(skill.tools().len(), 21);
     }
 
     #[test]

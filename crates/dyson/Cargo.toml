@@ -46,6 +46,7 @@ nanohtml2text = "0.1"
 
 # AST-aware editing — 20 grammars for 19 languages, statically linked.
 tree-sitter = "0.24.7"
+streaming-iterator = "0.1"
 tree-sitter-rust = "0.23.3"
 tree-sitter-python = "0.23.6"
 tree-sitter-javascript = "0.23.1"

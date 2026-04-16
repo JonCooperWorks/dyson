@@ -946,6 +946,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "streaming-iterator",
  "subtle",
  "tempfile",
  "thiserror 2.0.18",

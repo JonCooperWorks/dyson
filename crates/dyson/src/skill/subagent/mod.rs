@@ -20,8 +20,10 @@
 // ===========================================================================
 
 mod coder;
+mod security_engineer;
 
 pub use coder::CoderTool;
+pub use security_engineer::SecurityEngineerTool;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -399,8 +401,8 @@ impl SubagentSkill {
         let (coder_provider, coder_client) =
             (settings.agent.provider.clone(), registry.get_default());
         let coder_tool = CoderTool::new(
-            coder_provider,
-            coder_client,
+            coder_provider.clone(),
+            coder_client.clone(),
             Arc::clone(&sandbox),
             workspace.clone(),
             parent_tools,
@@ -408,13 +410,63 @@ impl SubagentSkill {
         prompt_lines.push(format!("- **{}**: {}", coder_tool.name(), coder_tool.description()));
         tools.push(Arc::new(coder_tool));
 
+        // Security engineer: an orchestrator with security tools + inner
+        // subagent dispatch.  Build inner subagent tools that the
+        // security_engineer child can invoke at depth 2.
+        {
+            let builtin_configs = builtin_subagent_configs();
+            let mut inner_subagent_tools: Vec<Arc<dyn Tool>> = Vec::new();
+
+            for cfg in &builtin_configs {
+                let inherited =
+                    filter_tools(parent_tools, &cfg.tools);
+                let inner_tool = SubagentTool::new(
+                    cfg.clone(),
+                    settings.agent.provider.clone(),
+                    registry.get_default(),
+                    Arc::clone(&sandbox),
+                    workspace.clone(),
+                    inherited,
+                );
+                inner_subagent_tools.push(Arc::new(inner_tool));
+            }
+
+            // Inner coder for the security_engineer's child.
+            let inner_coder = CoderTool::new(
+                settings.agent.provider.clone(),
+                registry.get_default(),
+                Arc::clone(&sandbox),
+                workspace.clone(),
+                parent_tools,
+            );
+            inner_subagent_tools.push(Arc::new(inner_coder));
+
+            let sec_tool = SecurityEngineerTool::new(
+                coder_provider,
+                coder_client,
+                Arc::clone(&sandbox),
+                workspace.clone(),
+                parent_tools,
+                inner_subagent_tools,
+            );
+            prompt_lines.push(format!(
+                "- **{}**: {}",
+                sec_tool.name(),
+                sec_tool.description()
+            ));
+            tools.push(Arc::new(sec_tool));
+        }
+
         // Subagents may contribute a usage-protocol fragment to the
         // parent's system prompt (e.g., `verifier` defines when it must
         // be invoked).
-        let protocol_fragments: Vec<&str> = configs
+        let mut protocol_fragments: Vec<&str> = configs
             .iter()
             .filter_map(|c| c.injects_protocol.as_deref())
             .collect();
+        // Security engineer injects its own protocol.
+        protocol_fragments
+            .push(include_str!("prompts/security_engineer_protocol.md"));
 
         let system_prompt = if prompt_lines.is_empty() {
             String::new()

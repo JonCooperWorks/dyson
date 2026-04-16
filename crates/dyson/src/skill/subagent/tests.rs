@@ -318,16 +318,18 @@ fn subagent_skill_system_prompt_lists_agents() {
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry);
 
     assert_eq!(skill.name(), "subagents");
-    // 1 config-driven subagent + 1 built-in coder tool = 2
-    assert_eq!(skill.tools().len(), 2);
+    // 1 config-driven subagent + 1 coder + 1 security_engineer = 3
+    assert_eq!(skill.tools().len(), 3);
     assert_eq!(skill.tools()[0].name(), "research_agent");
     assert_eq!(skill.tools()[1].name(), "coder");
+    assert_eq!(skill.tools()[2].name(), "security_engineer");
 
     let prompt = skill.system_prompt().unwrap();
     assert!(prompt.contains("research_agent"));
     assert!(prompt.contains("Research specialist"));
     assert!(prompt.contains("subagents"));
     assert!(prompt.contains("coder"));
+    assert!(prompt.contains("security_engineer"));
 }
 
 #[test]
@@ -351,10 +353,12 @@ fn subagent_skill_skips_unknown_provider() {
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry);
 
     // Should have skipped the subagent with unknown provider,
-    // but the built-in coder tool is always present.
-    assert_eq!(skill.tools().len(), 1);
+    // but the built-in coder and security_engineer are always present.
+    assert_eq!(skill.tools().len(), 2);
     assert_eq!(skill.tools()[0].name(), "coder");
+    assert_eq!(skill.tools()[1].name(), "security_engineer");
     assert!(skill.system_prompt().unwrap().contains("coder"));
+    assert!(skill.system_prompt().unwrap().contains("security_engineer"));
 }
 
 // -----------------------------------------------------------------------
@@ -547,10 +551,11 @@ fn default_provider_resolves_to_agent_settings() {
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry);
 
-    // Should have resolved successfully (1 config-driven + 1 coder = 2 tools).
-    assert_eq!(skill.tools().len(), 2);
+    // Should have resolved successfully (1 config-driven + 1 coder + 1 security_engineer = 3 tools).
+    assert_eq!(skill.tools().len(), 3);
     assert_eq!(skill.tools()[0].name(), "test_default");
     assert_eq!(skill.tools()[1].name(), "coder");
+    assert_eq!(skill.tools()[2].name(), "security_engineer");
 }
 
 // -----------------------------------------------------------------------
@@ -728,4 +733,131 @@ async fn coder_runs_child_and_returns_result() {
     let result = tool.run(&input, &ctx).await.unwrap();
     assert!(!result.is_error);
     assert_eq!(result.content, "Changes complete.");
+}
+
+// -----------------------------------------------------------------------
+// SecurityEngineerTool tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn security_engineer_tool_name_and_description() {
+    let tool = SecurityEngineerTool::new(
+        LlmProvider::Anthropic,
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
+        ),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+        vec![],
+    );
+    assert_eq!(tool.name(), "security_engineer");
+    assert!(!tool.description().is_empty());
+    assert!(tool.description().contains("security"));
+}
+
+#[test]
+fn security_engineer_filters_to_correct_tools() {
+    let parent_tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(crate::tool::bash::BashTool::default()),
+        Arc::new(crate::tool::read_file::ReadFileTool),
+        Arc::new(crate::tool::write_file::WriteFileTool),
+        Arc::new(crate::tool::edit_file::EditFileTool),
+        Arc::new(crate::tool::list_files::ListFilesTool),
+        Arc::new(crate::tool::search_files::SearchFilesTool),
+        Arc::new(crate::tool::send_file::SendFileTool),
+        Arc::new(crate::tool::security::AstQueryTool),
+        Arc::new(crate::tool::security::AttackSurfaceAnalyzerTool),
+        Arc::new(crate::tool::security::ExploitBuilderTool),
+    ];
+
+    let inner_subagents: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(crate::tool::bash::BashTool::default()), // stand-in
+    ];
+
+    let tool = SecurityEngineerTool::new(
+        LlmProvider::Anthropic,
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
+        ),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &parent_tools,
+        inner_subagents,
+    );
+
+    let direct_names: Vec<&str> = tool.direct_tools.iter().map(|t| t.name()).collect();
+    assert_eq!(direct_names.len(), 7);
+    assert!(direct_names.contains(&"bash"));
+    assert!(direct_names.contains(&"read_file"));
+    assert!(direct_names.contains(&"search_files"));
+    assert!(direct_names.contains(&"list_files"));
+    assert!(direct_names.contains(&"ast_query"));
+    assert!(direct_names.contains(&"attack_surface_analyzer"));
+    assert!(direct_names.contains(&"exploit_builder"));
+    // write_file, edit_file, send_file should be excluded.
+    assert!(!direct_names.contains(&"write_file"));
+    assert!(!direct_names.contains(&"edit_file"));
+    assert!(!direct_names.contains(&"send_file"));
+
+    // Inner subagent tools are passed through as-is.
+    assert_eq!(tool.inner_subagent_tools.len(), 1);
+}
+
+#[tokio::test]
+async fn security_engineer_depth_limit_prevents_recursion() {
+    let tool = SecurityEngineerTool::new(
+        LlmProvider::Anthropic,
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
+        ),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+        vec![],
+    );
+
+    let ctx = ToolContext {
+        working_dir: std::env::current_dir().unwrap(),
+        env: std::collections::HashMap::new(),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+        workspace: None,
+        depth: MAX_SUBAGENT_DEPTH,
+        dangerous_no_sandbox: false,
+    };
+
+    let input = serde_json::json!({"task": "should fail"});
+    let result = tool.run(&input, &ctx).await.unwrap();
+    assert!(result.is_error);
+    assert!(result.content.contains("Maximum subagent nesting depth"));
+}
+
+#[tokio::test]
+async fn security_engineer_runs_child_and_returns_result() {
+    let llm = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("Security review complete. No critical issues found.".into()),
+        StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        },
+    ]]);
+
+    let tool = SecurityEngineerTool::new(
+        LlmProvider::Anthropic,
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+        vec![],
+    );
+
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({
+        "task": "Review auth module",
+        "context": "Recently added OAuth2"
+    });
+
+    let result = tool.run(&input, &ctx).await.unwrap();
+    assert!(!result.is_error);
+    assert_eq!(result.content, "Security review complete. No critical issues found.");
 }

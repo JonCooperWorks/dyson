@@ -392,6 +392,43 @@ pub fn walk_dir(dir: &std::path::Path) -> ignore::Walk {
 }
 
 // ---------------------------------------------------------------------------
+// Language name → LanguageConfig lookup
+// ---------------------------------------------------------------------------
+
+/// Map a language name or common alias to a language config.
+///
+/// Accepts display names (`"Rust"`, `"C++"`), lowercase names (`"rust"`,
+/// `"python"`), common abbreviations (`"js"`, `"ts"`, `"rb"`), and file
+/// extensions (`"rs"`, `"py"`).  Case-insensitive.
+///
+/// Returns `None` for unrecognized names.
+pub fn config_for_language_name(name: &str) -> Option<&'static LanguageConfig> {
+    match name.to_ascii_lowercase().as_str() {
+        "rust" | "rs" => Some(&RUST),
+        "python" | "py" | "pyi" => Some(&PYTHON),
+        "javascript" | "js" | "jsx" | "mjs" | "cjs" => Some(&JAVASCRIPT),
+        "typescript" | "ts" | "mts" | "cts" => Some(&TYPESCRIPT),
+        "tsx" => Some(&TSX),
+        "go" | "golang" => Some(&GO),
+        "java" => Some(&JAVA),
+        "c" | "h" => Some(&C),
+        "cpp" | "c++" | "cc" | "cxx" | "hpp" | "hxx" => Some(&CPP),
+        "csharp" | "c#" | "cs" => Some(&CSHARP),
+        "ruby" | "rb" => Some(&RUBY),
+        "kotlin" | "kt" | "kts" => Some(&KOTLIN),
+        "swift" => Some(&SWIFT),
+        "zig" => Some(&ZIG),
+        "elixir" | "ex" | "exs" => Some(&ELIXIR),
+        "erlang" | "erl" | "hrl" => Some(&ERLANG),
+        "ocaml" | "ml" | "mli" => Some(&OCAML),
+        "haskell" | "hs" => Some(&HASKELL),
+        "nix" => Some(&NIX),
+        "json" => Some(&JSON),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Extension → LanguageConfig lookup
 // ---------------------------------------------------------------------------
 
@@ -470,5 +507,77 @@ mod tests {
     fn json_has_no_identifier_types() {
         let config = config_for_extension("json").unwrap();
         assert!(config.identifier_types.is_empty());
+    }
+
+    // -------------------------------------------------------------------
+    // config_for_language_name tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn language_name_resolves_all_languages() {
+        let names = [
+            "rust", "python", "javascript", "typescript", "tsx", "go", "java",
+            "c", "cpp", "csharp", "ruby", "kotlin", "swift", "zig", "elixir",
+            "erlang", "ocaml", "haskell", "nix", "json",
+        ];
+        for name in names {
+            assert!(
+                config_for_language_name(name).is_some(),
+                "expected config for language name '{name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn language_name_case_insensitive() {
+        assert!(config_for_language_name("Rust").is_some());
+        assert!(config_for_language_name("PYTHON").is_some());
+        assert!(config_for_language_name("JavaScript").is_some());
+        assert!(config_for_language_name("C++").is_some());
+        assert!(config_for_language_name("C#").is_some());
+    }
+
+    #[test]
+    fn language_name_aliases() {
+        // Common aliases should resolve to the same language.
+        assert_eq!(
+            config_for_language_name("js").unwrap().display_name,
+            "JavaScript"
+        );
+        assert_eq!(
+            config_for_language_name("ts").unwrap().display_name,
+            "TypeScript"
+        );
+        assert_eq!(
+            config_for_language_name("py").unwrap().display_name,
+            "Python"
+        );
+        assert_eq!(
+            config_for_language_name("rb").unwrap().display_name,
+            "Ruby"
+        );
+        assert_eq!(
+            config_for_language_name("rs").unwrap().display_name,
+            "Rust"
+        );
+        assert_eq!(
+            config_for_language_name("golang").unwrap().display_name,
+            "Go"
+        );
+        assert_eq!(
+            config_for_language_name("kt").unwrap().display_name,
+            "Kotlin"
+        );
+        assert_eq!(
+            config_for_language_name("hs").unwrap().display_name,
+            "Haskell"
+        );
+    }
+
+    #[test]
+    fn language_name_unknown_returns_none() {
+        assert!(config_for_language_name("fortran").is_none());
+        assert!(config_for_language_name("brainfuck").is_none());
+        assert!(config_for_language_name("").is_none());
     }
 }
