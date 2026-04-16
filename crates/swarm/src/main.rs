@@ -137,8 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The same ticker also reaps terminal TaskRecords older than 24h
     // from the TaskStore — no separate background task needed.
     {
-        let registry = hub.registry.clone();
-        let tasks = hub.tasks.clone();
+        let hub_for_reaper = hub.clone();
         let timeout = config.heartbeat_timeout;
         let task_ttl = Duration::from_secs(24 * 60 * 60);
         let shutdown_fut = hub.shutdown_notified();
@@ -153,16 +152,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // which the reaper re-reads under the task store's lock on
             // the next tick, so there is no loss of freshly-active tasks.
             let mut ticker = tokio::time::interval(Duration::from_secs(15));
+            // Idempotency sweep cadence: every 20 ticks (~5 min).  The
+            // index also sweeps opportunistically on insert past its
+            // soft cap, so this is the belt for write-silent hubs.
+            const IDEMPOTENCY_SWEEP_EVERY_N_TICKS: u64 = 20;
+            let mut tick_count: u64 = 0;
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        let reaped = registry.reap_stale(timeout).await;
+                        let reaped = hub_for_reaper.registry.reap_stale(timeout).await;
                         for id in reaped {
                             tracing::warn!(node_id = %id, "reaped stale node");
                         }
-                        let reaped_tasks = tasks.reap(task_ttl).await;
+                        let reaped_tasks = hub_for_reaper.tasks.reap(task_ttl).await;
                         if reaped_tasks > 0 {
                             tracing::info!(reaped_tasks, "reaped terminal tasks past TTL");
+                        }
+                        tick_count = tick_count.wrapping_add(1);
+                        if tick_count.is_multiple_of(IDEMPOTENCY_SWEEP_EVERY_N_TICKS) {
+                            hub_for_reaper.idempotency.sweep().await;
                         }
                     }
                     _ = &mut shutdown_fut => {

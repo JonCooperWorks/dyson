@@ -18,7 +18,7 @@ pub mod tls;
 
 use std::sync::Arc;
 
-use tokio::sync::broadcast;
+use tokio::sync::{Semaphore, broadcast};
 
 use crate::blob::BlobStore;
 use crate::idempotency::IdempotencyIndex;
@@ -93,6 +93,12 @@ pub struct Hub {
     /// Idempotency index for `swarm_submit`.  In-memory only; see
     /// [`crate::idempotency`].
     pub idempotency: IdempotencyIndex,
+    /// Process-wide cap on concurrent SSE subscribers.  Per-node channel
+    /// depth bounds memory per stream; this semaphore bounds total open
+    /// streams so a large deployment — or an abusive client opening
+    /// streams in a loop — cannot exhaust file descriptors.  A handler
+    /// that fails to acquire a permit rejects the request with 503.
+    pub sse_subscribers: Arc<Semaphore>,
     /// Broadcast channel used to tell long-lived handlers (specifically
     /// the SSE event stream) that the server is shutting down.
     ///
@@ -101,6 +107,11 @@ pub struct Hub {
     /// design — and Ctrl-C would appear to do nothing.
     shutdown: broadcast::Sender<()>,
 }
+
+/// Ceiling on concurrent SSE subscribers.  A generous default; the hub
+/// is designed for a small-to-medium fleet of nodes, not arbitrary
+/// external subscribers.  Deployments that need more can raise this.
+const MAX_SSE_SUBSCRIBERS: usize = 4_096;
 
 impl Hub {
     /// Build a new hub from an already-loaded key and data directory.
@@ -176,6 +187,7 @@ impl Hub {
             tasks,
             mcp_api_key,
             idempotency: IdempotencyIndex::new(),
+            sse_subscribers: Arc::new(Semaphore::new(MAX_SSE_SUBSCRIBERS)),
             shutdown,
         }))
     }

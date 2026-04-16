@@ -59,11 +59,12 @@ pub fn ensure_crypto_provider() {
 ///
 /// Blocks literal-IP redirects targeting loopback, private (RFC1918),
 /// link-local, ULA, or unspecified ranges, and well-known cloud metadata
-/// hosts.  Hostnames are allowed through: a domain that resolves (via DNS
-/// rebinding) to a private IP will still pass this filter — callers that
-/// need full SSRF defense must re-resolve the final URL themselves.  This
-/// is the best we can do in reqwest's synchronous redirect hook without
-/// its own resolver.
+/// hosts.  Hostnames in redirects are allowed through: a domain that
+/// resolves (via DNS rebinding) to a private IP still passes this
+/// filter.  The redirect hook is synchronous and cannot do its own DNS
+/// resolution, so full hostname-based SSRF defence happens at the
+/// *initial* URL via [`verify_url_safe`] — callers accepting untrusted
+/// URLs (e.g. `web_fetch`) must call it before dispatching the request.
 ///
 /// Also caps the redirect chain length.
 pub fn safe_redirect_policy() -> Policy {
@@ -159,4 +160,75 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 /// consistent User-Agent, timeouts, and TLS configuration.
 pub fn client() -> &'static reqwest::Client {
     &CLIENT
+}
+
+/// Verify that every address the URL's hostname resolves to is safe to
+/// connect to.  Closes the DNS-rebinding gap in [`safe_redirect_policy`]
+/// for callers that accept untrusted URLs: a hostname that resolves to
+/// an RFC1918 / loopback / metadata IP is rejected before reqwest ever
+/// opens a socket.
+///
+/// Behavior:
+///   - URLs without a host (rare; file://, data:) return an error.
+///   - IP-literal hosts are checked directly.
+///   - Hostnames are resolved via the OS resolver; every returned
+///     address must pass `is_private_v4` / `is_private_v6`.
+///
+/// A narrow TOCTOU remains: the resolver reqwest uses internally could
+/// in principle return a different result than our check.  For real-
+/// world DNS rebinding attacks to exploit this, the attacker would need
+/// the OS cache to flip between these two resolutions, which in
+/// practice requires TTL=0 records plus a carefully timed flip that
+/// beats the client's own resolver cache.  This check plus the redirect
+/// policy raises the bar significantly over doing nothing.
+pub async fn verify_url_safe(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+    let host = parsed.host_str().ok_or_else(|| "URL has no host".to_string())?;
+
+    // Strip bracket on IPv6 literal.
+    let raw = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) if is_private_v4(v4) => {
+                Err(format!("refusing to fetch private IPv4 literal: {v4}"))
+            }
+            std::net::IpAddr::V6(v6) if is_private_v6(v6) => {
+                Err(format!("refusing to fetch private IPv6 literal: {v6}"))
+            }
+            _ => Ok(()),
+        };
+    }
+
+    if is_metadata_host(host) {
+        return Err(format!("refusing to fetch cloud metadata host: {host}"));
+    }
+
+    // Resolve via the OS.  Port is required by lookup_host but irrelevant
+    // to the safety check.
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("DNS lookup failed for {host}: {e}"))?;
+
+    let mut saw_any = false;
+    for sa in addrs {
+        saw_any = true;
+        match sa.ip() {
+            std::net::IpAddr::V4(v4) if is_private_v4(v4) => {
+                return Err(format!(
+                    "refusing to fetch {host}: resolves to private IPv4 {v4}"
+                ));
+            }
+            std::net::IpAddr::V6(v6) if is_private_v6(v6) => {
+                return Err(format!(
+                    "refusing to fetch {host}: resolves to private IPv6 {v6}"
+                ));
+            }
+            _ => {}
+        }
+    }
+    if !saw_any {
+        return Err(format!("DNS lookup returned no addresses for {host}"));
+    }
+    Ok(())
 }

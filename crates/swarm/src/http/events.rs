@@ -48,6 +48,26 @@ pub async fn events_handler(
         return (StatusCode::UNAUTHORIZED, "unknown bearer token").into_response();
     };
 
+    // Enforce the process-wide subscriber ceiling before allocating
+    // channels or touching the registry.  `try_acquire_owned` is
+    // non-blocking: at the cap, reject fast rather than queueing.
+    // The permit is moved into the detach task so it's released when
+    // the stream ends (disconnect, shutdown, or panic).
+    let permit = match hub.sse_subscribers.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            tracing::warn!(
+                %node_id,
+                "SSE subscriber cap reached — rejecting new stream"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many concurrent SSE subscribers",
+            )
+                .into_response();
+        }
+    };
+
     // Build the per-node channel and attach it.
     let (tx, rx) = mpsc::channel::<SseEvent>(SSE_CHANNEL_DEPTH);
     hub.registry.attach_sse(&node_id, tx.clone()).await;
@@ -83,6 +103,10 @@ pub async fn events_handler(
     let registry = hub.registry.clone();
     let detach_id = node_id.clone();
     let handle = tokio::spawn(async move {
+        // Hold the subscriber permit for the lifetime of the stream;
+        // it's released when this task ends (either because the client
+        // disconnected, the hub shut down, or the tx was dropped).
+        let _permit = permit;
         tx.closed().await;
         if registry.remove_node(&detach_id).await {
             tracing::info!(node_id = %detach_id, "node disconnected — removed from registry");

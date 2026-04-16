@@ -819,49 +819,70 @@ async fn swarm_submit(
     let args = parse_dispatch_args(arguments)?;
 
     // Pre-generate the task_id so the idempotency record points at the
-    // real task we're about to place.  If a duplicate already exists
-    // under this key, short-circuit and return the original id; the
-    // generated uuid is discarded.
+    // real task we're about to place.  If a *committed* duplicate exists
+    // under this key, short-circuit with the original id.  Otherwise
+    // hold a tentative reservation that we commit only after `place_task`
+    // succeeds — a failed dispatch rolls the reservation back so a retry
+    // isn't pinned to a phantom task_id.
     let reserved_task_id = uuid::Uuid::new_v4().to_string();
-    let effective_task_id = if let Some(key) = args.idempotency_key.as_deref() {
-        match hub
-            .idempotency
-            .check_or_insert(&caller.node_id, key, &reserved_task_id)
-            .await
-        {
-            Some(existing) => {
-                // Replay: return the original task_id without a fresh dispatch.
-                let snap = hub.tasks.get_owned(&existing, &caller.node_id).await;
-                let (node_id, submitted_at_unix, state) = match snap {
-                    Some(s) => (
-                        s.node_id,
-                        s.submitted_at_unix,
-                        format!("{:?}", s.state).to_ascii_lowercase(),
-                    ),
-                    None => (String::new(), 0, "unknown".into()),
-                };
-                return Ok(json!({
-                    "task_id": existing,
-                    "node_id": node_id,
-                    "submitted_at_unix": submitted_at_unix,
-                    "state": state,
-                    "idempotent_replay": true,
-                }));
+    let (effective_task_id, reservation) =
+        if let Some(key) = args.idempotency_key.as_deref() {
+            match hub
+                .idempotency
+                .reserve(&caller.node_id, key, &reserved_task_id)
+                .await
+            {
+                crate::idempotency::Reservation::Replay(existing) => {
+                    // Replay: return the original task_id without a fresh dispatch.
+                    let snap = hub.tasks.get_owned(&existing, &caller.node_id).await;
+                    let (node_id, submitted_at_unix, state) = match snap {
+                        Some(s) => (
+                            s.node_id,
+                            s.submitted_at_unix,
+                            format!("{:?}", s.state).to_ascii_lowercase(),
+                        ),
+                        None => (String::new(), 0, "unknown".into()),
+                    };
+                    return Ok(json!({
+                        "task_id": existing,
+                        "node_id": node_id,
+                        "submitted_at_unix": submitted_at_unix,
+                        "state": state,
+                        "idempotent_replay": true,
+                    }));
+                }
+                crate::idempotency::Reservation::Fresh(handle) => {
+                    (reserved_task_id, Some(handle))
+                }
             }
-            None => reserved_task_id,
-        }
-    } else {
-        reserved_task_id
-    };
+        } else {
+            (reserved_task_id, None)
+        };
 
-    let placed = place_task(
+    let placed = match place_task(
         hub,
         &args,
         Some(&caller.node_id),
         None,
         Some(effective_task_id),
     )
-    .await?;
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            // Dispatch failed — drop the tentative reservation so the
+            // caller can retry with the same idempotency key.
+            if let Some(h) = reservation {
+                hub.idempotency.rollback(h).await;
+            }
+            return Err(e);
+        }
+    };
+
+    // Task is placed in the store; promote the reservation to committed.
+    if let Some(h) = reservation {
+        hub.idempotency.commit(h).await;
+    }
 
     Ok(json!({
         "task_id": placed.task_id,

@@ -34,6 +34,33 @@ pub fn generate_token() -> String {
     STANDARD.encode(buf)
 }
 
+/// Constant-time byte comparison.
+///
+/// Always touches every byte of the longer input so the runtime does
+/// not leak the length of a prefix match.  Used for bearer-token
+/// lookups — a HashMap probe is fast-compare and could in principle
+/// expose bucket-level timing; a linear scan with this routine is
+/// trivially cheap at the scale we operate (O(100) tokens) and keeps
+/// the comparison timing-flat.  Inline to avoid pulling `subtle` for
+/// one call site.
+#[inline]
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    // Compare to the longer length so both sides do equal work
+    // regardless of input sizes.  `len_diff` is folded into the
+    // accumulator so length mismatches don't short-circuit.
+    let max = a.len().max(b.len());
+    let mut diff: u8 = (a.len() ^ b.len()) as u8;
+    for i in 0..max {
+        let x = *a.get(i).unwrap_or(&0);
+        let y = *b.get(i).unwrap_or(&0);
+        diff |= x ^ y;
+    }
+    // `std::hint::black_box` is overkill here; LLVM won't elide the
+    // loop because `diff` is returned.  Keep the bool conversion
+    // explicit so it's clear there's no early exit.
+    diff == 0
+}
+
 /// Parse a bearer token out of the `Authorization` header.
 ///
 /// Returns `None` if the header is absent, malformed, or doesn't start
@@ -120,5 +147,18 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(AUTHORIZATION, "Basic dXNlcjpwYXNz".parse().unwrap());
         assert!(extract_bearer(&h).is_none());
+    }
+
+    #[test]
+    fn constant_time_eq_matches() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_different() {
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(!constant_time_eq(b"", b"x"));
     }
 }

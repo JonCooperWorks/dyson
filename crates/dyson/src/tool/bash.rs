@@ -348,12 +348,16 @@ fn is_safe_env_var(name: &str) -> bool {
         "GIT_", // GIT_DIR, GIT_INDEX_FILE, etc. — note GIT_ASKPASS is a path not a secret
     ];
 
-    if SAFE_EXACT.iter().any(|&s| name.eq_ignore_ascii_case(s)) {
+    // Env names are case-sensitive on Unix (the only platform Dyson
+    // supports).  Match exactly so lowercased variants like `path` or
+    // `lc_all` don't sneak past the allowlist on the grounds of an
+    // accidental case-insensitive compare.
+    if SAFE_EXACT.contains(&name) {
         return true;
     }
     if SAFE_PREFIXES
         .iter()
-        .any(|&s| name.len() >= s.len() && name[..s.len()].eq_ignore_ascii_case(s))
+        .any(|&s| name.len() >= s.len() && &name[..s.len()] == s)
     {
         return true;
     }

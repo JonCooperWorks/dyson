@@ -117,6 +117,15 @@ impl Tool for WebFetchTool {
             )));
         }
 
+        // SSRF defence-in-depth: the shared client's redirect policy
+        // blocks literal-IP redirects into private space, but the
+        // *initial* URL can still be a hostname that resolves to a
+        // private IP.  Resolve and verify up-front.  Closes the DNS
+        // rebinding gap documented in `crate::http::safe_redirect_policy`.
+        if let Err(e) = crate::http::verify_url_safe(&url).await {
+            return Ok(ToolOutput::error(e));
+        }
+
         let max_length = input["max_length"]
             .as_u64()
             .unwrap_or(DEFAULT_MAX_LENGTH as u64)

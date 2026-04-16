@@ -174,7 +174,16 @@ Lines containing any of these markers are extracted (up to 20):
 `Compiling`, `Finished`, `error`, `warning`, `Error`, `Warning`,
 `FAILED`, `PASSED`, `panic`, `thread '`
 
-`to_llm_message()` combines summary + output + truncation notice into the `tool_result` content. Outputs exceeding 30,000 characters are truncated.
+`to_llm_message()` combines summary + output + truncation notice into the `tool_result` content. Outputs exceeding 30,000 characters are truncated. The threshold is evaluated **after** sanitization so the `truncated` flag reflects the bytes the model actually sees.
+
+### Prompt-injection sanitization
+
+Every tool output flows through `sanitize_tool_output` before reaching the model. The sanitizer defangs two families of markers:
+
+- **Tokenizer-exact** (case-sensitive): ChatML / Llama delimiters such as `<|im_start|>`, `<|im_end|>`, `<|start_header_id|>`, `<|end_header_id|>`, `<|eot_id|>`, `<|endoftext|>`. Case matters because these are literal byte sequences in the tokenizer.
+- **Semantic** (case-insensitive): `<system-reminder>` / `</system-reminder>` — some models honour these even with mixed case, so we probe with `eq_ignore_ascii_case`.
+
+Defanging inserts a U+200B zero-width space after the opening `<` / `|` so the token no longer parses as a role delimiter while remaining readable for humans inspecting raw output. The formatter funnels every tool (including `file_write`, whose summary interpolates the output string) through a shared builder so no bypass path exists.
 
 ---
 

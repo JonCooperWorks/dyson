@@ -200,8 +200,28 @@ impl NodeRegistry {
     }
 
     /// Resolve a bearer token back to a node_id.
+    ///
+    /// Uses a constant-time byte comparison against every stored token
+    /// so a network attacker cannot use response-time differences to
+    /// probe for valid tokens a byte at a time.  The map is still keyed
+    /// by token for O(1) insert/delete; we sacrifice only the lookup
+    /// hot path, which at the hub's scale (O(100) tokens) costs tens
+    /// of microseconds worst case — negligible next to the network
+    /// round-trip already in flight.
     pub async fn node_id_for_token(&self, token: &str) -> Option<NodeId> {
-        self.inner.read().await.token_to_id.get(token).cloned()
+        let inner = self.inner.read().await;
+        let probe = token.as_bytes();
+        // Walk the entire set so timing doesn't leak which position
+        // matched (or whether any did).
+        let mut found: Option<NodeId> = None;
+        for (stored, id) in &inner.token_to_id {
+            if crate::auth::constant_time_eq(stored.as_bytes(), probe) {
+                // Don't break — keep walking so the total work is
+                // independent of the match position.
+                found = Some(id.clone());
+            }
+        }
+        found
     }
 
     /// Attach an SSE sender to the node, replacing any previous one.

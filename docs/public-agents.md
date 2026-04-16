@@ -223,14 +223,31 @@ should be aware that public agent memory is untrusted data.
 
 ### SSRF Protection
 
-The `PolicySandbox` blocks `web_fetch` requests to internal networks:
+SSRF defence is layered:
+
+**Baseline (`web_fetch`, all agents)** — `crate::http::verify_url_safe`
+resolves the URL's hostname up-front and rejects IPs in private space
+before the request is dispatched. The shared `reqwest::Client`'s
+redirect policy additionally caps the redirect chain and refuses
+literal-IP redirects into private space. Both hooks share the same
+address classification.
+
+**Policy-level (`PolicySandbox`, public agents)** — re-enforces the
+same address classification inside the tool invocation so
+`network: "deny"` / `"public"` overrides behave correctly per channel.
+
+Blocked ranges:
 - Loopback (`127.0.0.0/8`, `::1`, `localhost`)
 - Private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
 - Link-local (`169.254.0.0/16` — includes cloud metadata), `fe80::/10`
 - IPv6 ULA (`fc00::/7`), multicast, reserved hostnames
+- Well-known cloud metadata hostnames (`metadata.google.internal`, etc.)
 
-Hostnames are resolved via DNS before checking. The SSRF check lives in the
-sandbox layer and applies to all agents (public and private).
+A narrow DNS-rebinding TOCTOU remains between our pre-resolution and
+reqwest's internal resolution. Exploiting it requires TTL=0 records
+timed to flip between the two resolutions, beating the client's own
+resolver cache — the combined baseline + redirect policy + public-agent
+sandbox is the practical mitigation.
 
 ### Write Attribution
 

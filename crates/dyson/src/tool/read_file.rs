@@ -323,7 +323,7 @@ where
         )));
     }
     if input_len >= RATIO_MIN_INPUT_BYTES
-        && text.len() / input_len.max(1) > MAX_EXTRACT_RATIO
+        && text.len() / input_len.max(1) >= MAX_EXTRACT_RATIO
     {
         return Ok(ToolOutput::error(format!(
             "document '{}' decompression ratio {}x exceeds limit {}x — refusing to process",

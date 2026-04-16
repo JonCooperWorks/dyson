@@ -101,6 +101,8 @@ sequenceDiagram
 
 Both insert into the same `TaskStore`, so `swarm_task_list`, `swarm_task_status`, `swarm_task_checkpoints`, `swarm_task_result`, and `swarm_task_cancel` work uniformly across them.
 
+**Idempotency** (`swarm_submit` only): pass an optional `idempotency_key` (≤256 chars) to make retries safe. The hub records the mapping `(caller, key) → task_id` only **after** `place_task` succeeds, so a failed dispatch does not poison the key — a retry with the same key can proceed. A duplicate call with a key that already points at a committed task returns the original `task_id` with `"idempotent_replay": true`. Entries decay alongside the 24 h task TTL; a background sweep (~5 min cadence) reclaims expired entries even when the hub is write-silent.
+
 ---
 
 ## Routing: the caller decides
@@ -485,9 +487,15 @@ swarm --bind 0.0.0.0:443 --data-dir ./hub-data \
       --mcp-api-key-hash '$argon2id$v=19$m=19456,t=2,p=1$SALT$HASH'
 ```
 
-MCP clients authenticate with `Authorization: Bearer <plaintext-key>`. The hub tries the fast node-token lookup first (O(1)), then falls back to argon2id verification (~30-50ms) if the token doesn't match any registered node.
+MCP clients authenticate with `Authorization: Bearer <plaintext-key>`. The hub compares the presented token against every stored node token using a constant-time byte comparison before falling back to argon2id verification (~30-50 ms). The scan is linear in the number of registered nodes but trivially cheap at the hub's target scale (O(100) tokens); the constant-time walk keeps response timing independent of which position matched, so an attacker cannot probe for valid tokens a byte at a time from the network.
 
 API key callers get a synthetic owner ID (`apikey:<hash-prefix>`) so task ownership scoping works — their tasks are invisible to node-token callers and vice versa.
+
+### Abuse guards
+
+- **Body size limits** per endpoint (set in the router) bound the worst-case request payload.
+- **SSE subscriber cap**: `/swarm/events` is gated on a process-wide semaphore. A deployment above the cap receives `503 Service Unavailable` immediately (no queueing) so an abusive client cannot exhaust file descriptors by opening streams in a loop. Per-stream memory is already bounded by the 32-slot channel depth; this cap bounds *total* open streams.
+- **Idempotency index** is capped at a soft ceiling and opportunistically swept on insert; a separate periodic sweep bounds retention when writes are sparse.
 
 ### Deployment patterns
 
