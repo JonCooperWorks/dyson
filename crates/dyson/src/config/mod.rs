@@ -929,7 +929,11 @@ pub struct WebSearchConfig {
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
-            model: "claude-sonnet-4-20250514".into(),
+            // No hardcoded model default.  The config loader rejects configs
+            // that don't resolve to a concrete `agent.model` — users must
+            // configure their model explicitly so Dyson never silently bills
+            // a model they didn't choose.
+            model: String::new(),
             max_iterations: 20,
             max_retries: 3,
             max_tokens: 8192,

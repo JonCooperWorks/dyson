@@ -403,9 +403,30 @@ pub fn load_settings(path: Option<&Path>) -> Result<Settings> {
     let mut settings = build_settings(json_root, &secrets);
 
     resolve_api_keys(&mut settings, &secrets)?;
+    validate_agent_model(&settings)?;
     validate_subagent_configs(&settings)?;
 
     Ok(settings)
+}
+
+/// Refuse to boot with an unconfigured agent model.
+///
+/// Dyson no longer ships hardcoded per-provider defaults, so every config
+/// must resolve to an explicit model id — either `agent.model` or the first
+/// entry of the active provider's `models` array.  A missing model used to
+/// silently fall back to Sonnet, which billed users for a model they never
+/// asked for.
+fn validate_agent_model(settings: &Settings) -> Result<()> {
+    if settings.agent.model.trim().is_empty() {
+        return Err(DysonError::Config(
+            "no model configured for the active agent.  Set `agent.model` or \
+             populate the active provider's `models` array in dyson.json.  \
+             Dyson no longer falls back to a hardcoded default so the user \
+             is always in control of what they pay for."
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Reject subagent configs whose `provider` is not `"default"` or a
@@ -656,21 +677,22 @@ fn parse_providers(
             None => crate::auth::Credential::new(String::new()),
         };
 
-        let models = if jp.models.is_empty() {
-            vec![
-                crate::llm::registry::lookup(&provider_type)
-                    .default_model
-                    .into(),
-            ]
-        } else {
-            jp.models
-        };
+        if jp.models.is_empty() {
+            tracing::error!(
+                provider = name.as_str(),
+                r#type = jp.provider_type.as_str(),
+                "provider has no `models` configured — skipping.  \
+                 Dyson no longer ships hardcoded model defaults; specify \
+                 at least one model id in the provider's `models` array."
+            );
+            continue;
+        }
 
         settings.providers.insert(
             name,
             ProviderConfig {
                 provider_type,
-                models,
+                models: jp.models,
                 api_key,
                 base_url: jp.base_url,
             },
@@ -1336,9 +1358,34 @@ mod tests {
     fn defaults_when_no_config() {
         let secrets = SecretRegistry::default();
         let settings = build_settings(None, &secrets);
-        assert_eq!(settings.agent.model, "claude-sonnet-4-20250514");
+        // With no config file, the agent model is empty — `validate_agent_model`
+        // (run later by `load_settings`) will reject that so the user can't
+        // silently boot on a hardcoded default.
+        assert_eq!(settings.agent.model, "");
         assert_eq!(settings.agent.max_iterations, 20);
         assert!(!settings.skills.is_empty());
+    }
+
+    #[test]
+    fn validate_agent_model_rejects_empty_model() {
+        let settings = Settings::default();
+        assert!(settings.agent.model.is_empty());
+        let err = validate_agent_model(&settings).unwrap_err();
+        assert!(format!("{err}").contains("no model configured"));
+    }
+
+    #[test]
+    fn provider_without_models_is_rejected() {
+        let json = r#"{
+            "providers": {
+                "broken": { "type": "anthropic", "api_key": "sk-x" }
+            }
+        }"#;
+        let root: JsonRoot = serde_json::from_str(json).unwrap();
+        let secrets = SecretRegistry::default();
+        let settings = build_settings(Some(root), &secrets);
+        // Provider was skipped because `models` was empty.
+        assert!(!settings.providers.contains_key("broken"));
     }
 
     #[test]
@@ -1371,6 +1418,7 @@ mod tests {
             "providers": {
                 "test": {
                     "type": "anthropic",
+                    "models": ["claude-sonnet-4-20250514"],
                     "api_key": { "resolver": "insecure_env", "name": "DYSON_JSON_TEST_2" }
                 }
             },
@@ -1461,7 +1509,11 @@ mod tests {
     fn unknown_provider_name_warns() {
         let json = r#"{
             "providers": {
-                "claude": { "type": "anthropic", "api_key": "sk-test" }
+                "claude": {
+                    "type": "anthropic",
+                    "models": ["claude-sonnet-4-20250514"],
+                    "api_key": "sk-test"
+                }
             },
             "agent": { "provider": "nonexistent" }
         }"#;
@@ -1469,12 +1521,15 @@ mod tests {
         let secrets = SecretRegistry::default();
         let settings = build_settings(Some(root), &secrets);
 
-        // Falls back to defaults when provider name not found.
+        // Provider name didn't resolve, so nothing overrode the AgentSettings
+        // default.  With the registry default removed, the model is blank —
+        // `validate_agent_model` (called by `load_settings`) would reject this
+        // config so the user has to be explicit.
         assert_eq!(
             settings.agent.provider,
             crate::config::LlmProvider::Anthropic
         );
-        assert_eq!(settings.agent.model, "claude-sonnet-4-20250514");
+        assert_eq!(settings.agent.model, "");
     }
 
     #[test]

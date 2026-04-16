@@ -213,8 +213,15 @@ pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
 /// slice of the parent's tools.  See the module header for invariants.
 pub struct SubagentTool {
     config: SubagentAgentConfig,
-    /// Resolved provider type for default-model lookup.
+    /// Resolved provider type.
     provider: LlmProvider,
+    /// Fallback model used when `config.model` is `None`.  Resolved at
+    /// skill-construction time from the user's config — either the
+    /// parent agent's model (for the `"default"` sentinel provider) or
+    /// the first entry in the subagent provider's `models` list.  Never
+    /// a registry default, so subagents always bill the same model the
+    /// user configured.
+    parent_model: String,
     /// Shares the parent's rate-limit window via `ClientRegistry`.
     client: RateLimitedHandle<Box<dyn LlmClient>>,
     sandbox: Arc<dyn Sandbox>,
@@ -228,6 +235,7 @@ impl SubagentTool {
     pub fn new(
         config: SubagentAgentConfig,
         provider: LlmProvider,
+        parent_model: String,
         client: RateLimitedHandle<Box<dyn LlmClient>>,
         sandbox: Arc<dyn Sandbox>,
         workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
@@ -236,6 +244,7 @@ impl SubagentTool {
         Self {
             config,
             provider,
+            parent_model,
             client,
             sandbox,
             workspace,
@@ -282,11 +291,11 @@ impl Tool for SubagentTool {
             format!("Context:\n{}\n\nTask:\n{}", parsed.context, parsed.task)
         };
 
-        let model = self.config.model.clone().unwrap_or_else(|| {
-            crate::llm::registry::lookup(&self.provider)
-                .default_model
-                .to_string()
-        });
+        let model = self
+            .config
+            .model
+            .clone()
+            .unwrap_or_else(|| self.parent_model.clone());
 
         let settings = AgentSettings {
             model,
@@ -347,12 +356,20 @@ impl SubagentSkill {
         let mut prompt_lines: Vec<String> = Vec::new();
 
         for cfg in configs {
-            let (provider, client) = if cfg.provider == "default" {
-                (settings.agent.provider.clone(), registry.get_default())
+            let (provider, parent_model, client) = if cfg.provider == "default" {
+                (
+                    settings.agent.provider.clone(),
+                    settings.agent.model.clone(),
+                    registry.get_default(),
+                )
             } else {
                 match settings.providers.get(&cfg.provider) {
                     Some(pc) => match registry.get(&cfg.provider) {
-                        Ok(handle) => (pc.provider_type.clone(), handle),
+                        Ok(handle) => (
+                            pc.provider_type.clone(),
+                            pc.default_model().to_string(),
+                            handle,
+                        ),
                         Err(e) => {
                             tracing::error!(
                                 subagent = cfg.name,
@@ -379,6 +396,7 @@ impl SubagentSkill {
             let tool = SubagentTool::new(
                 cfg.clone(),
                 provider,
+                parent_model,
                 client,
                 Arc::clone(&sandbox),
                 workspace.clone(),
@@ -400,10 +418,14 @@ impl SubagentSkill {
 
         // Coder is always present: it takes a `path` and scopes the
         // child's `working_dir`, behavior SubagentTool doesn't expose.
-        let (coder_provider, coder_client) =
-            (settings.agent.provider.clone(), registry.get_default());
+        // Built-in tools (coder, orchestrators, inner subagents) all
+        // inherit the parent's configured model — never a registry default.
+        let coder_provider = settings.agent.provider.clone();
+        let coder_model = settings.agent.model.clone();
+        let coder_client = registry.get_default();
         let coder_tool = CoderTool::new(
             coder_provider.clone(),
+            coder_model.clone(),
             coder_client.clone(),
             Arc::clone(&sandbox),
             workspace.clone(),
@@ -425,6 +447,7 @@ impl SubagentSkill {
                 let inner_tool = SubagentTool::new(
                     cfg.clone(),
                     settings.agent.provider.clone(),
+                    settings.agent.model.clone(),
                     registry.get_default(),
                     Arc::clone(&sandbox),
                     workspace.clone(),
@@ -436,6 +459,7 @@ impl SubagentSkill {
             // Inner coder shared by all orchestrators.
             let inner_coder = CoderTool::new(
                 settings.agent.provider.clone(),
+                settings.agent.model.clone(),
                 registry.get_default(),
                 Arc::clone(&sandbox),
                 workspace.clone(),
@@ -455,6 +479,7 @@ impl SubagentSkill {
                 let orch_tool = OrchestratorTool::new(
                     orch_cfg.clone(),
                     coder_provider.clone(),
+                    coder_model.clone(),
                     coder_client.clone(),
                     Arc::clone(&sandbox),
                     workspace.clone(),

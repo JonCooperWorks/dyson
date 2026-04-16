@@ -53,9 +53,6 @@ pub struct ProviderEntry {
     /// Used by `from_str_loose()` to map user input to `LlmProvider`.
     pub aliases: &'static [&'static str],
 
-    /// Default model identifier when the user doesn't specify one.
-    pub default_model: &'static str,
-
     /// Environment variable name for API key fallback.
     ///
     /// `None` for CLI-subprocess providers (ClaudeCode, Codex) that
@@ -178,7 +175,6 @@ pub fn registry() -> &'static [ProviderEntry] {
                 provider: LlmProvider::Anthropic,
                 canonical_name: "anthropic",
                 aliases: &["anthropic"],
-                default_model: "claude-sonnet-4-20250514",
                 env_var: Some("ANTHROPIC_API_KEY"),
                 requires_api_key: true,
                 create_client: |c| Box::new(anthropic::AnthropicClient::new(c.api_key)),
@@ -187,7 +183,6 @@ pub fn registry() -> &'static [ProviderEntry] {
                 provider: LlmProvider::OpenAi,
                 canonical_name: "openai",
                 aliases: &["openai", "gpt"],
-                default_model: "gpt-4o",
                 env_var: Some("OPENAI_API_KEY"),
                 requires_api_key: true,
                 create_client: |c| {
@@ -203,7 +198,6 @@ pub fn registry() -> &'static [ProviderEntry] {
                 provider: LlmProvider::OpenRouter,
                 canonical_name: "openrouter",
                 aliases: &["openrouter", "open-router", "open_router"],
-                default_model: "anthropic/claude-sonnet-4",
                 env_var: Some("OPENROUTER_API_KEY"),
                 requires_api_key: true,
                 create_client: |c| {
@@ -214,7 +208,6 @@ pub fn registry() -> &'static [ProviderEntry] {
                 provider: LlmProvider::ClaudeCode,
                 canonical_name: "claude-code",
                 aliases: &["claude-code", "claude_code", "cc"],
-                default_model: "claude-sonnet-4-20250514",
                 env_var: None,
                 requires_api_key: false,
                 create_client: |c| {
@@ -230,7 +223,6 @@ pub fn registry() -> &'static [ProviderEntry] {
                 provider: LlmProvider::Codex,
                 canonical_name: "codex",
                 aliases: &["codex", "codex-cli"],
-                default_model: "codex",
                 env_var: None,
                 requires_api_key: false,
                 create_client: |c| {
@@ -245,7 +237,6 @@ pub fn registry() -> &'static [ProviderEntry] {
                 provider: LlmProvider::OllamaCloud,
                 canonical_name: "ollama-cloud",
                 aliases: &["ollama-cloud", "ollama_cloud", "ollama"],
-                default_model: "llama3.3",
                 env_var: Some("OLLAMA_API_KEY"),
                 requires_api_key: true,
                 create_client: |c| {
@@ -256,7 +247,6 @@ pub fn registry() -> &'static [ProviderEntry] {
                 provider: LlmProvider::Gemini,
                 canonical_name: "gemini",
                 aliases: &["gemini", "google"],
-                default_model: "gemini-2.5-flash",
                 env_var: Some("GEMINI_API_KEY"),
                 requires_api_key: true,
                 create_client: |c| {
@@ -339,7 +329,6 @@ mod tests {
     fn lookup_finds_all_providers() {
         let entry = lookup(&LlmProvider::Anthropic);
         assert_eq!(entry.canonical_name, "anthropic");
-        assert_eq!(entry.default_model, "claude-sonnet-4-20250514");
         assert_eq!(entry.env_var, Some("ANTHROPIC_API_KEY"));
         assert!(entry.requires_api_key);
 
