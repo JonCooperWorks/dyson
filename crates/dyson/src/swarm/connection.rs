@@ -16,6 +16,8 @@
 //   the same proxy settings.  No new dependency.
 // ===========================================================================
 
+use std::fmt;
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use futures_util::StreamExt;
@@ -230,10 +232,24 @@ impl SwarmConnection {
 // ---------------------------------------------------------------------------
 
 /// Response from the hub after successful registration.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+///
+/// `token` is a bearer credential — the manual `Debug` impl redacts it so
+/// it never reaches logs via `{:?}`, and `Serialize` skips it so the struct
+/// can't accidentally be re-emitted to another endpoint.
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub struct RegisterResponse {
     pub node_id: String,
+    #[serde(skip_serializing)]
     pub token: String,
+}
+
+impl fmt::Debug for RegisterResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegisterResponse")
+            .field("node_id", &self.node_id)
+            .field("token", &"***redacted***")
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +312,35 @@ fn parse_sse_event(event_type: &str, data: &str) -> Option<SwarmEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn register_response_debug_redacts_token() {
+        let resp = RegisterResponse {
+            node_id: "node-abc".into(),
+            token: "super-secret-bearer-token".into(),
+        };
+        let debug = format!("{resp:?}");
+        assert!(debug.contains("node-abc"), "node_id should be visible");
+        assert!(
+            !debug.contains("super-secret-bearer-token"),
+            "token must not appear in Debug output: {debug}"
+        );
+        assert!(debug.contains("redacted"), "should mark token redacted");
+    }
+
+    #[test]
+    fn register_response_serialize_skips_token() {
+        let resp = RegisterResponse {
+            node_id: "node-abc".into(),
+            token: "super-secret-bearer-token".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("node-abc"));
+        assert!(
+            !json.contains("super-secret-bearer-token"),
+            "token must not be re-serialized: {json}"
+        );
+    }
 
     #[test]
     fn parse_sse_registered() {
