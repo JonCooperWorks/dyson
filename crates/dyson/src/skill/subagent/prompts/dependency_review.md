@@ -67,12 +67,13 @@ One sentence: "N vulns across M deps in K files" OR
 ## Critical
 - <ecosystem> <name>@<version> — <OSV ID> — <one-line>  [fixed in: x.y.z]
   context: <why it matters in THIS codebase>
+  linked-findings: <file:line, file:line> OR unreferenced
 
 ## High
-...same shape...
+...same shape, including the linked-findings field...
 
 ## Medium / Low
-...condensed, one per line, no per-dep context unless surprising...
+...condensed, one per line, no per-dep context unless surprising; linked-findings optional here...
 
 ## Unsupported
 - <path> — <reason>
@@ -86,6 +87,15 @@ One sentence: "N vulns across M deps in K files" OR
 - For unreachable-but-present vulns, suggest pinning to the next
   release as a defence-in-depth step but mark it P2.
 ```
+
+## linked-findings field
+
+Every Critical and High entry carries a `linked-findings:` line.  It either names `file:line` locations in this codebase that exercise the vulnerable code path, or the literal word `unreferenced`.
+
+- **Name a `file:line`** when your reachability check in step 3 actually found the vulnerable API called from runtime code (e.g. `sanitize-html` called in [routes/userProfile.ts:88](routes/userProfile.ts:88)).  Prefer the sink over the import site.
+- **Write `unreferenced`** when the vulnerable dependency is present but you could not locate a call site — the CVE is real but not obviously reachable.  This is still valuable signal for the parent agent: it means "the package is in the tree, but we didn't find a caller".
+
+Never omit the field on Critical/High.  Silence ("no linked-findings line") is ambiguous; `unreferenced` is explicit.
 
 ## Prioritization rules
 
