@@ -164,7 +164,7 @@ async fn run_mini_loop(
         };
 
         let mut silent = SilentOutput;
-        let (assistant_msg, tool_calls, _tokens) =
+        let (assistant_msg, tool_calls, _tokens, _stop_reason) =
             stream_handler::process_stream(response.stream, &mut silent).await?;
 
         messages.push(assistant_msg);
@@ -533,7 +533,7 @@ pub(super) async fn synthesize_to_workspace(
         .await?;
 
     let mut silent = SilentOutput;
-    let (assistant_msg, _, _) =
+    let (assistant_msg, _, _, _stop_reason) =
         stream_handler::process_stream(response.stream, &mut silent).await?;
 
     let mut new_memory = String::new();

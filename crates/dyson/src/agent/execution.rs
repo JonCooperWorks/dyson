@@ -102,7 +102,7 @@ impl Agent {
             .await
         {
             Ok(response) => {
-                let (assistant_msg, _tool_calls, _output_tokens) =
+                let (assistant_msg, _tool_calls, _output_tokens, _stop_reason) =
                     super::stream_handler::process_stream(response.stream, output).await?;
                 let text = assistant_msg
                     .last_text()

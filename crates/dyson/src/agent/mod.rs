@@ -1121,7 +1121,7 @@ impl Agent {
             // text and no tool calls, retry the request per our retry policy
             // without advancing the iteration counter.
             let mut empty_attempts: usize = 0;
-            let (tool_mode, input_tokens, assistant_msg, tool_calls, output_tokens) = loop {
+            let (tool_mode, input_tokens, assistant_msg, tool_calls, output_tokens, stop_reason) = loop {
                 let response = match self
                     .stream_with_retry(&skill_fragments, &mut recovered_this_turn, output)
                     .await
@@ -1140,7 +1140,7 @@ impl Agent {
                     "streaming response"
                 );
 
-                let (assistant_msg, tool_calls, output_tokens) =
+                let (assistant_msg, tool_calls, output_tokens, stop_reason) =
                     stream_handler::process_stream(response.stream, output).await?;
 
                 // Empty responses (no text, no tool calls) can happen
@@ -1166,7 +1166,7 @@ impl Agent {
                     continue;
                 }
 
-                break (tool_mode, input_tokens, assistant_msg, tool_calls, output_tokens);
+                break (tool_mode, input_tokens, assistant_msg, tool_calls, output_tokens, stop_reason);
             };
 
             if let Some(input_tokens) = input_tokens {
@@ -1196,6 +1196,24 @@ impl Agent {
             // We display them to the user but don't re-execute, and break to
             // avoid an infinite loop re-feeding already-handled tool_use blocks.
             if tool_calls.is_empty() || tool_mode == crate::llm::ToolMode::Observe {
+                // MaxTokens with no tool calls means the response was
+                // truncated mid-generation.  Push the partial message into
+                // history and inject a continuation prompt so the LLM can
+                // pick up where it left off.
+                if stop_reason == crate::llm::stream::StopReason::MaxTokens
+                    && tool_mode != crate::llm::ToolMode::Observe
+                {
+                    tracing::warn!(
+                        "response truncated by max_tokens — injecting continuation prompt"
+                    );
+                    self.conversation.messages.push(assistant_msg);
+                    self.conversation.messages.push(Message::user(
+                        "[Your previous response was cut off because it exceeded the \
+                         output token limit. Please continue exactly where you left off.]",
+                    ));
+                    continue;
+                }
+
                 if let Some(text) = assistant_msg.last_text() {
                     final_text = text.to_string();
                 } else if any_text_streamed {
@@ -1504,7 +1522,7 @@ pub async fn quick_response(
         .await?;
 
     // Process the stream — reuse the standard handler.
-    let (assistant_msg, _tool_calls, _output_tokens) =
+    let (assistant_msg, _tool_calls, _output_tokens, _stop_reason) =
         stream_handler::process_stream(response.stream, output).await?;
 
     output.flush()?;

@@ -44,7 +44,7 @@ use tokio_stream::StreamExt;
 
 use crate::controller::Output;
 use crate::error::Result;
-use crate::llm::stream::StreamEvent;
+use crate::llm::stream::{StopReason, StreamEvent};
 use crate::message::{ContentBlock, Message};
 
 // ---------------------------------------------------------------------------
@@ -108,6 +108,9 @@ impl ToolCall {
 /// - `Vec<ToolCall>`: Tool calls that need to be executed (empty if the LLM
 ///   just sent text and no tool calls).
 /// - `usize`: Output token count (API-reported if available, otherwise estimated).
+/// - `StopReason`: Why the LLM stopped generating (end_turn, tool_use, or
+///   max_tokens).  The agent loop uses this to detect truncated responses
+///   and inject continuation prompts.
 ///
 /// ## Error handling
 ///
@@ -117,7 +120,7 @@ impl ToolCall {
 pub async fn process_stream(
     stream: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>,
     output: &mut dyn Output,
-) -> Result<(Message, Vec<ToolCall>, usize)> {
+) -> Result<(Message, Vec<ToolCall>, usize, StopReason)> {
     let mut content_blocks: Vec<ContentBlock> = Vec::with_capacity(4);
     let mut tool_calls: Vec<ToolCall> = Vec::with_capacity(4);
 
@@ -132,12 +135,13 @@ pub async fn process_stream(
     // servers and reclassifies them as thinking content.
     let mut think_tag_parser = ThinkTagParser::new();
 
-    // Timing and token counting.
+    // Timing, token counting, and stop reason tracking.
     let stream_start = std::time::Instant::now();
     let mut first_token_time: Option<std::time::Instant> = None;
     let mut token_count: usize = 0;
     let mut api_output_tokens: Option<usize> = None;
     let mut typing_cleared = false;
+    let mut final_stop_reason = StopReason::EndTurn;
 
     tokio::pin!(stream);
 
@@ -235,7 +239,8 @@ pub async fn process_stream(
                 output.tool_use_complete()?;
             }
 
-            StreamEvent::MessageComplete { output_tokens, .. } => {
+            StreamEvent::MessageComplete { stop_reason, output_tokens } => {
+                final_stop_reason = stop_reason;
                 api_output_tokens = output_tokens;
                 let elapsed = stream_start.elapsed();
                 let elapsed_ms = elapsed.as_millis();
@@ -290,7 +295,7 @@ pub async fn process_stream(
 
     let message = Message::assistant(content_blocks);
     let final_token_count = api_output_tokens.unwrap_or(token_count);
-    Ok((message, tool_calls, final_token_count))
+    Ok((message, tool_calls, final_token_count, final_stop_reason))
 }
 
 // ---------------------------------------------------------------------------
@@ -496,7 +501,7 @@ mod tests {
         ]);
 
         let mut output = RecordingOutput::new();
-        let (message, tool_calls, _tokens) = process_stream(stream, &mut output).await.unwrap();
+        let (message, tool_calls, _tokens, _stop) = process_stream(stream, &mut output).await.unwrap();
 
         assert_eq!(output.text(), "Hello world");
         assert!(tool_calls.is_empty());
@@ -527,7 +532,7 @@ mod tests {
         ]);
 
         let mut output = RecordingOutput::new();
-        let (message, tool_calls, _tokens) = process_stream(stream, &mut output).await.unwrap();
+        let (message, tool_calls, _tokens, _stop) = process_stream(stream, &mut output).await.unwrap();
 
         assert_eq!(output.text(), "Checking.");
         assert_eq!(tool_calls.len(), 1);
@@ -565,7 +570,7 @@ mod tests {
         ]);
 
         let mut output = RecordingOutput::new();
-        let (message, tool_calls, _tokens) = process_stream(stream, &mut output).await.unwrap();
+        let (message, tool_calls, _tokens, _stop) = process_stream(stream, &mut output).await.unwrap();
 
         // Output should show the thinking indicator + the visible text.
         assert_eq!(output.text(), "I'm thinking …\nThe answer is 42.");
@@ -672,7 +677,7 @@ mod tests {
         ]);
 
         let mut output = RecordingOutput::new();
-        let (message, _, _) = process_stream(stream, &mut output).await.unwrap();
+        let (message, _, _, _stop) = process_stream(stream, &mut output).await.unwrap();
 
         // Output should show indicator + visible text only.
         assert_eq!(output.text(), "I'm thinking …\nFinal answer.");
@@ -702,7 +707,7 @@ mod tests {
         ]);
 
         let mut output = RecordingOutput::new();
-        let (message, _, _) = process_stream(stream, &mut output).await.unwrap();
+        let (message, _, _, _stop) = process_stream(stream, &mut output).await.unwrap();
 
         assert_eq!(output.text(), "I'm thinking …\nanswer");
         assert_eq!(message.content.len(), 2);
@@ -724,7 +729,7 @@ mod tests {
         ]);
 
         let mut output = RecordingOutput::new();
-        let (message, _, _) = process_stream(stream, &mut output).await.unwrap();
+        let (message, _, _, _stop) = process_stream(stream, &mut output).await.unwrap();
 
         assert_eq!(output.text(), "Just normal text.");
         assert_eq!(message.content.len(), 1);
@@ -732,6 +737,70 @@ mod tests {
             ContentBlock::Text { text } => assert_eq!(text, "Just normal text."),
             other => panic!("expected Text, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn max_tokens_stop_reason_propagated() {
+        // When the LLM hits the token limit, the stop reason should be
+        // MaxTokens so the agent loop can inject a continuation prompt.
+        let stream = events_to_stream(vec![
+            StreamEvent::TextDelta("This response is trunca".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::MaxTokens,
+                output_tokens: Some(8192),
+            },
+        ]);
+
+        let mut output = RecordingOutput::new();
+        let (_message, tool_calls, _tokens, stop_reason) =
+            process_stream(stream, &mut output).await.unwrap();
+
+        assert_eq!(output.text(), "This response is trunca");
+        assert!(tool_calls.is_empty());
+        assert_eq!(stop_reason, StopReason::MaxTokens);
+    }
+
+    #[tokio::test]
+    async fn end_turn_stop_reason_propagated() {
+        let stream = events_to_stream(vec![
+            StreamEvent::TextDelta("Complete response.".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ]);
+
+        let mut output = RecordingOutput::new();
+        let (_message, _tool_calls, _tokens, stop_reason) =
+            process_stream(stream, &mut output).await.unwrap();
+
+        assert_eq!(stop_reason, StopReason::EndTurn);
+    }
+
+    #[tokio::test]
+    async fn tool_use_stop_reason_propagated() {
+        let stream = events_to_stream(vec![
+            StreamEvent::ToolUseStart {
+                id: "call_1".into(),
+                name: "bash".into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "call_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::ToolUse,
+                output_tokens: None,
+            },
+        ]);
+
+        let mut output = RecordingOutput::new();
+        let (_message, tool_calls, _tokens, stop_reason) =
+            process_stream(stream, &mut output).await.unwrap();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(stop_reason, StopReason::ToolUse);
     }
 
 }
