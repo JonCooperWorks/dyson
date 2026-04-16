@@ -408,12 +408,13 @@ fn filter_tools_empty_filter_returns_none() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn builtin_subagent_configs_returns_planner_researcher_and_verifier() {
+fn builtin_subagent_configs_returns_expected_set() {
     let configs = builtin_subagent_configs();
-    assert_eq!(configs.len(), 3);
-    assert_eq!(configs[0].name, "planner");
-    assert_eq!(configs[1].name, "researcher");
-    assert_eq!(configs[2].name, "verifier");
+    let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["planner", "researcher", "verifier", "dependency_review"]
+    );
     // All use the "default" provider.
     assert!(configs.iter().all(|c| c.provider == "default"));
 }

@@ -47,6 +47,7 @@ pub mod auth;
 pub mod chat_history;
 pub mod config;
 pub mod controller;
+pub mod dependency_analysis;
 pub mod error;
 pub mod export;
 pub mod feedback;

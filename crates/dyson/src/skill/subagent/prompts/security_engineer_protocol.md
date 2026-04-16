@@ -20,4 +20,4 @@ You have access to a **security_engineer** subagent — an orchestrator that can
 }
 ```
 
-The security_engineer will map the attack surface, write targeted AST queries to trace vulnerability patterns, dispatch researchers for CVE checks, and return a structured report with severity ratings and remediation advice.
+The security_engineer will map the attack surface, write targeted AST queries to trace vulnerability patterns, dispatch `dependency_review` against Google's OSV database for known-CVE findings, and return a structured report with severity ratings and remediation advice.

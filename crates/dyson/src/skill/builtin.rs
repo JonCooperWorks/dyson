@@ -28,6 +28,7 @@ use crate::skill::Skill;
 use crate::tool::Tool;
 use crate::tool::bash::BashTool;
 use crate::tool::bulk_edit::BulkEditTool;
+use crate::tool::dependency_scan::DependencyScanTool;
 use crate::tool::edit_file::EditFileTool;
 use crate::tool::kb_search::KbSearchTool;
 use crate::tool::kb_status::KbStatusTool;
@@ -114,6 +115,7 @@ impl BuiltinSkill {
             Arc::new(AstQueryTool),
             Arc::new(AttackSurfaceAnalyzerTool),
             Arc::new(ExploitBuilderTool),
+            Arc::new(DependencyScanTool),
         ];
 
         if let Some(ws_cfg) = web_search_config {
@@ -241,7 +243,7 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new(None, None, None);
         let tools = skill.tools();
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 21);
         assert_eq!(tools[0].name(), "bash");
         assert_eq!(tools[1].name(), "read_file");
         assert_eq!(tools[2].name(), "write_file");
@@ -262,6 +264,7 @@ mod tests {
         assert_eq!(tools[17].name(), "ast_query");
         assert_eq!(tools[18].name(), "attack_surface_analyzer");
         assert_eq!(tools[19].name(), "exploit_builder");
+        assert_eq!(tools[20].name(), "dependency_scan");
     }
 
     #[test]
@@ -308,7 +311,7 @@ mod tests {
         let skill = BuiltinSkill::new(None, Some(&config), None);
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert!(names.contains(&"image_generate"));
-        assert_eq!(skill.tools().len(), 21);
+        assert_eq!(skill.tools().len(), 22);
     }
 
     #[test]

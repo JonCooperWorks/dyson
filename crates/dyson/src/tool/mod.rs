@@ -54,6 +54,7 @@
 
 pub mod bash;
 pub mod bulk_edit;
+pub mod dependency_scan;
 pub mod edit_file;
 pub mod export_conversation;
 pub mod image_generate;

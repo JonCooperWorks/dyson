@@ -596,6 +596,31 @@ pub fn builtin_subagent_configs() -> Vec<SubagentAgentConfig> {
             ]),
             injects_protocol: Some(include_str!("prompts/verifier_protocol.md").into()),
         },
+        SubagentAgentConfig {
+            name: "dependency_review".into(),
+            description: "Finds dependency manifests/lockfiles in the repo, queries \
+                Google's OSV database for known vulnerabilities, and returns a \
+                prioritized summary grounded in the codebase.  Supports every OSV \
+                ecosystem (Cargo, npm, PyPI, Go, Maven, NuGet, RubyGems, Packagist, \
+                Pub, Hex, CRAN, SwiftURL, GitHub Actions, Hackage, ConanCenter, \
+                and any ecosystem via CycloneDX/SPDX SBOMs); flags unsupported \
+                manifests explicitly rather than guessing.  Use for pre-release \
+                checks, PR review, and supply-chain triage."
+                .into(),
+            system_prompt: include_str!("prompts/dependency_review.md").into(),
+            provider: "default".into(),
+            model: None,
+            max_iterations: Some(15),
+            max_tokens: Some(6144),
+            tools: Some(vec![
+                "dependency_scan".into(),
+                "read_file".into(),
+                "search_files".into(),
+                "list_files".into(),
+                "bash".into(),
+            ]),
+            injects_protocol: None,
+        },
     ]
 }
 

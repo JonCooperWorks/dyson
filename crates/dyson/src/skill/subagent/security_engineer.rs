@@ -15,6 +15,7 @@ const DIRECT_TOOLS: &[&str] = &[
     "ast_query",
     "attack_surface_analyzer",
     "exploit_builder",
+    "dependency_scan",
 ];
 
 /// Build the OrchestratorConfig for the security_engineer role.

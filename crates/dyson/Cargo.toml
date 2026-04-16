@@ -44,6 +44,13 @@ ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 nanohtml2text = "0.1"
 
+# Dependency manifest parsing — used by `dependency_analysis` module for
+# OSV-backed dependency review.  TOML covers Cargo.lock, poetry.lock,
+# uv.lock, pyproject.toml; YAML covers pnpm-lock.yaml, pubspec.lock,
+# stack.yaml.lock, and GitHub Actions workflows.
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+serde_yaml_ng = "0.10"
+
 # AST-aware editing — 20 grammars for 19 languages, statically linked.
 tree-sitter = "0.24.7"
 streaming-iterator = "0.1"
@@ -81,3 +88,4 @@ tikv-jemallocator = "0.6"
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
+wiremock = "0.6"
