@@ -68,17 +68,6 @@ const DEFAULT_LIST_LIMIT: usize = 50;
 /// Maximum characters stored as a `prompt_preview` on the TaskRecord.
 const PROMPT_PREVIEW_CHARS: usize = 200;
 
-/// Optional query parameters on the MCP endpoint.
-///
-/// Retained for backward compatibility — existing URLs with
-/// `?caller=<node_name>` won't fail deserialization — but all
-/// caller identity now comes from the bearer token.
-#[derive(serde::Deserialize, Default)]
-pub struct McpQuery {
-    #[allow(dead_code)]
-    caller: Option<String>,
-}
-
 /// The minimum JSON-RPC envelope we handle.
 ///
 /// We deliberately parse into `Value` rather than a typed struct because
@@ -86,7 +75,6 @@ pub struct McpQuery {
 /// notifications, and we want to be forgiving.
 pub async fn mcp_handler(
     State(hub): State<Arc<Hub>>,
-    axum::extract::Query(_query): axum::extract::Query<McpQuery>,
     headers: HeaderMap,
     Json(request): Json<Value>,
 ) -> Json<Value> {
@@ -100,8 +88,9 @@ pub async fn mcp_handler(
 
     tracing::debug!(method = %method, ?id, "MCP request");
 
-    // Resolve caller identity from bearer token.  Protocol methods
-    // (initialize, tools/list) are open; tools/call requires auth.
+    // Resolve caller identity from bearer token.  Only `initialize`
+    // and `notifications/initialized` are open; both `tools/list` and
+    // `tools/call` require a valid bearer.
     let caller = match crate::auth::extract_bearer(&headers) {
         Some(token) => {
             // Fast path: node registration token (O(1) HashMap lookup).
@@ -130,7 +119,15 @@ pub async fn mcp_handler(
             }
         })),
         "notifications/initialized" => Ok(json!({})),
-        "tools/list" => Ok(tools_list_response()),
+        // `tools/list` and `tools/call` both require auth.  An
+        // unauthenticated tools/list would leak the full tool schema
+        // (arg names, descriptions) to anyone who can reach the port —
+        // useful reconnaissance for an attacker even when they cannot
+        // invoke the tools.
+        "tools/list" => match caller {
+            Some(_) => Ok(tools_list_response()),
+            None => Err(McpError::unauthorized()),
+        },
         "tools/call" => match caller {
             Some(ref c) => handle_tools_call(&hub, c, params).await,
             None => Err(McpError::unauthorized()),
@@ -185,11 +182,12 @@ impl McpError {
         }
     }
 
-    /// Returned when `tools/call` is invoked without a valid bearer token.
+    /// Returned when `tools/list` or `tools/call` is invoked without a
+    /// valid bearer token.
     fn unauthorized() -> Self {
         Self {
             code: -32600, // Invalid Request
-            message: "unauthorized: valid bearer token required for tools/call".into(),
+            message: "unauthorized: valid bearer token required".into(),
         }
     }
 }
@@ -304,6 +302,15 @@ fn tools_list_response() -> Value {
                                 "min_ram_gb": { "type": "integer" }
                             },
                             "additionalProperties": false
+                        },
+                        "idempotency_key": {
+                            "type": "string",
+                            "maxLength": 256,
+                            "description": "Optional caller-chosen key for retry-safe \
+                                submission. A repeat swarm_submit with the same key from \
+                                the same caller returns the original task_id and sets \
+                                `idempotent_replay: true` on the response instead of \
+                                dispatching a new task. Mappings live for 24h."
                         }
                     },
                     "required": ["prompt"],
@@ -453,52 +460,58 @@ async fn list_nodes(hub: &Arc<Hub>, caller: &McpCaller) -> Value {
     let exclude = caller.node_name.as_deref();
     hub.registry
         .with_entries(|entries| {
-            let mut rows: Vec<Value> = entries
-                .values()
-                .filter(|entry| exclude.is_none_or(|c| entry.manifest.node_name != c))
-                .map(|entry| {
-                    let hw = &entry.manifest.hardware;
-                    let busy_task_id = match &entry.status {
-                        NodeStatus::Busy { task_id } => Some(task_id.clone()),
-                        _ => None,
-                    };
-                    let last_heartbeat_unix = entry
-                        .last_heartbeat_at
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let mut row = json!({
-                        "node_id": entry.node_id,
-                        "node_name": entry.manifest.node_name,
-                        "os": entry.manifest.os,
-                        "status": status_label(&entry.status),
-                        "capabilities": entry.manifest.capabilities,
-                        "hardware": {
-                            "ram_bytes": hw.ram_bytes,
-                            "disk_free_bytes": hw.disk_free_bytes,
-                            "cpus": hw.cpus,
-                            "gpus": hw.gpus,
-                        },
-                        "last_heartbeat_unix": last_heartbeat_unix,
-                    });
-                    if let Some(desc) = &entry.manifest.description {
-                        row.as_object_mut()
-                            .unwrap()
-                            .insert("description".into(), Value::String(desc.clone()));
-                    }
-                    if let Some(task_id) = busy_task_id {
-                        row.as_object_mut()
-                            .unwrap()
-                            .insert("busy_task_id".into(), Value::String(task_id));
-                    }
-                    row
-                })
-                .collect();
+            // Pre-size the row vector so we don't grow-and-memcpy.
+            let mut rows: Vec<Value> = Vec::with_capacity(entries.len());
+            for entry in entries.values() {
+                if exclude.is_some_and(|c| entry.manifest.node_name == c) {
+                    continue;
+                }
+                let hw = &entry.manifest.hardware;
+                let last_heartbeat_unix = entry
+                    .last_heartbeat_at
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                // Build the object in one shot so optional fields are
+                // inline — no second pass through `.as_object_mut()`
+                // and no `.unwrap()` on a macro invariant.
+                let mut row = serde_json::Map::with_capacity(10);
+                row.insert("node_id".into(), Value::String(entry.node_id.clone()));
+                row.insert(
+                    "node_name".into(),
+                    Value::String(entry.manifest.node_name.clone()),
+                );
+                row.insert("os".into(), Value::String(entry.manifest.os.clone()));
+                row.insert("status".into(), Value::from(status_label(&entry.status)));
+                row.insert(
+                    "capabilities".into(),
+                    serde_json::to_value(&entry.manifest.capabilities)
+                        .unwrap_or(Value::Null),
+                );
+                row.insert(
+                    "hardware".into(),
+                    json!({
+                        "ram_bytes": hw.ram_bytes,
+                        "disk_free_bytes": hw.disk_free_bytes,
+                        "cpus": hw.cpus,
+                        "gpus": hw.gpus,
+                    }),
+                );
+                row.insert("last_heartbeat_unix".into(), Value::from(last_heartbeat_unix));
+                if let Some(desc) = &entry.manifest.description {
+                    row.insert("description".into(), Value::String(desc.clone()));
+                }
+                if let NodeStatus::Busy { task_id } = &entry.status {
+                    row.insert("busy_task_id".into(), Value::String(task_id.clone()));
+                }
+                rows.push(Value::Object(row));
+            }
+            // Stable order by node_id.  Unwrap is safe: every row above
+            // was constructed with a String node_id.
             rows.sort_by(|a, b| {
-                a["node_id"]
-                    .as_str()
-                    .unwrap_or("")
-                    .cmp(b["node_id"].as_str().unwrap_or(""))
+                a.get("node_id").and_then(Value::as_str).unwrap_or("").cmp(
+                    b.get("node_id").and_then(Value::as_str).unwrap_or(""),
+                )
             });
             Value::Array(rows)
         })
@@ -549,22 +562,41 @@ struct DispatchArgs {
     payloads: Vec<Payload>,
     timeout_secs: Option<u64>,
     target: DispatchTarget,
+    /// Optional caller-supplied key.  Only honored on `swarm_submit`.
+    /// A repeat submit with the same (caller, key) returns the original
+    /// task_id instead of dispatching a new task.
+    idempotency_key: Option<String>,
 }
 
 fn parse_dispatch_args(arguments: Value) -> Result<DispatchArgs, DispatchError> {
     let prompt = arguments
         .get("prompt")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| DispatchError::Cancelled("missing prompt".into()))?
+        .ok_or_else(|| DispatchError::InvalidArgs("missing prompt".into()))?
         .to_string();
 
     let payloads: Vec<Payload> = match arguments.get("payloads") {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone())
-            .map_err(|e| DispatchError::Cancelled(format!("invalid payloads: {e}")))?,
+            .map_err(|e| DispatchError::InvalidArgs(format!("invalid payloads: {e}")))?,
         _ => vec![],
     };
 
     let timeout_secs = arguments.get("timeout_secs").and_then(serde_json::Value::as_u64);
+
+    let idempotency_key = arguments
+        .get("idempotency_key")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(std::string::ToString::to_string);
+    if let Some(ref k) = idempotency_key
+        && k.len() > crate::idempotency::MAX_KEY_LEN
+    {
+        return Err(DispatchError::InvalidArgs(format!(
+            "idempotency_key too long ({} chars, max {})",
+            k.len(),
+            crate::idempotency::MAX_KEY_LEN,
+        )));
+    }
 
     let target = parse_target(&arguments)?;
 
@@ -573,6 +605,7 @@ fn parse_dispatch_args(arguments: Value) -> Result<DispatchArgs, DispatchError> 
         payloads,
         timeout_secs,
         target,
+        idempotency_key,
     })
 }
 
@@ -595,7 +628,7 @@ fn parse_target(arguments: &Value) -> Result<DispatchTarget, DispatchError> {
         .is_some_and(|v| !v.is_null());
 
     match (explicit, constraints_present) {
-        (Some(_), true) => Err(DispatchError::Cancelled(
+        (Some(_), true) => Err(DispatchError::InvalidArgs(
             "target_node_id and constraints are mutually exclusive".into(),
         )),
         (Some(id), false) => Ok(DispatchTarget::Explicit(id)),
@@ -622,6 +655,7 @@ async fn place_task(
     args: &DispatchArgs,
     owner: Option<&str>,
     waiter: Option<oneshot::Sender<SwarmResult>>,
+    reserved_task_id: Option<String>,
 ) -> Result<PlacedTask, DispatchError> {
     let node_id = match &args.target {
         DispatchTarget::Explicit(id) => select_node_by_id(&hub.registry, id).await?,
@@ -631,14 +665,14 @@ async fn place_task(
     };
 
     let task = SwarmTask {
-        task_id: uuid::Uuid::new_v4().to_string(),
+        task_id: reserved_task_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         prompt: args.prompt.clone(),
         payloads: args.payloads.clone(),
         timeout_secs: args.timeout_secs,
     };
 
     let canonical = serde_json::to_vec(&task)
-        .map_err(|e| DispatchError::Cancelled(format!("task serialization failed: {e}")))?;
+        .map_err(|e| DispatchError::Transient(format!("task serialization failed: {e}")))?;
     let wire = hub.key.sign_task(&canonical);
 
     let submitted_at = SystemTime::now();
@@ -654,7 +688,12 @@ async fn place_task(
         result: None,
         waiter,
     };
-    hub.tasks.insert(record).await;
+    if let Err(e) = hub.tasks.insert(record).await {
+        tracing::error!(task_id = %task.task_id, error = %e, "failed to persist task insert");
+        return Err(DispatchError::Transient(format!(
+            "failed to persist task: {e}"
+        )));
+    }
 
     hub.registry
         .set_status(
@@ -683,10 +722,10 @@ async fn place_task(
             duration_secs: 0,
         };
         // Any sync waiter we stashed is dropped here — the caller will
-        // observe the DispatchError::Cancelled return value instead.
+        // observe the DispatchError::Transient return value instead.
         let _ = hub.tasks.finalize(&task.task_id, failed).await;
         hub.registry.set_status(&node_id, NodeStatus::Idle).await;
-        return Err(DispatchError::Cancelled(format!(
+        return Err(DispatchError::Transient(format!(
             "node '{node_id}' has no active SSE stream"
         )));
     }
@@ -704,8 +743,14 @@ async fn place_task(
     })
 }
 
+/// Cap `prompt` at roughly `PROMPT_PREVIEW_CHARS` bytes for storage on the
+/// `TaskRecord`, appending `"..."` when we actually shorten the string.
+///
+/// Prompts up to `PROMPT_PREVIEW_CHARS` bytes are returned unchanged;
+/// longer prompts are sliced on a UTF-8 char boundary (so we never
+/// split a code point) and get an ellipsis suffix to signal truncation
+/// to downstream tools.
 fn truncate_prompt(prompt: &str) -> String {
-    // Walk char boundaries so we never slice a UTF-8 code point in half.
     if prompt.len() <= PROMPT_PREVIEW_CHARS {
         return prompt.to_string();
     }
@@ -733,7 +778,7 @@ async fn swarm_dispatch(
         .unwrap_or(DEFAULT_DISPATCH_TIMEOUT);
 
     let (tx, rx) = oneshot::channel::<SwarmResult>();
-    let placed = place_task(hub, &args, Some(&caller.node_id), Some(tx)).await?;
+    let placed = place_task(hub, &args, Some(&caller.node_id), Some(tx), None).await?;
 
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(result)) => {
@@ -746,7 +791,7 @@ async fn swarm_dispatch(
             // Result channel closed before a value arrived.  The record
             // already reflects whatever state the result handler wrote.
             hub.tasks.abandon_waiter(&placed.task_id).await;
-            Err(DispatchError::Cancelled("result channel closed".into()))
+            Err(DispatchError::Transient("result channel closed".into()))
         }
         Err(_) => {
             // Sync dispatcher timed out waiting.  Clear the waiter so a
@@ -763,13 +808,60 @@ async fn swarm_dispatch(
 // ---------------------------------------------------------------------------
 
 /// `swarm_submit` — dispatch and return a task_id immediately.
+///
+/// Honors `idempotency_key`: a retry with the same key and caller
+/// returns the original `task_id` without dispatching a new task.
 async fn swarm_submit(
     hub: &Arc<Hub>,
     caller: &McpCaller,
     arguments: Value,
 ) -> Result<Value, DispatchError> {
     let args = parse_dispatch_args(arguments)?;
-    let placed = place_task(hub, &args, Some(&caller.node_id), None).await?;
+
+    // Pre-generate the task_id so the idempotency record points at the
+    // real task we're about to place.  If a duplicate already exists
+    // under this key, short-circuit and return the original id; the
+    // generated uuid is discarded.
+    let reserved_task_id = uuid::Uuid::new_v4().to_string();
+    let effective_task_id = if let Some(key) = args.idempotency_key.as_deref() {
+        match hub
+            .idempotency
+            .check_or_insert(&caller.node_id, key, &reserved_task_id)
+            .await
+        {
+            Some(existing) => {
+                // Replay: return the original task_id without a fresh dispatch.
+                let snap = hub.tasks.get_owned(&existing, &caller.node_id).await;
+                let (node_id, submitted_at_unix, state) = match snap {
+                    Some(s) => (
+                        s.node_id,
+                        s.submitted_at_unix,
+                        format!("{:?}", s.state).to_ascii_lowercase(),
+                    ),
+                    None => (String::new(), 0, "unknown".into()),
+                };
+                return Ok(json!({
+                    "task_id": existing,
+                    "node_id": node_id,
+                    "submitted_at_unix": submitted_at_unix,
+                    "state": state,
+                    "idempotent_replay": true,
+                }));
+            }
+            None => reserved_task_id,
+        }
+    } else {
+        reserved_task_id
+    };
+
+    let placed = place_task(
+        hub,
+        &args,
+        Some(&caller.node_id),
+        None,
+        Some(effective_task_id),
+    )
+    .await?;
 
     Ok(json!({
         "task_id": placed.task_id,
@@ -1034,7 +1126,8 @@ mod tests {
                 result: None,
                 waiter: None,
             })
-            .await;
+            .await
+            .unwrap();
         for seq in 1..=3 {
             store
                 .append_checkpoint(TaskCheckpoint {
@@ -1102,13 +1195,13 @@ mod tests {
             "constraints": { "needs_gpu": true },
         });
         match parse_dispatch_args(args) {
-            Err(DispatchError::Cancelled(m)) => {
+            Err(DispatchError::InvalidArgs(m)) => {
                 assert!(
                     m.contains("mutually exclusive"),
-                    "wrong Cancelled message: {m}"
+                    "wrong InvalidArgs message: {m}"
                 );
             }
-            Err(other) => panic!("expected Cancelled, got {other:?}"),
+            Err(other) => panic!("expected InvalidArgs, got {other:?}"),
             Ok(_) => panic!("expected error"),
         }
     }

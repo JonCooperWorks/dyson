@@ -111,7 +111,10 @@ pub async fn run(
                             Box::new(dyson::config::McpConfig {
                                 name: format!("swarm_{node_name}"),
                                 transport: dyson::config::McpTransportConfig::Http {
-                                    url: format!("{hub_base}/mcp?caller={node_name}"),
+                                    // Caller identity is resolved from the
+                                    // bearer token set via `DeferredBearerAuth`
+                                    // below — no query params needed.
+                                    url: format!("{hub_base}/mcp"),
                                     headers: std::collections::HashMap::new(),
                                     auth: None,
                                 },

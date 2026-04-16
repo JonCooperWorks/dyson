@@ -285,42 +285,80 @@ impl Tool for BashTool {
 
 /// Check if an environment variable name is safe to pass to child processes.
 ///
-/// Blocks variables whose names match common secret patterns to prevent
-/// the LLM from reading API keys, tokens, and passwords via `env` or
-/// `printenv`.  Allows standard system variables through.
+/// Allowlist model: only names that are either on `SAFE_EXACT` or share a
+/// prefix in `SAFE_PREFIXES` are passed through.  Anything else (including
+/// newly-coined secret names that wouldn't match a blocklist) is
+/// filtered out.  This inverts the previous blocklist approach so that
+/// leaks fail-closed — a var name that looks innocuous (e.g.
+/// `HF_HUB_ACCESS`, `APP_CREDENTIALS_JSON`) no longer slips through just
+/// because it doesn't end in `_KEY` / `_TOKEN` / …
+///
+/// The allowlist is deliberately short.  If a user hits a legitimate var
+/// that isn't here, they can run `export VAR=…` in-line in the bash
+/// command — the var then lives in the spawned shell, not in Dyson's
+/// parent environment.
 fn is_safe_env_var(name: &str) -> bool {
-    // Block common secret patterns using case-insensitive comparison
-    // to avoid allocating an uppercase copy of the name on every call.
-    const SECRET_SUFFIXES: &[&str] = &[
-        "_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIALS", "_CREDENTIAL",
+    // Exact matches — standard user/shell/locale/tooling vars.
+    const SAFE_EXACT: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TERM",
+        "TMPDIR",
+        "TZ",
+        "LANG",
+        "DISPLAY",
+        "EDITOR",
+        "VISUAL",
+        "PAGER",
+        "PWD",
+        "OLDPWD",
+        // Language toolchain dirs — values, not secrets.
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "GOPATH",
+        "GOROOT",
+        "GOCACHE",
+        "GOMODCACHE",
+        "VIRTUAL_ENV",
+        "PYTHONPATH",
+        "NODE_PATH",
+        "NPM_CONFIG_PREFIX",
+        "JAVA_HOME",
+        "MAVEN_HOME",
+        "GRADLE_HOME",
+        // Common toolchains that need their data dir in the env.
+        "PYENV_ROOT",
+        "NVM_DIR",
+        "RBENV_ROOT",
+        // Dyson-internal context (no secrets).
+        "DYSON_WORKING_DIR",
     ];
-    const SECRET_PREFIXES: &[&str] = &["SECRET_", "CREDENTIALS_"];
-    const SECRET_EXACT: &[&str] = &[
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "GITHUB_TOKEN",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
+    // Prefix matches — locale variants and terminal/CI signalling.
+    const SAFE_PREFIXES: &[&str] = &[
+        "LC_",
+        "LANGUAGE",
+        "COLORTERM",
+        "TERM_",
+        "XDG_",
+        "SSH_CLIENT", // connection metadata, not creds (SSH_AUTH_SOCK is a secret handle)
+        "SSH_TTY",
+        "GIT_", // GIT_DIR, GIT_INDEX_FILE, etc. — note GIT_ASKPASS is a path not a secret
     ];
 
-    if SECRET_EXACT.iter().any(|&s| name.eq_ignore_ascii_case(s)) {
-        return false;
+    if SAFE_EXACT.iter().any(|&s| name.eq_ignore_ascii_case(s)) {
+        return true;
     }
-    if SECRET_SUFFIXES
-        .iter()
-        .any(|&s| name.len() >= s.len() && name[name.len() - s.len()..].eq_ignore_ascii_case(s))
-    {
-        return false;
-    }
-    if SECRET_PREFIXES
+    if SAFE_PREFIXES
         .iter()
         .any(|&s| name.len() >= s.len() && name[..s.len()].eq_ignore_ascii_case(s))
     {
-        return false;
+        return true;
     }
 
-    true
+    false
 }
 
 // ===========================================================================
@@ -379,5 +417,30 @@ mod tests {
         let output = tool.run(&input, &test_ctx()).await.unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("timed out"));
+    }
+
+    #[test]
+    fn env_allowlist_passes_system_vars() {
+        for v in ["PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER"] {
+            assert!(is_safe_env_var(v), "expected {v} to be safe");
+        }
+    }
+
+    #[test]
+    fn env_allowlist_blocks_unknown_names() {
+        // The previous blocklist missed names like these because they
+        // don't match `_KEY`/`_TOKEN`/etc. suffix patterns.
+        for v in [
+            "HF_HUB_ACCESS",
+            "APP_CREDENTIALS_JSON",
+            "MY_API_AUTH",
+            "STRIPE_WEBHOOK",
+            "DATABASE_URL",
+            "AWS_ACCESS_KEY_ID",
+            "OPENAI_API_KEY",
+            "SSH_AUTH_SOCK", // explicitly not in the allowlist
+        ] {
+            assert!(!is_safe_env_var(v), "expected {v} to be filtered");
+        }
     }
 }

@@ -7,14 +7,31 @@
 use thiserror::Error;
 
 /// Errors produced by the dispatcher when it can't place a task.
+///
+/// The variants split into three retry-classes so callers can decide
+/// without parsing a message string:
+///
+///   * **terminal, caller error** — `InvalidArgs`, `NoTargetOrConstraints`.
+///     Retrying with the same input will fail the same way.
+///   * **terminal, environment** — `NoEligibleNode`, `NodeNotFound`,
+///     `NodeNotIdle`.  Caller may retry after re-inspecting the cluster.
+///   * **transient** — `Transient`, `Timeout`.  A retry of the identical
+///     request may succeed; exponential backoff is appropriate.
 #[derive(Debug, Error)]
 pub enum DispatchError {
     #[error("no eligible node for the requested constraints")]
     NoEligibleNode,
     #[error("dispatch timed out waiting for a result")]
     Timeout,
-    #[error("dispatch cancelled: {0}")]
-    Cancelled(String),
+    /// Transient failure: serialization error, result channel closed,
+    /// SSE stream gone between node selection and push, persistence
+    /// failure.  The input was valid; the cluster state was unstable.
+    #[error("dispatch transient failure: {0}")]
+    Transient(String),
+    /// Caller-side validation failure.  Retry will not help unless the
+    /// caller changes the arguments.
+    #[error("invalid dispatch arguments: {0}")]
+    InvalidArgs(String),
     /// The caller passed a `target_node_id` that isn't in the registry.
     #[error("target node not found: {0}")]
     NodeNotFound(String),
@@ -28,4 +45,11 @@ pub enum DispatchError {
     /// pushes routing decisions onto the (LLM) caller.
     #[error("dispatch requires exactly one of `target_node_id` or `constraints`")]
     NoTargetOrConstraints,
+}
+
+impl DispatchError {
+    /// True if a retry of the identical request may succeed.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Transient(_) | Self::Timeout)
+    }
 }

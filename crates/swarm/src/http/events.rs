@@ -76,12 +76,28 @@ pub async fn events_handler(
     // from `list_nodes` immediately, not linger until the reaper catches
     // up 15–90 seconds later.  Nodes reconnect by re-registering, which
     // the swarm controller already does automatically.
+    //
+    // If the detach task panics (unlikely — remove_node doesn't unwrap)
+    // or is aborted during runtime shutdown, log it so the silent-drop
+    // case is at least visible.  JoinHandle's result captures both.
     let registry = hub.registry.clone();
     let detach_id = node_id.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         tx.closed().await;
         if registry.remove_node(&detach_id).await {
             tracing::info!(node_id = %detach_id, "node disconnected — removed from registry");
+        }
+    });
+    // Watchdog: log if the detach task ends unexpectedly.  This task
+    // itself is cheap — it awaits the handle and exits.
+    let watchdog_id = node_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = handle.await {
+            if e.is_panic() {
+                tracing::error!(node_id = %watchdog_id, error = %e, "SSE detach task panicked");
+            } else if e.is_cancelled() {
+                tracing::warn!(node_id = %watchdog_id, "SSE detach task was cancelled before it could remove the node");
+            }
         }
     });
 

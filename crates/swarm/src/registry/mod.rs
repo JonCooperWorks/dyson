@@ -32,6 +32,14 @@ use tokio::sync::{RwLock, mpsc};
 
 use crate::registry::persistence::{NodePersistence, PersistedNode};
 
+/// How long `push_event` will wait for a slow subscriber before giving up.
+///
+/// A node that cannot accept an SSE frame within this window is treated as
+/// unresponsive — the caller gets `false`, and the dispatcher will either
+/// pick another node or fail the RPC.  The reaper will sweep the stuck node
+/// on its next pass.
+const PUSH_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Alias to keep the node_id type explicit.
 pub type NodeId = String;
 
@@ -152,7 +160,17 @@ impl NodeRegistry {
     }
 
     /// Register a new node, returning the assigned (node_id, token).
-    pub async fn register(&self, manifest: NodeManifest) -> (NodeId, String) {
+    ///
+    /// Persist-first: the SQLite row is written before the in-memory
+    /// entry so a persistence failure leaves both stores empty.  This
+    /// prevents the silent-divergence case where in-memory state
+    /// accepted a node that disk rejected — after restart the node
+    /// would be missing, and its bearer token (already returned to the
+    /// caller) would be orphaned.
+    pub async fn register(
+        &self,
+        manifest: NodeManifest,
+    ) -> Result<(NodeId, String), sqlx::Error> {
         let node_id = uuid::Uuid::new_v4().to_string();
         let token = crate::auth::generate_token();
 
@@ -168,18 +186,17 @@ impl NodeRegistry {
 
         let persisted = entry.to_persisted();
 
-        {
-            let mut inner = self.inner.write().await;
-            inner.by_id.insert(node_id.clone(), entry);
-            inner.token_to_id.insert(token.clone(), node_id.clone());
-        }
+        // Persist FIRST.  If disk refuses (disk full, constraint
+        // violation, transient I/O error) we return the error with
+        // nothing added to the in-memory maps — the caller can retry
+        // and the next attempt will get a fresh id/token.
+        self.persistence.insert(&persisted).await?;
 
-        // Persist outside the write lock so readers are not blocked by I/O.
-        if let Err(e) = self.persistence.insert(&persisted).await {
-            tracing::error!(node_id = %node_id, error = %e, "failed to persist node register");
-        }
+        let mut inner = self.inner.write().await;
+        inner.by_id.insert(node_id.clone(), entry);
+        inner.token_to_id.insert(token.clone(), node_id.clone());
 
-        (node_id, token)
+        Ok((node_id, token))
     }
 
     /// Resolve a bearer token back to a node_id.
@@ -232,7 +249,11 @@ impl NodeRegistry {
     /// Push an event to the node's SSE stream if one is attached.
     ///
     /// Returns `false` if the node is unknown or has no SSE sender, or if
-    /// the send failed because the receiver was dropped.
+    /// the send failed because the receiver was dropped, its buffer is
+    /// full for longer than `PUSH_EVENT_TIMEOUT`, or the channel is
+    /// closed.  The timeout prevents a slow/hung subscriber from stalling
+    /// the caller (and in the dispatch path, a waiting MCP client)
+    /// indefinitely.
     pub async fn push_event(&self, node_id: &str, event: SseEvent) -> bool {
         let tx_opt = {
             let inner = self.inner.read().await;
@@ -241,9 +262,23 @@ impl NodeRegistry {
                 .get(node_id)
                 .and_then(|e| e.sse_tx.clone())
         };
-        match tx_opt {
-            Some(tx) => tx.send(event).await.is_ok(),
-            None => false,
+        let Some(tx) = tx_opt else {
+            return false;
+        };
+        match tokio::time::timeout(PUSH_EVENT_TIMEOUT, tx.send(event)).await {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) => {
+                tracing::warn!(%node_id, "SSE receiver dropped during push_event");
+                false
+            }
+            Err(_) => {
+                tracing::warn!(
+                    %node_id,
+                    timeout_secs = PUSH_EVENT_TIMEOUT.as_secs(),
+                    "SSE push timed out — node is not draining its queue",
+                );
+                false
+            }
         }
     }
 
@@ -448,7 +483,7 @@ mod tests {
     #[tokio::test]
     async fn register_then_lookup() {
         let reg = NodeRegistry::new_for_test().await;
-        let (node_id, token) = reg.register(test_manifest("alpha")).await;
+        let (node_id, token) = reg.register(test_manifest("alpha")).await.unwrap();
 
         let looked_up = reg.node_id_for_token(&token).await;
         assert_eq!(looked_up.as_deref(), Some(node_id.as_str()));
@@ -457,7 +492,7 @@ mod tests {
     #[tokio::test]
     async fn reap_stale_drops_expired_nodes() {
         let reg = NodeRegistry::new_for_test().await;
-        let (node_id, _) = reg.register(test_manifest("beta")).await;
+        let (node_id, _) = reg.register(test_manifest("beta")).await.unwrap();
 
         // Force the heartbeat back in time.
         {
@@ -476,7 +511,7 @@ mod tests {
     #[tokio::test]
     async fn remove_node_clears_both_indices() {
         let reg = NodeRegistry::new_for_test().await;
-        let (node_id, token) = reg.register(test_manifest("delta")).await;
+        let (node_id, token) = reg.register(test_manifest("delta")).await.unwrap();
 
         assert!(reg.remove_node(&node_id).await);
         assert_eq!(reg.counts().await.total, 0);
@@ -491,7 +526,7 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_updates_status() {
         let reg = NodeRegistry::new_for_test().await;
-        let (node_id, _) = reg.register(test_manifest("gamma")).await;
+        let (node_id, _) = reg.register(test_manifest("gamma")).await.unwrap();
         let updated = reg
             .heartbeat(
                 &node_id,
@@ -516,7 +551,7 @@ mod tests {
     async fn register_is_durable() {
         let persistence = Arc::new(SqliteNodePersistence::open_in_memory().await.unwrap());
         let reg = NodeRegistry::with_persistence(persistence.clone(), Vec::new());
-        let (node_id, token) = reg.register(test_manifest("alpha")).await;
+        let (node_id, token) = reg.register(test_manifest("alpha")).await.unwrap();
 
         let loaded = persistence.load_all().await.unwrap();
         assert_eq!(loaded.len(), 1);
@@ -530,7 +565,7 @@ mod tests {
     async fn heartbeat_bumps_last_heartbeat_unix_durably() {
         let persistence = Arc::new(SqliteNodePersistence::open_in_memory().await.unwrap());
         let reg = NodeRegistry::with_persistence(persistence.clone(), Vec::new());
-        let (node_id, _) = reg.register(test_manifest("alpha")).await;
+        let (node_id, _) = reg.register(test_manifest("alpha")).await.unwrap();
 
         // Backdate the on-disk heartbeat so we can observe the bump.
         let initial = persistence.load_all().await.unwrap();
@@ -561,7 +596,7 @@ mod tests {
     async fn remove_node_deletes_row_durably() {
         let persistence = Arc::new(SqliteNodePersistence::open_in_memory().await.unwrap());
         let reg = NodeRegistry::with_persistence(persistence.clone(), Vec::new());
-        let (node_id, _) = reg.register(test_manifest("alpha")).await;
+        let (node_id, _) = reg.register(test_manifest("alpha")).await.unwrap();
 
         assert!(reg.remove_node(&node_id).await);
         let loaded = persistence.load_all().await.unwrap();
@@ -572,7 +607,7 @@ mod tests {
     async fn reap_stale_persists_removal() {
         let persistence = Arc::new(SqliteNodePersistence::open_in_memory().await.unwrap());
         let reg = NodeRegistry::with_persistence(persistence.clone(), Vec::new());
-        let (node_id, _) = reg.register(test_manifest("alpha")).await;
+        let (node_id, _) = reg.register(test_manifest("alpha")).await.unwrap();
 
         {
             let mut inner = reg.inner.write().await;
@@ -629,7 +664,7 @@ mod tests {
         // First run: register a node as Idle.
         let (node_id, token) = {
             let reg = NodeRegistry::with_persistence(persistence.clone(), Vec::new());
-            let (id, tok) = reg.register(test_manifest("alpha")).await;
+            let (id, tok) = reg.register(test_manifest("alpha")).await.unwrap();
             let counts = reg.counts().await;
             assert_eq!(counts.idle, 1);
             (id, tok)

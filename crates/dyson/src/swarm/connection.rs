@@ -69,10 +69,15 @@ impl SwarmConnection {
             client: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .timeout(std::time::Duration::from_secs(30))
+                // Node → hub: the operator points at a specific URL; a
+                // redirect would be either misconfiguration or a MITM
+                // attempt.  Fail loud rather than follow.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("failed to build HTTP client"),
             sse_client: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("failed to build SSE client"),
             auth_token: None,

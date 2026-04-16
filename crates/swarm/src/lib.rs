@@ -8,6 +8,7 @@ pub mod auth;
 pub mod blob;
 pub mod config;
 pub mod http;
+pub mod idempotency;
 pub mod key;
 pub mod queue;
 pub mod registry;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::blob::BlobStore;
+use crate::idempotency::IdempotencyIndex;
 use crate::key::HubKeyPair;
 use crate::registry::persistence::{NodePersistence, SqliteNodePersistence};
 use crate::registry::{NodeRegistry, reconcile_recovered_nodes};
@@ -88,6 +90,9 @@ pub struct Hub {
     /// tokens that don't match a registered node are verified against
     /// an argon2id hash as a fallback.
     pub mcp_api_key: Option<McpApiKey>,
+    /// Idempotency index for `swarm_submit`.  In-memory only; see
+    /// [`crate::idempotency`].
+    pub idempotency: IdempotencyIndex,
     /// Broadcast channel used to tell long-lived handlers (specifically
     /// the SSE event stream) that the server is shutting down.
     ///
@@ -170,6 +175,7 @@ impl Hub {
             key,
             tasks,
             mcp_api_key,
+            idempotency: IdempotencyIndex::new(),
             shutdown,
         }))
     }

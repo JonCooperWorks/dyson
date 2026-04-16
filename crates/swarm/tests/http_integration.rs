@@ -512,9 +512,11 @@ async fn mcp_initialize_returns_protocol_version() {
 async fn mcp_tools_list_has_expected_tools() {
     let h = start_hub().await;
     let client = reqwest::Client::new();
+    let (_caller_id, caller_token) = register_node(&client, &h.base_url, "caller").await;
 
     let resp: Value = client
         .post(format!("{}/mcp", h.base_url))
+        .bearer_auth(&caller_token)
         .json(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -545,6 +547,30 @@ async fn mcp_tools_list_has_expected_tools() {
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
+}
+
+#[tokio::test]
+async fn mcp_tools_list_requires_auth() {
+    let h = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let resp: Value = client
+        .post(format!("{}/mcp", h.base_url))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // JSON-RPC error envelope: result absent, error present.
+    assert!(resp.get("result").is_none());
+    assert_eq!(resp["error"]["code"], -32600);
 }
 
 /// End-to-end: register, dispatch via MCP, fake the node consuming the

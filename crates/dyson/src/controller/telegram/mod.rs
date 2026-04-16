@@ -1801,16 +1801,18 @@ enum DocumentKind {
 /// Classify a document by its MIME type, falling back to the filename
 /// extension when the MIME is missing or generic (`application/octet-stream`).
 fn classify_document(mime: &str, file_name: Option<&str>) -> DocumentKind {
+    use crate::media::{is_office_extension, is_office_mime, is_text_extension, is_text_like_mime};
+
     if mime.starts_with("image/") {
         return DocumentKind::Image;
     }
     if mime == "application/pdf" {
         return DocumentKind::Pdf;
     }
-    if crate::media::is_office_mime(mime) {
+    if is_office_mime(mime) {
         return DocumentKind::Office;
     }
-    if crate::media::is_text_like_mime(mime) {
+    if is_text_like_mime(mime) {
         return DocumentKind::Text;
     }
     // Fall back to extension when MIME is empty / octet-stream / unknown.
@@ -1821,7 +1823,7 @@ fn classify_document(mime: &str, file_name: Option<&str>) -> DocumentKind {
         if is_office_extension(&ext) {
             return DocumentKind::Office;
         }
-        if is_text_extension(ext) {
+        if is_text_extension(&ext) {
             return DocumentKind::Text;
         }
     }
@@ -1837,11 +1839,6 @@ fn extension_of(name: &str) -> Option<String> {
     } else {
         Some(ext.to_ascii_lowercase())
     }
-}
-
-/// Whitelist of Office file extensions.
-fn is_office_extension(ext: &str) -> bool {
-    matches!(ext, "docx" | "xlsx" | "pptx" | "doc" | "xls" | "ppt")
 }
 
 /// When Telegram's MIME type is empty / `application/octet-stream` but we
@@ -1869,95 +1866,6 @@ fn resolve_effective_mime(original: &str, kind: DocumentKind, file_name: Option<
         }
         _ => original.to_string(),
     }
-}
-
-/// Whitelist of file extensions we treat as UTF-8 text.
-fn is_text_extension(ext: String) -> bool {
-    matches!(
-        ext.as_str(),
-        "md" | "markdown"
-            | "txt"
-            | "rst"
-            | "log"
-            | "csv"
-            | "tsv"
-            | "json"
-            | "jsonl"
-            | "ndjson"
-            | "yaml"
-            | "yml"
-            | "toml"
-            | "ini"
-            | "cfg"
-            | "conf"
-            | "env"
-            | "rs"
-            | "go"
-            | "py"
-            | "pyi"
-            | "js"
-            | "mjs"
-            | "cjs"
-            | "ts"
-            | "tsx"
-            | "jsx"
-            | "rb"
-            | "sh"
-            | "bash"
-            | "zsh"
-            | "fish"
-            | "c"
-            | "h"
-            | "cpp"
-            | "hpp"
-            | "cc"
-            | "hh"
-            | "cxx"
-            | "hxx"
-            | "java"
-            | "kt"
-            | "kts"
-            | "swift"
-            | "m"
-            | "mm"
-            | "php"
-            | "pl"
-            | "lua"
-            | "sql"
-            | "html"
-            | "htm"
-            | "css"
-            | "scss"
-            | "sass"
-            | "less"
-            | "xml"
-            | "svg"
-            | "dockerfile"
-            | "makefile"
-            | "mk"
-            | "lock"
-            | "sum"
-            | "mod"
-            | "gitignore"
-            | "gitattributes"
-            | "editorconfig"
-            | "r"
-            | "scala"
-            | "clj"
-            | "ex"
-            | "exs"
-            | "erl"
-            | "hs"
-            | "elm"
-            | "dart"
-            | "vue"
-            | "svelte"
-            | "tf"
-            | "hcl"
-            | "proto"
-            | "graphql"
-            | "gql"
-    )
 }
 
 // TelegramOutput and formatting helpers are in submodules:

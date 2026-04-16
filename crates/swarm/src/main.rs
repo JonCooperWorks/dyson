@@ -144,6 +144,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let shutdown_fut = hub.shutdown_notified();
         tokio::spawn(async move {
             tokio::pin!(shutdown_fut);
+            // Reaper cadence.  A 15s tick against a 24h task TTL means an
+            // individual task may survive the deadline by up to one
+            // interval before being collected — acceptable given the
+            // TTL is already an imprecise "don't hold records forever"
+            // bound rather than a strict deletion SLA.  A result that
+            // lands mid-iteration bumps `last_update` on the record,
+            // which the reaper re-reads under the task store's lock on
+            // the next tick, so there is no loss of freshly-active tasks.
             let mut ticker = tokio::time::interval(Duration::from_secs(15));
             loop {
                 tokio::select! {

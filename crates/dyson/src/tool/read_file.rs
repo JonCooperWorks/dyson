@@ -268,6 +268,25 @@ fn extract_office_text(data: &[u8]) -> std::result::Result<String, String> {
     undoc::render::to_markdown(&doc, &opts).map_err(|e| e.to_string())
 }
 
+/// Decompression-bomb guards for office/PDF extraction.
+///
+/// A small compressed input can expand to hundreds of megabytes during
+/// PDF stream decoding or Office zip inflation.  The upstream 50 MB
+/// raw-byte cap only bounds the file on disk — not the text the parser
+/// produces.  These two constants keep the extracted text bounded in
+/// both absolute size and relative blow-up.
+const MAX_EXTRACTED_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum ratio of extracted-bytes to compressed-bytes before we
+/// treat the file as a decompression bomb and refuse.  50 covers
+/// well-compressed-but-legitimate office docs (text-heavy slide decks,
+/// spreadsheets with lots of shared strings); anything higher is almost
+/// always adversarial.
+const MAX_EXTRACT_RATIO: usize = 50;
+/// Ratio check only kicks in once the compressed size is above this
+/// floor, so tiny inputs (a 200-byte pptx stub that expands to 15 KB)
+/// don't trip on a ratio technicality.
+const RATIO_MIN_INPUT_BYTES: usize = 64 * 1024;
+
 /// Read a binary document (PDF, Office, etc.) from disk, extract Markdown via
 /// the provided `extractor`, and return the result as a tool output.
 async fn read_document_as_markdown<E>(
@@ -284,6 +303,7 @@ where
         }
     };
 
+    let input_len = data.len();
     let text = match extractor(&data) {
         Ok(t) => t,
         Err(e) => {
@@ -293,6 +313,25 @@ where
             )));
         }
     };
+
+    if text.len() > MAX_EXTRACTED_BYTES {
+        return Ok(ToolOutput::error(format!(
+            "document '{}' expanded to {:.1} MB of text (limit {} MB) — refusing to process",
+            path.display(),
+            text.len() as f64 / (1024.0 * 1024.0),
+            MAX_EXTRACTED_BYTES / (1024 * 1024),
+        )));
+    }
+    if input_len >= RATIO_MIN_INPUT_BYTES
+        && text.len() / input_len.max(1) > MAX_EXTRACT_RATIO
+    {
+        return Ok(ToolOutput::error(format!(
+            "document '{}' decompression ratio {}x exceeds limit {}x — refusing to process",
+            path.display(),
+            text.len() / input_len.max(1),
+            MAX_EXTRACT_RATIO,
+        )));
+    }
 
     if text.trim().is_empty() {
         return Ok(ToolOutput::success(

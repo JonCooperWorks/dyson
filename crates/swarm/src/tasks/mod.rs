@@ -31,21 +31,41 @@ use crate::tasks::persistence::TaskPersistence;
 // TaskState — hub-internal lifecycle for a task
 // ---------------------------------------------------------------------------
 
-/// The lifecycle state a task can be in.
+/// The lifecycle state a task can be in, as observed by the hub.
 ///
-/// The terminal variants (`Completed`, `Failed`, `Cancelled`) mirror the
-/// protocol-level `TaskStatus`, but as a hub-internal enum we can also
-/// carry the intermediate `Running` state.
+/// # Relation to `dyson_swarm_protocol::types::TaskStatus`
+///
+/// `TaskStatus` is the **wire** enum — it only encodes the three
+/// terminal outcomes (`Completed`, `Failed`, `Cancelled`) a node can
+/// report back via `POST /swarm/result`.  A node is never asked to
+/// describe an in-flight task; that's the hub's job.
+///
+/// `TaskState` is the **hub-internal** enum.  It adds the non-terminal
+/// `Running` variant — required so `TaskRecord` can express "handed to
+/// the node but not yet resolved" without resorting to an
+/// `Option<TaskStatus>`, which would conflate "still going" with
+/// "unknown" and obscure the finite state machine.
+///
+/// The two enums are **not** merged because adding `Running` to the
+/// wire type would break forward compatibility for every node that
+/// already ships `TaskStatus`-valued payloads; keeping them separate
+/// is a deliberate decoupling of wire format from internal model.
+/// [`TaskState::from_task_status`] is the one conversion direction the
+/// hub needs (node result → internal terminal state).
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum TaskState {
-    /// Task has been handed to the node and is executing.
+    /// Task has been handed to the node and is executing.  No
+    /// corresponding variant on the wire — the hub alone knows about
+    /// in-flight tasks.
     Running,
-    /// Task finished successfully.
+    /// Task finished successfully.  Maps to `TaskStatus::Completed`.
     Completed,
-    /// Task failed.  Error string is the node's report.
+    /// Task failed.  Error string is the node's report.  Maps to
+    /// `TaskStatus::Failed { error }`.
     Failed { error: String },
-    /// Task was cancelled (reserved — no cancellation path in v1).
+    /// Task was cancelled.  Maps to `TaskStatus::Cancelled`.  Set by
+    /// `swarm_task_cancel`; may also be reported by the node.
     Cancelled,
 }
 
@@ -55,6 +75,10 @@ impl TaskState {
         !matches!(self, Self::Running)
     }
 
+    /// Convert the wire-level terminal status a node reports into the
+    /// hub's internal state.  Called exactly once per task: when
+    /// `POST /swarm/result` lands and `TaskStore::finalize` needs to
+    /// pin the record's lifecycle position.
     fn from_task_status(status: &TaskStatus) -> Self {
         match status {
             TaskStatus::Completed => Self::Completed,
@@ -182,19 +206,15 @@ impl TaskStore {
     /// Insert a new task record.  Overwrites any existing entry for the
     /// same task_id — unique IDs are the caller's responsibility (we use
     /// UUIDv4 in `mcp.rs`).
-    pub async fn insert(&self, record: TaskRecord) {
-        let task_id = record.task_id.clone();
-        {
-            let mut inner = self.inner.write().await;
-            inner.insert(record.task_id.clone(), record);
-        }
-        // Persist outside the write lock.  Re-read under a read lock
-        // since record was moved into the map.
-        let inner = self.inner.read().await;
-        if let Some(record) = inner.get(&task_id)
-            && let Err(e) = self.persistence.insert(record).await {
-                tracing::error!(task_id = %task_id, error = %e, "failed to persist task insert");
-            }
+    ///
+    /// Persist-first: we write to disk before populating the in-memory
+    /// map.  On persistence failure the caller gets `Err`, and neither
+    /// store contains the record — retry is safe.
+    pub async fn insert(&self, record: TaskRecord) -> Result<(), sqlx::Error> {
+        self.persistence.insert(&record).await?;
+        let mut inner = self.inner.write().await;
+        inner.insert(record.task_id.clone(), record);
+        Ok(())
     }
 
     /// Append a checkpoint to the named task.  Returns `false` if the
@@ -574,7 +594,7 @@ mod tests {
     #[tokio::test]
     async fn insert_then_get_roundtrip() {
         let store = TaskStore::new_for_test().await;
-        store.insert(blank_record("t1")).await;
+        let _ = store.insert(blank_record("t1")).await;
         let snap = store.get("t1").await.unwrap();
         assert_eq!(snap.task_id, "t1");
         assert!(matches!(snap.state, TaskState::Running));
@@ -584,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn append_checkpoint_preserves_order_and_is_filtered_by_since() {
         let store = TaskStore::new_for_test().await;
-        store.insert(blank_record("t1")).await;
+        let _ = store.insert(blank_record("t1")).await;
         for seq in 1..=3 {
             store
                 .append_checkpoint(TaskCheckpoint {
@@ -627,7 +647,7 @@ mod tests {
         let (tx, rx) = oneshot::channel::<SwarmResult>();
         let mut rec = blank_record("t1");
         rec.waiter = Some(tx);
-        store.insert(rec).await;
+        let _ = store.insert(rec).await;
 
         let result = sample_result("t1", TaskStatus::Completed);
         let waiter = store.finalize("t1", result.clone()).await;
@@ -645,7 +665,7 @@ mod tests {
     #[tokio::test]
     async fn finalize_without_waiter_still_stores_result() {
         let store = TaskStore::new_for_test().await;
-        store.insert(blank_record("t1")).await;
+        let _ = store.insert(blank_record("t1")).await;
 
         let waiter = store
             .finalize("t1", sample_result("t1", TaskStatus::Completed))
@@ -660,7 +680,7 @@ mod tests {
     #[tokio::test]
     async fn failed_task_state_carries_error() {
         let store = TaskStore::new_for_test().await;
-        store.insert(blank_record("t1")).await;
+        let _ = store.insert(blank_record("t1")).await;
         store
             .finalize(
                 "t1",
@@ -685,7 +705,7 @@ mod tests {
         let (tx, _rx) = oneshot::channel::<SwarmResult>();
         let mut rec = blank_record("t1");
         rec.waiter = Some(tx);
-        store.insert(rec).await;
+        let _ = store.insert(rec).await;
 
         store.abandon_waiter("t1").await;
 
@@ -702,7 +722,7 @@ mod tests {
         let (tx, rx) = oneshot::channel::<SwarmResult>();
         let mut rec = blank_record("t1");
         rec.waiter = Some(tx);
-        store.insert(rec).await;
+        let _ = store.insert(rec).await;
 
         let (node_id, waiter) = store.cancel("t1").await.unwrap();
         assert_eq!(node_id, "node-a");
@@ -727,7 +747,7 @@ mod tests {
         let store = TaskStore::new_for_test().await;
         assert!(store.cancel("nope").await.is_none());
 
-        store.insert(blank_record("t1")).await;
+        let _ = store.insert(blank_record("t1")).await;
         store
             .finalize("t1", sample_result("t1", TaskStatus::Completed))
             .await;
@@ -737,7 +757,7 @@ mod tests {
     #[tokio::test]
     async fn late_checkpoint_after_terminal_is_dropped() {
         let store = TaskStore::new_for_test().await;
-        store.insert(blank_record("t1")).await;
+        let _ = store.insert(blank_record("t1")).await;
         store
             .finalize("t1", sample_result("t1", TaskStatus::Completed))
             .await;
@@ -761,7 +781,7 @@ mod tests {
         for i in 0..5 {
             let mut rec = blank_record(&format!("t{i}"));
             rec.submitted_at = base + Duration::from_secs(i);
-            store.insert(rec).await;
+            let _ = store.insert(rec).await;
         }
         let snaps = store.list(3).await;
         assert_eq!(snaps.len(), 3);
@@ -777,14 +797,14 @@ mod tests {
     #[tokio::test]
     async fn get_owned_returns_none_for_wrong_owner() {
         let store = TaskStore::new_for_test().await;
-        store.insert(owned_record("t1", "alice")).await;
+        let _ = store.insert(owned_record("t1", "alice")).await;
         assert!(store.get_owned("t1", "bob").await.is_none());
     }
 
     #[tokio::test]
     async fn get_owned_returns_snapshot_for_correct_owner() {
         let store = TaskStore::new_for_test().await;
-        store.insert(owned_record("t1", "alice")).await;
+        let _ = store.insert(owned_record("t1", "alice")).await;
         let snap = store.get_owned("t1", "alice").await.unwrap();
         assert_eq!(snap.task_id, "t1");
     }
@@ -792,7 +812,7 @@ mod tests {
     #[tokio::test]
     async fn get_owned_returns_none_for_unowned_task() {
         let store = TaskStore::new_for_test().await;
-        store.insert(blank_record("t1")).await; // owner: None
+        let _ = store.insert(blank_record("t1")).await; // owner: None
         assert!(store.get_owned("t1", "alice").await.is_none());
     }
 
@@ -803,14 +823,14 @@ mod tests {
         for i in 0..3 {
             let mut rec = owned_record(&format!("a{i}"), "alice");
             rec.submitted_at = base + Duration::from_secs(i);
-            store.insert(rec).await;
+            let _ = store.insert(rec).await;
         }
         for i in 0..2 {
             let mut rec = owned_record(&format!("b{i}"), "bob");
             rec.submitted_at = base + Duration::from_secs(10 + i);
-            store.insert(rec).await;
+            let _ = store.insert(rec).await;
         }
-        store.insert(blank_record("unowned")).await;
+        let _ = store.insert(blank_record("unowned")).await;
 
         let alice_tasks = store.list_owned("alice", 50).await;
         assert_eq!(alice_tasks.len(), 3);
@@ -826,7 +846,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoints_since_owned_rejects_wrong_owner() {
         let store = TaskStore::new_for_test().await;
-        store.insert(owned_record("t1", "alice")).await;
+        let _ = store.insert(owned_record("t1", "alice")).await;
         store
             .append_checkpoint(TaskCheckpoint {
                 task_id: "t1".into(),
@@ -844,7 +864,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_owned_rejects_wrong_owner() {
         let store = TaskStore::new_for_test().await;
-        store.insert(owned_record("t1", "alice")).await;
+        let _ = store.insert(owned_record("t1", "alice")).await;
         assert!(store.cancel_owned("t1", "bob").await.is_none());
         // Task should still be running.
         let snap = store.get("t1").await.unwrap();
@@ -862,17 +882,17 @@ mod tests {
         let mut old = blank_record("old");
         old.state = TaskState::Completed;
         old.last_update = SystemTime::now() - Duration::from_secs(3600);
-        store.insert(old).await;
+        let _ = store.insert(old).await;
 
         // terminal, fresh → kept
         let mut fresh = blank_record("fresh");
         fresh.state = TaskState::Completed;
-        store.insert(fresh).await;
+        let _ = store.insert(fresh).await;
 
         // running, old → kept
         let mut running = blank_record("running");
         running.last_update = SystemTime::now() - Duration::from_secs(3600);
-        store.insert(running).await;
+        let _ = store.insert(running).await;
 
         let reaped = store.reap(Duration::from_secs(60)).await;
         assert_eq!(reaped, 1);

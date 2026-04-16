@@ -286,8 +286,9 @@ impl super::Controller for SwarmController {
         // NOT have that tool — otherwise the agent executing a swarm task
         // can dispatch another swarm task, creating infinite loops.
         //
-        // The hub's `?caller=` query param already filters `list_nodes`
-        // results so the agent never sees its own node.
+        // The hub resolves caller identity from the bearer token and
+        // already filters `list_nodes` results so the agent never sees
+        // its own node.
         let mut local_settings = settings.clone();
         for skill in &mut local_settings.skills {
             if let crate::config::SkillConfig::Mcp(mcp) = skill

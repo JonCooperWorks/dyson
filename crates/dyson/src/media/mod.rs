@@ -150,6 +150,105 @@ pub fn is_office_mime(mime: &str) -> bool {
     )
 }
 
+/// True if `ext` (lowercase, no leading dot) names a Microsoft Office
+/// document we can extract text from.  Pair with [`is_office_mime`] when
+/// classifying a file that may arrive with a missing or `application/
+/// octet-stream` MIME type.
+pub fn is_office_extension(ext: &str) -> bool {
+    matches!(ext, "docx" | "xlsx" | "pptx" | "doc" | "xls" | "ppt")
+}
+
+/// True if `ext` (lowercase, no leading dot) names a file type we can
+/// safely ingest as inline UTF-8 text.  Co-located with [`is_text_like_mime`]
+/// so the MIME and extension whitelists evolve together.
+pub fn is_text_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "md" | "markdown"
+            | "txt"
+            | "rst"
+            | "log"
+            | "csv"
+            | "tsv"
+            | "json"
+            | "jsonl"
+            | "ndjson"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "ini"
+            | "cfg"
+            | "conf"
+            | "env"
+            | "rs"
+            | "go"
+            | "py"
+            | "pyi"
+            | "js"
+            | "mjs"
+            | "cjs"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "rb"
+            | "sh"
+            | "bash"
+            | "zsh"
+            | "fish"
+            | "c"
+            | "h"
+            | "cpp"
+            | "hpp"
+            | "cc"
+            | "hh"
+            | "cxx"
+            | "hxx"
+            | "java"
+            | "kt"
+            | "kts"
+            | "swift"
+            | "m"
+            | "mm"
+            | "php"
+            | "pl"
+            | "lua"
+            | "sql"
+            | "html"
+            | "htm"
+            | "css"
+            | "scss"
+            | "sass"
+            | "less"
+            | "xml"
+            | "svg"
+            | "dockerfile"
+            | "makefile"
+            | "mk"
+            | "lock"
+            | "sum"
+            | "mod"
+            | "gitignore"
+            | "gitattributes"
+            | "editorconfig"
+            | "r"
+            | "scala"
+            | "clj"
+            | "ex"
+            | "exs"
+            | "erl"
+            | "hs"
+            | "elm"
+            | "dart"
+            | "vue"
+            | "svelte"
+            | "tf"
+            | "hcl"
+            | "proto"
+            | "graphql"
+            | "gql"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Lower-level typed API (used internally and by resolve_attachment).
 // ---------------------------------------------------------------------------
