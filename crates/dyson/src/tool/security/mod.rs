@@ -24,7 +24,7 @@
 //                              nuclei template the LLM can use for
 //                              verification.
 //
-// All three use the shared tree-sitter infrastructure from `tool::ast`,
+// All three use the shared tree-sitter infrastructure from `crate::ast`,
 // so they support the same 20 languages and respect the same file-size
 // and file-count limits.
 // ===========================================================================

@@ -26,7 +26,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
 
 use crate::error::{DysonError, Result};
-use crate::tool::ast;
+use crate::ast;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::MAX_OUTPUT_BYTES;
 

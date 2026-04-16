@@ -18,7 +18,7 @@ use std::path::Path;
 
 use crate::error::Result;
 use crate::tool::ToolOutput;
-use crate::tool::ast::{
+use crate::ast::{
     self, MAX_FILE_SIZE, MAX_FILES, find_identifier_positions, find_word_boundary_matches,
 };
 

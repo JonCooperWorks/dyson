@@ -42,6 +42,7 @@
 
 pub mod advisor;
 pub mod agent;
+pub mod ast;
 pub mod auth;
 pub mod chat_history;
 pub mod config;

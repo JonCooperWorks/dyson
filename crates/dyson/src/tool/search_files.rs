@@ -21,7 +21,7 @@ use std::path::Path;
 use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
-use crate::tool::ast;
+use crate::ast;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::MAX_OUTPUT_BYTES;
 

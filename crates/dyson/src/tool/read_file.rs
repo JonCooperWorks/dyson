@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncBufReadExt;
 
 use crate::error::{DysonError, Result};
-use crate::tool::ast;
+use crate::ast;
 use crate::tool::{Tool, ToolContext, ToolOutput, resolve_and_validate_path};
 use crate::util::truncate_output;
 

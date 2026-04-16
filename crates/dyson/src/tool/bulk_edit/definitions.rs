@@ -15,10 +15,10 @@ use tree_sitter::Node;
 use crate::error::Result;
 use crate::tool::ToolOutput;
 
-use crate::tool::ast::nodes::{
+use crate::ast::nodes::{
     clean_kind, extract_definition_name, is_container_node, is_elixir_definition,
 };
-use crate::tool::ast::{self, LanguageConfig, MAX_FILES};
+use crate::ast::{self, LanguageConfig, MAX_FILES};
 
 /// List definitions in the given path (file or directory).
 ///

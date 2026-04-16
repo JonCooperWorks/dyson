@@ -16,7 +16,7 @@ use regex::Regex;
 use crate::error::Result;
 use crate::tool::ToolOutput;
 
-use crate::tool::ast::{self, MAX_FILE_SIZE};
+use crate::ast::{self, MAX_FILE_SIZE};
 
 /// Maximum number of files to process in a single find_replace.
 ///

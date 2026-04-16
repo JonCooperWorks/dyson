@@ -20,8 +20,8 @@ use async_trait::async_trait;
 use tree_sitter::Node;
 
 use crate::error::{DysonError, Result};
-use crate::tool::ast::{self, LanguageConfig};
-use crate::tool::ast::nodes;
+use crate::ast::{self, LanguageConfig};
+use crate::ast::nodes;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::MAX_OUTPUT_BYTES;
 
