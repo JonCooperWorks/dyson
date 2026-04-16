@@ -742,10 +742,10 @@ async fn coder_runs_child_and_returns_result() {
 #[test]
 fn orchestrator_tool_uses_config_name_and_description() {
     let config = OrchestratorConfig {
-        name: "test_orchestrator".into(),
-        description: "A test orchestrator".into(),
-        system_prompt: "You are a test.".into(),
-        direct_tool_names: vec!["bash".into()],
+        name: "test_orchestrator",
+        description: "A test orchestrator",
+        system_prompt: "You are a test.",
+        direct_tool_names: &["bash"],
         max_iterations: 10,
         max_tokens: 4096,
         injects_protocol: None,
@@ -774,9 +774,9 @@ fn security_engineer_config_produces_correct_values() {
     assert_eq!(config.max_iterations, 40);
     assert_eq!(config.max_tokens, 8192);
     assert!(config.injects_protocol.is_some());
-    assert!(config.direct_tool_names.contains(&"ast_query".to_string()));
-    assert!(config.direct_tool_names.contains(&"attack_surface_analyzer".to_string()));
-    assert!(config.direct_tool_names.contains(&"exploit_builder".to_string()));
+    assert!(config.direct_tool_names.contains(&"ast_query"));
+    assert!(config.direct_tool_names.contains(&"attack_surface_analyzer"));
+    assert!(config.direct_tool_names.contains(&"exploit_builder"));
 }
 
 #[test]
@@ -892,13 +892,13 @@ async fn orchestrator_runs_child_and_returns_result() {
 fn orchestrator_with_custom_config() {
     // Demonstrate composability: any role can be an orchestrator.
     let config = OrchestratorConfig {
-        name: "devops_engineer".into(),
-        description: "Infrastructure and deployment specialist".into(),
-        system_prompt: "You are a devops engineer.".into(),
-        direct_tool_names: vec!["bash".into(), "read_file".into()],
+        name: "devops_engineer",
+        description: "Infrastructure and deployment specialist",
+        system_prompt: "You are a devops engineer.",
+        direct_tool_names: &["bash", "read_file"],
         max_iterations: 20,
         max_tokens: 4096,
-        injects_protocol: Some("\n## DevOps Protocol\nUse for infra changes.".into()),
+        injects_protocol: Some("\n## DevOps Protocol\nUse for infra changes."),
     };
 
     let parent_tools: Vec<Arc<dyn Tool>> = vec![

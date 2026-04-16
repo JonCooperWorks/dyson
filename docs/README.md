@@ -23,7 +23,7 @@ layers on top of those primitives.
 | [Configuration](configuration.md) | dyson.json format, provider selection, skill config, env var resolution |
 | [Secrets](secrets.md) | Per-secret scheme routing, InsecureEnvironmentVariable, zeroize, adding resolvers |
 | [Tool Forwarding over MCP](tool-forwarding-over-mcp.md) | MCP server mode, bearer token auth, bidirectional MCP |
-| [Subagents](subagents.md) | Child agents with different models, tool inheritance, delegation patterns |
+| [Subagents](subagents.md) | Child agents, orchestrators (security_engineer), OrchestratorConfig composability, parallel dispatch |
 | [Advisor](advisor.md) | Consult a stronger model; native Anthropic `advisor_20260301` or generic subagent fallback |
 | [Public Agents](public-agents.md) | Group chat agents, AgentMode enum, tool restriction, SSRF protection, Telegram privacy mode |
 | [Adding a Provider](adding-a-provider.md) | How to add a new LLM provider (3-step process via the registry) |
@@ -56,6 +56,7 @@ src/
     search_files.rs       Content search (regex, or AST identifier mode)
     bulk_edit/            Multi-file edit: AST rename_symbol, find_replace, list_definitions (tree-sitter, 19 languages)
     ast/                  Shared tree-sitter grammars and walkers used by bulk_edit, read_file, search_files
+    security/             AST-aware security tools (ast_query, attack_surface_analyzer, exploit_builder)
     workspace_view.rs     View workspace files
     workspace_search.rs   Search workspace files by pattern
     workspace_update.rs   Write/append workspace files
@@ -71,7 +72,11 @@ src/
     mod.rs                Skill trait, create_skills() factory
     builtin.rs            BuiltinSkill (wraps built-in tools)
     local.rs              LocalSkill (SKILL.md parser, workspace discovery)
-    subagent.rs           SubagentSkill (child agents as tools)
+    subagent/             SubagentSkill, OrchestratorTool, CoderTool, spawn_child
+      orchestrator.rs     Generic composable orchestrator (OrchestratorConfig + OrchestratorTool)
+      security_engineer.rs  Security engineer config (composed from OrchestratorTool)
+      coder.rs            Directory-scoped coding subagent
+      prompts/            System prompts and protocol injections for all subagents
     mcp/
       mod.rs              McpSkill (client — connects to external MCP servers)
       serve.rs            McpHttpServer (server — exposes workspace tools with bearer auth)

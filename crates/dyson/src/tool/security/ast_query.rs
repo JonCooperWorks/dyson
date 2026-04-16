@@ -141,8 +141,6 @@ impl Tool for AstQueryTool {
             .canonicalize()
             .unwrap_or_else(|_| ctx.working_dir.clone());
 
-        let lang_display_name = config.display_name.to_string();
-
         // CPU-bound: compile query + walk AST.
         let results = tokio::task::spawn_blocking(move || {
             run_query(
@@ -151,7 +149,6 @@ impl Tool for AstQueryTool {
                 &search_dir,
                 &working_dir_canon,
                 include_glob.as_deref(),
-                &lang_display_name,
             )
         })
         .await
@@ -177,7 +174,6 @@ fn run_query(
     search_dir: &std::path::Path,
     working_dir_canon: &std::path::Path,
     include_glob: Option<&str>,
-    _lang_display_name: &str,
 ) -> Vec<String> {
     let mut results = Vec::new();
     let mut total_bytes = 0usize;
@@ -257,11 +253,11 @@ fn run_query(
 
                 let node_text = &parsed.source
                     [node.start_byte()..node.end_byte().min(parsed.source.len())];
-                // Truncate very long node texts (e.g., entire function bodies).
-                let display_text = if node_text.len() > 120 {
-                    format!("{}...", &node_text[..120])
+                // Truncate very long node texts to avoid flooding output.
+                let display_text: std::borrow::Cow<'_, str> = if node_text.len() > 120 {
+                    format!("{}...", &node_text[..120]).into()
                 } else {
-                    node_text.to_string()
+                    node_text.into()
                 };
 
                 let line_num = node.start_position().row + 1;

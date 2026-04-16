@@ -36,24 +36,28 @@ use super::{ChildSpawn, spawn_child};
 
 /// Configuration that defines an orchestrator's identity and capabilities.
 /// Compose any orchestrator role by filling in this struct.
+///
+/// Uses `&'static str` for fields that are typically `include_str!()` or
+/// string literals (system_prompt, injects_protocol, tool names) to avoid
+/// unnecessary heap allocations at startup.
 #[derive(Clone, Debug)]
 pub struct OrchestratorConfig {
     /// Tool name exposed to the parent agent (e.g., "security_engineer").
-    pub name: String,
+    pub name: &'static str,
     /// Tool description shown in the parent's tool list.
-    pub description: String,
+    pub description: &'static str,
     /// System prompt for the orchestrator's child agent.
-    pub system_prompt: String,
+    pub system_prompt: &'static str,
     /// Allowlist of parent tool names this orchestrator gets direct access to.
     /// Tools not in this list are filtered out.
-    pub direct_tool_names: Vec<String>,
+    pub direct_tool_names: &'static [&'static str],
     /// Max iterations for the child agent.
     pub max_iterations: usize,
     /// Max tokens per LLM response.
     pub max_tokens: u32,
     /// Optional protocol fragment injected into the parent's system prompt.
     /// Tells the parent when and how to invoke this orchestrator.
-    pub injects_protocol: Option<String>,
+    pub injects_protocol: Option<&'static str>,
 }
 
 /// A composable `Tool` that spawns an orchestrator child agent.
@@ -92,7 +96,7 @@ impl OrchestratorTool {
     ) -> Self {
         let direct_tools = parent_tools
             .iter()
-            .filter(|t| config.direct_tool_names.iter().any(|n| n == t.name()))
+            .filter(|t| config.direct_tool_names.contains(&t.name()))
             .cloned()
             .collect();
 
@@ -116,7 +120,7 @@ impl OrchestratorTool {
 #[async_trait]
 impl Tool for OrchestratorTool {
     fn name(&self) -> &str {
-        &self.config.name
+        self.config.name
     }
 
     fn description(&self) -> &str {
@@ -144,7 +148,7 @@ impl Tool for OrchestratorTool {
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let parsed: OrchestratorInput =
             serde_json::from_value(input.clone()).map_err(|e| {
-                DysonError::tool(&self.config.name, format!("invalid input: {e}"))
+                DysonError::tool(self.config.name, format!("invalid input: {e}"))
             })?;
 
         let user_message = if parsed.context.is_empty() {
@@ -156,8 +160,10 @@ impl Tool for OrchestratorTool {
             )
         };
 
-        // Combine direct tools + inner subagent tools into one flat list.
-        let mut all_tools = self.direct_tools.clone();
+        // Combine direct + inner subagent tools without cloning the Vec.
+        let mut all_tools =
+            Vec::with_capacity(self.direct_tools.len() + self.inner_subagent_tools.len());
+        all_tools.extend(self.direct_tools.iter().cloned());
         all_tools.extend(self.inner_subagent_tools.iter().cloned());
 
         let settings = AgentSettings {
@@ -166,13 +172,13 @@ impl Tool for OrchestratorTool {
                 .to_string(),
             max_iterations: self.config.max_iterations,
             max_tokens: self.config.max_tokens,
-            system_prompt: self.config.system_prompt.clone(),
+            system_prompt: self.config.system_prompt.to_string(),
             provider: self.provider.clone(),
             ..AgentSettings::default()
         };
 
         spawn_child(ChildSpawn {
-            name: &self.config.name,
+            name: self.config.name,
             settings,
             inherited_tools: all_tools,
             sandbox: Arc::clone(&self.sandbox),

@@ -414,8 +414,8 @@ impl SubagentSkill {
 
         // Orchestrators: composable subagents that get direct tools + inner
         // subagent dispatch.  Each is defined by an OrchestratorConfig.
-        let orchestrator_configs = builtin_orchestrator_configs();
-        if !orchestrator_configs.is_empty() {
+        let orch_configs = builtin_orchestrator_configs();
+        if !orch_configs.is_empty() {
             // Build inner subagent tools once — shared across all orchestrators.
             let builtin_configs = builtin_subagent_configs();
             let mut inner_subagent_tools: Vec<Arc<dyn Tool>> = Vec::new();
@@ -443,15 +443,23 @@ impl SubagentSkill {
             );
             inner_subagent_tools.push(Arc::new(inner_coder));
 
-            for orch_cfg in orchestrator_configs {
+            // Clone inner tools for all but the last orchestrator,
+            // then move the vec into the final one to avoid an extra clone.
+            let orch_count = orch_configs.len();
+            for (i, orch_cfg) in orch_configs.iter().enumerate() {
+                let inner = if i + 1 < orch_count {
+                    inner_subagent_tools.clone()
+                } else {
+                    std::mem::take(&mut inner_subagent_tools)
+                };
                 let orch_tool = OrchestratorTool::new(
-                    orch_cfg,
+                    orch_cfg.clone(),
                     coder_provider.clone(),
                     coder_client.clone(),
                     Arc::clone(&sandbox),
                     workspace.clone(),
                     parent_tools,
-                    inner_subagent_tools.clone(),
+                    inner,
                 );
                 prompt_lines.push(format!(
                     "- **{}**: {}",
@@ -483,7 +491,7 @@ impl SubagentSkill {
             }
 
             // Protocol fragments from orchestrators.
-            for orch_cfg in builtin_orchestrator_configs() {
+            for orch_cfg in &orch_configs {
                 if let Some(ref fragment) = orch_cfg.injects_protocol {
                     prompt.push_str(fragment);
                 }
