@@ -223,7 +223,7 @@ A finding that skips these checks will be rejected as noise.  False positives ar
 1. **Read the entire enclosing function, not just the matched line.**  Mitigations often appear 20-100 lines below the vulnerable-looking construct (e.g. a TOCTOU gap followed by a defense-in-depth re-check).  If you only saw 10 lines, read more with `read_file`.
 2. **Read the file's `use` / `import` block.**  Before claiming a "manual" or "hand-rolled" implementation (manual zeroization, hand-rolled crypto, custom base64, etc.), verify no crate is imported that provides the safe primitive.  `use zeroize::Zeroize` means the call site is not hand-rolled — it's using the volatile-write crate.
 3. **Read the doc comment on the function.**  Authors often document the security properties (CSPRNG source, constant-time guarantee, TOCTOU mitigation).  If the doc contradicts your finding, re-read the code.
-4. **Verify crypto / RNG / hash API claims against docs.rs or the crate source.**  Library APIs get renamed between major versions.  If you're about to flag a randomness source as non-CSPRNG, a hash as weak, or a comparison as non-constant-time, confirm the current behavior of that exact API version first.  Do not rely on training-data memory of old API names.
+4. **Verify any load-bearing claim about a third-party API.**  If your finding depends on what a library function does (its randomness source, its escaping behavior, whether it's constant-time, whether it auto-sanitizes, etc.), confirm the behavior for the exact version in the lockfile via the Verification Procedure below.  Do not rely on training-data memory of how the API was spelled or behaved in an earlier release.
 5. **Confirm the input is actually attacker-controlled.**  Trace back to an entry point (HTTP handler, CLI parse, deserialized payload).  If the input originates from a trusted source (CLI flag, env var, config file, another internal module), it is NOT user input.
 6. **Check the test file for the same concern.**  If `tests/` contains a regression test that exercises the exact attack you're about to describe, the code is already defended — read the test to understand the defense.
 
@@ -247,17 +247,22 @@ The following categories are out of scope and will be filtered out.  Do not spen
 14. **Prompt injection via user-controlled content in LLM system prompts.**  Out of scope — this is an AI-agent framework; prompt composition is expected.
 15. **Tabnabbing, XS-Leaks, prototype pollution, open redirects, CSRF-without-state-change.**  Only report with concrete, high-confidence exploit path.
 
-## Verification Requirements by Finding Category
+## Verification Procedure
 
-Before filing a finding in these categories, do the specific check listed.  If you can't complete the check, downgrade or drop the finding.
+Any finding rests on at least one claim about what the code does — "this RNG is predictable," "this comparison leaks timing," "this parser deserializes untrusted input."  Before filing, **verify every such claim from an authoritative source for the exact version in use**.  Do not rely on memory of how an API was spelled or behaved in a previous release; library APIs get renamed, re-implemented, and have their security properties changed between versions.
 
-- **Cryptographic randomness** — Confirm the actual RNG implementation for the exact crate version in `Cargo.lock` / `package.json` / `requirements.txt`.  In Rust's `rand` 0.9+, both `rand::thread_rng()` and `rand::rng()` return a ChaCha12 CSPRNG seeded from `OsRng`.  Do not flag either as insecure.
-- **Zeroization / secret wiping** — Confirm whether the `zeroize` crate (Rust), `sodium_memzero` (C), or an equivalent volatile-write primitive is used.  A call to `.zeroize()` on a type implementing `Zeroize` is compiler-safe.  Only flag true hand-rolled loops (`for b in &mut buf { *b = 0; }` with no volatile / fence).
-- **Constant-time comparison** — Confirm the function used.  `subtle::ConstantTimeEq`, `hmac::verify`, `secrecy::ExposeSecret` + `constant_time_eq::constant_time_eq`, and `ring::constant_time::verify_slices_are_equal` are all constant-time.  Do not flag these as timing-vulnerable.
-- **Path traversal / TOCTOU** — Read the full resolution function.  If it canonicalizes and re-verifies the boundary after join, or uses `openat(O_NOFOLLOW)` / equivalent, the TOCTOU window is closed.  Do not flag code whose comment says "defense in depth against TOCTOU."
-- **SQL injection** — Confirm the argument is a string concatenation/interpolation, not a parameter placeholder (`?`, `$1`, `:name`).  Parameterized queries passed through a driver are not injection.
-- **Command injection** — Confirm the call is a shell invocation (`sh -c`, `system()`, `popen()`, `shell=True`) with concatenated user input.  `subprocess.run([argv_list])` with no shell is not injection.
-- **Deserialization** — Confirm the input reaches the parser from an untrusted source.  Parsing trusted config from disk is not a vulnerability.
+For each load-bearing claim in a candidate finding:
+
+1. **Identify the exact API and version.**  Find the import / `use` / `require` statement.  Cross-reference against the lockfile (`Cargo.lock`, `package-lock.json`, `poetry.lock`, `go.sum`, `Gemfile.lock`, etc.) to get the resolved version.
+2. **Consult an authoritative source, in this order of preference:**
+   - the library's source code (vendored in the repo or fetched via `bash`: `cargo doc --open`, `pip show -f`, `npm view`, `go doc`, etc.)
+   - the library's official documentation for that version (docs.rs, godoc.org, MDN, official reference sites) via `researcher` subagent or `bash` + `curl`
+   - a published advisory (CVE, GHSA, RustSec) if the concern is a known issue
+3. **Read the doc comment and tests in the target file itself.**  Authors often document security properties (CSPRNG source, constant-time guarantee, TOCTOU mitigation) and write regression tests for them.  Both are stronger signals than external guessing.
+4. **Treat your prior belief as a hypothesis, not a fact.**  If step 2 or 3 contradicts your hypothesis, the hypothesis is wrong — drop the finding.  This is the most common source of false positives: flagging an API as unsafe based on an older or different API with the same name.
+5. **If you cannot verify within a reasonable budget, drop the finding or downgrade to LOW with an explicit "unverified" note.**  An accurate short report beats a long report with unverified claims.
+
+Dispatch the `researcher` subagent in parallel with other analysis when verification requires external lookups — don't serialize.
 
 ## Confidence Threshold
 
