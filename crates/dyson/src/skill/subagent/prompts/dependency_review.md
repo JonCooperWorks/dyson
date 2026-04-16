@@ -65,7 +65,7 @@ One sentence: "N vulns across M deps in K files" OR
 "NO_MANIFESTS_FOUND (see above)".
 
 ## Critical
-- <ecosystem> <name>@<version> — <OSV ID> — <one-line>  [fixed in: x.y.z]
+- <ecosystem> <name>@<version> — <OSV ID or "no OSV ID"> — <one-line>  [fixed in: x.y.z or "no fix"]
   context: <why it matters in THIS codebase>
   linked-findings: <file:line, file:line> OR unreferenced
 
@@ -92,10 +92,14 @@ One sentence: "N vulns across M deps in K files" OR
 
 Every Critical and High entry carries a `linked-findings:` line.  It either names `file:line` locations in this codebase that exercise the vulnerable code path, or the literal word `unreferenced`.
 
-- **Name a `file:line`** when your reachability check in step 3 actually found the vulnerable API called from runtime code (e.g. `sanitize-html` called in [routes/userProfile.ts:88](routes/userProfile.ts:88)).  Prefer the sink over the import site.
+- **Name a `file:line`** when your reachability check in step 3 actually found the vulnerable API called from runtime code.  Prefer the call site (the line that invokes the vulnerable function) over the import site.
 - **Write `unreferenced`** when the vulnerable dependency is present but you could not locate a call site — the CVE is real but not obviously reachable.  This is still valuable signal for the parent agent: it means "the package is in the tree, but we didn't find a caller".
 
 Never omit the field on Critical/High.  Silence ("no linked-findings line") is ambiguous; `unreferenced` is explicit.
+
+## OSV ID sourcing
+
+Every CVE, GHSA, RUSTSEC, or other vulnerability ID that appears in your output must come from a `dependency_scan` result in this run.  Do not compose, predict, guess, or extrapolate IDs from a numbering pattern — even if a range looks "probably assigned by now."  If `dependency_scan` produced no ID for a finding, write `no OSV ID` in that slot, and note it in the one-line description.  Inventing IDs makes the report worse than omitting the finding: a fabricated CVE number looks authoritative and wastes the reader's time when they try to look it up.
 
 ## Prioritization rules
 
