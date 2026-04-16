@@ -75,6 +75,7 @@ fn subagent_tool_name_and_description() {
     let tool = SubagentTool::new(
         config,
         LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
         ),
@@ -104,6 +105,7 @@ fn subagent_tool_input_schema_has_required_task() {
     let tool = SubagentTool::new(
         config,
         LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
         ),
@@ -125,13 +127,23 @@ fn subagent_tool_input_schema_has_required_task() {
 /// Mock LLM that returns pre-programmed responses for subagent tests.
 struct MockLlm {
     responses: std::sync::Mutex<Vec<Vec<StreamEvent>>>,
+    /// Records the `model` field of every `CompletionConfig` the client
+    /// receives so tests can assert which model a subagent billed.
+    models_seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl MockLlm {
     fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
         Self {
             responses: std::sync::Mutex::new(responses),
+            models_seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    /// Handle to the shared `models_seen` buffer; clone before wrapping
+    /// the client in `Box<dyn LlmClient>` so the test can still read it.
+    fn models_seen_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        std::sync::Arc::clone(&self.models_seen)
     }
 }
 
@@ -143,8 +155,9 @@ impl crate::llm::LlmClient for MockLlm {
         _system: &str,
         _system_suffix: &str,
         _tools: &[crate::llm::ToolDefinition],
-        _config: &crate::llm::CompletionConfig,
+        config: &crate::llm::CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
+        self.models_seen.lock().unwrap().push(config.model.clone());
         let events = self.responses.lock().unwrap().remove(0);
         Ok(crate::llm::StreamResponse {
             stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
@@ -207,6 +220,7 @@ async fn subagent_depth_limit_prevents_recursion() {
     let tool = SubagentTool::new(
         config,
         LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
         ),
@@ -249,6 +263,7 @@ async fn subagent_missing_task_returns_error() {
     let tool = SubagentTool::new(
         config,
         LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
         ),
@@ -559,6 +574,115 @@ fn default_provider_resolves_to_agent_settings() {
     assert_eq!(skill.tools()[2].name(), "security_engineer");
 }
 
+/// Regression: `SubagentTool` must bill the parent's model when its own
+/// `config.model` is unset.  Before this fix it silently fell back to
+/// the provider registry's hardcoded Sonnet, which billed users for a
+/// model they never configured.
+#[tokio::test]
+async fn subagent_uses_parent_model_when_config_model_unset() {
+    let llm = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("done".into()),
+        StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        },
+    ]]);
+    let seen = llm.models_seen_handle();
+
+    let config = SubagentAgentConfig {
+        name: "test_sub".into(),
+        description: "Test".into(),
+        system_prompt: "Test".into(),
+        provider: "anthropic".into(),
+        model: None, // unset → should inherit parent_model
+        max_iterations: None,
+        max_tokens: None,
+        tools: None,
+        injects_protocol: None,
+    };
+
+    let tool = SubagentTool::new(
+        config,
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(), // parent's model
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        vec![],
+    );
+
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({"task": "do something"});
+    let _ = tool.run(&input, &ctx).await.unwrap();
+
+    let models = seen.lock().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0], "claude-opus-4-20250514");
+}
+
+/// Regression: `CoderTool` must bill the parent's model, not a registry default.
+#[tokio::test]
+async fn coder_uses_parent_model() {
+    let llm = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("done".into()),
+        StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        },
+    ]]);
+    let seen = llm.models_seen_handle();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let tool = CoderTool::new(
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+    );
+
+    let ctx = ToolContext::for_test(tmp.path());
+    let input = serde_json::json!({"path": ".", "task": "refactor"});
+    let _ = tool.run(&input, &ctx).await.unwrap();
+
+    let models = seen.lock().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0], "claude-opus-4-20250514");
+}
+
+/// Regression: `OrchestratorTool` must bill the parent's model, not a registry default.
+#[tokio::test]
+async fn orchestrator_uses_parent_model() {
+    let llm = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("done".into()),
+        StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        },
+    ]]);
+    let seen = llm.models_seen_handle();
+
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+        vec![],
+    );
+
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({"task": "audit auth"});
+    let _ = tool.run(&input, &ctx).await.unwrap();
+
+    let models = seen.lock().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0], "claude-opus-4-20250514");
+}
+
 // -----------------------------------------------------------------------
 // CoderTool tests
 // -----------------------------------------------------------------------
@@ -567,6 +691,7 @@ fn default_provider_resolves_to_agent_settings() {
 fn make_coder_tool() -> CoderTool {
     CoderTool::new(
         LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
         ),
@@ -681,6 +806,7 @@ fn coder_filters_to_correct_tools() {
 
     let tool = CoderTool::new(
         LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
         ),
@@ -719,6 +845,7 @@ async fn coder_runs_child_and_returns_result() {
 
     let tool = CoderTool::new(
         LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
@@ -754,6 +881,7 @@ fn orchestrator_tool_uses_config_name_and_description() {
     let tool = OrchestratorTool::new(
         config,
         LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
         ),
@@ -802,6 +930,7 @@ fn orchestrator_filters_to_config_tool_names() {
     let tool = OrchestratorTool::new(
         security_engineer_config(),
         LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
         ),
@@ -834,6 +963,7 @@ async fn orchestrator_depth_limit_prevents_recursion() {
     let tool = OrchestratorTool::new(
         security_engineer_config(),
         LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
         ),
@@ -871,6 +1001,7 @@ async fn orchestrator_runs_child_and_returns_result() {
     let tool = OrchestratorTool::new(
         security_engineer_config(),
         LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
@@ -911,6 +1042,7 @@ fn orchestrator_with_custom_config() {
     let tool = OrchestratorTool::new(
         config,
         LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
         ),

@@ -41,6 +41,10 @@ const CODER_SYSTEM_PROMPT: &str = include_str!("prompts/coder.md");
 /// ```
 pub struct CoderTool {
     provider: LlmProvider,
+    /// Model identifier inherited from the parent agent's configuration.
+    /// Never falls back to a registry default — subagents must bill the
+    /// same model the user configured, not a hardcoded Sonnet.
+    model: String,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
     sandbox: Arc<dyn Sandbox>,
     workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
@@ -52,6 +56,7 @@ impl CoderTool {
     /// Filters `parent_tools` down to [`CODER_TOOLS`].
     pub fn new(
         provider: LlmProvider,
+        model: String,
         client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
         sandbox: Arc<dyn Sandbox>,
         workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
@@ -65,6 +70,7 @@ impl CoderTool {
 
         Self {
             provider,
+            model,
             client,
             sandbox,
             workspace,
@@ -118,9 +124,7 @@ impl Tool for CoderTool {
         }
 
         let settings = AgentSettings {
-            model: crate::llm::registry::lookup(&self.provider)
-                .default_model
-                .to_string(),
+            model: self.model.clone(),
             max_iterations: 30,
             max_tokens: 8192,
             system_prompt: CODER_SYSTEM_PROMPT.to_string(),

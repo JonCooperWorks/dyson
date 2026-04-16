@@ -69,6 +69,10 @@ pub struct OrchestratorConfig {
 pub struct OrchestratorTool {
     config: OrchestratorConfig,
     provider: LlmProvider,
+    /// Model identifier inherited from the parent agent's configuration.
+    /// Never falls back to a registry default — subagents must bill the
+    /// same model the user configured, not a hardcoded Sonnet.
+    model: String,
     client: RateLimitedHandle<Box<dyn LlmClient>>,
     sandbox: Arc<dyn Sandbox>,
     workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
@@ -85,9 +89,11 @@ impl OrchestratorTool {
     /// `parent_tools` is filtered to `config.direct_tool_names`.
     /// `inner_subagent_tools` are pre-built SubagentTool/CoderTool instances
     /// that the child can invoke (they spawn at depth 2).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: OrchestratorConfig,
         provider: LlmProvider,
+        model: String,
         client: RateLimitedHandle<Box<dyn LlmClient>>,
         sandbox: Arc<dyn Sandbox>,
         workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
@@ -103,6 +109,7 @@ impl OrchestratorTool {
         Self {
             config,
             provider,
+            model,
             client,
             sandbox,
             workspace,
@@ -164,9 +171,7 @@ impl Tool for OrchestratorTool {
         all_tools.extend(self.inner_subagent_tools.iter().cloned());
 
         let settings = AgentSettings {
-            model: crate::llm::registry::lookup(&self.provider)
-                .default_model
-                .to_string(),
+            model: self.model.clone(),
             max_iterations: self.config.max_iterations,
             max_tokens: self.config.max_tokens,
             system_prompt: self.config.system_prompt.to_string(),
