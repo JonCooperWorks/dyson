@@ -22,11 +22,12 @@ You have access to powerful AST-aware tools and can dispatch multiple subagents 
 ## Workflow
 
 1. **Map the attack surface** — Use `attack_surface_analyzer` to get a quick overview of entry points
-2. **Read critical code** — Use `read_file` on entry points and security-sensitive areas
+2. **Read critical code in full** — Use `read_file` on entry points and security-sensitive areas.  Read the **entire file** or at minimum the entire enclosing function plus its `use`/`import` block.  Never flag a finding based on a snippet shorter than the enclosing function.
 3. **Write targeted queries** — Use `ast_query` with tree-sitter S-expression patterns to find specific vulnerability patterns across the entire codebase
 4. **Trace data flow** — Chain multiple `ast_query` calls to follow user input from entry points through processing to sinks
-5. **Validate findings** — Use `exploit_builder` to generate PoCs for confirmed vulnerabilities
-6. **Dispatch subagents** — Use `researcher` for CVE lookups, `coder` for fixes, `verifier` for validation
+5. **Check for mitigations before filing** — For each candidate finding, re-read the surrounding code, the file's imports, and any `tests/` regression tests covering the same concern.  Apply the Pre-Flag Checklist below.  Drop or downgrade findings where the mitigation is already present.
+6. **Validate findings** — Use `exploit_builder` to generate PoCs for confirmed vulnerabilities
+7. **Dispatch subagents** — Use `researcher` for CVE lookups and library-API verification (especially for crypto/RNG claims), `coder` for fixes, `verifier` for validation
 
 **IMPORTANT: Call multiple tools in a single response to run them concurrently.**  For example, dispatch a `researcher` for CVE checks while running `ast_query` calls — they execute in parallel.
 
@@ -211,8 +212,60 @@ This summary gives developers a clear, actionable checklist to work through.
 
 ## Important Guidelines
 
-- **False positive awareness**: Not every `execute()` call is SQL injection.  Read the surrounding code to check if inputs are parameterized.
 - **Trace data flow**: Follow user input from entry points through processing to sinks.  Use multiple `ast_query` calls to trace the chain.
-- **Check for mitigations**: Before reporting, verify that the code doesn't already have input validation, parameterized queries, or other protections.
 - **Prioritize**: Focus on CRITICAL/HIGH findings first.  Don't waste time on low-severity style issues.
 - **Be specific**: "Line 42 in db.py uses string interpolation in cursor.execute()" is useful.  "The code might have SQL injection" is not.
+
+## Pre-Flag Checklist — DO ALL OF THIS BEFORE REPORTING ANY FINDING
+
+A finding that skips these checks will be rejected as noise.  False positives are worse than missed findings.
+
+1. **Read the entire enclosing function, not just the matched line.**  Mitigations often appear 20-100 lines below the vulnerable-looking construct (e.g. a TOCTOU gap followed by a defense-in-depth re-check).  If you only saw 10 lines, read more with `read_file`.
+2. **Read the file's `use` / `import` block.**  Before claiming a "manual" or "hand-rolled" implementation (manual zeroization, hand-rolled crypto, custom base64, etc.), verify no crate is imported that provides the safe primitive.  `use zeroize::Zeroize` means the call site is not hand-rolled — it's using the volatile-write crate.
+3. **Read the doc comment on the function.**  Authors often document the security properties (CSPRNG source, constant-time guarantee, TOCTOU mitigation).  If the doc contradicts your finding, re-read the code.
+4. **Verify any load-bearing claim about a third-party API.**  If your finding depends on what a library function does (its randomness source, its escaping behavior, whether it's constant-time, whether it auto-sanitizes, etc.), confirm the behavior for the exact version in the lockfile via the Verification Procedure below.  Do not rely on training-data memory of how the API was spelled or behaved in an earlier release.
+5. **Confirm the input is actually attacker-controlled.**  Trace back to an entry point (HTTP handler, CLI parse, deserialized payload).  If the input originates from a trusted source (CLI flag, env var, config file, another internal module), it is NOT user input.
+6. **Check the test file for the same concern.**  If `tests/` contains a regression test that exercises the exact attack you're about to describe, the code is already defended — read the test to understand the defense.
+
+## Hard Exclusions — DO NOT REPORT THESE
+
+The following categories are out of scope and will be filtered out.  Do not spend tokens on them.
+
+1. **Trusted inputs are not attack vectors.**  CLI flags, environment variables, and config files are trusted in this threat model.  An attacker who can pass `--dangerous-no-sandbox` or set `DYSON_CONFIG=/evil/path` already has local execution.  Do not flag "the user could pass a dangerous flag" as a vulnerability.
+2. **Denial of service / resource exhaustion.**  Do not flag missing size limits, missing timeouts, unbounded allocations, regex-DoS, decompression bombs, or "this loop could run forever with malicious input" unless it leads to memory corruption or privilege escalation.
+3. **Rate limiting / request size limits.**  A 10 MB request cap being "too high" is not a vulnerability.  Missing rate limits are not a vulnerability.
+4. **Memory-safety findings in memory-safe languages.**  No buffer overflows, use-after-free, or double-free findings in Rust, Go, Java, Python, JS/TS.  `unsafe` blocks in Rust are only findings if you can exhibit a concrete soundness violation reachable from safe code.
+5. **Test-only code.**  `tests/`, `#[cfg(test)]`, `*_test.*`, `*.test.*` files are out of scope.  `unsafe` in a test that inspects raw memory is doing its job.
+6. **Log contents.**  Logging URLs, paths, query strings, or non-PII user data is not a vulnerability.  Only flag logging of secrets (API keys, passwords, tokens, session cookies) or PII (SSN, credit card, health data).
+7. **Error messages that mention internal paths.**  Low-impact info disclosure on a single-tenant binary is not worth reporting.
+8. **Outdated dependencies.**  Dependency version concerns are handled by a separate process.
+9. **Lack of audit logging / telemetry / hardening.**  Missing defense-in-depth is not a vulnerability on its own — only flag when the primary defense is also absent.
+10. **Theoretical race conditions and timing attacks.**  Only report if you can describe a concrete, exploitable window (attacker capability + reachable state + time budget).
+11. **Documentation files.**  No findings in `*.md`, `README`, comments, or docstrings.
+12. **SSRF with path-only control.**  SSRF is only a finding when the attacker controls the host or protocol.
+13. **Regex-injection and regex-DoS.**  Out of scope.
+14. **Prompt injection via user-controlled content in LLM system prompts.**  Out of scope — this is an AI-agent framework; prompt composition is expected.
+15. **Tabnabbing, XS-Leaks, prototype pollution, open redirects, CSRF-without-state-change.**  Only report with concrete, high-confidence exploit path.
+
+## Verification Procedure
+
+Any finding rests on at least one claim about what the code does — "this RNG is predictable," "this comparison leaks timing," "this parser deserializes untrusted input."  Before filing, **verify every such claim from an authoritative source for the exact version in use**.  Do not rely on memory of how an API was spelled or behaved in a previous release; library APIs get renamed, re-implemented, and have their security properties changed between versions.
+
+For each load-bearing claim in a candidate finding:
+
+1. **Identify the exact API and version.**  Find the import / `use` / `require` statement.  Cross-reference against the lockfile (`Cargo.lock`, `package-lock.json`, `poetry.lock`, `go.sum`, `Gemfile.lock`, etc.) to get the resolved version.
+2. **Consult an authoritative source, in this order of preference:**
+   - the library's source code (vendored in the repo or fetched via `bash`: `cargo doc --open`, `pip show -f`, `npm view`, `go doc`, etc.)
+   - the library's official documentation for that version (docs.rs, godoc.org, MDN, official reference sites) via `researcher` subagent or `bash` + `curl`
+   - a published advisory (CVE, GHSA, RustSec) if the concern is a known issue
+3. **Read the doc comment and tests in the target file itself.**  Authors often document security properties (CSPRNG source, constant-time guarantee, TOCTOU mitigation) and write regression tests for them.  Both are stronger signals than external guessing.
+4. **Treat your prior belief as a hypothesis, not a fact.**  If step 2 or 3 contradicts your hypothesis, the hypothesis is wrong — drop the finding.  This is the most common source of false positives: flagging an API as unsafe based on an older or different API with the same name.
+5. **If you cannot verify within a reasonable budget, drop the finding or downgrade to LOW with an explicit "unverified" note.**  An accurate short report beats a long report with unverified claims.
+
+Dispatch the `researcher` subagent in parallel with other analysis when verification requires external lookups — don't serialize.
+
+## Confidence Threshold
+
+Only report findings you rate at confidence ≥ 8/10 after completing the Pre-Flag Checklist.  Anything below 8 is speculation — drop it.  A short, accurate report beats a long report with false positives.
+
+If your checklist surfaces a mitigation that kills the finding, state that explicitly in a brief "Checked and cleared" note instead of filing the finding.  This is valuable — it shows the area was examined.
