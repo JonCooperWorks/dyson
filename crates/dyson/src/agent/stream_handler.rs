@@ -501,10 +501,11 @@ mod tests {
         ]);
 
         let mut output = RecordingOutput::new();
-        let (message, tool_calls, _tokens, _stop) = process_stream(stream, &mut output).await.unwrap();
+        let (message, tool_calls, _tokens, stop) = process_stream(stream, &mut output).await.unwrap();
 
         assert_eq!(output.text(), "Hello world");
         assert!(tool_calls.is_empty());
+        assert_eq!(stop, StopReason::EndTurn);
         assert_eq!(message.content.len(), 1);
         match &message.content[0] {
             ContentBlock::Text { text } => assert_eq!(text, "Hello world"),
@@ -532,12 +533,13 @@ mod tests {
         ]);
 
         let mut output = RecordingOutput::new();
-        let (message, tool_calls, _tokens, _stop) = process_stream(stream, &mut output).await.unwrap();
+        let (message, tool_calls, _tokens, stop) = process_stream(stream, &mut output).await.unwrap();
 
         assert_eq!(output.text(), "Checking.");
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "bash");
         assert_eq!(tool_calls[0].input["command"], "ls");
+        assert_eq!(stop, StopReason::ToolUse);
 
         // Message should have text block + tool_use block.
         assert_eq!(message.content.len(), 2);
@@ -758,49 +760,6 @@ mod tests {
         assert_eq!(output.text(), "This response is trunca");
         assert!(tool_calls.is_empty());
         assert_eq!(stop_reason, StopReason::MaxTokens);
-    }
-
-    #[tokio::test]
-    async fn end_turn_stop_reason_propagated() {
-        let stream = events_to_stream(vec![
-            StreamEvent::TextDelta("Complete response.".into()),
-            StreamEvent::MessageComplete {
-                stop_reason: StopReason::EndTurn,
-                output_tokens: None,
-            },
-        ]);
-
-        let mut output = RecordingOutput::new();
-        let (_message, _tool_calls, _tokens, stop_reason) =
-            process_stream(stream, &mut output).await.unwrap();
-
-        assert_eq!(stop_reason, StopReason::EndTurn);
-    }
-
-    #[tokio::test]
-    async fn tool_use_stop_reason_propagated() {
-        let stream = events_to_stream(vec![
-            StreamEvent::ToolUseStart {
-                id: "call_1".into(),
-                name: "bash".into(),
-            },
-            StreamEvent::ToolUseComplete {
-                id: "call_1".into(),
-                name: "bash".into(),
-                input: serde_json::json!({"command": "ls"}),
-            },
-            StreamEvent::MessageComplete {
-                stop_reason: StopReason::ToolUse,
-                output_tokens: None,
-            },
-        ]);
-
-        let mut output = RecordingOutput::new();
-        let (_message, tool_calls, _tokens, stop_reason) =
-            process_stream(stream, &mut output).await.unwrap();
-
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(stop_reason, StopReason::ToolUse);
     }
 
 }

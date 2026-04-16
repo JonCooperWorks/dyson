@@ -48,7 +48,7 @@ use crate::error::DysonError;
 /// - `ToolUse` → execute tools, then loop (LLM sees results)
 /// - `MaxTokens` → the response was truncated; the agent may continue
 ///   with a follow-up prompt
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
     /// The LLM finished naturally (it has nothing more to say).
     EndTurn,

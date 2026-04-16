@@ -1190,30 +1190,33 @@ impl Agent {
 
             self.log_response(&assistant_msg, &tool_calls);
 
+            // MaxTokens with no tool calls means the response was truncated
+            // mid-generation.  Push the partial message into history and
+            // inject a continuation prompt so the LLM picks up where it
+            // left off.  Skip for Observe mode (provider manages its own
+            // loop) and when tool calls are present (they'll execute
+            // normally and the next iteration continues naturally).
+            if stop_reason == crate::llm::stream::StopReason::MaxTokens
+                && tool_calls.is_empty()
+                && tool_mode != crate::llm::ToolMode::Observe
+            {
+                tracing::warn!(
+                    "response truncated by max_tokens — injecting continuation prompt"
+                );
+                self.conversation.messages.push(assistant_msg);
+                self.conversation.messages.push(Message::user(
+                    "[Your previous response was cut off because it exceeded the \
+                     output token limit. Please continue exactly where you left off.]",
+                ));
+                continue;
+            }
+
             // If no tool calls, we're done.  If the provider set Observe mode,
             // tool calls in the stream are informational only — the provider
             // already executed them internally (e.g. Claude Code CLI, Codex).
             // We display them to the user but don't re-execute, and break to
             // avoid an infinite loop re-feeding already-handled tool_use blocks.
             if tool_calls.is_empty() || tool_mode == crate::llm::ToolMode::Observe {
-                // MaxTokens with no tool calls means the response was
-                // truncated mid-generation.  Push the partial message into
-                // history and inject a continuation prompt so the LLM can
-                // pick up where it left off.
-                if stop_reason == crate::llm::stream::StopReason::MaxTokens
-                    && tool_mode != crate::llm::ToolMode::Observe
-                {
-                    tracing::warn!(
-                        "response truncated by max_tokens — injecting continuation prompt"
-                    );
-                    self.conversation.messages.push(assistant_msg);
-                    self.conversation.messages.push(Message::user(
-                        "[Your previous response was cut off because it exceeded the \
-                         output token limit. Please continue exactly where you left off.]",
-                    ));
-                    continue;
-                }
-
                 if let Some(text) = assistant_msg.last_text() {
                     final_text = text.to_string();
                 } else if any_text_streamed {
