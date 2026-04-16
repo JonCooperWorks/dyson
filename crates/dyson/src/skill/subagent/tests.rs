@@ -736,12 +736,22 @@ async fn coder_runs_child_and_returns_result() {
 }
 
 // -----------------------------------------------------------------------
-// SecurityEngineerTool tests
+// OrchestratorTool tests
 // -----------------------------------------------------------------------
 
 #[test]
-fn security_engineer_tool_name_and_description() {
-    let tool = SecurityEngineerTool::new(
+fn orchestrator_tool_uses_config_name_and_description() {
+    let config = OrchestratorConfig {
+        name: "test_orchestrator".into(),
+        description: "A test orchestrator".into(),
+        system_prompt: "You are a test.".into(),
+        direct_tool_names: vec!["bash".into()],
+        max_iterations: 10,
+        max_tokens: 4096,
+        injects_protocol: None,
+    };
+    let tool = OrchestratorTool::new(
+        config,
         LlmProvider::Anthropic,
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
@@ -751,13 +761,26 @@ fn security_engineer_tool_name_and_description() {
         &[],
         vec![],
     );
-    assert_eq!(tool.name(), "security_engineer");
-    assert!(!tool.description().is_empty());
-    assert!(tool.description().contains("security"));
+    assert_eq!(tool.name(), "test_orchestrator");
+    assert_eq!(tool.description(), "A test orchestrator");
 }
 
 #[test]
-fn security_engineer_filters_to_correct_tools() {
+fn security_engineer_config_produces_correct_values() {
+    let config = security_engineer_config();
+    assert_eq!(config.name, "security_engineer");
+    assert!(config.description.contains("security"));
+    assert!(config.system_prompt.contains("ast_query"));
+    assert_eq!(config.max_iterations, 40);
+    assert_eq!(config.max_tokens, 8192);
+    assert!(config.injects_protocol.is_some());
+    assert!(config.direct_tool_names.contains(&"ast_query".to_string()));
+    assert!(config.direct_tool_names.contains(&"attack_surface_analyzer".to_string()));
+    assert!(config.direct_tool_names.contains(&"exploit_builder".to_string()));
+}
+
+#[test]
+fn orchestrator_filters_to_config_tool_names() {
     let parent_tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(crate::tool::bash::BashTool::default()),
         Arc::new(crate::tool::read_file::ReadFileTool),
@@ -775,7 +798,8 @@ fn security_engineer_filters_to_correct_tools() {
         Arc::new(crate::tool::bash::BashTool::default()), // stand-in
     ];
 
-    let tool = SecurityEngineerTool::new(
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
         LlmProvider::Anthropic,
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
@@ -805,8 +829,9 @@ fn security_engineer_filters_to_correct_tools() {
 }
 
 #[tokio::test]
-async fn security_engineer_depth_limit_prevents_recursion() {
-    let tool = SecurityEngineerTool::new(
+async fn orchestrator_depth_limit_prevents_recursion() {
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
         LlmProvider::Anthropic,
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(
             crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
@@ -833,7 +858,7 @@ async fn security_engineer_depth_limit_prevents_recursion() {
 }
 
 #[tokio::test]
-async fn security_engineer_runs_child_and_returns_result() {
+async fn orchestrator_runs_child_and_returns_result() {
     let llm = MockLlm::new(vec![vec![
         StreamEvent::TextDelta("Security review complete. No critical issues found.".into()),
         StreamEvent::MessageComplete {
@@ -842,7 +867,8 @@ async fn security_engineer_runs_child_and_returns_result() {
         },
     ]]);
 
-    let tool = SecurityEngineerTool::new(
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
         LlmProvider::Anthropic,
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
@@ -860,4 +886,51 @@ async fn security_engineer_runs_child_and_returns_result() {
     let result = tool.run(&input, &ctx).await.unwrap();
     assert!(!result.is_error);
     assert_eq!(result.content, "Security review complete. No critical issues found.");
+}
+
+#[test]
+fn orchestrator_with_custom_config() {
+    // Demonstrate composability: any role can be an orchestrator.
+    let config = OrchestratorConfig {
+        name: "devops_engineer".into(),
+        description: "Infrastructure and deployment specialist".into(),
+        system_prompt: "You are a devops engineer.".into(),
+        direct_tool_names: vec!["bash".into(), "read_file".into()],
+        max_iterations: 20,
+        max_tokens: 4096,
+        injects_protocol: Some("\n## DevOps Protocol\nUse for infra changes.".into()),
+    };
+
+    let parent_tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(crate::tool::bash::BashTool::default()),
+        Arc::new(crate::tool::read_file::ReadFileTool),
+        Arc::new(crate::tool::write_file::WriteFileTool),
+    ];
+
+    let tool = OrchestratorTool::new(
+        config,
+        LlmProvider::Anthropic,
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
+        ),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &parent_tools,
+        vec![],
+    );
+
+    assert_eq!(tool.name(), "devops_engineer");
+    assert_eq!(tool.direct_tools.len(), 2);
+    let names: Vec<&str> = tool.direct_tools.iter().map(|t| t.name()).collect();
+    assert!(names.contains(&"bash"));
+    assert!(names.contains(&"read_file"));
+    assert!(!names.contains(&"write_file"));
+    assert!(tool.config().injects_protocol.is_some());
+}
+
+#[test]
+fn builtin_orchestrator_configs_includes_security_engineer() {
+    let configs = builtin_orchestrator_configs();
+    assert_eq!(configs.len(), 1);
+    assert_eq!(configs[0].name, "security_engineer");
 }
