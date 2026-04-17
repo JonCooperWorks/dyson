@@ -82,7 +82,7 @@ impl Tool for ReadFileTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("read_file", "missing or invalid 'file_path'"))?;
 
-        let path = match resolve_and_validate_path(&ctx.working_dir, file_path) {
+        let path = match resolve_and_validate_path(&ctx.working_dir, file_path, ctx.dangerous_no_sandbox) {
             Ok(p) => p,
             Err(e) => return Ok(ToolOutput::error(e)),
         };

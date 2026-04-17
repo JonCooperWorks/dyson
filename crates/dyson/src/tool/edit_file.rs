@@ -64,7 +64,7 @@ impl Tool for EditFileTool {
             return Ok(ToolOutput::error("old_string must not be empty"));
         }
 
-        let path = match resolve_and_validate_path(&ctx.working_dir, file_path) {
+        let path = match resolve_and_validate_path(&ctx.working_dir, file_path, ctx.dangerous_no_sandbox) {
             Ok(p) => p,
             Err(e) => return Ok(ToolOutput::error(e)),
         };

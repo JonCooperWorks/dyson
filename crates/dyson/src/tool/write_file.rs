@@ -49,7 +49,7 @@ impl Tool for WriteFileTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("write_file", "missing or invalid 'content'"))?;
 
-        let path = match resolve_and_validate_path(&ctx.working_dir, file_path) {
+        let path = match resolve_and_validate_path(&ctx.working_dir, file_path, ctx.dangerous_no_sandbox) {
             Ok(p) => p,
             Err(e) => return Ok(ToolOutput::error(e)),
         };

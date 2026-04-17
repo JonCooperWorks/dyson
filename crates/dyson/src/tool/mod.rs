@@ -400,21 +400,38 @@ pub fn validate_workspace_path(path: &str) -> std::result::Result<(), String> {
 /// Resolve a user-provided path relative to the working directory and
 /// verify it does not escape the working directory boundary.
 ///
-/// Accepts both relative and absolute paths.  For existing files, the path
-/// is canonicalized (resolving symlinks).  For new files (e.g., write_file),
-/// the nearest existing ancestor is canonicalized.
+/// Accepts both relative and absolute paths.  `~` and `~/…` are expanded
+/// to `$HOME` regardless of sandbox state (tilde is a convenience, not a
+/// security boundary).  For existing files, the path is canonicalized
+/// (resolving symlinks).  For new files (e.g., write_file), the nearest
+/// existing ancestor is canonicalized.
+///
+/// When `dangerous_no_sandbox` is true, the workspace-escape check is
+/// skipped: the path is resolved (canonicalized when it exists, left
+/// lexical when it doesn't) and returned without boundary enforcement.
+/// This matches `--dangerous-no-sandbox`'s contract of truly disabling
+/// every sandbox layer, not just the Sandbox trait.
 ///
 /// Returns the resolved absolute path on success, or a human-readable
 /// error string on failure.
 pub fn resolve_and_validate_path(
     working_dir: &std::path::Path,
     user_path: &str,
+    dangerous_no_sandbox: bool,
 ) -> std::result::Result<PathBuf, String> {
-    let candidate = if std::path::Path::new(user_path).is_absolute() {
-        PathBuf::from(user_path)
+    let expanded = expand_tilde(user_path);
+    let candidate = if std::path::Path::new(expanded.as_ref()).is_absolute() {
+        PathBuf::from(expanded.as_ref())
     } else {
-        working_dir.join(user_path)
+        working_dir.join(expanded.as_ref())
     };
+
+    if dangerous_no_sandbox {
+        // Escape check is disabled — canonicalize when possible for a
+        // clean absolute path, otherwise return the lexical candidate so
+        // write_file-style flows can create new files.
+        return Ok(candidate.canonicalize().unwrap_or(candidate));
+    }
 
     // Try to canonicalize directly — eliminates TOCTOU race between
     // exists() and canonicalize() by going straight to the syscall.
@@ -478,6 +495,29 @@ pub fn resolve_and_validate_path(
 /// Format a path-related error message: `"cannot {verb} '{path}': {err}"`.
 pub(crate) fn path_err(verb: &str, path: &std::path::Path, err: impl std::fmt::Display) -> String {
     format!("cannot {verb} '{}': {err}", path.display())
+}
+
+/// Expand a leading `~` or `~/` to the value of `$HOME`.  Returns the
+/// input unchanged if HOME is unset, the path has no tilde prefix, or
+/// starts with `~user/` (per-user expansion is not supported).
+fn expand_tilde(path: &str) -> std::borrow::Cow<'_, str> {
+    if path == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::borrow::Cow::Owned(home);
+        }
+        return std::borrow::Cow::Borrowed(path);
+    }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        let mut out = home;
+        if !out.ends_with('/') {
+            out.push('/');
+        }
+        out.push_str(rest);
+        return std::borrow::Cow::Owned(out);
+    }
+    std::borrow::Cow::Borrowed(path)
 }
 
 impl ToolOutput {
@@ -617,5 +657,59 @@ mod tests {
         let result = truncate(&long, 200);
         assert_eq!(result.len(), 203); // 200 + "..."
         assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn expand_tilde_bare() {
+        // Bare "~" becomes $HOME. HOME is guaranteed in the test env.
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_tilde("~").as_ref(), home);
+    }
+
+    #[test]
+    fn expand_tilde_prefix() {
+        let home = std::env::var("HOME").unwrap();
+        let expanded = expand_tilde("~/projects/foo.txt");
+        let expected = format!(
+            "{}{}projects/foo.txt",
+            home,
+            if home.ends_with('/') { "" } else { "/" },
+        );
+        assert_eq!(expanded.as_ref(), expected);
+    }
+
+    #[test]
+    fn expand_tilde_passthrough() {
+        // Absolute, relative, and ~user paths are not expanded.
+        assert_eq!(expand_tilde("/etc/passwd").as_ref(), "/etc/passwd");
+        assert_eq!(expand_tilde("relative/path").as_ref(), "relative/path");
+        assert_eq!(expand_tilde("~alice/foo").as_ref(), "~alice/foo");
+    }
+
+    #[test]
+    fn dangerous_no_sandbox_accepts_outside_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = std::env::temp_dir();
+        let outside_str = outside.to_str().unwrap();
+        // Without the flag: escape rejected (temp_dir is not inside `tmp`).
+        let err = resolve_and_validate_path(tmp.path(), outside_str, false);
+        assert!(err.is_err(), "escape check should fire when sandboxed");
+
+        // With the flag: returned unchanged (canonicalized if it exists).
+        let ok = resolve_and_validate_path(tmp.path(), outside_str, true);
+        assert!(ok.is_ok(), "no-sandbox should skip escape check");
+    }
+
+    #[test]
+    fn dangerous_no_sandbox_expands_tilde() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = std::env::var("HOME").unwrap();
+        // ~ is convenience, not sandboxing — expansion happens regardless.
+        let ok = resolve_and_validate_path(tmp.path(), "~", true).unwrap();
+        assert!(
+            ok.starts_with(&home) || ok.to_string_lossy().starts_with(&home),
+            "tilde should expand to $HOME: got {:?}",
+            ok
+        );
     }
 }

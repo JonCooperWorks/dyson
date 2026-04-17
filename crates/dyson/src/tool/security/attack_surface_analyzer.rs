@@ -128,7 +128,7 @@ impl Tool for AttackSurfaceAnalyzerTool {
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let search_dir = if let Some(sub) = input["path"].as_str() {
-            match super::super::resolve_and_validate_path(&ctx.working_dir, sub) {
+            match super::super::resolve_and_validate_path(&ctx.working_dir, sub, ctx.dangerous_no_sandbox) {
                 Ok(resolved) => resolved,
                 Err(e) => return Ok(ToolOutput::error(e)),
             }
