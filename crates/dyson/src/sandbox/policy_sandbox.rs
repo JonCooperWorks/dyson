@@ -186,7 +186,7 @@ impl Sandbox for PolicySandbox {
 /// Replaces Bearer tokens, Authorization headers, and environment variable
 /// assignments that look like secrets (names containing KEY, TOKEN, SECRET,
 /// PASSWORD, or CREDENTIAL) with `[REDACTED]`.
-fn redact_secrets(command: &str) -> String {
+pub(crate) fn redact_secrets(command: &str) -> String {
     use regex::Regex;
     use std::sync::LazyLock;
 
@@ -366,17 +366,15 @@ fn check_network_only(
 
 /// Validate that a URL does not target internal network resources.
 ///
-/// Blocks:
-/// - Loopback: `127.0.0.0/8`, `::1`, `localhost`
-/// - Private: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
-/// - Link-local: `169.254.0.0/16`, `fe80::/10`
-/// - IPv6 ULA: `fc00::/7`
-/// - Multicast: `224.0.0.0/4`, `ff00::/8`
-/// - `0.0.0.0` (unspecified)
+/// Delegates to the shared SSRF predicates in [`crate::http`] so the
+/// sandbox and the HTTP client agree on exactly which ranges are
+/// considered internal (loopback, RFC1918, RFC 6598 CGNAT, link-local,
+/// ULA, multicast, unspecified, and well-known cloud-metadata hosts).
 ///
-/// Uses `std::net::IpAddr` for parsing — no new dependencies.
-/// Hostnames are resolved via `std::net::ToSocketAddrs` to catch DNS
-/// rebinding of hostnames like `internal.company.com` pointing to `10.x`.
+/// Hostnames are resolved via `std::net::ToSocketAddrs` so this can be
+/// called from synchronous sandbox code; every returned address is
+/// checked, and DNS failures fall through (reqwest will surface the
+/// underlying error later).
 fn check_url_not_internal(url: &str) -> std::result::Result<(), String> {
     // Parse the URL to extract the host.
     // We do minimal parsing: split on "://" to get scheme+authority,
@@ -406,12 +404,10 @@ fn check_url_not_internal(url: &str) -> std::result::Result<(), String> {
         return Err("web_fetch blocked: empty host in URL".into());
     }
 
-    // Check well-known internal hostnames.
     let host_lower = host.to_lowercase();
-    if host_lower == "localhost"
-        || host_lower.ends_with(".localhost")
-        || host_lower == "metadata.google.internal"
+    if crate::http::is_metadata_host(host)
         || host_lower.ends_with(".internal")
+        || host_lower.ends_with(".localhost")
     {
         return Err(format!(
             "web_fetch blocked: hostname '{host}' resolves to internal network"
@@ -443,33 +439,17 @@ fn check_url_not_internal(url: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Check if an IP address is internal/private/reserved.
-fn check_ip_not_internal(ip: std::net::IpAddr, original_host: &str) -> std::result::Result<(), String> {
+/// Check if an IP address is internal/private/reserved.  Uses the
+/// shared predicates from [`crate::http`] so sandbox and HTTP-client
+/// SSRF policy never diverge (in particular, CGNAT 100.64.0.0/10 is
+/// rejected by both).
+fn check_ip_not_internal(
+    ip: std::net::IpAddr,
+    original_host: &str,
+) -> std::result::Result<(), String> {
     let is_internal = match ip {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()                     // 127.0.0.0/8
-                || v4.is_private()               // 10/8, 172.16/12, 192.168/16
-                || v4.is_link_local()            // 169.254.0.0/16
-                || v4.is_broadcast()             // 255.255.255.255
-                || v4.is_unspecified()           // 0.0.0.0
-                || v4.octets()[0] >= 224         // multicast 224/4 + reserved 240/4
-        }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()                     // ::1
-                || v6.is_unspecified()           // ::
-                || v6.is_multicast()             // ff00::/8
-                || {
-                    let seg = v6.segments();
-                    // Link-local: fe80::/10
-                    (seg[0] & 0xffc0) == 0xfe80
-                    // Unique local: fc00::/7
-                    || (seg[0] & 0xfe00) == 0xfc00
-                    // IPv4-mapped private: ::ffff:10.x.x.x, etc.
-                    || (seg[0] == 0 && seg[1] == 0 && seg[2] == 0
-                        && seg[3] == 0 && seg[4] == 0 && seg[5] == 0xffff
-                        && is_v4_mapped_private(seg[6], seg[7]))
-                }
-        }
+        std::net::IpAddr::V4(v4) => crate::http::is_private_v4(v4),
+        std::net::IpAddr::V6(v6) => crate::http::is_private_v6(v6),
     };
 
     if is_internal {
@@ -479,25 +459,6 @@ fn check_ip_not_internal(ip: std::net::IpAddr, original_host: &str) -> std::resu
     } else {
         Ok(())
     }
-}
-
-/// Check if the last two segments of an IPv4-mapped IPv6 address encode a private IPv4.
-///
-/// Reconstructs the embedded IPv4 address and delegates to the same std library
-/// checks used by `check_ip_not_internal` for native IPv4 — single source of truth.
-const fn is_v4_mapped_private(hi: u16, lo: u16) -> bool {
-    let v4 = std::net::Ipv4Addr::new(
-        (hi >> 8) as u8,
-        (hi & 0xff) as u8,
-        (lo >> 8) as u8,
-        (lo & 0xff) as u8,
-    );
-    v4.is_loopback()
-        || v4.is_private()
-        || v4.is_link_local()
-        || v4.is_broadcast()
-        || v4.is_unspecified()
-        || v4.octets()[0] >= 224
 }
 
 // ---------------------------------------------------------------------------
@@ -1266,6 +1227,20 @@ mod tests {
     fn ssrf_blocks_link_local() {
         assert!(check_url_not_internal("http://169.254.169.254/").is_err());
         assert!(check_url_not_internal("http://169.254.0.1/").is_err());
+    }
+
+    #[test]
+    fn ssrf_blocks_cgnat_rfc6598() {
+        // 100.64.0.0/10 is RFC 6598 shared CGNAT space.  The consolidated
+        // SSRF path must refuse it — previously only the HTTP client did.
+        assert!(check_url_not_internal("http://100.64.0.1/").is_err());
+        assert!(check_url_not_internal("http://100.127.255.255/").is_err());
+    }
+
+    #[test]
+    fn ssrf_allows_100_outside_cgnat() {
+        // 100.0.0.1 is outside 100.64.0.0/10 — should be allowed.
+        assert!(check_url_not_internal("http://100.0.0.1/").is_ok());
     }
 
     #[test]

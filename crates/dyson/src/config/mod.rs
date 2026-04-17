@@ -470,6 +470,19 @@ pub enum McpTransportConfig {
         command: String,
         args: Vec<String>,
         env: std::collections::HashMap<String, String>,
+        /// When true, wrap the subprocess in `bwrap` (Linux) with a
+        /// read-only root, tmpfs `/tmp`, a PID namespace, and
+        /// `--die-with-parent`.  Network is left shared because most
+        /// MCP servers need it; set `sandbox_deny_network: true` to
+        /// isolate.
+        ///
+        /// When false or omitted, the subprocess runs unsandboxed with
+        /// full Dyson-process privileges — a warning is logged at load.
+        sandbox: bool,
+        /// When `sandbox` is true, also unshare the network namespace.
+        /// Defaults to false (shared) so servers that legitimately need
+        /// APIs keep working.
+        sandbox_deny_network: bool,
     },
     /// POST JSON-RPC to an HTTP endpoint (Streamable HTTP MCP).
     /// Used by servers like Context7, Stripe MCP, etc.

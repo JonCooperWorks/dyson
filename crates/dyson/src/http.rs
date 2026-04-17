@@ -96,7 +96,13 @@ pub fn safe_redirect_policy() -> Policy {
     })
 }
 
-fn is_private_v4(ip: std::net::Ipv4Addr) -> bool {
+/// Whether an IPv4 address falls inside a range the HTTP layer refuses
+/// to connect to (loopback, RFC1918, link-local, broadcast, multicast,
+/// unspecified, or RFC 6598 CGNAT).
+///
+/// Exposed so every SSRF check in the codebase routes through the same
+/// predicate — no second set of rules to drift out of sync with this one.
+pub fn is_private_v4(ip: std::net::Ipv4Addr) -> bool {
     ip.is_loopback()
         || ip.is_private()
         || ip.is_link_local()
@@ -111,7 +117,8 @@ fn is_private_v4(ip: std::net::Ipv4Addr) -> bool {
         || ip.octets()[0] == 0
 }
 
-fn is_private_v6(ip: std::net::Ipv6Addr) -> bool {
+/// Companion to [`is_private_v4`] for IPv6.
+pub fn is_private_v6(ip: std::net::Ipv6Addr) -> bool {
     ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
@@ -123,7 +130,8 @@ fn is_private_v6(ip: std::net::Ipv6Addr) -> bool {
         || matches!(ip.to_ipv4_mapped(), Some(v4) if is_private_v4(v4))
 }
 
-fn is_metadata_host(host: &str) -> bool {
+/// Whether a hostname matches a well-known cloud metadata service.
+pub fn is_metadata_host(host: &str) -> bool {
     let h = host.trim_end_matches('.').to_ascii_lowercase();
     matches!(
         h.as_str(),
