@@ -30,10 +30,30 @@ fn assignment_types(language: &'static str) -> &'static [&'static str] {
         "C" | "C++" => &["init_declarator", "assignment_expression"],
         "C#" => &["variable_declarator", "assignment_expression"],
         "Ruby" => &["assignment"],
-        "Swift" | "Kotlin" => &["property_declaration", "assignment_expression"],
+        "Swift" | "Kotlin" => &["property_declaration", "assignment"],
         "Zig" => &["variable_declaration", "assignment_expression"],
         _ => &[],
     }
+}
+
+/// Whether a `definition_types` kind acts as a function-like scope for
+/// taint analysis.  Data declarations (variables, properties, types) live
+/// in `definition_types` for `list_definitions` but aren't scopes — and if
+/// we entered them as a scope, their own assignment-kind siblings would
+/// be attributed to this transient "scope" instead of the enclosing fn.
+fn is_fn_scope(kind: &str) -> bool {
+    !matches!(
+        kind,
+        "lexical_declaration"
+            | "variable_declaration"
+            | "property_declaration"
+            | "type_alias"
+            | "type_alias_declaration"
+            | "const_item"
+            | "static_item"
+            | "type_item"
+            | "type_definition"
+    )
 }
 
 pub(crate) fn build_index_sync(
@@ -201,7 +221,7 @@ impl Walker<'_> {
         let kind = node.kind();
         let saved_fn = self.current_fn;
 
-        if self.config.definition_types.contains(&kind) {
+        if self.config.definition_types.contains(&kind) && is_fn_scope(kind) {
             let elixir_skip = self.config.definitions_are_calls
                 && kind == "call"
                 && !nodes::is_elixir_definition(&node, self.source.as_bytes());
@@ -271,8 +291,24 @@ impl Walker<'_> {
     }
 
     fn record_assignment(&mut self, node: Node<'_>, fn_id: FnId) {
-        let lhs = extract_field_idents(node, self.source, self.config, &["name", "left", "pattern"]);
-        let rhs = extract_field_idents(node, self.source, self.config, &["value", "right"]);
+        let mut lhs = extract_field_idents(
+            node,
+            self.source,
+            self.config,
+            &["name", "left", "pattern", "target"],
+        );
+        let mut rhs = extract_field_idents(
+            node,
+            self.source,
+            self.config,
+            &["value", "right", "result"],
+        );
+        // Field-less fallback: Kotlin's `property_declaration` has no named
+        // fields; LHS sits inside a `variable_declaration` child and RHS
+        // is the trailing expression.
+        if lhs.is_empty() && rhs.is_empty() {
+            extract_kinded_children(node, self.source, self.config, &mut lhs, &mut rhs);
+        }
         if lhs.is_empty() && rhs.is_empty() {
             return;
         }
@@ -297,7 +333,7 @@ fn extract_callee_name(node: Node<'_>, source: &str) -> String {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         let k = child.kind();
-        if k == "identifier" || k == "property_identifier" {
+        if k == "identifier" || k == "property_identifier" || k == "simple_identifier" {
             return source[child.byte_range()].to_string();
         }
     }
@@ -329,15 +365,30 @@ fn flatten_callee(node: Node<'_>, source: &str) -> String {
 }
 
 pub(crate) fn extract_parameters(node: Node<'_>, source: &str) -> Vec<String> {
-    let Some(pn) = ["parameters", "formal_parameters", "params"]
+    // The wrapper varies by language: `parameters`/`formal_parameters`/`params`
+    // as named fields, or an unnamed child of one of a handful of kinds
+    // (Swift, Kotlin).  Swift has no wrapper at all — `parameter` nodes
+    // sit directly under function_declaration.
+    let wrapper = ["parameters", "formal_parameters", "params"]
         .iter()
         .find_map(|f| node.child_by_field_name(f))
-    else {
-        return Vec::new();
-    };
+        .or_else(|| {
+            find_child_of_kind(
+                node,
+                &["function_value_parameters", "parameter_clause", "parameter_list"],
+            )
+        })
+        .unwrap_or(node);
+
     let mut out = Vec::new();
-    let mut cursor = pn.walk();
-    for child in pn.children(&mut cursor) {
+    let mut cursor = wrapper.walk();
+    for child in wrapper.children(&mut cursor) {
+        // Skip punctuation, but don't filter on kind — Python exposes
+        // parameters as bare `identifier` children; Rust/Java wrap them
+        // in `parameter`/`formal_parameter` nodes; Swift uses `parameter`.
+        if !child.is_named() {
+            continue;
+        }
         let name = child
             .child_by_field_name("name")
             .or_else(|| child.child_by_field_name("pattern"))
@@ -350,6 +401,11 @@ pub(crate) fn extract_parameters(node: Node<'_>, source: &str) -> Vec<String> {
         }
     }
     out
+}
+
+fn find_child_of_kind<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).find(|c| kinds.contains(&c.kind()))
 }
 
 fn first_identifier_text(node: Node<'_>, source: &str) -> Option<String> {
@@ -371,10 +427,25 @@ pub(crate) fn extract_arg_idents(
     source: &str,
     config: &LanguageConfig,
 ) -> Vec<Vec<String>> {
-    let Some(args) = call_node
+    let args = call_node
         .child_by_field_name("arguments")
         .or_else(|| call_node.child_by_field_name("argument_list"))
-    else {
+        .or_else(|| {
+            find_child_of_kind(
+                call_node,
+                &["arguments", "argument_list", "value_arguments", "call_suffix"],
+            )
+        });
+    // Swift nests `value_arguments` inside a `call_suffix`.  Descend one
+    // level to get the real arg list.
+    let args = args.and_then(|n| {
+        if n.kind() == "call_suffix" {
+            find_child_of_kind(n, &["value_arguments"])
+        } else {
+            Some(n)
+        }
+    });
+    let Some(args) = args else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -446,6 +517,31 @@ fn extract_field_idents(
         }
     }
     Vec::new()
+}
+
+/// Child-kind fallback for field-less nodes (Kotlin `property_declaration`).
+/// Treats `variable_declaration` children as LHS and the tail `expression`
+/// child as RHS.
+fn extract_kinded_children(
+    node: Node<'_>,
+    source: &str,
+    config: &LanguageConfig,
+    lhs: &mut Vec<String>,
+    rhs: &mut Vec<String>,
+) {
+    let mut cursor = node.walk();
+    let mut last_expr: Option<Node<'_>> = None;
+    for child in node.children(&mut cursor) {
+        let kind = child.kind();
+        if kind == "variable_declaration" {
+            collect_tainted_identifiers(child, source, config, lhs);
+        } else if kind == "expression" || config.identifier_types.contains(&kind) {
+            last_expr = Some(child);
+        }
+    }
+    if let Some(r) = last_expr {
+        collect_tainted_identifiers(r, source, config, rhs);
+    }
 }
 
 #[cfg(test)]

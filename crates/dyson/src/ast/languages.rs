@@ -216,7 +216,7 @@ static RUBY: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
 
 static KOTLIN: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     language: tree_sitter_kotlin_ng::LANGUAGE.into(),
-    identifier_types: &["simple_identifier"],
+    identifier_types: &["identifier"],
     definition_types: &[
         "function_declaration",
         "class_declaration",
