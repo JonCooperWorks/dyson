@@ -252,7 +252,7 @@ pub fn create_channel_workspace(
     config: &WorkspaceConfig,
     channel_id: &str,
 ) -> Result<Box<dyn Workspace>> {
-    let main_path = openclaw::resolve_tilde(config.connection_string.expose());
+    let main_path = crate::util::resolve_tilde(config.connection_string.expose());
     let channel_path = main_path.join("channels").join(channel_id);
 
     // Create the channel directory if it doesn't exist.

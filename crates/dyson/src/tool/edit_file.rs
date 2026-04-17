@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
-use crate::tool::{Tool, ToolContext, ToolOutput, path_err, resolve_and_validate_path};
+use crate::tool::{Tool, ToolContext, ToolOutput, path_err};
 
 /// Maximum file size we'll load into memory for editing (10 MB).
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
@@ -64,10 +64,7 @@ impl Tool for EditFileTool {
             return Ok(ToolOutput::error("old_string must not be empty"));
         }
 
-        let path = match resolve_and_validate_path(&ctx.working_dir, file_path, ctx.dangerous_no_sandbox) {
-            Ok(p) => p,
-            Err(e) => return Ok(ToolOutput::error(e)),
-        };
+        let path = match ctx.resolve_path(file_path) { Ok(p) => p, Err(e) => return Ok(e) };
 
         // Check file size before reading.
         let metadata = match tokio::fs::metadata(&path).await {

@@ -1,7 +1,6 @@
 // dependency_scan — agent-facing wrapper around
 // `crate::dependency_analysis::scan`.
 
-
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
@@ -60,14 +59,7 @@ impl Tool for DependencyScanTool {
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let parsed: Input = serde_json::from_value(input.clone())
             .map_err(|e| DysonError::tool("dependency_scan", format!("invalid input: {e}")))?;
-        let root = match crate::tool::resolve_and_validate_path(
-            &ctx.working_dir,
-            &parsed.path,
-            ctx.dangerous_no_sandbox,
-        ) {
-            Ok(p) => p,
-            Err(e) => return Ok(ToolOutput::error(e)),
-        };
+        let root = match ctx.resolve_path(&parsed.path) { Ok(p) => p, Err(e) => return Ok(e) };
         let opts = ScanOptions {
             recursive: parsed.recursive,
             severity_min: parse_severity(parsed.severity_min.as_deref()),

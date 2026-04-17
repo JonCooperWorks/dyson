@@ -182,13 +182,13 @@ impl OpenClawWorkspace {
     ///
     /// Used by the hot reloader to know which directory to watch.
     pub fn resolve_path(config_path: Option<&str>) -> Option<PathBuf> {
-        let path = resolve_tilde(config_path.unwrap_or("~/.dyson"));
+        let path = crate::util::resolve_tilde(config_path.unwrap_or("~/.dyson"));
         if path.exists() { Some(path) } else { None }
     }
 
     /// Load from the default path (~/.dyson/) or a configured path.
     pub fn load_default(config_path: Option<&str>, memory_config: MemoryConfig) -> Result<Self> {
-        let path = resolve_tilde(config_path.unwrap_or("~/.dyson"));
+        let path = crate::util::resolve_tilde(config_path.unwrap_or("~/.dyson"));
         Self::load(&path, memory_config)
     }
 
@@ -197,7 +197,7 @@ impl OpenClawWorkspace {
         connection_string: &str,
         memory_config: MemoryConfig,
     ) -> Result<Self> {
-        let path = resolve_tilde(connection_string);
+        let path = crate::util::resolve_tilde(connection_string);
         Self::load(&path, memory_config)
     }
 
@@ -557,18 +557,6 @@ fn read_dir_recursive(dir: &Path, prefix: &str, files: &mut HashMap<String, Stri
         {
             files.insert(format!("{prefix}/{name}"), content);
         }
-    }
-}
-
-/// Resolve ~ to $HOME in a path string.
-pub(crate) fn resolve_tilde(path: &str) -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    if let Some(rest) = path.strip_prefix("~/") {
-        PathBuf::from(&home).join(rest)
-    } else if path == "~" {
-        PathBuf::from(&home)
-    } else {
-        PathBuf::from(path)
     }
 }
 

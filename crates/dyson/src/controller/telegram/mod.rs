@@ -372,7 +372,7 @@ impl super::Controller for TelegramController {
         // Feedback directory — lives alongside chat history.  Each agent gets
         // its own FeedbackStore instance via set_feedback_store().
         let feedback_dir =
-            crate::workspace::openclaw::resolve_tilde(settings.chat_history.connection_string.expose());
+            crate::util::resolve_tilde(settings.chat_history.connection_string.expose());
 
         let mut offset: i64 = 0;
         let mut consecutive_failures: u64 = 0;

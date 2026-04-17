@@ -51,14 +51,9 @@ impl Tool for ListFilesTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("list_files", "missing or invalid 'pattern'"))?;
 
-        let base_dir = if let Some(sub) = input["path"].as_str() {
-            // Validate the path doesn't escape the working directory.
-            match super::resolve_and_validate_path(&ctx.working_dir, sub, ctx.dangerous_no_sandbox) {
-                Ok(resolved) => resolved,
-                Err(e) => return Ok(ToolOutput::error(e)),
-            }
-        } else {
-            ctx.working_dir.clone()
+        let base_dir = match input["path"].as_str() {
+            Some(sub) => match ctx.resolve_path(sub) { Ok(p) => p, Err(e) => return Ok(e) },
+            None => ctx.working_dir.clone(),
         };
 
         if !base_dir.exists() {

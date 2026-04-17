@@ -113,8 +113,7 @@ impl Tool for CoderTool {
         let parsed: CoderInput = serde_json::from_value(input.clone())
             .map_err(|e| DysonError::tool("coder", format!("invalid input: {e}")))?;
 
-        let scoped_dir = crate::tool::resolve_and_validate_path(&ctx.working_dir, &parsed.path, ctx.dangerous_no_sandbox)
-            .map_err(|e| DysonError::tool("coder", e))?;
+        let scoped_dir = match ctx.resolve_path(&parsed.path) { Ok(p) => p, Err(e) => return Ok(e) };
 
         if !scoped_dir.is_dir() {
             return Ok(ToolOutput::error(format!(

@@ -436,6 +436,19 @@ pub fn config_for_language_name(name: &str) -> Option<&'static LanguageConfig> {
 ///
 /// Returns `None` for unrecognized extensions — callers should skip silently
 /// (or use a text fallback).
+/// Look up a language config from the trailing extension of a glob like
+/// `*.rs`, `src/**/*.py`, or `file.tsx`.  Returns `None` when the glob
+/// has no trailing dot-extension or the extension isn't one we know —
+/// brace expansions like `*.{ts,tsx}` land here naturally because
+/// `{ts,tsx}` isn't a recognized extension.
+pub fn config_for_glob(glob: &str) -> Option<&'static LanguageConfig> {
+    let (_, ext) = glob.rsplit_once('.')?;
+    if ext.is_empty() {
+        return None;
+    }
+    config_for_extension(ext)
+}
+
 pub fn config_for_extension(ext: &str) -> Option<&'static LanguageConfig> {
     match ext {
         "rs" => Some(&RUST),
@@ -579,5 +592,23 @@ mod tests {
         assert!(config_for_language_name("fortran").is_none());
         assert!(config_for_language_name("brainfuck").is_none());
         assert!(config_for_language_name("").is_none());
+    }
+
+    #[test]
+    fn glob_resolves_to_language_config() {
+        assert_eq!(config_for_glob("*.rs").unwrap().display_name, "Rust");
+        assert_eq!(config_for_glob("src/**/*.py").unwrap().display_name, "Python");
+        assert_eq!(config_for_glob("file.tsx").unwrap().display_name, "TSX");
+    }
+
+    #[test]
+    fn glob_returns_none_when_not_inferable() {
+        // No dot, no extension — nothing to look up.
+        assert!(config_for_glob("src/**/*").is_none());
+        assert!(config_for_glob("noext").is_none());
+        // Brace expansion: `{ts,tsx}` isn't a registered extension.
+        assert!(config_for_glob("*.{ts,tsx}").is_none());
+        // Trailing dot — empty extension.
+        assert!(config_for_glob("trailing.").is_none());
     }
 }

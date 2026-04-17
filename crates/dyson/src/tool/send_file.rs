@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
-use crate::tool::{Tool, ToolContext, ToolOutput, resolve_and_validate_path};
+use crate::tool::{Tool, ToolContext, ToolOutput};
 
 pub struct SendFileTool;
 
@@ -51,10 +51,7 @@ impl Tool for SendFileTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("send_file", "missing or invalid 'file_path'"))?;
 
-        let path = match resolve_and_validate_path(&ctx.working_dir, file_path, ctx.dangerous_no_sandbox) {
-            Ok(p) => p,
-            Err(e) => return Ok(ToolOutput::error(e)),
-        };
+        let path = match ctx.resolve_path(file_path) { Ok(p) => p, Err(e) => return Ok(e) };
 
         if !path.exists() {
             return Ok(ToolOutput::error(format!(

@@ -97,29 +97,25 @@ impl Tool for AstQueryTool {
 
         let include_glob = input["include"].as_str().map(String::from);
 
-        // `language` is optional: if omitted, infer from `include`'s extension.
-        // This sidesteps the common LLM mistake of forgetting the field when
-        // the extension already pins the language unambiguously.
+        // `language` is optional when the `include` glob already pins one
+        // via its extension — sidesteps the common LLM mistake of omitting
+        // the field after `"include": "*.rs"`.
         let config = match input["language"].as_str() {
             Some(name) => match ast::config_for_language_name(name) {
                 Some(c) => c,
-                None => {
-                    return Ok(ToolOutput::error(format!(
-                        "unknown language '{name}'.  Supported: rust, python, javascript, \
-                         typescript, tsx, go, java, c, cpp, csharp, ruby, kotlin, swift, zig, \
-                         elixir, erlang, ocaml, haskell, nix, json"
-                    )));
-                }
+                None => return Ok(ToolOutput::error(format!(
+                    "unknown language '{name}'.  Supported: rust, python, javascript, \
+                     typescript, tsx, go, java, c, cpp, csharp, ruby, kotlin, swift, zig, \
+                     elixir, erlang, ocaml, haskell, nix, json"
+                ))),
             },
-            None => match include_glob.as_deref().and_then(extract_ext).and_then(ast::config_for_extension) {
+            None => match include_glob.as_deref().and_then(ast::config_for_glob) {
                 Some(c) => c,
-                None => {
-                    return Ok(ToolOutput::error(
-                        "missing 'language' field and couldn't infer it from `include`. \
-                         Pass `language` explicitly (e.g. 'rust', 'python') or use an \
-                         `include` pattern ending in a known extension like '*.rs' or '*.py'.",
-                    ));
-                }
+                None => return Ok(ToolOutput::error(
+                    "missing 'language' and couldn't infer it from `include`.  Pass \
+                     `language` explicitly or use an `include` pattern ending in a \
+                     known extension like '*.rs' or '*.py'.",
+                )),
             },
         };
 
@@ -133,13 +129,9 @@ impl Tool for AstQueryTool {
             }
         };
 
-        let search_dir = if let Some(sub) = input["path"].as_str() {
-            match super::super::resolve_and_validate_path(&ctx.working_dir, sub, ctx.dangerous_no_sandbox) {
-                Ok(resolved) => resolved,
-                Err(e) => return Ok(ToolOutput::error(e)),
-            }
-        } else {
-            ctx.working_dir.clone()
+        let search_dir = match input["path"].as_str() {
+            Some(sub) => match ctx.resolve_path(sub) { Ok(p) => p, Err(e) => return Ok(e) },
+            None => ctx.working_dir.clone(),
         };
 
         if !search_dir.exists() {
@@ -294,19 +286,6 @@ fn line_at_row(source: &str, row: usize) -> &str {
     source.split('\n').nth(row).unwrap_or("").trim_end()
 }
 
-/// Pull the trailing extension out of an `include` glob like `*.rs`,
-/// `src/**/*.py`, or `routes/*.{ts,tsx}`.  Returns `None` if the pattern
-/// doesn't end in a literal extension — brace expansions with multiple
-/// extensions are rejected so we never guess wrong.
-fn extract_ext(pattern: &str) -> Option<&str> {
-    let last_dot = pattern.rfind('.')?;
-    let ext = &pattern[last_dot + 1..];
-    if ext.is_empty() || ext.contains(['{', '}', '*', '?', '/', ',']) {
-        return None;
-    }
-    Some(ext)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,22 +433,6 @@ mod tests {
     #[test]
     fn is_agent_only() {
         assert!(AstQueryTool.agent_only());
-    }
-
-    #[test]
-    fn extract_ext_from_glob() {
-        assert_eq!(extract_ext("*.rs"), Some("rs"));
-        assert_eq!(extract_ext("src/**/*.py"), Some("py"));
-        assert_eq!(extract_ext("file.tsx"), Some("tsx"));
-    }
-
-    #[test]
-    fn extract_ext_rejects_ambiguous() {
-        // Brace expansion with multiple extensions — we refuse to guess.
-        assert_eq!(extract_ext("*.{ts,tsx}"), None);
-        assert_eq!(extract_ext("src/**/*"), None);
-        assert_eq!(extract_ext("noext"), None);
-        assert_eq!(extract_ext("trailing."), None);
     }
 
     #[tokio::test]

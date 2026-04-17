@@ -21,7 +21,7 @@ pub mod nodes;
 
 pub use languages::{
     LanguageConfig, MAX_FILE_SIZE, MAX_FILES, ParsedFile, config_for_extension,
-    config_for_language_name, try_parse_file, walk_dir,
+    config_for_glob, config_for_language_name, try_parse_file, walk_dir,
 };
 
 use tree_sitter::{Node, Tree};

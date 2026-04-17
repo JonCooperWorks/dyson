@@ -19,7 +19,7 @@ mod rename;
 use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
-use crate::tool::{Tool, ToolContext, ToolOutput, resolve_and_validate_path};
+use crate::tool::{Tool, ToolContext, ToolOutput};
 
 pub struct BulkEditTool;
 
@@ -93,10 +93,7 @@ impl Tool for BulkEditTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("bulk_edit", "missing or invalid 'path'"))?;
 
-        let resolved = match resolve_and_validate_path(&ctx.working_dir, path_str, ctx.dangerous_no_sandbox) {
-            Ok(p) => p,
-            Err(e) => return Ok(ToolOutput::error(e)),
-        };
+        let resolved = match ctx.resolve_path(path_str) { Ok(p) => p, Err(e) => return Ok(e) };
 
         let working_dir = ctx.working_dir.clone();
 

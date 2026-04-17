@@ -19,7 +19,7 @@ use tokio::io::AsyncBufReadExt;
 
 use crate::error::{DysonError, Result};
 use crate::ast;
-use crate::tool::{Tool, ToolContext, ToolOutput, resolve_and_validate_path};
+use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::truncate_output;
 
 pub struct ReadFileTool;
@@ -82,10 +82,7 @@ impl Tool for ReadFileTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("read_file", "missing or invalid 'file_path'"))?;
 
-        let path = match resolve_and_validate_path(&ctx.working_dir, file_path, ctx.dangerous_no_sandbox) {
-            Ok(p) => p,
-            Err(e) => return Ok(ToolOutput::error(e)),
-        };
+        let path = match ctx.resolve_path(file_path) { Ok(p) => p, Err(e) => return Ok(e) };
 
         let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize;
         let limit = input["limit"].as_u64().map(|l| l as usize);

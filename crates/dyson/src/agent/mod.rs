@@ -116,6 +116,18 @@ use self::stream_handler::ToolCall;
 
 use self::token_budget::TokenBudget;
 
+/// Injected after a tool call's JSON arguments were cut off by max_tokens.
+/// Retrying verbatim would just re-truncate, so we redirect to small-write
+/// primitives.
+const MAXTOKENS_TOOL_CALL_TRUNCATED: &str =
+    "[Your last tool call was cut off mid-argument because the output exceeded \
+     the max token limit.  Do NOT retry the same call — the JSON will \
+     truncate again.  Instead: (1) use `write_file` instead of `bash` \
+     heredocs to write files, or (2) split the content across multiple \
+     smaller tool calls.  For writes over ~4 KB prefer `write_file`; for \
+     larger files, write an initial chunk with `write_file` then append \
+     subsequent chunks with `edit_file` or `bulk_edit`.]";
+
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
@@ -1161,9 +1173,6 @@ impl Agent {
                         delay_ms,
                         "LLM returned no text and no tool calls — retrying"
                     );
-                    // Race the backoff against the cancellation token so a
-                    // /stop or swarm abort during a long wait doesn't have
-                    // to watch the full 8 s of max-retry sleep tick down.
                     tokio::select! {
                         _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
                         _ = self.tool_context.cancellation.cancelled() => {
@@ -1220,38 +1229,25 @@ impl Agent {
                 continue;
             }
 
-            // MaxTokens WITH tool calls: check whether any tool call's JSON
-            // was truncated mid-argument (finalize_tool_call marks these with
-            // a `_parse_error` field and stores the partial bytes in
-            // `_raw_json`).  Dispatching the broken call would waste another
-            // round-trip on an error result the LLM can't learn from — and
-            // would typically loop because the model re-emits the same huge
-            // payload.  Instead, tell it exactly what happened so it switches
-            // strategy (write_file, split the work, smaller arguments).
-            let truncated: Vec<&ToolCall> = tool_calls
-                .iter()
-                .filter(|c| c.input.get("_parse_error").is_some())
-                .collect();
+            // MaxTokens WITH tool calls: if `finalize_tool_call` marked any
+            // call with `_parse_error`, the JSON was cut off mid-argument.
+            // Dispatching it would waste a round-trip and the model would
+            // re-emit the same oversized payload.  Redirect it to a smaller
+            // strategy instead.
             if stop_reason == crate::llm::stream::StopReason::MaxTokens
-                && !truncated.is_empty()
                 && tool_mode != crate::llm::ToolMode::Observe
+                && tool_calls.iter().any(|c| c.input.get("_parse_error").is_some())
             {
-                let names: Vec<&str> = truncated.iter().map(|c| c.name.as_str()).collect();
+                let names: Vec<&str> = tool_calls
+                    .iter()
+                    .filter_map(|c| c.input.get("_parse_error").is_some().then_some(c.name.as_str()))
+                    .collect();
                 tracing::warn!(
                     tools = ?names,
-                    "tool call JSON truncated by max_tokens — instructing LLM to split work"
+                    "tool call JSON truncated by max_tokens — redirecting LLM to split work"
                 );
                 self.conversation.messages.push(assistant_msg);
-                self.conversation.messages.push(Message::user(
-                    "[Your last tool call was cut off mid-argument because the \
-                     output exceeded the max token limit. Do NOT retry the same \
-                     call — the JSON will truncate again. Instead: (1) use \
-                     `write_file` instead of `bash` heredocs to write files, or \
-                     (2) split the content across multiple smaller tool calls. \
-                     For file writes over ~4 KB prefer `write_file`; for larger \
-                     files, write an initial chunk with `write_file` then append \
-                     subsequent chunks with `edit_file` or `bulk_edit`.]",
-                ));
+                self.conversation.messages.push(Message::user(MAXTOKENS_TOOL_CALL_TRUNCATED));
                 continue;
             }
 

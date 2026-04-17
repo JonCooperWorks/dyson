@@ -74,6 +74,23 @@ pub fn escape_single_quotes(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
+/// Expand a leading `~` or `~/` to `$HOME` and return the result as a
+/// `PathBuf`.  Leaves every other input (absolute, relative, `~user/…`)
+/// unchanged.  Returns `PathBuf::from(path)` verbatim when `HOME` is unset.
+pub fn resolve_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return std::path::PathBuf::from(home).join(rest);
+    }
+    if path == "~"
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return std::path::PathBuf::from(home);
+    }
+    std::path::PathBuf::from(path)
+}
+
 /// Generate a short (8-char) hex hash of a string.
 ///
 /// Used to create deterministic-but-readable identifiers from URLs, paths,
@@ -116,5 +133,20 @@ mod tests {
     fn no_truncation_for_short_output() {
         let short = "hello world";
         assert_eq!(&*truncate_output(short), short);
+    }
+
+    #[test]
+    fn resolve_tilde_expands_bare_and_prefix() {
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+        assert_eq!(resolve_tilde("~"), home);
+        assert_eq!(resolve_tilde("~/foo/bar"), home.join("foo/bar"));
+    }
+
+    #[test]
+    fn resolve_tilde_passes_through_other_inputs() {
+        assert_eq!(resolve_tilde("/etc/passwd"), std::path::PathBuf::from("/etc/passwd"));
+        assert_eq!(resolve_tilde("relative/path"), std::path::PathBuf::from("relative/path"));
+        // ~user/ is not supported — per-user home lookup would need `getpwnam`.
+        assert_eq!(resolve_tilde("~alice/foo"), std::path::PathBuf::from("~alice/foo"));
     }
 }

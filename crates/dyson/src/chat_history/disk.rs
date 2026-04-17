@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use crate::chat_history::ChatHistory;
 use crate::error::Result;
 use crate::message::{ContentBlock, Message};
-use crate::workspace::openclaw::resolve_tilde;
+use crate::util::resolve_tilde;
 
 /// Prefix used in the `data` field to indicate externalized image data.
 /// This cannot be valid base64, so there's no collision risk.
