@@ -1,19 +1,6 @@
-// ===========================================================================
-// TaintTraceTool — cross-file source→sink reachability oracle.
-//
-// The security_engineer subagent's data-flow companion to ast_query.
-// Given a source `file:line` and sink `file:line`, returns candidate
-// call chains ranked by confidence.  Name-based call resolution with
-// positional argument binding — intentionally lossy.  The tool prints
-// an uncertainty header and per-hop byte ranges so the agent can
-// verify each step with a single `read_file` call.
-//
-// Architecture:
-//   - Symbol index per language, cached on ToolContext.taint_indexes.
-//   - mtime-checked on every call; any file change invalidates the
-//     whole language index (cheap, session-scale).
-//   - BFS in `ast::taint::trace` with max_depth / max_paths / frontier cap.
-// ===========================================================================
+// TaintTraceTool — thin agent-facing wrapper around `ast::taint::trace`.
+// Caches the per-language SymbolIndex on ToolContext with mtime
+// invalidation; renders paths with explicit uncertainty annotations.
 
 use std::fmt::Write;
 use std::sync::Arc;
@@ -273,10 +260,15 @@ fn render(index: &taint::SymbolIndex, result: &taint::TraceResult, input: &Input
                 hop.detail,
                 kind_tag,
             );
-            if !hop.ambiguous_candidates.is_empty() {
-                for (f, l, name) in &hop.ambiguous_candidates {
-                    let _ = writeln!(out, "{prefix}    - {}:{} {}()", display_path(f), l, name);
-                }
+            for &id in &hop.ambiguous_candidates {
+                let d = &index.fn_defs[id];
+                let _ = writeln!(
+                    out,
+                    "{prefix}    - {}:{} {}()",
+                    display_path(&d.file),
+                    d.line,
+                    d.name,
+                );
             }
         }
         let _ = writeln!(out);
@@ -297,16 +289,6 @@ fn display_path(p: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use crate::tool::ToolContext;
-
-    fn run_tool(ctx: &ToolContext, input: serde_json::Value) -> ToolOutput {
-        let tool = TaintTraceTool;
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(tool.run(&input, ctx))
-            .unwrap()
-    }
 
     #[tokio::test]
     async fn same_function_same_line_trivially_traces() {
@@ -577,11 +559,5 @@ mod tests {
             1,
             "second call should reuse the cached index",
         );
-    }
-
-    // Silence unused warning in case helper isn't used by every test.
-    #[allow(dead_code)]
-    fn _touch(ctx: &ToolContext, input: serde_json::Value) -> ToolOutput {
-        run_tool(ctx, input)
     }
 }

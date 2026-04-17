@@ -1,10 +1,10 @@
 // Build a per-language SymbolIndex by walking the working directory,
-// parsing every file with the matching language, and flattening function
-// definitions, call sites, and assignments into index-friendly lists.
+// parsing every matching file, and flattening function definitions,
+// call sites, and assignments into lookup-friendly lists.
 //
-// Runs inside `spawn_blocking` because tree-sitter parsing is sync CPU;
-// blocking the tokio runtime starves concurrent tool calls that the
-// security_engineer prompt explicitly encourages.
+// Runs inside `spawn_blocking` — tree-sitter parsing is sync CPU and
+// would starve concurrent tool calls the security_engineer prompt
+// explicitly encourages.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,15 +17,12 @@ use crate::error::Result;
 
 use super::types::{Assignment, CallSite, FnDef, FnId, SymbolIndex};
 
-/// Node kinds that act like "name = value" assignments, per language.
-/// Tier 1 (TS / JS / Python / Rust / Go / Java / C / C++ / C# / Ruby) has
-/// proper support; other languages parse calls/defs but same-frame
-/// assignment propagation degrades to none.
+/// Node kinds that behave like "name = value" assignments.  Tier-1 only
+/// (TS/JS/Python/Rust/Go/Java/C/C++/C#/Ruby); other languages still parse
+/// calls + defs but same-frame assignment propagation silently degrades.
 fn assignment_types(language: &'static str) -> &'static [&'static str] {
     match language {
-        "JavaScript" | "TypeScript" | "TSX" => {
-            &["variable_declarator", "assignment_expression"]
-        }
+        "JavaScript" | "TypeScript" | "TSX" => &["variable_declarator", "assignment_expression"],
         "Python" => &["assignment", "augmented_assignment"],
         "Rust" => &["let_declaration", "assignment_expression"],
         "Go" => &["short_var_declaration", "assignment_statement"],
@@ -37,8 +34,7 @@ fn assignment_types(language: &'static str) -> &'static [&'static str] {
     }
 }
 
-/// Entry point — synchronous, must be called inside `spawn_blocking`.
-pub fn build_index_sync(
+pub(crate) fn build_index_sync(
     language: &'static LanguageConfig,
     working_dir: &Path,
 ) -> Result<SymbolIndex> {
@@ -46,93 +42,55 @@ pub fn build_index_sync(
         .canonicalize()
         .unwrap_or_else(|_| working_dir.to_path_buf());
 
-    let mut files_seen = 0usize;
-    let mut truncated = false;
-
-    let mut fn_defs: Vec<FnDef> = Vec::new();
-    let mut call_sites: Vec<CallSite> = Vec::new();
-    let mut assignments: Vec<Assignment> = Vec::new();
-    let mut fn_by_file: HashMap<PathBuf, Vec<FnId>> = HashMap::new();
-    let mut file_mtimes: HashMap<PathBuf, SystemTime> = HashMap::new();
-    let mut unresolved_callees = 0usize;
+    let mut builder = IndexBuilder::default();
+    let assign_kinds = assignment_types(language.display_name);
 
     for entry in ast::walk_dir(&working_dir_canon).flatten() {
-        if files_seen >= ast::MAX_FILES {
-            truncated = true;
+        if builder.files_seen >= ast::MAX_FILES {
+            builder.truncated = true;
             break;
         }
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
         let path = entry.path();
-        let ext = match path.extension().and_then(|e| e.to_str()) {
-            Some(e) => e,
-            None => continue,
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
         };
-        let config = match ast::config_for_extension(ext) {
-            Some(c) => c,
-            None => continue,
+        let Some(config) = ast::config_for_extension(ext) else {
+            continue;
         };
         if config.display_name != language.display_name {
             continue;
         }
-
-        let parsed = match ast::try_parse_file(path, &working_dir_canon, false) {
-            Ok(Some((_, p))) => p,
-            _ => continue,
+        let Ok(Some((_, parsed))) = ast::try_parse_file(path, &working_dir_canon, false) else {
+            continue;
         };
-        files_seen += 1;
+        builder.files_seen += 1;
 
         let rel = PathBuf::from(&parsed.rel_path);
         if let Ok(md) = std::fs::metadata(path)
             && let Ok(mt) = md.modified()
         {
-            file_mtimes.insert(rel.clone(), mt);
+            builder.file_mtimes.insert(rel.clone(), mt);
         }
 
-        let assign_kinds = assignment_types(language.display_name);
-        let mut walker = Walker {
+        Walker {
             config: language,
             source: &parsed.source,
             rel_path: &rel,
             assign_kinds,
-            fn_defs: &mut fn_defs,
-            call_sites: &mut call_sites,
-            assignments: &mut assignments,
-            fn_by_file: &mut fn_by_file,
-            unresolved_callees: &mut unresolved_callees,
+            builder: &mut builder,
             current_fn: None,
-        };
-        walker.walk(parsed.tree.root_node());
-    }
-
-    let mut by_name: HashMap<String, Vec<FnId>> = HashMap::new();
-    for (id, def) in fn_defs.iter().enumerate() {
-        if !def.name.is_empty() {
-            by_name.entry(def.name.clone()).or_default().push(id);
         }
+        .walk(parsed.tree.root_node());
     }
 
-    // Stable order inside fn_by_file so enclosing lookups prefer earlier defs.
-    for ids in fn_by_file.values_mut() {
-        ids.sort_by_key(|&id| fn_defs[id].def_range.start);
-    }
-
-    Ok(SymbolIndex {
-        language: language.display_name,
-        fn_defs,
-        by_name,
-        call_sites,
-        assignments,
-        fn_by_file,
-        file_mtimes,
-        truncated,
-        unresolved_callees,
-    })
+    Ok(builder.finish(language.display_name))
 }
 
-/// Check whether any file in `index` has been modified since the index
-/// was built.  Cheap — one `metadata` syscall per indexed file.
+/// Any indexed file's mtime > index-build time?  One `metadata` syscall
+/// per indexed file; invalidation drops the whole language's cache.
 pub fn is_stale(index: &SymbolIndex, working_dir: &Path) -> bool {
     for (rel, built_mtime) in &index.file_mtimes {
         let abs = working_dir.join(rel);
@@ -148,8 +106,83 @@ pub fn is_stale(index: &SymbolIndex, working_dir: &Path) -> bool {
     false
 }
 
+pub async fn build_index(
+    language: &'static LanguageConfig,
+    working_dir: &Path,
+) -> Result<SymbolIndex> {
+    let dir = working_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || build_index_sync(language, &dir))
+        .await
+        .map_err(|e| crate::error::DysonError::tool("taint_trace", format!("index build: {e}")))?
+}
+
 // ---------------------------------------------------------------------------
-// Per-file recursive walker
+// IndexBuilder — owns accumulated state across files.  Walker holds a
+// single `&mut IndexBuilder` instead of six separate `&mut` fields.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct IndexBuilder {
+    fn_defs: Vec<FnDef>,
+    call_sites: Vec<CallSite>,
+    assignments: Vec<Assignment>,
+    fn_by_file: HashMap<PathBuf, Vec<FnId>>,
+    file_mtimes: HashMap<PathBuf, SystemTime>,
+    files_seen: usize,
+    truncated: bool,
+    unresolved_callees: usize,
+}
+
+impl IndexBuilder {
+    /// Finalize accumulated state into a ready-to-query `SymbolIndex`.
+    /// Pre-sorts per-fn call-site and assignment lists so BFS skips the
+    /// sort on every frame.
+    fn finish(mut self, language: &'static str) -> SymbolIndex {
+        let mut by_name: HashMap<String, Vec<FnId>> = HashMap::new();
+        for (id, def) in self.fn_defs.iter().enumerate() {
+            if !def.name.is_empty() {
+                by_name.entry(def.name.clone()).or_default().push(id);
+            }
+        }
+
+        let mut calls_by_fn: HashMap<FnId, Vec<usize>> = HashMap::new();
+        for (i, cs) in self.call_sites.iter().enumerate() {
+            calls_by_fn.entry(cs.in_fn).or_default().push(i);
+        }
+        for v in calls_by_fn.values_mut() {
+            v.sort_by_key(|&i| self.call_sites[i].byte_range.start);
+        }
+
+        let mut assigns_by_fn: HashMap<FnId, Vec<usize>> = HashMap::new();
+        for (i, a) in self.assignments.iter().enumerate() {
+            assigns_by_fn.entry(a.in_fn).or_default().push(i);
+        }
+        for v in assigns_by_fn.values_mut() {
+            v.sort_by_key(|&i| self.assignments[i].byte_start);
+        }
+
+        for ids in self.fn_by_file.values_mut() {
+            ids.sort_by_key(|&id| self.fn_defs[id].def_range.start);
+        }
+
+        SymbolIndex {
+            language,
+            fn_defs: self.fn_defs,
+            by_name,
+            call_sites: self.call_sites,
+            assignments: self.assignments,
+            calls_by_fn,
+            assigns_by_fn,
+            fn_by_file: self.fn_by_file,
+            file_mtimes: self.file_mtimes,
+            truncated: self.truncated,
+            unresolved_callees: self.unresolved_callees,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Walker — per-file recursive descent.
 // ---------------------------------------------------------------------------
 
 struct Walker<'a> {
@@ -157,15 +190,11 @@ struct Walker<'a> {
     source: &'a str,
     rel_path: &'a Path,
     assign_kinds: &'static [&'static str],
-    fn_defs: &'a mut Vec<FnDef>,
-    call_sites: &'a mut Vec<CallSite>,
-    assignments: &'a mut Vec<Assignment>,
-    fn_by_file: &'a mut HashMap<PathBuf, Vec<FnId>>,
-    unresolved_callees: &'a mut usize,
+    builder: &'a mut IndexBuilder,
     current_fn: Option<FnId>,
 }
 
-impl<'a> Walker<'a> {
+impl Walker<'_> {
     fn walk(&mut self, node: Node<'_>) {
         let kind = node.kind();
         let mut entered_fn = false;
@@ -205,23 +234,21 @@ impl<'a> Walker<'a> {
     }
 
     fn record_definition(&mut self, node: Node<'_>) -> Option<FnId> {
-        let name =
-            nodes::extract_definition_name(&node, self.source.as_bytes()).unwrap_or_default();
-        let body = node
-            .child_by_field_name("body")
-            .map(|b| b.byte_range())
-            .unwrap_or_else(|| node.byte_range());
-        let params = extract_parameters(node, self.source);
-        let id = self.fn_defs.len();
-        self.fn_defs.push(FnDef {
+        let id = self.builder.fn_defs.len();
+        self.builder.fn_defs.push(FnDef {
             file: self.rel_path.to_path_buf(),
             line: node.start_position().row + 1,
             def_range: node.byte_range(),
-            body_range: body,
-            name,
-            params,
+            body_range: node
+                .child_by_field_name("body")
+                .map(|b| b.byte_range())
+                .unwrap_or_else(|| node.byte_range()),
+            name: nodes::extract_definition_name(&node, self.source.as_bytes())
+                .unwrap_or_default(),
+            params: extract_parameters(node, self.source),
         });
-        self.fn_by_file
+        self.builder
+            .fn_by_file
             .entry(self.rel_path.to_path_buf())
             .or_default()
             .push(id);
@@ -231,19 +258,15 @@ impl<'a> Walker<'a> {
     fn record_call(&mut self, node: Node<'_>, fn_id: FnId) {
         let callee = extract_callee_name(node, self.source);
         if callee.is_empty() {
-            *self.unresolved_callees += 1;
+            self.builder.unresolved_callees += 1;
         }
-        let arg_idents = extract_arg_idents(node, self.source, self.config);
-        let range = node.byte_range();
-        let snippet = short_snippet(&self.source[range.clone()]);
-        self.call_sites.push(CallSite {
+        self.builder.call_sites.push(CallSite {
             file: self.rel_path.to_path_buf(),
             line: node.start_position().row + 1,
-            byte_range: range,
+            byte_range: node.byte_range(),
             in_fn: fn_id,
             callee,
-            arg_idents,
-            snippet,
+            arg_idents: extract_arg_idents(node, self.source, self.config),
         });
     }
 
@@ -253,7 +276,7 @@ impl<'a> Walker<'a> {
         if lhs.is_empty() && rhs.is_empty() {
             return;
         }
-        self.assignments.push(Assignment {
+        self.builder.assignments.push(Assignment {
             line: node.start_position().row + 1,
             byte_start: node.start_byte(),
             in_fn: fn_id,
@@ -271,32 +294,28 @@ fn extract_callee_name(node: Node<'_>, source: &str) -> String {
     if let Some(fn_field) = node.child_by_field_name("function") {
         return flatten_callee(fn_field, source);
     }
-    // Fallback: first identifier / member-access child.
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        let kind = child.kind();
-        if kind == "identifier" || kind == "property_identifier" {
+        let k = child.kind();
+        if k == "identifier" || k == "property_identifier" {
             return source[child.byte_range()].to_string();
         }
     }
     String::new()
 }
 
-/// For `foo.bar.baz(...)` tree-sitter exposes the callee as a
-/// `member_expression` / `field_expression`.  We flatten to the last
-/// identifier (`baz`) — that's the name used for resolution.
+/// `foo.bar.baz(...)` is a `member_expression` wrapping the callee.
+/// Flatten to the rightmost identifier — that's the resolution name.
 fn flatten_callee(node: Node<'_>, source: &str) -> String {
     let kind = node.kind();
     if kind == "identifier" || kind == "property_identifier" || kind == "simple_identifier" {
         return source[node.byte_range()].to_string();
     }
-    if let Some(p) = node.child_by_field_name("property") {
-        return source[p.byte_range()].to_string();
+    for field in ["property", "name"] {
+        if let Some(n) = node.child_by_field_name(field) {
+            return source[n.byte_range()].to_string();
+        }
     }
-    if let Some(n) = node.child_by_field_name("name") {
-        return source[n.byte_range()].to_string();
-    }
-    // Walk for the rightmost identifier.
     let mut cursor = node.walk();
     let mut last = String::new();
     for child in node.children(&mut cursor) {
@@ -309,19 +328,15 @@ fn flatten_callee(node: Node<'_>, source: &str) -> String {
 }
 
 fn extract_parameters(node: Node<'_>, source: &str) -> Vec<String> {
-    let params_node = node
-        .child_by_field_name("parameters")
-        .or_else(|| node.child_by_field_name("formal_parameters"))
-        .or_else(|| node.child_by_field_name("params"));
-    let Some(pn) = params_node else {
+    let Some(pn) = ["parameters", "formal_parameters", "params"]
+        .iter()
+        .find_map(|f| node.child_by_field_name(f))
+    else {
         return Vec::new();
     };
     let mut out = Vec::new();
     let mut cursor = pn.walk();
     for child in pn.children(&mut cursor) {
-        // A parameter may be wrapped in `parameter`, `typed_parameter`,
-        // `required_parameter`, `identifier_pattern`, etc.  The name
-        // field / first identifier descendant is the parameter name.
         let name = child
             .child_by_field_name("name")
             .or_else(|| child.child_by_field_name("pattern"))
@@ -350,25 +365,21 @@ fn first_identifier_text(node: Node<'_>, source: &str) -> Option<String> {
     None
 }
 
-/// Collect identifier names inside each positional argument of a call.
-/// Used for positional taint binding.
 pub(crate) fn extract_arg_idents(
     call_node: Node<'_>,
     source: &str,
     config: &LanguageConfig,
 ) -> Vec<Vec<String>> {
-    let args_node = call_node
+    let Some(args) = call_node
         .child_by_field_name("arguments")
-        .or_else(|| call_node.child_by_field_name("argument_list"));
-    let Some(args) = args_node else {
+        .or_else(|| call_node.child_by_field_name("argument_list"))
+    else {
         return Vec::new();
     };
     let mut out = Vec::new();
     let mut cursor = args.walk();
     for child in args.children(&mut cursor) {
-        // Skip punctuation nodes.
-        let k = child.kind();
-        if !child.is_named() || k == "(" || k == ")" || k == "," {
+        if !child.is_named() {
             continue;
         }
         let mut idents = Vec::new();
@@ -378,9 +389,9 @@ pub(crate) fn extract_arg_idents(
     out
 }
 
-/// Collect identifiers we'd consider "data" (not callees).  For member
-/// chains like `req.body.url`, take only the root object — matching the
-/// tainted-symbol extraction rules.
+/// Collect identifiers considered "data" (not callees).  For member
+/// chains like `req.body.url`, take only the root object — property
+/// identifiers would cause `body`/`url` to match unrelated repo-wide vars.
 pub(crate) fn collect_tainted_identifiers(
     node: Node<'_>,
     source: &str,
@@ -389,16 +400,14 @@ pub(crate) fn collect_tainted_identifiers(
 ) {
     let kind = node.kind();
     if config.identifier_types.contains(&kind) {
-        // Skip if this identifier is the callee of a parent call expression.
+        if kind == "property_identifier" {
+            return;
+        }
         if let Some(parent) = node.parent()
             && config.call_types.contains(&parent.kind())
             && let Some(fn_field) = parent.child_by_field_name("function")
             && fn_field.id() == node.id()
         {
-            return;
-        }
-        // Skip property_identifier in a member_expression (root-only taint).
-        if kind == "property_identifier" {
             return;
         }
         let text = source[node.byte_range()].to_string();
@@ -407,9 +416,7 @@ pub(crate) fn collect_tainted_identifiers(
         }
         return;
     }
-    // For member_expression / field_expression: descend only into the object
-    // side to reach the root identifier.
-    if kind == "member_expression" || kind == "field_expression" || kind == "attribute" {
+    if matches!(kind, "member_expression" | "field_expression" | "attribute") {
         if let Some(obj) = node
             .child_by_field_name("object")
             .or_else(|| node.child_by_field_name("value"))
@@ -438,33 +445,4 @@ fn extract_field_idents(
         }
     }
     Vec::new()
-}
-
-fn short_snippet(s: &str) -> String {
-    const MAX: usize = 80;
-    let cleaned: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
-    if cleaned.len() <= MAX {
-        cleaned
-    } else {
-        let mut truncated: String = cleaned.chars().take(MAX).collect();
-        truncated.push('…');
-        truncated
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Async entry — wraps sync build in spawn_blocking so the tokio runtime
-// isn't starved.
-// ---------------------------------------------------------------------------
-
-pub async fn build_index(
-    language: &'static LanguageConfig,
-    working_dir: &Path,
-) -> Result<SymbolIndex> {
-    let dir = working_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || build_index_sync(language, &dir))
-        .await
-        .map_err(|e| {
-            crate::error::DysonError::tool("taint_trace", format!("index build join: {e}"))
-        })?
 }

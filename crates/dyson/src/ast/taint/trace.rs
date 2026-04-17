@@ -1,15 +1,16 @@
 // BFS taint-reachability from a source `file:line` to a sink `file:line`
-// over a pre-built `SymbolIndex`.  Name-based call resolution with
-// positional argument binding.  Lossy by design — the tool is a
-// hypothesis generator; the agent verifies each hop.
+// over a pre-built `SymbolIndex`.  Name-based call resolution, positional
+// argument binding, lossy by design — the agent verifies each hop.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+use tree_sitter::Node;
+
 use crate::ast::{self, LanguageConfig};
 
 use super::index::collect_tainted_identifiers;
-use super::types::{FnId, Frame, Hop, HopKind, SymbolIndex, TaintPath};
+use super::types::{FnId, Hop, HopKind, SymbolIndex, TaintPath};
 
 pub struct TraceOptions {
     pub max_depth: usize,
@@ -46,6 +47,13 @@ pub enum TraceError {
     UnsupportedLanguage { language: &'static str },
 }
 
+#[derive(Debug, Clone)]
+struct Frame {
+    fn_id: FnId,
+    tainted: BTreeSet<String>,
+    hops: Vec<Hop>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn trace(
     index: &SymbolIndex,
@@ -66,72 +74,54 @@ pub fn trace(
     let source_rel = rel_path(working_dir, source_file);
     let sink_rel = rel_path(working_dir, sink_file);
 
-    // Re-parse the source file once to read identifiers on source.line.
-    let source_parsed = ast::try_parse_file(source_file, working_dir, false)
-        .map_err(|e| TraceError::ParseFailed {
+    let source_parsed = parse(source_file, working_dir).map_err(|e| match e {
+        ParseErr::Parse(r) => TraceError::ParseFailed {
             file: source_rel.display().to_string(),
-            reason: e.to_string(),
-        })?
-        .ok_or_else(|| TraceError::SourceNotIndexed {
+            reason: r,
+        },
+        ParseErr::Missing => TraceError::SourceNotIndexed {
             file: source_rel.display().to_string(),
-        })?;
-    let source_tree = &source_parsed.1.tree;
-    let source_src = source_parsed.1.source.as_str();
-
+        },
+    })?;
+    let source_src = source_parsed.source.as_str();
     let source_byte = byte_offset_of_line(source_src, source_line);
-    let source_line_end = line_end_byte(source_src, source_line);
-    let source_node = source_tree
-        .root_node()
-        .descendant_for_byte_range(source_byte, source_line_end)
-        .unwrap_or_else(|| source_tree.root_node());
 
-    let enclosing_node = ast::find_enclosing_function(source_node, config, source_src.as_bytes())
+    let source_node = source_parsed
+        .tree
+        .root_node()
+        .descendant_for_byte_range(source_byte, line_end_byte(source_src, source_line))
+        .unwrap_or_else(|| source_parsed.tree.root_node());
+    let enclosing_fn_node = ast::find_enclosing_function(source_node, config, source_src.as_bytes())
         .ok_or_else(|| TraceError::NoEnclosingFunction {
             file: source_rel.display().to_string(),
             line: source_line,
         })?;
-
-    // Map enclosing node to its FnId in the index.  Fall back to
-    // `fn_enclosing` lookup — the index is the source of truth.
-    let start_fn = match index.fn_enclosing(&source_rel, source_byte) {
-        Some(id) => id,
-        None => {
-            return Err(TraceError::NoEnclosingFunction {
-                file: source_rel.display().to_string(),
-                line: source_line,
-            });
+    let start_fn = index.fn_enclosing(&source_rel, source_byte).ok_or_else(|| {
+        TraceError::NoEnclosingFunction {
+            file: source_rel.display().to_string(),
+            line: source_line,
         }
-    };
+    })?;
 
-    // Extract initial tainted identifiers from the *statement* containing
-    // source.line.  Skip the LHS on declarations (receivers are not
-    // sources — the RHS is).
-    let initial_tainted =
-        extract_source_taint(enclosing_node, source_byte, source_src, config);
-    if initial_tainted.is_empty() {
-        // Fall back to all identifiers on the line — conservative, gives
-        // the agent some starting ground instead of silent zero paths.
-        // Real "no identifiers" usually means blank / comment / punctuation,
-        // which NoEnclosingFunction will have caught first.
-    }
+    let initial_tainted = extract_source_taint(enclosing_fn_node, source_byte, source_src, config);
 
-    // Parse sink file to look up identifiers on sink.line for the
-    // reachability check.
-    let sink_parsed = ast::try_parse_file(sink_file, working_dir, false)
-        .map_err(|e| TraceError::ParseFailed {
+    let sink_parsed = parse(sink_file, working_dir).map_err(|e| match e {
+        ParseErr::Parse(r) => TraceError::ParseFailed {
             file: sink_rel.display().to_string(),
-            reason: e.to_string(),
-        })?
-        .ok_or_else(|| TraceError::SinkNotIndexed {
+            reason: r,
+        },
+        ParseErr::Missing => TraceError::SinkNotIndexed {
             file: sink_rel.display().to_string(),
-        })?;
-    let sink_src = sink_parsed.1.source.as_str();
+        },
+    })?;
+    let sink_src = sink_parsed.source.as_str();
     let sink_byte = byte_offset_of_line(sink_src, sink_line);
-    let sink_identifiers = identifiers_on_line(&sink_parsed.1.tree, sink_src, sink_line, config);
+    let sink_fn = index.fn_enclosing(&sink_rel, sink_byte);
+    let sink_identifiers = identifiers_on_line(&sink_parsed.tree, sink_src, sink_line, config);
+    let sink_line_range = byte_range_of_line(sink_src, sink_line);
 
-    // BFS.
     let mut paths: Vec<TaintPath> = Vec::new();
-    let mut visited: HashSet<(FnId, Vec<String>)> = HashSet::new();
+    let mut visited: HashSet<(FnId, BTreeSet<String>)> = HashSet::new();
     let mut frontier_count = 0usize;
     let mut truncated_frontier = false;
 
@@ -139,15 +129,10 @@ pub fn trace(
         file: source_rel.clone(),
         line: source_line,
         byte_range: byte_range_of_line(source_src, source_line),
-        fn_name: index.fn_defs[start_fn].name.clone(),
         detail: format!(
             "fn `{}` — taint root: {}",
             index.fn_defs[start_fn].name,
-            if initial_tainted.is_empty() {
-                "<none extracted>".to_string()
-            } else {
-                initial_tainted.iter().cloned().collect::<Vec<_>>().join(", ")
-            },
+            join_sorted(&initial_tainted).unwrap_or_else(|| "<none extracted>".into()),
         ),
         kind: HopKind::Source,
         ambiguous_candidates: Vec::new(),
@@ -159,216 +144,112 @@ pub fn trace(
         hops: vec![source_hop],
     }];
 
-    while let Some(frame) = queue.pop() {
+    'outer: while let Some(frame) = queue.pop() {
         if paths.len() >= opts.max_paths {
             break;
         }
-        let dedup_key = (frame.fn_id, frame.tainted.iter().cloned().collect::<Vec<_>>());
-        if !visited.insert(dedup_key) {
+        if !visited.insert((frame.fn_id, frame.tainted.clone())) {
             continue;
         }
 
-        // Gather all call sites in this frame's function, in byte order.
-        let mut call_sites: Vec<&super::types::CallSite> = index
-            .call_sites
-            .iter()
-            .filter(|cs| cs.in_fn == frame.fn_id)
-            .collect();
-        call_sites.sort_by_key(|cs| cs.byte_range.start);
+        let local_calls = calls_for(index, frame.fn_id);
+        let local_assigns = assigns_for(index, frame.fn_id);
 
-        let mut local_assigns: Vec<&super::types::Assignment> = index
-            .assignments
-            .iter()
-            .filter(|a| a.in_fn == frame.fn_id)
-            .collect();
-        local_assigns.sort_by_key(|a| a.byte_start);
-
-        // Check same-frame sink reachability.
-        if frame.fn_id == start_fn_for_sink(index, &sink_rel, sink_byte).unwrap_or(usize::MAX)
-            || Some(frame.fn_id) == index.fn_enclosing(&sink_rel, sink_byte)
-        {
-            // Apply same-frame assignment propagation up to the sink line,
-            // then check overlap with sink identifiers.
-            let mut running_taint = frame.tainted.clone();
-            for a in &local_assigns {
-                if a.line >= sink_line {
-                    break;
-                }
-                if a.rhs_idents.iter().any(|r| running_taint.contains(r)) {
-                    for l in &a.lhs {
-                        running_taint.insert(l.clone());
-                    }
-                }
-            }
-            if sink_identifiers.iter().any(|s| running_taint.contains(s)) {
-                let sink_hop = Hop {
+        // Same-frame sink reachability: propagate assignments up to sink_line,
+        // then check overlap.  Only run when we're actually in the sink's fn.
+        if sink_fn == Some(frame.fn_id) {
+            let running = propagate_until(&frame.tainted, local_assigns, index, |a| a.line < sink_line);
+            if sink_identifiers.iter().any(|s| running.contains(s)) {
+                let mut hops = frame.hops.clone();
+                hops.push(Hop {
                     file: sink_rel.clone(),
                     line: sink_line,
-                    byte_range: byte_range_of_line(sink_src, sink_line),
-                    fn_name: index.fn_defs[frame.fn_id].name.clone(),
+                    byte_range: sink_line_range.clone(),
                     detail: format!(
                         "[SINK REACHED] — tainted at sink: {}",
                         sink_identifiers
                             .iter()
-                            .filter(|s| running_taint.contains(*s))
+                            .filter(|s| running.contains(*s))
                             .cloned()
                             .collect::<Vec<_>>()
                             .join(", "),
                     ),
                     kind: HopKind::Sink,
                     ambiguous_candidates: Vec::new(),
-                };
-                let mut hops = frame.hops.clone();
-                hops.push(sink_hop);
-                paths.push(TaintPath {
-                    hops,
-                    truncated: false,
                 });
+                paths.push(TaintPath { hops });
                 continue;
             }
         }
 
-        // Stop expanding if we've hit depth.
         if frame.hops.len() > opts.max_depth {
             continue;
         }
 
-        // Propagate same-frame assignments into a per-frame running set
-        // that we can reference at each call site below.
+        // Walk call sites in byte order, propagating assignments as we go.
         let mut running = frame.tainted.clone();
-        for (idx, cs) in call_sites.iter().enumerate() {
-            // Apply assignments that precede this call site.
-            for a in &local_assigns {
-                if a.byte_start >= cs.byte_range.start {
-                    break;
-                }
-                if a.rhs_idents.iter().any(|r| running.contains(r)) {
-                    for l in &a.lhs {
-                        running.insert(l.clone());
-                    }
-                }
+        let mut assign_iter = local_assigns.iter().map(|&i| &index.assignments[i]);
+        let mut next_assign = assign_iter.next();
+
+        for &cs_idx in local_calls {
+            let cs = &index.call_sites[cs_idx];
+            // Apply assignments preceding this call site.
+            while let Some(a) = next_assign
+                && a.byte_start < cs.byte_range.start
+            {
+                apply_assignment(&mut running, a);
+                next_assign = assign_iter.next();
             }
 
-            // Is any argument slot tainted?
-            let mut tainted_arg_positions: Vec<usize> = Vec::new();
-            for (i, args) in cs.arg_idents.iter().enumerate() {
-                if args.iter().any(|id| running.contains(id)) {
-                    tainted_arg_positions.push(i);
-                }
-            }
-            if tainted_arg_positions.is_empty() {
+            let tainted_args = tainted_arg_positions(&cs.arg_idents, &running);
+            if tainted_args.is_empty() {
                 continue;
             }
 
-            // Resolve callee to fn defs.
-            let candidates: Vec<FnId> = if cs.callee.is_empty() {
-                Vec::new()
-            } else {
-                index
-                    .by_name
-                    .get(&cs.callee)
-                    .cloned()
-                    .unwrap_or_default()
-            };
-
+            let candidates = index.by_name.get(&cs.callee).map(Vec::as_slice).unwrap_or(&[]);
             if candidates.is_empty() {
-                // Unresolved — record hop but don't extend path.
+                // Unresolved callee — annotate but don't extend path.
                 let mut hops = frame.hops.clone();
                 hops.push(Hop {
                     file: cs.file.clone(),
                     line: cs.line,
                     byte_range: cs.byte_range.clone(),
-                    fn_name: index.fn_defs[frame.fn_id].name.clone(),
                     detail: format!(
                         "calls `{}` — callee unresolved (dynamic dispatch, import alias, or out of index)",
-                        if cs.callee.is_empty() {
-                            "<computed>".to_string()
-                        } else {
-                            cs.callee.clone()
-                        },
+                        if cs.callee.is_empty() { "<computed>" } else { &cs.callee },
                     ),
                     kind: HopKind::UnresolvedCallee,
                     ambiguous_candidates: Vec::new(),
                 });
-                // Still emit as a "candidate path" if the frame already
-                // reached the sink's function; but since we gate on
-                // same-fn-as-sink above, this branch is strictly informational.
-                // We include it only if it would advance us toward the sink
-                // — skip extending the queue here.
-                let _ = idx; // silence warn
+                paths.push(TaintPath { hops });
                 continue;
             }
 
-            // Resolved — push one frame per candidate.
             let ambiguous = candidates.len() > 1;
-            for &cand in &candidates {
-                let mut new_tainted = BTreeSet::new();
-                let callee_params = &index.fn_defs[cand].params;
-                let mut imprecise = false;
-                for &arg_pos in &tainted_arg_positions {
-                    if arg_pos < callee_params.len() {
-                        new_tainted.insert(callee_params[arg_pos].clone());
-                    } else {
-                        // Arity mismatch — fall back to tainting all params.
-                        for p in callee_params {
-                            new_tainted.insert(p.clone());
-                        }
-                        imprecise = true;
-                    }
-                }
-                // Also carry over any globally-visible symbols the
-                // callee might refer to.  For MVP we don't track
-                // closures — just pass params.
-
-                let hop_kind = if imprecise {
+            for &cand in candidates {
+                let (new_tainted, imprecise) = bind_args(&index.fn_defs[cand].params, &tainted_args);
+                let kind = if imprecise {
                     HopKind::ImpreciseBinding
                 } else if ambiguous {
                     HopKind::Ambiguous
                 } else {
                     HopKind::Resolved
                 };
-
-                let ambiguous_candidates: Vec<(PathBuf, usize, String)> = if ambiguous {
-                    candidates
-                        .iter()
-                        .map(|&c| {
-                            let d = &index.fn_defs[c];
-                            (d.file.clone(), d.line, d.name.clone())
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-
                 let detail = format!(
                     "calls `{}({})` → {}{}",
                     cs.callee,
-                    render_tainted_args(&cs.arg_idents, &tainted_arg_positions),
-                    if new_tainted.is_empty() {
-                        "no param binding".to_string()
-                    } else {
-                        format!(
-                            "param{} {}",
-                            if new_tainted.len() == 1 { "" } else { "s" },
-                            new_tainted
-                                .iter()
-                                .map(|p| format!("`{p}`"))
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                        )
-                    },
+                    render_tainted_args(&cs.arg_idents, &tainted_args),
+                    render_param_binding(&new_tainted),
                     if imprecise { " [IMPRECISE]" } else { "" },
                 );
-
                 let mut new_hops = frame.hops.clone();
                 new_hops.push(Hop {
                     file: cs.file.clone(),
                     line: cs.line,
                     byte_range: cs.byte_range.clone(),
-                    fn_name: index.fn_defs[frame.fn_id].name.clone(),
                     detail,
-                    kind: hop_kind,
-                    ambiguous_candidates,
+                    kind,
+                    ambiguous_candidates: if ambiguous { candidates.to_vec() } else { Vec::new() },
                 });
 
                 if new_hops.len() > opts.max_depth + 1 {
@@ -378,7 +259,7 @@ pub fn trace(
                 frontier_count += 1;
                 if frontier_count > opts.max_frontier {
                     truncated_frontier = true;
-                    break;
+                    break 'outer;
                 }
 
                 queue.push(Frame {
@@ -387,16 +268,9 @@ pub fn trace(
                     hops: new_hops,
                 });
             }
-            if truncated_frontier {
-                break;
-            }
-        }
-        if truncated_frontier {
-            break;
         }
     }
 
-    // Rank: (unresolved asc, depth asc, imprecise asc).
     paths.sort_by(|a, b| {
         a.unresolved_hops()
             .cmp(&b.unresolved_hops())
@@ -412,8 +286,113 @@ pub fn trace(
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// BFS helpers
 // ---------------------------------------------------------------------------
+
+fn calls_for(index: &SymbolIndex, fn_id: FnId) -> &[usize] {
+    index.calls_by_fn.get(&fn_id).map(Vec::as_slice).unwrap_or(&[])
+}
+
+fn assigns_for(index: &SymbolIndex, fn_id: FnId) -> &[usize] {
+    index.assigns_by_fn.get(&fn_id).map(Vec::as_slice).unwrap_or(&[])
+}
+
+fn apply_assignment(running: &mut BTreeSet<String>, a: &super::types::Assignment) {
+    if a.rhs_idents.iter().any(|r| running.contains(r)) {
+        for l in &a.lhs {
+            running.insert(l.clone());
+        }
+    }
+}
+
+fn propagate_until(
+    seed: &BTreeSet<String>,
+    assign_ids: &[usize],
+    index: &SymbolIndex,
+    cond: impl Fn(&super::types::Assignment) -> bool,
+) -> BTreeSet<String> {
+    let mut running = seed.clone();
+    for &i in assign_ids {
+        let a = &index.assignments[i];
+        if !cond(a) {
+            break;
+        }
+        apply_assignment(&mut running, a);
+    }
+    running
+}
+
+fn tainted_arg_positions(arg_idents: &[Vec<String>], running: &BTreeSet<String>) -> Vec<usize> {
+    arg_idents
+        .iter()
+        .enumerate()
+        .filter_map(|(i, args)| args.iter().any(|id| running.contains(id)).then_some(i))
+        .collect()
+}
+
+fn bind_args(callee_params: &[String], tainted_positions: &[usize]) -> (BTreeSet<String>, bool) {
+    let mut out = BTreeSet::new();
+    let mut imprecise = false;
+    for &pos in tainted_positions {
+        if pos < callee_params.len() {
+            out.insert(callee_params[pos].clone());
+        } else {
+            for p in callee_params {
+                out.insert(p.clone());
+            }
+            imprecise = true;
+        }
+    }
+    (out, imprecise)
+}
+
+fn render_param_binding(bound: &BTreeSet<String>) -> String {
+    if bound.is_empty() {
+        return "no param binding".into();
+    }
+    let joined = bound.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
+    format!("param{} {}", if bound.len() == 1 { "" } else { "s" }, joined)
+}
+
+fn render_tainted_args(arg_idents: &[Vec<String>], tainted_positions: &[usize]) -> String {
+    arg_idents
+        .iter()
+        .enumerate()
+        .map(|(i, args)| {
+            let joined = if args.is_empty() { "_".into() } else { args.join("+") };
+            if tainted_positions.contains(&i) {
+                format!("[{joined}]")
+            } else {
+                joined
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn join_sorted(set: &BTreeSet<String>) -> Option<String> {
+    if set.is_empty() {
+        None
+    } else {
+        Some(set.iter().cloned().collect::<Vec<_>>().join(", "))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parsing + byte/line helpers
+// ---------------------------------------------------------------------------
+
+enum ParseErr {
+    Parse(String),
+    Missing,
+}
+
+fn parse(file: &Path, working_dir: &Path) -> Result<crate::ast::ParsedFile, ParseErr> {
+    ast::try_parse_file(file, working_dir, false)
+        .map_err(|e| ParseErr::Parse(e.to_string()))?
+        .map(|(_, p)| p)
+        .ok_or(ParseErr::Missing)
+}
 
 fn rel_path(working_dir: &Path, file: &Path) -> PathBuf {
     if let Ok(canon_file) = file.canonicalize()
@@ -428,41 +407,34 @@ fn rel_path(working_dir: &Path, file: &Path) -> PathBuf {
 }
 
 fn byte_offset_of_line(src: &str, line: usize) -> usize {
-    if line == 0 {
+    if line <= 1 {
         return 0;
     }
-    let mut current_line = 1;
+    let mut current = 1;
     for (i, b) in src.bytes().enumerate() {
-        if current_line == line {
-            return i;
-        }
         if b == b'\n' {
-            current_line += 1;
+            current += 1;
+            if current == line {
+                return i + 1;
+            }
         }
     }
-    src.len().saturating_sub(1)
-}
-
-fn byte_range_of_line(src: &str, line: usize) -> std::ops::Range<usize> {
-    let start = byte_offset_of_line(src, line);
-    let end = line_end_byte(src, line);
-    start..end
+    src.len()
 }
 
 fn line_end_byte(src: &str, line: usize) -> usize {
     let start = byte_offset_of_line(src, line);
-    let mut end = start;
-    for b in src.bytes().skip(start) {
-        if b == b'\n' {
-            break;
-        }
-        end += 1;
-    }
-    end
+    src.bytes()
+        .skip(start)
+        .position(|b| b == b'\n')
+        .map(|off| start + off)
+        .unwrap_or(src.len())
 }
 
-/// Tree walk for identifiers on a given line, obeying the same "skip
-/// callees, root of member_expression only" rules as the index builder.
+fn byte_range_of_line(src: &str, line: usize) -> std::ops::Range<usize> {
+    byte_offset_of_line(src, line)..line_end_byte(src, line)
+}
+
 fn identifiers_on_line(
     tree: &tree_sitter::Tree,
     src: &str,
@@ -474,15 +446,15 @@ fn identifiers_on_line(
         .root_node()
         .descendant_for_byte_range(byte, byte)
         .unwrap_or_else(|| tree.root_node());
-    // Walk up to the enclosing statement so we scoop the whole line's
-    // expressions, not just the leaf at the byte offset.
     let stmt = climb_to_statement(node);
     let mut out = Vec::new();
     collect_tainted_identifiers(stmt, src, config, &mut out);
     out
 }
 
-fn climb_to_statement<'a>(mut node: tree_sitter::Node<'a>) -> tree_sitter::Node<'a> {
+/// Walk parents until hitting a statement-like ancestor.  Used to scope
+/// identifier collection to the statement containing a given byte.
+fn climb_to_statement(mut node: Node<'_>) -> Node<'_> {
     while let Some(parent) = node.parent() {
         let k = parent.kind();
         if k.ends_with("_statement")
@@ -493,7 +465,7 @@ fn climb_to_statement<'a>(mut node: tree_sitter::Node<'a>) -> tree_sitter::Node<
         {
             return parent;
         }
-        if k == "program" || k == "source_file" || k == "module" || k == "compilation_unit" {
+        if matches!(k, "program" | "source_file" | "module" | "compilation_unit") {
             return node;
         }
         node = parent;
@@ -501,59 +473,25 @@ fn climb_to_statement<'a>(mut node: tree_sitter::Node<'a>) -> tree_sitter::Node<
     node
 }
 
-/// Extract initial taint from the source line.  Looks for the statement
-/// at `byte`, prefers the `value` / `right` field (RHS of a declaration),
-/// falls back to all data identifiers in the statement.
 fn extract_source_taint(
-    enclosing_fn: tree_sitter::Node<'_>,
+    enclosing_fn: Node<'_>,
     byte: usize,
     src: &str,
     config: &LanguageConfig,
 ) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    let node = enclosing_fn
-        .descendant_for_byte_range(byte, byte)
-        .unwrap_or(enclosing_fn);
+    let node = enclosing_fn.descendant_for_byte_range(byte, byte).unwrap_or(enclosing_fn);
     let stmt = climb_to_statement(node);
-    let mut collected: Vec<String> = Vec::new();
-    // RHS-first: if the statement has a `value` or `right` field, prefer it.
-    let rhs = stmt
+    let mut collected = Vec::new();
+    // Prefer the RHS of a declaration so the LHS receiver isn't itself a taint source.
+    if let Some(rhs) = stmt
         .child_by_field_name("value")
-        .or_else(|| stmt.child_by_field_name("right"));
-    if let Some(r) = rhs {
-        collect_tainted_identifiers(r, src, config, &mut collected);
+        .or_else(|| stmt.child_by_field_name("right"))
+    {
+        collect_tainted_identifiers(rhs, src, config, &mut collected);
     }
     if collected.is_empty() {
-        // Function parameters on the header line also count as taint sources
-        // (e.g. agent points at `fn handler(req, res) {`).
+        // Fall back to the whole statement — e.g. agent points at `fn handler(req)`.
         collect_tainted_identifiers(stmt, src, config, &mut collected);
     }
-    for s in collected {
-        out.insert(s);
-    }
-    out
-}
-
-fn start_fn_for_sink(index: &SymbolIndex, sink_rel: &Path, sink_byte: usize) -> Option<FnId> {
-    index.fn_enclosing(sink_rel, sink_byte)
-}
-
-fn render_tainted_args(
-    arg_idents: &[Vec<String>],
-    tainted_positions: &[usize],
-) -> String {
-    let mut parts = Vec::new();
-    for (i, args) in arg_idents.iter().enumerate() {
-        let joined = if args.is_empty() {
-            "_".to_string()
-        } else {
-            args.join("+")
-        };
-        if tainted_positions.contains(&i) {
-            parts.push(format!("[{joined}]"));
-        } else {
-            parts.push(joined);
-        }
-    }
-    parts.join(", ")
+    collected.into_iter().collect()
 }
