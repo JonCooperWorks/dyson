@@ -32,7 +32,7 @@ tower-service = "0.3"
 
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = "2"
+rustls-pki-types = { version = "1.9", features = ["std"] }
 tokio-rustls = "0.26"
 rustls-acme = "0.12"
 
@@ -48,7 +48,7 @@ thiserror = { workspace = true }
 argon2 = "0.5"
 
 # Persistence
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 async-trait = "0.1"
 
 # Utilities

@@ -97,13 +97,25 @@ pub struct StdioTransport {
 
 impl StdioTransport {
     /// Spawn an MCP server process and establish communication.
+    ///
+    /// When `sandbox` is true on Linux and `bwrap` is on PATH, the
+    /// subprocess is wrapped with `bwrap` using a read-only root,
+    /// tmpfs `/tmp`, PID-namespace isolation, and `--die-with-parent`.
+    /// If `deny_network` is also true, the network namespace is
+    /// unshared so the server cannot reach the network.
+    ///
+    /// On non-Linux or when bwrap is missing, `sandbox = true` falls
+    /// back to the unsandboxed path with a warning.
     pub async fn spawn(
         command: &str,
         args: &[String],
         env: &HashMap<String, String>,
+        sandbox: bool,
+        deny_network: bool,
     ) -> Result<Self> {
-        let mut cmd = Command::new(command);
-        cmd.args(args)
+        let (exec, exec_args) = Self::resolve_exec(command, args, sandbox, deny_network);
+        let mut cmd = Command::new(&exec);
+        cmd.args(&exec_args)
             .envs(env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -170,6 +182,56 @@ impl StdioTransport {
             _child: Arc::new(Mutex::new(child)),
             _reader_handle: reader_handle,
         })
+    }
+}
+
+impl StdioTransport {
+    /// Decide whether to invoke the MCP command directly or wrap it in
+    /// `bwrap`.  Returns `(exec, argv)` suitable for `Command::new` +
+    /// `.args()`.
+    ///
+    /// Non-Linux, missing bwrap, or `sandbox == false` → direct invocation.
+    fn resolve_exec(
+        command: &str,
+        args: &[String],
+        sandbox: bool,
+        deny_network: bool,
+    ) -> (String, Vec<String>) {
+        if !sandbox {
+            return (command.to_string(), args.to_vec());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let has_bwrap = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("command -v bwrap")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if has_bwrap {
+                let argv = crate::sandbox::os::build_bwrap_argv_for_mcp_stdio(
+                    command,
+                    args,
+                    deny_network,
+                );
+                return ("bwrap".to_string(), argv);
+            }
+            tracing::warn!(
+                command = command,
+                "MCP stdio sandbox requested but bwrap not found on PATH \
+                 — falling back to UNSANDBOXED spawn"
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = deny_network;
+            tracing::warn!(
+                command = command,
+                "MCP stdio sandbox requested but only supported on Linux \
+                 — falling back to UNSANDBOXED spawn"
+            );
+        }
+        (command.to_string(), args.to_vec())
     }
 }
 
@@ -514,6 +576,8 @@ mod tests {
                     .to_string(),
             ],
             &HashMap::new(),
+            false,
+            false,
         )
         .await
         .expect("failed to spawn echo server")
@@ -544,6 +608,8 @@ mod tests {
             "sh",
             &["-c".to_string(), "exit 0".to_string()],
             &HashMap::new(),
+            false,
+            false,
         )
         .await
         .expect("failed to spawn");
@@ -574,6 +640,8 @@ mod tests {
                     .to_string(),
             ],
             &HashMap::new(),
+            false,
+            false,
         )
         .await
         .expect("failed to spawn error server");
@@ -599,6 +667,8 @@ mod tests {
             "nonexistent-command-xyz",
             &[],
             &HashMap::new(),
+            false,
+            false,
         )
         .await;
         assert!(err.is_err());

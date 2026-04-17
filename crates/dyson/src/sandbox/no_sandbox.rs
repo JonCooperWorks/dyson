@@ -54,7 +54,12 @@ impl Sandbox for DangerousNoSandbox {
         input: &serde_json::Value,
         _ctx: &ToolContext,
     ) -> Result<SandboxDecision> {
-        tracing::info!(tool = tool_name, input = %input, "tool call allowed (no sandbox)");
+        let redacted = crate::sandbox::policy_sandbox::redact_secrets(&input.to_string());
+        tracing::info!(
+            tool = tool_name,
+            input = %redacted,
+            "tool call allowed (no sandbox)"
+        );
         Ok(SandboxDecision::Allow {
             input: input.clone(),
         })
@@ -89,6 +94,23 @@ mod tests {
             }
             other => panic!("expected Allow, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn redact_secrets_strips_bearer_from_log_payload() {
+        // Sanity check that the secret-redaction helper used when logging
+        // tool-call input in DangerousNoSandbox actually redacts common
+        // secret shapes.  If this drifts, secrets will hit INFO logs.
+        let raw = serde_json::json!({
+            "command": "curl -H 'Authorization: Bearer sk-live-topsecret' https://api",
+            "env": "API_KEY=sk-live-topsecret"
+        })
+        .to_string();
+        let redacted = crate::sandbox::policy_sandbox::redact_secrets(&raw);
+        assert!(
+            !redacted.contains("sk-live-topsecret"),
+            "expected bearer + API_KEY to be redacted, got: {redacted}"
+        );
     }
 
     #[tokio::test]

@@ -903,10 +903,16 @@ fn parse_mcp_servers(
                 })
                 .unwrap_or_default();
 
+            let sandbox = server_json["sandbox"].as_bool().unwrap_or(false);
+            let sandbox_deny_network =
+                server_json["sandbox_deny_network"].as_bool().unwrap_or(false);
+
             McpTransportConfig::Stdio {
                 command: command.to_string(),
                 args,
                 env,
+                sandbox,
+                sandbox_deny_network,
             }
         } else if let Some(url) = server_json["url"].as_str() {
             let headers: std::collections::HashMap<String, String> = server_json["headers"]

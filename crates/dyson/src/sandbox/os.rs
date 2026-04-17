@@ -63,8 +63,8 @@ const ESSENTIAL_SYSTEM_DIRS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib6
 /// - `file_read: Allow` + `file_write: Allow` → `--bind / /`
 /// - `file_read: Allow` + `file_write: Deny/RestrictTo` → `--ro-bind / /` + writable binds
 /// - `file_read: RestrictTo/Deny` → selective read-only binds for allowed paths + system dirs
-/// - `network`: always shared (`--share-net` omitted; no `--unshare-net`) to support
-///   skill execution (pip, API calls) and ARM kernel compatibility.
+/// - `network: Deny` → `--unshare-net` (full network namespace isolation)
+/// - `network: Allow` → network namespace shared with host (for pip, API calls)
 /// - `process_exec: Deny` → `--unshare-pid` (PID visibility only; does NOT prevent exec)
 ///
 /// When `/tmp` appears in writable paths, `--tmpfs /tmp` is used instead of
@@ -123,8 +123,12 @@ pub fn build_bwrap_command_from_policy(
     parts.push("--dev /dev".to_string());
     parts.push("--proc /proc".to_string());
 
-    // Network: always shared to support skill execution (pip, APIs) and
-    // avoid RTM_NEWADDR errors on ARM kernels. No --unshare-net.
+    // Network: isolate into a fresh namespace when policy denies network.
+    // When allowed, the host network namespace is shared so skills can
+    // reach pip, package indexes, and the Anthropic API.
+    if policy.network == Access::Deny {
+        parts.push("--unshare-net".to_string());
+    }
 
     // PID namespace isolation: hides host processes from the sandbox.
     // NOTE: This does NOT prevent process execution (fork/execve).
@@ -140,6 +144,50 @@ pub fn build_bwrap_command_from_policy(
     parts.push(format!("bash -c '{escaped}'"));
 
     parts.join(" ")
+}
+
+/// Build a bwrap argv (not a shell string) for wrapping an MCP stdio
+/// subprocess.  Unlike `build_bwrap_command_from_policy`, this returns
+/// a Vec<String> suitable for direct `Command::new("bwrap").args(...)`
+/// use — no shell interpretation, no escaping pitfalls.
+///
+/// The default policy is conservative but pragmatic for MCP:
+/// - read-only root (so servers can read /usr, /etc, /lib)
+/// - tmpfs `/tmp` (isolated ephemeral writes)
+/// - PID namespace (`--unshare-pid`) to hide host processes
+/// - `--die-with-parent` so the child can't outlive Dyson
+/// - network: shared by default (MCP servers typically need APIs);
+///   set `deny_network` to isolate
+///
+/// `command` and `args` are appended last so the child sees them as
+/// argv[0..] — exactly as if invoked directly.
+pub fn build_bwrap_argv_for_mcp_stdio(
+    command: &str,
+    args: &[String],
+    deny_network: bool,
+) -> Vec<String> {
+    let mut argv = vec![
+        "--ro-bind".to_string(),
+        "/".to_string(),
+        "/".to_string(),
+        "--dev".to_string(),
+        "/dev".to_string(),
+        "--proc".to_string(),
+        "/proc".to_string(),
+        "--tmpfs".to_string(),
+        "/tmp".to_string(),
+        "--unshare-pid".to_string(),
+        "--die-with-parent".to_string(),
+    ];
+    if deny_network {
+        argv.push("--unshare-net".to_string());
+    }
+    argv.push("--".to_string());
+    argv.push(command.to_string());
+    for a in args {
+        argv.push(a.clone());
+    }
+    argv
 }
 
 /// Add writable mount flags for a `PathAccess` policy.
@@ -272,8 +320,7 @@ mod tests {
             process_exec: Access::Allow,
         };
         let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
-        // Network is always shared now — --unshare-net should NOT be present.
-        assert!(!cmd.contains("--unshare-net"), "should not unshare network");
+        assert!(cmd.contains("--unshare-net"), "network Deny must unshare net");
         assert!(cmd.contains("--ro-bind / /"), "should have read-only root");
         assert!(
             cmd.contains("--bind '/workspace' '/workspace'"),
@@ -295,6 +342,36 @@ mod tests {
         assert!(!cmd.contains("--unshare-net"), "should allow network");
         assert!(cmd.contains("--bind / /"), "should have writable root");
         assert!(!cmd.contains("--ro-bind"), "should not be read-only");
+    }
+
+    #[test]
+    fn bwrap_policy_deny_network_unshares_net() {
+        let policy = SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::Allow,
+            process_exec: Access::Allow,
+        };
+        let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
+        assert!(
+            cmd.contains("--unshare-net"),
+            "network Deny must produce --unshare-net, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn bwrap_policy_allow_network_omits_unshare() {
+        let policy = SandboxPolicy {
+            network: Access::Allow,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::Allow,
+            process_exec: Access::Allow,
+        };
+        let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
+        assert!(
+            !cmd.contains("--unshare-net"),
+            "network Allow must not produce --unshare-net, got: {cmd}"
+        );
     }
 
     #[test]
@@ -629,5 +706,32 @@ mod tests {
             "expected write to /var/tmp to be blocked: {}",
             output.content
         );
+    }
+
+    #[test]
+    fn mcp_stdio_argv_default_shares_network() {
+        let argv = build_bwrap_argv_for_mcp_stdio(
+            "npx",
+            &["-y".to_string(), "@ctx/server".to_string()],
+            false,
+        );
+        assert!(argv.contains(&"--ro-bind".to_string()));
+        assert!(argv.contains(&"--die-with-parent".to_string()));
+        assert!(argv.contains(&"--unshare-pid".to_string()));
+        assert!(
+            !argv.contains(&"--unshare-net".to_string()),
+            "default must share network so MCP servers can reach APIs"
+        );
+        // Command + args appear after `--`.
+        let dash_dash = argv.iter().position(|s| s == "--").expect("-- present");
+        assert_eq!(argv[dash_dash + 1], "npx");
+        assert_eq!(argv[dash_dash + 2], "-y");
+        assert_eq!(argv[dash_dash + 3], "@ctx/server");
+    }
+
+    #[test]
+    fn mcp_stdio_argv_deny_network_unshares() {
+        let argv = build_bwrap_argv_for_mcp_stdio("cmd", &[], true);
+        assert!(argv.contains(&"--unshare-net".to_string()));
     }
 }

@@ -58,17 +58,17 @@ pub async fn serve_manual_tls(
 
 /// Load PEM certificate and key files into a TlsAcceptor.
 fn build_manual_acceptor(cert_path: &Path, key_path: &Path) -> Result<TlsAcceptor, BoxError> {
-    let cert_file = std::fs::File::open(cert_path)?;
-    let mut cert_reader = std::io::BufReader::new(cert_file);
-    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader).collect::<Result<_, _>>()?;
+    use rustls_pki_types::pem::PemObject;
+    use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_path)?
+        .collect::<Result<_, _>>()?;
     if certs.is_empty() {
         return Err(format!("no certificates found in {}", cert_path.display()).into());
     }
 
-    let key_file = std::fs::File::open(key_path)?;
-    let mut key_reader = std::io::BufReader::new(key_file);
-    let key = rustls_pemfile::private_key(&mut key_reader)?
-        .ok_or_else(|| format!("no private key found in {}", key_path.display()))?;
+    let key = PrivateKeyDer::from_pem_file(key_path)
+        .map_err(|e| format!("no private key found in {}: {e}", key_path.display()))?;
 
     let mut server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
