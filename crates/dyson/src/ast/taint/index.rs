@@ -17,6 +17,15 @@ use crate::error::Result;
 
 use super::types::{Assignment, CallSite, FnDef, FnId, SymbolIndex};
 
+/// Per-language index ceiling.  Deliberately larger than `ast::MAX_FILES`
+/// (the per-query cap used by `ast_query` / `search_files`): taint_trace
+/// builds the index once per language per session and serves many BFS
+/// queries against it, so indexing more files amortises well.  At 5k
+/// files / 150-byte-per-call average, hot codebases like deno/cli or
+/// nushell/crates stay fully indexed; only compiler-scale repos
+/// (TypeScript, swift-project) still truncate.
+pub const TAINT_MAX_FILES: usize = 5000;
+
 /// Node kinds that behave like "name = value" assignments.  Tier-1 only
 /// (TS/JS/Python/Rust/Go/Java/C/C++/C#/Ruby); other languages still parse
 /// calls + defs but same-frame assignment propagation silently degrades.
@@ -68,7 +77,7 @@ pub(crate) fn build_index_sync(
     let assign_kinds = assignment_types(language.display_name);
 
     for entry in ast::walk_dir(&working_dir_canon).flatten() {
-        if builder.files_seen >= ast::MAX_FILES {
+        if builder.files_seen >= TAINT_MAX_FILES {
             builder.truncated = true;
             break;
         }
@@ -327,6 +336,10 @@ impl Walker<'_> {
 // ---------------------------------------------------------------------------
 
 fn extract_callee_name(node: Node<'_>, source: &str) -> String {
+    callee_name(node, source).unwrap_or_default().to_string()
+}
+
+fn callee_name<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
     // `function` (most languages) / `macro` (Rust macro_invocation).
     for field in ["function", "macro"] {
         if let Some(fn_field) = node.child_by_field_name(field) {
@@ -347,39 +360,39 @@ fn extract_callee_name(node: Node<'_>, source: &str) -> String {
         ) {
             continue;
         }
-        let name = flatten_callee(child, source);
-        if !name.is_empty() {
-            return name;
+        if let Some(name) = flatten_callee(child, source) {
+            return Some(name);
         }
     }
-    String::new()
+    None
 }
 
 /// `foo.bar.baz(...)` is a `member_expression` (JS/TS), `field_expression`
 /// (Rust/Go), `attribute` (Python), `navigation_expression → navigation_suffix`
 /// (Swift), etc.  Flatten to the rightmost identifier — that's the name used
 /// for call resolution.
-fn flatten_callee(node: Node<'_>, source: &str) -> String {
+/// Returns a `&str` into `source` so recursion doesn't allocate a fresh
+/// `String` at every level — callers `.to_string()` once at the leaf.
+fn flatten_callee<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
     if is_identifier_kind(node.kind()) {
-        return source[node.byte_range()].to_string();
+        return Some(&source[node.byte_range()]);
     }
     // Recurse through wrapper fields.  `suffix` handles Swift's
     // navigation_expression chain; `attrpath` handles Nix dotted paths;
     // the rest cover JS/TS, Python, Rust, Go, OCaml.
     for field in ["property", "field", "attribute", "name", "suffix", "attrpath"] {
-        if let Some(n) = node.child_by_field_name(field) {
-            let result = flatten_callee(n, source);
-            if !result.is_empty() {
-                return result;
-            }
+        if let Some(n) = node.child_by_field_name(field)
+            && let Some(name) = flatten_callee(n, source)
+        {
+            return Some(name);
         }
     }
     // Fallback: rightmost identifier-like child.
     let mut cursor = node.walk();
-    let mut last = String::new();
+    let mut last = None;
     for child in node.children(&mut cursor) {
         if is_identifier_kind(child.kind()) {
-            last = source[child.byte_range()].to_string();
+            last = Some(&source[child.byte_range()]);
         }
     }
     last
@@ -438,12 +451,12 @@ pub(crate) fn extract_parameters(node: Node<'_>, source: &str) -> Vec<String> {
         let name = child
             .child_by_field_name("name")
             .or_else(|| child.child_by_field_name("pattern"))
-            .map(|n| source[n.byte_range()].to_string())
+            .map(|n| &source[n.byte_range()])
             .or_else(|| first_identifier_text(child, source));
         if let Some(n) = name
             && !n.is_empty()
         {
-            out.push(n);
+            out.push(n.to_string());
         }
     }
     out
@@ -454,10 +467,10 @@ fn find_child_of_kind<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
     node.children(&mut cursor).find(|c| kinds.contains(&c.kind()))
 }
 
-fn first_identifier_text(node: Node<'_>, source: &str) -> Option<String> {
+fn first_identifier_text<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
     let kind = node.kind();
     if kind == "identifier" || kind == "simple_identifier" {
-        return Some(source[node.byte_range()].to_string());
+        return Some(&source[node.byte_range()]);
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {

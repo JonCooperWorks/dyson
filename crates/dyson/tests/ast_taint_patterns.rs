@@ -953,14 +953,18 @@ async fn many_file_python_project_indexes_cleanly() {
     );
 }
 
-/// Exceed MAX_FILES (500) and confirm truncation is flagged, not silently
-/// dropped.  Surfaced during smoke on a 500+ file C++ repo.
+/// Exceed `TAINT_MAX_FILES` and confirm truncation is flagged, not silently
+/// dropped.  Surfaced during smoke on large codebases (TypeScript compiler,
+/// linux kernel).  The cap is deliberately higher than `ast::MAX_FILES` —
+/// taint_trace builds once per session, so indexing more files amortises.
 #[tokio::test]
-async fn index_flags_max_files_truncation() {
+async fn index_flags_taint_max_files_truncation() {
+    use dyson::ast::taint::index::TAINT_MAX_FILES;
     let tmp = tempfile::tempdir().unwrap();
-    for i in 0..520 {
+    let overshoot = TAINT_MAX_FILES + 20;
+    for i in 0..overshoot {
         fs::write(
-            tmp.path().join(format!("m{i:04}.py")),
+            tmp.path().join(format!("m{i:05}.py")),
             format!("def f{i}():\n    pass\n"),
         )
         .unwrap();
@@ -971,12 +975,13 @@ async fn index_flags_max_files_truncation() {
         .unwrap();
     assert!(
         index.truncated,
-        "500+ files should trigger MAX_FILES truncation",
+        "{}+ files should trigger TAINT_MAX_FILES truncation",
+        TAINT_MAX_FILES,
     );
     assert_eq!(
         index.file_mtimes.len(),
-        500,
-        "should have indexed exactly MAX_FILES",
+        TAINT_MAX_FILES,
+        "should have indexed exactly TAINT_MAX_FILES",
     );
 }
 
