@@ -79,6 +79,30 @@ impl Ecosystem {
             _ => return None,
         })
     }
+
+    /// Inverse of [`from_purl_type`] for emitting PURLs.  `None` for
+    /// `Other(_)` since the distro string isn't a PURL type.
+    pub fn to_purl_type(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::CratesIo => "cargo",
+            Self::Npm => "npm",
+            Self::PyPI => "pypi",
+            Self::Go => "golang",
+            Self::Maven => "maven",
+            Self::NuGet => "nuget",
+            Self::RubyGems => "gem",
+            Self::Packagist => "composer",
+            Self::Pub => "pub",
+            Self::Hex => "hex",
+            Self::CRAN => "cran",
+            Self::Bioconductor => "bioconductor",
+            Self::SwiftURL => "swift",
+            Self::GitHubActions => "githubactions",
+            Self::Hackage => "hackage",
+            Self::ConanCenter => "conan",
+            Self::Other(_) => return None,
+        })
+    }
 }
 
 /// A resolved dependency.  `version` is `None` for un-pinned manifests;
@@ -174,6 +198,11 @@ pub struct ScanReport {
     pub unsupported: Vec<PathBuf>,
     pub deps_total: usize,
     pub deps_queried: usize,
+    /// Every dep parsed across all manifests, in discovery order.  Kept
+    /// for SBOM emission — an SBOM lists every component, not only the
+    /// vulnerable ones.  Entries here are not deduped across manifests
+    /// (a dep pinned in two lockfiles appears twice).
+    pub deps: Vec<Dependency>,
     pub findings: Vec<(Dependency, Vec<Vulnerability>)>,
     pub warnings: Vec<String>,
 }

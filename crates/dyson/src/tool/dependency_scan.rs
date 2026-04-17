@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::dependency_analysis::{self, OsvClient, ScanOptions, ScanReport, Severity};
+use crate::dependency_analysis::{
+    self, Dependency, OsvClient, ScanOptions, ScanReport, Severity,
+};
 use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
@@ -49,7 +51,12 @@ impl Tool for DependencyScanTool {
             "properties": {
                 "path": { "type": "string", "description": "Manifest file OR project directory" },
                 "recursive": { "type": "boolean", "default": true },
-                "format": { "type": "string", "enum": ["text","json"], "default": "text" },
+                "format": {
+                    "type": "string",
+                    "enum": ["text","json","cyclonedx"],
+                    "default": "text",
+                    "description": "text: human report. json: full ScanReport. cyclonedx: CycloneDX 1.5 JSON SBOM with components + vulnerabilities."
+                },
                 "severity_min": { "type": "string", "enum": ["low","medium","high","critical"] }
             },
             "required": ["path"]
@@ -68,11 +75,12 @@ impl Tool for DependencyScanTool {
         let client = OsvClient::new();
         let report = dependency_analysis::scan(&root, &opts, &client).await?;
 
-        let out = if parsed.format.as_deref() == Some("json") {
-            serde_json::to_string_pretty(&report)
-                .map_err(|e| DysonError::tool("dependency_scan", format!("json encode: {e}")))?
-        } else {
-            render_text(&report)
+        let out = match parsed.format.as_deref() {
+            Some("json") => serde_json::to_string_pretty(&report)
+                .map_err(|e| DysonError::tool("dependency_scan", format!("json encode: {e}")))?,
+            Some("cyclonedx") => serde_json::to_string_pretty(&render_cyclonedx(&report))
+                .map_err(|e| DysonError::tool("dependency_scan", format!("cyclonedx encode: {e}")))?,
+            _ => render_text(&report),
         };
         Ok(ToolOutput::success(out))
     }
@@ -166,6 +174,75 @@ fn render_text(report: &ScanReport) -> String {
     out
 }
 
+/// Stable identifier for a dep in CycloneDX output.  PURL when the
+/// parser gave us one; otherwise synthesize from ecosystem/name@version.
+fn bom_ref(dep: &Dependency) -> String {
+    if let Some(p) = dep.purl.as_deref() {
+        return p.to_string();
+    }
+    let ty = dep.ecosystem.to_purl_type().unwrap_or("generic");
+    match dep.version.as_deref() {
+        Some(v) => format!("pkg:{ty}/{}@{v}", dep.name),
+        None => format!("pkg:{ty}/{}", dep.name),
+    }
+}
+
+fn render_cyclonedx(report: &ScanReport) -> serde_json::Value {
+    let components: Vec<serde_json::Value> = report
+        .deps
+        .iter()
+        .map(|d| {
+            let mut c = json!({
+                "type": "library",
+                "bom-ref": bom_ref(d),
+                "name": d.name,
+            });
+            if let Some(v) = &d.version {
+                c["version"] = json!(v);
+            }
+            if let Some(p) = &d.purl {
+                c["purl"] = json!(p);
+            }
+            c
+        })
+        .collect();
+
+    let vulnerabilities: Vec<serde_json::Value> = report
+        .findings
+        .iter()
+        .flat_map(|(dep, vulns)| {
+            let dep_ref = bom_ref(dep);
+            vulns.iter().map(move |v| {
+                let mut entry = json!({
+                    "id": v.id,
+                    "source": { "name": "OSV", "url": format!("https://osv.dev/vulnerability/{}", v.id) },
+                    "ratings": [{ "severity": v.severity.as_str() }],
+                    "description": v.summary,
+                    "affects": [{ "ref": dep_ref }],
+                });
+                if !v.fixed_versions.is_empty() {
+                    entry["recommendation"] =
+                        json!(format!("Upgrade to {}", v.fixed_versions.join(", ")));
+                }
+                if !v.references.is_empty() {
+                    entry["references"] = json!(
+                        v.references.iter().map(|r| json!({ "url": r })).collect::<Vec<_>>()
+                    );
+                }
+                entry
+            })
+        })
+        .collect();
+
+    json!({
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "components": components,
+        "vulnerabilities": vulnerabilities,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +283,103 @@ mod tests {
         assert!(txt.contains("## HIGH"));
         assert!(txt.contains("GHSA-xxxx"));
         assert!(txt.contains("fixed in: 1.0.1"));
+    }
+
+    fn sample_report() -> ScanReport {
+        let dep = Dependency {
+            name: "foo".into(),
+            version: Some("1.0.0".into()),
+            ecosystem: Ecosystem::CratesIo,
+            purl: None,
+            source_file: PathBuf::from("Cargo.lock"),
+            direct: true,
+        };
+        let clean = Dependency {
+            name: "bar".into(),
+            version: Some("2.1.0".into()),
+            ecosystem: Ecosystem::Npm,
+            purl: Some("pkg:npm/bar@2.1.0".into()),
+            source_file: PathBuf::from("package-lock.json"),
+            direct: true,
+        };
+        let vuln = Vulnerability {
+            id: "GHSA-xxxx".into(),
+            aliases: vec![],
+            summary: "boom".into(),
+            severity: Severity::High,
+            affected_ranges: vec![],
+            references: vec!["https://example.invalid/advisory".into()],
+            fixed_versions: vec!["1.0.1".into()],
+        };
+        let mut report = ScanReport::default();
+        report.deps.push(dep.clone());
+        report.deps.push(clean);
+        report.findings.push((dep, vec![vuln]));
+        report.deps_total = 2;
+        report.deps_queried = 2;
+        report
+    }
+
+    #[test]
+    fn cyclonedx_has_required_envelope() {
+        let v = render_cyclonedx(&sample_report());
+        assert_eq!(v["bomFormat"], "CycloneDX");
+        assert_eq!(v["specVersion"], "1.5");
+        assert_eq!(v["version"], 1);
+        assert!(v["components"].is_array());
+        assert!(v["vulnerabilities"].is_array());
+    }
+
+    #[test]
+    fn cyclonedx_lists_all_components_not_just_vulnerable() {
+        let v = render_cyclonedx(&sample_report());
+        let names: Vec<&str> = v["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn cyclonedx_synthesizes_purl_when_missing() {
+        let v = render_cyclonedx(&sample_report());
+        let foo = &v["components"][0];
+        assert_eq!(foo["bom-ref"], "pkg:cargo/foo@1.0.0");
+        assert!(foo.get("purl").is_none(), "no purl to pass through");
+        let bar = &v["components"][1];
+        assert_eq!(bar["bom-ref"], "pkg:npm/bar@2.1.0");
+        assert_eq!(bar["purl"], "pkg:npm/bar@2.1.0");
+    }
+
+    #[test]
+    fn cyclonedx_affects_ref_matches_component_bom_ref() {
+        let v = render_cyclonedx(&sample_report());
+        let affects_ref = v["vulnerabilities"][0]["affects"][0]["ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let component_ref = v["components"][0]["bom-ref"].as_str().unwrap().to_string();
+        assert_eq!(affects_ref, component_ref);
+    }
+
+    #[test]
+    fn cyclonedx_vuln_carries_severity_and_fix() {
+        let v = render_cyclonedx(&sample_report());
+        let vuln = &v["vulnerabilities"][0];
+        assert_eq!(vuln["id"], "GHSA-xxxx");
+        assert_eq!(vuln["ratings"][0]["severity"], "high");
+        assert_eq!(vuln["source"]["name"], "OSV");
+        assert!(
+            vuln["recommendation"]
+                .as_str()
+                .unwrap()
+                .contains("1.0.1")
+        );
+        assert_eq!(
+            vuln["references"][0]["url"],
+            "https://example.invalid/advisory"
+        );
     }
 }

@@ -83,6 +83,8 @@ pub async fn scan(root: &Path, opts: &ScanOptions, client: &OsvClient) -> Result
         .collect();
     report.deps_queried = queryable.len();
     if queryable.is_empty() {
+        drop(queryable);
+        report.deps = all_deps;
         return Ok(report);
     }
 
@@ -117,6 +119,8 @@ pub async fn scan(root: &Path, opts: &ScanOptions, client: &OsvClient) -> Result
         }
     }
 
+    drop(queryable);
+    report.deps = all_deps;
     Ok(report)
 }
 
