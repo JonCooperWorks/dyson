@@ -281,9 +281,82 @@ that a regex grep would either miss (typed as `Self::Foo`) or over-count
 | Max file size        | 10 MB  | Prevents OOM on generated files                 |
 | Max files (AST ops)  | 500    | Bounds wall-clock time for rename/definitions   |
 | Max files (find_replace) | 200 | Tighter bound: text replace can touch many more files |
+| Max files (taint_trace) | 5000 | Built once per session and amortised across many BFS queries — see below |
 
 Binary / non-UTF-8 files are always skipped silently.  All directory
 walks respect `.gitignore` via the `ignore` crate.
+
+---
+
+## Cross-File Taint Tracing (`taint_trace`)
+
+`ast_query` is per-file and per-query.  A security reviewer often needs the
+opposite shape: one query that spans the whole codebase.  "Does tainted
+data flowing from this HTTP handler parameter reach `conn.execute(...)`
+eleven files away?"  Answering that by hand is 10+ `ast_query` + `read_file`
+calls chasing call sites — expensive in tokens, error-prone, and the chain
+usually gets abandoned mid-trace.
+
+`taint_trace` collapses that into one call.  The tool takes a source
+`file:line` (where taint enters) and a sink `file:line` (the dangerous
+operation) and returns ranked candidate call chains.
+
+**Key files:**
+- `src/ast/taint/types.rs` — `SymbolIndex`, `FnDef`, `CallSite`,
+  `Assignment`, `Hop`, `TaintPath`
+- `src/ast/taint/index.rs` — `build_index()` (walks the repo, parses every
+  matching file, flattens defs / calls / assignments into lookup-friendly
+  tables) and `is_stale()` (mtime check for session-lifetime invalidation)
+- `src/ast/taint/trace.rs` — BFS from source enclosing-function outward,
+  name-based call resolution with positional argument binding, same-frame
+  assignment propagation, ambiguity / unresolved-callee annotation
+- `src/tool/security/taint_trace.rs` — agent-facing Tool wrapper; caches the
+  per-language `SymbolIndex` on `ToolContext.taint_indexes`
+
+**Architecture:**
+
+1. **Index once per language per session.**  `ToolContext.taint_indexes` is
+   a `HashMap<language_name, Arc<SymbolIndex>>`.  First call builds; later
+   calls reuse.  `is_stale()` drops and rebuilds when any indexed file's
+   mtime exceeds build time (correctness after `bulk_edit` / `write_file`).
+   Index build runs inside `tokio::task::spawn_blocking` — tree-sitter
+   parsing is sync CPU and would starve concurrent tool calls otherwise.
+
+2. **BFS from source.**  The agent specifies source and sink as
+   `file:line`.  The tool resolves the source's enclosing function via
+   the index (with a line-range fallback for multi-line declarations like
+   `export function foo(\n  input: T\n)` where the AST node starts after
+   `export`), extracts initial tainted symbols from the function's
+   parameters, and walks forward through call sites and assignments in
+   byte order.
+
+3. **Positional argument binding.**  When a call's arg references a tainted
+   symbol, the callee's param at that arg position becomes tainted in the
+   next frame.  Mismatched arities fall back to tainting all params and
+   flag the hop as `ImpreciseBinding`.
+
+4. **Lossy by design.**  Name-based call resolution only — no type
+   resolution, no interface dispatch, no FFI.  Ambiguous resolution
+   (multiple defs share a name) lists all candidates; unresolvable calls
+   are flagged `UnresolvedCallee`.  The agent treats every returned path
+   as a hypothesis and verifies each hop with `read_file` before filing.
+
+**Supported languages:** all 19 with call-expression nodes
+(JSON excepted — no call concept).  Languages with heavy functional
+patterns (Haskell typeclass dispatch, Nix attribute-path applies) have
+higher unresolved ratios because many calls are indirect by construction.
+
+**File cap:** `TAINT_MAX_FILES = 5000`, deliberately 10× higher than
+`MAX_FILES = 500`.  `ast_query` / `rename_symbol` / `search_files` are
+per-query tools where bounded results matter.  `taint_trace` builds once
+per session and serves many BFS queries — indexing more files amortises.
+At ~300 bytes/call-site × ~500k calls (hot codebase scale) the index
+holds ~150 MB — acceptable for a developer laptop.
+
+**When the cap hits:** the index header carries `[TRUNCATED: MAX_FILES
+hit]` and `index.truncated = true`.  Calls outside the first 5k files are
+invisible.  If your vectors routinely truncate, bump `TAINT_MAX_FILES`
+in `src/ast/taint/index.rs`.
 
 ---
 

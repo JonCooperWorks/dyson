@@ -180,6 +180,49 @@ The system prompt teaches the agent how to write tree-sitter S-expression
 queries and includes p95 common vulnerability patterns as examples.  The agent
 constructs and executes its own checks — nothing is hardcoded.
 
+#### Evaluating report quality
+
+Signals to watch when security_engineer reports come back from a live run:
+
+- **Attack Tree depth.**  The system prompt requires every finding to carry
+  a root-to-leaf chain to an entry point.  Before `taint_trace`, the agent
+  paid 10+ `ast_query` + `read_file` calls per hop and often abandoned the
+  chain mid-trace, emitting stub trees with a single hop.  Post-taint_trace,
+  expect 2–3 resolved hops on non-trivial findings.  Single-hop trees on
+  anything above MEDIUM are a regression signal — the agent isn't using
+  `taint_trace` (or is using it with poor source/sink inputs).
+
+- **`resolved_hops / total_hops` per trace.**  Every `taint_trace` output
+  includes this ratio in each path header.  A consistent `1/2` or `0/1`
+  across a run means the agent is feeding the tool weak hypotheses — the
+  normal flow is `ast_query` to discover sources / sinks, then `taint_trace`
+  to rank reachability.  Skipping the discovery step produces noise.
+
+- **`UnresolvedCallee` rate.**  The index header reports
+  `N unresolved (X%)`.  Baselines from the in-repo smoke
+  (`examples/smoke_taint_trace.rs`):
+  - 0–2% for most languages (Rust, Go, Python, TypeScript, Swift, C, C++,
+    Kotlin, Zig, Ruby, Elixir, Erlang, Java, C#)
+  - ~25% for Haskell (typeclass dispatch, operator sections)
+  - ~30% for Nix (attribute-path applies, `callPackage` patterns)
+
+  A spike above these baselines on a supported language points at a
+  callee-resolution bug in `flatten_callee` — reproduce on a minimal
+  fixture and add a regression test to `tests/ast_taint_patterns.rs`.
+
+- **`[TRUNCATED]` in the index header.**  The indexed repo exceeded
+  `TAINT_MAX_FILES = 5000`.  Calls in files beyond the cap are invisible;
+  any finding that should have crossed into them will miss.  Bump the cap
+  in `src/ast/taint/index.rs` if your vectors hit this often.
+
+- **"Checked and cleared" notes.**  The prompt allows these in place of
+  low-confidence findings.  Many of them on expected-vulnerable code
+  means the agent is dropping findings it could have confirmed — usually
+  a sign that `taint_trace` is returning NO_PATH when it shouldn't (wrong
+  source line, non-tier-1 language without assignment propagation, or a
+  real bug).  Re-run with the source line moved to the exact taint-entry
+  point and see if the path materialises.
+
 ---
 
 ## Depth Budget
