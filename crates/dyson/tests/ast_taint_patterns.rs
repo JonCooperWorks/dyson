@@ -509,6 +509,283 @@ async fn empty_project_is_not_an_error() {
     );
 }
 
+/// Regression: Swift `obj.method()` parses as
+/// `call_expression → navigation_expression → navigation_suffix`.  An
+/// earlier version of `flatten_callee` only matched `property`/`name`
+/// fields and returned empty for the navigation chain — half of Swift
+/// calls came back unresolved (46% on real repos).
+#[tokio::test]
+async fn swift_navigation_expression_resolves_method_callee() {
+    let src = "class Handler {\n\
+               \x20\x20func process(_ req: String) {\n\
+               \x20\x20\x20\x20let q = device.makeQuery(req)\n\
+               \x20\x20\x20\x20execute(q)\n\
+               \x20\x20}\n\
+               }\n\
+               func execute(_ s: String) {}\n";
+    let out = trace(
+        &[("app.swift", src)],
+        "swift",
+        ("app.swift", 2),
+        ("app.swift", 4),
+    )
+    .await;
+    assert_reaches(&out);
+    assert!(
+        !out.content.contains("device.makeQuery` — callee unresolved"),
+        "navigation_expression should resolve to `makeQuery`: {}",
+        out.content,
+    );
+}
+
+/// Regression: Zig's tree-sitter grammar uses `function_declaration` and
+/// `variable_declaration`, not the `fn_decl`/`var_decl` the earlier
+/// LanguageConfig specified.  Zig indexing produced 0 defs / 0 calls on
+/// a 277-file project until the definition_types list was corrected.
+#[tokio::test]
+async fn zig_indexes_function_declarations() {
+    let src = "fn handle(req: []const u8) void {\n\
+               \x20\x20\x20\x20const x = req;\n\
+               \x20\x20\x20\x20execute(x);\n\
+               }\n\
+               fn execute(s: []const u8) void {\n\
+               \x20\x20\x20\x20_ = s;\n\
+               }\n";
+    let out = trace(
+        &[("app.zig", src)],
+        "zig",
+        ("app.zig", 1),
+        ("app.zig", 3),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+/// Regression: C# `obj.Method()` uses `invocation_expression` + member
+/// access.  The tool must resolve method calls on receivers.
+#[tokio::test]
+async fn csharp_method_call_resolves() {
+    let src = "class Handler {\n\
+               \x20\x20public void Process(string req) {\n\
+               \x20\x20\x20\x20Execute(req);\n\
+               \x20\x20}\n\
+               \x20\x20public void Execute(string data) {\n\
+               \x20\x20\x20\x20// sink\n\
+               \x20\x20}\n\
+               }\n";
+    let out = trace(
+        &[("App.cs", src)],
+        "csharp",
+        ("App.cs", 2),
+        ("App.cs", 3),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+// ---------------------------------------------------------------------------
+// Trace smoke for every remaining supported language — ensures each
+// language's grammar + LanguageConfig + taint machinery lines up end-to-end.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn java_method_trace_resolves() {
+    let src = "class App {\n\
+               \x20\x20\x20\x20void handle(String req) {\n\
+               \x20\x20\x20\x20\x20\x20\x20\x20execute(req);\n\
+               \x20\x20\x20\x20}\n\
+               \x20\x20\x20\x20void execute(String data) {}\n\
+               }\n";
+    let out = trace(
+        &[("App.java", src)],
+        "java",
+        ("App.java", 2),
+        ("App.java", 3),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+#[tokio::test]
+async fn ruby_method_trace_resolves() {
+    let src = "def handle(req)\n\
+               \x20\x20execute(req)\n\
+               end\n\
+               def execute(data)\n\
+               end\n";
+    let out = trace(
+        &[("app.rb", src)],
+        "ruby",
+        ("app.rb", 1),
+        ("app.rb", 2),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+#[tokio::test]
+async fn c_function_trace_resolves() {
+    let src = "#include <stddef.h>\n\
+               void execute(const char *s) { (void)s; }\n\
+               void handle(const char *req) {\n\
+               \x20\x20\x20\x20execute(req);\n\
+               }\n";
+    let out = trace(
+        &[("app.c", src)],
+        "c",
+        ("app.c", 3),
+        ("app.c", 4),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+#[tokio::test]
+async fn cpp_function_trace_resolves() {
+    let src = "#include <string>\n\
+               void execute(const std::string& s) { (void)s; }\n\
+               void handle(const std::string& req) {\n\
+               \x20\x20\x20\x20execute(req);\n\
+               }\n";
+    let out = trace(
+        &[("app.cpp", src)],
+        "cpp",
+        ("app.cpp", 3),
+        ("app.cpp", 4),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+/// Regression: OCaml `application_expression.function` returns a `value_path`
+/// wrapping a `value_name`.  Neither was in `is_identifier_kind`, so callees
+/// came back empty — 100% of dune's 6,154 calls were unresolved.
+#[tokio::test]
+async fn ocaml_application_resolves_value_name() {
+    let src = "let execute s = s\nlet handle req = execute req\n";
+    let out = trace(
+        &[("app.ml", src)],
+        "ocaml",
+        ("app.ml", 2),
+        ("app.ml", 2),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+/// Haskell's `apply` has `function` field which is a `variable`; both are
+/// now in the identifier sets.  Index should build cleanly and resolve
+/// callees at ≥50% (remaining unresolved are corner cases — lambdas,
+/// operator sections, typeclass dispatch).
+#[tokio::test]
+async fn haskell_indexes_apply_cleanly() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(
+        tmp.path().join("App.hs"),
+        "execute s = s\nhandle req = execute req\nprocess x = foo (bar x)\n",
+    )
+    .unwrap();
+    let config = dyson::ast::config_for_language_name("haskell").unwrap();
+    let idx = dyson::ast::taint::build_index(config, tmp.path()).await.unwrap();
+    assert!(!idx.call_sites.is_empty(), "Haskell should index apply calls");
+    let resolved = idx
+        .call_sites
+        .iter()
+        .filter(|cs| !cs.callee.is_empty())
+        .count();
+    assert!(
+        resolved >= idx.call_sites.len() / 2,
+        "at least half of Haskell calls should have a non-empty callee; got {resolved}/{}",
+        idx.call_sites.len(),
+    );
+}
+
+/// Erlang's `call` node with `-module/-export` preamble — ensure calls
+/// inside a function clause are attributed to that clause.
+#[tokio::test]
+async fn erlang_indexes_call_cleanly() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(
+        tmp.path().join("app.erl"),
+        "-module(app).\n\
+         -export([handle/1]).\n\
+         handle(Req) -> execute(Req).\n\
+         execute(Data) -> Data.\n",
+    )
+    .unwrap();
+    let config = dyson::ast::config_for_language_name("erlang").unwrap();
+    let idx = dyson::ast::taint::build_index(config, tmp.path()).await.unwrap();
+    assert!(
+        !idx.call_sites.is_empty(),
+        "Erlang should index at least one call",
+    );
+    // `execute` should resolve.
+    assert!(
+        idx.call_sites.iter().any(|cs| cs.callee == "execute"),
+        "Erlang `execute(Req)` callee should resolve to `execute`",
+    );
+}
+
+#[tokio::test]
+async fn elixir_function_trace_resolves() {
+    let src = "defmodule App do\n\
+               \x20\x20def handle(req) do\n\
+               \x20\x20\x20\x20execute(req)\n\
+               \x20\x20end\n\
+               \x20\x20def execute(data) do\n\
+               \x20\x20\x20\x20data\n\
+               \x20\x20end\n\
+               end\n";
+    let out = trace(
+        &[("app.ex", src)],
+        "elixir",
+        ("app.ex", 2),
+        ("app.ex", 3),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+/// OCaml / Erlang / Haskell / Nix trace shapes are functional-dominant
+/// and the tool isn't a polished fit — we still want the index to build
+/// cleanly and error paths to be clean, even if traces don't always find.
+#[tokio::test]
+async fn functional_languages_at_least_index_cleanly() {
+    // OCaml
+    let ocaml = "let execute s = s\nlet handle req = execute req\n";
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("a.ml"), ocaml).unwrap();
+    let config = dyson::ast::config_for_language_name("ocaml").unwrap();
+    let idx = dyson::ast::taint::build_index(config, tmp.path()).await.unwrap();
+    assert!(!idx.call_sites.is_empty(), "OCaml should index at least one call");
+
+    // Haskell
+    let haskell = "execute s = s\nhandle req = execute req\n";
+    let tmp2 = tempfile::tempdir().unwrap();
+    fs::write(tmp2.path().join("A.hs"), haskell).unwrap();
+    let config = dyson::ast::config_for_language_name("haskell").unwrap();
+    let idx = dyson::ast::taint::build_index(config, tmp2.path()).await.unwrap();
+    assert!(!idx.call_sites.is_empty(), "Haskell should index at least one call");
+
+    // Nix — wrap the apply inside a binding so the walker records it.
+    // Top-level Nix expressions sit outside any binding scope; taint_trace
+    // only records calls that fall inside a tracked scope.
+    let nix = "{ result = execute \"hi\"; }\n";
+    let tmp3 = tempfile::tempdir().unwrap();
+    fs::write(tmp3.path().join("a.nix"), nix).unwrap();
+    let config = dyson::ast::config_for_language_name("nix").unwrap();
+    let idx = dyson::ast::taint::build_index(config, tmp3.path()).await.unwrap();
+    assert!(!idx.call_sites.is_empty(), "Nix should index at least one call");
+
+    // Erlang
+    let erlang = "-module(app).\nhandle(Req) -> execute(Req).\nexecute(Data) -> Data.\n";
+    let tmp4 = tempfile::tempdir().unwrap();
+    fs::write(tmp4.path().join("app.erl"), erlang).unwrap();
+    let config = dyson::ast::config_for_language_name("erlang").unwrap();
+    let idx = dyson::ast::taint::build_index(config, tmp4.path()).await.unwrap();
+    assert!(!idx.call_sites.is_empty(), "Erlang should index at least one call");
+}
+
 // ---------------------------------------------------------------------------
 // Scale + cross-language traces — replicating the spirit of smoke
 // testing against real repos.  Each test exercises the full pipeline

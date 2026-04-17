@@ -248,7 +248,7 @@ static SWIFT: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
 static ZIG: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     language: tree_sitter_zig::LANGUAGE.into(),
     identifier_types: &["identifier"],
-    definition_types: &["fn_decl", "var_decl", "container_decl"],
+    definition_types: &["function_declaration", "variable_declaration"],
     call_types: &["call_expression"],
     display_name: "Zig",
     definitions_are_calls: false,

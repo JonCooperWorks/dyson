@@ -20,7 +20,7 @@ There are three kinds of subagent:
 - `src/skill/subagent/security_engineer.rs` — `security_engineer_config()`
 - `src/skill/subagent/prompts/` — System prompts and protocol injections
 - `src/config/mod.rs` — `SubagentAgentConfig`
-- `src/tool/security/` — Security tools (`ast_query`, `attack_surface_analyzer`, `exploit_builder`)
+- `src/tool/security/` — Security tools (`ast_query`, `attack_surface_analyzer`, `exploit_builder`, `taint_trace`)
 
 ---
 
@@ -73,6 +73,7 @@ Parent Agent (depth 0)
         └── Child Agent (depth 1)
               ├── [direct tools]
               │     ast_query, attack_surface_analyzer, exploit_builder,
+              │     taint_trace, dependency_scan,
               │     bash, read_file, search_files, list_files
               └── [inner subagents → depth 2, run in parallel]
                     planner, researcher, coder, verifier
@@ -166,6 +167,12 @@ The built-in security engineer orchestrator can:
   deserialization)
 - **Generate exploit PoCs** via `exploit_builder` (payloads, curl commands,
   Nuclei YAML templates, remediation advice)
+- **Trace cross-file taint** via `taint_trace` — given a source `file:line`
+  (where user input enters) and a sink `file:line` (the dangerous operation),
+  returns ranked candidate call chains.  Lossy by design; each hop is a
+  hypothesis the agent verifies with `read_file` before filing
+- **Scan dependencies** via `dependency_scan` against Google's OSV database
+  (every ecosystem OSV tracks; also reads / emits CycloneDX SBOMs)
 - **Dispatch subagents in parallel** — researcher for CVE lookups while
   running AST queries, coder for fixes, verifier for validation
 

@@ -330,38 +330,81 @@ fn extract_callee_name(node: Node<'_>, source: &str) -> String {
     if let Some(fn_field) = node.child_by_field_name("function") {
         return flatten_callee(fn_field, source);
     }
+    // Field-less calls (Swift): the first named non-arg child is the callee
+    // expression — a bare identifier OR a member-access wrapper like
+    // `navigation_expression`.  `flatten_callee` handles both.
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        let k = child.kind();
-        if k == "identifier" || k == "property_identifier" || k == "simple_identifier" {
-            return source[child.byte_range()].to_string();
+        if !child.is_named() {
+            continue;
+        }
+        if matches!(
+            child.kind(),
+            "call_suffix" | "arguments" | "argument_list" | "value_arguments"
+        ) {
+            continue;
+        }
+        let name = flatten_callee(child, source);
+        if !name.is_empty() {
+            return name;
         }
     }
     String::new()
 }
 
 /// `foo.bar.baz(...)` is a `member_expression` (JS/TS), `field_expression`
-/// (Rust/Go), `attribute` (Python), etc.  Flatten to the rightmost
-/// identifier — that's the resolution name.
+/// (Rust/Go), `attribute` (Python), `navigation_expression → navigation_suffix`
+/// (Swift), etc.  Flatten to the rightmost identifier — that's the name used
+/// for call resolution.
 fn flatten_callee(node: Node<'_>, source: &str) -> String {
-    let kind = node.kind();
-    if kind == "identifier" || kind == "property_identifier" || kind == "simple_identifier" {
+    if is_identifier_kind(node.kind()) {
         return source[node.byte_range()].to_string();
     }
-    for field in ["property", "field", "attribute", "name"] {
+    // Recurse through wrapper fields.  `suffix` handles Swift's
+    // navigation_expression chain; `attrpath` handles Nix dotted paths;
+    // the rest cover JS/TS, Python, Rust, Go, OCaml.
+    for field in ["property", "field", "attribute", "name", "suffix", "attrpath"] {
         if let Some(n) = node.child_by_field_name(field) {
-            return source[n.byte_range()].to_string();
+            let result = flatten_callee(n, source);
+            if !result.is_empty() {
+                return result;
+            }
         }
     }
+    // Fallback: rightmost identifier-like child.
     let mut cursor = node.walk();
     let mut last = String::new();
     for child in node.children(&mut cursor) {
-        let k = child.kind();
-        if k == "identifier" || k == "property_identifier" {
+        if is_identifier_kind(child.kind()) {
             last = source[child.byte_range()].to_string();
         }
     }
     last
+}
+
+fn is_identifier_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        // Common
+        "identifier"
+            | "property_identifier"
+            | "simple_identifier"
+            | "field_identifier"
+            | "type_identifier"
+            // Erlang / Elixir
+            | "atom"
+            | "variable"
+            // Ruby
+            | "constant"
+            // OCaml
+            | "value_name"
+            | "constructor_name"
+            | "module_name"
+            | "type_constructor"
+            // Haskell
+            | "variable_identifier"
+            | "constructor_identifier"
+    )
 }
 
 pub(crate) fn extract_parameters(node: Node<'_>, source: &str) -> Vec<String> {
