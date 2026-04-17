@@ -11,7 +11,10 @@ pub type FnId = usize;
 #[derive(Debug, Clone)]
 pub struct FnDef {
     pub file: PathBuf,
+    /// 1-indexed start line of the definition header.
     pub line: usize,
+    /// 1-indexed end line (inclusive) of the full definition.
+    pub end_line: usize,
     pub def_range: Range<usize>,
     pub body_range: Range<usize>,
     pub name: String,
@@ -58,16 +61,26 @@ pub struct SymbolIndex {
 }
 
 impl SymbolIndex {
-    /// Find the innermost `FnId` whose *full definition* contains `byte`.
-    /// Header-inclusive — source lines on `def handler(...)` resolve here.
-    pub fn fn_enclosing(&self, file: &Path, byte: usize) -> Option<FnId> {
-        self.fn_in_file(file, byte, |d| &d.def_range)
-    }
-
-    /// Like [`fn_enclosing`] but body-only.  Used for "is this call/sink
-    /// *inside* the function body (not the header)?" queries.
-    pub fn fn_enclosing_body(&self, file: &Path, byte: usize) -> Option<FnId> {
-        self.fn_in_file(file, byte, |d| &d.body_range)
+    /// Find the innermost `FnId` at `file:line` whose full definition
+    /// contains the given byte.  Falls back to line-range containment when
+    /// the byte lands outside the AST node's span — common for multi-line
+    /// declarations (`export function foo(\n  input: T\n)`), leading
+    /// attributes, or whitespace before the node's first char.
+    pub fn fn_enclosing(&self, file: &Path, byte: usize, line: usize) -> Option<FnId> {
+        if let Some(id) = self.fn_in_file(file, byte, |d| &d.def_range) {
+            return Some(id);
+        }
+        let list = self.fn_by_file.get(file)?;
+        list.iter()
+            .copied()
+            .filter(|&id| {
+                let d = &self.fn_defs[id];
+                d.line <= line && line <= d.end_line
+            })
+            .min_by_key(|&id| {
+                let d = &self.fn_defs[id];
+                d.end_line - d.line
+            })
     }
 
     fn fn_in_file(

@@ -30,6 +30,8 @@ fn assignment_types(language: &'static str) -> &'static [&'static str] {
         "C" | "C++" => &["init_declarator", "assignment_expression"],
         "C#" => &["variable_declarator", "assignment_expression"],
         "Ruby" => &["assignment"],
+        "Swift" | "Kotlin" => &["property_declaration", "assignment_expression"],
+        "Zig" => &["variable_declaration", "assignment_expression"],
         _ => &[],
     }
 }
@@ -197,7 +199,7 @@ struct Walker<'a> {
 impl Walker<'_> {
     fn walk(&mut self, node: Node<'_>) {
         let kind = node.kind();
-        let mut entered_fn = false;
+        let saved_fn = self.current_fn;
 
         if self.config.definition_types.contains(&kind) {
             let elixir_skip = self.config.definitions_are_calls
@@ -207,7 +209,6 @@ impl Walker<'_> {
                 && let Some(id) = self.record_definition(node)
             {
                 self.current_fn = Some(id);
-                entered_fn = true;
             }
         }
 
@@ -228,9 +229,7 @@ impl Walker<'_> {
             self.walk(child);
         }
 
-        if entered_fn {
-            self.current_fn = None;
-        }
+        self.current_fn = saved_fn;
     }
 
     fn record_definition(&mut self, node: Node<'_>) -> Option<FnId> {
@@ -238,6 +237,7 @@ impl Walker<'_> {
         self.builder.fn_defs.push(FnDef {
             file: self.rel_path.to_path_buf(),
             line: node.start_position().row + 1,
+            end_line: node.end_position().row + 1,
             def_range: node.byte_range(),
             body_range: node
                 .child_by_field_name("body")
@@ -271,7 +271,7 @@ impl Walker<'_> {
     }
 
     fn record_assignment(&mut self, node: Node<'_>, fn_id: FnId) {
-        let lhs = extract_field_idents(node, self.source, self.config, &["name", "left"]);
+        let lhs = extract_field_idents(node, self.source, self.config, &["name", "left", "pattern"]);
         let rhs = extract_field_idents(node, self.source, self.config, &["value", "right"]);
         if lhs.is_empty() && rhs.is_empty() {
             return;
@@ -304,14 +304,15 @@ fn extract_callee_name(node: Node<'_>, source: &str) -> String {
     String::new()
 }
 
-/// `foo.bar.baz(...)` is a `member_expression` wrapping the callee.
-/// Flatten to the rightmost identifier — that's the resolution name.
+/// `foo.bar.baz(...)` is a `member_expression` (JS/TS), `field_expression`
+/// (Rust/Go), `attribute` (Python), etc.  Flatten to the rightmost
+/// identifier — that's the resolution name.
 fn flatten_callee(node: Node<'_>, source: &str) -> String {
     let kind = node.kind();
     if kind == "identifier" || kind == "property_identifier" || kind == "simple_identifier" {
         return source[node.byte_range()].to_string();
     }
-    for field in ["property", "name"] {
+    for field in ["property", "field", "attribute", "name"] {
         if let Some(n) = node.child_by_field_name(field) {
             return source[n.byte_range()].to_string();
         }
@@ -327,7 +328,7 @@ fn flatten_callee(node: Node<'_>, source: &str) -> String {
     last
 }
 
-fn extract_parameters(node: Node<'_>, source: &str) -> Vec<String> {
+pub(crate) fn extract_parameters(node: Node<'_>, source: &str) -> Vec<String> {
     let Some(pn) = ["parameters", "formal_parameters", "params"]
         .iter()
         .find_map(|f| node.child_by_field_name(f))
@@ -445,4 +446,80 @@ fn extract_field_idents(
         }
     }
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ast::config_for_language_name;
+
+    /// Count nodes whose kind is in `config.call_types`.  Panics with a
+    /// descriptive message on any failure — we don't hide bad grammars.
+    fn count_call_nodes(language: &str, source: &str) -> usize {
+        let config = config_for_language_name(language)
+            .unwrap_or_else(|| panic!("no config for {language}"));
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&config.language)
+            .unwrap_or_else(|e| panic!("{language}: set_language failed: {e}"));
+        let tree = parser
+            .parse(source, None)
+            .unwrap_or_else(|| panic!("{language}: parser returned no tree for `{source}`"));
+        let mut count = 0usize;
+        let mut stack = vec![tree.root_node()];
+        while let Some(n) = stack.pop() {
+            if config.call_types.contains(&n.kind()) {
+                count += 1;
+            }
+            let mut cursor = n.walk();
+            for c in n.children(&mut cursor) {
+                stack.push(c);
+            }
+        }
+        count
+    }
+
+    /// Every non-empty `call_types` entry must match at least one node in
+    /// a minimal call sample.  Safety net for the exotic languages
+    /// (Haskell, Nix, OCaml, etc.) where node names were guessed.
+    #[test]
+    fn call_types_match_real_parses() {
+        let samples: &[(&str, &str)] = &[
+            ("rust", "fn f() { g(); }"),
+            ("python", "g()"),
+            ("javascript", "g();"),
+            ("typescript", "g();"),
+            ("tsx", "const x = g();"),
+            ("go", "package p\nfunc f() { g() }"),
+            ("java", "class C { void f() { g(); } }"),
+            ("c", "int f() { g(); return 0; }"),
+            ("cpp", "int f() { g(); return 0; }"),
+            ("csharp", "class C { void f() { g(); } }"),
+            ("ruby", "g()"),
+            ("kotlin", "fun f() { g() }"),
+            ("swift", "func f() { g() }"),
+            ("zig", "fn f() void { _ = g(); }"),
+            ("elixir", "g()"),
+            ("erlang", "-module(m).\nf() -> g()."),
+            ("ocaml", "let _ = g ()"),
+            ("haskell", "f = g 1"),
+            ("nix", "g 1"),
+        ];
+        let mut failed = Vec::new();
+        for (lang, src) in samples {
+            let n = count_call_nodes(lang, src);
+            if n == 0 {
+                failed.push(format!("{lang} (0 matches in `{src}`)"));
+            }
+        }
+        assert!(
+            failed.is_empty(),
+            "call_types did not match real parses: {failed:?}",
+        );
+    }
+
+    #[test]
+    fn json_has_empty_call_types() {
+        let config = config_for_language_name("json").unwrap();
+        assert!(config.call_types.is_empty());
+    }
 }

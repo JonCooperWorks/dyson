@@ -560,4 +560,71 @@ mod tests {
             "second call should reuse the cached index",
         );
     }
+
+    /// Regression: the Walker used to set `current_fn = None` on exit from
+    /// any definition, which meant calls in `outer` appearing *after* a
+    /// nested `inner` definition were silently dropped.
+    #[tokio::test]
+    async fn nested_function_does_not_drop_outer_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("app.py"),
+            "def outer(req):\n    def inner(x):\n        pass\n    execute(req)\n",
+        )
+        .unwrap();
+
+        let ctx = ToolContext::for_test(tmp.path());
+        let tool = TaintTraceTool;
+        let out = tool
+            .run(
+                &json!({
+                    "language": "python",
+                    "source": { "file": "app.py", "line": 1 },
+                    "sink":   { "file": "app.py", "line": 4 },
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error, "err: {}", out.content);
+        assert!(
+            out.content.contains("SINK REACHED"),
+            "nested fn scope was dropped: {}",
+            out.content,
+        );
+    }
+
+    /// Regression: Rust's `let_declaration` exposes its LHS via the
+    /// `pattern` field, not `name` / `left`.  Earlier the LHS came back
+    /// empty, so `let x = req; execute(x);` never propagated taint.
+    #[tokio::test]
+    async fn rust_let_declaration_propagates_taint() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("app.rs"),
+            "fn handler(req: String) {\n    let x = req;\n    execute(x);\n}\n\
+             fn execute(s: String) { let _ = s; }\n",
+        )
+        .unwrap();
+
+        let ctx = ToolContext::for_test(tmp.path());
+        let tool = TaintTraceTool;
+        let out = tool
+            .run(
+                &json!({
+                    "language": "rust",
+                    "source": { "file": "app.rs", "line": 1 },
+                    "sink":   { "file": "app.rs", "line": 3 },
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error, "err: {}", out.content);
+        assert!(
+            out.content.contains("SINK REACHED"),
+            "Rust let-declaration propagation broken: {}",
+            out.content,
+        );
+    }
 }

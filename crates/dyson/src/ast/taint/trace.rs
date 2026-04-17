@@ -84,26 +84,36 @@ pub fn trace(
         },
     })?;
     let source_src = source_parsed.source.as_str();
-    let source_byte = byte_offset_of_line(source_src, source_line);
+    let source_byte = first_non_whitespace_byte(source_src, source_line);
 
-    let source_node = source_parsed
-        .tree
-        .root_node()
-        .descendant_for_byte_range(source_byte, line_end_byte(source_src, source_line))
-        .unwrap_or_else(|| source_parsed.tree.root_node());
-    let enclosing_fn_node = ast::find_enclosing_function(source_node, config, source_src.as_bytes())
+    // Resolve the enclosing function via the index first — robust against
+    // `export`/decorator/attribute wrappers where the AST's definition node
+    // starts AFTER the user-pointed byte.
+    let start_fn = index
+        .fn_enclosing(&source_rel, source_byte, source_line)
         .ok_or_else(|| TraceError::NoEnclosingFunction {
             file: source_rel.display().to_string(),
             line: source_line,
         })?;
-    let start_fn = index.fn_enclosing(&source_rel, source_byte).ok_or_else(|| {
-        TraceError::NoEnclosingFunction {
-            file: source_rel.display().to_string(),
-            line: source_line,
-        }
-    })?;
 
-    let initial_tainted = extract_source_taint(enclosing_fn_node, source_byte, source_src, config);
+    // Fetch the fn's AST node by descending into the middle of its def_range,
+    // which is guaranteed to sit inside the definition.
+    let fn_def = &index.fn_defs[start_fn];
+    let probe = fn_def.def_range.start;
+    let enclosing_fn_node = source_parsed
+        .tree
+        .root_node()
+        .descendant_for_byte_range(probe, probe)
+        .and_then(|n| ast::find_enclosing_function(n, config, source_src.as_bytes()))
+        .unwrap_or_else(|| source_parsed.tree.root_node());
+
+    let initial_tainted = extract_source_taint(
+        enclosing_fn_node,
+        source_byte,
+        source_src,
+        config,
+        &index.fn_defs[start_fn].params,
+    );
 
     let sink_parsed = parse(sink_file, working_dir).map_err(|e| match e {
         ParseErr::Parse(r) => TraceError::ParseFailed {
@@ -116,7 +126,7 @@ pub fn trace(
     })?;
     let sink_src = sink_parsed.source.as_str();
     let sink_byte = byte_offset_of_line(sink_src, sink_line);
-    let sink_fn = index.fn_enclosing(&sink_rel, sink_byte);
+    let sink_fn = index.fn_enclosing(&sink_rel, sink_byte, sink_line);
     let sink_identifiers = identifiers_on_line(&sink_parsed.tree, sink_src, sink_line, config);
     let sink_line_range = byte_range_of_line(sink_src, sink_line);
 
@@ -478,7 +488,20 @@ fn extract_source_taint(
     byte: usize,
     src: &str,
     config: &LanguageConfig,
+    fn_params: &[String],
 ) -> BTreeSet<String> {
+    // If the source byte is on the function header (before the body), the
+    // parameter list IS the taint source.  Using all identifiers on the
+    // line would sweep up return types, visibility keywords, and generic
+    // arguments as "taint" — noise that poisons downstream matching.
+    let body_start = enclosing_fn
+        .child_by_field_name("body")
+        .map(|b| b.start_byte())
+        .unwrap_or(enclosing_fn.end_byte());
+    if byte < body_start {
+        return fn_params.iter().cloned().collect();
+    }
+
     let node = enclosing_fn.descendant_for_byte_range(byte, byte).unwrap_or(enclosing_fn);
     let stmt = climb_to_statement(node);
     let mut collected = Vec::new();
@@ -490,8 +513,18 @@ fn extract_source_taint(
         collect_tainted_identifiers(rhs, src, config, &mut collected);
     }
     if collected.is_empty() {
-        // Fall back to the whole statement — e.g. agent points at `fn handler(req)`.
         collect_tainted_identifiers(stmt, src, config, &mut collected);
     }
     collected.into_iter().collect()
+}
+
+/// First non-whitespace byte on `line` (1-indexed), or end-of-line.
+fn first_non_whitespace_byte(src: &str, line: usize) -> usize {
+    let start = byte_offset_of_line(src, line);
+    let bytes = src.as_bytes();
+    let mut i = start;
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    i
 }
