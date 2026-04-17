@@ -1,6 +1,6 @@
-// Integration tests codifying patterns surfaced by the smoke run
-// (see `examples/smoke_taint_trace.rs`).  Each test is a regression
-// guard for a real-world failure mode the ad-hoc unit tests missed.
+// Integration tests codifying patterns surfaced by ad-hoc smoke testing
+// against real repos.  Each test is a regression guard for a real-world
+// failure mode the isolated unit tests missed.
 
 use std::collections::HashMap;
 use std::fs;
@@ -509,11 +509,275 @@ async fn empty_project_is_not_an_error() {
     );
 }
 
-// Confirm files we reference exist as expected (sanity for future refactors).
-#[test]
-fn smoke_example_exists() {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("examples")
-        .join("smoke_taint_trace.rs");
-    assert!(p.exists(), "smoke example missing at {}", p.display());
+// ---------------------------------------------------------------------------
+// Scale + cross-language traces — replicating the spirit of smoke
+// testing against real repos.  Each test exercises the full pipeline
+// on a multi-file, multi-language fixture that mirrors a shape seen
+// in actual projects.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cross_file_typescript_three_hop_trace() {
+    // Shape from a real Node TS backend: request handler → service → db.
+    let handler = "import { sanitize } from './sanitize';\n\
+                   import { save } from './db';\n\
+                   export async function attachUser(req: Request) {\n\
+                       const clean = sanitize(req);\n\
+                       save(clean);\n\
+                   }\n";
+    let sanitize = "export function sanitize(input: Request) {\n\
+                        return input;\n\
+                    }\n";
+    let db = "export function save(payload: Request) {\n\
+                  execute(payload);\n\
+              }\n\
+              function execute(query: Request) { return query; }\n";
+    let out = trace(
+        &[
+            ("middleware/auth.ts", handler),
+            ("lib/sanitize.ts", sanitize),
+            ("lib/db.ts", db),
+        ],
+        "typescript",
+        ("middleware/auth.ts", 3),
+        ("lib/db.ts", 2),
+    )
+    .await;
+    assert_reaches(&out);
+    for f in ["middleware/auth.ts", "lib/db.ts"] {
+        assert!(out.content.contains(f), "missing {f}: {}", out.content);
+    }
+}
+
+#[tokio::test]
+async fn cross_file_rust_three_hop_trace() {
+    // Shape from an axum-style Rust service: handler → sanitizer → sink.
+    let handler = "use crate::sanitize::clean;\n\
+                   use crate::db::save;\n\
+                   pub fn put_blob_handler(body: String) -> String {\n\
+                       let c = clean(body);\n\
+                       save(c)\n\
+                   }\n";
+    let sanitize = "pub fn clean(input: String) -> String { input }\n";
+    let db = "pub fn save(payload: String) -> String {\n\
+                  execute(payload)\n\
+              }\n\
+              fn execute(query: String) -> String { query }\n";
+    let out = trace(
+        &[
+            ("src/http.rs", handler),
+            ("src/sanitize.rs", sanitize),
+            ("src/db.rs", db),
+        ],
+        "rust",
+        ("src/http.rs", 3),
+        ("src/db.rs", 2),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+#[tokio::test]
+async fn cross_file_go_three_hop_trace() {
+    let handler = "package main\n\
+                   import (\n\
+                   \t\"example.com/sanitize\"\n\
+                   \t\"example.com/db\"\n\
+                   )\n\
+                   func director(req string) string {\n\
+                       c := sanitize.Clean(req)\n\
+                       return db.Save(c)\n\
+                   }\n";
+    let sanitize = "package sanitize\n\
+                    func Clean(input string) string { return input }\n";
+    let db = "package db\n\
+              func Save(payload string) string {\n\
+                  return Execute(payload)\n\
+              }\n\
+              func Execute(query string) string { return query }\n";
+    let out = trace(
+        &[
+            ("main.go", handler),
+            ("sanitize/sanitize.go", sanitize),
+            ("db/db.go", db),
+        ],
+        "go",
+        ("main.go", 6),
+        ("db/db.go", 3),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+/// Generate a 60-file Python project and verify the index builds, the
+/// unresolved ratio is reasonable, and a single-file trace still works.
+/// Mirrors the scale stressor that smoke testing applied ad-hoc.
+#[tokio::test]
+async fn many_file_python_project_indexes_cleanly() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 59 noise files: simple `def f(): pass` in each.
+    for i in 0..59 {
+        fs::write(
+            tmp.path().join(format!("mod{i:03}.py")),
+            format!("def f{i}(x):\n    return x\n"),
+        )
+        .unwrap();
+    }
+    // 1 real trace target.
+    fs::write(
+        tmp.path().join("app.py"),
+        "def handler(req):\n    execute(req)\ndef execute(q):\n    pass\n",
+    )
+    .unwrap();
+
+    let ctx = test_ctx(tmp.path());
+    let tool = TaintTraceTool;
+    let out = tool
+        .run(
+            &json!({
+                "language": "python",
+                "source": { "file": "app.py", "line": 1 },
+                "sink":   { "file": "app.py", "line": 2 },
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert_reaches(&out);
+    // Header line reports index stats.  Confirm we indexed the 60 files.
+    let header = out
+        .content
+        .lines()
+        .find(|l| l.starts_with("index:"))
+        .expect("no index header line");
+    assert!(header.contains("files=60"), "expected 60 files: {header}");
+    // Unresolved callees should be 0 — every callee is defined locally.
+    assert!(
+        header.contains("unresolved_callees=0"),
+        "unexpected unresolved callees in a fully-local fixture: {header}",
+    );
+}
+
+/// Exceed MAX_FILES (500) and confirm truncation is flagged, not silently
+/// dropped.  Surfaced during smoke on a 500+ file C++ repo.
+#[tokio::test]
+async fn index_flags_max_files_truncation() {
+    let tmp = tempfile::tempdir().unwrap();
+    for i in 0..520 {
+        fs::write(
+            tmp.path().join(format!("m{i:04}.py")),
+            format!("def f{i}():\n    pass\n"),
+        )
+        .unwrap();
+    }
+    let config = dyson::ast::config_for_language_name("python").unwrap();
+    let index = dyson::ast::taint::build_index(config, tmp.path())
+        .await
+        .unwrap();
+    assert!(
+        index.truncated,
+        "500+ files should trigger MAX_FILES truncation",
+    );
+    assert_eq!(
+        index.file_mtimes.len(),
+        500,
+        "should have indexed exactly MAX_FILES",
+    );
+}
+
+/// Multiple languages can coexist in the same ToolContext without
+/// cross-contamination.  Smoke hit this when a multi-language repo
+/// (Python + C++) cached two independent indexes.
+#[tokio::test]
+async fn multiple_language_indexes_coexist_in_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(
+        tmp.path().join("app.py"),
+        "def handler(req):\n    execute(req)\ndef execute(q):\n    pass\n",
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join("app.rs"),
+        "fn handler(req: String) { execute(req); }\nfn execute(q: String) {}\n",
+    )
+    .unwrap();
+    let ctx = test_ctx(tmp.path());
+    let tool = TaintTraceTool;
+
+    for (lang, file, src_line, sink_line) in [
+        ("python", "app.py", 1, 2),
+        ("rust", "app.rs", 1, 1),
+    ] {
+        let out = tool
+            .run(
+                &json!({
+                    "language": lang,
+                    "source": { "file": file, "line": src_line },
+                    "sink":   { "file": file, "line": sink_line },
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{lang} errored: {}", out.content);
+    }
+    assert_eq!(
+        ctx.taint_indexes.read().await.len(),
+        2,
+        "should cache one index per language",
+    );
+}
+
+/// Sanity: the index rebuilds when a file is modified after caching.
+/// (The tool uses mtime invalidation — smoke verified this works in
+/// practice by running back-to-back traces between edits.)
+#[tokio::test]
+async fn index_rebuilds_on_file_modification() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(
+        tmp.path().join("app.py"),
+        "def handler(req):\n    execute(req)\ndef execute(q): pass\n",
+    )
+    .unwrap();
+    let ctx = test_ctx(tmp.path());
+    let tool = TaintTraceTool;
+    let input = json!({
+        "language": "python",
+        "source": { "file": "app.py", "line": 1 },
+        "sink":   { "file": "app.py", "line": 2 },
+    });
+    let _ = tool.run(&input, &ctx).await.unwrap();
+    let first_index = ctx
+        .taint_indexes
+        .read()
+        .await
+        .get("Python")
+        .cloned()
+        .unwrap();
+
+    // Modify the file — force a newer mtime.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(
+        tmp.path().join("app.py"),
+        "def handler(req):\n    execute(req)\n    other(req)\ndef execute(q): pass\ndef other(q): pass\n",
+    )
+    .unwrap();
+
+    let _ = tool.run(&input, &ctx).await.unwrap();
+    let second_index = ctx
+        .taint_indexes
+        .read()
+        .await
+        .get("Python")
+        .cloned()
+        .unwrap();
+
+    assert!(
+        !Arc::ptr_eq(&first_index, &second_index),
+        "index should have been rebuilt after file mtime changed",
+    );
+    assert!(
+        second_index.call_sites.len() > first_index.call_sites.len(),
+        "rebuilt index should reflect the added call",
+    );
 }
