@@ -659,6 +659,7 @@ impl Agent {
             workspace: None,
             depth: 0,
             dangerous_no_sandbox: sandbox.skip_path_validation(),
+            taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         };
         tool_context.workspace = workspace;
         tool_context

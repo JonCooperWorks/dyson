@@ -49,6 +49,7 @@ use crate::tool::write_file::WriteFileTool;
 use crate::tool::security::AstQueryTool;
 use crate::tool::security::AttackSurfaceAnalyzerTool;
 use crate::tool::security::ExploitBuilderTool;
+use crate::tool::security::TaintTraceTool;
 
 // ---------------------------------------------------------------------------
 // BuiltinSkill
@@ -115,6 +116,7 @@ impl BuiltinSkill {
             Arc::new(AstQueryTool),
             Arc::new(AttackSurfaceAnalyzerTool),
             Arc::new(ExploitBuilderTool),
+            Arc::new(TaintTraceTool),
             Arc::new(DependencyScanTool),
         ];
 
@@ -243,7 +245,7 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new(None, None, None);
         let tools = skill.tools();
-        assert_eq!(tools.len(), 21);
+        assert_eq!(tools.len(), 22);
         assert_eq!(tools[0].name(), "bash");
         assert_eq!(tools[1].name(), "read_file");
         assert_eq!(tools[2].name(), "write_file");
@@ -264,7 +266,8 @@ mod tests {
         assert_eq!(tools[17].name(), "ast_query");
         assert_eq!(tools[18].name(), "attack_surface_analyzer");
         assert_eq!(tools[19].name(), "exploit_builder");
-        assert_eq!(tools[20].name(), "dependency_scan");
+        assert_eq!(tools[20].name(), "taint_trace");
+        assert_eq!(tools[21].name(), "dependency_scan");
     }
 
     #[test]
@@ -311,7 +314,7 @@ mod tests {
         let skill = BuiltinSkill::new(None, Some(&config), None);
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert!(names.contains(&"image_generate"));
-        assert_eq!(skill.tools().len(), 22);
+        assert_eq!(skill.tools().len(), 23);
     }
 
     #[test]

@@ -17,6 +17,10 @@ pub struct LanguageConfig {
     pub language: tree_sitter::Language,
     pub identifier_types: &'static [&'static str],
     pub definition_types: &'static [&'static str],
+    /// Call-expression node types.  Used by cross-file data-flow tools
+    /// (e.g. `taint_trace`) to discover call sites.  Empty for languages
+    /// with no call concept (e.g. JSON).
+    pub call_types: &'static [&'static str],
     #[cfg_attr(not(test), allow(dead_code))]
     pub display_name: &'static str,
     /// Whether definitions require special extraction logic (e.g., Elixir
@@ -43,6 +47,7 @@ static RUST: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "mod_item",
         "macro_definition",
     ],
+    call_types: &["call_expression", "macro_invocation"],
     display_name: "Rust",
     definitions_are_calls: false,
 });
@@ -51,6 +56,7 @@ static PYTHON: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     language: tree_sitter_python::LANGUAGE.into(),
     identifier_types: &["identifier"],
     definition_types: &["function_definition", "class_definition"],
+    call_types: &["call"],
     display_name: "Python",
     definitions_are_calls: false,
 });
@@ -68,6 +74,7 @@ static JAVASCRIPT: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "lexical_declaration",
         "variable_declaration",
     ],
+    call_types: &["call_expression", "new_expression"],
     display_name: "JavaScript",
     definitions_are_calls: false,
 });
@@ -88,6 +95,7 @@ static TYPESCRIPT: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "type_alias_declaration",
         "enum_declaration",
     ],
+    call_types: &["call_expression", "new_expression"],
     display_name: "TypeScript",
     definitions_are_calls: false,
 });
@@ -108,6 +116,7 @@ static TSX: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "type_alias_declaration",
         "enum_declaration",
     ],
+    call_types: &["call_expression", "new_expression"],
     display_name: "TSX",
     definitions_are_calls: false,
 });
@@ -122,6 +131,7 @@ static GO: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "const_declaration",
         "var_declaration",
     ],
+    call_types: &["call_expression"],
     display_name: "Go",
     definitions_are_calls: false,
 });
@@ -137,6 +147,7 @@ static JAVA: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "constructor_declaration",
         "record_declaration",
     ],
+    call_types: &["method_invocation", "object_creation_expression"],
     display_name: "Java",
     definitions_are_calls: false,
 });
@@ -150,6 +161,7 @@ static C: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "enum_specifier",
         "type_definition",
     ],
+    call_types: &["call_expression"],
     display_name: "C",
     definitions_are_calls: false,
 });
@@ -171,6 +183,7 @@ static CPP: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "type_definition",
         "template_declaration",
     ],
+    call_types: &["call_expression", "new_expression"],
     display_name: "C++",
     definitions_are_calls: false,
 });
@@ -187,6 +200,7 @@ static CSHARP: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "namespace_declaration",
         "record_declaration",
     ],
+    call_types: &["invocation_expression", "object_creation_expression"],
     display_name: "C#",
     definitions_are_calls: false,
 });
@@ -195,6 +209,7 @@ static RUBY: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     language: tree_sitter_ruby::LANGUAGE.into(),
     identifier_types: &["identifier", "constant"],
     definition_types: &["method", "singleton_method", "class", "module"],
+    call_types: &["call"],
     display_name: "Ruby",
     definitions_are_calls: false,
 });
@@ -209,6 +224,7 @@ static KOTLIN: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "property_declaration",
         "type_alias",
     ],
+    call_types: &["call_expression"],
     display_name: "Kotlin",
     definitions_are_calls: false,
 });
@@ -224,6 +240,7 @@ static SWIFT: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "protocol_declaration",
         "typealias_declaration",
     ],
+    call_types: &["call_expression"],
     display_name: "Swift",
     definitions_are_calls: false,
 });
@@ -232,6 +249,7 @@ static ZIG: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     language: tree_sitter_zig::LANGUAGE.into(),
     identifier_types: &["identifier"],
     definition_types: &["fn_decl", "var_decl", "container_decl"],
+    call_types: &["call_expression"],
     display_name: "Zig",
     definitions_are_calls: false,
 });
@@ -240,6 +258,7 @@ static ELIXIR: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     language: tree_sitter_elixir::LANGUAGE.into(),
     identifier_types: &["identifier", "atom"],
     definition_types: &["call"],
+    call_types: &["call"],
     display_name: "Elixir",
     definitions_are_calls: true,
 });
@@ -253,6 +272,7 @@ static ERLANG: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "record_declaration",
         "macro_definition",
     ],
+    call_types: &["call"],
     display_name: "Erlang",
     definitions_are_calls: false,
 });
@@ -271,6 +291,7 @@ static OCAML: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "module_definition",
         "module_type_definition",
     ],
+    call_types: &["application_expression"],
     display_name: "OCaml",
     definitions_are_calls: false,
 });
@@ -286,6 +307,7 @@ static HASKELL: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
         "class_declaration",
         "instance_declaration",
     ],
+    call_types: &["apply"],
     display_name: "Haskell",
     definitions_are_calls: false,
 });
@@ -294,6 +316,7 @@ static NIX: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     language: tree_sitter_nix::LANGUAGE.into(),
     identifier_types: &["identifier", "attrpath"],
     definition_types: &["binding", "inherit"],
+    call_types: &["apply_expression"],
     display_name: "Nix",
     definitions_are_calls: false,
 });
@@ -302,6 +325,7 @@ static JSON: LazyLock<LanguageConfig> = LazyLock::new(|| LanguageConfig {
     language: tree_sitter_json::LANGUAGE.into(),
     identifier_types: &[], // rename not supported for JSON
     definition_types: &["pair"],
+    call_types: &[],
     display_name: "JSON",
     definitions_are_calls: false,
 });

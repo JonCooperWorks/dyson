@@ -735,6 +735,7 @@ impl McpHttpServer {
             workspace: Some(Arc::clone(&self.workspace)),
             depth: 0,
             dangerous_no_sandbox: false,
+            taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         };
 
         // -- Sandbox hook (future) --

@@ -237,6 +237,7 @@ async fn subagent_depth_limit_prevents_recursion() {
         workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
         dangerous_no_sandbox: false,
+        taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -732,6 +733,7 @@ async fn coder_depth_limit_prevents_recursion() {
         workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
         dangerous_no_sandbox: false,
+        taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     let input = serde_json::json!({"path": ".", "task": "should fail"});
@@ -980,6 +982,7 @@ async fn orchestrator_depth_limit_prevents_recursion() {
         workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
         dangerous_no_sandbox: false,
+        taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     let input = serde_json::json!({"task": "should fail"});

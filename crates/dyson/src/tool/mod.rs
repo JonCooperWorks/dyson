@@ -230,6 +230,15 @@ pub struct ToolContext {
     /// Set from `--dangerous-no-sandbox` on the CLI.  Allows tools like
     /// `send_file` to access paths outside the working directory.
     pub dangerous_no_sandbox: bool,
+
+    /// Per-language symbol index cache for `taint_trace`.  Keyed by
+    /// `LanguageConfig.display_name`.  Lazily populated on first call;
+    /// invalidated via mtime check inside the tool.
+    ///
+    /// Shared across all tool calls within an agent session to avoid
+    /// re-walking the codebase for each trace — a typical security
+    /// review issues many taint_trace calls against the same language.
+    pub taint_indexes: Arc<RwLock<HashMap<&'static str, Arc<crate::ast::taint::SymbolIndex>>>>,
 }
 
 impl Clone for ToolContext {
@@ -241,6 +250,7 @@ impl Clone for ToolContext {
             workspace: self.workspace.as_ref().map(Arc::clone),
             depth: self.depth,
             dangerous_no_sandbox: self.dangerous_no_sandbox,
+            taint_indexes: Arc::clone(&self.taint_indexes),
         }
     }
 }
@@ -258,6 +268,7 @@ impl ToolContext {
             workspace: None,
             depth: 0,
             dangerous_no_sandbox: false,
+            taint_indexes: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -274,6 +285,7 @@ impl ToolContext {
             workspace: None,
             depth: 0,
             dangerous_no_sandbox: false,
+            taint_indexes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -291,6 +303,7 @@ impl ToolContext {
             workspace: Some(Arc::new(RwLock::new(workspace))),
             depth: 0,
             dangerous_no_sandbox: false,
+            taint_indexes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

@@ -192,6 +192,7 @@ async fn memory_system_prompt_contains_usage_stats_and_curation_rules() {
         workspace: Some(std::sync::Arc::new(tokio::sync::RwLock::new(workspace))),
         depth: 0,
         dangerous_no_sandbox: false,
+        taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     };
 
     let prompt = reflection::build_memory_system_prompt(&ctx).await;
@@ -222,6 +223,7 @@ async fn reflection_system_prompt_lists_tools() {
         workspace: None,
         depth: 0,
         dangerous_no_sandbox: false,
+        taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
     };
     let prompt = reflection::build_reflection_system_prompt(&ctx).await;
     assert!(prompt.contains("skill_create"));

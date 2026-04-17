@@ -18,6 +18,7 @@
 
 pub mod languages;
 pub mod nodes;
+pub mod taint;
 
 pub use languages::{
     LanguageConfig, MAX_FILE_SIZE, MAX_FILES, ParsedFile, config_for_extension,
@@ -170,6 +171,34 @@ fn walk_defs(
     for child in node.children(&mut cursor) {
         walk_defs(child, source, config, target_name, kind_filter, out);
     }
+}
+
+/// Walk up from `node` to the nearest ancestor whose kind is one of
+/// `config.definition_types` (function / method / class / module — whatever
+/// the language considers a definition).  Returns the ancestor node, so
+/// callers can query its body range, extract its parameters, or derive a
+/// name via [`nodes::extract_definition_name`].
+///
+/// Returns `None` when `node` lies outside any definition (module-level
+/// top-level code, e.g. Python scripts without a `def`).
+pub fn find_enclosing_function<'a>(
+    node: Node<'a>,
+    config: &LanguageConfig,
+    source: &[u8],
+) -> Option<Node<'a>> {
+    let mut current = Some(node);
+    while let Some(cur) = current {
+        if config.definition_types.contains(&cur.kind()) {
+            let elixir_skip = config.definitions_are_calls
+                && cur.kind() == "call"
+                && !nodes::is_elixir_definition(&cur, source);
+            if !elixir_skip {
+                return Some(cur);
+            }
+        }
+        current = cur.parent();
+    }
+    None
 }
 
 // ===========================================================================

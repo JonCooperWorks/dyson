@@ -15,6 +15,7 @@ const DIRECT_TOOLS: &[&str] = &[
     "ast_query",
     "attack_surface_analyzer",
     "exploit_builder",
+    "taint_trace",
     "dependency_scan",
 ];
 

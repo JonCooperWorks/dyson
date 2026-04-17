@@ -267,6 +267,7 @@ mod tests {
             workspace: None,
             depth: 0,
             dangerous_no_sandbox: false,
+            taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         };
 
         (ctx, tmp)
@@ -363,6 +364,7 @@ mod tests {
             workspace: None,
             depth: 0,
             dangerous_no_sandbox: false,
+            taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         };
 
         let tool = ExportConversationTool;

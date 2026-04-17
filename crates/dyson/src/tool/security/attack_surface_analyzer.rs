@@ -289,7 +289,8 @@ fn scan_node(
                         && clean.eq_ignore_ascii_case(&pattern.replace('_', "."))
                 {
                     let line = node.start_position().row + 1;
-                    let enclosing = find_enclosing_function(node, config, source_bytes);
+                    let enclosing = ast::find_enclosing_function(node, config, source_bytes)
+                        .and_then(|n| nodes::extract_definition_name(&n, source_bytes));
                     let context = enclosing
                         .as_deref()
                         .unwrap_or("<top-level>");
@@ -322,24 +323,6 @@ fn scan_node(
             total_bytes,
         );
     }
-}
-
-/// Walk up the tree from `node` to find the nearest enclosing function/method.
-fn find_enclosing_function<'a>(
-    node: Node<'a>,
-    config: &LanguageConfig,
-    source: &'a [u8],
-) -> Option<String> {
-    let mut current = node.parent();
-    while let Some(parent) = current {
-        if config.definition_types.contains(&parent.kind())
-            && let Some(name) = nodes::extract_definition_name(&parent, source)
-        {
-            return Some(name);
-        }
-        current = parent.parent();
-    }
-    None
 }
 
 #[cfg(test)]

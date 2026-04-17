@@ -32,7 +32,9 @@
 pub mod ast_query;
 pub mod attack_surface_analyzer;
 pub mod exploit_builder;
+pub mod taint_trace;
 
 pub use ast_query::AstQueryTool;
 pub use attack_surface_analyzer::AttackSurfaceAnalyzerTool;
 pub use exploit_builder::ExploitBuilderTool;
+pub use taint_trace::TaintTraceTool;
