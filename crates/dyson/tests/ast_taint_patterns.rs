@@ -509,6 +509,24 @@ async fn empty_project_is_not_an_error() {
     );
 }
 
+/// Regression: Rust `println!`, `vec!`, `format!` etc. are `macro_invocation`
+/// nodes whose callee sits in the `macro` field, not `function`.  The tool
+/// was leaving them unresolved until the fallback chain picked up `macro`.
+#[tokio::test]
+async fn rust_macro_invocation_resolves_callee() {
+    let src = "fn handle(req: String) {\n    log!(req);\n    execute(req);\n}\nfn execute(s: String) {}\nmacro_rules! log { ($x:expr) => {{ let _ = $x; }} }\n";
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("app.rs"), src).unwrap();
+    let config = dyson::ast::config_for_language_name("rust").unwrap();
+    let idx = dyson::ast::taint::build_index(config, tmp.path()).await.unwrap();
+    let log_call = idx
+        .call_sites
+        .iter()
+        .find(|cs| cs.callee == "log")
+        .expect("macro `log!` should resolve to `log`");
+    assert_eq!(log_call.callee, "log");
+}
+
 /// Regression: Swift `obj.method()` parses as
 /// `call_expression → navigation_expression → navigation_suffix`.  An
 /// earlier version of `flatten_callee` only matched `property`/`name`

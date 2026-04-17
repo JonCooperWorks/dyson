@@ -67,7 +67,8 @@ async fn run() {
         ("d", "Terra", "", "csharp"),
         // C++
         ("d", "llama-cpp-turboquant", "", "cpp"),
-        // ---- /tmp/smoke_repos — external repos for missing-language coverage ----
+        // ---- /tmp/smoke_repos — external GitHub repos ----
+        // Missing-language coverage
         ("s", "spring-petclinic", "", "java"),
         ("s", "sinatra", "", "ruby"),
         ("s", "cJSON", "", "c"),
@@ -77,6 +78,34 @@ async fn run() {
         ("s", "dune", "", "ocaml"),
         ("s", "samples", "", "csharp"),
         ("s", "nixpkgs", "pkgs/top-level", "nix"),
+        // Stress: large, complex, production codebases
+        ("s", "react", "packages", "typescript"),
+        ("s", "react", "packages/react/src", "typescript"),
+        ("s", "django", "django", "python"),
+        ("s", "flask", "src/flask", "python"),
+        ("s", "express", "lib", "javascript"),
+        ("s", "rails", "activerecord/lib", "ruby"),
+        ("s", "rails", "actionpack/lib", "ruby"),
+        ("s", "tokio", "tokio/src", "rust"),
+        ("s", "ripgrep", "crates", "rust"),
+        ("s", "gin", "", "go"),
+        ("s", "kotlinx.coroutines", "kotlinx-coroutines-core/jvm/src", "kotlin"),
+        ("s", "okhttp", "okhttp/src/main/kotlin", "kotlin"),
+        ("s", "swift-nio", "Sources", "swift"),
+        ("s", "git", "", "c"),
+        ("s", "serenity", "Kernel", "cpp"),
+        ("s", "serenity", "Userland", "cpp"),
+        // More monsters
+        ("s", "nushell", "crates", "rust"),
+        ("s", "bevy", "crates", "rust"),
+        ("s", "deno", "cli", "rust"),
+        ("s", "deno", "ext", "rust"),
+        ("s", "zig", "src", "zig"),
+        ("s", "zig", "lib", "zig"),
+        ("s", "elixir", "lib", "elixir"),
+        ("s", "redis", "src", "c"),
+        ("s", "TypeScript", "src", "typescript"),
+        ("s", "svelte", "packages/svelte/src", "typescript"),
     ];
 
     let targets: Vec<RepoTarget> = targets_spec

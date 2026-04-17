@@ -432,8 +432,10 @@ fn byte_offset_of_line(src: &str, line: usize) -> usize {
     src.len()
 }
 
-fn line_end_byte(src: &str, line: usize) -> usize {
-    let start = byte_offset_of_line(src, line);
+/// End-of-line byte relative to a known start.  Shared by
+/// [`byte_range_of_line`] and the source-descent byte range in [`trace`]
+/// so we never scan twice for the same line.
+fn end_of_line_from(src: &str, start: usize) -> usize {
     src.bytes()
         .skip(start)
         .position(|b| b == b'\n')
@@ -442,7 +444,8 @@ fn line_end_byte(src: &str, line: usize) -> usize {
 }
 
 fn byte_range_of_line(src: &str, line: usize) -> std::ops::Range<usize> {
-    byte_offset_of_line(src, line)..line_end_byte(src, line)
+    let start = byte_offset_of_line(src, line);
+    start..end_of_line_from(src, start)
 }
 
 fn identifiers_on_line(

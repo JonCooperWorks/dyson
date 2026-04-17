@@ -327,8 +327,11 @@ impl Walker<'_> {
 // ---------------------------------------------------------------------------
 
 fn extract_callee_name(node: Node<'_>, source: &str) -> String {
-    if let Some(fn_field) = node.child_by_field_name("function") {
-        return flatten_callee(fn_field, source);
+    // `function` (most languages) / `macro` (Rust macro_invocation).
+    for field in ["function", "macro"] {
+        if let Some(fn_field) = node.child_by_field_name(field) {
+            return flatten_callee(fn_field, source);
+        }
     }
     // Field-less calls (Swift): the first named non-arg child is the callee
     // expression — a bare identifier OR a member-access wrapper like
