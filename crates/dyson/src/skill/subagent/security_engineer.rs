@@ -12,6 +12,7 @@ const DIRECT_TOOLS: &[&str] = &[
     "read_file",
     "search_files",
     "list_files",
+    "ast_describe",
     "ast_query",
     "attack_surface_analyzer",
     "exploit_builder",
