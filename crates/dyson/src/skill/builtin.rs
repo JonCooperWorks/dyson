@@ -82,11 +82,17 @@ impl BuiltinSkill {
     /// When `web_search_config` is `Some`, the `web_search` tool is
     /// registered with the configured search provider.  When `None`,
     /// the tool is simply absent.
+    ///
+    /// `with_swarm_checkpoint` gates `swarm_checkpoint` — outside the
+    /// swarm controller the tool is a no-op (the default `Output::checkpoint`
+    /// hook drops events), so skip registering it and save a tool slot on
+    /// every turn.  Callers pass `settings.has_swarm_controller()`.
     pub fn new_filtered(
         web_search_config: Option<&crate::config::WebSearchConfig>,
         image_provider_config: Option<&crate::config::ProviderConfig>,
         image_model_override: Option<&str>,
         filter: &[String],
+        with_swarm_checkpoint: bool,
     ) -> Self {
         let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(BashTool::default()),
@@ -102,10 +108,13 @@ impl BuiltinSkill {
             Arc::new(LoadSkillTool),
             Arc::new(KbSearchTool),
             Arc::new(KbStatusTool),
-            Arc::new(SwarmCheckpointTool),
             Arc::new(WebFetchTool::default()),
             Arc::new(DependencyScanTool),
         ];
+
+        if with_swarm_checkpoint {
+            tools.push(Arc::new(SwarmCheckpointTool));
+        }
 
         if let Some(ws_cfg) = web_search_config {
             match web_search::create_provider(ws_cfg) {
@@ -162,13 +171,22 @@ impl BuiltinSkill {
 }
 
 impl BuiltinSkill {
-    /// Create a new BuiltinSkill with all default tools (no filter).
+    /// Create a new BuiltinSkill with all default tools (no filter, no swarm).
+    ///
+    /// Convenience used by tests and setups that aren't swarm nodes.  Real
+    /// runtimes go through `new_filtered` with the controller-derived flag.
     pub fn new(
         web_search_config: Option<&crate::config::WebSearchConfig>,
         image_provider_config: Option<&crate::config::ProviderConfig>,
         image_model_override: Option<&str>,
     ) -> Self {
-        Self::new_filtered(web_search_config, image_provider_config, image_model_override, &[])
+        Self::new_filtered(
+            web_search_config,
+            image_provider_config,
+            image_model_override,
+            &[],
+            false,
+        )
     }
 }
 
@@ -232,7 +250,7 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new(None, None, None);
         let tools = skill.tools();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 15);
         assert_eq!(tools[0].name(), "bash");
         assert_eq!(tools[1].name(), "read_file");
         assert_eq!(tools[2].name(), "write_file");
@@ -246,9 +264,19 @@ mod tests {
         assert_eq!(tools[10].name(), "load_skill");
         assert_eq!(tools[11].name(), "kb_search");
         assert_eq!(tools[12].name(), "kb_status");
-        assert_eq!(tools[13].name(), "swarm_checkpoint");
-        assert_eq!(tools[14].name(), "web_fetch");
-        assert_eq!(tools[15].name(), "dependency_scan");
+        assert_eq!(tools[13].name(), "web_fetch");
+        assert_eq!(tools[14].name(), "dependency_scan");
+    }
+
+    #[test]
+    fn swarm_checkpoint_registered_only_when_requested() {
+        let off = BuiltinSkill::new_filtered(None, None, None, &[], false);
+        let on = BuiltinSkill::new_filtered(None, None, None, &[], true);
+        assert_eq!(off.tools().len() + 1, on.tools().len());
+        let on_names: Vec<&str> = on.tools().iter().map(|t| t.name()).collect();
+        let off_names: Vec<&str> = off.tools().iter().map(|t| t.name()).collect();
+        assert!(on_names.contains(&"swarm_checkpoint"));
+        assert!(!off_names.contains(&"swarm_checkpoint"));
     }
 
     #[test]
@@ -258,6 +286,7 @@ mod tests {
             None,
             None,
             &["bash".to_string(), "read_file".to_string()],
+            false,
         );
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert_eq!(names, vec!["bash", "read_file"]);
@@ -266,7 +295,7 @@ mod tests {
     #[test]
     fn empty_filter_includes_all() {
         let all = BuiltinSkill::new(None, None, None);
-        let filtered = BuiltinSkill::new_filtered(None, None, None, &[]);
+        let filtered = BuiltinSkill::new_filtered(None, None, None, &[], false);
         assert_eq!(all.tools().len(), filtered.tools().len());
     }
 
@@ -295,7 +324,7 @@ mod tests {
         let skill = BuiltinSkill::new(None, Some(&config), None);
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert!(names.contains(&"image_generate"));
-        assert_eq!(skill.tools().len(), 17);
+        assert_eq!(skill.tools().len(), 16);
     }
 
     #[test]

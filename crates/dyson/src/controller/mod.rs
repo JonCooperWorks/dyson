@@ -457,6 +457,7 @@ fn build_public_agent(
             ig_provider,
             settings.agent.image_generation_model.as_deref(),
             &filter,
+            false,
         ),
     )];
 
@@ -1499,7 +1500,7 @@ mod tests {
         // Build an agent using the same skill filter as build_public_agent.
         let filter: Vec<String> = PUBLIC_AGENT_TOOLS.iter().map(|s| (*s).to_string()).collect();
         let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
-            crate::skill::builtin::BuiltinSkill::new_filtered(None, None, None, &filter),
+            crate::skill::builtin::BuiltinSkill::new_filtered(None, None, None, &filter, false),
         )];
 
         let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =

@@ -992,6 +992,17 @@ impl Default for AgentSettings {
     }
 }
 
+impl Settings {
+    /// True when any configured controller is a swarm node.
+    ///
+    /// Used to gate swarm-only builtins like `swarm_checkpoint` — outside
+    /// the swarm controller those tools are no-ops, so we skip registering
+    /// them rather than pay for the schema on every turn.
+    pub fn has_swarm_controller(&self) -> bool {
+        self.controllers.iter().any(|c| c.controller_type == "swarm")
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {

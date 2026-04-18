@@ -199,6 +199,7 @@ pub async fn create_skills(
                     ig_provider,
                     settings.agent.image_generation_model.as_deref(),
                     &cfg.tools,
+                    settings.has_swarm_controller(),
                 )));
             }
             crate::config::SkillConfig::Mcp(cfg) => {
