@@ -146,6 +146,14 @@ impl Tool for OrchestratorTool {
                     "type": "string",
                     "description": "Optional background context about the codebase, \
                         recent changes, or specific areas of concern."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional directory to scope the orchestrator's \
+                        child agent to.  When set, the child's working directory is \
+                        this path — relative tool paths resolve against it and `bash` \
+                        starts here.  Falls back to the parent's working directory \
+                        when omitted."
                 }
             },
             "required": ["task"]
@@ -157,6 +165,35 @@ impl Tool for OrchestratorTool {
             serde_json::from_value(input.clone()).map_err(|e| {
                 DysonError::tool(self.config.name, format!("invalid input: {e}"))
             })?;
+
+        // Validate + canonicalize the optional scope path before handing it
+        // to the child.  `canonicalize` also implicitly checks existence.
+        let scoped_dir = if parsed.path.is_empty() {
+            None
+        } else {
+            let requested = std::path::PathBuf::from(&parsed.path);
+            let resolved = if requested.is_absolute() {
+                requested
+            } else {
+                ctx.working_dir.join(&requested)
+            };
+            let canonical = match resolved.canonicalize() {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(ToolOutput::error(format!(
+                        "path '{}' cannot be resolved: {e}",
+                        parsed.path
+                    )));
+                }
+            };
+            if !canonical.is_dir() {
+                return Ok(ToolOutput::error(format!(
+                    "path '{}' is not a directory",
+                    parsed.path
+                )));
+            }
+            Some(canonical)
+        };
 
         let user_message = if parsed.context.is_empty() {
             parsed.task
@@ -187,7 +224,7 @@ impl Tool for OrchestratorTool {
             workspace: self.workspace.clone(),
             client: self.client.clone(),
             parent_depth: ctx.depth,
-            working_dir: None,
+            working_dir: scoped_dir,
             user_message,
         })
         .await
@@ -200,4 +237,7 @@ struct OrchestratorInput {
     task: String,
     #[serde(default)]
     context: String,
+    /// Optional directory to scope the child agent to.  See `input_schema`.
+    #[serde(default)]
+    path: String,
 }

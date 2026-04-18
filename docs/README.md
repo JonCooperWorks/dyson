@@ -31,6 +31,7 @@ layers on top of those primitives.
 | [MCP OAuth](mcp-oauth.md) | OAuth 2.0 Authorization Code + PKCE for MCP servers |
 | [Dreaming](dreaming.md) | Background cognitive tasks (memory maintenance, learning synthesis, self-improvement) |
 | [Swarm](swarm.md) | Distributed task routing across Dyson nodes — hub, workers, constraint matching, Ed25519 signing |
+| [Testing & Tuning](testing.md) | Four test layers (unit / smoke / regression / live subagent review), smoke-to-regression promotion, run-grade-tune-run loop, case study tuning `security_engineer.md` against Qwen |
 | [Comparison: Hermes Agent](comparison-hermes-agent.md) | Side-by-side with Hermes Agent (Nous Research) |
 
 **Key source files:**

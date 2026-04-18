@@ -1070,3 +1070,256 @@ fn builtin_orchestrator_configs_includes_security_engineer() {
     assert_eq!(configs.len(), 1);
     assert_eq!(configs[0].name, "security_engineer");
 }
+
+// -----------------------------------------------------------------------
+// OrchestratorTool `path` input tests
+//
+// The `path` field scopes the child agent's working directory.  This
+// matters any time the orchestrator is invoked with a target location
+// that differs from the parent's working directory — most obviously the
+// `examples/expensive_live_security_review.rs` harness, but also any
+// future controller that routes a "review /abs/dir" message through the
+// security_engineer tool.
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn orchestrator_rejects_nonexistent_path() {
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
+        ),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+        vec![],
+    );
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({
+        "task": "any",
+        "path": "/this/path/definitely/does/not/exist/dyson-test"
+    });
+    let result = tool.run(&input, &ctx).await.unwrap();
+    assert!(result.is_error, "expected error for nonexistent path");
+    assert!(
+        result.content.contains("cannot be resolved"),
+        "unexpected error text: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
+async fn orchestrator_rejects_path_pointing_to_file() {
+    // Write a temp file, then try to scope the orchestrator at it.
+    let file = std::env::temp_dir().join(format!(
+        "dyson-orch-test-{}.tmp",
+        std::process::id()
+    ));
+    std::fs::write(&file, b"not a directory").unwrap();
+
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
+        ),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+        vec![],
+    );
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({
+        "task": "any",
+        "path": file.display().to_string(),
+    });
+    let result = tool.run(&input, &ctx).await.unwrap();
+    let _ = std::fs::remove_file(&file);
+    assert!(result.is_error, "expected error for file path");
+    assert!(
+        result.content.contains("not a directory"),
+        "unexpected error text: {}",
+        result.content
+    );
+}
+
+/// Spy tool that records `ctx.working_dir` when invoked, so a test can
+/// assert the orchestrator forwarded its `path` input into the child
+/// agent's working directory.
+struct WorkingDirSpy {
+    captured: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+}
+
+#[async_trait]
+impl Tool for WorkingDirSpy {
+    fn name(&self) -> &str {
+        "working_dir_spy"
+    }
+    fn description(&self) -> &str {
+        "Records ctx.working_dir (test-only)."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+    async fn run(
+        &self,
+        _input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput> {
+        *self.captured.lock().unwrap() = Some(ctx.working_dir.clone());
+        Ok(ToolOutput::success("captured"))
+    }
+}
+
+#[tokio::test]
+async fn orchestrator_propagates_path_to_child_working_dir() {
+    // Use $TMPDIR directly as the scoped path — guaranteed to exist
+    // and distinct from the process cwd.
+    let target = std::env::temp_dir().canonicalize().unwrap();
+
+    // MockLlm: one tool call to `working_dir_spy`, then end.
+    let llm = MockLlm::new(vec![
+        vec![
+            StreamEvent::ToolUseStart {
+                id: "call_1".into(),
+                name: "working_dir_spy".into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "call_1".into(),
+                name: "working_dir_spy".into(),
+                input: serde_json::json!({}),
+            },
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::ToolUse,
+                output_tokens: None,
+            },
+        ],
+        vec![
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ],
+    ]);
+
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let spy: Arc<dyn Tool> = Arc::new(WorkingDirSpy {
+        captured: std::sync::Arc::clone(&captured),
+    });
+
+    // Minimal config: allow only the spy as a direct tool so the child
+    // has exactly one tool available.
+    let config = OrchestratorConfig {
+        name: "scope_test",
+        description: "test",
+        system_prompt: "test",
+        direct_tool_names: &["working_dir_spy"],
+        max_iterations: 5,
+        max_tokens: 1024,
+        injects_protocol: None,
+    };
+
+    let tool = OrchestratorTool::new(
+        config,
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        std::slice::from_ref(&spy),
+        vec![],
+    );
+
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({
+        "task": "call the spy",
+        "path": target.display().to_string(),
+    });
+    let result = tool.run(&input, &ctx).await.unwrap();
+    assert!(!result.is_error, "unexpected error: {}", result.content);
+
+    let captured_dir = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("spy was never invoked");
+    assert_eq!(
+        captured_dir, target,
+        "child's working_dir should equal the scoped path"
+    );
+}
+
+#[tokio::test]
+async fn orchestrator_without_path_keeps_process_cwd() {
+    // No `path` in input → child inherits the process cwd, matching
+    // the pre-existing behavior that controllers already depend on.
+    let llm = MockLlm::new(vec![
+        vec![
+            StreamEvent::ToolUseStart {
+                id: "call_1".into(),
+                name: "working_dir_spy".into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "call_1".into(),
+                name: "working_dir_spy".into(),
+                input: serde_json::json!({}),
+            },
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::ToolUse,
+                output_tokens: None,
+            },
+        ],
+        vec![
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ],
+    ]);
+
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let spy: Arc<dyn Tool> = Arc::new(WorkingDirSpy {
+        captured: std::sync::Arc::clone(&captured),
+    });
+
+    let config = OrchestratorConfig {
+        name: "scope_test",
+        description: "test",
+        system_prompt: "test",
+        direct_tool_names: &["working_dir_spy"],
+        max_iterations: 5,
+        max_tokens: 1024,
+        injects_protocol: None,
+    };
+    let tool = OrchestratorTool::new(
+        config,
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        std::slice::from_ref(&spy),
+        vec![],
+    );
+
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({ "task": "call the spy" });
+    let result = tool.run(&input, &ctx).await.unwrap();
+    assert!(!result.is_error);
+
+    let captured_dir = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("spy was never invoked");
+    // Child defaults to process cwd (std::env::current_dir) when no
+    // `path` is passed.  The orchestrator's own ctx.working_dir is NOT
+    // used in that fallback path, matching the previous behaviour.
+    let process_cwd = std::env::current_dir().unwrap();
+    assert_eq!(captured_dir, process_cwd);
+}

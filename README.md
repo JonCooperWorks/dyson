@@ -210,6 +210,7 @@ Secrets can be literal strings or resolver references (`{ "resolver": "insecure_
 | [Dreaming](docs/dreaming.md) | Background cognition — memory consolidation, self-improvement, skill creation |
 | [Advisor](docs/advisor.md) | Advisor pattern — consult a stronger model for complex decisions |
 | [Swarm](docs/swarm.md) | Distributed task routing over a trusted network — hub, workers, Ed25519-signed dispatch |
+| [Testing & Tuning](docs/testing.md) | Four test layers, smoke-to-regression promotion, live subagent review, case study tuning a prompt against Qwen |
 
 ## Tests
 
@@ -218,6 +219,32 @@ cargo test
 ```
 
 1100+ tests covering the full stack — SSE parsing, sandbox decisions, config loading, workspace persistence, and the agent loop with mock LLM clients.
+
+### Smoke tests against real repos
+
+Three `smoke_*` examples stress the AST tools against shallow clones of popular open-source projects.  They don't hit an LLM — they're just deterministic exercises of the parser, index, and query/describe/trace paths against production-scale code.  Failures here become regression tests under `tests/ast_taint_patterns.rs`.
+
+```bash
+cargo run -p dyson --example smoke_ast_query --release
+cargo run -p dyson --example smoke_ast_describe --release
+cargo run -p dyson --example smoke_taint_trace --release
+```
+
+### Tuning the security prompt against your model (billable)
+
+The `security_engineer.md` system prompt was tuned against Claude.  If you run Dyson against a different model (a smaller local model, a cheap OpenRouter model, etc.), its failure modes will differ — it may skip `taint_trace`, hallucinate paths, or produce shallower reports.  [`examples/expensive_live_security_review.rs`](crates/dyson/examples/expensive_live_security_review.rs) spins up the **real** orchestrator (direct tools + inner planner/researcher/coder/verifier) against a fixed set of deliberately-vulnerable repos (Juice Shop, NodeGoat, RailsGoat) using **whatever provider and model `dyson.json` resolves to**, so you can grade the resulting reports and feed the gaps back into the prompt.
+
+```bash
+# Single target, default model from dyson.json.
+cargo run -p dyson --example expensive_live_security_review --release -- \
+    --config dyson.json --target juice-shop
+
+# Full sweep (fans out across every target — hence the long flag name).
+cargo run -p dyson --example expensive_live_security_review --release -- \
+    --config dyson.json --expensive-scan-all-targets
+```
+
+This is **not** a `cargo test`.  It makes real, billable LLM calls.  Reports land in `/tmp/dyson-security-review-<name>.md`.  See [Subagents → Tuning against your production model](docs/subagents.md#tuning-against-your-production-model) for how to evaluate the output.
 
 ## Running in production
 

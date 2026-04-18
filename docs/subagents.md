@@ -202,6 +202,53 @@ Signals to check on live reports:
   `taint_trace` is returning NO_PATH when it shouldn't — wrong source
   line or a non-tier-1 language missing assignment propagation.
 
+#### Tuning against your production model
+
+`smoke_ast_query`, `smoke_ast_describe`, and `smoke_taint_trace` exercise
+the security tools in isolation.  They answer "does the parser work on
+real code?" — not "does the prompt produce useful findings when driven
+by the specific model I run in prod?"  That second question is what
+[`examples/expensive_live_security_review.rs`](../crates/dyson/examples/expensive_live_security_review.rs)
+is for.
+
+The example spins up the full orchestrator stack — the `security_engineer`
+with its direct tools plus the inner planner/researcher/coder/verifier
+subagents — and runs it against a fixed set of deliberately-vulnerable
+repos (OWASP Juice Shop, NodeGoat, RailsGoat).  It uses **whatever
+provider and model your `dyson.json` resolves to**.  That is the whole
+point: when you swap in a cheaper or smaller model (say a Qwen or
+Minimax OpenRouter model instead of Opus), the failure modes shift —
+the agent may skip `taint_trace`, hallucinate file paths, invent CVE
+IDs, or confuse itself about which directory it's reviewing.  The
+`security_engineer.md` system prompt was tuned against Claude; a weaker
+model may need tighter guardrails or different few-shot examples to
+produce the same quality of report.  Run the example against your
+production model, grade the resulting `/tmp/dyson-security-review-*.md`
+reports against the signals above, and feed the gaps back into the
+prompt.  Because the example is billable, it lives *outside* `cargo
+test` — it's opt-in, one invocation at a time.
+
+```bash
+# Single target, uses the default model from dyson.json.
+cargo run -p dyson --example expensive_live_security_review --release -- \
+    --config dyson.json --target juice-shop
+
+# Full sweep across every target.  Explicit flag because it fans out
+# across several billable runs.
+cargo run -p dyson --example expensive_live_security_review --release -- \
+    --config dyson.json --expensive-scan-all-targets
+
+# One-off model override without editing the config.
+cargo run -p dyson --example expensive_live_security_review --release -- \
+    --config dyson.json --model qwen/qwen3.6-plus --target juice-shop
+```
+
+Reports land in `/tmp/dyson-security-review-<name>.md`.  Targets are
+shallow-cloned into `$TMPDIR/dyson-smoke-repos/` (shared with the
+smoke-test cache) and reused on subsequent runs.  Runtime varies
+wildly with model choice — a single target is typically 2–10 minutes;
+a full sweep can be 30+.
+
 ---
 
 ## Depth Budget
