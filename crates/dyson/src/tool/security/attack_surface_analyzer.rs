@@ -266,28 +266,21 @@ fn scan_node(
     }
 
     let source_bytes = source.as_bytes();
-    let node_text = &source[node.start_byte()..node.end_byte().min(source.len())];
     let kind = node.kind();
 
-    // Check if this is an identifier-like node that matches a surface pattern.
-    let is_identifier = config.identifier_types.contains(&kind)
-        || kind == "string_content"
-        || kind == "string_literal"
-        || kind == "string";
+    // Only identifier-kind AST nodes — substring matching on string
+    // literals flagged any source containing common English fragments
+    // (`"main"`, `"get"`, `"open"`) and blew past the 500-entry cap on
+    // any non-trivial codebase.
+    if config.identifier_types.contains(&kind) {
+        let ident = &source[node.start_byte()..node.end_byte().min(source.len())];
 
-    if is_identifier {
-        // Normalize: strip quotes, underscores for flexible matching.
-        let clean = node_text
-            .trim_matches(|c: char| c == '"' || c == '\'' || c == '`');
-
-        for (cat_idx, (_cat_name, patterns)) in SURFACE_PATTERNS.iter().enumerate() {
+        'cats: for (cat_idx, (_cat_name, patterns)) in SURFACE_PATTERNS.iter().enumerate() {
             for pattern in *patterns {
-                // Case-insensitive substring match for identifiers.
-                if clean.eq_ignore_ascii_case(pattern)
-                    || clean.contains(pattern)
-                    || pattern.contains('_')
-                        && clean.eq_ignore_ascii_case(&pattern.replace('_', "."))
-                {
+                // Exact case-insensitive match.  Substring matching is too
+                // noisy: `"get"` matched `get_users`, `target`, `widget`;
+                // `"main"` matched `domain`, `remain`, `maintenance`.
+                if ident.eq_ignore_ascii_case(pattern) {
                     let line = node.start_position().row + 1;
                     let enclosing = ast::find_enclosing_function(node, config, source_bytes)
                         .and_then(|n| nodes::extract_definition_name(&n, source_bytes));
@@ -295,16 +288,14 @@ fn scan_node(
                         .as_deref()
                         .unwrap_or("<top-level>");
 
-                    let entry = format!(
-                        "{rel_path}:{line}: {context} — {clean}"
-                    );
+                    let entry = format!("{rel_path}:{line}: {context} — {ident}");
 
                     *total_bytes += entry.len() + 1;
                     *total_entries += 1;
                     categories[cat_idx].1.push(entry);
 
-                    // Only match once per node per category.
-                    break;
+                    // One categorization per node.
+                    break 'cats;
                 }
             }
         }
@@ -433,5 +424,60 @@ mod tests {
     #[test]
     fn is_agent_only() {
         assert!(AttackSurfaceAnalyzerTool.agent_only());
+    }
+
+    #[tokio::test]
+    async fn does_not_flag_substring_matches() {
+        // Identifiers that share substrings with patterns (`get`, `main`,
+        // `post`, `open`, `flag`, `raw`) but aren't themselves the pattern
+        // must not register — that's the bug that caused the scanner to
+        // saturate at 500 entries on any realistic codebase.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("app.py"),
+            "def get_users():\n    domain = 'example.com'\n    maintenance = True\n    \
+             reopen_file = None\n    budget = 0\n    message = 'main menu'\n    \
+             flagship = 'x'\n    return domain\n",
+        )
+        .unwrap();
+
+        let tool = AttackSurfaceAnalyzerTool;
+        let input = serde_json::json!({});
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+        assert!(!output.is_error, "error: {}", output.content);
+        assert!(
+            output.content.contains("No entry points"),
+            "should have found no entry points; got: {}",
+            output.content
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_flag_strings_containing_patterns() {
+        // String literals mentioning pattern words must not register.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("msg.py"),
+            "def render():\n    \
+             msg = 'please open the main menu and post a comment'\n    \
+             return msg\n",
+        )
+        .unwrap();
+
+        let tool = AttackSurfaceAnalyzerTool;
+        let input = serde_json::json!({});
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+        assert!(!output.is_error, "error: {}", output.content);
+        assert!(
+            output.content.contains("No entry points"),
+            "should have found no entry points; got: {}",
+            output.content
+        );
     }
 }

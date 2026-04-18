@@ -124,10 +124,32 @@ impl Tool for AstQueryTool {
             Ok(q) => q,
             Err(e) => {
                 return Ok(ToolOutput::error(format!(
-                    "invalid tree-sitter query: {e}"
+                    "invalid tree-sitter query: {e}\n\n\
+                     Tip: node names differ by language.  \"Invalid node \
+                     type\" means the kind doesn't exist in this grammar — \
+                     start with a broad query (e.g. `(call_expression) @c` \
+                     for Rust/JS/Go, `(call) @c` for Python) to see the real \
+                     node structure, then narrow.  Rust in particular has no \
+                     `path_expression` or `member_expression`; use \
+                     `scoped_identifier` and `field_expression` instead."
                 )));
             }
         };
+
+        // A query with no @captures compiles but produces zero output —
+        // every result in run_query() is keyed off a capture.  Catch this
+        // up front so the model sees the real problem, not a silent
+        // "No matches found."
+        if query.capture_names().is_empty() {
+            return Ok(ToolOutput::error(
+                "query has no captures.  Add at least one `@name` so matched \
+                 nodes can be surfaced — e.g. `(function_item name: \
+                 (identifier) @fn_name)` or `(call_expression) @call`.  \
+                 Without a capture, tree-sitter matches internally but the \
+                 tool has no handle to report."
+                .to_string(),
+            ));
+        }
 
         let search_dir = match input["path"].as_str() {
             Some(sub) => match ctx.resolve_path(sub) { Ok(p) => p, Err(e) => return Ok(e) },
@@ -451,6 +473,31 @@ mod tests {
             .unwrap();
         assert!(!output.is_error, "error: {}", output.content);
         assert!(output.content.contains("hi"), "output: {}", output.content);
+    }
+
+    #[tokio::test]
+    async fn query_without_captures_returns_error() {
+        // A valid query with no @captures used to silently return "No
+        // matches found." because run_query keys output off captures.
+        // Now we catch it up front so the model sees the real problem.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("lib.rs"), "fn hello() {}\n").unwrap();
+
+        let tool = AstQueryTool;
+        let input = serde_json::json!({
+            "query": "(function_item)",
+            "language": "rust"
+        });
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+        assert!(output.is_error, "expected error, got: {}", output.content);
+        assert!(
+            output.content.contains("no captures"),
+            "output: {}",
+            output.content
+        );
     }
 
     #[tokio::test]
