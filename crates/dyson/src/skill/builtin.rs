@@ -38,7 +38,6 @@ use crate::tool::memory_search::MemorySearchTool;
 use crate::tool::read_file::ReadFileTool;
 use crate::tool::search_files::SearchFilesTool;
 use crate::tool::send_file::SendFileTool;
-use crate::tool::swarm_checkpoint::SwarmCheckpointTool;
 use crate::tool::image_generate;
 use crate::tool::web_fetch::WebFetchTool;
 use crate::tool::web_search;
@@ -83,16 +82,14 @@ impl BuiltinSkill {
     /// registered with the configured search provider.  When `None`,
     /// the tool is simply absent.
     ///
-    /// `with_swarm_checkpoint` gates `swarm_checkpoint` — outside the
-    /// swarm controller the tool is a no-op (the default `Output::checkpoint`
-    /// hook drops events), so skip registering it and save a tool slot on
-    /// every turn.  Callers pass `settings.has_swarm_controller()`.
+    /// Swarm-only tools (e.g., `swarm_checkpoint`) are NOT registered here.
+    /// The swarm controller adds them to the agent it builds, so non-swarm
+    /// deploys don't carry the schema on every LLM turn.
     pub fn new_filtered(
         web_search_config: Option<&crate::config::WebSearchConfig>,
         image_provider_config: Option<&crate::config::ProviderConfig>,
         image_model_override: Option<&str>,
         filter: &[String],
-        with_swarm_checkpoint: bool,
     ) -> Self {
         let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(BashTool::default()),
@@ -111,10 +108,6 @@ impl BuiltinSkill {
             Arc::new(WebFetchTool::default()),
             Arc::new(DependencyScanTool),
         ];
-
-        if with_swarm_checkpoint {
-            tools.push(Arc::new(SwarmCheckpointTool));
-        }
 
         if let Some(ws_cfg) = web_search_config {
             match web_search::create_provider(ws_cfg) {
@@ -171,22 +164,13 @@ impl BuiltinSkill {
 }
 
 impl BuiltinSkill {
-    /// Create a new BuiltinSkill with all default tools (no filter, no swarm).
-    ///
-    /// Convenience used by tests and setups that aren't swarm nodes.  Real
-    /// runtimes go through `new_filtered` with the controller-derived flag.
+    /// Create a new BuiltinSkill with all default tools (no filter).
     pub fn new(
         web_search_config: Option<&crate::config::WebSearchConfig>,
         image_provider_config: Option<&crate::config::ProviderConfig>,
         image_model_override: Option<&str>,
     ) -> Self {
-        Self::new_filtered(
-            web_search_config,
-            image_provider_config,
-            image_model_override,
-            &[],
-            false,
-        )
+        Self::new_filtered(web_search_config, image_provider_config, image_model_override, &[])
     }
 }
 
@@ -269,14 +253,13 @@ mod tests {
     }
 
     #[test]
-    fn swarm_checkpoint_registered_only_when_requested() {
-        let off = BuiltinSkill::new_filtered(None, None, None, &[], false);
-        let on = BuiltinSkill::new_filtered(None, None, None, &[], true);
-        assert_eq!(off.tools().len() + 1, on.tools().len());
-        let on_names: Vec<&str> = on.tools().iter().map(|t| t.name()).collect();
-        let off_names: Vec<&str> = off.tools().iter().map(|t| t.name()).collect();
-        assert!(on_names.contains(&"swarm_checkpoint"));
-        assert!(!off_names.contains(&"swarm_checkpoint"));
+    fn swarm_checkpoint_is_not_a_builtin() {
+        let skill = BuiltinSkill::new(None, None, None);
+        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
+        assert!(
+            !names.contains(&"swarm_checkpoint"),
+            "swarm_checkpoint belongs to the swarm controller, not BuiltinSkill"
+        );
     }
 
     #[test]
@@ -286,7 +269,6 @@ mod tests {
             None,
             None,
             &["bash".to_string(), "read_file".to_string()],
-            false,
         );
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert_eq!(names, vec!["bash", "read_file"]);
@@ -295,7 +277,7 @@ mod tests {
     #[test]
     fn empty_filter_includes_all() {
         let all = BuiltinSkill::new(None, None, None);
-        let filtered = BuiltinSkill::new_filtered(None, None, None, &[], false);
+        let filtered = BuiltinSkill::new_filtered(None, None, None, &[]);
         assert_eq!(all.tools().len(), filtered.tools().len());
     }
 

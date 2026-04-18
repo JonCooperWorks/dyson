@@ -321,6 +321,12 @@ impl super::Controller for SwarmController {
         )
         .await?;
 
+        // `swarm_checkpoint` lives on the swarm controller rather than in
+        // BuiltinSkill because it's a no-op outside this controller (the
+        // default `Output::checkpoint` hook drops events).  Registering it
+        // here keeps non-swarm deploys from paying for the schema.
+        agent.register_tool(std::sync::Arc::new(crate::tool::swarm_checkpoint::SwarmCheckpointTool));
+
         // ── 2. PROBE HARDWARE ──
         let tool_names = agent.tool_names();
         let manifest = HardwareProbe::run(&node_name, tool_names, self.config.description.clone()).await;

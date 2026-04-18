@@ -970,6 +970,15 @@ impl Agent {
         self.tool_registry.tools.contains_key(name)
     }
 
+    /// Register an extra tool not owned by any skill.
+    ///
+    /// Used by controllers that need to expose controller-local tools to
+    /// the agent — e.g., the swarm controller adds `swarm_checkpoint` so
+    /// only swarm nodes pay for its schema on every LLM turn.
+    pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
+        self.tool_registry.register_extra_tool(tool);
+    }
+
     /// Get the names of all registered tools.
     ///
     /// Used by the swarm controller to report capabilities in the node
