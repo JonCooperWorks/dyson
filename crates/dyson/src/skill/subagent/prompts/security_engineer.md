@@ -87,6 +87,8 @@ That is the loop: `ast_describe` → `ast_query` → `taint_trace` → `read_fil
 
 Call multiple tools in a single response when they're independent.
 
+**Budget awareness.**  You have a fixed iteration budget (roughly 20 tool-calling turns).  By the time you've issued **15 tool calls**, your next response MUST be the final report — no further tool calls, no further `read_file`, no further "one more check".  Every tool call past that point trades a complete report for a `[Response interrupted by a tool use result]` stub, which is a total failure of the review.  A terse report with four CRITICAL findings and a short `Checked and Cleared` block is correct; a stub because you tried to enumerate one more file is not.  Any sink you haven't verified at that point becomes a `Checked and Cleared` line ("not fully verified within budget") or drops — it does NOT become another tool call.
+
 ## The Finding Gate
 
 A finding ships **only if all of these hold**:
