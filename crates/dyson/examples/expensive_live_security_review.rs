@@ -67,6 +67,17 @@ struct Args {
     /// each other — particularly when measuring run-to-run variance.
     #[arg(long)]
     report_suffix: Option<String>,
+
+    /// Override the git ref (tag, branch, or commit SHA) checked out
+    /// for the target.  Takes precedence over `Target::git_ref`.  Use
+    /// this to review a specific historical version — particularly for
+    /// reproducing a published CVE against the exact vulnerable release.
+    /// Example: `--target juice-shop --ref v15.0.0`.  Cache directory
+    /// includes the ref so different versions of the same target don't
+    /// collide.  Use full 40-character SHAs; GitHub rejects short SHAs
+    /// in the upload-pack protocol (`couldn't find remote ref`).
+    #[arg(long = "ref")]
+    git_ref: Option<String>,
 }
 
 struct Target {
@@ -80,6 +91,12 @@ struct Target {
     sub: &'static str,
     /// Human-readable description threaded into the task context.
     description: &'static str,
+    /// Optional git ref (tag, branch, or commit SHA) to check out.
+    /// `None` = shallow-clone the default branch head (latest).  `Some`
+    /// pins to a specific version — useful for reproducing published
+    /// CVEs against the exact vulnerable release.  Overridden by the
+    /// `--ref` CLI flag when present.
+    git_ref: Option<&'static str>,
 }
 
 const TARGETS: &[Target] = &[
@@ -88,24 +105,42 @@ const TARGETS: &[Target] = &[
         slug: "juice-shop/juice-shop",
         sub: "routes",
         description: "OWASP Juice Shop - deliberately vulnerable Node/Express app",
+        git_ref: None,
     },
     Target {
         name: "nodegoat",
         slug: "OWASP/NodeGoat",
         sub: "app",
         description: "OWASP NodeGoat - deliberately vulnerable Node/Express app for OWASP Top 10",
+        git_ref: None,
     },
     Target {
         name: "railsgoat",
         slug: "OWASP/railsgoat",
         sub: "app",
         description: "OWASP RailsGoat - deliberately vulnerable Ruby on Rails app",
+        git_ref: None,
     },
     Target {
         name: "dyson",
         slug: "joncooperworks/dyson",
         sub: "",
         description: "Rust based agent - review the app for AI and rust vulnerabilities",
+        git_ref: None,
+    },
+    // --- Pinned-version targets for CVE-reproduction runs -----------------
+    //
+    // These entries pin a specific release so the reviewer can be
+    // compared against published advisories.  Keep the sub scoped tight —
+    // React's monorepo is too large to review wholesale in the 20-iter
+    // budget.  `packages/react-dom/src/server` is the historical CVE
+    // hotspot (SSR HTML escape bugs).
+    Target {
+        name: "react-19.2.0",
+        slug: "facebook/react",
+        sub: "packages/react-dom/src/server",
+        description: "React 19.2.0 - packages/react-dom/src/server (SSR render / HTML escape path) for CVE repro",
+        git_ref: Some("v19.2.0"),
     },
 ];
 
@@ -216,8 +251,9 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let suffix = args.report_suffix.as_deref();
+    let ref_override = args.git_ref.as_deref();
     for t in selected {
-        run_target(t, &cache, &sec_eng, suffix).await?;
+        run_target(t, &cache, &sec_eng, suffix, ref_override).await?;
     }
     Ok(())
 }
@@ -227,11 +263,30 @@ async fn run_target(
     cache: &Path,
     sec_eng: &Arc<dyn Tool>,
     report_suffix: Option<&str>,
+    ref_override: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let repo_dir = cache.join(t.slug.replace('/', "__"));
+    // Resolve the effective ref: CLI flag wins, else baked-in `git_ref`,
+    // else None (clone default branch head).
+    let effective_ref: Option<&str> = ref_override.or(t.git_ref);
+
+    // Cache directory includes the ref so `juice-shop@v15.0.0` and
+    // `juice-shop@HEAD` don't share a checkout.  Slashes and other
+    // filesystem-unfriendly chars in refs get replaced.
+    let cache_key = match effective_ref {
+        Some(r) => format!(
+            "{}__{}",
+            t.slug.replace('/', "__"),
+            sanitize_ref_for_path(r)
+        ),
+        None => t.slug.replace('/', "__"),
+    };
+    let repo_dir = cache.join(&cache_key);
     if !repo_dir.exists() {
-        println!("-> cloning {} ...", t.slug);
-        shallow_clone(t.slug, &repo_dir)?;
+        match effective_ref {
+            Some(r) => println!("-> cloning {} @ {} ...", t.slug, r),
+            None => println!("-> cloning {} ...", t.slug),
+        }
+        shallow_clone(t.slug, &repo_dir, effective_ref)?;
     }
     let review_root = repo_dir.join(t.sub);
     if !review_root.exists() {
@@ -241,24 +296,44 @@ async fn run_target(
     // no `..` segments, no symlink wobble between parent and child.
     let review_root = review_root.canonicalize()?;
 
-    println!(
-        "\n=== {} [{}] @ {} ===",
-        t.slug,
-        t.name,
-        review_root.display()
-    );
+    match effective_ref {
+        Some(r) => println!(
+            "\n=== {} [{}] @ {} @ {} ===",
+            t.slug,
+            t.name,
+            r,
+            review_root.display()
+        ),
+        None => println!(
+            "\n=== {} [{}] @ {} ===",
+            t.slug,
+            t.name,
+            review_root.display()
+        ),
+    }
 
     // ToolContext's working_dir is irrelevant now — the orchestrator's
     // `path` input overrides it for the child.
     let mut ctx = ToolContext::from_cwd()?;
     ctx.dangerous_no_sandbox = true;
 
-    let input = json!({
-        "task": REVIEW_PROMPT,
-        "context": format!(
+    // Fold the version/ref into the context string so the reviewer knows
+    // which release it's looking at — relevant when reproducing a CVE
+    // against a specific version.
+    let context = match effective_ref {
+        Some(r) => format!(
+            "Target: {} (pinned to {}).\nReview scope: `{}` subpath of {} at {}.",
+            t.description, r, t.sub, t.slug, r
+        ),
+        None => format!(
             "Target: {}.\nReview scope: `{}` subpath of {}.",
             t.description, t.sub, t.slug
         ),
+    };
+
+    let input = json!({
+        "task": REVIEW_PROMPT,
+        "context": context,
         "path": review_root.display().to_string(),
     });
 
@@ -283,15 +358,56 @@ async fn run_target(
     Ok(())
 }
 
-fn shallow_clone(slug: &str, dest: &Path) -> Result<(), String> {
+fn shallow_clone(slug: &str, dest: &Path, git_ref: Option<&str>) -> Result<(), String> {
     let url = format!("https://github.com/{slug}.git");
-    let status = Command::new("git")
-        .args(["clone", "--depth", "1", "--quiet", &url])
-        .arg(dest)
-        .status()
-        .map_err(|e| format!("spawn git: {e}"))?;
-    if !status.success() {
-        return Err(format!("git clone {url} exited {status}"));
+    match git_ref {
+        None => {
+            // Default path: one-shot shallow clone of the default branch.
+            let status = Command::new("git")
+                .args(["clone", "--depth", "1", "--quiet", &url])
+                .arg(dest)
+                .status()
+                .map_err(|e| format!("spawn git: {e}"))?;
+            if !status.success() {
+                return Err(format!("git clone {url} exited {status}"));
+            }
+        }
+        Some(r) => {
+            // Pinned ref: init + fetch the specific ref + checkout
+            // FETCH_HEAD.  Works for tags, branches, and commit SHAs —
+            // GitHub allows fetching arbitrary reachable SHAs over the
+            // smart HTTP protocol.
+            std::fs::create_dir_all(dest)
+                .map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
+            run_git_in(&["init", "--quiet"], dest)?;
+            run_git_in(&["remote", "add", "origin", &url], dest)?;
+            run_git_in(&["fetch", "--depth", "1", "--quiet", "origin", r], dest)?;
+            run_git_in(&["checkout", "--quiet", "FETCH_HEAD"], dest)?;
+        }
     }
     Ok(())
+}
+
+fn run_git_in(args: &[&str], cwd: &Path) -> Result<(), String> {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .status()
+        .map_err(|e| format!("spawn git {args:?}: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "git {args:?} in {} exited {status}",
+            cwd.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Replace path-unfriendly characters in a git ref so it can safely be
+/// a directory-name component.  Slashes become underscores (e.g.
+/// `release/v15` → `release_v15`).  Tags and SHAs pass through unchanged.
+fn sanitize_ref_for_path(r: &str) -> String {
+    r.chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':') { '_' } else { c })
+        .collect()
 }
