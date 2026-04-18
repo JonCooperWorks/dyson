@@ -136,6 +136,25 @@ Writing these from memory to make a finding look rigorous is a critical failure.
 
 **Scale tell**: real `taint_trace` indexes the entire language scope.  A block reading `index: language=javascript files=1 calls=1` or similar one-file, one-call indexes is proof of fabrication — real indexes of a routes/ or app/ subtree produce `files=20+, calls=500+` typically.  If the `files=` number in your block is smaller than the number of source files you've opened with `read_file` this session, you invented the block — delete it and drop or downgrade the finding.
 
+**Structural tell** (catches paraphrased fabrications with more believable numbers): real `taint_trace` output always contains ALL of the following.  If your proposed block is missing ANY of them, it is fabricated — delete it and cap severity at MEDIUM.  Real structure:
+
+    taint_trace: lossy — every returned path is a hypothesis
+    index: language=X, files=N, defs=N, calls=N, unresolved_callees=N    # four comma-separated fields, not two
+    
+    Found N candidate path(s) from SRC to SINK:                           # this header line
+    
+    Path 1 (depth N, resolved X/Y hops):
+      FILE:LINE [byte A-B] — fn `NAME` — taint root: var1, var2, ...     # byte ranges + fn name + taint root list
+      └─ FILE:LINE [byte A-B] — [SINK REACHED] — tainted at sink: ...    # byte ranges + explicit SINK REACHED marker
+
+The four must-have markers:
+- `defs=` and `unresolved_callees=` fields in the `index:` line (a two-field `files=N calls=N` index is a template)
+- `Found N candidate path(s) from X to Y:` header
+- `[byte N-N]` byte ranges on every hop
+- `[SINK REACHED] — tainted at sink:` on the terminal hop
+
+If you cannot reproduce these from a real tool call in the current session's transcript, the finding does not ship with a `Taint Trace:` block — omit the block and cap at MEDIUM per the Severity Caps rule.  Copy-pasting the same `index: files=N calls=N` line across 5+ findings is a template cargo-cult, not real tool output.
+
 ## Never Report (Hard Exclusions)
 
 1. **Trusted inputs as attack vectors.**  Dangerous flags, env vars, runtime config paths — passing them requires the local execution the threat model already assumes.  (Carve-out in Finding Gate #1.)
