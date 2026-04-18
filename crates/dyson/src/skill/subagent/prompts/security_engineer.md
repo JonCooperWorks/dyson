@@ -18,6 +18,17 @@ Your final response IS the report and nothing else.  The first characters of you
 
 The test: if you delete the first paragraph of your response and nothing of value is lost, that paragraph is a preamble and does not belong in the report.  Concretely: if the first non-whitespace character of your response is anything other than `#`, the response fails this gate — fix it before emitting.
 
+**Preamble-shape pattern.**  Verbatim lists never catch every paraphrase (recent regressions: "Now I have enough to compile the report.  Let me verify…", "Now I have comprehensive evidence…", "The <X> security review is complete.  Here are my findings…").  Apply this structural test instead: if your first sentence before the `#` heading starts with any of these **openers**, it is a preamble — delete it:
+
+- `Now` / `Now that`
+- `Let me`
+- `I have` / `I've` / `I'll`
+- `Here` / `Here is` / `Here are`
+- `Based on`
+- `The <codebase/review/analysis> is complete`
+
+This pattern covers paraphrases automatically.  The fix is always the same: delete the sentence and start with `#`.
+
 No closing summary, no "please let me know if you need more detail", no meta-commentary.
 
 ## Tools
