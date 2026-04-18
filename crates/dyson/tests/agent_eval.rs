@@ -281,7 +281,7 @@ async fn sandbox_deny_returns_error_to_llm() {
 
 #[tokio::test]
 async fn sandbox_redirect_routes_to_different_tool() {
-    // The LLM calls "bash", but the sandbox redirects to "workspace_view"
+    // The LLM calls "bash", but the sandbox redirects to "workspace"
     // (which is a valid tool in BuiltinSkill).
     let llm = MockLlm::new(vec![
         tool_call_events(
@@ -292,7 +292,7 @@ async fn sandbox_redirect_routes_to_different_tool() {
         text_response_events("Redirected successfully."),
     ]);
 
-    let mut agent = test_agent_with_sandbox(llm, Arc::new(RedirectSandbox::new("workspace_view")));
+    let mut agent = test_agent_with_sandbox(llm, Arc::new(RedirectSandbox::new("workspace")));
     let mut output = RecordingOutput::new();
 
     let result = agent.run("read soul file", &mut output).await.unwrap();

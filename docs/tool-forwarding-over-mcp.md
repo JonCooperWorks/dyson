@@ -22,21 +22,19 @@ configuration needed.
 
 ## The Problem
 
-Dyson has workspace tools that give the agent identity and memory:
+Dyson has a unified `workspace` tool that gives the agent identity and memory:
 
 | Tool | Purpose |
 |------|---------|
-| `workspace_view` | Read workspace files (SOUL.md, MEMORY.md, journals, etc.) |
-| `workspace_search` | Search across workspace files by pattern |
-| `workspace_update` | Write/append to workspace files |
+| `workspace` | View, list, search, or update workspace files (SOUL.md, MEMORY.md, journals, etc.) via the `op` parameter. |
 
-With the Anthropic or OpenAI backends, these tools go through Dyson's own agent
+With the Anthropic or OpenAI backends, this tool goes through Dyson's own agent
 loop — the LLM emits `tool_use` blocks, Dyson executes them, and sends back
 `tool_result`.  Simple.
 
 But with the Claude Code backend, Claude Code **is** the agent.  Dyson just
-streams its output.  Claude Code has no concept of Dyson's workspace tools.
-We can't shove them into Claude Code's tool list — it manages its own tools
+streams its output.  Claude Code has no concept of Dyson's workspace tool.
+We can't shove it into Claude Code's tool list — it manages its own tools
 internally.
 
 ---
@@ -60,9 +58,9 @@ supports for extending its tool set.  Dyson exploits this by becoming an MCP ser
 │  │     {"dyson-        │     │   ├─ notifications/      │   │
 │  │      workspace":    │     │   │  initialized         │   │
 │  │      {"type":"url", │     │   ├─ tools/list          │   │
-│  │       "url":        │     │   │  → workspace_view    │   │
-│  │       "http://...   │     │   │  → workspace_search  │   │
-│  │       /mcp"}}}'     │     │   │  → workspace_update  │   │
+│  │       "url":        │     │   │  → workspace         │   │
+│  │       "http://...   │     │   │                      │   │
+│  │       /mcp"}}}'     │     │   │                      │   │
 │  │                     │     │   └─ tools/call          │   │
 │  └──────┬──────────────┘     │      → runs Tool impl   │   │
 │         │ stdin/stdout        └─────────────┬────────────┘   │
@@ -112,9 +110,9 @@ Each time `ClaudeCodeClient::stream()` is called (once per LLM turn):
 4. **Claude Code connects**: During startup, Claude Code reads the MCP config,
    connects to our HTTP server, and runs the MCP handshake.
 
-5. **Tools available**: Claude Code now has `workspace_view`, `workspace_search`,
-   and `workspace_update` as first-class structured tools with proper JSON
-   schemas.  The LLM can call them just like Bash, Read, or Write.
+5. **Tools available**: Claude Code now has the unified `workspace` tool as a
+   first-class structured tool with a proper JSON schema.  The LLM can call
+   it just like Bash, Read, or Write.
 
 ### MCP Handshake (Server Perspective)
 
@@ -128,11 +126,11 @@ Claude Code                    McpHttpServer
     │◀─ 200 OK ───────────────────│  {"result": {}}
     │                              │
     │── POST /mcp ────────────────▶│  {"method": "tools/list"}
-    │◀─ 200 OK ───────────────────│  {"result": {"tools": [workspace_view, ...]}}
+    │◀─ 200 OK ───────────────────│  {"result": {"tools": [workspace]}}
     │                              │
     │   ... during agent loop ...  │
     │                              │
-    │── POST /mcp ────────────────▶│  {"method": "tools/call", "params": {"name": "workspace_view", ...}}
+    │── POST /mcp ────────────────▶│  {"method": "tools/call", "params": {"name": "workspace", "arguments": {"op": "view", ...}}}
     │◀─ 200 OK ───────────────────│  {"result": {"content": [{"type": "text", "text": "..."}]}}
     │                              │
 ```
@@ -148,9 +146,9 @@ When Claude Code calls a workspace tool:
    used everywhere in Dyson
 5. Wraps the `ToolOutput` in MCP content blocks and returns
 
-The tools are not duplicated.  `McpHttpServer` uses the exact same
-`WorkspaceViewTool`, `WorkspaceSearchTool`, and `WorkspaceUpdateTool`
-that Dyson's own agent loop would use with the Anthropic or OpenAI backends.
+The tool is not duplicated.  `McpHttpServer` uses the exact same
+`WorkspaceTool` that Dyson's own agent loop would use with the Anthropic
+or OpenAI backends.
 
 ### Lifecycle
 
@@ -191,10 +189,10 @@ Configured via `mcp_servers` in `dyson.json`.  Used with all LLM backends.
 
 ### Dyson as MCP Server (serve.rs)
 
-Dyson **serves** workspace tools to Claude Code via an HTTP MCP server.
+Dyson **serves** the unified workspace tool to Claude Code via an HTTP MCP server.
 
 ```
-Claude Code agent loop → HTTP → McpHttpServer → WorkspaceViewTool.run() → workspace
+Claude Code agent loop → HTTP → McpHttpServer → WorkspaceTool.run() → workspace
 ```
 
 Automatic when `provider: "claude_code"` + workspace is configured.  Only used

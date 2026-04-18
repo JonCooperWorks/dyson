@@ -75,7 +75,7 @@ Subdirectories are fully supported — files are loaded recursively from both
 3. If `kb/INDEX.md` exists and is non-empty, its content is injected into the
    system prompt under `## KNOWLEDGE BASE`.
 4. At runtime the agent queries the KB via the `kb_search` tool.  Writes via
-   `workspace_update` automatically re-index the affected file.
+   the `workspace` tool (op=update) automatically re-index the affected file.
 
 ---
 
@@ -155,8 +155,8 @@ on `memory/`.  Both use the same underlying `MemoryStore::search()` method.
    the agent.  Files are indexed automatically on load.
 
 2. **Agent-maintained wiki** — Ask the agent to read raw sources and compile
-   them into wiki articles under `kb/wiki/`.  The agent writes via
-   `workspace_update`.
+   them into wiki articles under `kb/wiki/`.  The agent writes via the
+   `workspace` tool (op=update).
 
 3. **INDEX.md curation** — Create `kb/INDEX.md` with a topic map.  This goes
    into the system prompt so the agent always knows what's available without

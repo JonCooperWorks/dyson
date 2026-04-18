@@ -119,11 +119,9 @@ impl Sandbox for PolicySandbox {
             "web_fetch" => check_web_fetch(input, &policy),
 
             // ----- Internal tools — always allowed -----
-            "workspace_view" | "workspace_search" | "workspace_update" | "memory_search" => {
-                Ok(SandboxDecision::Allow {
-                    input: input.clone(),
-                })
-            }
+            "workspace" | "memory_search" => Ok(SandboxDecision::Allow {
+                input: input.clone(),
+            }),
 
             // ----- Network tools + unknown tools (including MCP) -----
             _ => {
@@ -899,12 +897,7 @@ mod tests {
     async fn workspace_tools_always_pass() {
         let s = sandbox_default();
         let ctx = ctx();
-        for tool in &[
-            "workspace_view",
-            "workspace_search",
-            "workspace_update",
-            "memory_search",
-        ] {
+        for tool in &["workspace", "memory_search"] {
             let input = serde_json::json!({});
             let decision = s.check(tool, &input, &ctx).await.unwrap();
             assert!(

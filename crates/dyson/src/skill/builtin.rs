@@ -42,9 +42,7 @@ use crate::tool::swarm_checkpoint::SwarmCheckpointTool;
 use crate::tool::image_generate;
 use crate::tool::web_fetch::WebFetchTool;
 use crate::tool::web_search;
-use crate::tool::workspace_search::WorkspaceSearchTool;
-use crate::tool::workspace_update::WorkspaceUpdateTool;
-use crate::tool::workspace_view::WorkspaceViewTool;
+use crate::tool::workspace::WorkspaceTool;
 use crate::tool::write_file::WriteFileTool;
 
 // ---------------------------------------------------------------------------
@@ -55,11 +53,10 @@ use crate::tool::write_file::WriteFileTool;
 ///
 /// Currently provides:
 /// - **bash**: Shell command execution
-/// - **workspace_view**: View/list workspace files (SOUL.md, MEMORY.md, etc.)
-/// - **workspace_search**: Search across workspace files
-/// - **workspace_update**: Update workspace files (set or append content)
+/// - **workspace**: Unified view/list/search/update for workspace files
+///   (SOUL.md, MEMORY.md, IDENTITY.md, journals, etc.)
 ///
-/// The workspace tools give the agent runtime access to its identity and
+/// The workspace tool gives the agent runtime access to its identity and
 /// memory files through the `Workspace` trait, enabling it to read and
 /// evolve its own personality, memory, and journals.
 ///
@@ -101,9 +98,7 @@ impl BuiltinSkill {
             Arc::new(SearchFilesTool),
             Arc::new(SendFileTool),
             Arc::new(MemorySearchTool),
-            Arc::new(WorkspaceViewTool),
-            Arc::new(WorkspaceSearchTool),
-            Arc::new(WorkspaceUpdateTool),
+            Arc::new(WorkspaceTool),
             Arc::new(LoadSkillTool),
             Arc::new(KbSearchTool),
             Arc::new(KbStatusTool),
@@ -237,7 +232,7 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new(None, None, None);
         let tools = skill.tools();
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 16);
         assert_eq!(tools[0].name(), "bash");
         assert_eq!(tools[1].name(), "read_file");
         assert_eq!(tools[2].name(), "write_file");
@@ -247,15 +242,13 @@ mod tests {
         assert_eq!(tools[6].name(), "search_files");
         assert_eq!(tools[7].name(), "send_file");
         assert_eq!(tools[8].name(), "memory_search");
-        assert_eq!(tools[9].name(), "workspace_view");
-        assert_eq!(tools[10].name(), "workspace_search");
-        assert_eq!(tools[11].name(), "workspace_update");
-        assert_eq!(tools[12].name(), "load_skill");
-        assert_eq!(tools[13].name(), "kb_search");
-        assert_eq!(tools[14].name(), "kb_status");
-        assert_eq!(tools[15].name(), "swarm_checkpoint");
-        assert_eq!(tools[16].name(), "web_fetch");
-        assert_eq!(tools[17].name(), "dependency_scan");
+        assert_eq!(tools[9].name(), "workspace");
+        assert_eq!(tools[10].name(), "load_skill");
+        assert_eq!(tools[11].name(), "kb_search");
+        assert_eq!(tools[12].name(), "kb_status");
+        assert_eq!(tools[13].name(), "swarm_checkpoint");
+        assert_eq!(tools[14].name(), "web_fetch");
+        assert_eq!(tools[15].name(), "dependency_scan");
     }
 
     #[test]
@@ -302,7 +295,7 @@ mod tests {
         let skill = BuiltinSkill::new(None, Some(&config), None);
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert!(names.contains(&"image_generate"));
-        assert_eq!(skill.tools().len(), 19);
+        assert_eq!(skill.tools().len(), 17);
     }
 
     #[test]

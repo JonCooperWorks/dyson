@@ -10,21 +10,17 @@
 //   this one trait.
 //
 // Module layout:
-//   mod.rs              — Tool trait, ToolContext, ToolOutput (this file)
-//   bash.rs             — Shell execution tool
-//   workspace_view.rs   — View/list workspace files
-//   workspace_search.rs — Search across workspace files
-//   workspace_update.rs — Update workspace files (set/append)
+//   mod.rs       — Tool trait, ToolContext, ToolOutput (this file)
+//   bash.rs      — Shell execution tool
+//   workspace.rs — Unified view/list/search/update for workspace files
 //
 // How tools fit into the architecture:
 //
 //   Skill (owns tools)
 //     │
 //     ├── Arc<dyn Tool>  ─── BashTool
-//     ├── Arc<dyn Tool>  ─── WorkspaceViewTool
-//     ├── Arc<dyn Tool>  ─── WorkspaceSearchTool
-//     ├── Arc<dyn Tool>  ─── WorkspaceUpdateTool
-//     └── Arc<dyn Tool>  ─── McpRemoteTool     (MCP servers)
+//     ├── Arc<dyn Tool>  ─── WorkspaceTool  (view / list / search / update)
+//     └── Arc<dyn Tool>  ─── McpRemoteTool  (MCP servers)
 //           │
 //           ▼
 //   Agent (flat lookup: HashMap<name, Arc<dyn Tool>>)
@@ -70,9 +66,7 @@ pub mod skill_create;
 pub mod swarm_checkpoint;
 pub mod web_fetch;
 pub mod web_search;
-pub mod workspace_search;
-pub mod workspace_update;
-pub mod workspace_view;
+pub mod workspace;
 pub mod write_file;
 pub mod security;
 

@@ -60,8 +60,8 @@ use crate::error::{DysonError, Result};
 /// SOUL.md, IDENTITY.md, MEMORY.md, journals, etc.  Implementations
 /// decide where and how files are stored.
 ///
-/// The agent interacts with the workspace through tools (workspace_view,
-/// workspace_search, workspace_update) which call these methods.
+/// The agent interacts with the workspace through the unified `workspace`
+/// tool (ops: view/list/search/update) which calls these methods.
 pub trait Workspace: Send + Sync {
     /// Get a file's content by name (e.g., "SOUL.md", "memory/2026-03-19.md").
     ///

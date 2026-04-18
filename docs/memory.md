@@ -97,7 +97,7 @@ chars of truncated context.
 | `MEMORY.md` | 2,500 chars | 3,375 chars |
 | `USER.md` | 1,375 chars | 1,856 chars |
 
-`workspace_update` behaviour:
+`workspace` op=update behaviour:
 
 - **At or below soft target** — success, `[current/target chars]`.
 - **In the overflow band** — success, `[current/target chars — over soft target, within ceiling N]`.
@@ -221,7 +221,7 @@ reassembly, and orphaned tool pair repair.  See
 | memory_search tool | `src/tool/memory_search.rs` |
 | KbSearchTool | `src/tool/kb_search.rs` |
 | KbStatusTool | `src/tool/kb_status.rs` |
-| workspace_update tool | `src/tool/workspace_update.rs` |
+| workspace tool | `src/tool/workspace.rs` |
 
 ---
 

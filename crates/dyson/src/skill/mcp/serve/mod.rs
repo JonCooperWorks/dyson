@@ -19,9 +19,9 @@
 //     Normal Dyson:  Dyson agent loop → tool.run() → workspace
 //     Claude Code:   Claude Code agent loop → MCP → Dyson HTTP server → workspace
 //
-//   This way, Claude Code can access workspace_view, workspace_search,
-//   and workspace_update as first-class structured tools — with proper
-//   JSON schemas, validation, and tool_use blocks — without Dyson needing
+//   This way, Claude Code can access the unified `workspace` tool as a
+//   first-class structured tool — with a proper JSON schema, validation,
+//   and tool_use blocks — without Dyson needing
 //   to duplicate Claude Code's built-in tool execution.
 //
 // Architecture:
@@ -39,9 +39,9 @@
 //   │  │     {"dyson-        │     │   ├─ notifications/      │   │
 //   │  │      workspace":    │     │   │  initialized         │   │
 //   │  │      {"type":"sse", │     │   ├─ tools/list          │   │
-//   │  │       "url":        │     │   │  → workspace_view    │   │
-//   │  │       "http://...   │     │   │  → workspace_search  │   │
-//   │  │       /mcp"}}}'     │     │   │  → workspace_update  │   │
+//   │  │       "url":        │     │   │  → workspace         │   │
+//   │  │       "http://...   │     │   │                      │   │
+//   │  │       /mcp"}}}'     │     │   │                      │   │
 //   │  │                     │     │   └─ tools/call          │   │
 //   │  └──────┬──────────────┘     │      → runs Tool impl   │   │
 //   │         │ stdin/stdout        └─────────────┬────────────┘   │
@@ -58,7 +58,7 @@
 //   1. Claude Code connects to http://127.0.0.1:{port}/mcp
 //   2. Sends POST with `initialize` → we respond with capabilities
 //   3. Sends POST with `notifications/initialized` → we acknowledge
-//   4. Sends POST with `tools/list` → we return workspace tool definitions
+//   4. Sends POST with `tools/list` → we return the workspace tool definition
 //   5. During its agent loop, sends `tools/call` → we execute the tool
 //
 // HTTP transport details:
@@ -75,18 +75,18 @@
 // Tool execution flow:
 //
 //   Claude Code calls tools/call with:
-//     {"method":"tools/call","params":{"name":"workspace_view","arguments":{"file":"SOUL.md"}}}
+//     {"method":"tools/call","params":{"name":"workspace","arguments":{"op":"view","file":"SOUL.md"}}}
 //
 //   McpHttpServer:
-//     1. Looks up "workspace_view" in its tools HashMap
+//     1. Looks up "workspace" in its tools HashMap
 //     2. Builds a ToolContext with the shared workspace Arc<RwLock<...>>
 //     3. Calls tool.run(arguments, &ctx) — same Tool trait used everywhere
 //     4. Wraps the ToolOutput in MCP content blocks:
 //        {"content":[{"type":"text","text":"# Agent Soul\n..."}],"isError":false}
 //     5. Returns as JSON-RPC response
 //
-//   The tools are the exact same WorkspaceViewTool, WorkspaceSearchTool,
-//   and WorkspaceUpdateTool that Dyson uses internally — no duplication.
+//   The tool is the exact same WorkspaceTool that Dyson uses internally —
+//   no duplication.
 //
 // Sandboxing:
 //
@@ -151,9 +151,7 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 
 /// Per-request timeout for MCP request handling.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-use crate::tool::workspace_search::WorkspaceSearchTool;
-use crate::tool::workspace_update::WorkspaceUpdateTool;
-use crate::tool::workspace_view::WorkspaceViewTool;
+use crate::tool::workspace::WorkspaceTool;
 use crate::tool::{Tool, ToolContext};
 use crate::workspace::Workspace;
 
@@ -170,11 +168,11 @@ use super::protocol::{JsonRpcResponse, McpToolDef};
 ///
 /// ## How it works
 ///
-/// The server wraps Dyson's existing workspace tools (view, search, update)
-/// as MCP tool definitions.  When Claude Code calls `tools/list`, it gets
-/// back the tool names, descriptions, and JSON schemas.  When it calls
-/// `tools/call`, the server delegates to the same `Tool::run()` method
-/// that Dyson's own agent loop uses.
+/// The server wraps Dyson's unified `WorkspaceTool` as an MCP tool
+/// definition.  When Claude Code calls `tools/list`, it gets back the tool
+/// name, description, and JSON schema.  When it calls `tools/call`, the
+/// server delegates to the same `Tool::run()` method that Dyson's own
+/// agent loop uses.
 ///
 /// ## Shared state
 ///
@@ -202,8 +200,9 @@ pub struct McpHttpServer {
 
     /// Workspace tools indexed by name for O(1) dispatch.
     ///
-    /// Populated once in `new()` with WorkspaceViewTool, WorkspaceSearchTool,
-    /// and WorkspaceUpdateTool.  Never modified after construction.
+    /// Populated once in `new()` with the unified `WorkspaceTool`, plus any
+    /// extra non-agent-only tools the agent forwards.  Never modified after
+    /// construction.
     tools: HashMap<String, Arc<dyn Tool>>,
 
     /// Whether sandbox enforcement is bypassed.
@@ -263,15 +262,10 @@ impl McpHttpServer {
     ) -> Self {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
 
-        // Create the three workspace tools.  These are the same Tool impls
-        // used by Dyson's own agent loop — we're just wrapping them in MCP.
-        let view = Arc::new(WorkspaceViewTool) as Arc<dyn Tool>;
-        let search = Arc::new(WorkspaceSearchTool) as Arc<dyn Tool>;
-        let update = Arc::new(WorkspaceUpdateTool) as Arc<dyn Tool>;
-
-        tools.insert(view.name().to_string(), view);
-        tools.insert(search.name().to_string(), search);
-        tools.insert(update.name().to_string(), update);
+        // Create the unified workspace tool.  This is the same Tool impl
+        // used by Dyson's own agent loop — we're just wrapping it in MCP.
+        let workspace_tool = Arc::new(WorkspaceTool) as Arc<dyn Tool>;
+        tools.insert(workspace_tool.name().to_string(), workspace_tool);
 
         // Merge in extra (non-agent-only) tools from the agent.
         for (name, tool) in extra_tools {
@@ -607,7 +601,7 @@ impl McpHttpServer {
     /// Handle `tools/list` — return definitions for all workspace tools.
     ///
     /// Converts each `Arc<dyn Tool>` into an `McpToolDef` containing:
-    /// - `name`: The tool's unique identifier (e.g., "workspace_view")
+    /// - `name`: The tool's unique identifier (e.g., "workspace")
     /// - `description`: Human-readable description (shown to the LLM)
     /// - `inputSchema`: JSON Schema for the tool's parameters
     ///
@@ -638,8 +632,8 @@ impl McpHttpServer {
     ///   "id": 3,
     ///   "method": "tools/call",
     ///   "params": {
-    ///     "name": "workspace_view",
-    ///     "arguments": { "file": "SOUL.md" }
+    ///     "name": "workspace",
+    ///     "arguments": { "op": "view", "file": "SOUL.md" }
     ///   }
     /// }
     /// ```

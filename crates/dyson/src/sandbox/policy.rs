@@ -191,14 +191,12 @@ pub fn default_policy(tool_name: &str, working_dir: &Path) -> SandboxPolicy {
             process_exec: Access::Deny,
         },
         // Workspace and memory tools are internal — always allowed.
-        "workspace_view" | "workspace_search" | "workspace_update" | "memory_search" => {
-            SandboxPolicy {
-                network: Access::Deny,
-                file_read: PathAccess::Allow,
-                file_write: PathAccess::Allow,
-                process_exec: Access::Deny,
-            }
-        }
+        "workspace" | "memory_search" => SandboxPolicy {
+            network: Access::Deny,
+            file_read: PathAccess::Allow,
+            file_write: PathAccess::Allow,
+            process_exec: Access::Deny,
+        },
         // Unknown tools (including MCP) default to network-only.
         // MCP tools need network to communicate with their server.
         _ => SandboxPolicy {
@@ -334,9 +332,7 @@ impl PolicyTable {
             "list_files",
             "search_files",
             "send_file",
-            "workspace_view",
-            "workspace_search",
-            "workspace_update",
+            "workspace",
             "memory_search",
         ] {
             exact.insert(name.to_string(), default_policy(name, working_dir));
@@ -564,12 +560,7 @@ mod tests {
 
     #[test]
     fn workspace_tools_always_allowed() {
-        for name in &[
-            "workspace_view",
-            "workspace_search",
-            "workspace_update",
-            "memory_search",
-        ] {
+        for name in &["workspace", "memory_search"] {
             let p = default_policy(name, &wd());
             assert_eq!(
                 p.file_read,

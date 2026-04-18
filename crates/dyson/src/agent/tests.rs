@@ -204,7 +204,7 @@ async fn memory_system_prompt_contains_usage_stats_and_curation_rules() {
     assert!(prompt.contains("USER.md"));
     assert!(prompt.contains("soft target 1375"));
     assert!(prompt.contains("memory_search"));
-    assert!(prompt.contains("workspace_update"));
+    assert!(prompt.contains("workspace"));
     // Curation rules must be embedded.
     assert!(prompt.contains("KEEP"));
     assert!(prompt.contains("DISCARD"));

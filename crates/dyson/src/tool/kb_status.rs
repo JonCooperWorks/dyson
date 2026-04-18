@@ -101,7 +101,7 @@ impl Tool for KbStatusTool {
 
         if raw_files.is_empty() && wiki_files.is_empty() {
             output.push_str(
-                "\nThe knowledge base is empty. Use `workspace_update` to add files \
+                "\nThe knowledge base is empty. Use `workspace` (op=\"update\") to add files \
                  under `kb/raw/` (source material) or `kb/wiki/` (articles).",
             );
         }

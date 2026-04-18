@@ -97,34 +97,32 @@ async fn initialize_returns_capabilities() {
 // Tool discovery tests
 // -----------------------------------------------------------------------
 
-/// Verify that `tools/list` returns exactly the three workspace tools
-/// with their names matching the Tool trait implementations.
+/// Verify that `tools/list` returns the unified workspace tool with its
+/// name matching the Tool trait implementation.
 #[tokio::test]
 async fn tools_list_returns_workspace_tools() {
     let server = make_server();
     let resp = server.dispatch(Some(2), "tools/list", None).await;
     assert!(resp.error.is_none());
     let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
-    assert_eq!(tools.len(), 3);
+    assert_eq!(tools.len(), 1);
 
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    assert!(names.contains(&"workspace_view"));
-    assert!(names.contains(&"workspace_search"));
-    assert!(names.contains(&"workspace_update"));
+    assert!(names.contains(&"workspace"));
 }
 
 // -----------------------------------------------------------------------
 // Tool execution tests
 // -----------------------------------------------------------------------
 
-/// Verify that `tools/call` with workspace_view actually reads from
+/// Verify that `tools/call` with workspace op=view actually reads from
 /// the workspace and returns the file content in MCP format.
 #[tokio::test]
 async fn tools_call_workspace_view() {
     let server = make_server();
     let params = serde_json::json!({
-        "name": "workspace_view",
-        "arguments": { "file": "identity" }
+        "name": "workspace",
+        "arguments": { "op": "view", "file": "identity" }
     });
     let resp = server.dispatch(Some(3), "tools/call", Some(params)).await;
     assert!(resp.error.is_none());

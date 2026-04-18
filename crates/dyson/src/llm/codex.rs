@@ -614,13 +614,13 @@ mod tests {
     fn mcp_tool_call_started_yields_tool_use_start() {
         let mut state = StreamParserState::new();
         let events = state.parse_line(
-            r#"{"type":"item.started","item":{"id":"mcp_1","type":"mcp_tool_call","server":"dyson-workspace","tool":"workspace_view","arguments":{},"status":"in_progress"}}"#,
+            r#"{"type":"item.started","item":{"id":"mcp_1","type":"mcp_tool_call","server":"dyson-workspace","tool":"workspace","arguments":{},"status":"in_progress"}}"#,
         );
         assert_eq!(events.len(), 1);
         match &events[0] {
             Ok(StreamEvent::ToolUseStart { id, name }) => {
                 assert_eq!(id, "mcp_1");
-                assert_eq!(name, "workspace_view");
+                assert_eq!(name, "workspace");
             }
             other => panic!("expected ToolUseStart, got: {other:?}"),
         }
@@ -630,13 +630,13 @@ mod tests {
     fn mcp_tool_call_completed_yields_tool_use_complete() {
         let mut state = StreamParserState::new();
         let events = state.parse_line(
-            r#"{"type":"item.completed","item":{"id":"mcp_1","type":"mcp_tool_call","server":"dyson-workspace","tool":"workspace_view","arguments":{"key":"SOUL"},"result":{"content":[]},"status":"completed"}}"#,
+            r#"{"type":"item.completed","item":{"id":"mcp_1","type":"mcp_tool_call","server":"dyson-workspace","tool":"workspace","arguments":{"key":"SOUL"},"result":{"content":[]},"status":"completed"}}"#,
         );
         assert_eq!(events.len(), 1);
         match &events[0] {
             Ok(StreamEvent::ToolUseComplete { id, name, input }) => {
                 assert_eq!(id, "mcp_1");
-                assert_eq!(name, "workspace_view");
+                assert_eq!(name, "workspace");
                 assert_eq!(input["key"], "SOUL");
             }
             other => panic!("expected ToolUseComplete, got: {other:?}"),

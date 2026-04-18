@@ -104,10 +104,9 @@
 //
 // Workspace tools via MCP:
 //
-//   Claude Code has its own tools, but it doesn't have Dyson's workspace
-//   tools (workspace_view, workspace_search, workspace_update).  These
-//   let the agent read/search/update its identity files (SOUL.md, etc.)
-//   and memory/journal.
+//   Claude Code has its own tools, but it doesn't have Dyson's unified
+//   `workspace` tool.  That tool lets the agent view, list, search, and
+//   update its identity files (SOUL.md, etc.) and memory/journal.
 //
 //   To bridge this gap, ClaudeCodeClient starts an in-process HTTP MCP
 //   server (see skill/mcp/serve.rs) before spawning `claude -p`.  The
@@ -120,7 +119,7 @@
 //     3. Build MCP config JSON: {"mcpServers":{"dyson-workspace":{"type":"sse","url":"http://127.0.0.1:{port}/mcp"}}}
 //     4. Pass as --mcp-config '<json>' CLI arg
 //     5. Claude Code connects to the server, discovers tools
-//     6. During its agent loop, Claude Code can call workspace_view etc.
+//     6. During its agent loop, Claude Code can call the `workspace` tool.
 //     7. When the stream ends, the server task is dropped (aborted)
 //
 //   This means Claude Code gets the full Dyson workspace experience
@@ -195,8 +194,8 @@ pub struct ClaudeCodeClient {
     /// 4. Claude Code connects back to our server, discovers tools
     /// 5. The server lives until the stream is dropped (turn complete)
     ///
-    /// This gives Claude Code access to workspace_view, workspace_search,
-    /// and workspace_update as structured MCP tools with proper JSON schemas.
+    /// This gives Claude Code access to the unified `workspace` tool as a
+    /// structured MCP tool with a proper JSON schema.
     ///
     /// When `None`, no MCP server is started and Claude Code runs without
     /// workspace tools.  This happens in tests or when no workspace is configured.
@@ -234,9 +233,9 @@ impl ClaudeCodeClient {
     ///   system, not CLI args.  Kept for future direct pass-through.
     ///
     /// - `workspace`: If `Some`, the client will start an in-process HTTP
-    ///   MCP server per `stream()` call, exposing workspace_view,
-    ///   workspace_search, and workspace_update to Claude Code.  Pass
-    ///   `None` to skip MCP server creation (no workspace tools).
+    ///   MCP server per `stream()` call, exposing the unified `workspace`
+    ///   tool to Claude Code.  Pass `None` to skip MCP server creation
+    ///   (no workspace tool).
     ///
     /// - `dangerous_no_sandbox`: Whether the `--dangerous-no-sandbox` CLI
     ///   flag was passed.  Forwarded to `McpHttpServer` for future sandbox

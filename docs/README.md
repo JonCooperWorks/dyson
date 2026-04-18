@@ -58,9 +58,7 @@ src/
     bulk_edit/            Multi-file edit: AST rename_symbol, find_replace, list_definitions (tree-sitter, 19 languages)
     ast/                  Shared tree-sitter grammars and walkers used by bulk_edit, read_file, search_files
     security/             AST-aware security tools (ast_query, attack_surface_analyzer, exploit_builder)
-    workspace_view.rs     View workspace files
-    workspace_search.rs   Search workspace files by pattern
-    workspace_update.rs   Write/append workspace files
+    workspace.rs          Unified view/list/search/update for workspace files
     memory_search.rs      FTS5 memory search
     kb_search.rs          FTS5 knowledge base search (scope: all/raw/wiki)
     kb_status.rs          Knowledge base statistics and file listing

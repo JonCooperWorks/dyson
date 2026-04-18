@@ -109,9 +109,7 @@ The default skill wrapping Dyson's built-in tools:
 - `ListFilesTool` — glob-based file discovery
 - `SearchFilesTool` — regex content search across files
 - `MemorySearchTool` — full-text search over memory files
-- `WorkspaceViewTool` — view/list workspace files
-- `WorkspaceSearchTool` — search across workspace files
-- `WorkspaceUpdateTool` — update workspace files (set/append)
+- `WorkspaceTool` — unified view/list/search/update for workspace files
 - `LoadSkillTool` — on-demand skill loading
 - `SkillCreateTool` — create, update, or improve skills
 - `SendFileTool` — send file to user via controller

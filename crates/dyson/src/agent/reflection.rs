@@ -406,11 +406,11 @@ impl Dream for LearningSynthesisDream {
 /// Curates workspace memory files using tools and an agent mini-loop.
 ///
 /// Unlike LearningSynthesisDream (which does a single write), this dream
-/// runs a mini agent loop with workspace_view, workspace_update,
-/// workspace_search, and memory_search tools.  It reads the existing
-/// files, applies a Keep / Refine / Discard judgment (see
-/// [`CURATION_RULES`]), rewrites them via `workspace_update mode=set`,
-/// and moves overflow to `memory/notes/` when even the ceiling is tight.
+/// runs a mini agent loop with the unified `workspace` tool plus
+/// `memory_search`.  It reads the existing files, applies a Keep / Refine
+/// / Discard judgment (see [`CURATION_RULES`]), rewrites them via
+/// `workspace op=update mode=set`, and moves overflow to `memory/notes/`
+/// when even the ceiling is tight.
 ///
 /// When the curation pass takes at least one action, the dream writes an
 /// audit trail to `improvement/{epoch}.json` via [`save_reflection_log`]
@@ -441,9 +441,7 @@ impl Dream for MemoryMaintenanceDream {
         let memory_system = build_memory_system_prompt(&ctx.tool_context).await;
 
         let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(crate::tool::workspace_view::WorkspaceViewTool),
-            Arc::new(crate::tool::workspace_update::WorkspaceUpdateTool),
-            Arc::new(crate::tool::workspace_search::WorkspaceSearchTool),
+            Arc::new(crate::tool::workspace::WorkspaceTool),
             Arc::new(crate::tool::memory_search::MemorySearchTool),
         ];
 
@@ -607,10 +605,10 @@ pub(super) async fn build_memory_system_prompt(ctx: &ToolContext) -> String {
          - **memory/notes/*.md** — unlimited overflow storage, searchable via \
            memory_search.  Park detail here when even the ceiling is tight.\n\n\
          ## Process\n\
-         1. Call workspace_view to read the current memory files.\n\
+         1. Call `workspace` with op=\"view\" to read the current memory files.\n\
          2. For every existing line or block, silently label it KEEP, REFINE, \
             or DISCARD using the rules below.\n\
-         3. Call workspace_update with mode \"set\" to rewrite the file: \
+         3. Call `workspace` with op=\"update\" and mode=\"set\" to rewrite the file: \
             DISCARD lines removed, REFINE lines compressed, KEEP lines \
             preserved, new signal folded in.\n\
          4. If a file is already well curated, doing nothing is the right \
