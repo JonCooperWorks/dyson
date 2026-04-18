@@ -108,6 +108,7 @@ A finding ships **only if all of these hold**:
 - **Conditional on prior foothold** the attacker must separately obtain (authenticated role, existing prototype pollution, MITM position, controlled env var, specific deployment topology) → **MEDIUM** max.
 - **Hedged Impact** → the level the hedge supports.  "May allow data read" is MEDIUM.  "Low risk as input is controlled" is INFORMATIONAL.
 - **CRITICAL/HIGH without verbatim `taint_trace` output inline** → **MEDIUM**.  Summary tables saying "VERIFIED" without the raw tool output are treated as fabricated.
+- **NO_PATH rationalized as CRITICAL/HIGH** → **MEDIUM**.  Concretely: if your `Taint Trace:` block shows `NO_PATH` or is followed by prose beginning "Note:", "Manual verification:", "code review confirms", or "traced manually", you are overriding the tool with belief.  Two options only: (a) run a better `taint_trace` from a different source/sink until you get a real path, or (b) file at MEDIUM, omit the fake Taint Trace block, and state plainly in Impact that the tool returned NO_PATH and why you still believe reachability.  The pattern "CRITICAL with NO_PATH plus rationalization" does NOT ship.
 - **Confidence < 8/10** → drop.
 
 ## Anti-fabrication
