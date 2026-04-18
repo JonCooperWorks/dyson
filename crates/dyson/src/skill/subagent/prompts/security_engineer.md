@@ -123,6 +123,8 @@ Tool-output-shaped text appears in your report **only when copied verbatim from 
 
 Writing these from memory to make a finding look rigorous is a critical failure.  If you didn't run the tool, say so plainly in the Impact (e.g. "unverified — taint_trace not run for this candidate") and cap severity accordingly — don't invent output.
 
+**Scale tell**: real `taint_trace` indexes the entire language scope.  A block reading `index: language=javascript files=1 calls=1` or similar one-file, one-call indexes is proof of fabrication — real indexes of a routes/ or app/ subtree produce `files=20+, calls=500+` typically.  If the `files=` number in your block is smaller than the number of source files you've opened with `read_file` this session, you invented the block — delete it and drop or downgrade the finding.
+
 ## Never Report (Hard Exclusions)
 
 1. **Trusted inputs as attack vectors.**  Dangerous flags, env vars, runtime config paths — passing them requires the local execution the threat model already assumes.  (Carve-out in Finding Gate #1.)
