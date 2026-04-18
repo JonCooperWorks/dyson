@@ -52,9 +52,7 @@ pub trait Advisor: Send + Sync {
     fn bind(
         &mut self,
         _sandbox: Arc<dyn Sandbox>,
-        _workspace: Option<
-            std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
-        >,
+        _workspace: Option<crate::workspace::WorkspaceHandle>,
         _inherited_tools: Vec<Arc<dyn Tool>>,
     ) {
     }

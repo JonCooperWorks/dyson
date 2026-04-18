@@ -426,7 +426,7 @@ pub struct AgentBuilder {
     sandbox: Arc<dyn Sandbox>,
     skills: Vec<Box<dyn Skill>>,
     settings: AgentSettings,
-    workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    workspace: Option<crate::workspace::WorkspaceHandle>,
     nudge_interval: usize,
     transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
     advisor: Option<Box<dyn crate::advisor::Advisor>>,
@@ -448,7 +448,7 @@ impl AgentBuilder {
     /// Attach a workspace for identity, memory, and working directory.
     pub fn workspace(
         mut self,
-        ws: std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
+        ws: crate::workspace::WorkspaceHandle,
     ) -> Self {
         self.workspace = Some(ws);
         self
@@ -533,7 +533,7 @@ impl Agent {
         skills: Vec<Box<dyn Skill>>,
         settings: &AgentSettings,
         workspace: Option<
-            std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
+            crate::workspace::WorkspaceHandle,
         >,
         nudge_interval: usize,
         transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
@@ -641,7 +641,7 @@ impl Agent {
     fn build_tool_context(
         sandbox: &Arc<dyn Sandbox>,
         workspace: Option<
-            std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
+            crate::workspace::WorkspaceHandle,
         >,
     ) -> ToolContext {
         let working_dir = workspace

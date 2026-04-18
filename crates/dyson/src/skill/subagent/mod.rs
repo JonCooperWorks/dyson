@@ -32,7 +32,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::sync::RwLock;
 
 use crate::agent::rate_limiter::RateLimitedHandle;
 use crate::config::{AgentSettings, LlmProvider, SubagentAgentConfig};
@@ -42,7 +41,7 @@ use crate::llm::LlmClient;
 use crate::sandbox::Sandbox;
 use crate::skill::Skill;
 use crate::tool::{MAX_SUBAGENT_DEPTH, Tool, ToolContext, ToolOutput};
-use crate::workspace::Workspace;
+use crate::workspace::WorkspaceHandle;
 
 /// An `Output` that accumulates a child agent's streamed text into a
 /// buffer.  Tool events are logged at `debug` but never captured —
@@ -136,7 +135,7 @@ pub(crate) struct ChildSpawn<'a> {
     pub settings: AgentSettings,
     pub inherited_tools: Vec<Arc<dyn Tool>>,
     pub sandbox: Arc<dyn Sandbox>,
-    pub workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
+    pub workspace: Option<WorkspaceHandle>,
     pub client: RateLimitedHandle<Box<dyn LlmClient>>,
     /// Depth of the calling parent; the child runs at `parent_depth + 1`.
     pub parent_depth: u8,
@@ -225,7 +224,7 @@ pub struct SubagentTool {
     /// Shares the parent's rate-limit window via `ClientRegistry`.
     client: RateLimitedHandle<Box<dyn LlmClient>>,
     sandbox: Arc<dyn Sandbox>,
-    workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
+    workspace: Option<WorkspaceHandle>,
     /// `Arc<dyn Tool>` clones from the parent's already-loaded skills;
     /// MCP connections remain owned by the parent's `McpSkill`.
     inherited_tools: Vec<Arc<dyn Tool>>,
@@ -238,7 +237,7 @@ impl SubagentTool {
         parent_model: String,
         client: RateLimitedHandle<Box<dyn LlmClient>>,
         sandbox: Arc<dyn Sandbox>,
-        workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
+        workspace: Option<WorkspaceHandle>,
         inherited_tools: Vec<Arc<dyn Tool>>,
     ) -> Self {
         Self {
@@ -348,7 +347,7 @@ impl SubagentSkill {
         configs: &[SubagentAgentConfig],
         settings: &crate::config::Settings,
         sandbox: Arc<dyn Sandbox>,
-        workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
+        workspace: Option<WorkspaceHandle>,
         parent_tools: &[Arc<dyn Tool>],
         registry: &crate::controller::ClientRegistry,
     ) -> Self {

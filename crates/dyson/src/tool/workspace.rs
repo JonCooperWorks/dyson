@@ -15,17 +15,13 @@
 // ===========================================================================
 
 use std::fmt::Write;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::RwLock;
 
 use crate::tool::{Tool, ToolContext, ToolOutput};
-use crate::workspace::Workspace;
-
-type WorkspaceRef<'a> = &'a Arc<RwLock<Box<dyn Workspace>>>;
+use crate::workspace::WorkspaceHandle;
 
 pub struct WorkspaceTool;
 
@@ -125,7 +121,7 @@ impl Tool for WorkspaceTool {
     }
 }
 
-async fn view(ws: WorkspaceRef<'_>, file: &str) -> crate::Result<ToolOutput> {
+async fn view(ws: &WorkspaceHandle, file: &str) -> crate::Result<ToolOutput> {
     if let Err(msg) = super::validate_workspace_path(file) {
         return Ok(ToolOutput::error(msg));
     }
@@ -146,7 +142,7 @@ async fn view(ws: WorkspaceRef<'_>, file: &str) -> crate::Result<ToolOutput> {
     }
 }
 
-async fn list(ws: WorkspaceRef<'_>) -> crate::Result<ToolOutput> {
+async fn list(ws: &WorkspaceHandle) -> crate::Result<ToolOutput> {
     let files = ws.read().await.list_files();
     if files.is_empty() {
         Ok(ToolOutput::success("Workspace is empty."))
@@ -161,7 +157,7 @@ async fn list(ws: WorkspaceRef<'_>) -> crate::Result<ToolOutput> {
     }
 }
 
-async fn search(ws: WorkspaceRef<'_>, pattern: &str) -> crate::Result<ToolOutput> {
+async fn search(ws: &WorkspaceHandle, pattern: &str) -> crate::Result<ToolOutput> {
     let results = ws.read().await.search(pattern);
     if results.is_empty() {
         return Ok(ToolOutput::success(format!("No matches for '{pattern}'.")));
@@ -178,7 +174,7 @@ async fn search(ws: WorkspaceRef<'_>, pattern: &str) -> crate::Result<ToolOutput
 }
 
 async fn update(
-    ws: WorkspaceRef<'_>,
+    ws: &WorkspaceHandle,
     file: &str,
     content: &str,
     mode: UpdateMode,

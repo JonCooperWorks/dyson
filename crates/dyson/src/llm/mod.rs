@@ -258,7 +258,7 @@ pub trait LlmClient: Send + Sync {
 /// the CLI-subprocess backends (Claude Code and Codex).
 pub(crate) fn create_client(
     settings: &crate::config::AgentSettings,
-    workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    workspace: Option<crate::workspace::WorkspaceHandle>,
     dangerous_no_sandbox: bool,
 ) -> Box<dyn LlmClient> {
     let entry = registry::lookup(&settings.provider);
@@ -536,18 +536,13 @@ pub(crate) struct McpServerInfo {
 /// Start an MCP server exposing workspace + Dyson tools to CLI subprocesses.
 /// Fresh server per `stream()` call; lives until the returned handle is dropped.
 pub(crate) async fn start_mcp_server(
-    workspace: &std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
-    dangerous_no_sandbox: bool,
+    workspace: &crate::workspace::WorkspaceHandle,
     extra_tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
 ) -> Result<McpServerInfo> {
     use crate::skill::mcp::serve::McpHttpServer;
     use std::sync::Arc;
 
-    let server = Arc::new(McpHttpServer::new(
-        Arc::clone(workspace),
-        dangerous_no_sandbox,
-        extra_tools,
-    ));
+    let server = Arc::new(McpHttpServer::new(Arc::clone(workspace), extra_tools));
 
     let (port, handle, token) = server.start().await.map_err(|e| {
         crate::error::DysonError::Llm(format!("failed to start MCP HTTP server: {e}"))

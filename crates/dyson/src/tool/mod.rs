@@ -207,7 +207,7 @@ pub struct ToolContext {
     ///
     /// `None` when workspace is not configured (e.g., tests without
     /// workspace setup, or when the provider handles tools internally).
-    pub workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    pub workspace: Option<crate::workspace::WorkspaceHandle>,
 
     /// Subagent nesting depth.  0 = top-level agent.
     ///
@@ -285,8 +285,8 @@ impl ToolContext {
 
     /// Create a test context with a workspace attached.
     ///
-    /// Uses `temp_dir()` as working directory. Wraps the workspace in
-    /// the `Arc<RwLock<Box<dyn Workspace>>>` that tools expect.
+    /// Uses `temp_dir()` as working directory. Wraps the workspace in a
+    /// `WorkspaceHandle` the way tools expect.
     #[cfg(test)]
     pub fn for_test_with_workspace(ws: impl crate::workspace::Workspace + 'static) -> Self {
         let workspace: Box<dyn crate::workspace::Workspace> = Box::new(ws);
@@ -302,10 +302,7 @@ impl ToolContext {
     }
 
     /// Get a reference to the workspace, or return a tool error if not configured.
-    pub fn workspace(
-        &self,
-        tool_name: &str,
-    ) -> Result<&Arc<RwLock<Box<dyn crate::workspace::Workspace>>>> {
+    pub fn workspace(&self, tool_name: &str) -> Result<&crate::workspace::WorkspaceHandle> {
         self.workspace
             .as_ref()
             .ok_or_else(|| DysonError::tool(tool_name, "no workspace configured"))

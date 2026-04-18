@@ -125,13 +125,6 @@
 //   This means Claude Code gets the full Dyson workspace experience
 //   without Dyson needing to intercept or re-implement Claude Code's
 //   tool execution loop.
-//
-// Sandbox plumbing:
-//
-//   The `dangerous_no_sandbox` flag is passed from the CLI through
-//   Settings → create_client() → ClaudeCodeClient → McpHttpServer.
-//   Today it has no effect (workspace tools are in-memory), but the
-//   hook is in place for future sandbox enforcement of MCP tool calls.
 // ===========================================================================
 
 use std::collections::HashMap;
@@ -140,7 +133,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
 
 use crate::error::{DysonError, Result};
 use crate::llm::cli_subprocess::{self, CliLineParser, cli_event_stream};
@@ -148,7 +140,7 @@ use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolCallBuffer, ToolDefinition, finalize_tool_call};
 use crate::message::Message;
 use crate::tool::Tool;
-use crate::workspace::Workspace;
+use crate::workspace::WorkspaceHandle;
 
 // ---------------------------------------------------------------------------
 // ClaudeCodeClient
@@ -199,19 +191,7 @@ pub struct ClaudeCodeClient {
     ///
     /// When `None`, no MCP server is started and Claude Code runs without
     /// workspace tools.  This happens in tests or when no workspace is configured.
-    workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
-
-    /// Whether sandbox enforcement is disabled (`--dangerous-no-sandbox`).
-    ///
-    /// Plumbed through to `McpHttpServer` for future sandbox gating of
-    /// MCP tool calls.  Today workspace tools are pure in-memory operations
-    /// (reading/writing a HashMap behind an RwLock) that don't need
-    /// sandboxing, but the hook is here so that:
-    ///
-    /// 1. Adding sandbox enforcement later requires zero API changes
-    /// 2. The flag flows consistently through the full chain:
-    ///    CLI → Settings → create_client() → ClaudeCodeClient → McpHttpServer
-    dangerous_no_sandbox: bool,
+    workspace: Option<WorkspaceHandle>,
 
     /// Dyson tools exposed via MCP (set by agent via `set_mcp_tools`).
     mcp_tools: std::sync::Mutex<HashMap<String, Arc<dyn Tool>>>,
@@ -236,15 +216,10 @@ impl ClaudeCodeClient {
     ///   MCP server per `stream()` call, exposing the unified `workspace`
     ///   tool to Claude Code.  Pass `None` to skip MCP server creation
     ///   (no workspace tool).
-    ///
-    /// - `dangerous_no_sandbox`: Whether the `--dangerous-no-sandbox` CLI
-    ///   flag was passed.  Forwarded to `McpHttpServer` for future sandbox
-    ///   enforcement.  No effect today (workspace tools are in-memory).
     pub fn new(
         claude_path: Option<&str>,
         mcp_configs: Vec<String>,
-        workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
-        dangerous_no_sandbox: bool,
+        workspace: Option<WorkspaceHandle>,
     ) -> Self {
         let resolved = match claude_path {
             Some(p) => p.to_string(),
@@ -255,7 +230,6 @@ impl ClaudeCodeClient {
             claude_path: resolved,
             mcp_configs,
             workspace,
-            dangerous_no_sandbox,
             mcp_tools: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -360,7 +334,7 @@ impl LlmClient for ClaudeCodeClient {
 
         if let Some(ref workspace) = self.workspace {
             let extra = self.mcp_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-            let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox, extra).await?;
+            let info = super::start_mcp_server(workspace, extra).await?;
 
             // Build MCP config JSON for Claude Code's --mcp-config flag.
             let config = serde_json::json!({
@@ -791,13 +765,8 @@ mod tests {
     #[test]
     fn build_args_always_includes_skip_permissions() {
         // claude -p is non-interactive — it MUST always pass
-        // --dangerously-skip-permissions regardless of the sandbox flag.
-        let client = ClaudeCodeClient::new(
-            Some("/usr/bin/claude"),
-            vec![],
-            None,
-            false, // sandbox NOT disabled
-        );
+        // --dangerously-skip-permissions.
+        let client = ClaudeCodeClient::new(Some("/usr/bin/claude"), vec![], None);
         let args = client.build_args("sonnet", "be helpful", None);
         assert!(
             args.contains(&"--dangerously-skip-permissions".to_string()),
@@ -807,7 +776,7 @@ mod tests {
 
     #[test]
     fn build_args_includes_model_and_system_prompt() {
-        let client = ClaudeCodeClient::new(Some("claude"), vec![], None, false);
+        let client = ClaudeCodeClient::new(Some("claude"), vec![], None);
         let args = client.build_args("claude-opus-4-20250514", "You are Dyson", None);
         assert!(args.contains(&"claude-opus-4-20250514".to_string()));
         assert!(args.contains(&"You are Dyson".to_string()));
@@ -816,7 +785,7 @@ mod tests {
 
     #[test]
     fn build_args_includes_mcp_config() {
-        let client = ClaudeCodeClient::new(Some("claude"), vec![], None, false);
+        let client = ClaudeCodeClient::new(Some("claude"), vec![], None);
         let mcp_json = r#"{"mcpServers":{"test":{"type":"sse","url":"http://localhost:1234"}}}"#;
         let args = client.build_args("sonnet", "", Some(mcp_json));
         assert!(args.contains(&"--mcp-config".to_string()));
@@ -826,7 +795,7 @@ mod tests {
     #[test]
     fn build_args_forwards_extra_mcp_configs() {
         let extra = r#"{"mcpServers":{"extra":{"type":"stdio"}}}"#.to_string();
-        let client = ClaudeCodeClient::new(Some("claude"), vec![extra.clone()], None, false);
+        let client = ClaudeCodeClient::new(Some("claude"), vec![extra.clone()], None);
         let args = client.build_args("sonnet", "", None);
         assert!(args.contains(&extra));
     }

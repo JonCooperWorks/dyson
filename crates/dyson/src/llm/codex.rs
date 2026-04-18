@@ -78,7 +78,6 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
 
 use crate::error::{DysonError, Result};
 use crate::llm::cli_subprocess::{self, CliLineParser, cli_event_stream};
@@ -86,7 +85,7 @@ use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
 use crate::message::Message;
 use crate::tool::Tool;
-use crate::workspace::Workspace;
+use crate::workspace::WorkspaceHandle;
 
 // ---------------------------------------------------------------------------
 // CodexClient
@@ -116,7 +115,7 @@ pub struct CodexClient {
     /// When `Some`, each call to `stream()` will start an in-process HTTP
     /// MCP server and register it with Codex via `-c mcp_servers...` config
     /// override.  When `None`, no MCP server is started.
-    workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
+    workspace: Option<WorkspaceHandle>,
 
     /// Whether sandbox enforcement is disabled.
     dangerous_no_sandbox: bool,
@@ -140,7 +139,7 @@ impl CodexClient {
     ///   Forwarded to `McpHttpServer`.
     pub fn new(
         codex_path: Option<&str>,
-        workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
+        workspace: Option<WorkspaceHandle>,
         dangerous_no_sandbox: bool,
     ) -> Self {
         let resolved = match codex_path {
@@ -243,7 +242,7 @@ impl LlmClient for CodexClient {
 
         if let Some(ref workspace) = self.workspace {
             let extra = self.mcp_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-            let info = super::start_mcp_server(workspace, self.dangerous_no_sandbox, extra).await?;
+            let info = super::start_mcp_server(workspace, extra).await?;
             tracing::info!(port = info.port, "MCP server started for Codex");
             mcp_url = Some(info.url);
             mcp_token = Some(info.token);

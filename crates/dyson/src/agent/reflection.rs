@@ -489,7 +489,7 @@ pub(super) async fn synthesize_to_workspace(
     client: &dyn LlmClient,
     config: &CompletionConfig,
     conversation_summary: &str,
-    workspace: &Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
+    workspace: &crate::workspace::WorkspaceHandle,
 ) -> Result<()> {
     let (current_memory, soft_target, ceiling) = {
         let ws = workspace.read().await;

@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::sync::RwLock;
 
 use crate::config::{AgentSettings, LlmProvider};
 use crate::error::{DysonError, Result};
@@ -47,7 +46,7 @@ pub struct CoderTool {
     model: String,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
     sandbox: Arc<dyn Sandbox>,
-    workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    workspace: Option<crate::workspace::WorkspaceHandle>,
     /// Parent tools filtered to `CODER_TOOLS`.
     pub(crate) inherited_tools: Vec<Arc<dyn Tool>>,
 }
@@ -59,7 +58,7 @@ impl CoderTool {
         model: String,
         client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
         sandbox: Arc<dyn Sandbox>,
-        workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
+        workspace: Option<crate::workspace::WorkspaceHandle>,
         parent_tools: &[Arc<dyn Tool>],
     ) -> Self {
         let inherited_tools = parent_tools

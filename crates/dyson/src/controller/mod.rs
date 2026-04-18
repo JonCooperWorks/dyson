@@ -164,7 +164,7 @@ struct ClientRegistryInner {
     /// Settings snapshot used to create clients on demand.
     settings: Settings,
     /// Workspace reference for CLI-subprocess providers (ClaudeCode, Codex).
-    workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    workspace: Option<crate::workspace::WorkspaceHandle>,
 }
 
 impl ClientRegistry {
@@ -175,7 +175,7 @@ impl ClientRegistry {
     /// clients at any time without borrowing from the controller.
     pub fn new(
         settings: &Settings,
-        workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+        workspace: Option<crate::workspace::WorkspaceHandle>,
     ) -> Self {
         Self {
             inner: std::sync::Mutex::new(ClientRegistryInner {
@@ -194,7 +194,7 @@ impl ClientRegistry {
     pub fn reload(
         &self,
         settings: &Settings,
-        workspace: Option<std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>>,
+        workspace: Option<crate::workspace::WorkspaceHandle>,
     ) {
         let mut inner = self.inner.lock().expect("ClientRegistry poisoned");
         inner.clients.clear();
@@ -336,7 +336,7 @@ pub async fn build_agent(
         agent_settings.system_prompt.push_str(prompt);
     }
 
-    let workspace: std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>> =
+    let workspace: crate::workspace::WorkspaceHandle =
         std::sync::Arc::new(tokio::sync::RwLock::new(workspace));
 
     let nudge_interval = {
@@ -487,7 +487,7 @@ fn build_public_agent(
 
     let nudge_interval = workspace.nudge_interval();
 
-    let workspace: std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>> =
+    let workspace: crate::workspace::WorkspaceHandle =
         std::sync::Arc::new(tokio::sync::RwLock::new(workspace));
 
     // SECURITY: Always false — public agent sandbox is never disabled.

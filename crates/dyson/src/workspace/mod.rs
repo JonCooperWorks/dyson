@@ -47,8 +47,21 @@ pub mod openclaw;
 pub use in_memory::InMemoryWorkspace;
 pub use openclaw::OpenClawWorkspace;
 
+use std::sync::Arc;
+
+use tokio::sync::RwLock;
+
 use crate::config::WorkspaceConfig;
 use crate::error::{DysonError, Result};
+
+/// Shared, mutable handle to a `Workspace`.
+///
+/// Every layer of Dyson that touches the workspace — tools, LLM clients, MCP
+/// servers, subagents — holds this same Arc so memory reads and writes stay
+/// consistent across concurrent tool calls.  The RwLock is fine-grained:
+/// reads (view/list/search) proceed in parallel, updates take exclusive
+/// access.
+pub type WorkspaceHandle = Arc<RwLock<Box<dyn Workspace>>>;
 
 // ---------------------------------------------------------------------------
 // Workspace trait

@@ -1,4 +1,6 @@
 use super::*;
+use crate::workspace::Workspace;
+use tokio::sync::RwLock;
 
 /// Minimal in-memory workspace for testing MCP server behavior.
 ///
@@ -69,12 +71,10 @@ impl Workspace for MockWorkspace {
 }
 
 /// Helper to create a server with a MockWorkspace for testing.
-///
-/// Uses `dangerous_no_sandbox: true` since tests don't need sandbox gating.
 fn make_server() -> Arc<McpHttpServer> {
-    let ws: Arc<RwLock<Box<dyn Workspace>>> =
+    let ws: crate::workspace::WorkspaceHandle =
         Arc::new(RwLock::new(Box::new(MockWorkspace::new())));
-    Arc::new(McpHttpServer::new(ws, true, HashMap::new()))
+    Arc::new(McpHttpServer::new(ws, HashMap::new()))
 }
 
 // -----------------------------------------------------------------------

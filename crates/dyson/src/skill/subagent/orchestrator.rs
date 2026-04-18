@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::sync::RwLock;
 
 use crate::agent::rate_limiter::RateLimitedHandle;
 use crate::config::{AgentSettings, LlmProvider};
@@ -30,7 +29,7 @@ use crate::error::{DysonError, Result};
 use crate::llm::LlmClient;
 use crate::sandbox::Sandbox;
 use crate::tool::{Tool, ToolContext, ToolOutput};
-use crate::workspace::Workspace;
+use crate::workspace::WorkspaceHandle;
 
 use super::{ChildSpawn, spawn_child};
 
@@ -75,7 +74,7 @@ pub struct OrchestratorTool {
     model: String,
     client: RateLimitedHandle<Box<dyn LlmClient>>,
     sandbox: Arc<dyn Sandbox>,
-    workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
+    workspace: Option<WorkspaceHandle>,
     /// Parent tools filtered to `config.direct_tool_names`.
     pub(crate) direct_tools: Vec<Arc<dyn Tool>>,
     /// Inner subagent tools (planner, researcher, coder, verifier) that
@@ -96,7 +95,7 @@ impl OrchestratorTool {
         model: String,
         client: RateLimitedHandle<Box<dyn LlmClient>>,
         sandbox: Arc<dyn Sandbox>,
-        workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
+        workspace: Option<WorkspaceHandle>,
         parent_tools: &[Arc<dyn Tool>],
         inner_subagent_tools: Vec<Arc<dyn Tool>>,
     ) -> Self {

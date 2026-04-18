@@ -22,16 +22,12 @@
 //   fn pointers work perfectly.
 // ===========================================================================
 
-use std::sync::Arc;
-
-use tokio::sync::RwLock;
-
 use crate::auth::Credential;
 use crate::config::LlmProvider;
 use crate::error::{DysonError, Result};
 use crate::llm::LlmClient;
 use crate::secret::{SecretRegistry, SecretValue};
-use crate::workspace::Workspace;
+use crate::workspace::WorkspaceHandle;
 
 // ---------------------------------------------------------------------------
 // ProviderEntry — one row in the registry.
@@ -152,7 +148,7 @@ pub struct ClientConfig<'a> {
     pub base_url: Option<&'a str>,
 
     /// Shared workspace reference (used by CLI-subprocess providers).
-    pub workspace: Option<Arc<RwLock<Box<dyn Workspace>>>>,
+    pub workspace: Option<WorkspaceHandle>,
 
     /// Whether `--dangerous-no-sandbox` was passed (CLI-subprocess only).
     pub dangerous_no_sandbox: bool,
@@ -215,7 +211,6 @@ pub fn registry() -> &'static [ProviderEntry] {
                         c.base_url,
                         vec![],
                         c.workspace.clone(),
-                        c.dangerous_no_sandbox,
                     ))
                 },
             },

@@ -176,9 +176,7 @@ pub async fn create_skills(
     settings: &crate::config::Settings,
     workspace: Option<&dyn crate::workspace::Workspace>,
     sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox>,
-    workspace_arc: Option<
-        std::sync::Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>>,
-    >,
+    workspace_arc: Option<crate::workspace::WorkspaceHandle>,
     registry: &crate::controller::ClientRegistry,
 ) -> Vec<Box<dyn Skill>> {
     let mut skills: Vec<Box<dyn Skill>> = Vec::new();

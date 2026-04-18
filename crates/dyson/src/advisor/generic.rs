@@ -10,7 +10,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::RwLock;
 
 use crate::agent::rate_limiter::RateLimitedHandle;
 use crate::config::{AgentSettings, LlmProvider};
@@ -39,7 +38,7 @@ pub(crate) struct AdvisorTool {
     model: String,
     provider: LlmProvider,
     pub(crate) sandbox: Arc<dyn Sandbox>,
-    workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
+    workspace: Option<crate::workspace::WorkspaceHandle>,
     pub(crate) inherited_tools: Vec<Arc<dyn Tool>>,
 }
 
@@ -180,7 +179,7 @@ impl Advisor for GenericAdvisor {
     fn bind(
         &mut self,
         sandbox: Arc<dyn Sandbox>,
-        workspace: Option<Arc<RwLock<Box<dyn crate::workspace::Workspace>>>>,
+        workspace: Option<crate::workspace::WorkspaceHandle>,
         inherited_tools: Vec<Arc<dyn Tool>>,
     ) {
         self.sandbox = Some(Arc::clone(&sandbox));

@@ -355,7 +355,7 @@ async fn synthesize_to_workspace_updates_memory() {
     let ws = crate::workspace::InMemoryWorkspace::new()
         .with_file("MEMORY.md", "Old memory content.");
 
-    let workspace: Arc<tokio::sync::RwLock<Box<dyn crate::workspace::Workspace>>> =
+    let workspace: crate::workspace::WorkspaceHandle =
         Arc::new(tokio::sync::RwLock::new(Box::new(ws)));
 
     let llm = MockLlm::new(vec![vec![

@@ -88,19 +88,6 @@
 //   The tool is the exact same WorkspaceTool that Dyson uses internally —
 //   no duplication.
 //
-// Sandboxing:
-//
-//   The `dangerous_no_sandbox` flag is plumbed through from the CLI
-//   (`--dangerous-no-sandbox`) to McpHttpServer for future use.
-//   Today, workspace tools are pure in-memory operations (read/write
-//   a HashMap behind an RwLock) that don't need sandboxing.  The hook
-//   is here so that when we add tools that touch the filesystem or
-//   execute commands, we can gate them through the sandbox system
-//   without changing any APIs or call sites.
-//
-//   Flow: CLI flag → Settings.dangerous_no_sandbox → create_client()
-//         → ClaudeCodeClient.dangerous_no_sandbox → McpHttpServer
-//
 // Lifecycle:
 //
 //   The server's lifetime is tied to the LLM stream:
@@ -140,7 +127,6 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -153,7 +139,7 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 use crate::tool::workspace::WorkspaceTool;
 use crate::tool::{Tool, ToolContext};
-use crate::workspace::Workspace;
+use crate::workspace::WorkspaceHandle;
 
 use super::protocol::{JsonRpcResponse, McpToolDef};
 
@@ -176,7 +162,7 @@ use super::protocol::{JsonRpcResponse, McpToolDef};
 ///
 /// ## Shared state
 ///
-/// The workspace is shared via `Arc<RwLock<Box<dyn Workspace>>>`:
+/// The workspace is shared via `WorkspaceHandle`:
 /// - Multiple concurrent reads (view, search) proceed in parallel
 /// - Writes (update) get exclusive access via the RwLock
 /// - The same Arc is shared with Dyson's internal tools if any are
@@ -188,15 +174,14 @@ use super::protocol::{JsonRpcResponse, McpToolDef};
 /// closure per HTTP request.  All share the same `Arc<McpHttpServer>`,
 /// which is `Send + Sync` because:
 /// - `HashMap<String, Arc<dyn Tool>>` is immutable after construction
-/// - `Arc<RwLock<Box<dyn Workspace>>>` is designed for concurrent access
-/// - `dangerous_no_sandbox` is a plain `bool` (Copy, immutable)
+/// - `WorkspaceHandle` is designed for concurrent access
 pub struct McpHttpServer {
     /// The agent's workspace, shared with other parts of Dyson.
     ///
     /// Used to construct a `ToolContext` for each `tools/call` invocation.
     /// The RwLock ensures safe concurrent access: reads are parallel,
     /// writes are exclusive.
-    workspace: Arc<RwLock<Box<dyn Workspace>>>,
+    workspace: WorkspaceHandle,
 
     /// Workspace tools indexed by name for O(1) dispatch.
     ///
@@ -204,21 +189,6 @@ pub struct McpHttpServer {
     /// extra non-agent-only tools the agent forwards.  Never modified after
     /// construction.
     tools: HashMap<String, Arc<dyn Tool>>,
-
-    /// Whether sandbox enforcement is bypassed.
-    ///
-    /// Plumbed through from the CLI `--dangerous-no-sandbox` flag for
-    /// future use.  When `false` (the default), a sandbox implementation
-    /// could gate tool calls before execution.  Today this field is unused
-    /// because workspace tools are pure in-memory operations that don't
-    /// need sandboxing.
-    ///
-    /// The hook is here so that:
-    /// 1. Adding sandbox enforcement later requires zero API changes
-    /// 2. The flag flows consistently through the entire call chain:
-    ///    CLI → Settings → create_client() → ClaudeCodeClient → McpHttpServer
-    #[allow(dead_code)]
-    dangerous_no_sandbox: bool,
 
     /// Authentication handler for validating incoming requests.
     ///
@@ -244,20 +214,16 @@ impl McpHttpServer {
     ///
     /// - `workspace`: Shared workspace reference.  The same Arc can be
     ///   (and typically is) shared with Dyson's own internal tool context.
-    /// - `dangerous_no_sandbox`: Whether the `--dangerous-no-sandbox` CLI
-    ///   flag was passed.  Stored for future sandbox enforcement.  Has no
-    ///   effect today — workspace tools are in-memory operations.
     ///
     /// ## Example
     ///
     /// ```ignore
-    /// let ws: Arc<RwLock<Box<dyn Workspace>>> = /* ... */;
-    /// let server = Arc::new(McpHttpServer::new(ws, true, HashMap::new()));
+    /// let ws: WorkspaceHandle = /* ... */;
+    /// let server = Arc::new(McpHttpServer::new(ws, HashMap::new()));
     /// let (port, handle, token) = server.start().await?;
     /// ```
     pub fn new(
-        workspace: Arc<RwLock<Box<dyn Workspace>>>,
-        dangerous_no_sandbox: bool,
+        workspace: WorkspaceHandle,
         extra_tools: HashMap<String, Arc<dyn Tool>>,
     ) -> Self {
         let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
@@ -278,7 +244,6 @@ impl McpHttpServer {
         Self {
             workspace,
             tools,
-            dangerous_no_sandbox,
             auth: Arc::new(bearer_auth),
             bearer_token,
         }
@@ -670,13 +635,6 @@ impl McpHttpServer {
     /// Note the distinction: protocol validation errors use JSON-RPC error
     /// codes; tool-level failures use the MCP `isError` field in the
     /// result.  This matches the MCP spec's error model.
-    ///
-    /// ## Sandbox hook
-    ///
-    /// There is a placeholder for future sandbox enforcement between
-    /// steps 4 and 5.  When `dangerous_no_sandbox` is false, a sandbox
-    /// could inspect the tool name and arguments and deny execution.
-    /// Today this is a no-op because workspace tools are in-memory.
     async fn handle_tools_call(
         &self,
         id: Option<u64>,
@@ -731,12 +689,6 @@ impl McpHttpServer {
             dangerous_no_sandbox: false,
             taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         };
-
-        // -- Sandbox hook (future) --
-        //
-        // When dangerous_no_sandbox is false, a sandbox implementation
-        // could gate this call before execution.  For now workspace tools
-        // are pure in-memory operations and don't need sandboxing.
 
         // -- Execute the tool and format the response --
         //
