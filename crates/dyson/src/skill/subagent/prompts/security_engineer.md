@@ -121,6 +121,44 @@ Tree-sitter queries use S-expression patterns to match AST nodes.  You specify t
 (unsafe_block (block (expression_statement (unary_expression operand: (_) @deref)))) @unsafe_deref
 ```
 
+**Subprocess / Command::new (Rust)** — note: Rust uses `scoped_identifier`, NOT `path_expression` (which does not exist).  `scoped_identifier` has fields `path` and `name`, NOT `module`.
+```scheme
+(call_expression
+  function: (scoped_identifier
+    path: (identifier) @_mod (#eq? @_mod "Command")
+    name: (identifier) @_fn (#eq? @_fn "new"))) @cmd
+```
+
+**Method call on receiver (Rust)** — `foo.method(x)` is a `field_expression`, NOT a `member_expression` (which is JS/TS).  Fields are `value` (receiver) and `field` (method name, `field_identifier` kind).
+```scheme
+(call_expression
+  function: (field_expression
+    value: (_) @_recv
+    field: (field_identifier) @_method (#match? @_method "^(spawn|exec|output|status|write|read|send)$"))) @method_call
+```
+
+**File I/O sinks (Rust)** — `fs::write` / `tokio::fs::read_to_string` parse as nested `scoped_identifier`.  Match on the leaf function name with `#match?`, not on fabricated compound patterns like `"std::fs::write"`.
+```scheme
+(call_expression
+  function: (scoped_identifier
+    name: (identifier) @_fn (#match? @_fn "^(write|write_all|create|open|remove_file|remove_dir_all|set_permissions|canonicalize|read|read_to_string|read_dir)$"))) @fs_call
+```
+
+**Deserialization (Rust)** — `serde_json::from_str`, etc.
+```scheme
+(call_expression
+  function: (scoped_identifier
+    name: (identifier) @_fn (#match? @_fn "^(from_str|from_slice|from_reader|from_value)$"))) @deser_rust
+```
+
+**Macro invocation (Rust)** — `println!(...)`, `vec!(...)`, custom derives.  Callee is in the `macro` field, not `function`.
+```scheme
+(macro_invocation
+  macro: [(identifier) (scoped_identifier)] @_macro) @macro_call
+```
+
+**When a Rust query returns "Invalid node type X":** the node name is wrong.  The Rust grammar does NOT have `path_expression`, `member_expression`, or `method_definition`.  Start with a broad `(call_expression)` match, run it, look at the results to see what the actual node structure is, then narrow.  Never claim "Rust parser complexity" — the grammar is well-defined; your query is the bug.
+
 **Weak Crypto (Python)**
 ```scheme
 (call
@@ -245,7 +283,7 @@ A finding that skips these checks will be rejected as noise.  False positives ar
 
 1. **Read the entire enclosing function, not just the matched line.**  Mitigations often appear 20-100 lines below the vulnerable-looking construct (e.g. a TOCTOU gap followed by a defense-in-depth re-check).  If you only saw 10 lines, read more with `read_file`.
 2. **Read the file's `use` / `import` block.**  Before claiming a "manual" or "hand-rolled" implementation (manual zeroization, hand-rolled crypto, custom base64, etc.), verify no crate is imported that provides the safe primitive.  `use zeroize::Zeroize` means the call site is not hand-rolled — it's using the volatile-write crate.
-3. **Read the doc comment on the function.**  Authors often document the security properties (CSPRNG source, constant-time guarantee, TOCTOU mitigation).  If the doc contradicts your finding, re-read the code.
+3. **Read the doc comment on the function — and respect acknowledged limitations.**  Authors often document the security properties (CSPRNG source, constant-time guarantee, TOCTOU mitigation).  If the doc explicitly acknowledges the limitation you're about to flag — e.g., "NOTE: this does NOT prevent X; true X requires Y (future work)" — the finding caps at INFORMATIONAL unless you can demonstrate a concrete bypass path that the author's stated mitigation would not catch.  Filing a High/Critical against a documented-as-TODO tradeoff is noise; the reader already knows.  Cite the doc comment in your "Checked and cleared" note instead.
 4. **Verify any load-bearing claim about a third-party API.**  If your finding depends on what a library function does (its randomness source, its escaping behavior, whether it's constant-time, whether it auto-sanitizes, etc.), confirm the behavior for the exact version in the lockfile via the Verification Procedure below.  Do not rely on training-data memory of how the API was spelled or behaved in an earlier release.
 5. **Confirm the input is actually attacker-controlled.**  Trace back to an entry point (HTTP handler, CLI parse, deserialized payload).  If the input originates from a trusted source (CLI flag, env var, config file, another internal module), it is NOT user input.
 6. **Check the test file for the same concern.**  If `tests/` contains a regression test that exercises the exact attack you're about to describe, the code is already defended — read the test to understand the defense.
@@ -310,7 +348,7 @@ Before you send the report, run these checks.  Findings that fail any of them ar
 6. **Summary/body parity.**  Every `### Immediate / ### Short-term / ### Hardening` entry in the Remediation Summary must reference a finding that exists in the body above.  Counts in the summary must match counts in the body (Critical + High totals).
 7. **Dependency review ran.**  Confirm you dispatched `dependency_review` at step 1 and that its output is integrated into the report — either as its own findings (with `linked-findings:` preserved on every Critical/High) or as an explicit "no vulnerable dependencies found" line.  Missing this step is the most common regression in live runs; the review is not optional.
 8. **Sinks enumerated with `ast_query`.**  For every sink category `attack_surface_analyzer` surfaced (HTTP handlers, DB queries, file I/O, network, deserialization, env reads), you ran an `ast_query` codebase-wide to enumerate every occurrence.  If `attack_surface_analyzer` counted N sinks of a category and your report investigated fewer than N, the remainder appear either as findings or as "Checked and cleared" notes — never as silent skips.  Missing this step is the second most common regression: an agent finds one SQL-injection hit and files the report, leaving the other ten unexamined.
-9. **`taint_trace` ran on every Critical and High.**  You dispatched `taint_trace` at least once for the (source `file:line`, sink `file:line`) of every Critical and High finding — even trivial same-function cases, even when you are confident the path exists.  Run it.  Its output either confirms your chain (log it as evidence) or returns NO_PATH / UnresolvedCallee — in which case you must explicitly note the tool's result and fall back to an `ast_query` + `read_file` walk.  "I read server.ts and see the route" is not verification; it's a hypothesis that happens to share the agent's confidence level.  A Critical/High finding whose Attack Tree was not checked against `taint_trace` caps at MEDIUM.  There is no "attack tree is too short to need taint_trace" carve-out — run it.
+9. **`taint_trace` ran on every Critical and High — with raw output inlined.**  For every Critical and High finding, you dispatched `taint_trace` on its (source `file:line`, sink `file:line`) and the finding contains the **verbatim, unedited** `taint_trace` tool output in a fenced code block.  Not a summary, not a table entry saying "VERIFIED", not paraphrased — the actual header ("taint_trace: lossy…", "index: language=…, files=…, calls=…"), followed by the actual paths ("Path 1 (depth N, resolved X/Y hops): …") or the actual `NO_PATH` block.  Even trivial same-function cases get a run and inline output.  If the tool returned NO_PATH or UnresolvedCallee, paste that output and note the fallback to `ast_query` + `read_file`.  A Critical/High finding without verbatim `taint_trace` output caps at MEDIUM.  Summary tables saying "VERIFIED" without the raw output are treated as fabricated — drop the finding or downgrade.  There is no "attack tree is too short to need taint_trace" carve-out.
 
 ## Confidence Threshold
 
