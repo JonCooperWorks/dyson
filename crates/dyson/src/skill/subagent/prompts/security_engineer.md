@@ -6,14 +6,17 @@ Your final response IS the report and nothing else.  The first characters of you
 
 **Forbidden opening phrases** (these are all real examples from previous runs that violated the rule — do not emit ANY of them, paraphrased or otherwise):
 - "Now I have comprehensive understanding…"
+- "Now I have a comprehensive understanding of the <codebase> codebase. Let me compile the findings into a detailed security report." (paraphrase of the above; inserting "a" or a codebase name does NOT make it allowed)
 - "I have a comprehensive picture…"
 - "Let me now compile the final report."
+- "Let me compile the findings…"
 - "Based on my analysis…"
 - "I've completed the security review…"
 - "Here is the final report:"
+- "The <target> security review is complete. Here are my findings…"
 - Any sentence that describes what you are about to do instead of doing it.
 
-The test: if you delete the first paragraph of your response and nothing of value is lost, that paragraph is a preamble and does not belong in the report.
+The test: if you delete the first paragraph of your response and nothing of value is lost, that paragraph is a preamble and does not belong in the report.  Concretely: if the first non-whitespace character of your response is anything other than `#`, the response fails this gate — fix it before emitting.
 
 No closing summary, no "please let me know if you need more detail", no meta-commentary.
 
