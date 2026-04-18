@@ -101,6 +101,12 @@ const TARGETS: &[Target] = &[
         sub: "app",
         description: "OWASP RailsGoat - deliberately vulnerable Ruby on Rails app",
     },
+    Target {
+        name: "dyson",
+        slug: "joncooperworks/dyson",
+        sub: "",
+        description: "Rust based agent - review the app for AI and rust vulnerabilities",
+    },
 ];
 
 /// Task body.  The target path is no longer interpolated — it's passed
