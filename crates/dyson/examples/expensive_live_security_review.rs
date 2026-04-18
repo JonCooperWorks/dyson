@@ -142,6 +142,20 @@ const TARGETS: &[Target] = &[
         description: "React 19.2.0 - packages/react-dom/src/server (SSR render / HTML escape path) for CVE repro",
         git_ref: Some("v19.2.0"),
     },
+    Target {
+        name: "react-server-19.2.0",
+        slug: "facebook/react",
+        sub: "packages/react-server/src",
+        description: "React 19.2.0 - packages/react-server/src (Fizz streaming SSR + RSC protocol core - HTML escape logic lives here)",
+        git_ref: Some("v19.2.0"),
+    },
+    Target {
+        name: "react-server-dom-webpack-19.2.0",
+        slug: "facebook/react",
+        sub: "packages/react-server-dom-webpack/src",
+        description: "React 19.2.0 - packages/react-server-dom-webpack/src (RSC + Server Actions over Webpack - new attack surface)",
+        git_ref: Some("v19.2.0"),
+    },
 ];
 
 /// Task body.  The target path is no longer interpolated — it's passed
