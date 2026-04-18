@@ -194,34 +194,10 @@ impl Tool for AstDescribeTool {
             ));
         }
 
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&config.language).map_err(|e| {
-            DysonError::tool("ast_describe", format!("parser setup: {e}"))
-        })?;
-
-        let tree = match parser.parse(&source, None) {
-            Some(t) => t,
-            None => {
-                return Ok(ToolOutput::error(
-                    "parser returned no tree — source may be too large or malformed",
-                ));
-            }
+        let rendered = match describe_source(&source, config, line_range, max_depth) {
+            Ok(s) => s,
+            Err(e) => return Ok(ToolOutput::error(e)),
         };
-
-        let roots: Vec<Node<'_>> = match line_range {
-            Some((start_line, end_line)) => nodes_overlapping_lines(
-                tree.root_node(),
-                start_line,
-                end_line,
-            ),
-            None => vec![tree.root_node()],
-        };
-
-        if roots.is_empty() {
-            return Ok(ToolOutput::success(format!(
-                "{header}: no nodes overlap the requested line range"
-            )));
-        }
 
         let mut out = String::new();
         writeln!(&mut out, "# {header}").unwrap();
@@ -230,20 +206,61 @@ impl Tool for AstDescribeTool {
         }
         writeln!(&mut out, "# max_depth: {max_depth}").unwrap();
         out.push('\n');
-
-        for (i, root) in roots.iter().enumerate() {
-            if i > 0 {
-                out.push('\n');
-            }
-            render_node(*root, &source, 0, max_depth, &mut out);
-            if out.len() >= MAX_OUTPUT_BYTES {
-                out.push_str("\n... (truncated at output byte cap)\n");
-                break;
-            }
-        }
+        out.push_str(&rendered);
 
         Ok(ToolOutput::success(out))
     }
+}
+
+/// Parse `source` as `config.language` and render its tree-sitter node tree.
+///
+/// This is the engine of the `ast_describe` tool, exposed for direct use
+/// by smoke tests and other callers that want a rendered AST without
+/// going through the Tool/ToolContext plumbing.
+///
+/// When `line_range` is `Some((start, end))` (1-indexed, inclusive), output
+/// is narrowed to the smallest named subtrees that fully contain the range.
+/// `max_depth` caps the rendered depth; deeper nodes are replaced with a
+/// `... (N children truncated)` marker.  Returned string is capped at
+/// `MAX_OUTPUT_BYTES` with a trailing truncation note.
+pub fn describe_source(
+    source: &str,
+    config: &'static crate::ast::LanguageConfig,
+    line_range: Option<(usize, usize)>,
+    max_depth: usize,
+) -> std::result::Result<String, String> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&config.language)
+        .map_err(|e| format!("parser setup: {e}"))?;
+
+    let tree = parser
+        .parse(source, None)
+        .ok_or_else(|| "parser returned no tree — source may be too large or malformed".to_string())?;
+
+    let roots: Vec<Node<'_>> = match line_range {
+        Some((start_line, end_line)) => {
+            nodes_overlapping_lines(tree.root_node(), start_line, end_line)
+        }
+        None => vec![tree.root_node()],
+    };
+
+    if roots.is_empty() {
+        return Ok("(no nodes overlap the requested line range)".to_string());
+    }
+
+    let mut out = String::new();
+    for (i, root) in roots.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        render_node(*root, source, 0, max_depth, &mut out);
+        if out.len() >= MAX_OUTPUT_BYTES {
+            out.push_str("\n... (truncated at output byte cap)\n");
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// Parse a `start-end` or single-line range.  1-indexed, inclusive.  Returns

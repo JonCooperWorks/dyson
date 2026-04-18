@@ -194,6 +194,38 @@ impl Tool for AstQueryTool {
     }
 }
 
+/// Compile a query string against `config.language`, then run it against
+/// every matching file under `search_dir`.
+///
+/// This is the engine of the `ast_query` tool, exposed for direct use by
+/// smoke tests and other callers that want to execute a query without
+/// going through the Tool/ToolContext plumbing.
+///
+/// Returns the formatted match lines (same format as the tool output).
+/// Errors on compile failure or capture-less queries.
+pub fn execute_query_string(
+    query_str: &str,
+    config: &'static ast::LanguageConfig,
+    search_dir: &std::path::Path,
+    include_glob: Option<&str>,
+) -> std::result::Result<Vec<String>, String> {
+    let query = Query::new(&config.language, query_str)
+        .map_err(|e| format!("compile: {e}"))?;
+    if query.capture_names().is_empty() {
+        return Err("query has no captures".to_string());
+    }
+    let working_dir_canon = search_dir
+        .canonicalize()
+        .unwrap_or_else(|_| search_dir.to_path_buf());
+    Ok(run_query(
+        &query,
+        config,
+        search_dir,
+        &working_dir_canon,
+        include_glob,
+    ))
+}
+
 /// Run the compiled query against all matching files in `search_dir`.
 fn run_query(
     query: &Query,
