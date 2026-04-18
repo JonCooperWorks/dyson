@@ -965,7 +965,6 @@ impl Agent {
     }
 
     /// Check whether a tool is registered by name.
-    #[cfg(test)]
     pub fn has_tool(&self, name: &str) -> bool {
         self.tool_registry.tools.contains_key(name)
     }

@@ -321,11 +321,10 @@ impl super::Controller for SwarmController {
         )
         .await?;
 
-        // `swarm_checkpoint` lives on the swarm controller rather than in
-        // BuiltinSkill because it's a no-op outside this controller (the
-        // default `Output::checkpoint` hook drops events).  Registering it
-        // here keeps non-swarm deploys from paying for the schema.
-        agent.register_tool(std::sync::Arc::new(crate::tool::swarm_checkpoint::SwarmCheckpointTool));
+        // `swarm_checkpoint` is registered inside `run_session` after the
+        // first successful SSE connect — there's no consumer for checkpoint
+        // events until then, and the tool shouldn't appear in the hardware
+        // manifest because the hub doesn't dispatch to it.
 
         // ── 2. PROBE HARDWARE ──
         let tool_names = agent.tool_names();
@@ -429,6 +428,15 @@ impl SwarmController {
             Ok(rx) => rx,
             Err(e) => return SessionResult::Disconnected(e),
         };
+
+        // First time we've confirmed a live hub: register the controller-local
+        // `swarm_checkpoint` tool.  Idempotent via `has_tool` so reconnects
+        // don't duplicate the schema.  Until this point there's no consumer
+        // for checkpoint events, so exposing the tool to the LLM would just
+        // waste schema tokens.
+        if !agent.has_tool("swarm_checkpoint") {
+            agent.register_tool(Arc::new(crate::tool::swarm_checkpoint::SwarmCheckpointTool));
+        }
 
         // Heartbeat background task.
         //
