@@ -16,12 +16,12 @@ Full case study in [../security-engineer-subagent.md → Case study: CVE-repro s
 
 | Verdict | Count | Targets |
 |---|---|---|
-| **Hit** (CVE pinned OR multiple real findings) | 12 | log4j, jackson, nextjs, pyyaml, lodash, commons-text, webgoat, ghost, strapi, react-server, tomcat, node-forge |
+| **Hit** (CVE pinned OR multiple real findings) | 13 | log4j, jackson, nextjs, pyyaml, lodash, commons-text, webgoat, ghost, strapi, react-server, tomcat, node-forge, meilisearch |
 | **Partial hit** (adjacent real finding, not the exact CVE) | 4 | spring-beans (ClassEditor vs Spring4Shell), mastodon (LinkDetails iframe vs formatter), keycloak (testSMTPConnection + stack trace leak), airflow (4 webserver-hardening findings) |
 | **Near-miss** (right code examined, safe-looking reasoning, no finding) | 2 | django (Trunc/Extract regex rationale), spring-security (RegexRequestMatcher dismissed) |
 | **Miss** | 2 | react-server-dom-webpack (dismissed as delegator), gitea (filed HTML-attr MEDIUM, missed SVG SSRF) |
 
-Stacks exercised: **Java** (Log4j, Spring, jackson-databind, Commons Text, WebGoat), **JavaScript/TypeScript** (lodash, Next.js, React server + adapter, Ghost, Strapi), **Python** (PyYAML, Django), **Ruby** (Mastodon), **Go** (Gitea).
+Stacks exercised: **Java** (Log4j, Spring, jackson-databind, Commons Text, WebGoat, Tomcat, Keycloak), **JavaScript/TypeScript** (lodash, Next.js, React server + adapter, Ghost, Strapi, node-forge, ejs), **Python** (PyYAML, Django, Airflow), **Ruby** (Mastodon), **Go** (Gitea, Grafana), **Rust** (Meilisearch).
 
 ## Detailed index
 
@@ -41,6 +41,7 @@ Stacks exercised: **Java** (Log4j, Spring, jackson-databind, Commons Text, WebGo
 | [`iter8-react-server-19.2.0-hit.md`](iter8-react-server-19.2.0-hit.md) | React 19.2.0 `react-server/src` | Node/TS | **The React2Shell prototype-walk primitive**, found cleanly when the scope points at the package that actually contains the sink (`react-server`), not the wrapper package.  Lists prototype-walk in `getOutlinedModel`, same primitive in `createModelResolver`, `JSON.parse` on unvalidated `FormData`, `bindArgs` on attacker-controlled args.  Paired with the still-miss below to illustrate the scope-delegation failure mode. |
 | [`iter9-tomcat-9.0.30-hit.md`](iter9-tomcat-9.0.30-hit.md) | Apache Tomcat 9.0.30 `coyote/ajp` | Java | Five findings including **CVE-2020-1938 Ghostcat** at `AjpProcessor.java:709-733` CRITICAL, plus AJP-attribute-based authentication bypass (`SC_A_AUTH_TYPE` spoofing), remote user impersonation, host header injection via `localName`, arbitrary `localPort`.  Reference example of concern-scoped review: `sub: java/org/apache/coyote/ajp` narrows the agent to the AJP protocol handler and surfaces the whole adjacent family of AJP trust-boundary issues, not just the headline CVE. |
 | [`iter9-node-forge-1.2.1-hit.md`](iter9-node-forge-1.2.1-hit.md) | node-forge 1.2.1 `lib` | Node/crypto | Six crypto findings including **CVE-2022-24771** (RSA PKCS#1 v1.5 Bleichenbacher-variant signature forgery at `rsa.js:1111-1113`, CRITICAL), plus TLS 1.2 PRF stub returning undefined, missing cipher-suite validation (with FIXME acknowledgement in code), weak exponent e=3 default, MD5 in PKCS#12 MAC / certificate signing, X.509 verify accepts `md5WithRSAEncryption`.  Rich cross-class crypto review on a library the cheatsheets never specifically addressed. |
+| [`iter10-meilisearch-1.4.0-hit.md`](iter10-meilisearch-1.4.0-hit.md) | Meilisearch 1.4.0 `meilisearch` | Rust / actix-web | **GHSA-h395-gr665-qw3r** JWT tenant-token authorization bypass via `jsonwebtoken` type confusion (CRITICAL at `src/extractors/authentication/mod.rs:135`), plus permissive CORS on credential-bearing requests, unauth `/health` endpoint noted as intentional, version endpoint info disclosure.  First Rust web-app target and first actix-web framework exercise in the suite — exercised `lang/rust.md` + `framework/actix.md`.  Note: the staged CVE was CVE-2023-47626 but the agent found a different real published advisory on the same codebase; both are legitimate rediscoveries. |
 
 ### Partial hits — adjacent findings, class rule worked
 
