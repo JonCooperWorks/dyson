@@ -35,7 +35,10 @@ const UP_WALK_DEPTH: usize = 5;
 /// the cap fits: 2 langs + 2 frameworks ≈ 300 lines, well under.
 const MAX_CHEATSHEET_LINES: usize = 400;
 
-/// Languages for which a cheatsheet ships in v1.
+/// Languages for which a cheatsheet ships.  Covers every tree-sitter
+/// grammar dyson's `ast_query` supports, plus PHP (no in-tree grammar
+/// but a major dependency ecosystem — the sheet still guides `read_file`
+/// and `search_files` work even without `ast_query`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
     Python,
@@ -45,17 +48,39 @@ pub enum Language {
     JavaScript,
     Go,
     Rust,
+    Ruby,
+    Java,
+    Kotlin,
+    CSharp,
+    Php,
+    Cpp,
+    Elixir,
+    Haskell,
+    Swift,
+    Ocaml,
+    Erlang,
+    Zig,
+    Nix,
 }
 
-/// Frameworks for which a cheatsheet ships in v1.  Each binds to one
-/// language for detection purposes.
+/// Frameworks for which a cheatsheet ships.  Each binds to one language
+/// for detection purposes — the cap logic drops a framework if its
+/// language isn't in the top-2 selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Framework {
     Django,
     Flask,
+    FastApi,
     Express,
+    NextJs,
     Actix,
     Axum,
+    Rails,
+    Spring,
+    AspNet,
+    Laravel,
+    Phoenix,
+    Gin,
 }
 
 impl Framework {
@@ -64,9 +89,15 @@ impl Framework {
     /// is still in the selection.
     const fn language(self) -> Language {
         match self {
-            Self::Django | Self::Flask => Language::Python,
-            Self::Express => Language::JavaScript,
+            Self::Django | Self::Flask | Self::FastApi => Language::Python,
+            Self::Express | Self::NextJs => Language::JavaScript,
             Self::Actix | Self::Axum => Language::Rust,
+            Self::Rails => Language::Ruby,
+            Self::Spring => Language::Java,
+            Self::AspNet => Language::CSharp,
+            Self::Laravel => Language::Php,
+            Self::Phoenix => Language::Elixir,
+            Self::Gin => Language::Go,
         }
     }
 }
@@ -211,10 +242,25 @@ fn inspect_file(
         "package.json" => Some(Language::JavaScript),
         "pyproject.toml" | "requirements.txt" => Some(Language::Python),
         "go.mod" => Some(Language::Go),
-        "gemfile" => None, // Ruby in v1 has no sheet; ignore for ranking.
+        "gemfile" | "gemfile.lock" => Some(Language::Ruby),
+        "pom.xml" | "build.gradle" | "build.gradle.kts" => Some(Language::Java),
+        "composer.json" | "composer.lock" => Some(Language::Php),
+        "mix.exs" | "mix.lock" => Some(Language::Elixir),
+        "rebar.config" => Some(Language::Erlang),
+        "package.swift" => Some(Language::Swift),
+        "stack.yaml" | "cabal.project" => Some(Language::Haskell),
+        "dune-project" => Some(Language::Ocaml),
+        "build.zig" | "build.zig.zon" => Some(Language::Zig),
+        "flake.nix" | "default.nix" | "shell.nix" => Some(Language::Nix),
+        "conanfile.txt" | "conanfile.py" | "cmakelists.txt" => Some(Language::Cpp),
         _ => {
             if lower.starts_with("requirements") && lower.ends_with(".txt") {
                 Some(Language::Python)
+            } else if lower.ends_with(".csproj")
+                || lower.ends_with(".fsproj")
+                || lower.ends_with(".vbproj")
+            {
+                Some(Language::CSharp)
             } else {
                 None
             }
@@ -242,6 +288,15 @@ fn inspect_file(
         (Language::Rust, "cargo.toml") => {
             scan_cargo_toml(&contents, frameworks, seen);
         }
+        (Language::Ruby, "gemfile") => scan_gemfile(&contents, frameworks, seen),
+        (Language::Java, "pom.xml") => scan_pom_xml(&contents, frameworks, seen),
+        (Language::Java, "build.gradle" | "build.gradle.kts") => {
+            scan_build_gradle(&contents, frameworks, seen)
+        }
+        (Language::Php, "composer.json") => scan_composer_json(&contents, frameworks, seen),
+        (Language::Elixir, "mix.exs") => scan_mix_exs(&contents, frameworks, seen),
+        (Language::CSharp, _) => scan_dotnet_project(&contents, frameworks, seen),
+        (Language::Go, "go.mod") => scan_go_mod(&contents, frameworks, seen),
         _ => {}
     }
 }
@@ -272,6 +327,9 @@ fn scan_package_json(
     };
     if has_dep("express") {
         push_framework(Framework::Express, frameworks, seen);
+    }
+    if has_dep("next") {
+        push_framework(Framework::NextJs, frameworks, seen);
     }
 }
 
@@ -318,6 +376,9 @@ fn scan_pyproject_toml(
     if names.contains("flask") {
         push_framework(Framework::Flask, frameworks, seen);
     }
+    if names.contains("fastapi") {
+        push_framework(Framework::FastApi, frameworks, seen);
+    }
 }
 
 /// Treat every non-comment line as `pkg[==ver]` and extract `pkg`.
@@ -332,10 +393,11 @@ fn scan_requirements_txt(
             continue;
         }
         let name = requirement_name(line);
-        if name == "django" {
-            push_framework(Framework::Django, frameworks, seen);
-        } else if name == "flask" {
-            push_framework(Framework::Flask, frameworks, seen);
+        match name.as_str() {
+            "django" => push_framework(Framework::Django, frameworks, seen),
+            "flask" => push_framework(Framework::Flask, frameworks, seen),
+            "fastapi" => push_framework(Framework::FastApi, frameworks, seen),
+            _ => {}
         }
     }
 }
@@ -384,17 +446,159 @@ fn push_framework(fw: Framework, frameworks: &mut Vec<Framework>, seen: &mut Has
     }
 }
 
+/// `Gemfile` isn't a structured format we parse as a whole — instead,
+/// match the common `gem 'name'` / `gem "name"` line shape.  False
+/// negatives (gem name hidden behind a group/if block) are acceptable;
+/// false positives (a commented-out gem declaration) would be worse,
+/// so respect `#` comment lines.
+fn scan_gemfile(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut HashSet<Framework>) {
+    for raw in contents.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if !line.starts_with("gem ") && !line.starts_with("gem\t") {
+            continue;
+        }
+        // Extract the quoted name: `gem 'rails'` or `gem "rails"`.
+        let Some(after_gem) = line.get(4..).map(str::trim_start) else {
+            continue;
+        };
+        let name = match after_gem.chars().next() {
+            Some('\'') => after_gem[1..]
+                .split('\'')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase(),
+            Some('"') => after_gem[1..]
+                .split('"')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase(),
+            _ => continue,
+        };
+        if name == "rails" {
+            push_framework(Framework::Rails, frameworks, seen);
+        }
+    }
+}
+
+/// `pom.xml` — shallow substring match on common Spring Boot / Spring
+/// coordinate strings.  Full XML parsing would be more robust but pulls
+/// a heavy dep; substring suffices for detection.
+fn scan_pom_xml(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut HashSet<Framework>) {
+    let lower = contents.to_ascii_lowercase();
+    if lower.contains("spring-boot-starter") || lower.contains("org.springframework") {
+        push_framework(Framework::Spring, frameworks, seen);
+    }
+}
+
+/// `build.gradle` / `build.gradle.kts` — substring match on Spring
+/// Boot Gradle plugin or `org.springframework` coordinates.  Groovy
+/// and Kotlin DSL variants both express the dep as a string containing
+/// the coordinate, so line-based scanning catches either.
+fn scan_build_gradle(
+    contents: &str,
+    frameworks: &mut Vec<Framework>,
+    seen: &mut HashSet<Framework>,
+) {
+    let lower = contents.to_ascii_lowercase();
+    if lower.contains("spring-boot-starter") || lower.contains("org.springframework") {
+        push_framework(Framework::Spring, frameworks, seen);
+    }
+}
+
+/// `composer.json` — parse as JSON and look at `require` /
+/// `require-dev` tables.  Laravel ships via `laravel/framework`.
+fn scan_composer_json(
+    contents: &str,
+    frameworks: &mut Vec<Framework>,
+    seen: &mut HashSet<Framework>,
+) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(contents) else {
+        return;
+    };
+    let has_dep = |name: &str| -> bool {
+        for key in ["require", "require-dev"] {
+            if value
+                .get(key)
+                .and_then(|v| v.as_object())
+                .is_some_and(|m| m.contains_key(name))
+            {
+                return true;
+            }
+        }
+        false
+    };
+    if has_dep("laravel/framework") {
+        push_framework(Framework::Laravel, frameworks, seen);
+    }
+}
+
+/// `mix.exs` — no clean parser for Elixir code; substring match on
+/// the `{:phoenix, ...}` dep atom form is reliable enough.
+fn scan_mix_exs(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut HashSet<Framework>) {
+    // Collapse whitespace before matching so `{ :phoenix ,` variants
+    // still hit.
+    let compact: String = contents
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if compact.contains("{:phoenix,") {
+        push_framework(Framework::Phoenix, frameworks, seen);
+    }
+}
+
+/// `.csproj` / `.fsproj` / `.vbproj` / `packages.config` — ASP.NET Core
+/// ships as `Microsoft.AspNetCore.App` / `Microsoft.AspNetCore.*`
+/// framework references.  Substring match on the coordinate.
+fn scan_dotnet_project(
+    contents: &str,
+    frameworks: &mut Vec<Framework>,
+    seen: &mut HashSet<Framework>,
+) {
+    let lower = contents.to_ascii_lowercase();
+    if lower.contains("microsoft.aspnetcore") {
+        push_framework(Framework::AspNet, frameworks, seen);
+    }
+}
+
+/// `go.mod` — look for `github.com/gin-gonic/gin` in `require` blocks.
+fn scan_go_mod(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut HashSet<Framework>) {
+    if contents.contains("github.com/gin-gonic/gin") {
+        push_framework(Framework::Gin, frameworks, seen);
+    }
+}
+
 /// Round-trip `as usize` discriminant → enum.  Keep in sync with the
 /// variant order — the test module asserts round-trip for every
 /// variant.
 fn language_from_discriminant(d: usize) -> Option<Language> {
-    match d {
-        x if x == Language::Python as usize => Some(Language::Python),
-        x if x == Language::JavaScript as usize => Some(Language::JavaScript),
-        x if x == Language::Go as usize => Some(Language::Go),
-        x if x == Language::Rust as usize => Some(Language::Rust),
-        _ => None,
+    for lang in [
+        Language::Python,
+        Language::JavaScript,
+        Language::Go,
+        Language::Rust,
+        Language::Ruby,
+        Language::Java,
+        Language::Kotlin,
+        Language::CSharp,
+        Language::Php,
+        Language::Cpp,
+        Language::Elixir,
+        Language::Haskell,
+        Language::Swift,
+        Language::Ocaml,
+        Language::Erlang,
+        Language::Zig,
+        Language::Nix,
+    ] {
+        if lang as usize == d {
+            return Some(lang);
+        }
     }
+    None
 }
 
 /// Compose the cheatsheet text to inject into the security_engineer's
@@ -494,6 +698,40 @@ fn lang_sheet(lang: Language) -> (&'static str, &'static str) {
         ),
         Language::Go => ("lang/go", include_str!("prompts/cheatsheets/lang/go.md")),
         Language::Rust => ("lang/rust", include_str!("prompts/cheatsheets/lang/rust.md")),
+        Language::Ruby => ("lang/ruby", include_str!("prompts/cheatsheets/lang/ruby.md")),
+        Language::Java => ("lang/java", include_str!("prompts/cheatsheets/lang/java.md")),
+        Language::Kotlin => (
+            "lang/kotlin",
+            include_str!("prompts/cheatsheets/lang/kotlin.md"),
+        ),
+        Language::CSharp => (
+            "lang/csharp",
+            include_str!("prompts/cheatsheets/lang/csharp.md"),
+        ),
+        Language::Php => ("lang/php", include_str!("prompts/cheatsheets/lang/php.md")),
+        Language::Cpp => ("lang/cpp", include_str!("prompts/cheatsheets/lang/cpp.md")),
+        Language::Elixir => (
+            "lang/elixir",
+            include_str!("prompts/cheatsheets/lang/elixir.md"),
+        ),
+        Language::Haskell => (
+            "lang/haskell",
+            include_str!("prompts/cheatsheets/lang/haskell.md"),
+        ),
+        Language::Swift => (
+            "lang/swift",
+            include_str!("prompts/cheatsheets/lang/swift.md"),
+        ),
+        Language::Ocaml => (
+            "lang/ocaml",
+            include_str!("prompts/cheatsheets/lang/ocaml.md"),
+        ),
+        Language::Erlang => (
+            "lang/erlang",
+            include_str!("prompts/cheatsheets/lang/erlang.md"),
+        ),
+        Language::Zig => ("lang/zig", include_str!("prompts/cheatsheets/lang/zig.md")),
+        Language::Nix => ("lang/nix", include_str!("prompts/cheatsheets/lang/nix.md")),
     }
 }
 
@@ -507,9 +745,17 @@ fn framework_sheet(fw: Framework) -> (&'static str, &'static str) {
             "framework/flask",
             include_str!("prompts/cheatsheets/framework/flask.md"),
         ),
+        Framework::FastApi => (
+            "framework/fastapi",
+            include_str!("prompts/cheatsheets/framework/fastapi.md"),
+        ),
         Framework::Express => (
             "framework/express",
             include_str!("prompts/cheatsheets/framework/express.md"),
+        ),
+        Framework::NextJs => (
+            "framework/nextjs",
+            include_str!("prompts/cheatsheets/framework/nextjs.md"),
         ),
         Framework::Actix => (
             "framework/actix",
@@ -518,6 +764,30 @@ fn framework_sheet(fw: Framework) -> (&'static str, &'static str) {
         Framework::Axum => (
             "framework/axum",
             include_str!("prompts/cheatsheets/framework/axum.md"),
+        ),
+        Framework::Rails => (
+            "framework/rails",
+            include_str!("prompts/cheatsheets/framework/rails.md"),
+        ),
+        Framework::Spring => (
+            "framework/spring",
+            include_str!("prompts/cheatsheets/framework/spring.md"),
+        ),
+        Framework::AspNet => (
+            "framework/aspnet",
+            include_str!("prompts/cheatsheets/framework/aspnet.md"),
+        ),
+        Framework::Laravel => (
+            "framework/laravel",
+            include_str!("prompts/cheatsheets/framework/laravel.md"),
+        ),
+        Framework::Phoenix => (
+            "framework/phoenix",
+            include_str!("prompts/cheatsheets/framework/phoenix.md"),
+        ),
+        Framework::Gin => (
+            "framework/gin",
+            include_str!("prompts/cheatsheets/framework/gin.md"),
         ),
     }
 }
@@ -563,6 +833,19 @@ mod tests {
             Language::JavaScript,
             Language::Go,
             Language::Rust,
+            Language::Ruby,
+            Language::Java,
+            Language::Kotlin,
+            Language::CSharp,
+            Language::Php,
+            Language::Cpp,
+            Language::Elixir,
+            Language::Haskell,
+            Language::Swift,
+            Language::Ocaml,
+            Language::Erlang,
+            Language::Zig,
+            Language::Nix,
         ] {
             let d = lang as usize;
             assert_eq!(language_from_discriminant(d), Some(lang));
@@ -671,12 +954,150 @@ mod tests {
     }
 
     #[test]
-    fn gemfile_does_not_contribute_a_language() {
-        // Ruby has no v1 sheet; a Gemfile-only repo yields no languages.
+    fn detects_ruby_via_gemfile() {
         let tmp = TempDir::new().unwrap();
-        write(tmp.path(), "Gemfile", "source 'https://rubygems.org'\n");
+        write(
+            tmp.path(),
+            "Gemfile",
+            "source 'https://rubygems.org'\ngem 'sqlite3'\n",
+        );
         let det = detect_repo(tmp.path());
-        assert!(det.languages.is_empty());
+        assert_eq!(det.languages, vec![Language::Ruby]);
+        assert!(det.frameworks.is_empty());
+    }
+
+    #[test]
+    fn detects_rails_framework() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Gemfile",
+            "source 'https://rubygems.org'\ngem 'rails', '~> 7.0'\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.frameworks, vec![Framework::Rails]);
+    }
+
+    #[test]
+    fn detects_java_via_pom() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "pom.xml",
+            "<project>\n  <dependencies>\n    <dependency>\n      <groupId>org.springframework.boot</groupId>\n      <artifactId>spring-boot-starter-web</artifactId>\n    </dependency>\n  </dependencies>\n</project>\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Java]);
+        assert_eq!(det.frameworks, vec![Framework::Spring]);
+    }
+
+    #[test]
+    fn detects_java_via_gradle_kotlin_dsl() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "build.gradle.kts",
+            "plugins {\n  id(\"org.springframework.boot\") version \"3.1.0\"\n}\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Java]);
+        assert_eq!(det.frameworks, vec![Framework::Spring]);
+    }
+
+    #[test]
+    fn detects_csharp_via_csproj() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "App.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk.Web\">\n  <PropertyGroup>\n    <TargetFramework>net8.0</TargetFramework>\n  </PropertyGroup>\n  <ItemGroup>\n    <FrameworkReference Include=\"Microsoft.AspNetCore.App\" />\n  </ItemGroup>\n</Project>\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::CSharp]);
+        assert_eq!(det.frameworks, vec![Framework::AspNet]);
+    }
+
+    #[test]
+    fn detects_php_via_composer() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "composer.json",
+            r#"{"name":"app","require":{"laravel/framework":"^10.0"}}"#,
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Php]);
+        assert_eq!(det.frameworks, vec![Framework::Laravel]);
+    }
+
+    #[test]
+    fn detects_elixir_via_mix_and_phoenix() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "mix.exs",
+            "defp deps, do: [\n  {:phoenix, \"~> 1.7\"},\n  {:ecto, \"~> 3.10\"}\n]\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Elixir]);
+        assert_eq!(det.frameworks, vec![Framework::Phoenix]);
+    }
+
+    #[test]
+    fn detects_gin_via_go_mod() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "go.mod",
+            "module x\n\ngo 1.22\n\nrequire (\n\tgithub.com/gin-gonic/gin v1.9.1\n)\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Go]);
+        assert_eq!(det.frameworks, vec![Framework::Gin]);
+    }
+
+    #[test]
+    fn detects_nextjs_via_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","dependencies":{"next":"^14","react":"^18"}}"#,
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.frameworks, vec![Framework::NextJs]);
+    }
+
+    #[test]
+    fn detects_fastapi_via_requirements() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "requirements.txt",
+            "fastapi>=0.100\nuvicorn\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.frameworks, vec![Framework::FastApi]);
+    }
+
+    #[test]
+    fn detects_cpp_via_conanfile() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "conanfile.txt", "[requires]\nfmt/9.0.0\n");
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Cpp]);
+    }
+
+    #[test]
+    fn detects_nix_via_flake() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "flake.nix",
+            "{ description = \"x\"; inputs = {}; outputs = { self }: {}; }\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Nix]);
     }
 
     #[test]

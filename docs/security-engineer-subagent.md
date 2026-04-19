@@ -66,17 +66,44 @@ Sheets live at [prompts/cheatsheets/{lang,framework}/*.md](../crates/dyson/src/s
 - **Up** 5 ancestor directories, non-recursive — handles `juice-shop/routes/` scoping where `package.json` sits one level up.
 - **Down** 3 depth levels via `ignore::WalkBuilder`, which already respects `.gitignore` (with `require_git(false)` so it bites on bare tarballs too), `.git/info/exclude`, global gitignore, and hidden files.  A supplementary skip list covers `node_modules`, `target`, `.venv`, `venv`, `__pycache__`, `dist`, `build`, `vendor`, `.next`, `.cache` for repos shipped without a `.gitignore`.
 
-Manifests recognised: `Cargo.toml` (Rust), `package.json` (JS/TS), `pyproject.toml` / `requirements.txt` / `requirements*.txt` (Python), `go.mod` (Go).  Ruby's `Gemfile` is detected but ignored — no v1 sheet.
+Coverage matches every tree-sitter grammar dyson's `ast_query` supports (13 langs) plus PHP (no in-tree grammar; the sheet still guides `read_file` / `search_files` work).  Manifests recognised:
+
+| Lang | Manifests |
+|---|---|
+| Rust | `Cargo.toml` |
+| JavaScript / TypeScript | `package.json` |
+| Python | `pyproject.toml`, `requirements*.txt` |
+| Go | `go.mod` |
+| Ruby | `Gemfile`, `Gemfile.lock` |
+| Java / Kotlin | `pom.xml`, `build.gradle`, `build.gradle.kts` |
+| C# / .NET | `*.csproj`, `*.fsproj`, `*.vbproj` |
+| PHP | `composer.json`, `composer.lock` |
+| C / C++ | `conanfile.txt`, `conanfile.py`, `CMakeLists.txt` |
+| Elixir | `mix.exs`, `mix.lock` |
+| Haskell | `stack.yaml`, `cabal.project` |
+| Swift | `Package.swift` |
+| OCaml | `dune-project` |
+| Erlang | `rebar.config` |
+| Zig | `build.zig`, `build.zig.zon` |
+| Nix | `flake.nix`, `default.nix`, `shell.nix` |
 
 Framework detection shallow-parses dependency tables:
 
-| Manifest | Dep name | Sheet |
+| Manifest | Dep name / coord | Sheet |
 |---|---|---|
 | `package.json` | `express` | `framework/express` |
-| `pyproject.toml` / `requirements.txt` | `django` | `framework/django` |
-| `pyproject.toml` / `requirements.txt` | `flask` | `framework/flask` |
+| `package.json` | `next` | `framework/nextjs` |
+| `pyproject.toml` / `requirements*.txt` | `django` | `framework/django` |
+| `pyproject.toml` / `requirements*.txt` | `flask` | `framework/flask` |
+| `pyproject.toml` / `requirements*.txt` | `fastapi` | `framework/fastapi` |
 | `Cargo.toml` | `actix-web` / `actix` | `framework/actix` |
 | `Cargo.toml` | `axum` | `framework/axum` |
+| `Gemfile` | `gem 'rails'` | `framework/rails` |
+| `pom.xml` / `build.gradle[.kts]` | `spring-boot-starter-*` / `org.springframework` | `framework/spring` |
+| `*.csproj` / `*.fsproj` | `Microsoft.AspNetCore` | `framework/aspnet` |
+| `composer.json` | `laravel/framework` | `framework/laravel` |
+| `mix.exs` | `{:phoenix, ...}` | `framework/phoenix` |
+| `go.mod` | `github.com/gin-gonic/gin` | `framework/gin` |
 
 ### Composition and cap
 

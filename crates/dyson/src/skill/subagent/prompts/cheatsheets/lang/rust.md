@@ -45,6 +45,9 @@ Starting points for Rust — not exhaustive. Novel sinks outside this list are s
 **Regex**
 - `Regex::new(user)` — DoS via pathological backtracking. `regex` crate is linear, but allocation is not bounded — use `RegexBuilder::size_limit` / `dfa_size_limit`.
 
+**Deep-dispatch / layer-chain analysis**
+Tower-style middleware (axum, actix-web, tonic) routes a request through N `.layer(…)` wrappers before the handler runs — each layer is a trait-object boundary that `taint_trace`'s name-resolution has to punch through.  Raise `max_depth: 32, max_paths: 20` when tracing into a handler behind 3+ layers; the default 16 cuts short in the middle of the onion and the trace returns `NO_PATH` even for reachable sinks.  Same for async runtime boundaries (`spawn(move || …)`, `block_on`, actor-model `send()`) — each hop eats a depth budget and the chain needs headroom.
+
 ## Tree-sitter seeds (rust)
 
 ```scheme

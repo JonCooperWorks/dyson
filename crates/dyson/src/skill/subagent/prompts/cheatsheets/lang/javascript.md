@@ -30,6 +30,7 @@ Starting points for JavaScript / TypeScript — not exhaustive. Novel sinks outs
 - If `value` is later used as a callable (`new value(...)`, `value(args)`, `loadServerReference(value)`), or any resolved result feeds `require`/`import`/`Function`, the walk is a live RCE primitive.
 - Dismissal phrases you may NOT accept for this shape: "path segments are numeric", "path came from a trusted chunk ID list", "value is a bound callable not arbitrary". None of these are a `constructor/__proto__/prototype` blocklist. Cite the blocklist lines or file it CRITICAL.
 - **Preferred evidence for this class**: one `taint_trace` invocation from the wire-read (`FormData.get`, `request.formData()`, `req.body`, stream-chunk assembly) to the walk loop's sink line.  Same-file / same-function / same-line traces count.  If budget prevents running one, still ship the finding — cap severity per the main Severity Caps rule, do NOT downgrade to a progress-update memo.
+- **Raise `max_depth` on deep dispatchers.**  Defaults are `max_depth=16, max_paths=10`.  For RSC / RPC / message-bus / reflection-heavy dispatch (anything that looks like `registry[id](args)`, `handlers[type].call(...)`, `modules[name].run(...)`), pass `max_depth: 32, max_paths: 20` to `taint_trace` — the indirection layer adds 4-8 hops that the default cap cuts short.  `[TRUNCATED]` in the index header means you still need more; 48/30 is the realistic upper bound.
 
 **Deserialization**
 - `JSON.parse(x)` — parse itself is safe; danger is what you do with the parsed tree (see prototype walk).
