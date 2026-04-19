@@ -597,6 +597,42 @@ const TARGETS: &[Target] = &[
         summary: "Plausible Analytics — Elixir / Phoenix privacy-focused web analytics.",
         git_ref: Some("v2.0.0"),
     },
+    // --- Novel-target runs (latest releases, no specific CVE staged) -----
+    //
+    // Pointed at current stable OSS releases, not pinned vulnerable
+    // versions.  The goal is to see whether dyson finds genuine issues
+    // against code that has been through the project's normal review
+    // cycle.  `description` carries no CVE spoiler; `--hints off` is
+    // the expected mode.
+    Target {
+        name: "appwrite-1.9.0",
+        slug: "appwrite/appwrite",
+        sub: "app/controllers/api",
+        description: "Appwrite 1.9.0 - latest stable release, PHP Backend-as-a-Service.  \
+                      Review scoped to the API controllers (`account.php`, `users.php`, \
+                      `teams.php`, `projects.php`, etc.) where authentication, session \
+                      management, team invites, and user-facing CRUD live.  No specific \
+                      CVE pinned — this is a novel-target run against code that has \
+                      been through the project's normal review cycle.  Prior CVEs in \
+                      this codebase (CVE-2023-27159, CVE-2024-55875) suggest real \
+                      surface in account / session handling.",
+        summary: "Appwrite — PHP Backend-as-a-Service platform.",
+        git_ref: Some("1.9.0"),
+    },
+    Target {
+        name: "outline-1.6.1",
+        slug: "outline/outline",
+        sub: "server/routes/api",
+        description: "Outline 1.6.1 - latest stable release, TypeScript / Koa team \
+                      knowledge-base application.  Review scoped to the API route \
+                      handlers where authentication, document access control, \
+                      attachments, OAuth, and collaboration endpoints live.  No \
+                      specific CVE pinned — novel-target run.  Outline has real-time \
+                      collaboration + OIDC SSO + file upload surface that is less \
+                      reviewed than Notion alternatives.",
+        summary: "Outline — TypeScript / Koa self-hosted team knowledge base.",
+        git_ref: Some("v1.6.1"),
+    },
     // --- Deliberately-vulnerable teaching targets -------------------------
     //
     // Clear, well-documented intended vulnerabilities (no pinned CVE
