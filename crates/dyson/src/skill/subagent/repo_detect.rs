@@ -71,16 +71,48 @@ pub enum Framework {
     Django,
     Flask,
     FastApi,
+    Aiohttp,
+    Tornado,
+    Sanic,
+    Celery,
     Express,
     NextJs,
+    Fastify,
+    NestJs,
+    Trpc,
+    Koa,
+    Hono,
+    SvelteKit,
+    Remix,
+    GraphQL,
     Actix,
     Axum,
+    Rocket,
+    Warp,
+    Tonic,
     Rails,
+    Sinatra,
     Spring,
+    Quarkus,
+    Micronaut,
+    Javalin,
+    Ktor,
     AspNet,
     Laravel,
+    Symfony,
+    Slim,
+    CodeIgniter,
     Phoenix,
     Gin,
+    Echo,
+    Chi,
+    Fiber,
+    GorillaMux,
+    Vapor,
+    Hummingbird,
+    Servant,
+    Dream,
+    Cowboy,
 }
 
 impl Framework {
@@ -89,15 +121,35 @@ impl Framework {
     /// is still in the selection.
     const fn language(self) -> Language {
         match self {
-            Self::Django | Self::Flask | Self::FastApi => Language::Python,
-            Self::Express | Self::NextJs => Language::JavaScript,
-            Self::Actix | Self::Axum => Language::Rust,
-            Self::Rails => Language::Ruby,
-            Self::Spring => Language::Java,
+            Self::Django
+            | Self::Flask
+            | Self::FastApi
+            | Self::Aiohttp
+            | Self::Tornado
+            | Self::Sanic
+            | Self::Celery => Language::Python,
+            Self::Express
+            | Self::NextJs
+            | Self::Fastify
+            | Self::NestJs
+            | Self::Trpc
+            | Self::Koa
+            | Self::Hono
+            | Self::SvelteKit
+            | Self::Remix
+            | Self::GraphQL => Language::JavaScript,
+            Self::Actix | Self::Axum | Self::Rocket | Self::Warp | Self::Tonic => Language::Rust,
+            Self::Rails | Self::Sinatra => Language::Ruby,
+            Self::Spring | Self::Quarkus | Self::Micronaut | Self::Javalin => Language::Java,
+            Self::Ktor => Language::Kotlin,
             Self::AspNet => Language::CSharp,
-            Self::Laravel => Language::Php,
+            Self::Laravel | Self::Symfony | Self::Slim | Self::CodeIgniter => Language::Php,
             Self::Phoenix => Language::Elixir,
-            Self::Gin => Language::Go,
+            Self::Gin | Self::Echo | Self::Chi | Self::Fiber | Self::GorillaMux => Language::Go,
+            Self::Vapor | Self::Hummingbird => Language::Swift,
+            Self::Servant => Language::Haskell,
+            Self::Dream => Language::Ocaml,
+            Self::Cowboy => Language::Erlang,
         }
     }
 }
@@ -243,13 +295,17 @@ fn inspect_file(
         "pyproject.toml" | "requirements.txt" => Some(Language::Python),
         "go.mod" => Some(Language::Go),
         "gemfile" | "gemfile.lock" => Some(Language::Ruby),
-        "pom.xml" | "build.gradle" | "build.gradle.kts" => Some(Language::Java),
+        // `.kts` extension is the Kotlin DSL — Kotlin-first project.
+        // Plain `build.gradle` (Groovy) typically indicates a Java
+        // project; keep the old mapping for that.
+        "build.gradle.kts" => Some(Language::Kotlin),
+        "pom.xml" | "build.gradle" => Some(Language::Java),
         "composer.json" | "composer.lock" => Some(Language::Php),
         "mix.exs" | "mix.lock" => Some(Language::Elixir),
         "rebar.config" => Some(Language::Erlang),
         "package.swift" => Some(Language::Swift),
         "stack.yaml" | "cabal.project" => Some(Language::Haskell),
-        "dune-project" => Some(Language::Ocaml),
+        "dune-project" | "dune" => Some(Language::Ocaml),
         "build.zig" | "build.zig.zon" => Some(Language::Zig),
         "flake.nix" | "default.nix" | "shell.nix" => Some(Language::Nix),
         "conanfile.txt" | "conanfile.py" | "cmakelists.txt" => Some(Language::Cpp),
@@ -261,6 +317,8 @@ fn inspect_file(
                 || lower.ends_with(".vbproj")
             {
                 Some(Language::CSharp)
+            } else if lower.ends_with(".cabal") {
+                Some(Language::Haskell)
             } else {
                 None
             }
@@ -290,13 +348,18 @@ fn inspect_file(
         }
         (Language::Ruby, "gemfile") => scan_gemfile(&contents, frameworks, seen),
         (Language::Java, "pom.xml") => scan_pom_xml(&contents, frameworks, seen),
-        (Language::Java, "build.gradle" | "build.gradle.kts") => {
-            scan_build_gradle(&contents, frameworks, seen)
-        }
+        (Language::Java, "build.gradle") => scan_build_gradle(&contents, frameworks, seen),
+        (Language::Kotlin, "build.gradle.kts") => scan_build_gradle(&contents, frameworks, seen),
+        (Language::Swift, "package.swift") => scan_package_swift(&contents, frameworks, seen),
         (Language::Php, "composer.json") => scan_composer_json(&contents, frameworks, seen),
         (Language::Elixir, "mix.exs") => scan_mix_exs(&contents, frameworks, seen),
         (Language::CSharp, _) => scan_dotnet_project(&contents, frameworks, seen),
         (Language::Go, "go.mod") => scan_go_mod(&contents, frameworks, seen),
+        (Language::Haskell, _) if lower.ends_with(".cabal") => {
+            scan_cabal_file(&contents, frameworks, seen)
+        }
+        (Language::Ocaml, "dune") => scan_dune_file(&contents, frameworks, seen),
+        (Language::Erlang, "rebar.config") => scan_rebar_config(&contents, frameworks, seen),
         _ => {}
     }
 }
@@ -330,6 +393,37 @@ fn scan_package_json(
     }
     if has_dep("next") {
         push_framework(Framework::NextJs, frameworks, seen);
+    }
+    if has_dep("fastify") {
+        push_framework(Framework::Fastify, frameworks, seen);
+    }
+    if has_dep("@nestjs/core") || has_dep("@nestjs/common") {
+        push_framework(Framework::NestJs, frameworks, seen);
+    }
+    if has_dep("@trpc/server") {
+        push_framework(Framework::Trpc, frameworks, seen);
+    }
+    if has_dep("koa") {
+        push_framework(Framework::Koa, frameworks, seen);
+    }
+    if has_dep("hono") {
+        push_framework(Framework::Hono, frameworks, seen);
+    }
+    if has_dep("@sveltejs/kit") {
+        push_framework(Framework::SvelteKit, frameworks, seen);
+    }
+    if has_dep("@remix-run/node")
+        || has_dep("@remix-run/react")
+        || has_dep("@remix-run/server-runtime")
+    {
+        push_framework(Framework::Remix, frameworks, seen);
+    }
+    if has_dep("@apollo/server")
+        || has_dep("apollo-server")
+        || has_dep("graphql-yoga")
+        || has_dep("@nestjs/graphql")
+    {
+        push_framework(Framework::GraphQL, frameworks, seen);
     }
 }
 
@@ -379,6 +473,18 @@ fn scan_pyproject_toml(
     if names.contains("fastapi") {
         push_framework(Framework::FastApi, frameworks, seen);
     }
+    if names.contains("aiohttp") {
+        push_framework(Framework::Aiohttp, frameworks, seen);
+    }
+    if names.contains("tornado") {
+        push_framework(Framework::Tornado, frameworks, seen);
+    }
+    if names.contains("sanic") {
+        push_framework(Framework::Sanic, frameworks, seen);
+    }
+    if names.contains("celery") {
+        push_framework(Framework::Celery, frameworks, seen);
+    }
 }
 
 /// Treat every non-comment line as `pkg[==ver]` and extract `pkg`.
@@ -397,6 +503,10 @@ fn scan_requirements_txt(
             "django" => push_framework(Framework::Django, frameworks, seen),
             "flask" => push_framework(Framework::Flask, frameworks, seen),
             "fastapi" => push_framework(Framework::FastApi, frameworks, seen),
+            "aiohttp" => push_framework(Framework::Aiohttp, frameworks, seen),
+            "tornado" => push_framework(Framework::Tornado, frameworks, seen),
+            "sanic" => push_framework(Framework::Sanic, frameworks, seen),
+            "celery" => push_framework(Framework::Celery, frameworks, seen),
             _ => {}
         }
     }
@@ -438,6 +548,15 @@ fn scan_cargo_toml(
     if has_dep("axum") {
         push_framework(Framework::Axum, frameworks, seen);
     }
+    if has_dep("rocket") {
+        push_framework(Framework::Rocket, frameworks, seen);
+    }
+    if has_dep("warp") {
+        push_framework(Framework::Warp, frameworks, seen);
+    }
+    if has_dep("tonic") {
+        push_framework(Framework::Tonic, frameworks, seen);
+    }
 }
 
 fn push_framework(fw: Framework, frameworks: &mut Vec<Framework>, seen: &mut HashSet<Framework>) {
@@ -477,8 +596,10 @@ fn scan_gemfile(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut Hash
                 .to_ascii_lowercase(),
             _ => continue,
         };
-        if name == "rails" {
-            push_framework(Framework::Rails, frameworks, seen);
+        match name.as_str() {
+            "rails" => push_framework(Framework::Rails, frameworks, seen),
+            "sinatra" => push_framework(Framework::Sinatra, frameworks, seen),
+            _ => {}
         }
     }
 }
@@ -490,6 +611,15 @@ fn scan_pom_xml(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut Hash
     let lower = contents.to_ascii_lowercase();
     if lower.contains("spring-boot-starter") || lower.contains("org.springframework") {
         push_framework(Framework::Spring, frameworks, seen);
+    }
+    if lower.contains("io.quarkus") {
+        push_framework(Framework::Quarkus, frameworks, seen);
+    }
+    if lower.contains("io.micronaut") {
+        push_framework(Framework::Micronaut, frameworks, seen);
+    }
+    if lower.contains("io.javalin") {
+        push_framework(Framework::Javalin, frameworks, seen);
     }
 }
 
@@ -505,6 +635,18 @@ fn scan_build_gradle(
     let lower = contents.to_ascii_lowercase();
     if lower.contains("spring-boot-starter") || lower.contains("org.springframework") {
         push_framework(Framework::Spring, frameworks, seen);
+    }
+    if lower.contains("io.ktor:ktor-") || lower.contains("\"io.ktor\"") {
+        push_framework(Framework::Ktor, frameworks, seen);
+    }
+    if lower.contains("io.quarkus") {
+        push_framework(Framework::Quarkus, frameworks, seen);
+    }
+    if lower.contains("io.micronaut") {
+        push_framework(Framework::Micronaut, frameworks, seen);
+    }
+    if lower.contains("io.javalin") {
+        push_framework(Framework::Javalin, frameworks, seen);
     }
 }
 
@@ -532,6 +674,18 @@ fn scan_composer_json(
     };
     if has_dep("laravel/framework") {
         push_framework(Framework::Laravel, frameworks, seen);
+    }
+    if has_dep("symfony/framework-bundle")
+        || has_dep("symfony/symfony")
+        || has_dep("symfony/http-kernel")
+    {
+        push_framework(Framework::Symfony, frameworks, seen);
+    }
+    if has_dep("slim/slim") {
+        push_framework(Framework::Slim, frameworks, seen);
+    }
+    if has_dep("codeigniter4/framework") || has_dep("codeigniter/framework") {
+        push_framework(Framework::CodeIgniter, frameworks, seen);
     }
 }
 
@@ -568,6 +722,75 @@ fn scan_dotnet_project(
 fn scan_go_mod(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut HashSet<Framework>) {
     if contents.contains("github.com/gin-gonic/gin") {
         push_framework(Framework::Gin, frameworks, seen);
+    }
+    if contents.contains("github.com/labstack/echo") {
+        push_framework(Framework::Echo, frameworks, seen);
+    }
+    if contents.contains("github.com/go-chi/chi") {
+        push_framework(Framework::Chi, frameworks, seen);
+    }
+    if contents.contains("github.com/gofiber/fiber") {
+        push_framework(Framework::Fiber, frameworks, seen);
+    }
+    if contents.contains("github.com/gorilla/mux") {
+        push_framework(Framework::GorillaMux, frameworks, seen);
+    }
+}
+
+/// `Package.swift` — Swift Package Manager manifest.  Vapor ships as
+/// the `vapor/vapor` repo in a `.package(url: "...vapor.git", ...)`
+/// dependency entry.  Substring match on the repo name.
+fn scan_package_swift(
+    contents: &str,
+    frameworks: &mut Vec<Framework>,
+    seen: &mut HashSet<Framework>,
+) {
+    let lower = contents.to_ascii_lowercase();
+    if lower.contains("vapor/vapor") {
+        push_framework(Framework::Vapor, frameworks, seen);
+    }
+    if lower.contains("hummingbird-project/hummingbird") {
+        push_framework(Framework::Hummingbird, frameworks, seen);
+    }
+}
+
+/// `*.cabal` — Haskell package description.  Substring match on
+/// `servant` / `servant-server` in the `build-depends:` section.
+/// Full-grammar parsing is heavier than the value here.
+fn scan_cabal_file(
+    contents: &str,
+    frameworks: &mut Vec<Framework>,
+    seen: &mut HashSet<Framework>,
+) {
+    let lower = contents.to_ascii_lowercase();
+    if lower.contains("servant") {
+        push_framework(Framework::Servant, frameworks, seen);
+    }
+}
+
+/// `dune` — OCaml build stanza file.  Substring match on `dream` in
+/// a `libraries` clause.  `dune-project` is at the repo root;
+/// per-dir `dune` files carry the actual library deps.
+fn scan_dune_file(
+    contents: &str,
+    frameworks: &mut Vec<Framework>,
+    seen: &mut HashSet<Framework>,
+) {
+    if contents.contains("dream") {
+        push_framework(Framework::Dream, frameworks, seen);
+    }
+}
+
+/// `rebar.config` — Erlang/OTP build config.  Substring match on
+/// `{cowboy, ...}` in the `deps` tuple.
+fn scan_rebar_config(
+    contents: &str,
+    frameworks: &mut Vec<Framework>,
+    seen: &mut HashSet<Framework>,
+) {
+    let compact: String = contents.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.contains("{cowboy,") {
+        push_framework(Framework::Cowboy, frameworks, seen);
     }
 }
 
@@ -789,6 +1012,134 @@ fn framework_sheet(fw: Framework) -> (&'static str, &'static str) {
             "framework/gin",
             include_str!("prompts/cheatsheets/framework/gin.md"),
         ),
+        Framework::Aiohttp => (
+            "framework/aiohttp",
+            include_str!("prompts/cheatsheets/framework/aiohttp.md"),
+        ),
+        Framework::Fastify => (
+            "framework/fastify",
+            include_str!("prompts/cheatsheets/framework/fastify.md"),
+        ),
+        Framework::NestJs => (
+            "framework/nestjs",
+            include_str!("prompts/cheatsheets/framework/nestjs.md"),
+        ),
+        Framework::Trpc => (
+            "framework/trpc",
+            include_str!("prompts/cheatsheets/framework/trpc.md"),
+        ),
+        Framework::Rocket => (
+            "framework/rocket",
+            include_str!("prompts/cheatsheets/framework/rocket.md"),
+        ),
+        Framework::Sinatra => (
+            "framework/sinatra",
+            include_str!("prompts/cheatsheets/framework/sinatra.md"),
+        ),
+        Framework::Ktor => (
+            "framework/ktor",
+            include_str!("prompts/cheatsheets/framework/ktor.md"),
+        ),
+        Framework::Symfony => (
+            "framework/symfony",
+            include_str!("prompts/cheatsheets/framework/symfony.md"),
+        ),
+        Framework::Echo => (
+            "framework/echo",
+            include_str!("prompts/cheatsheets/framework/echo.md"),
+        ),
+        Framework::Chi => (
+            "framework/chi",
+            include_str!("prompts/cheatsheets/framework/chi.md"),
+        ),
+        Framework::Vapor => (
+            "framework/vapor",
+            include_str!("prompts/cheatsheets/framework/vapor.md"),
+        ),
+        Framework::Tornado => (
+            "framework/tornado",
+            include_str!("prompts/cheatsheets/framework/tornado.md"),
+        ),
+        Framework::Sanic => (
+            "framework/sanic",
+            include_str!("prompts/cheatsheets/framework/sanic.md"),
+        ),
+        Framework::Celery => (
+            "framework/celery",
+            include_str!("prompts/cheatsheets/framework/celery.md"),
+        ),
+        Framework::Koa => (
+            "framework/koa",
+            include_str!("prompts/cheatsheets/framework/koa.md"),
+        ),
+        Framework::Hono => (
+            "framework/hono",
+            include_str!("prompts/cheatsheets/framework/hono.md"),
+        ),
+        Framework::SvelteKit => (
+            "framework/sveltekit",
+            include_str!("prompts/cheatsheets/framework/sveltekit.md"),
+        ),
+        Framework::Remix => (
+            "framework/remix",
+            include_str!("prompts/cheatsheets/framework/remix.md"),
+        ),
+        Framework::GraphQL => (
+            "framework/graphql",
+            include_str!("prompts/cheatsheets/framework/graphql.md"),
+        ),
+        Framework::Warp => (
+            "framework/warp",
+            include_str!("prompts/cheatsheets/framework/warp.md"),
+        ),
+        Framework::Tonic => (
+            "framework/tonic",
+            include_str!("prompts/cheatsheets/framework/tonic.md"),
+        ),
+        Framework::Quarkus => (
+            "framework/quarkus",
+            include_str!("prompts/cheatsheets/framework/quarkus.md"),
+        ),
+        Framework::Micronaut => (
+            "framework/micronaut",
+            include_str!("prompts/cheatsheets/framework/micronaut.md"),
+        ),
+        Framework::Javalin => (
+            "framework/javalin",
+            include_str!("prompts/cheatsheets/framework/javalin.md"),
+        ),
+        Framework::Slim => (
+            "framework/slim",
+            include_str!("prompts/cheatsheets/framework/slim.md"),
+        ),
+        Framework::CodeIgniter => (
+            "framework/codeigniter",
+            include_str!("prompts/cheatsheets/framework/codeigniter.md"),
+        ),
+        Framework::Fiber => (
+            "framework/fiber",
+            include_str!("prompts/cheatsheets/framework/fiber.md"),
+        ),
+        Framework::GorillaMux => (
+            "framework/gorilla-mux",
+            include_str!("prompts/cheatsheets/framework/gorilla-mux.md"),
+        ),
+        Framework::Hummingbird => (
+            "framework/hummingbird",
+            include_str!("prompts/cheatsheets/framework/hummingbird.md"),
+        ),
+        Framework::Servant => (
+            "framework/servant",
+            include_str!("prompts/cheatsheets/framework/servant.md"),
+        ),
+        Framework::Dream => (
+            "framework/dream",
+            include_str!("prompts/cheatsheets/framework/dream.md"),
+        ),
+        Framework::Cowboy => (
+            "framework/cowboy",
+            include_str!("prompts/cheatsheets/framework/cowboy.md"),
+        ),
     }
 }
 
@@ -854,16 +1205,48 @@ mod tests {
         Framework::Django,
         Framework::Flask,
         Framework::FastApi,
+        Framework::Aiohttp,
+        Framework::Tornado,
+        Framework::Sanic,
+        Framework::Celery,
         Framework::Express,
         Framework::NextJs,
+        Framework::Fastify,
+        Framework::NestJs,
+        Framework::Trpc,
+        Framework::Koa,
+        Framework::Hono,
+        Framework::SvelteKit,
+        Framework::Remix,
+        Framework::GraphQL,
         Framework::Actix,
         Framework::Axum,
+        Framework::Rocket,
+        Framework::Warp,
+        Framework::Tonic,
         Framework::Rails,
+        Framework::Sinatra,
         Framework::Spring,
+        Framework::Quarkus,
+        Framework::Micronaut,
+        Framework::Javalin,
+        Framework::Ktor,
         Framework::AspNet,
         Framework::Laravel,
+        Framework::Symfony,
+        Framework::Slim,
+        Framework::CodeIgniter,
         Framework::Phoenix,
         Framework::Gin,
+        Framework::Echo,
+        Framework::Chi,
+        Framework::Fiber,
+        Framework::GorillaMux,
+        Framework::Vapor,
+        Framework::Hummingbird,
+        Framework::Servant,
+        Framework::Dream,
+        Framework::Cowboy,
     ];
 
     /// Compile-time guard: if a new variant is added to either enum
@@ -895,16 +1278,48 @@ mod tests {
             Framework::Django
             | Framework::Flask
             | Framework::FastApi
+            | Framework::Aiohttp
+            | Framework::Tornado
+            | Framework::Sanic
+            | Framework::Celery
             | Framework::Express
             | Framework::NextJs
+            | Framework::Fastify
+            | Framework::NestJs
+            | Framework::Trpc
+            | Framework::Koa
+            | Framework::Hono
+            | Framework::SvelteKit
+            | Framework::Remix
+            | Framework::GraphQL
             | Framework::Actix
             | Framework::Axum
+            | Framework::Rocket
+            | Framework::Warp
+            | Framework::Tonic
             | Framework::Rails
+            | Framework::Sinatra
             | Framework::Spring
+            | Framework::Quarkus
+            | Framework::Micronaut
+            | Framework::Javalin
+            | Framework::Ktor
             | Framework::AspNet
             | Framework::Laravel
+            | Framework::Symfony
+            | Framework::Slim
+            | Framework::CodeIgniter
             | Framework::Phoenix
-            | Framework::Gin => {}
+            | Framework::Gin
+            | Framework::Echo
+            | Framework::Chi
+            | Framework::Fiber
+            | Framework::GorillaMux
+            | Framework::Vapor
+            | Framework::Hummingbird
+            | Framework::Servant
+            | Framework::Dream
+            | Framework::Cowboy => {}
         }
     }
 
@@ -1192,7 +1607,17 @@ mod tests {
     }
 
     #[test]
-    fn detects_java_via_gradle_kotlin_dsl() {
+    fn build_gradle_kts_with_spring_detects_kotlin_plus_spring() {
+        // After the build.gradle.kts → Kotlin split, a Kotlin-DSL
+        // build file with a Spring Boot plugin should register as
+        // Kotlin (because .kts) but still include Spring (since the
+        // framework cheatsheet binds to Java — but the language
+        // doesn't surface; the framework stays through language()).
+        // In practice: language is Kotlin, framework list still
+        // contains Spring (bound to Java), so in composition Spring
+        // drops out because Java isn't in the top 2.  We assert
+        // language here and leave framework-composition behavior to
+        // the compose tests.
         let tmp = TempDir::new().unwrap();
         write(
             tmp.path(),
@@ -1200,8 +1625,10 @@ mod tests {
             "plugins {\n  id(\"org.springframework.boot\") version \"3.1.0\"\n}\n",
         );
         let det = detect_repo(tmp.path());
-        assert_eq!(det.languages, vec![Language::Java]);
-        assert_eq!(det.frameworks, vec![Framework::Spring]);
+        assert_eq!(det.languages, vec![Language::Kotlin]);
+        // Framework list records what the manifest advertised even if
+        // its bound language isn't primary — the compose step filters.
+        assert!(det.frameworks.contains(&Framework::Spring));
     }
 
     #[test]
@@ -1278,6 +1705,442 @@ mod tests {
         );
         let det = detect_repo(tmp.path());
         assert_eq!(det.frameworks, vec![Framework::FastApi]);
+    }
+
+    // ------------------------------------------------------------------
+    // Framework expansion — second wave.  Tests authored ahead of the
+    // Framework enum additions, the scanner logic, and the sheet files
+    // (TDD); tests fail to compile until the enum variants exist, then
+    // fail for missing sheet / detection until fully wired.
+    // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // Framework expansion — third wave.  More JS/TS (koa, hono,
+    // sveltekit, remix), more Python (tornado, sanic, celery), more
+    // Go (fiber, gorilla/mux, net/http-stdlib marker), more Rust
+    // (warp, tonic), more JVM (quarkus, micronaut, javalin), more
+    // PHP (slim, codeigniter), plus Servant (Haskell), Dream (OCaml),
+    // Cowboy (Erlang), Hummingbird (Swift), and a protocol-level
+    // GraphQL sheet.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn detects_koa_via_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","dependencies":{"koa":"^2.15"}}"#,
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Koa));
+    }
+
+    #[test]
+    fn detects_hono_via_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","dependencies":{"hono":"^4"}}"#,
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Hono));
+    }
+
+    #[test]
+    fn detects_sveltekit_via_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","devDependencies":{"@sveltejs/kit":"^2"}}"#,
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::SvelteKit));
+    }
+
+    #[test]
+    fn detects_remix_via_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","dependencies":{"@remix-run/node":"^2"}}"#,
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Remix));
+    }
+
+    #[test]
+    fn detects_graphql_via_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","dependencies":{"@apollo/server":"^4","graphql":"^16"}}"#,
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::GraphQL));
+    }
+
+    #[test]
+    fn detects_tornado_via_requirements() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "requirements.txt", "tornado>=6.4\n");
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Tornado));
+    }
+
+    #[test]
+    fn detects_sanic_via_requirements() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "requirements.txt", "sanic>=23\n");
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Sanic));
+    }
+
+    #[test]
+    fn detects_celery_via_requirements() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "requirements.txt", "celery>=5.3\nredis\n");
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Celery));
+    }
+
+    #[test]
+    fn detects_fiber_via_go_mod() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "go.mod",
+            "module x\n\ngo 1.22\n\nrequire github.com/gofiber/fiber/v2 v2.52.0\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Fiber));
+    }
+
+    #[test]
+    fn detects_gorilla_mux_via_go_mod() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "go.mod",
+            "module x\n\ngo 1.22\n\nrequire github.com/gorilla/mux v1.8.1\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::GorillaMux));
+    }
+
+    #[test]
+    fn detects_warp_via_cargo_toml() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Cargo.toml",
+            "[dependencies]\nwarp = \"0.3\"\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Warp));
+    }
+
+    #[test]
+    fn detects_tonic_via_cargo_toml() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Cargo.toml",
+            "[dependencies]\ntonic = \"0.11\"\nprost = \"0.12\"\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Tonic));
+    }
+
+    #[test]
+    fn detects_quarkus_via_pom_xml() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "pom.xml",
+            "<project><dependencies>\n  <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-rest</artifactId></dependency>\n</dependencies></project>\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Quarkus));
+    }
+
+    #[test]
+    fn detects_micronaut_via_gradle() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "build.gradle",
+            "plugins { id 'io.micronaut.application' version '4.3' }\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Micronaut));
+    }
+
+    #[test]
+    fn detects_javalin_via_gradle() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "build.gradle",
+            "dependencies { implementation 'io.javalin:javalin:6.0.0' }\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Javalin));
+    }
+
+    #[test]
+    fn detects_slim_via_composer() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "composer.json",
+            r#"{"name":"app","require":{"slim/slim":"^4"}}"#,
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Slim));
+    }
+
+    #[test]
+    fn detects_codeigniter_via_composer() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "composer.json",
+            r#"{"name":"app","require":{"codeigniter4/framework":"^4"}}"#,
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::CodeIgniter));
+    }
+
+    #[test]
+    fn detects_servant_via_cabal_project() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "cabal.project", "packages: .\n");
+        write(
+            tmp.path(),
+            "app.cabal",
+            "build-depends: base, servant, servant-server\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Servant));
+    }
+
+    #[test]
+    fn detects_dream_via_dune_project() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "dune-project", "(lang dune 3.0)\n");
+        write(
+            tmp.path(),
+            "dune",
+            "(executable (name app) (libraries dream))\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Dream));
+    }
+
+    #[test]
+    fn detects_cowboy_via_rebar_config() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "rebar.config",
+            "{deps, [\n  {cowboy, \"2.10.0\"}\n]}.\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Cowboy));
+    }
+
+    #[test]
+    fn detects_hummingbird_via_package_swift() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Package.swift",
+            "// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(\n  name: \"app\",\n  dependencies: [\n    .package(url: \"https://github.com/hummingbird-project/hummingbird.git\", from: \"2.0.0\"),\n  ]\n)\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Hummingbird));
+    }
+
+    #[test]
+    fn detects_aiohttp_via_requirements() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "requirements.txt",
+            "aiohttp>=3.9\nuvloop\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Python]);
+        assert!(det.frameworks.contains(&Framework::Aiohttp));
+    }
+
+    #[test]
+    fn detects_fastify_via_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","dependencies":{"fastify":"^4.26"}}"#,
+        );
+        let det = detect_repo(tmp.path());
+        assert!(det.frameworks.contains(&Framework::Fastify));
+    }
+
+    #[test]
+    fn detects_nestjs_via_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","dependencies":{"@nestjs/core":"^10","@nestjs/common":"^10"}}"#,
+        );
+        let det = detect_repo(tmp.path());
+        assert!(det.frameworks.contains(&Framework::NestJs));
+    }
+
+    #[test]
+    fn detects_trpc_via_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","dependencies":{"@trpc/server":"^11"}}"#,
+        );
+        let det = detect_repo(tmp.path());
+        assert!(det.frameworks.contains(&Framework::Trpc));
+    }
+
+    #[test]
+    fn detects_rocket_via_cargo_toml() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Cargo.toml",
+            "[dependencies]\nrocket = \"0.5\"\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert!(det.frameworks.contains(&Framework::Rocket));
+    }
+
+    #[test]
+    fn detects_sinatra_via_gemfile() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Gemfile",
+            "source 'https://rubygems.org'\ngem 'sinatra', '~> 4.0'\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert!(det.frameworks.contains(&Framework::Sinatra));
+    }
+
+    #[test]
+    fn detects_kotlin_and_ktor_via_build_gradle_kts() {
+        // A `.kts` build script means Kotlin DSL → reviewer should see
+        // Kotlin-specific patterns, not Java.  If ktor is a dep, it
+        // binds to the Kotlin language sheet.
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "build.gradle.kts",
+            "plugins { application }\ndependencies {\n  implementation(\"io.ktor:ktor-server-core:2.3.10\")\n}\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Kotlin]);
+        assert!(det.frameworks.contains(&Framework::Ktor));
+    }
+
+    #[test]
+    fn detects_echo_via_go_mod() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "go.mod",
+            "module x\n\ngo 1.22\n\nrequire github.com/labstack/echo/v4 v4.11.4\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert!(det.frameworks.contains(&Framework::Echo));
+    }
+
+    #[test]
+    fn detects_chi_via_go_mod() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "go.mod",
+            "module x\n\ngo 1.22\n\nrequire github.com/go-chi/chi/v5 v5.0.12\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert!(det.frameworks.contains(&Framework::Chi));
+    }
+
+    #[test]
+    fn detects_symfony_via_composer() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "composer.json",
+            r#"{"name":"app","require":{"symfony/framework-bundle":"^7.0"}}"#,
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Php]);
+        assert!(det.frameworks.contains(&Framework::Symfony));
+    }
+
+    #[test]
+    fn detects_vapor_via_package_swift() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Package.swift",
+            "// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(\n  name: \"app\",\n  dependencies: [\n    .package(url: \"https://github.com/vapor/vapor.git\", from: \"4.89.0\"),\n  ]\n)\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Swift]);
+        assert!(det.frameworks.contains(&Framework::Vapor));
+    }
+
+    // --- Guard: adjusted bindings after Kotlin gained a distinct lang ---
+    // `build.gradle.kts` used to register as Java; after this round it
+    // must register as Kotlin.  `pom.xml` and plain `build.gradle` stay
+    // Java (most common case).
+    #[test]
+    fn plain_build_gradle_is_java_not_kotlin() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "build.gradle",
+            "plugins { id 'org.springframework.boot' version '3.1.0' }\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Java]);
+        assert!(det.frameworks.contains(&Framework::Spring));
     }
 
     #[test]

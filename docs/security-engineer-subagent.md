@@ -93,17 +93,51 @@ Framework detection shallow-parses dependency tables:
 |---|---|---|
 | `package.json` | `express` | `framework/express` |
 | `package.json` | `next` | `framework/nextjs` |
+| `package.json` | `fastify` | `framework/fastify` |
+| `package.json` | `@nestjs/core` / `@nestjs/common` | `framework/nestjs` |
+| `package.json` | `@trpc/server` | `framework/trpc` |
+| `package.json` | `koa` | `framework/koa` |
+| `package.json` | `hono` | `framework/hono` |
+| `package.json` | `@sveltejs/kit` | `framework/sveltekit` |
+| `package.json` | `@remix-run/*` | `framework/remix` |
+| `package.json` | `@apollo/server` / `apollo-server` / `graphql-yoga` | `framework/graphql` |
 | `pyproject.toml` / `requirements*.txt` | `django` | `framework/django` |
 | `pyproject.toml` / `requirements*.txt` | `flask` | `framework/flask` |
 | `pyproject.toml` / `requirements*.txt` | `fastapi` | `framework/fastapi` |
+| `pyproject.toml` / `requirements*.txt` | `aiohttp` | `framework/aiohttp` |
+| `pyproject.toml` / `requirements*.txt` | `tornado` | `framework/tornado` |
+| `pyproject.toml` / `requirements*.txt` | `sanic` | `framework/sanic` |
+| `pyproject.toml` / `requirements*.txt` | `celery` | `framework/celery` |
 | `Cargo.toml` | `actix-web` / `actix` | `framework/actix` |
 | `Cargo.toml` | `axum` | `framework/axum` |
+| `Cargo.toml` | `rocket` | `framework/rocket` |
+| `Cargo.toml` | `warp` | `framework/warp` |
+| `Cargo.toml` | `tonic` | `framework/tonic` |
 | `Gemfile` | `gem 'rails'` | `framework/rails` |
-| `pom.xml` / `build.gradle[.kts]` | `spring-boot-starter-*` / `org.springframework` | `framework/spring` |
+| `Gemfile` | `gem 'sinatra'` | `framework/sinatra` |
+| `pom.xml` / `build.gradle` | `spring-boot-starter-*` / `org.springframework` | `framework/spring` |
+| `pom.xml` / `build.gradle` | `io.quarkus` | `framework/quarkus` |
+| `pom.xml` / `build.gradle` | `io.micronaut` | `framework/micronaut` |
+| `pom.xml` / `build.gradle` | `io.javalin` | `framework/javalin` |
+| `build.gradle.kts` | `io.ktor:ktor-*` | `framework/ktor` |
 | `*.csproj` / `*.fsproj` | `Microsoft.AspNetCore` | `framework/aspnet` |
 | `composer.json` | `laravel/framework` | `framework/laravel` |
+| `composer.json` | `symfony/framework-bundle` | `framework/symfony` |
+| `composer.json` | `slim/slim` | `framework/slim` |
+| `composer.json` | `codeigniter4/framework` | `framework/codeigniter` |
 | `mix.exs` | `{:phoenix, ...}` | `framework/phoenix` |
 | `go.mod` | `github.com/gin-gonic/gin` | `framework/gin` |
+| `go.mod` | `github.com/labstack/echo` | `framework/echo` |
+| `go.mod` | `github.com/go-chi/chi` | `framework/chi` |
+| `go.mod` | `github.com/gofiber/fiber` | `framework/fiber` |
+| `go.mod` | `github.com/gorilla/mux` | `framework/gorilla-mux` |
+| `Package.swift` | `vapor/vapor` | `framework/vapor` |
+| `Package.swift` | `hummingbird-project/hummingbird` | `framework/hummingbird` |
+| `*.cabal` | `servant` / `servant-server` | `framework/servant` |
+| `dune` | `dream` | `framework/dream` |
+| `rebar.config` | `{cowboy, ...}` | `framework/cowboy` |
+
+`build.gradle.kts` (Kotlin DSL) registers the review as **Kotlin** (not Java); plain `build.gradle` and `pom.xml` stay Java.  Spring is flagged from either.
 
 ### Composition and cap
 
