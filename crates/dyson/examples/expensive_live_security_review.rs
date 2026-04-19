@@ -357,7 +357,7 @@ const TARGETS: &[Target] = &[
                       finding: the nested-object walk in `index.js` that lacks a \
                       `constructor`/`__proto__`/`prototype` blocklist before descent.",
         summary: "minimist — Node.js CLI argument parser.",
-        git_ref: Some("1.2.5"),
+        git_ref: Some("v1.2.5"),
     },
     Target {
         name: "urllib3-1.26.14",
