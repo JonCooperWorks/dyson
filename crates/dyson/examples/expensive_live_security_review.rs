@@ -524,6 +524,34 @@ const TARGETS: &[Target] = &[
         summary: "Keycloak admin services — Java / Quarkus identity & access management.",
         git_ref: Some("22.0.0"),
     },
+    Target {
+        name: "bookstack-23.10",
+        slug: "BookStackApp/BookStack",
+        sub: "app",
+        description: "BookStack v23.10 - CVE-2023-44399 (stored XSS via template \
+                      comments).  An authenticated editor user can inject script \
+                      content into a template that renders unescaped when another \
+                      user views a page referencing the template.  Expected \
+                      finding: the template-render / comment-handling path in \
+                      the Laravel controllers that does not escape comment \
+                      content before interpolating into HTML.",
+        summary: "BookStack — PHP / Laravel self-hosted knowledge-base application.",
+        git_ref: Some("v23.10"),
+    },
+    Target {
+        name: "meilisearch-1.4.0",
+        slug: "meilisearch/meilisearch",
+        sub: "meilisearch",
+        description: "Meilisearch v1.4.0 - CVE-2023-47626 (missing API-key validation \
+                      on administrative routes).  Several administrative endpoints \
+                      fail to validate the master API key, letting an unauthenticated \
+                      attacker invoke index-manipulation or config-read operations \
+                      over the network.  Expected finding: the actix-web route / \
+                      middleware wiring that registers an admin-capable handler \
+                      without the API-key guard.",
+        summary: "Meilisearch — Rust / actix-web search engine HTTP server.",
+        git_ref: Some("v1.4.0"),
+    },
     // --- Deliberately-vulnerable teaching targets -------------------------
     //
     // Clear, well-documented intended vulnerabilities (no pinned CVE
