@@ -332,6 +332,47 @@ const TARGETS: &[Target] = &[
         summary: "Django ORM functions — Python web framework query builder.",
         git_ref: Some("3.2.14"),
     },
+    Target {
+        name: "commons-text-1.9",
+        slug: "apache/commons-text",
+        sub: "src/main/java/org/apache/commons/text",
+        description: "Apache Commons Text 1.9 - CVE-2022-42889 (Text4Shell).  \
+                      `StringSubstitutor.createInterpolator()` enables the `script:`, \
+                      `dns:`, and `url:` lookups by default.  An attacker who reaches a \
+                      substitution call with a string like `${script:javascript:...}` \
+                      executes arbitrary JS (via Nashorn) — full RCE.  Expected finding: \
+                      the default interpolator configuration that registers active \
+                      (side-effectful) lookups by default rather than opt-in.",
+        summary: "Apache Commons Text — Java string manipulation library.",
+        git_ref: Some("rel/commons-text-1.9"),
+    },
+    Target {
+        name: "minimist-1.2.5",
+        slug: "minimistjs/minimist",
+        sub: "",
+        description: "minimist 1.2.5 - CVE-2021-44906 (prototype pollution via CLI args).  \
+                      The argument-path walker accepts `--__proto__.polluted=yes` style \
+                      flags and writes through to `Object.prototype` because the walk \
+                      does not filter reflection-relevant segment names.  Expected \
+                      finding: the nested-object walk in `index.js` that lacks a \
+                      `constructor`/`__proto__`/`prototype` blocklist before descent.",
+        summary: "minimist — Node.js CLI argument parser.",
+        git_ref: Some("1.2.5"),
+    },
+    Target {
+        name: "urllib3-1.26.14",
+        slug: "urllib3/urllib3",
+        sub: "src/urllib3",
+        description: "urllib3 1.26.14 - CVE-2023-43804 (cookie leakage across cross-origin \
+                      redirects).  When the client followed a redirect to a different \
+                      host, the `Cookie` header set on the initial request was not \
+                      stripped — leaking session cookies to the redirect target.  \
+                      Expected finding: the redirect-follow path in \
+                      `connectionpool.py` / `connection.py` that preserves the Cookie \
+                      header across a host change without an allowlist check.",
+        summary: "urllib3 — Python HTTP client library.",
+        git_ref: Some("1.26.14"),
+    },
     // --- Deliberately-vulnerable teaching targets -------------------------
     //
     // Clear, well-documented intended vulnerabilities (no pinned CVE
