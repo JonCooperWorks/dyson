@@ -29,6 +29,7 @@ Starting points for JavaScript / TypeScript — not exhaustive. Novel sinks outs
   ```
 - If `value` is later used as a callable (`new value(...)`, `value(args)`, `loadServerReference(value)`), or any resolved result feeds `require`/`import`/`Function`, the walk is a live RCE primitive.
 - Dismissal phrases you may NOT accept for this shape: "path segments are numeric", "path came from a trusted chunk ID list", "value is a bound callable not arbitrary". None of these are a `constructor/__proto__/prototype` blocklist. Cite the blocklist lines or file it CRITICAL.
+- **Scope-delegation dismissal is NOT a mitigation.** When an in-scope function receives attacker-controlled input and hands it to an unsafe operation in a sibling package (`../react-server/...`, `../react-client/...`, any module outside the review root), the wrapper is the attacker's API — file it.  Phrases to reject verbatim: "the real parser / deserializer / sink lives in another package", "wraps X which is outside scope", "delegates to Y in another module — not reviewed here".  File at the wrapper's exported entry; cite the delegation call site (the `createResponse(...)`, `decodeReply(...)`, `parse(...)`, etc.) as the sink line; describe the downstream unsafe op in Impact ("the outlined-model path walk in `../react-server/src/ReactFlightReplyServer.js`").  The wrapper being one file-move away from the sink does not exonerate it.
 - **Preferred evidence for this class**: one `taint_trace` invocation from the wire-read (`FormData.get`, `request.formData()`, `req.body`, stream-chunk assembly) to the walk loop's sink line.  Same-file / same-function / same-line traces count.  If budget prevents running one, still ship the finding — cap severity per the main Severity Caps rule, do NOT downgrade to a progress-update memo.
 - **Raise `max_depth` on deep dispatchers.**  Defaults are `max_depth=16, max_paths=10`.  For RSC / RPC / message-bus / reflection-heavy dispatch (anything that looks like `registry[id](args)`, `handlers[type].call(...)`, `modules[name].run(...)`), pass `max_depth: 32, max_paths: 20` to `taint_trace` — the indirection layer adds 4-8 hops that the default cap cuts short.  `[TRUNCATED]` in the index header means you still need more; 48/30 is the realistic upper bound.
 
@@ -59,26 +60,6 @@ Starting points for JavaScript / TypeScript — not exhaustive. Novel sinks outs
 - `jwt.verify(token, secret)` without `algorithms` option — RS256 / HS256 confusion (sign with pub key as HMAC secret = forgery).
 - `jwt.verify(token, secret, { algorithms: ['none'] })` — explicit bypass.
 - `crypto.createHash('md5')` / `'sha1'` for password hashing.
-
-## Scope-delegation dismissal — NOT a mitigation
-
-Applies to every sink class above, not just RSC / wire-format.
-
-When an in-scope function receives attacker-controlled input and then calls an unsafe operation that physically lives in a sibling package or upstream module (`../react-server/...`, `../react-client/...`, `node_modules/...`, any path outside the review root), **the in-scope wrapper is still the finding**.  The wrapper is the attacker's API — it is the function an attacker reaches over the wire.  The sink being one `import` away from the wrapper does not exonerate the wrapper.
-
-Phrases to reject verbatim — these describe the code's call-graph, not a mitigation:
-- "the real parser / deserializer / unsafe call lives in another package / sibling module — outside scope"
-- "this file just re-exports / delegates to X in `../<sibling>/src/...`"
-- "wraps Y which is outside this review"
-- "the sink is in the runtime / framework core — not this package"
-
-How to file it:
-1. **File at the wrapper's exported entry**, not at the out-of-scope sink.  The `File:` line is the in-scope function signature line.
-2. **Cite the delegation call site as the sink line** in the Attack Tree's last in-scope hop (e.g. the `createResponse(body, webpackMap, ...)` call inside `decodeReply`, the `Class.forName(typeId)` call inside `StdTypeResolverBuilder`, the `pickle.loads(stream)` call inside your module's public `load()`).
-3. **In Impact, describe the downstream unsafe op** ("the outlined-model path walk in `../react-server/src/ReactFlightReplyServer.js:resolveModelToJSON`") so the reader sees the full chain even though the tail hop is out of scope.
-4. **Do not move the wrapper to `Checked and Cleared`** with an "outside scope" reason.  That reason never clears a finding — wrapping IS the defense you own, and there isn't one here.
-
-If you find yourself writing "the actual sink is outside scope" anywhere in the report, the sentence belongs in `## CRITICAL` as an Impact line on the wrapper's finding, not in `Checked and Cleared`.
 
 ## Tree-sitter seeds (javascript / typescript)
 

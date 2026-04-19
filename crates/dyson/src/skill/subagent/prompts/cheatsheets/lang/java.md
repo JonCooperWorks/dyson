@@ -20,6 +20,8 @@ Starting points for Java (and Kotlin — JVM shares most sinks) — not exhausti
 - Kotlinx serialization with `@Polymorphic` + open registration on untrusted input.
 - **Polymorphic-deser gadget-chain wrappers.**  Jackson/XStream/SnakeYAML route from the public entry (`readValue`, `fromXML`, `Yaml.load`) through a type-resolver → bean-deserializer → reflective setter chain.  When the in-scope file is the wrapper (`BeanDeserializer`, `AsPropertyTypeDeserializer`, `SubTypeValidator`, a `TypeIdResolver` impl) and the reflective-invoke lands in a sibling package, that is STILL the finding — file at the wrapper.  The chain depth is why `taint_trace` for this class usually needs `max_depth: 32, max_paths: 20`; the default cap (16/10) truncates before reaching the setter sink.
 
+**Scope-delegation dismissal is NOT a mitigation.** When an in-scope class receives attacker-controlled input and hands it to an unsafe operation in a sibling package or parent project (`com.fasterxml.jackson.core.*`, `org.yaml.snakeyaml.constructor.*`, anything outside the review root), the in-scope class is the attacker's API — file it.  Phrases to reject: "the reflective invoke lives in another jar", "delegates to X in a sibling package — out of scope", "sink is in the JDK / core library".  File at the in-scope class's public method; cite the delegation call site as the sink line; describe the downstream unsafe op in Impact.
+
 **SQL / JPQL injection**
 - `Statement.executeQuery("SELECT ... '" + user + "'")` — string concat in JDBC.  Use `PreparedStatement.setString`.
 - JPA `entityManager.createQuery("... " + user)` / `createNativeQuery`.
@@ -46,24 +48,6 @@ Starting points for Java (and Kotlin — JVM shares most sinks) — not exhausti
 - `MessageDigest.getInstance("MD5"|"SHA-1")` for password hashing / auth tokens.
 - `new Random()` for session IDs / tokens — use `SecureRandom`.
 - `String.equals` on HMACs / MACs — timing-unsafe; use `MessageDigest.isEqual`.
-
-## Scope-delegation dismissal — NOT a mitigation
-
-Applies to every sink class above — deserialization, reflection, SQL, template, XXE, command exec.
-
-When an in-scope class receives attacker-controlled input and then calls an unsafe operation that physically lives in a sibling package, parent jar, or the JDK (`com.fasterxml.jackson.core.*`, `org.yaml.snakeyaml.constructor.*`, `java.lang.reflect.*`, anything outside the review root), **the in-scope class is still the finding**.  The wrapper is the attacker's API — the method an attacker reaches over the wire.  The sink being one `import` away does not exonerate the wrapper.
-
-Phrases to reject verbatim:
-- "the reflective invoke lives in another jar / sibling package — out of scope"
-- "delegates to X in `com.fasterxml.jackson.core.*` — not reviewed here"
-- "the actual deserialization call is in the JDK / core library"
-- "this class just configures, the unsafe op is elsewhere"
-
-How to file it:
-1. **File at the in-scope class's public method or constructor** — the entry point attacker input reaches first.
-2. **Cite the delegation call site as the sink line** (the `Class.forName(typeId)` call inside your `TypeIdResolver`, the `Method.invoke(...)` call inside your `BeanDeserializer`, the `Yaml.load(stream)` call inside your public loader wrapper).
-3. **In Impact, describe the downstream unsafe op** ("reflective class instantiation via `com.fasterxml.jackson.databind.util.ClassUtil.createInstance`") so the reader sees the full chain.
-4. **Do not move the wrapper to `Checked and Cleared`** with an "outside scope" reason.  Wrapping is the defense you own and there isn't one.
 
 ## Tree-sitter seeds (java)
 
