@@ -157,6 +157,171 @@ const TARGETS: &[Target] = &[
                       (CSRF, XSS, SQLi, broken auth, deserialization, SSRF)",
         git_ref: None,
     },
+    // --- CVE-reproduction targets -----------------------------------------
+    //
+    // Real-world OSS pinned to versions with documented published CVEs.
+    // The goal here is NOT to review teaching code — it's to measure
+    // whether the security_engineer can INDEPENDENTLY rediscover a
+    // known CVE path, given only the vulnerable source.  Successful
+    // runs find the bug without being told where to look; grading is
+    // against the CVE advisory.
+    //
+    // react-server-19.2.0 (above) was the first of this kind (ReactFlight
+    // prototype-walk).  These add variety: JVM deserialization, JS
+    // prototype pollution, JS template RCE, Python YAML RCE.
+    Target {
+        name: "log4j-2.14.1",
+        slug: "apache/logging-log4j2",
+        sub: "log4j-core/src/main/java/org/apache/logging/log4j/core/net",
+        description: "Apache Log4j 2.14.1 - CVE-2021-44228 (Log4Shell).  `JndiManager.lookup` \
+                      fetches attacker-supplied URLs via JNDI when a log message contains a \
+                      `${jndi:...}` lookup.  Expected finding: JNDI `lookup(name)` on \
+                      attacker-controlled `name` → LDAP/RMI deserialization → class \
+                      loading → RCE.  `max_depth=32` on taint_trace recommended; the JNDI \
+                      chain spans several indirection layers.",
+        git_ref: Some("rel/2.14.1"),
+    },
+    Target {
+        name: "spring-beans-5.3.17",
+        slug: "spring-projects/spring-framework",
+        sub: "spring-beans/src/main/java/org/springframework/beans",
+        description: "Spring Framework 5.3.17 - CVE-2022-22965 (Spring4Shell).  JavaBean \
+                      property binding walks `class.module.classLoader` on JDK 9+, reaching \
+                      Tomcat's `WebappClassLoader` and writing arbitrary JSP via access-log \
+                      properties.  Expected finding: `CachedIntrospectionResults` missing \
+                      an allowlist for introspected properties; the bug IS the absence of \
+                      the filter that shipped in 5.3.18.",
+        git_ref: Some("v5.3.17"),
+    },
+    Target {
+        name: "jackson-databind-2.12.6",
+        slug: "FasterXML/jackson-databind",
+        sub: "src/main/java/com/fasterxml/jackson/databind/deser",
+        description: "jackson-databind 2.12.6 - polymorphic-deserialization CVE class \
+                      (CVE-2022-42003 etc.).  When `enableDefaultTyping()` or \
+                      `@JsonTypeInfo(use = CLASS)` is enabled, the deserializer instantiates \
+                      classes named by attacker input, reaching gadget chains (JNDI \
+                      managers, template engines, etc.) → RCE.  Expected finding: \
+                      `BeanDeserializerFactory` / `StdDeserializer` path that resolves \
+                      class names from wire format without an allowlist.",
+        git_ref: Some("jackson-databind-2.12.6"),
+    },
+    Target {
+        name: "lodash-4.17.11",
+        slug: "lodash/lodash",
+        sub: "",
+        description: "lodash 4.17.11 - CVE-2019-10744 (prototype pollution).  \
+                      `_.defaultsDeep(target, source)` walks `source`'s keys into `target` \
+                      without filtering `constructor` / `__proto__` / `prototype`.  Pollution \
+                      of `Object.prototype` propagates to unrelated objects across the \
+                      process.  Expected finding: the `defaultsDeep` / `merge` / `set` \
+                      property-walk lacks the reflection-name blocklist.",
+        git_ref: Some("4.17.11"),
+    },
+    Target {
+        name: "ejs-3.1.6",
+        slug: "mde/ejs",
+        sub: "lib",
+        description: "EJS 3.1.6 - CVE-2022-29078 (server-side template injection → RCE).  \
+                      `ejs.compile(template, options)` interpolates `options.outputFunctionName` \
+                      into the generated function source without escaping.  An attacker who \
+                      controls that option writes arbitrary JavaScript executed at render \
+                      time.  Expected finding: the option-to-source concatenation in \
+                      `lib/ejs.js`; the prompt's JS cheatsheet covers `new Function`-family \
+                      RCE primitives which this maps onto.",
+        git_ref: Some("v3.1.6"),
+    },
+    Target {
+        name: "pyyaml-5.3",
+        slug: "yaml/pyyaml",
+        sub: "lib3/yaml",
+        description: "PyYAML 5.3 - CVE-2020-1747 (FullLoader RCE).  `yaml.FullLoader` was \
+                      billed as safe but accepted `python/object/new:SUBCLASS` tags that \
+                      instantiate arbitrary Python classes via their `__init__`, reaching \
+                      `subprocess.Popen` gadgets etc.  Expected finding: `FullLoader`'s \
+                      tag-to-constructor map includes unsafe constructors that the \
+                      advisory-fixed `SafeLoader` omits.",
+        git_ref: Some("5.3"),
+    },
+    Target {
+        name: "nextjs-14.0.0",
+        slug: "vercel/next.js",
+        sub: "packages/next/src/server/web",
+        description: "Next.js 14.0.0 - CVE-2025-29927 (middleware authorization bypass).  \
+                      The `x-middleware-subrequest` header tells Next's runtime to skip \
+                      registered middleware for an incoming request — a legitimate internal \
+                      signal, but trusted from the client side.  An attacker who sets the \
+                      header bypasses every auth / rate-limit / role check implemented as a \
+                      middleware.  Expected finding: the request-handling path that reads \
+                      `x-middleware-subrequest` from an external request and short-circuits \
+                      the middleware pipeline without origin verification.",
+        git_ref: Some("v14.0.0"),
+    },
+    Target {
+        name: "rails-6.0.4.7",
+        slug: "rails/rails",
+        sub: "activesupport/lib/active_support",
+        description: "Rails 6.0.4.7 - CVE-2022-32224 (Marshal RCE via YAML encoded columns).  \
+                      ActiveRecord serialized-attribute columns defaulted to YAML encoding; \
+                      when the DB row was loaded, `YAML.safe_load` in older Psych still \
+                      accepted `!ruby/object:` tags that instantiated arbitrary Ruby \
+                      objects, reaching gadget chains.  Expected finding: the \
+                      serialization layer in ActiveSupport / ActiveRecord that passes \
+                      untrusted bytes through an unsafe YAML loader.",
+        git_ref: Some("v6.0.4.7"),
+    },
+    Target {
+        name: "django-3.2.14",
+        slug: "django/django",
+        sub: "django/db/models/functions",
+        description: "Django 3.2.14 - CVE-2022-34265 (SQL injection via Trunc / Extract).  \
+                      `Trunc(..., kind=user_input)` and `Extract(..., lookup_name=user_input)` \
+                      let an attacker-controlled string reach a raw SQL fragment that \
+                      builds the truncation / extraction expression.  Expected finding: \
+                      the lookup-name handling in `functions/datetime.py` (or similar) \
+                      concatenates user-derived `kind` into SQL without validating against \
+                      an allowlist.",
+        git_ref: Some("3.2.14"),
+    },
+    // --- Deliberately-vulnerable teaching targets -------------------------
+    //
+    // Clear, well-documented intended vulnerabilities (no pinned CVE
+    // numbers, but the project IS the ground truth — every exploit
+    // path is documented in the project's own lesson materials).
+    // Distinct from the CVE-repro targets above which test the agent's
+    // ability to rediscover a published bug.  These test end-to-end
+    // find-something-of-quality behavior on framework-specific surface.
+    Target {
+        name: "dvga",
+        slug: "dolevf/Damn-Vulnerable-GraphQL-Application",
+        sub: "core",
+        description: "Damn Vulnerable GraphQL Application - Python Flask + Graphene. \
+                      Exercises framework/graphql sheet: introspection abuse, batching DoS, \
+                      alias-based auth bypass, SQLi / command injection in resolvers, \
+                      field-level authorization gaps.  Committed passwords + hardcoded secrets.",
+        git_ref: None,
+    },
+    Target {
+        name: "webgoat-sqli",
+        slug: "WebGoat/WebGoat",
+        sub: "src/main/java/org/owasp/webgoat/lessons/sqlinjection",
+        description: "OWASP WebGoat - SQL injection lessons (Java Spring).  \
+                      Multiple deliberately-vulnerable JDBC + JPA patterns across \
+                      string-concat Statement / PreparedStatement misuse / JPQL injection.  \
+                      Exercises lang/java + framework/spring.",
+        git_ref: None,
+    },
+    Target {
+        name: "crapi-workshop",
+        slug: "OWASP/crAPI",
+        sub: "services/workshop",
+        description: "OWASP crAPI - completely ridiculous API, workshop microservice \
+                      (Python/Django).  BOLA / IDOR, mass-assignment, SSRF via attacker URL \
+                      fetches, JWT weaknesses.  Smaller scope than pygoat but tests the same \
+                      lang/python + framework/django pair on code that looks closer to \
+                      production than a teaching toy.",
+        git_ref: None,
+    },
     // --- Pinned-version targets for CVE-reproduction runs -----------------
     //
     // These entries pin a specific release so the reviewer can be
