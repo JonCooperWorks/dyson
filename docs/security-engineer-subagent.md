@@ -53,7 +53,7 @@ On invocation:
 2. `OrchestratorTool::run` canonicalises `path` to a scoped review root.
 3. `repo_detect::detect_and_compose` shallow-parses manifests, returns cheatsheet markdown + the list of included sheet names (logged at INFO).
 4. Cheatsheet body is concatenated onto the base `security_engineer.md` prompt; the child agent is spawned with the composed prompt.
-5. Child runs up to 40 iterations / 8192 tokens per turn.  Inner subagents execute at depth 2.  Only the child's final assistant text returns to the parent.
+5. Child runs up to 150 iterations / 8192 tokens per turn.  Inner subagents execute at depth 2, inheriting the orchestrator child's scoped `working_dir` (propagation fix in [`SubagentTool::run`](../crates/dyson/src/skill/subagent/mod.rs) — without it, `dependency_review` fell back to the process cwd and scanned stale checkouts from prior runs).  Only the child's final assistant text returns to the parent.
 
 ## Cheatsheet injection
 
@@ -290,9 +290,37 @@ Weaker models collapse these into a single "don't mention tool output" directive
 
 Budget awareness is written as a behaviour rule, not an assertion of the underlying `max_iterations`:
 
-> You have a fixed iteration budget (roughly 20 tool-calling turns).  By the time you've issued 15 tool calls, your next response MUST be the final report — no further tool calls, no further `read_file`, no further "one more check".  Every tool call past that point trades a complete report for a `[Response interrupted by a tool use result]` stub.
+> You have a generous iteration budget (~150 tool-calling turns).  Treat turn 140 as your "must start writing the report" line: by then, every remaining turn is either for verification of an already-identified finding or for the final write-up, NOT for "one more check" or new exploration.  Every tool call past ~148 trades a complete report for a `[Response interrupted by a tool use result]` stub.
 
-This pressure helps avoid the iteration-limit cliff while leaving enough budget for the final write.  Pair with the Section 2 "minimal schema-compliant report" fallback so the model has a safe default when the budget feels tight.
+Raised from 40 to 150 after repeated budget-outs on deep-chain CVE targets (see the iter4-9 case study below).  Pair with the Section 2 "minimal schema-compliant report" fallback so the model has a safe default when the budget feels tight even with the generous limit.
+
+### 10. Concern-scoped reviews
+
+Pattern that emerged in the iter4-9 sweep: the agent finds more when `sub:` narrows to the subsystem where the bug lives, rather than the project root.  The difference is not that the agent can't search a larger surface — it's that the per-finding verification cost (ast_query → taint_trace → read_file → file it) scales with the count of plausible sinks.  A narrower scope produces fewer false candidates, so more budget goes to verifying the real ones.
+
+Working pattern:
+
+- Protocol handler (e.g. `java/org/apache/coyote/ajp` for Tomcat AJP bugs)
+- Path matcher (e.g. `.../security/web/util/matcher` for request-matcher bypasses)
+- Admin resources (e.g. `services/resources/admin` for authorization audits)
+- Flight / RSC protocol core (`packages/react-server/src` for prototype-walk primitives)
+- Deserialization tree (`.../jackson/databind/deser` for polymorphic-deser bugs)
+
+Anti-pattern: scoping to a wrapper package that delegates to a sibling for the unsafe op.  See case study below for the `react-server-dom-webpack` vs. `react-server` pair: same agent, same prompt, different `sub` — hit vs. six-attempt miss.
+
+### 11. Class-level vulnerability rules (cheatsheet sections)
+
+Rules that surface a *class* of bug, not a specific CVE.  Each was added to the cheatsheets after a hints-off miss and tested against fresh targets to confirm it doesn't overfit.  Language-independent framings where possible:
+
+| Rule | Cheatsheet | Shape it teaches |
+|---|---|---|
+| **Scope-delegation dismissal is NOT a mitigation** | all langs | Wrapper in scope receiving attacker input → unsafe op in sibling package.  File at the wrapper; cite the delegation call site as the sink; describe the downstream op in Impact. |
+| **Reviewing a serialization library itself** | java | Public read API (`readValue`/`load`/`parse`) is the entry, not the sink.  Sink is any internal method that turns a wire-format string into a `Class<?>` / `Constructor<?>` / `Method`. |
+| **Property-path reflection walk** | java | Dotted user path traversing introspected getter chains reaches reflection primitives.  BLOCKLIST of property names means the walk is known-reachable; any reachable reflection-returning getter not on it is a finding. |
+| **Trust-boundary internal headers** | javascript | Runtime internal header (`x-*-subrequest`, `x-origin-verified`, `x-admin-override`) read from untrusted network input without provenance check → middleware / auth bypass. |
+| **Wire-format / RSC prototype-walk silhouette** | javascript | `path.split(sep)` → `value = value[path[i]]` loop fed from request body.  Segments on `constructor`/`__proto__`/`prototype` give `Function` indirectly — no explicit `eval` required. |
+
+The *generalisability discipline* is as important as the content: every rule above was de-fit after its first draft to strip named classes from specific CVEs.  A rule that names `CachedIntrospectionResults` will pattern-match Spring4Shell; a rule that names "blocklist of property names returning reflection primitives" will find novel variants too.
 
 ## Output schema
 
@@ -453,7 +481,9 @@ Tune: pulled the scope-delegation rule out of the wire-format subsection and mad
 
 Not a rewrite of the prompt — a promotion of existing content from bullet depth 2 to section depth 0.  Total delta across three cheatsheets: ~40 added lines, ~5 removed (consolidation).
 
-Running this against react-server-dom-webpack-19.2.0 (third attempt), spring-beans-5.3.17 (tests promoted Java rule on a fresh Spring4Shell surface), and lodash-4.17.11 (tests promoted JS rule on a prototype-pollution class, different silhouette from RSC wire-format).
+Third-attempt results on react-server-dom-webpack: **worse**.  Filed zero findings (iter2 had filed MEDIUM+LOW).  The agent routed around the promoted rule's banned phrases by rewording the same dismissal as *"passes body to createResponse (out of scope). No transformation."* — semantically identical, structurally novel, filed under Checked and Cleared.  Reverted the JS promotion the same day; kept Java and Python promoted where they worked cleanly.
+
+Lesson: **a rule catches reasoning but not rewording.**  Banning specific phrases gives the model permission to use adjacent phrases.  The fix is either (a) a structural test on the Checked-and-Cleared reason shape (if the reason is "function hands its argument to another function", it's a finding, not a clear) or (b) accept model limits on this specific pattern.  See iter4-9 case study for the eventual resolution: when scope points at the package that actually contains the sink rather than the delegating wrapper, the same agent finds the bug in one attempt.
 
 ### Lessons so far
 
@@ -464,6 +494,64 @@ Running this against react-server-dom-webpack-19.2.0 (third attempt), spring-bea
 - **"Don't overfit to the failure case" is real.**  The first iter2 draft (before the user pushed back) wanted to name `decodeReply` / `ReactFlightReplyServer` / `createResponse` as specific wrappers-to-file.  That would have helped react at the cost of not generalising.  The generic rule is weaker on the original case but applies to jackson, spring, and anything else that follows the wrapper-to-sibling-package shape.
 
 Sample reports from each iter (including both hits and the ongoing react miss) live under [docs/sample-seceng-reports/](sample-seceng-reports/).
+
+## Case study: iter4-9 — hints-off baseline, 150-turn budget, concern-scoped targets
+
+The first two case studies tuned against a narrow target set with hints-on (target `description` including the CVE number and vulnerable API name fed into the agent's `context`).  iter4 onwards removed that spoiler, raised the budget, and diversified the target list to cover real OSS web applications across four language stacks.  The goal was a baseline for *independent rediscovery*: can the agent find the bug without being told where to look?
+
+### Infrastructure changes
+
+- **`--hints off` as default** ([expensive_live_security_review.rs](../crates/dyson/examples/expensive_live_security_review.rs)).  Target now carries two fields: a spoiler-laden `description` (the CVE number + vulnerable API — used when `--hints on`) and a neutral `summary` ("Apache Log4j — Java logging library").  Default sends only the summary.  Every sample report in [docs/sample-seceng-reports/](sample-seceng-reports/) was produced under this regime — findings are independent rediscoveries.
+- **Iteration budget 40 → 150** ([security_engineer.rs](../crates/dyson/src/skill/subagent/security_engineer.rs)).  iter5 jackson-databind budgeted out in preamble at 40; iter6 spring-beans hit Spring4Shell analytically but ran out during the write phase and bailed into a progress-memo.  Budget cap was the bottleneck, not analysis.
+- **`SubagentTool` scoped-path propagation fix** ([mod.rs](../crates/dyson/src/skill/subagent/mod.rs)).  Previously `SubagentTool::run` passed `working_dir: None` to `spawn_child` regardless of the caller's context, so every inner subagent (`dependency_review`, `researcher`, `verifier`) fell back to the process cwd.  Visible failure: iter1 next.js review produced a Dependencies section listing juice-shop findings because a stale juice-shop clone was the only lockfile the dep scanner could reach.  Regression test `subagent_inherits_parents_working_dir` pins the fix.
+- **`--output-dir` flag** for reports, defaulting to `test-output/` (gitignored).  Previous hardcoded `/tmp` made iteration artifacts hard to organise across runs.
+
+### Target set diversification
+
+Starting set covered library-internal Java / JS / Python CVE-repros.  Added:
+
+- **Real OSS web applications.** Ghost 5.59.0 (Node/Express CMS, file upload + SSRF), Mastodon 4.0.2 (Ruby/Rails social, HTML sanitisation), Gitea 1.17.3 (Go/Chi Git host, SVG SSRF), Strapi 4.4.5 (Node/Koa headless CMS, webhook SSRF), Airflow 2.4.0 (Python/Flask orchestrator, stored XSS), Grafana 9.3.6 (Go observability, stored XSS), Keycloak 22.0.0 (Java/Quarkus IAM, admin XSS).  Each exercises a different framework cheatsheet.
+- **Fresh CVE-repro libraries** the cheatsheets had never seen: commons-text 1.9 (Java Text4Shell), minimist 1.2.5 (Node proto-pollution), urllib3 1.26.14 (Python cookie-on-redirect), Tomcat 9.0.30 (Java Ghostcat AJP), Spring Security 5.6.2 (regex auth bypass), node-forge 1.2.1 (RSA sig verify bypass).
+
+Five framework cheatsheets that had never seen a live run (Koa, Quarkus, Flask, Chi, Rails) were exercised for the first time.
+
+### Verdict tally (iter7 + iter8 + iter9, hints off)
+
+| Verdict | Count | Representative |
+|---|---|---|
+| **Hit** (CVE pinned or multiple real findings) | 10 | log4j (Log4Shell), jackson-databind (SubTypeValidator), nextjs (middleware bypass), pyyaml (5 FullLoader sinks), lodash (proto-pollution), commons-text (Text4Shell), webgoat (ORDER BY SQLi), ghost (4 bugs: SQLi + 2 no-auth uploads + open redirect), strapi (CVE-2023-22894 + JWT bypass + 3 more), react-server (React2Shell prototype-walk) |
+| **Partial hit** (adjacent real finding, not exact CVE) | 4 | spring-beans (ClassEditor vs Spring4Shell), mastodon (LinkDetails iframe vs formatter), keycloak (testSMTPConnection missing-auth + stack trace leak), airflow (4 webserver-hardening findings) |
+| **Near-miss** (right code examined, safe-looking reasoning) | 2 | django (Trunc/Extract regex rationale), spring-security (RegexRequestMatcher dismissed as developer-controlled) |
+| **Miss** | 2 | react-server-dom-webpack (wrapper dismissal, 7 attempts), gitea (filed HTML-attr MEDIUM, missed SVG SSRF) |
+| **API flake** (OpenRouter malformed response, not dyson) | 5+ | pyyaml iter5 flake then iter7 success, ejs 3 flakes in a row, jackson iter8 de-fit truncation, urllib3 iter8 truncated after correctly identifying CVE-2023-43804 |
+
+Fabrication across the set: 1 incident (ejs iter2 inlined 2 `Taint Trace:` blocks with 0 real calls).  Every other report had `blocks ≤ real`.
+
+### The scope-delegation resolution
+
+iter1 → iter3 spent three rounds trying to get `react-server-dom-webpack` to file CVE-2025-55182.  iter5 retry failed again.  iter7 pointed the scope at the package that actually contains the sink (`packages/react-server/src`) rather than the wrapper that delegates to it (`packages/react-server-dom-webpack/src`).  Result: clean HIT, multiple findings, 24.9KB report listing prototype-walk in `getOutlinedModel`, same primitive in `createModelResolver`, `JSON.parse` on unvalidated `FormData`, `bindArgs` on attacker-controlled args.
+
+The fix that worked was not a prompt tune.  It was scoping to where the bug lives.  The scope-delegation rule still ships because it helps on less-extreme cases (the Java rule worked cleanly on jackson and commons-text), but the React-family path showed a cheatsheet rule can't fully substitute for choosing scope correctly.
+
+### The overfit audit
+
+Three spots crept in during the cheatsheet tuning.  Called out + fixed:
+
+1. **`x-middleware-subrequest` in the JS trust-boundary-header rule.**  User call: keep it.  That header pattern is a class of vulnerability across frameworks, not a CVE-specific string.  The rule lists it alongside generic placeholders.
+2. **Jackson-specific terms in the Java deser rule** (`typeFromId`, `TypeIdResolver`).  Stripped — replaced with *"any internal method that takes a `String` off the parse path and returns a `Class<?>` / `Constructor<?>` / `Method` / `MethodHandle`"* + JVM primitives (`Class.forName` / `ClassLoader.loadClass`).  Validated: commons-text iter8 (fresh target, never mentioned in the cheatsheet) still found Text4Shell cleanly.
+3. **React-specific example paths in the JS scope-delegation rule** (`../react-server/...`, `../react-client/...`).  Stripped.
+
+Rule of thumb confirmed: after every prompt/cheatsheet tune, read the added lines aloud and ask "does this name a specific library or a class of bug?"  If it names a library, strip it.
+
+### Lessons
+
+- **Hints leak is load-bearing in "independent rediscovery" claims.**  Prior samples that looked like wins (log4j iter1 HIT) were real *but* the `description` fed the CVE number into the prompt.  The hints-off baseline is the first set where every sample is a defensible rediscovery.
+- **Budget matters more than rules for deep-chain targets.**  40 → 150 flipped jackson from budget-out to HIT and spring-beans from progress-memo to schema-compliant.  No cheatsheet change could have fixed those cases; they needed write-the-report budget.
+- **Scope is the unsung hero.**  The same agent with the same prompt gets different verdicts purely on `sub:` choice.  Scoping to a concern (protocol handler, path matcher, admin resources) surfaces more findings than scoping to a package root, because per-candidate verification cost is the binding constraint.
+- **Framework cheatsheet coverage pays off on first contact.**  Five cheatsheets exercised for the first time (Koa, Quarkus, Flask, Chi, Rails) yielded 3 hits + 2 partial-hits with no tuning — the sheets had been written in advance against generic framework surface and held up.
+- **API flakes are a separate risk class.**  5+ truncations this session.  Pure provider-side, not dyson.  Worth tracking but not a dyson engineering problem until the provider is stable.
+
+Full sample set: [docs/sample-seceng-reports/](sample-seceng-reports/) (15 reports, hints off, mix of hit / partial / near-miss / miss across Java / JS / Python / Ruby / Go).
 
 ## When to use
 
@@ -482,6 +570,8 @@ Sample reports from each iter (including both hits and the ongoing react miss) l
 
 Known limits worth tracking:
 
-- `taint_trace` per-call defaults are `max_depth=16`, `max_paths=10` (bumped from 8/5 during iter3 follow-up — the RSC chain `FormData → resolveField → getChunk → JSON.parse → reviveModel → parseModelString → getOutlinedModel → walk` is 8 hops on its own and needs headroom for a plausible source line above the handler).  If you introduce a deeper class of sink, prefer passing explicit `max_depth`/`max_paths` from the per-call input over bumping defaults further.
-- Pygoat-style polyglot targets (settings.py outside `introduction/` scope) can leave secrets invisible to the scoped child — consider an `up_walk: N` input on `OrchestratorTool` to let a caller widen the scope for settings-file reads without changing `working_dir`.
-- The fabricated-block defence relies on Pre-Submit Check #13 (transcript walk).  A model that ignores it still ships fabrication.  Future: a structural post-hoc check in `OrchestratorTool::run` that compares `Taint Trace:` block count to the transcript's `taint_trace` call count before returning the report.
+- **`taint_trace` defaults.**  Per-call `max_depth=16` / `max_paths=10` (bumped from 8/5 during the qwen case study's iter3 follow-up — the RSC chain `FormData → resolveField → getChunk → JSON.parse → reviveModel → parseModelString → getOutlinedModel → walk` is 8 hops on its own).  For deeper classes (polymorphic deser, reflection-heavy dispatch, bean-binding walks) pass explicit `max_depth: 32, max_paths: 20` from the per-call input rather than bumping defaults further.  The Java deser cheatsheet rule already nudges the model there.
+- **Up-walk for scoped settings.**  Pygoat-style polyglot targets (settings.py outside `introduction/` scope) can leave secrets invisible to the scoped child.  An `up_walk: N` input on `OrchestratorTool` would let a caller widen the scope for settings-file reads without changing `working_dir`.  Not implemented.
+- **Fabrication defence is soft.**  Pre-Submit Check #13 (walk-the-transcript) is a prompt rule.  A model that ignores it still ships fabrication (ejs iter2 shipped two fabricated blocks).  Harder defence: a structural post-hoc check in `OrchestratorTool::run` that compares `Taint Trace:` block count to the transcript's `taint_trace` call count before returning the report, and caps any surplus-block findings at MEDIUM automatically.  Not implemented.
+- **Scope-delegation model limit.**  When the agent scopes to a wrapper package that delegates to a sibling for the unsafe op (`react-server-dom-webpack` vs. `react-server`), a cheatsheet rule does not reliably override the "thin delegation" framing — the model reroutes around banned phrases.  The practical workaround is to scope at the package that contains the sink, not the wrapper (see iter4-9 case study).
+- **OpenRouter stability.**  5+ `HTTP error: error decoding response body` truncations this session on specific targets (ejs, pyyaml, minimist, jackson de-fit, urllib3).  Provider-side.  Retry works sometimes; some targets won't serve for hours.  Future: circuit-breaker + automatic retry within the live-review harness, capped at 2-3 attempts per target.

@@ -16,9 +16,9 @@ Full case study in [../security-engineer-subagent.md → Case study: CVE-repro s
 
 | Verdict | Count | Targets |
 |---|---|---|
-| **Hit** (CVE pinned OR multiple real findings) | 10 | log4j, jackson, nextjs, pyyaml, lodash, commons-text, webgoat, ghost, strapi, react-server |
-| **Partial hit** (adjacent real finding, not the exact CVE) | 2 | spring-beans (ClassEditor vs Spring4Shell), mastodon (LinkDetails iframe vs formatter) |
-| **Near-miss** (right code examined, safe-looking reasoning, no finding) | 1 | django (Trunc/Extract regex rationale) |
+| **Hit** (CVE pinned OR multiple real findings) | 11 | log4j, jackson, nextjs, pyyaml, lodash, commons-text, webgoat, ghost, strapi, react-server, tomcat |
+| **Partial hit** (adjacent real finding, not the exact CVE) | 4 | spring-beans (ClassEditor vs Spring4Shell), mastodon (LinkDetails iframe vs formatter), keycloak (testSMTPConnection + stack trace leak), airflow (4 webserver-hardening findings) |
+| **Near-miss** (right code examined, safe-looking reasoning, no finding) | 2 | django (Trunc/Extract regex rationale), spring-security (RegexRequestMatcher dismissed) |
 | **Miss** | 2 | react-server-dom-webpack (dismissed as delegator), gitea (filed HTML-attr MEDIUM, missed SVG SSRF) |
 
 Stacks exercised: **Java** (Log4j, Spring, jackson-databind, Commons Text, WebGoat), **JavaScript/TypeScript** (lodash, Next.js, React server + adapter, Ghost, Strapi), **Python** (PyYAML, Django), **Ruby** (Mastodon), **Go** (Gitea).
@@ -39,6 +39,7 @@ Stacks exercised: **Java** (Log4j, Spring, jackson-databind, Commons Text, WebGo
 | [`iter8-ghost-5.59.0-hit.md`](iter8-ghost-5.59.0-hit.md) | Ghost 5.59.0 admin API | Node/Express | Did not pin CVE-2023-40028 (symlink file-read) exactly — instead filed four other real bugs: SQL injection via filter param concatenation, no-auth file upload endpoint, no-auth media upload endpoint, open redirect in mail event processing.  Shows the agent finding meaningful issues in a full-stack CMS when scoped to routes. |
 | [`iter8-strapi-4.4.5-hit.md`](iter8-strapi-4.4.5-hit.md) | Strapi 4.4.5 admin server | Node/Koa | Five findings including **CVE-2023-22894 SSRF via admin webhook** (CRITICAL), JWT signature algorithm bypass (CRITICAL), password reset token in URL, admin static-files auth gap.  5 real taint_trace calls, 1 inlined.  First Koa target in the suite. |
 | [`iter8-react-server-19.2.0-hit.md`](iter8-react-server-19.2.0-hit.md) | React 19.2.0 `react-server/src` | Node/TS | **The React2Shell prototype-walk primitive**, found cleanly when the scope points at the package that actually contains the sink (`react-server`), not the wrapper package.  Lists prototype-walk in `getOutlinedModel`, same primitive in `createModelResolver`, `JSON.parse` on unvalidated `FormData`, `bindArgs` on attacker-controlled args.  Paired with the still-miss below to illustrate the scope-delegation failure mode. |
+| [`iter9-tomcat-9.0.30-hit.md`](iter9-tomcat-9.0.30-hit.md) | Apache Tomcat 9.0.30 `coyote/ajp` | Java | Five findings including **CVE-2020-1938 Ghostcat** at `AjpProcessor.java:709-733` CRITICAL, plus AJP-attribute-based authentication bypass (`SC_A_AUTH_TYPE` spoofing), remote user impersonation, host header injection via `localName`, arbitrary `localPort`.  Reference example of concern-scoped review: `sub: java/org/apache/coyote/ajp` narrows the agent to the AJP protocol handler and surfaces the whole adjacent family of AJP trust-boundary issues, not just the headline CVE. |
 
 ### Partial hits — adjacent findings, class rule worked
 
