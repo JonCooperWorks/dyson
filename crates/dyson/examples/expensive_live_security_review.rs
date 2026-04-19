@@ -102,10 +102,29 @@ struct Args {
     /// as an `Arc<dyn Tool>` via `create_skills`.
     #[arg(long, value_enum, default_value_t = CheatsheetMode::On)]
     cheatsheets: CheatsheetMode,
+
+    /// Pass the target's `description` string (which for CVE-repro
+    /// targets names the specific CVE and sometimes the vulnerable API)
+    /// into the orchestrator's `context` input.  Default `off` — the
+    /// context is empty, and the only thing the agent knows about its
+    /// target is the scoped `path`.  Off is the right default for
+    /// measuring whether the agent can INDEPENDENTLY rediscover a
+    /// published CVE; flipping it on is useful when debugging a failing
+    /// run against a known bug and you want the agent to start from the
+    /// hint ("Target: log4j 2.14.1 — CVE-2021-44228 via JndiManager.lookup")
+    /// rather than from scratch.
+    #[arg(long, value_enum, default_value_t = HintsMode::Off)]
+    hints: HintsMode,
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum CheatsheetMode {
+    On,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum, PartialEq, Eq)]
+enum HintsMode {
     On,
     Off,
 }
@@ -485,10 +504,11 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let suffix = args.report_suffix.as_deref();
     let ref_override = args.git_ref.as_deref();
     let output_dir = args.output_dir.clone();
+    let hints_on = args.hints == HintsMode::On;
     std::fs::create_dir_all(&output_dir)
         .map_err(|e| format!("create output dir {}: {}", output_dir.display(), e))?;
     for t in selected {
-        run_target(t, &cache, &sec_eng, suffix, ref_override, &output_dir).await?;
+        run_target(t, &cache, &sec_eng, suffix, ref_override, &output_dir, hints_on).await?;
     }
     Ok(())
 }
@@ -500,6 +520,7 @@ async fn run_target(
     report_suffix: Option<&str>,
     ref_override: Option<&str>,
     output_dir: &Path,
+    hints_on: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve the effective ref: CLI flag wins, else baked-in `git_ref`,
     // else None (clone default branch head).
@@ -555,16 +576,26 @@ async fn run_target(
 
     // Fold the version/ref into the context string so the reviewer knows
     // which release it's looking at — relevant when reproducing a CVE
-    // against a specific version.
-    let context = match effective_ref {
-        Some(r) => format!(
-            "Target: {} (pinned to {}).\nReview scope: `{}` subpath of {} at {}.",
-            t.description, r, t.sub, t.slug, r
-        ),
-        None => format!(
-            "Target: {}.\nReview scope: `{}` subpath of {}.",
-            t.description, t.sub, t.slug
-        ),
+    // against a specific version.  Gated by `--hints`: the description
+    // for CVE-repro targets names the specific CVE and sometimes the
+    // vulnerable API, which compromises the "independent rediscovery"
+    // framing of the sweep.  Default is `off` — pass empty context so
+    // the agent's only pointer is the scoped `path`.  Flip on when
+    // debugging a known failing case and you want the agent to start
+    // from the hint rather than from scratch.
+    let context = if hints_on {
+        match effective_ref {
+            Some(r) => format!(
+                "Target: {} (pinned to {}).\nReview scope: `{}` subpath of {} at {}.",
+                t.description, r, t.sub, t.slug, r
+            ),
+            None => format!(
+                "Target: {}.\nReview scope: `{}` subpath of {}.",
+                t.description, t.sub, t.slug
+            ),
+        }
+    } else {
+        String::new()
     };
 
     let input = json!({
