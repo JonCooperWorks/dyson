@@ -17,11 +17,11 @@ Full case study in [../security-engineer-subagent.md → Case study: CVE-repro s
 | Verdict | Count | Targets |
 |---|---|---|
 | **Hit** (CVE pinned OR multiple real findings) | 13 | log4j, jackson, nextjs, pyyaml, lodash, commons-text, webgoat, ghost, strapi, react-server, tomcat, node-forge, meilisearch |
-| **Partial hit** (adjacent real finding, not the exact CVE) | 4 | spring-beans (ClassEditor vs Spring4Shell), mastodon (LinkDetails iframe vs formatter), keycloak (testSMTPConnection + stack trace leak), airflow (4 webserver-hardening findings) |
+| **Partial hit** (adjacent real finding, not the exact CVE) | 5 | spring-beans (ClassEditor vs Spring4Shell), mastodon (LinkDetails iframe vs formatter), keycloak (testSMTPConnection + stack trace leak), airflow (4 webserver-hardening findings), bookstack (hardcoded APP_KEY + SAML2 CSRF-exempt) |
 | **Near-miss** (right code examined, safe-looking reasoning, no finding) | 2 | django (Trunc/Extract regex rationale), spring-security (RegexRequestMatcher dismissed) |
 | **Miss** | 2 | react-server-dom-webpack (dismissed as delegator), gitea (filed HTML-attr MEDIUM, missed SVG SSRF) |
 
-Stacks exercised: **Java** (Log4j, Spring, jackson-databind, Commons Text, WebGoat, Tomcat, Keycloak), **JavaScript/TypeScript** (lodash, Next.js, React server + adapter, Ghost, Strapi, node-forge, ejs), **Python** (PyYAML, Django, Airflow), **Ruby** (Mastodon), **Go** (Gitea, Grafana), **Rust** (Meilisearch).
+Stacks exercised: **Java** (Log4j, Spring, jackson-databind, Commons Text, WebGoat, Tomcat, Keycloak), **JavaScript/TypeScript** (lodash, Next.js, React server + adapter, Ghost, Strapi, node-forge, ejs), **Python** (PyYAML, Django, Airflow), **Ruby** (Mastodon), **Go** (Gitea, Grafana), **Rust** (Meilisearch), **PHP** (BookStack).
 
 ## Detailed index
 
@@ -51,6 +51,7 @@ Stacks exercised: **Java** (Log4j, Spring, jackson-databind, Commons Text, WebGo
 | [`iter8-mastodon-4.0.2-partial-hit.md`](iter8-mastodon-4.0.2-partial-hit.md) | Mastodon 4.0.2 `app/lib` | Ruby/Rails | Did NOT pin CVE-2023-36462 (HTML injection in toot formatter) exactly.  Filed five adjacent findings: stored HTML injection via `LinkDetailsExtractor` iframe (same sanitiser-gap class, different subsystem), WebFinger host-meta SSRF, admin-only SQL interpolation, unscoped `send(key)` via ActiveModel, Nokogiri with libxml2 CVEs.  2 real taint_trace calls, 1 inlined.  First Ruby target in the sample set. |
 | [`iter9-keycloak-22.0.0-partial-hit.md`](iter9-keycloak-22.0.0-partial-hit.md) | Keycloak 22.0.0 `services/resources/admin` | Java/Quarkus | Did NOT pin CVE-2023-6134 (SAML URL reflected XSS) exactly.  Filed two real admin-auth issues in the scoped subsystem: HIGH missing authorization check on `testSMTPConnection` endpoint (`RealmAdminResource.java:989`), LOW stack trace leak in admin event endpoint.  First Quarkus target in the suite — shows the concern-scoped approach (scope = admin resources directory) surfacing real auth bugs even when it doesn't land the specific CVE. |
 | [`iter9-airflow-2.4.0-partial-hit.md`](iter9-airflow-2.4.0-partial-hit.md) | Apache Airflow 2.4.0 `airflow/www` | Python/Flask | Did NOT pin CVE-2022-27949 (stored XSS in task instance detail).  Filed 4 real webserver-hardening findings: unauthenticated `/health` endpoint exposing scheduler + DB status, `ProxyFix` trust-all-headers risk, Experimental API permissive-stub default auth backend, `/tmp` cache directory shared across users on multi-user hosts.  First Flask framework cheatsheet target. |
+| [`iter10-bookstack-23.10-partial-hit.md`](iter10-bookstack-23.10-partial-hit.md) | BookStack v23.10 `app` | PHP/Laravel | Did NOT pin CVE-2023-44399 (stored XSS via template comments) exactly.  Filed CRITICAL on hardcoded default encryption key in `Config/app.php:104` (Laravel `env('APP_KEY', 'AbAZ...')` committed-in-source fallback — ships as finding per the prompt's committed-in-source carve-out), plus HIGH on SAML2 POST routes exempt from CSRF via overly broad wildcard.  First PHP / Laravel target in the suite — exercised `lang/php.md` + `framework/laravel.md`. |
 
 ### Near-miss — right code examined, no finding
 
