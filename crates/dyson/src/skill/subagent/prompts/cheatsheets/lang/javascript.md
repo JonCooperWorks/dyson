@@ -56,6 +56,15 @@ Starting points for JavaScript / TypeScript — not exhaustive. Novel sinks outs
 - `res.redirect(req.query.next)` without allowlist → open redirect.
 - `axios.get(user_url)`, `fetch(user_url)`, `http.request({ host: user })` without host allowlist → SSRF. Node fetch follows redirects by default.
 
+**Trust-boundary headers — framework / runtime internal signals read from the wire**
+A class of auth / authorization / middleware bypass that appears in nearly every web framework (Express, Next.js, Fastify, Hono, NestJS, tRPC, Remix, SvelteKit, Koa): the framework uses an internal header to tell its own runtime "this request is a subrequest / has already been authorized / is from a trusted origin / should skip middleware".  Such a header is safe when it only travels *within* the server (loopback, sidecar, internal proxy) but becomes a full bypass when the framework reads it from the same request object that carries attacker input, without verifying provenance.
+
+Silhouette: `const flag = req.headers[INTERNAL_HEADER_NAME]; if (flag === SOME_STRING || flag.includes(SOME_ID)) { shortCircuit(); }` where the short-circuit skips auth / middleware / rate-limit / authorization, and no upstream layer strips `INTERNAL_HEADER_NAME` from external requests.  Header names often contain `internal`, `subrequest`, `middleware`, `origin-verified`, `admin`, `signed`, `rpc`, `rsc`, `trusted`, `skip-*`, `x-forwarded-preauth` or a framework prefix like `x-nextjs-*` / `x-remix-*`.
+
+Grep strategy: `ast_query` for `subscript_expression` / `member_expression` where the base is `req.headers` / `request.headers` / `ctx.request.headers`, harvest the indexed header names, then `taint_trace` each header read to the nearest short-circuit return / early response / `waitUntil` / `next()`-skip.  If the header value gates a control-flow branch that bypasses a middleware/auth layer AND there is no provenance check upstream (IP allowlist, signature verify, mTLS, internal-only port), file CRITICAL.
+
+Dismissal phrases that do NOT clear this finding: "this header is set internally by the framework" (same code path reads it from external requests), "it's only used for subrequests" (attacker can forge), "it's part of the RSC/middleware protocol" (protocols that trust client-supplied headers without signing are the bug class).
+
 **JWT / crypto**
 - `jwt.verify(token, secret)` without `algorithms` option — RS256 / HS256 confusion (sign with pub key as HMAC secret = forgery).
 - `jwt.verify(token, secret, { algorithms: ['none'] })` — explicit bypass.
