@@ -157,97 +157,13 @@ coder, verifier) — no extra wiring needed.
 
 ### Security Engineer
 
-The built-in security engineer orchestrator can:
+The built-in security engineer orchestrator hunts reachable vulnerabilities using AST-aware tools, cross-file taint analysis, runtime-injected language/framework cheatsheets, and parallel subagent dispatch.  See [security-engineer-subagent.md](security-engineer-subagent.md) for:
 
-- **Write custom tree-sitter queries** via `ast_query` to trace structural
-  patterns (SQL injection sinks, command injection vectors, hardcoded secrets)
-  across all 20 supported languages
-- **Map attack surfaces** via `attack_surface_analyzer` (HTTP handlers, CLI
-  entry points, network listeners, database queries, file I/O, env reads,
-  deserialization)
-- **Generate exploit PoCs** via `exploit_builder` (payloads, curl commands,
-  Nuclei YAML templates, remediation advice)
-- **Trace cross-file taint** via `taint_trace` — given a source `file:line`
-  (where user input enters) and a sink `file:line` (the dangerous operation),
-  returns ranked candidate call chains.  Lossy by design; each hop is a
-  hypothesis the agent verifies with `read_file` before filing
-- **Scan dependencies** via `dependency_scan` against Google's OSV database
-  (every ecosystem OSV tracks; also reads / emits CycloneDX SBOMs)
-- **Dispatch subagents in parallel** — researcher for CVE lookups while
-  running AST queries, coder for fixes, verifier for validation
-
-The system prompt teaches the agent how to write tree-sitter S-expression
-queries and includes p95 common vulnerability patterns as examples.  The agent
-constructs and executes its own checks — nothing is hardcoded.
-
-#### Evaluating report quality
-
-Signals to check on live reports:
-
-- **Attack Tree depth.**  Non-trivial findings should carry 2–3 resolved
-  hops.  Single-hop trees above MEDIUM mean the agent skipped `taint_trace`
-  or fed it weak sources/sinks.
-- **`resolved_hops / total_hops` per trace.**  Consistent `1/2` or `0/1`
-  means the agent isn't running `ast_query` first to find real sources and
-  sinks before calling `taint_trace`.
-- **`UnresolvedCallee` rate** (index header).  Baselines from
-  `examples/smoke_taint_trace.rs`: 0–2% for all imperative languages,
-  ~25% Haskell (typeclasses), ~30% Nix (attribute paths).  A spike on a
-  supported language is a `flatten_callee` bug — reproduce on a minimal
-  fixture and add a regression test in `tests/ast_taint_patterns.rs`.
-- **`[TRUNCATED]` in the index header.**  Repo exceeded `TAINT_MAX_FILES
-  = 5000`; calls beyond the cap are invisible.  Bump the constant in
-  `src/ast/taint/index.rs`.
-- **"Checked and cleared" notes on expected-vulnerable code.**  Usually
-  `taint_trace` is returning NO_PATH when it shouldn't — wrong source
-  line or a non-tier-1 language missing assignment propagation.
-
-#### Tuning against your production model
-
-`smoke_ast_query`, `smoke_ast_describe`, and `smoke_taint_trace` exercise
-the security tools in isolation.  They answer "does the parser work on
-real code?" — not "does the prompt produce useful findings when driven
-by the specific model I run in prod?"  That second question is what
-[`examples/expensive_live_security_review.rs`](../crates/dyson/examples/expensive_live_security_review.rs)
-is for.
-
-The example spins up the full orchestrator stack — the `security_engineer`
-with its direct tools plus the inner planner/researcher/coder/verifier
-subagents — and runs it against a fixed set of deliberately-vulnerable
-repos (OWASP Juice Shop, NodeGoat, RailsGoat).  It uses **whatever
-provider and model your `dyson.json` resolves to**.  That is the whole
-point: when you swap in a cheaper or smaller model (say a Qwen or
-Minimax OpenRouter model instead of Opus), the failure modes shift —
-the agent may skip `taint_trace`, hallucinate file paths, invent CVE
-IDs, or confuse itself about which directory it's reviewing.  The
-`security_engineer.md` system prompt was tuned against Claude; a weaker
-model may need tighter guardrails or different few-shot examples to
-produce the same quality of report.  Run the example against your
-production model, grade the resulting `/tmp/dyson-security-review-*.md`
-reports against the signals above, and feed the gaps back into the
-prompt.  Because the example is billable, it lives *outside* `cargo
-test` — it's opt-in, one invocation at a time.
-
-```bash
-# Single target, uses the default model from dyson.json.
-cargo run -p dyson --example expensive_live_security_review --release -- \
-    --config dyson.json --target juice-shop
-
-# Full sweep across every target.  Explicit flag because it fans out
-# across several billable runs.
-cargo run -p dyson --example expensive_live_security_review --release -- \
-    --config dyson.json --expensive-scan-all-targets
-
-# One-off model override without editing the config.
-cargo run -p dyson --example expensive_live_security_review --release -- \
-    --config dyson.json --model qwen/qwen3.6-plus --target juice-shop
-```
-
-Reports land in `/tmp/dyson-security-review-<name>.md`.  Targets are
-shallow-cloned into `$TMPDIR/dyson-smoke-repos/` (shared with the
-smoke-test cache) and reused on subsequent runs.  Runtime varies
-wildly with model choice — a single target is typically 2–10 minutes;
-a full sweep can be 30+.
+- Architecture and cheatsheet-injection design
+- The nine prompt techniques that make it work against weaker production models (concrete negative examples, anti-fabrication, budget-out fallback, per-finding penalties, coincidental-guard rule, etc.)
+- Report quality signals + fabrication-detection heuristics
+- The `expensive_live_security_review` tuning loop with `--cheatsheets on|off` for A/B runs
+- Case study: three-iteration tune against qwen3.6-plus covering pygoat (Django) and react-server-19.2.0 (Node/RSC)
 
 ---
 

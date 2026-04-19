@@ -16,11 +16,14 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
+use ignore::WalkBuilder;
+
 /// Maximum directory depth walked when counting manifests inside the
-/// scoped review root.  2 covers `root/` and immediate subdirectories —
-/// enough for monorepo roots + single-crate repos without traversing
-/// `node_modules`-sized trees.
-const DOWN_WALK_DEPTH: usize = 2;
+/// scoped review root.  `ignore::WalkBuilder` counts the root itself as
+/// depth 0, so 3 yields files at root + two subdir levels — enough for
+/// monorepo child manifests (`packages/child/package.json`) without
+/// traversing `node_modules`-sized trees.
+const DOWN_WALK_DEPTH: usize = 3;
 
 /// How many ancestors above the scoped path to probe for root-level
 /// manifests.  Expensive-live reviews scope to e.g. `repo/routes/`; the
@@ -98,7 +101,7 @@ pub fn detect_repo(root: &Path) -> Detection {
     }
 
     // Downward walk from the scoped path.
-    walk_down(root, 0, &mut lang_counts, &mut frameworks, &mut seen_frameworks);
+    walk_down(root, &mut lang_counts, &mut frameworks, &mut seen_frameworks);
 
     // Rank languages by count desc, tiebreak by enum discriminant so
     // output is stable across runs.  BTreeMap keyed by discriminant
@@ -118,31 +121,35 @@ pub fn detect_repo(root: &Path) -> Detection {
     }
 }
 
-/// Walk `dir` down to [`DOWN_WALK_DEPTH`] levels recursively.  Skips
-/// common dependency / build directories to avoid counting vendored
-/// manifests as repo signal.  `ignore::WalkBuilder` would respect
-/// `.gitignore` but we want deterministic output across cloned-with-no-
-/// gitignore tarballs too — hand-rolled walk.
+/// Walk `dir` down to [`DOWN_WALK_DEPTH`] levels.  Uses
+/// `ignore::WalkBuilder` so `.gitignore`, hidden files, and `.git` are
+/// skipped automatically; supplementary [`is_skippable_dir`] covers
+/// big dependency / build directories in repos shipped without a
+/// `.gitignore` (tarball drops, fresh scaffolds).
 fn walk_down(
     dir: &Path,
-    depth: usize,
     counts: &mut BTreeMap<usize, usize>,
     frameworks: &mut Vec<Framework>,
     seen: &mut HashSet<Framework>,
 ) {
-    if depth > DOWN_WALK_DEPTH {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_file() {
-            inspect_file(&path, counts, frameworks, seen);
-        } else if ft.is_dir() && depth < DOWN_WALK_DEPTH && !is_skippable_dir(&path) {
-            walk_down(&path, depth + 1, counts, frameworks, seen);
+    let mut builder = WalkBuilder::new(dir);
+    builder
+        .max_depth(Some(DOWN_WALK_DEPTH))
+        // `.gitignore` should apply even when the target is a bare
+        // tarball extract (no `.git`); default `require_git(true)`
+        // silently ignores the file in that case.
+        .require_git(false)
+        .filter_entry(|e| {
+            // Only filter directories — files pass through.
+            if e.file_type().is_some_and(|ft| ft.is_dir()) {
+                !is_skippable_dir(e.path())
+            } else {
+                true
+            }
+        });
+    for entry in builder.build().flatten() {
+        if entry.file_type().is_some_and(|ft| ft.is_file()) {
+            inspect_file(entry.path(), counts, frameworks, seen);
         }
     }
 }
@@ -709,6 +716,26 @@ mod tests {
         let det = detect_repo(&scoped);
         assert_eq!(det.languages, vec![Language::JavaScript]);
         assert_eq!(det.frameworks, vec![Framework::Express]);
+    }
+
+    #[test]
+    fn gitignore_is_respected_during_walk() {
+        // Regression: `ignore::WalkBuilder` reads `.gitignore` at the root.
+        // A generated `pyproject.toml` inside an ignored build dir should
+        // NOT contribute a Python language count.  Distinct from the
+        // hardcoded skip list — this one uses a non-default ignore name.
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), ".gitignore", "generated/\n");
+        write(tmp.path(), "package.json", r#"{"name":"root"}"#);
+        write(
+            tmp.path(),
+            "generated/pyproject.toml",
+            "[project]\nname = \"generated\"\ndependencies = []\n",
+        );
+        let det = detect_repo(tmp.path());
+        // Only the root package.json contributed; the gitignored
+        // pyproject.toml did not register Python.
+        assert_eq!(det.languages, vec![Language::JavaScript]);
     }
 
     #[test]

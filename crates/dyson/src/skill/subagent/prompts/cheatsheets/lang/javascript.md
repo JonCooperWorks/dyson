@@ -17,6 +17,20 @@ Starting points for JavaScript / TypeScript — not exhaustive. Novel sinks outs
 - `_.merge`, `_.set`, `_.defaultsDeep`, `Object.assign(target, JSON.parse(user))` with keys from untrusted input → prototype pollution; a polluted `Object.prototype` flips downstream gadgets (`res.render` options, `Object.keys` checks, template helper lookups).
 - `Reflect.get(obj, user_key)` — same primitive.
 
+**RSC / RPC / wire-format deserializers (high-yield prototype-walk surface)**
+- React Server Components reply parsers, tRPC-style `input` decoders, MessagePack/Avro-JSON bridges, anything that takes bytes from a `FormData` / request body and reconstructs typed values by splitting a reference string and walking a chunk graph.
+- Canonical shape (memorise the SILHOUETTE, then confirm with `ast_describe` + `ast_query`):
+  ```
+  const path = reference.split(':');    // or '.', '/', any user-supplied separator
+  let value = chunks[parseInt(path[0])];
+  for (let i = 1; i < path.length; i++) {
+    value = value[path[i]];             // <-- the primitive
+  }
+  ```
+- If `value` is later used as a callable (`new value(...)`, `value(args)`, `loadServerReference(value)`), or any resolved result feeds `require`/`import`/`Function`, the walk is a live RCE primitive.
+- Dismissal phrases you may NOT accept for this shape: "path segments are numeric", "path came from a trusted chunk ID list", "value is a bound callable not arbitrary". None of these are a `constructor/__proto__/prototype` blocklist. Cite the blocklist lines or file it CRITICAL.
+- **Preferred evidence for this class**: one `taint_trace` invocation from the wire-read (`FormData.get`, `request.formData()`, `req.body`, stream-chunk assembly) to the walk loop's sink line.  Same-file / same-function / same-line traces count.  If budget prevents running one, still ship the finding — cap severity per the main Severity Caps rule, do NOT downgrade to a progress-update memo.
+
 **Deserialization**
 - `JSON.parse(x)` — parse itself is safe; danger is what you do with the parsed tree (see prototype walk).
 - `node-serialize.unserialize(user)` → RCE (IIFE payload).

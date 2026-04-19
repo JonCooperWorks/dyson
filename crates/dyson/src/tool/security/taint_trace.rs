@@ -79,8 +79,8 @@ impl Tool for TaintTraceTool {
                     },
                     "required": ["file", "line"]
                 },
-                "max_depth": { "type": "integer", "minimum": 1, "default": 8 },
-                "max_paths": { "type": "integer", "minimum": 1, "default": 5 }
+                "max_depth": { "type": "integer", "minimum": 1, "default": 16 },
+                "max_paths": { "type": "integer", "minimum": 1, "default": 10 }
             },
             "required": ["language", "source", "sink"]
         })
@@ -140,8 +140,12 @@ impl Tool for TaintTraceTool {
         };
 
         let opts = taint::TraceOptions {
-            max_depth: parsed.max_depth.unwrap_or(8),
-            max_paths: parsed.max_paths.unwrap_or(5),
+            // Defaults sized for modern RSC/RPC wire-format chains —
+            // e.g. `FormData → resolveField → getChunk → JSON.parse →
+            // reviveModel → parseModelString → getOutlinedModel → walk`
+            // is 8 hops on its own, which the old depth-8 cap cut short.
+            max_depth: parsed.max_depth.unwrap_or(16),
+            max_paths: parsed.max_paths.unwrap_or(10),
             ..taint::TraceOptions::default()
         };
 
