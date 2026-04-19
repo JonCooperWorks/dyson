@@ -53,6 +53,7 @@ Stacks exercised: **Java** (Log4j, Spring, jackson-databind, Commons Text, WebGo
 | File | Target | Stack | What it shows |
 |---|---|---|---|
 | [`iter7-django-near-miss.md`](iter7-django-near-miss.md) | Django 3.2.14 `db/models/functions/` | Python/Django | CVE-2022-34265 (Trunc/Extract SQL injection).  Agent correctly navigated to `datetime.py:44-50` — the exact CVE location — examined the `extract_trunc_lookup_pattern` regex, and concluded the input is validated against an allowlist.  Plausible reasoning, no finding.  Instructional example of the difference between "looks at the right code" and "files the bug". |
+| [`iter9-spring-security-5.6.2-near-miss.md`](iter9-spring-security-5.6.2-near-miss.md) | Spring Security 5.6.2 `web/util/matcher` | Java/Spring | CVE-2022-22978 (regex auth bypass via `RegexRequestMatcher`).  Agent navigated to `RegexRequestMatcher.java:101` (the exact sink) and dismissed it: *"If the pattern is developer-controlled (standard usage), this is fine."*  The bug is that anchor-absence lets attacker URLs fake-match a developer pattern — the exact thing that "developer-controlled" doesn't mitigate.  Filed two adjacent real MEDIUM findings instead (SpEL evaluation in `ELRequestMatcher`, log injection).  2 real taint_trace calls, 1 inlined.  Preamble leak. |
 
 ### Misses — class rule didn't fire or wrong conclusion
 
