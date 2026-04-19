@@ -37,7 +37,7 @@ pub fn security_engineer_config() -> OrchestratorConfig {
              security-sensitive changes.",
         system_prompt: include_str!("prompts/security_engineer.md"),
         direct_tool_names: DIRECT_TOOLS,
-        max_iterations: 40,
+        max_iterations: 150,
         max_tokens: 8192,
         injects_protocol: Some(include_str!("prompts/security_engineer_protocol.md")),
         // Only the security_engineer wants lang/framework vuln sheets;

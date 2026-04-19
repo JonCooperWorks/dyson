@@ -978,7 +978,7 @@ fn security_engineer_config_produces_correct_values() {
     assert_eq!(config.name, "security_engineer");
     assert!(config.description.contains("security"));
     assert!(config.system_prompt.contains("ast_query"));
-    assert_eq!(config.max_iterations, 40);
+    assert_eq!(config.max_iterations, 150);
     assert_eq!(config.max_tokens, 8192);
     assert!(config.injects_protocol.is_some());
     assert!(config.direct_tool_names.contains(&"ast_query"));
