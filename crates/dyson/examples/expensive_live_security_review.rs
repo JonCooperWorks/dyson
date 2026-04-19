@@ -149,6 +149,14 @@ const TARGETS: &[Target] = &[
         description: "Rust based agent - review the app for AI and rust vulnerabilities",
         git_ref: None,
     },
+    Target {
+        name: "pygoat",
+        slug: "adeyosemanputra/pygoat",
+        sub: "introduction",
+        description: "PyGoat - deliberately vulnerable Django app teaching OWASP Top 10 \
+                      (CSRF, XSS, SQLi, broken auth, deserialization, SSRF)",
+        git_ref: None,
+    },
     // --- Pinned-version targets for CVE-reproduction runs -----------------
     //
     // These entries pin a specific release so the reviewer can be
