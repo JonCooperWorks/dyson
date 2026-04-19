@@ -19,7 +19,7 @@ Starting points for Java (and Kotlin — JVM shares most sinks) — not exhausti
 - XStream without a strict allowlist.
 - `ObjectMapper#readValue(data, Object.class)` when `@JsonTypeInfo(use = Id.CLASS)` or global default typing is on.
 - Kotlinx serialization with `@Polymorphic` + open registration on untrusted input.
-- **Reviewing a serialization library *itself* (not an app using one).**  The public read API (`readValue`/`fromXML`/`load`/`parse`/`deserialize`) is the entry, not the sink — every codebase calls it, so it can't be what's CVE-worthy.  The sink is whichever call-site turns a wire-format string (a type-id, a tag, a class-discriminator, a constructor name) into an executable artifact (a `Class<?>`, a `Constructor<?>`, a `Method`).  Concretely: any same-file or sibling-file call that takes a `String` off the parse path and returns a `Class<?>` — `Class.forName`, `ClassLoader.loadClass`, anything named `findClass`/`resolveClass`/`typeFromId`/`classForName`, any `TypeIdResolver` implementation.  Grep strategy: `ast_query` for `method_invocation` with name matching `^(forName|loadClass|findClass|resolveClass|typeFromId)$` across the scope, then `taint_trace max_depth: 32, max_paths: 20` from a wire-read entry to each match.  The chain runs entry → type-resolver → bean-deserializer → reflective setter; the default `max_depth=16` truncates before reaching the setter.  If a validator class exists that checks class names against a list (allow or block), the gap is WHERE the list is incomplete — JDK9+'s `Module` surface is a common blind spot in pre-JDK9 blocklists.
+- **Reviewing a serialization library *itself* (not an app using one).**  The public read API (`readValue`/`fromXML`/`load`/`parse`/`deserialize`) is the entry, not the sink — every codebase calls it, so it can't be what's CVE-worthy.  The sink is whichever call-site turns a wire-format string (a type-id, a tag, a class-discriminator, a constructor name) into an executable artifact (a `Class<?>`, a `Constructor<?>`, a `Method`, a `MethodHandle`).  Concretely: any internal method that takes a `String` off the parse path and returns one of those types.  `Class.forName` and `ClassLoader.loadClass` are the JVM primitives; every serialization library wraps them in its own method (names vary — look for whatever the library calls its "class-from-string" or "type resolver" step).  Grep strategy: `ast_query` for `method_invocation` with name matching `^(forName|loadClass)$`, plus `search_files` for the library's own wrapper method (often a method that takes a single `String` parameter and returns `Class<?>` — read its signature), then `taint_trace max_depth: 32, max_paths: 20` from a wire-read entry to each match.  The chain runs entry → type resolution → bean instantiation → reflective setter; the default `max_depth=16` truncates before reaching the setter.  If a validator class exists that checks class names against a list (allow or block), the gap is WHERE the list is incomplete — JDK-version bumps that add new reachable classes create blind spots in blocklists written against older JDKs.
 
 **SQL / JPQL injection**
 - `Statement.executeQuery("SELECT ... '" + user + "'")` — string concat in JDBC.  Use `PreparedStatement.setString`.
@@ -56,14 +56,14 @@ When an in-scope class receives attacker-controlled input and then calls an unsa
 
 Phrases to reject verbatim:
 - "the reflective invoke lives in another jar / sibling package — out of scope"
-- "delegates to X in `com.fasterxml.jackson.core.*` — not reviewed here"
+- "delegates to a library in another package — not reviewed here"
 - "the actual deserialization call is in the JDK / core library"
 - "this class just configures, the unsafe op is elsewhere"
 
 How to file it:
 1. **File at the in-scope class's public method or constructor** — the entry point attacker input reaches first.
-2. **Cite the delegation call site as the sink line** (the `Class.forName(typeId)` call inside your `TypeIdResolver`, the `Method.invoke(...)` call inside your `BeanDeserializer`, the `Yaml.load(stream)` call inside your public loader wrapper).
-3. **In Impact, describe the downstream unsafe op** ("reflective class instantiation via `com.fasterxml.jackson.databind.util.ClassUtil.createInstance`") so the reader sees the full chain.
+2. **Cite the delegation call site as the sink line** — the line inside the in-scope method that hands attacker-tainted data to the out-of-scope unsafe operation (a `Class.forName(name)` / `Method.invoke(...)` / unsafe loader call / reflective instantiation).
+3. **In Impact, describe the downstream unsafe op** so the reader sees the full chain even though the tail hop is out of scope.
 4. **Do not move the wrapper to `Checked and Cleared`** with an "outside scope" reason.  Wrapping is the defense you own and there isn't one.
 
 ## Tree-sitter seeds (java)
