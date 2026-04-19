@@ -384,6 +384,87 @@ Lessons that generalise:
 - **Give the model an honest escape hatch.**  When budget prevents `taint_trace`, a `not run within budget` disclaimer beats invention AND beats degrading to a memo.
 - **Some ceilings are model limits.**  Even after three iterations, qwen3.6-plus occasionally falls back to `search_files`/`bash grep` over `ast_query` on familiar-looking grep targets.  Know when to stop tuning.
 
+## Case study: CVE-repro sweep and the scope-delegation rule
+
+Where the qwen3.6-plus case study above was about *structural* report failures (preamble, fabrication, memo-instead-of-report), this one is about *analytic* failures on targets where the vulnerable code is physically separated from the user-facing wrapper — a failure mode that only shows up when you run against real published CVEs instead of teaching repos.
+
+The target set for this iteration is the nine CVE-repro entries in [expensive_live_security_review.rs](../crates/dyson/examples/expensive_live_security_review.rs) (log4j 2.14.1, spring-beans 5.3.17, jackson-databind 2.12.6, lodash 4.17.11, ejs 3.1.6, pyyaml 5.3, nextjs 14.0.0, rails 6.0.4.7, django 3.2.14) plus three React 19.2.0 subpackages including `react-server-dom-webpack/src` (the React2Shell / CVE-2025-55182 surface).  These differ from the OWASP teaching targets in one important way: the bug is in library code, and the vulnerable sink is often a few `import`s away from the user-facing wrapper the agent is scoped to.  That physical separation is what triggered the regression.
+
+### Methodology
+
+Same run → grade → tune → run loop as the qwen tuning, but with one addition: **per-target verdicts** against a rubric of Hit / Near-miss / Miss + fabrication / Miss + preamble / Tool-mix regression.  A "Hit" requires the CRITICAL finding's `File:` line to be the documented CVE path (or within 5 lines).  A "Near-miss" is right-file-wrong-severity OR the dismissal arm mentions the pattern but the agent doesn't file it.  The rubric runs as a shell one-liner post-sweep:
+
+```bash
+for t in <targets>; do
+  log=test-output/iterN/dyson-live-$t.log
+  rpt=test-output/iterN/dyson-security-review-$t-iterN.md
+  grep 'tool call started' "$log" | grep -oE '"[a-z_]+"' | sort | uniq -c | sort -rn
+  real=$(grep -c 'tool call finished.*taint_trace' "$log")
+  blocks=$(grep -c 'taint_trace: lossy' "$rpt")
+  echo "$t: taint_trace real=$real blocks_in_report=$blocks"
+done
+```
+
+`real ≥ blocks` across every target = zero fabrication.  `real < blocks` on any target = fabrication; go look.
+
+### iter1: baseline sweep
+
+Ran four targets 4×-parallel against the current prompt + cheatsheets.  Outcomes:
+
+| Target | Verdict | Notes |
+|---|---|---|
+| log4j-2.14.1 | **Hit** | `JndiManager.java:172` — full Log4Shell chain, 3 real traces, one inlined |
+| pyyaml-5.3 | **Hit** | `constructor.py:698` — CVE-2020-1747 FullLoader RCE, depth-4 trace |
+| nextjs-14.0.0 | **Hit** (different CVE) | `sandbox/sandbox.ts:83` — CVE-2025-29927 middleware subrequest bypass (not the CVE the target was originally staged for, but a legitimate pre-auth bypass in scope) |
+| react-server-dom-webpack-19.2.0 | **Near-miss + preamble + tool-mix regression** | 0 `taint_trace` calls (deep-chain target); preamble "I have a complete picture now"; dismissed `decodeReply` to Checked and Cleared with "sink lives in another package" |
+
+Fabrication across all four: clean.  The React2Shell miss was the signal finding.
+
+### The scope-delegation dismissal
+
+The React2Shell agent correctly identified `decodeReply` in `server/ReactFlightDOMServerNode.js` as receiving attacker input (a `FormData` POST body), correctly identified that `decodeReply` delegates to `createResponse` → `resolveField` in `react-server/src/ReactFlightReplyServer.js`, and then **moved the finding to Checked and Cleared with the reason "outside this review scope"**.  That reason never clears a finding.  `decodeReply` is the attacker's API over the wire; the fact that the unsafe op is one `import` away is a call-graph observation, not a mitigation.
+
+Existing prompt rules didn't catch this.  The anti-preamble rule is triggered; the forbidden-downgrade-phrasings list is triggered for a different shape (coincidental guards, type-coercive constructors); the wire-format-class dismissal list is triggered for "path segments are numeric" and "value is bound" — none of those are "sink is in a sibling package".  The gap was a new dismissal pattern.
+
+### iter2: add scope-delegation rule to cheatsheets
+
+Tune: added a "Scope-delegation dismissal — NOT a mitigation" section to `cheatsheets/lang/javascript.md`, `java.md`, and `python.md`.  Phrased generically — any wrapper-to-sibling-package pattern — rather than naming React specifically.  The rule tells the model:
+
+1. File at the wrapper's exported entry, not at the out-of-scope sink.
+2. Cite the delegation call site as the sink line.
+3. Describe the downstream unsafe op in Impact.
+4. Do not move the wrapper to Checked and Cleared with an "outside scope" reason.
+
+Also added a Java-specific hint for polymorphic deser gadget-chain wrappers (BeanDeserializer, AsPropertyTypeDeserializer, TypeIdResolver) because that chain has a well-known silhouette that the generic rule doesn't surface.
+
+Reran: react-server-dom-webpack, jackson-databind-2.12.6 (tests the new Java rule on a deep chain), ejs-3.1.6 (tests we don't regress on shallow cases).
+
+| Target | Verdict | Notes |
+|---|---|---|
+| react-server-dom-webpack (retry) | **Still near-miss**, preamble fixed | Rule didn't fire.  Filed MEDIUM info-disclosure + LOW fail-open + LOW CWD scan; moved `decodeReply` to Checked and Cleared again with "core Flight parsing lives in `react-server/src`".  0 `taint_trace`. |
+| jackson-databind-2.12.6 | **Hit + preamble regression** | Correct CRITICAL on `StdTypeResolverBuilder.java:141` with full `Class.forName` → gadget chain.  Rule activated.  But opened with "Now I have a comprehensive understanding…" — verbatim banned phrase. |
+| ejs-3.1.6 | **Hit + fabrication** | Correct CVE-2022-29078 at `lib/ejs.js:590`.  **Two `Taint Trace:` blocks in the report, zero `taint_trace` calls in the log.**  Blocks pass all four structural markers. |
+
+Clear partial win.  Java rule worked on jackson; JS rule didn't fire on react.  Diagnosis: the scope-delegation rule was a sub-bullet *inside* the wire-format subsection — the model only consulted it when it was already in "wire-format finding" mode.  For react-server-dom-webpack, the agent concluded early that the package is a thin wrapper (build-time plugin + runtime re-exports) and never entered wire-format mode.
+
+### iter3: promote the rule to a top-level section
+
+Tune: pulled the scope-delegation rule out of the wire-format subsection and made it a peer of `## Sinks` / `## Tree-sitter seeds` in each language cheatsheet.  Header: `## Scope-delegation dismissal — NOT a mitigation`.  Opens with "Applies to every sink class above, not just RSC / wire-format."  Phrases-to-reject list expanded with "this file just re-exports / delegates to X", "wraps Y which is outside this review", "the sink is in the runtime / framework core".  Also expanded the Java rule beyond polymorphic deser to cover reflection / SQL / template / XXE / command exec wrappers.
+
+Not a rewrite of the prompt — a promotion of existing content from bullet depth 2 to section depth 0.  Total delta across three cheatsheets: ~40 added lines, ~5 removed (consolidation).
+
+Running this against react-server-dom-webpack-19.2.0 (third attempt), spring-beans-5.3.17 (tests promoted Java rule on a fresh Spring4Shell surface), and lodash-4.17.11 (tests promoted JS rule on a prototype-pollution class, different silhouette from RSC wire-format).
+
+### Lessons so far
+
+- **Deep-chain CVE targets expose failure modes that teaching repos don't.**  Pygoat/Juice Shop SQLi lives one line from the handler entry — there's no chance to "lose the trail" between wrapper and sink.  Real library code puts 2-4 file boundaries between them, and the agent interprets each boundary as a scope boundary.
+- **Rule depth matters.**  A rule buried as a sub-bullet under a subsection only fires when the model is already in that subsection's frame.  Rules that should apply across all sink classes belong at section depth 0 with an explicit "applies to every sink class" prefix.
+- **Phrasing the rule generically is worth the effort even when you're fixing one specific miss.**  The iter2 Java rule (which is generic) caught jackson on the first run of iter2.  The iter2 JS rule (which mentioned `react-server` / `react-client` as example callees) didn't catch react, because the agent's dismissal phrased the callee differently.  Examples hurt when they let the model pattern-match a miss as "not this one, that was a different import path".  iter3 removes the specific package names from the phrases-to-reject list and keeps only structural phrasings ("delegates to X", "wraps Y").
+- **The scope-delegation rule doesn't help with fabrication or preamble.**  Those are orthogonal failures.  ejs iter2 fabricated even though the scope-delegation rule was present; the two issues don't share a root cause.  A tuning round should expect to surface new unrelated failures, not fix them all.
+- **"Don't overfit to the failure case" is real.**  The first iter2 draft (before the user pushed back) wanted to name `decodeReply` / `ReactFlightReplyServer` / `createResponse` as specific wrappers-to-file.  That would have helped react at the cost of not generalising.  The generic rule is weaker on the original case but applies to jackson, spring, and anything else that follows the wrapper-to-sibling-package shape.
+
+Sample reports from each iter (including both hits and the ongoing react miss) live under [docs/sample-seceng-reports/](sample-seceng-reports/).
+
 ## When to use
 
 - Security review of a directory or module (scope via the `path` input)

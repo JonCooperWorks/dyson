@@ -124,6 +124,10 @@ Four iterations against OWASP Juice Shop's `routes/` subpath:
 
 The live review is how you find out any of this in the first place.  Running `cargo test` would not have told you the prompt was fabricating taint traces, because unit tests never call an LLM.
 
+### Case study: CVE-repro sweep and scope-delegation dismissal
+
+The qwen3.6-plus case study above was about structural report failures (preamble, fabrication, memo-in-place-of-report) using OWASP teaching repos.  A second case study covers *analytic* failures on real published CVEs — where the vulnerable sink is often one `import` away from the user-facing wrapper the agent is scoped to, and the agent dismisses the wrapper with "the real sink lives in another package".  Full walkthrough of iter1 → iter3 (React2Shell, jackson-databind, ejs, lodash, spring-beans) lives in [security-engineer-subagent.md → Case study: CVE-repro sweep and the scope-delegation rule](security-engineer-subagent.md#case-study-cve-repro-sweep-and-the-scope-delegation-rule).  Sample reports from both hits and the ongoing React2Shell miss are in [sample-seceng-reports/](sample-seceng-reports/).
+
 ## Adding a new orchestrator or subagent
 
 1. Write the prompt at `src/skill/subagent/prompts/<role>.md` and register via `OrchestratorConfig` or `SubagentAgentConfig`.
