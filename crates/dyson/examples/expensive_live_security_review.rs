@@ -12,7 +12,9 @@
 //
 // Each target is shallow-cloned into `$TMPDIR/dyson-smoke-repos/`
 // (shared with the other smoke tests).  Reports land in
-// `/tmp/dyson-security-review-<name>.md`.
+// `test-output/dyson-security-review-<name>.md` by default, relative
+// to CWD (the repo root when invoked via `cargo run`).  Override with
+// `--output-dir`.
 //
 // This is NOT a cargo test.  Run explicitly with:
 //     cargo run -p dyson --example expensive_live_security_review \
@@ -62,11 +64,18 @@ struct Args {
     expensive_scan_all_targets: bool,
 
     /// Optional suffix appended to report filenames
-    /// (`/tmp/dyson-security-review-<target>[-<suffix>].md`).  Use this
-    /// to keep multiple runs against the same target from overwriting
-    /// each other — particularly when measuring run-to-run variance.
+    /// (`<output-dir>/dyson-security-review-<target>[-<suffix>].md`).
+    /// Use this to keep multiple runs against the same target from
+    /// overwriting each other — particularly when measuring run-to-run
+    /// variance.
     #[arg(long)]
     report_suffix: Option<String>,
+
+    /// Directory to write reports into.  Defaults to `test-output` in
+    /// CWD (the repo root when invoked via `cargo run`).  Created if
+    /// missing.  Kept out of git via `.gitignore`.
+    #[arg(long, default_value = "test-output")]
+    output_dir: PathBuf,
 
     /// Override the git ref (tag, branch, or commit SHA) checked out
     /// for the target.  Takes precedence over `Target::git_ref`.  Use
@@ -475,8 +484,11 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let suffix = args.report_suffix.as_deref();
     let ref_override = args.git_ref.as_deref();
+    let output_dir = args.output_dir.clone();
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("create output dir {}: {}", output_dir.display(), e))?;
     for t in selected {
-        run_target(t, &cache, &sec_eng, suffix, ref_override).await?;
+        run_target(t, &cache, &sec_eng, suffix, ref_override, &output_dir).await?;
     }
     Ok(())
 }
@@ -487,6 +499,7 @@ async fn run_target(
     sec_eng: &Arc<dyn Tool>,
     report_suffix: Option<&str>,
     ref_override: Option<&str>,
+    output_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve the effective ref: CLI flag wins, else baked-in `git_ref`,
     // else None (clone default branch head).
@@ -568,7 +581,7 @@ async fn run_target(
         Some(s) => format!("dyson-security-review-{}-{s}.md", t.name),
         None => format!("dyson-security-review-{}.md", t.name),
     };
-    let report_path = PathBuf::from("/tmp").join(filename);
+    let report_path = output_dir.join(filename);
     std::fs::write(&report_path, &output.content)?;
 
     println!(

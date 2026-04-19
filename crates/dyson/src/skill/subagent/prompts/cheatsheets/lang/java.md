@@ -18,6 +18,9 @@ Starting points for Java (and Kotlin — JVM shares most sinks) — not exhausti
 - XStream without a strict allowlist.
 - `ObjectMapper#readValue(data, Object.class)` when `@JsonTypeInfo(use = Id.CLASS)` or global default typing is on.
 - Kotlinx serialization with `@Polymorphic` + open registration on untrusted input.
+- **Polymorphic-deser gadget-chain wrappers.**  Jackson/XStream/SnakeYAML route from the public entry (`readValue`, `fromXML`, `Yaml.load`) through a type-resolver → bean-deserializer → reflective setter chain.  When the in-scope file is the wrapper (`BeanDeserializer`, `AsPropertyTypeDeserializer`, `SubTypeValidator`, a `TypeIdResolver` impl) and the reflective-invoke lands in a sibling package, that is STILL the finding — file at the wrapper.  The chain depth is why `taint_trace` for this class usually needs `max_depth: 32, max_paths: 20`; the default cap (16/10) truncates before reaching the setter sink.
+
+**Scope-delegation dismissal is NOT a mitigation.** When an in-scope class receives attacker-controlled input and hands it to an unsafe operation in a sibling package or parent project (`com.fasterxml.jackson.core.*`, `org.yaml.snakeyaml.constructor.*`, anything outside the review root), the in-scope class is the attacker's API — file it.  Phrases to reject: "the reflective invoke lives in another jar", "delegates to X in a sibling package — out of scope", "sink is in the JDK / core library".  File at the in-scope class's public method; cite the delegation call site as the sink line; describe the downstream unsafe op in Impact.
 
 **SQL / JPQL injection**
 - `Statement.executeQuery("SELECT ... '" + user + "'")` — string concat in JDBC.  Use `PreparedStatement.setString`.

@@ -23,6 +23,8 @@ Starting points for Python — not exhaustive. Novel sinks outside this list are
 - `yaml.load(data)` without `Loader=yaml.SafeLoader` is RCE. Only `yaml.safe_load` is safe.
 - `xml.etree.ElementTree.parse`, `xml.dom.minidom.parseString`, `lxml.etree.parse` — XXE / billion-laughs unless `resolve_entities=False` and DTDs are disabled. Prefer `defusedxml`.
 
+**Scope-delegation dismissal is NOT a mitigation.**  When an in-scope module receives attacker-controlled input and hands it to an unsafe operation in a sibling package or the stdlib, the in-scope module is the attacker's API — file it.  Phrases to reject: "the actual `__new__` / `__reduce__` runs in the stdlib — out of scope", "delegates to X in another package", "the unsafe call is one import away".  File at the in-scope public function; cite the delegation call site as the sink line; describe the downstream unsafe op in Impact.
+
 **SQL injection**
 - `cursor.execute(f"... {user}")`, `cursor.execute("... %s" % user)`, `.execute("..." + user)` — all SQLi.
 - Django `Model.objects.extra(where=[user])`, `.raw(f"... {user}")` — see framework sheet.
