@@ -138,8 +138,15 @@ struct Target {
     /// surface small enough that the agent can enumerate it within its
     /// iteration budget.
     sub: &'static str,
-    /// Human-readable description threaded into the task context.
+    /// Spoiler-laden description used when `--hints on`.  For CVE-repro
+    /// targets this names the specific CVE and the vulnerable API.
     description: &'static str,
+    /// Neutral one-line summary used when `--hints off` (the default).
+    /// Library name + what it is.  No version, no CVE ref, no specific
+    /// API mention, no "expected finding" prose — the point is to let
+    /// the agent know what kind of codebase it's in without telling it
+    /// where the bug is.
+    summary: &'static str,
     /// Optional git ref (tag, branch, or commit SHA) to check out.
     /// `None` = shallow-clone the default branch head (latest).  `Some`
     /// pins to a specific version — useful for reproducing published
@@ -154,6 +161,7 @@ const TARGETS: &[Target] = &[
         slug: "juice-shop/juice-shop",
         sub: "routes",
         description: "OWASP Juice Shop - deliberately vulnerable Node/Express app",
+        summary: "Node/Express web application.",
         git_ref: None,
     },
     Target {
@@ -161,6 +169,7 @@ const TARGETS: &[Target] = &[
         slug: "OWASP/NodeGoat",
         sub: "app",
         description: "OWASP NodeGoat - deliberately vulnerable Node/Express app for OWASP Top 10",
+        summary: "Node/Express web application.",
         git_ref: None,
     },
     Target {
@@ -168,6 +177,7 @@ const TARGETS: &[Target] = &[
         slug: "OWASP/railsgoat",
         sub: "app",
         description: "OWASP RailsGoat - deliberately vulnerable Ruby on Rails app",
+        summary: "Ruby on Rails web application.",
         git_ref: None,
     },
     Target {
@@ -175,6 +185,7 @@ const TARGETS: &[Target] = &[
         slug: "joncooperworks/dyson",
         sub: "",
         description: "Rust based agent - review the app for AI and rust vulnerabilities",
+        summary: "Rust AI-agent framework.",
         git_ref: None,
     },
     Target {
@@ -183,6 +194,7 @@ const TARGETS: &[Target] = &[
         sub: "introduction",
         description: "PyGoat - deliberately vulnerable Django app teaching OWASP Top 10 \
                       (CSRF, XSS, SQLi, broken auth, deserialization, SSRF)",
+        summary: "Python/Django web application.",
         git_ref: None,
     },
     // --- CVE-reproduction targets -----------------------------------------
@@ -207,6 +219,7 @@ const TARGETS: &[Target] = &[
                       attacker-controlled `name` → LDAP/RMI deserialization → class \
                       loading → RCE.  `max_depth=32` on taint_trace recommended; the JNDI \
                       chain spans several indirection layers.",
+        summary: "Apache Log4j — Java logging library.",
         git_ref: Some("rel/2.14.1"),
     },
     Target {
@@ -219,6 +232,7 @@ const TARGETS: &[Target] = &[
                       properties.  Expected finding: `CachedIntrospectionResults` missing \
                       an allowlist for introspected properties; the bug IS the absence of \
                       the filter that shipped in 5.3.18.",
+        summary: "Spring Framework beans module — Java IoC container / bean binding.",
         git_ref: Some("v5.3.17"),
     },
     Target {
@@ -232,6 +246,7 @@ const TARGETS: &[Target] = &[
                       managers, template engines, etc.) → RCE.  Expected finding: \
                       `BeanDeserializerFactory` / `StdDeserializer` path that resolves \
                       class names from wire format without an allowlist.",
+        summary: "jackson-databind — Java JSON serialisation library.",
         git_ref: Some("jackson-databind-2.12.6"),
     },
     Target {
@@ -244,6 +259,7 @@ const TARGETS: &[Target] = &[
                       of `Object.prototype` propagates to unrelated objects across the \
                       process.  Expected finding: the `defaultsDeep` / `merge` / `set` \
                       property-walk lacks the reflection-name blocklist.",
+        summary: "lodash — JavaScript utility library.",
         git_ref: Some("4.17.11"),
     },
     Target {
@@ -257,6 +273,7 @@ const TARGETS: &[Target] = &[
                       time.  Expected finding: the option-to-source concatenation in \
                       `lib/ejs.js`; the prompt's JS cheatsheet covers `new Function`-family \
                       RCE primitives which this maps onto.",
+        summary: "EJS — embedded JavaScript template engine.",
         git_ref: Some("v3.1.6"),
     },
     Target {
@@ -269,6 +286,7 @@ const TARGETS: &[Target] = &[
                       `subprocess.Popen` gadgets etc.  Expected finding: `FullLoader`'s \
                       tag-to-constructor map includes unsafe constructors that the \
                       advisory-fixed `SafeLoader` omits.",
+        summary: "PyYAML — Python YAML parser / serialiser.",
         git_ref: Some("5.3"),
     },
     Target {
@@ -283,6 +301,7 @@ const TARGETS: &[Target] = &[
                       middleware.  Expected finding: the request-handling path that reads \
                       `x-middleware-subrequest` from an external request and short-circuits \
                       the middleware pipeline without origin verification.",
+        summary: "Next.js — React web framework (server runtime).",
         git_ref: Some("v14.0.0"),
     },
     Target {
@@ -296,6 +315,7 @@ const TARGETS: &[Target] = &[
                       objects, reaching gadget chains.  Expected finding: the \
                       serialization layer in ActiveSupport / ActiveRecord that passes \
                       untrusted bytes through an unsafe YAML loader.",
+        summary: "Ruby on Rails ActiveSupport — Ruby web framework core utilities.",
         git_ref: Some("v6.0.4.7"),
     },
     Target {
@@ -309,6 +329,7 @@ const TARGETS: &[Target] = &[
                       the lookup-name handling in `functions/datetime.py` (or similar) \
                       concatenates user-derived `kind` into SQL without validating against \
                       an allowlist.",
+        summary: "Django ORM functions — Python web framework query builder.",
         git_ref: Some("3.2.14"),
     },
     // --- Deliberately-vulnerable teaching targets -------------------------
@@ -327,6 +348,7 @@ const TARGETS: &[Target] = &[
                       Exercises framework/graphql sheet: introspection abuse, batching DoS, \
                       alias-based auth bypass, SQLi / command injection in resolvers, \
                       field-level authorization gaps.  Committed passwords + hardcoded secrets.",
+        summary: "Python/Flask + Graphene GraphQL API.",
         git_ref: None,
     },
     Target {
@@ -337,6 +359,7 @@ const TARGETS: &[Target] = &[
                       Multiple deliberately-vulnerable JDBC + JPA patterns across \
                       string-concat Statement / PreparedStatement misuse / JPQL injection.  \
                       Exercises lang/java + framework/spring.",
+        summary: "Java Spring web application.",
         git_ref: None,
     },
     Target {
@@ -348,6 +371,7 @@ const TARGETS: &[Target] = &[
                       fetches, JWT weaknesses.  Smaller scope than pygoat but tests the same \
                       lang/python + framework/django pair on code that looks closer to \
                       production than a teaching toy.",
+        summary: "Python/Django API microservice.",
         git_ref: None,
     },
     // --- Pinned-version targets for CVE-reproduction runs -----------------
@@ -362,6 +386,7 @@ const TARGETS: &[Target] = &[
         slug: "facebook/react",
         sub: "packages/react-dom/src/server",
         description: "React 19.2.0 - packages/react-dom/src/server (SSR render / HTML escape path) for CVE repro",
+        summary: "React DOM server-side rendering.",
         git_ref: Some("v19.2.0"),
     },
     Target {
@@ -369,6 +394,7 @@ const TARGETS: &[Target] = &[
         slug: "facebook/react",
         sub: "packages/react-server/src",
         description: "React 19.2.0 - packages/react-server/src (Fizz streaming SSR + RSC protocol core - HTML escape logic lives here)",
+        summary: "React server package (SSR / RSC runtime).",
         git_ref: Some("v19.2.0"),
     },
     Target {
@@ -376,6 +402,7 @@ const TARGETS: &[Target] = &[
         slug: "facebook/react",
         sub: "packages/react-server-dom-webpack/src",
         description: "React 19.2.0 - packages/react-server-dom-webpack/src (RSC + Server Actions over Webpack - new attack surface)",
+        summary: "React server-components Webpack adapter.",
         git_ref: Some("v19.2.0"),
     },
 ];
@@ -574,15 +601,14 @@ async fn run_target(
     let mut ctx = ToolContext::from_cwd()?;
     ctx.dangerous_no_sandbox = true;
 
-    // Fold the version/ref into the context string so the reviewer knows
-    // which release it's looking at — relevant when reproducing a CVE
-    // against a specific version.  Gated by `--hints`: the description
-    // for CVE-repro targets names the specific CVE and sometimes the
-    // vulnerable API, which compromises the "independent rediscovery"
-    // framing of the sweep.  Default is `off` — pass empty context so
-    // the agent's only pointer is the scoped `path`.  Flip on when
-    // debugging a known failing case and you want the agent to start
-    // from the hint rather than from scratch.
+    // Build the context string.  Gated by `--hints`: the `description`
+    // field on CVE-repro targets names the specific CVE and sometimes
+    // the vulnerable API, which compromises the "independent
+    // rediscovery" framing of the sweep.  Default is `off` — pass only
+    // the neutral `summary` (library name + what it is, no version, no
+    // CVE ref, no API mention), so the agent knows the kind of codebase
+    // without being told where the bug is.  Flip on when debugging a
+    // known failing case and you want the agent to start from the hint.
     let context = if hints_on {
         match effective_ref {
             Some(r) => format!(
@@ -595,7 +621,7 @@ async fn run_target(
             ),
         }
     } else {
-        String::new()
+        format!("Target: {}", t.summary)
     };
 
     let input = json!({
