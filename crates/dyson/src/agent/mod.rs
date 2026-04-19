@@ -1110,6 +1110,11 @@ impl Agent {
         // Remember the most recent text the LLM streamed this turn so we can
         // surface it if the final iteration comes back empty after retries.
         let mut last_streamed_text = String::new();
+        // Accumulate partial assistant text across MaxTokens-forced
+        // continuations.  `final_text` only holds the *last* turn's text,
+        // so without this buffer every chunk before the final one is lost
+        // from the return value (the conversation history still has them).
+        let mut continuation_prefix = String::new();
 
         let skill_fragments = self.collect_skill_context().await;
 
@@ -1230,6 +1235,9 @@ impl Agent {
                 tracing::warn!(
                     "response truncated by max_tokens — injecting continuation prompt"
                 );
+                if let Some(text) = assistant_msg.last_text() {
+                    continuation_prefix.push_str(text);
+                }
                 self.conversation.messages.push(assistant_msg);
                 self.conversation.messages.push(Message::user(
                     "[Your previous response was cut off because it exceeded the \
@@ -1288,6 +1296,9 @@ impl Agent {
                     output.text_delta(fallback)?;
                     final_text = fallback.to_string();
                 }
+                if !continuation_prefix.is_empty() {
+                    final_text = format!("{continuation_prefix}{final_text}");
+                }
                 self.conversation.messages.push(assistant_msg);
                 output.flush()?;
                 break;
@@ -1310,6 +1321,9 @@ impl Agent {
             final_text = self
                 .summarize_on_max_iterations(&skill_fragments, output)
                 .await?;
+            if !continuation_prefix.is_empty() {
+                final_text = format!("{continuation_prefix}{final_text}");
+            }
         }
 
         output.flush()?;

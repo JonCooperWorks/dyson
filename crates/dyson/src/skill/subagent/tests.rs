@@ -212,6 +212,72 @@ async fn subagent_runs_child_and_returns_result() {
     assert_eq!(capture.text(), "Research complete.");
 }
 
+/// Regression: when the child LLM hits `max_tokens` mid-response, the
+/// agent injects a continuation prompt and re-streams.  The returned
+/// text (surfaced as `ToolOutput::success(final_text)` by `spawn_child`)
+/// must include BOTH the truncated first chunk and the continuation —
+/// otherwise long subagent reports are silently clipped to only the tail
+/// turn.  See the pygoat run where a 27370-byte main report was followed
+/// by a 1376-byte continuation and the return value was 1376 bytes.
+#[tokio::test]
+async fn subagent_concatenates_text_across_max_tokens_continuation() {
+    let llm = MockLlm::new(vec![
+        vec![
+            StreamEvent::TextDelta("first-chunk ".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::MaxTokens,
+                output_tokens: None,
+            },
+        ],
+        vec![
+            StreamEvent::TextDelta("second-chunk".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ],
+    ]);
+
+    let config = SubagentAgentConfig {
+        name: "continuation_agent".into(),
+        description: "Test".into(),
+        system_prompt: "Test".into(),
+        provider: "anthropic".into(),
+        model: None,
+        max_iterations: Some(5),
+        max_tokens: Some(1024),
+        tools: None,
+        injects_protocol: None,
+    };
+
+    let tool = SubagentTool::new(
+        config,
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        vec![],
+    );
+
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({"task": "write a long answer"});
+    let result = tool.run(&input, &ctx).await.unwrap();
+
+    assert!(!result.is_error, "unexpected error: {}", result.content);
+    assert!(
+        result.content.contains("first-chunk "),
+        "return value lost the pre-continuation chunk: {:?}",
+        result.content
+    );
+    assert!(
+        result.content.contains("second-chunk"),
+        "return value missing post-continuation chunk: {:?}",
+        result.content
+    );
+    assert_eq!(result.content, "first-chunk second-chunk");
+}
+
 #[tokio::test]
 async fn subagent_depth_limit_prevents_recursion() {
     let config = SubagentAgentConfig {
