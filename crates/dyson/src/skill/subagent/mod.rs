@@ -315,7 +315,16 @@ impl Tool for SubagentTool {
             workspace: self.workspace.clone(),
             client: self.client.clone(),
             parent_depth: ctx.depth,
-            working_dir: None,
+            // Inherit the caller's scope.  When a SubagentTool is dispatched
+            // from inside an OrchestratorTool's child (the common case —
+            // e.g. `security_engineer` dispatching `dependency_review`),
+            // the orchestrator has already scoped `ctx.working_dir` to the
+            // review root, and the inner subagent needs to see the same
+            // root to reach the target's lockfiles / manifests / source.
+            // Passing None here silently drops the scope and the child
+            // falls back to the process cwd, where it may pick up stale
+            // checkouts from prior smoke runs.
+            working_dir: Some(ctx.working_dir.clone()),
             user_message,
         })
         .await

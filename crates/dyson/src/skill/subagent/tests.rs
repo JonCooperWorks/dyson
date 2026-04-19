@@ -1331,6 +1331,112 @@ async fn orchestrator_propagates_path_to_child_working_dir() {
     );
 }
 
+/// Regression: `SubagentTool::run` must forward the calling context's
+/// `working_dir` into its child agent.  Without this, inner subagents
+/// dispatched from inside a `security_engineer` orchestrator (which
+/// scopes its own child to the target repo via `--path`) fall back to
+/// the process cwd instead of the target scope.  Symptom in the wild:
+/// `dependency_review` spawned from within a `security_engineer` review
+/// of `nextjs-14.0.0` reported findings from `juice-shop` instead —
+/// the only lockfile `dependency_scan` could reach was the Juice Shop
+/// one left in the process cwd by a previous smoke run, because the
+/// subagent lost scope on the jump from orchestrator-child to inner
+/// subagent.  See docs/sample-seceng-reports/iter1-nextjs-14.0.0-hit.md
+/// and iter2-react-server-dom-webpack-still-miss.md for the reports
+/// that exposed this.
+#[tokio::test]
+async fn subagent_inherits_parents_working_dir() {
+    // Scoped path distinct from the process cwd — temp dir is the
+    // standard choice here (orchestrator test above uses the same).
+    let scoped = std::env::temp_dir().canonicalize().unwrap();
+    assert_ne!(
+        scoped,
+        std::env::current_dir().unwrap(),
+        "test precondition: temp_dir must differ from cwd",
+    );
+
+    // MockLlm: the child makes one call to the spy, then ends.
+    let llm = MockLlm::new(vec![
+        vec![
+            StreamEvent::ToolUseStart {
+                id: "call_1".into(),
+                name: "working_dir_spy".into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "call_1".into(),
+                name: "working_dir_spy".into(),
+                input: serde_json::json!({}),
+            },
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::ToolUse,
+                output_tokens: None,
+            },
+        ],
+        vec![
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: None,
+            },
+        ],
+    ]);
+
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let spy: Arc<dyn Tool> = Arc::new(WorkingDirSpy {
+        captured: std::sync::Arc::clone(&captured),
+    });
+
+    let config = SubagentAgentConfig {
+        name: "scoped_subagent".into(),
+        description: "Test".into(),
+        system_prompt: "Test".into(),
+        provider: "anthropic".into(),
+        model: None,
+        max_iterations: Some(3),
+        max_tokens: Some(1024),
+        tools: None,
+        injects_protocol: None,
+    };
+    let tool = SubagentTool::new(
+        config,
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        vec![spy],
+    );
+
+    // Context mirrors what an OrchestratorTool child would pass when it
+    // dispatched an inner subagent: its own scoped working_dir.
+    let ctx = ToolContext {
+        working_dir: scoped.clone(),
+        env: std::collections::HashMap::new(),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+        workspace: None,
+        depth: 1,
+        dangerous_no_sandbox: false,
+        taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+    };
+
+    let input = serde_json::json!({ "task": "call the spy" });
+    let result = tool.run(&input, &ctx).await.unwrap();
+    assert!(!result.is_error, "unexpected error: {}", result.content);
+
+    let captured_dir = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("spy was never invoked");
+    assert_eq!(
+        captured_dir, scoped,
+        "inner subagent's working_dir should inherit the caller's ctx.working_dir \
+         (got {}, expected {})",
+        captured_dir.display(),
+        scoped.display(),
+    );
+}
+
 #[tokio::test]
 async fn orchestrator_without_path_keeps_process_cwd() {
     // No `path` in input → child inherits the process cwd, matching
