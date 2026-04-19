@@ -86,6 +86,7 @@ Coverage matches every tree-sitter grammar dyson's `ast_query` supports (13 lang
 | Erlang | `rebar.config` |
 | Zig | `build.zig`, `build.zig.zon` |
 | Nix | `flake.nix`, `default.nix`, `shell.nix` |
+| Lua | `*.rockspec` |
 
 Framework detection shallow-parses dependency tables:
 
@@ -101,6 +102,10 @@ Framework detection shallow-parses dependency tables:
 | `package.json` | `@sveltejs/kit` | `framework/sveltekit` |
 | `package.json` | `@remix-run/*` | `framework/remix` |
 | `package.json` | `@apollo/server` / `apollo-server` / `graphql-yoga` | `framework/graphql` |
+| `package.json` | `@hapi/hapi` | `framework/hapi` |
+| `package.json` | `@adonisjs/core` | `framework/adonis` |
+| `package.json` | top-level `meteor` key or `meteor-node-stubs` | `framework/meteor` |
+| `package.json` | `nuxt` | `framework/nuxt` |
 | `pyproject.toml` / `requirements*.txt` | `django` | `framework/django` |
 | `pyproject.toml` / `requirements*.txt` | `flask` | `framework/flask` |
 | `pyproject.toml` / `requirements*.txt` | `fastapi` | `framework/fastapi` |
@@ -108,6 +113,10 @@ Framework detection shallow-parses dependency tables:
 | `pyproject.toml` / `requirements*.txt` | `tornado` | `framework/tornado` |
 | `pyproject.toml` / `requirements*.txt` | `sanic` | `framework/sanic` |
 | `pyproject.toml` / `requirements*.txt` | `celery` | `framework/celery` |
+| `pyproject.toml` / `requirements*.txt` | `starlette` | `framework/starlette` |
+| `pyproject.toml` / `requirements*.txt` | `pyramid` | `framework/pyramid` |
+| `pyproject.toml` / `requirements*.txt` | `falcon` | `framework/falcon` |
+| `pyproject.toml` / `requirements*.txt` | `bottle` | `framework/bottle` |
 | `Cargo.toml` | `actix-web` / `actix` | `framework/actix` |
 | `Cargo.toml` | `axum` | `framework/axum` |
 | `Cargo.toml` | `rocket` | `framework/rocket` |
@@ -119,6 +128,10 @@ Framework detection shallow-parses dependency tables:
 | `pom.xml` / `build.gradle` | `io.quarkus` | `framework/quarkus` |
 | `pom.xml` / `build.gradle` | `io.micronaut` | `framework/micronaut` |
 | `pom.xml` / `build.gradle` | `io.javalin` | `framework/javalin` |
+| `pom.xml` / `build.gradle` | `com.typesafe.play` / `play-java` / `play-scala` | `framework/play` |
+| `pom.xml` / `build.gradle` | `io.dropwizard` | `framework/dropwizard` |
+| `pom.xml` / `build.gradle` | `io.helidon` | `framework/helidon` |
+| `pom.xml` / `build.gradle` | `io.vertx` | `framework/vertx` |
 | `build.gradle.kts` | `io.ktor:ktor-*` | `framework/ktor` |
 | `*.csproj` / `*.fsproj` | `Microsoft.AspNetCore` | `framework/aspnet` |
 | `composer.json` | `laravel/framework` | `framework/laravel` |
@@ -136,6 +149,7 @@ Framework detection shallow-parses dependency tables:
 | `*.cabal` | `servant` / `servant-server` | `framework/servant` |
 | `dune` | `dream` | `framework/dream` |
 | `rebar.config` | `{cowboy, ...}` | `framework/cowboy` |
+| `*.rockspec` | `lua-resty-*` / `openresty` | `framework/openresty` |
 
 `build.gradle.kts` (Kotlin DSL) registers the review as **Kotlin** (not Java); plain `build.gradle` and `pom.xml` stay Java.  Spring is flagged from either.
 

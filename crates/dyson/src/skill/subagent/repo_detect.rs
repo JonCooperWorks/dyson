@@ -36,10 +36,14 @@ const UP_WALK_DEPTH: usize = 5;
 const MAX_CHEATSHEET_LINES: usize = 400;
 
 /// Languages for which a cheatsheet ships.  Covers every tree-sitter
-/// grammar dyson's `ast_query` supports, plus PHP (no in-tree grammar
-/// but a major dependency ecosystem — the sheet still guides `read_file`
-/// and `search_files` work even without `ast_query`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// grammar dyson's `ast_query` supports, plus PHP + Lua (no in-tree
+/// grammar but the sheets still guide `read_file` / `search_files`
+/// work).
+///
+/// Derives `Ord` so `BTreeMap<Language, usize>` can key directly on
+/// the enum (stable tiebreak via declaration order).  Avoids a second
+/// hand-maintained variant list that would drift from the enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Language {
     Python,
     /// Shared sheet for JavaScript and TypeScript; detected through
@@ -61,6 +65,7 @@ pub enum Language {
     Erlang,
     Zig,
     Nix,
+    Lua,
 }
 
 /// Frameworks for which a cheatsheet ships.  Each binds to one language
@@ -113,6 +118,19 @@ pub enum Framework {
     Servant,
     Dream,
     Cowboy,
+    Starlette,
+    Pyramid,
+    Falcon,
+    Bottle,
+    Play,
+    Dropwizard,
+    Helidon,
+    Vertx,
+    Hapi,
+    Adonis,
+    Meteor,
+    Nuxt,
+    OpenResty,
 }
 
 impl Framework {
@@ -127,7 +145,11 @@ impl Framework {
             | Self::Aiohttp
             | Self::Tornado
             | Self::Sanic
-            | Self::Celery => Language::Python,
+            | Self::Celery
+            | Self::Starlette
+            | Self::Pyramid
+            | Self::Falcon
+            | Self::Bottle => Language::Python,
             Self::Express
             | Self::NextJs
             | Self::Fastify
@@ -137,10 +159,21 @@ impl Framework {
             | Self::Hono
             | Self::SvelteKit
             | Self::Remix
-            | Self::GraphQL => Language::JavaScript,
+            | Self::GraphQL
+            | Self::Hapi
+            | Self::Adonis
+            | Self::Meteor
+            | Self::Nuxt => Language::JavaScript,
             Self::Actix | Self::Axum | Self::Rocket | Self::Warp | Self::Tonic => Language::Rust,
             Self::Rails | Self::Sinatra => Language::Ruby,
-            Self::Spring | Self::Quarkus | Self::Micronaut | Self::Javalin => Language::Java,
+            Self::Spring
+            | Self::Quarkus
+            | Self::Micronaut
+            | Self::Javalin
+            | Self::Play
+            | Self::Dropwizard
+            | Self::Helidon
+            | Self::Vertx => Language::Java,
             Self::Ktor => Language::Kotlin,
             Self::AspNet => Language::CSharp,
             Self::Laravel | Self::Symfony | Self::Slim | Self::CodeIgniter => Language::Php,
@@ -150,6 +183,7 @@ impl Framework {
             Self::Servant => Language::Haskell,
             Self::Dream => Language::Ocaml,
             Self::Cowboy => Language::Erlang,
+            Self::OpenResty => Language::Lua,
         }
     }
 }
@@ -169,7 +203,7 @@ pub struct Detection {
 /// repos pointed at their root; upward walk handles scoped reviews like
 /// `repo/routes/` where the manifest lives in `repo/`.
 pub fn detect_repo(root: &Path) -> Detection {
-    let mut lang_counts: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut lang_counts: BTreeMap<Language, usize> = BTreeMap::new();
     let mut frameworks: Vec<Framework> = Vec::new();
     let mut seen_frameworks: HashSet<Framework> = HashSet::new();
 
@@ -186,17 +220,13 @@ pub fn detect_repo(root: &Path) -> Detection {
     // Downward walk from the scoped path.
     walk_down(root, &mut lang_counts, &mut frameworks, &mut seen_frameworks);
 
-    // Rank languages by count desc, tiebreak by enum discriminant so
-    // output is stable across runs.  BTreeMap keyed by discriminant
-    // already gives a stable tiebreak order.
-    let mut ranked: Vec<(usize, usize)> =
-        lang_counts.iter().map(|(k, v)| (*k, *v)).collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    // Rank by count desc; tiebreak by enum declaration order via Ord.
+    // BTreeMap gives iteration sorted by key (Language's derived Ord);
+    // a stable sort on count inherits that tiebreak.
+    let mut ranked: Vec<(Language, usize)> = lang_counts.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1));
 
-    let languages: Vec<Language> = ranked
-        .into_iter()
-        .filter_map(|(disc, _)| language_from_discriminant(disc))
-        .collect();
+    let languages: Vec<Language> = ranked.into_iter().map(|(lang, _)| lang).collect();
 
     Detection {
         languages,
@@ -211,7 +241,7 @@ pub fn detect_repo(root: &Path) -> Detection {
 /// `.gitignore` (tarball drops, fresh scaffolds).
 fn walk_down(
     dir: &Path,
-    counts: &mut BTreeMap<usize, usize>,
+    counts: &mut BTreeMap<Language, usize>,
     frameworks: &mut Vec<Framework>,
     seen: &mut HashSet<Framework>,
 ) {
@@ -241,7 +271,7 @@ fn walk_down(
 /// about files directly inside `dir`.
 fn inspect_dir_nonrecursive(
     dir: &Path,
-    counts: &mut BTreeMap<usize, usize>,
+    counts: &mut BTreeMap<Language, usize>,
     frameworks: &mut Vec<Framework>,
     seen: &mut HashSet<Framework>,
 ) {
@@ -280,7 +310,7 @@ fn is_skippable_dir(p: &Path) -> bool {
 /// manifest detection is a heuristic, not a source of truth.
 fn inspect_file(
     path: &Path,
-    counts: &mut BTreeMap<usize, usize>,
+    counts: &mut BTreeMap<Language, usize>,
     frameworks: &mut Vec<Framework>,
     seen: &mut HashSet<Framework>,
 ) {
@@ -319,6 +349,8 @@ fn inspect_file(
                 Some(Language::CSharp)
             } else if lower.ends_with(".cabal") {
                 Some(Language::Haskell)
+            } else if lower.ends_with(".rockspec") {
+                Some(Language::Lua)
             } else {
                 None
             }
@@ -326,7 +358,7 @@ fn inspect_file(
     };
 
     let Some(lang) = lang else { return };
-    *counts.entry(lang as usize).or_default() += 1;
+    *counts.entry(lang).or_default() += 1;
 
     // Frameworks: only parse the few manifests where an O(1) shallow
     // match on dependency names is cheap and high-signal.
@@ -360,6 +392,9 @@ fn inspect_file(
         }
         (Language::Ocaml, "dune") => scan_dune_file(&contents, frameworks, seen),
         (Language::Erlang, "rebar.config") => scan_rebar_config(&contents, frameworks, seen),
+        (Language::Lua, _) if lower.ends_with(".rockspec") => {
+            scan_rockspec(&contents, frameworks, seen)
+        }
         _ => {}
     }
 }
@@ -425,6 +460,19 @@ fn scan_package_json(
     {
         push_framework(Framework::GraphQL, frameworks, seen);
     }
+    if has_dep("@hapi/hapi") || has_dep("hapi") {
+        push_framework(Framework::Hapi, frameworks, seen);
+    }
+    if has_dep("@adonisjs/core") {
+        push_framework(Framework::Adonis, frameworks, seen);
+    }
+    if has_dep("nuxt") {
+        push_framework(Framework::Nuxt, frameworks, seen);
+    }
+    // Meteor apps carry a top-level `meteor` object in package.json.
+    if value.get("meteor").is_some() || has_dep("meteor-node-stubs") {
+        push_framework(Framework::Meteor, frameworks, seen);
+    }
 }
 
 /// `pyproject.toml` framework detection.  Handles both PEP 621
@@ -485,6 +533,18 @@ fn scan_pyproject_toml(
     if names.contains("celery") {
         push_framework(Framework::Celery, frameworks, seen);
     }
+    if names.contains("starlette") {
+        push_framework(Framework::Starlette, frameworks, seen);
+    }
+    if names.contains("pyramid") {
+        push_framework(Framework::Pyramid, frameworks, seen);
+    }
+    if names.contains("falcon") {
+        push_framework(Framework::Falcon, frameworks, seen);
+    }
+    if names.contains("bottle") {
+        push_framework(Framework::Bottle, frameworks, seen);
+    }
 }
 
 /// Treat every non-comment line as `pkg[==ver]` and extract `pkg`.
@@ -507,6 +567,10 @@ fn scan_requirements_txt(
             "tornado" => push_framework(Framework::Tornado, frameworks, seen),
             "sanic" => push_framework(Framework::Sanic, frameworks, seen),
             "celery" => push_framework(Framework::Celery, frameworks, seen),
+            "starlette" => push_framework(Framework::Starlette, frameworks, seen),
+            "pyramid" => push_framework(Framework::Pyramid, frameworks, seen),
+            "falcon" => push_framework(Framework::Falcon, frameworks, seen),
+            "bottle" => push_framework(Framework::Bottle, frameworks, seen),
             _ => {}
         }
     }
@@ -621,6 +685,18 @@ fn scan_pom_xml(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut Hash
     if lower.contains("io.javalin") {
         push_framework(Framework::Javalin, frameworks, seen);
     }
+    if lower.contains("com.typesafe.play") || lower.contains("play-java") || lower.contains("play-scala") {
+        push_framework(Framework::Play, frameworks, seen);
+    }
+    if lower.contains("io.dropwizard") {
+        push_framework(Framework::Dropwizard, frameworks, seen);
+    }
+    if lower.contains("io.helidon") {
+        push_framework(Framework::Helidon, frameworks, seen);
+    }
+    if lower.contains("io.vertx") {
+        push_framework(Framework::Vertx, frameworks, seen);
+    }
 }
 
 /// `build.gradle` / `build.gradle.kts` — substring match on Spring
@@ -647,6 +723,18 @@ fn scan_build_gradle(
     }
     if lower.contains("io.javalin") {
         push_framework(Framework::Javalin, frameworks, seen);
+    }
+    if lower.contains("com.typesafe.play") || lower.contains("play-java") || lower.contains("play-scala") {
+        push_framework(Framework::Play, frameworks, seen);
+    }
+    if lower.contains("io.dropwizard") {
+        push_framework(Framework::Dropwizard, frameworks, seen);
+    }
+    if lower.contains("io.helidon") {
+        push_framework(Framework::Helidon, frameworks, seen);
+    }
+    if lower.contains("io.vertx") {
+        push_framework(Framework::Vertx, frameworks, seen);
     }
 }
 
@@ -794,36 +882,26 @@ fn scan_rebar_config(
     }
 }
 
+/// `*.rockspec` — luarocks package manifest.  OpenResty typically
+/// shows up via its `lua-resty-*` ecosystem dependencies (`lua-resty-
+/// http`, `lua-resty-openssl`, `lua-resty-redis`, `lua-resty-jwt`)
+/// rather than a single `openresty` package name.  A rockspec
+/// mentioning any `lua-resty-` prefix is almost certainly an
+/// OpenResty-targeted project.
+fn scan_rockspec(
+    contents: &str,
+    frameworks: &mut Vec<Framework>,
+    seen: &mut HashSet<Framework>,
+) {
+    let lower = contents.to_ascii_lowercase();
+    if lower.contains("lua-resty-") || lower.contains("openresty") {
+        push_framework(Framework::OpenResty, frameworks, seen);
+    }
+}
+
 /// Round-trip `as usize` discriminant → enum.  Keep in sync with the
 /// variant order — the test module asserts round-trip for every
 /// variant.
-fn language_from_discriminant(d: usize) -> Option<Language> {
-    for lang in [
-        Language::Python,
-        Language::JavaScript,
-        Language::Go,
-        Language::Rust,
-        Language::Ruby,
-        Language::Java,
-        Language::Kotlin,
-        Language::CSharp,
-        Language::Php,
-        Language::Cpp,
-        Language::Elixir,
-        Language::Haskell,
-        Language::Swift,
-        Language::Ocaml,
-        Language::Erlang,
-        Language::Zig,
-        Language::Nix,
-    ] {
-        if lang as usize == d {
-            return Some(lang);
-        }
-    }
-    None
-}
-
 /// Compose the cheatsheet text to inject into the security_engineer's
 /// system prompt.  Returns the composed text and the list of sheet
 /// names actually included (for logging).  Empty return value = nothing
@@ -955,6 +1033,7 @@ fn lang_sheet(lang: Language) -> (&'static str, &'static str) {
         ),
         Language::Zig => ("lang/zig", include_str!("prompts/cheatsheets/lang/zig.md")),
         Language::Nix => ("lang/nix", include_str!("prompts/cheatsheets/lang/nix.md")),
+        Language::Lua => ("lang/lua", include_str!("prompts/cheatsheets/lang/lua.md")),
     }
 }
 
@@ -1140,6 +1219,58 @@ fn framework_sheet(fw: Framework) -> (&'static str, &'static str) {
             "framework/cowboy",
             include_str!("prompts/cheatsheets/framework/cowboy.md"),
         ),
+        Framework::Starlette => (
+            "framework/starlette",
+            include_str!("prompts/cheatsheets/framework/starlette.md"),
+        ),
+        Framework::Pyramid => (
+            "framework/pyramid",
+            include_str!("prompts/cheatsheets/framework/pyramid.md"),
+        ),
+        Framework::Falcon => (
+            "framework/falcon",
+            include_str!("prompts/cheatsheets/framework/falcon.md"),
+        ),
+        Framework::Bottle => (
+            "framework/bottle",
+            include_str!("prompts/cheatsheets/framework/bottle.md"),
+        ),
+        Framework::Play => (
+            "framework/play",
+            include_str!("prompts/cheatsheets/framework/play.md"),
+        ),
+        Framework::Dropwizard => (
+            "framework/dropwizard",
+            include_str!("prompts/cheatsheets/framework/dropwizard.md"),
+        ),
+        Framework::Helidon => (
+            "framework/helidon",
+            include_str!("prompts/cheatsheets/framework/helidon.md"),
+        ),
+        Framework::Vertx => (
+            "framework/vertx",
+            include_str!("prompts/cheatsheets/framework/vertx.md"),
+        ),
+        Framework::Hapi => (
+            "framework/hapi",
+            include_str!("prompts/cheatsheets/framework/hapi.md"),
+        ),
+        Framework::Adonis => (
+            "framework/adonis",
+            include_str!("prompts/cheatsheets/framework/adonis.md"),
+        ),
+        Framework::Meteor => (
+            "framework/meteor",
+            include_str!("prompts/cheatsheets/framework/meteor.md"),
+        ),
+        Framework::Nuxt => (
+            "framework/nuxt",
+            include_str!("prompts/cheatsheets/framework/nuxt.md"),
+        ),
+        Framework::OpenResty => (
+            "framework/openresty",
+            include_str!("prompts/cheatsheets/framework/openresty.md"),
+        ),
     }
 }
 
@@ -1199,6 +1330,7 @@ mod tests {
         Language::Erlang,
         Language::Zig,
         Language::Nix,
+        Language::Lua,
     ];
 
     const ALL_FRAMEWORKS: &[Framework] = &[
@@ -1247,6 +1379,19 @@ mod tests {
         Framework::Servant,
         Framework::Dream,
         Framework::Cowboy,
+        Framework::Starlette,
+        Framework::Pyramid,
+        Framework::Falcon,
+        Framework::Bottle,
+        Framework::Play,
+        Framework::Dropwizard,
+        Framework::Helidon,
+        Framework::Vertx,
+        Framework::Hapi,
+        Framework::Adonis,
+        Framework::Meteor,
+        Framework::Nuxt,
+        Framework::OpenResty,
     ];
 
     /// Compile-time guard: if a new variant is added to either enum
@@ -1272,7 +1417,8 @@ mod tests {
             | Language::Ocaml
             | Language::Erlang
             | Language::Zig
-            | Language::Nix => {}
+            | Language::Nix
+            | Language::Lua => {}
         }
         match fw {
             Framework::Django
@@ -1319,7 +1465,20 @@ mod tests {
             | Framework::Hummingbird
             | Framework::Servant
             | Framework::Dream
-            | Framework::Cowboy => {}
+            | Framework::Cowboy
+            | Framework::Starlette
+            | Framework::Pyramid
+            | Framework::Falcon
+            | Framework::Bottle
+            | Framework::Play
+            | Framework::Dropwizard
+            | Framework::Helidon
+            | Framework::Vertx
+            | Framework::Hapi
+            | Framework::Adonis
+            | Framework::Meteor
+            | Framework::Nuxt
+            | Framework::OpenResty => {}
         }
     }
 
@@ -1438,32 +1597,6 @@ mod tests {
                 "single-language composition for {lang:?} exceeded the cap ({} lines)",
                 line_count(&body)
             );
-        }
-    }
-
-    #[test]
-    fn language_discriminant_roundtrips() {
-        for lang in [
-            Language::Python,
-            Language::JavaScript,
-            Language::Go,
-            Language::Rust,
-            Language::Ruby,
-            Language::Java,
-            Language::Kotlin,
-            Language::CSharp,
-            Language::Php,
-            Language::Cpp,
-            Language::Elixir,
-            Language::Haskell,
-            Language::Swift,
-            Language::Ocaml,
-            Language::Erlang,
-            Language::Zig,
-            Language::Nix,
-        ] {
-            let d = lang as usize;
-            assert_eq!(language_from_discriminant(d), Some(lang));
         }
     }
 
@@ -1713,6 +1846,186 @@ mod tests {
     // (TDD); tests fail to compile until the enum variants exist, then
     // fail for missing sheet / detection until fully wired.
     // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // Framework expansion — fourth wave.  Finishes out Python
+    // (starlette, pyramid, falcon, bottle), the Java ecosystem (play,
+    // dropwizard, helidon, vertx), JS legacy + ecosystem (hapi,
+    // adonis, meteor, nuxt), plus a brand-new Lua language with
+    // OpenResty (nginx + LuaJIT; widely deployed in front-of-stack
+    // gateways and embedded CDN logic).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn detects_starlette_via_requirements() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "requirements.txt", "starlette>=0.37\nuvicorn\n");
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Starlette));
+    }
+
+    #[test]
+    fn detects_pyramid_via_pyproject() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "pyproject.toml",
+            "[project]\nname = \"x\"\ndependencies = [\"pyramid>=2\"]\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Pyramid));
+    }
+
+    #[test]
+    fn detects_falcon_via_requirements() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "requirements.txt", "falcon>=3\n");
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Falcon));
+    }
+
+    #[test]
+    fn detects_bottle_via_requirements() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "requirements.txt", "bottle>=0.12\n");
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Bottle));
+    }
+
+    #[test]
+    fn detects_play_via_pom() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "pom.xml",
+            "<project><dependencies><dependency><groupId>com.typesafe.play</groupId><artifactId>play-java</artifactId></dependency></dependencies></project>\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Play));
+    }
+
+    #[test]
+    fn detects_dropwizard_via_pom() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "pom.xml",
+            "<project><dependencies><dependency><groupId>io.dropwizard</groupId><artifactId>dropwizard-core</artifactId></dependency></dependencies></project>\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Dropwizard));
+    }
+
+    #[test]
+    fn detects_helidon_via_pom() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "pom.xml",
+            "<project><dependencies><dependency><groupId>io.helidon.webserver</groupId><artifactId>helidon-webserver</artifactId></dependency></dependencies></project>\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Helidon));
+    }
+
+    #[test]
+    fn detects_vertx_via_pom() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "pom.xml",
+            "<project><dependencies><dependency><groupId>io.vertx</groupId><artifactId>vertx-core</artifactId></dependency></dependencies></project>\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Vertx));
+    }
+
+    #[test]
+    fn detects_hapi_via_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","dependencies":{"@hapi/hapi":"^21"}}"#,
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Hapi));
+    }
+
+    #[test]
+    fn detects_adonis_via_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","dependencies":{"@adonisjs/core":"^6"}}"#,
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Adonis));
+    }
+
+    #[test]
+    fn detects_meteor_via_package_json() {
+        // Meteor apps register a `meteor` key at the top level of
+        // package.json plus meteor-node-stubs dep.
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","meteor":{"mainModule":{"client":"client/main.js"}},"dependencies":{"meteor-node-stubs":"^1"}}"#,
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Meteor));
+    }
+
+    #[test]
+    fn detects_nuxt_via_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","devDependencies":{"nuxt":"^3"}}"#,
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::Nuxt));
+    }
+
+    #[test]
+    fn detects_lua_via_rockspec() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "app-1.0.0-1.rockspec",
+            "package = \"app\"\nversion = \"1.0.0-1\"\ndependencies = {\n  \"lua >= 5.1\",\n}\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Lua]);
+    }
+
+    #[test]
+    fn detects_openresty_via_rockspec() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "app-1.0.0-1.rockspec",
+            "package = \"app\"\nversion = \"1.0.0-1\"\ndependencies = {\n  \"lua-resty-openssl\",\n  \"lua-resty-http\",\n}\n",
+        );
+        assert!(detect_repo(tmp.path())
+            .frameworks
+            .contains(&Framework::OpenResty));
+    }
 
     // ------------------------------------------------------------------
     // Framework expansion — third wave.  More JS/TS (koa, hono,
