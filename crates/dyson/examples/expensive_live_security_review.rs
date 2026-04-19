@@ -78,6 +78,27 @@ struct Args {
     /// in the upload-pack protocol (`couldn't find remote ref`).
     #[arg(long = "ref")]
     git_ref: Option<String>,
+
+    /// Toggle the security_engineer's language / framework cheatsheet
+    /// injection.  Default `on` — the orchestrator detects manifests in
+    /// the review root and appends matching sheets (lang/framework)
+    /// onto the child agent's system prompt before the first turn.
+    /// Pass `off` to disable injection for a run; pairs with
+    /// `--report-suffix` so A/B diffs are straightforward.
+    ///
+    /// Implemented by setting `DYSON_SECURITY_ENGINEER_CHEATSHEETS` in
+    /// the example process's environment — `OrchestratorTool` checks
+    /// that variable at `run()` time.  Env-gating keeps the example
+    /// from having to rebuild the OrchestratorConfig, which is shipped
+    /// as an `Arc<dyn Tool>` via `create_skills`.
+    #[arg(long, value_enum, default_value_t = CheatsheetMode::On)]
+    cheatsheets: CheatsheetMode,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CheatsheetMode {
+    On,
+    Off,
 }
 
 struct Target {
@@ -205,6 +226,21 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(m) = args.model {
         settings.agent.model = m;
     }
+
+    // Propagate the --cheatsheets flag into the env so the orchestrator
+    // picks it up.  Must happen BEFORE any OrchestratorTool runs.
+    match args.cheatsheets {
+        CheatsheetMode::On => {
+            // SAFETY: single-threaded startup; no concurrent env reads.
+            // The reqwest/tokio machinery hasn't spun up background
+            // threads that read env yet.
+            unsafe { std::env::set_var("DYSON_SECURITY_ENGINEER_CHEATSHEETS", "on") };
+        }
+        CheatsheetMode::Off => {
+            unsafe { std::env::set_var("DYSON_SECURITY_ENGINEER_CHEATSHEETS", "off") };
+        }
+    }
+    println!("cheatsheets: {:?}", args.cheatsheets);
     // The example clones read-only source trees into $TMPDIR and the
     // security_engineer only needs read + ast access.  Skip the macOS
     // container sandbox check — if the user wanted it enforced they'd

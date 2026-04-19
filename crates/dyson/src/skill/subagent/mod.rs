@@ -21,6 +21,7 @@
 
 mod coder;
 mod orchestrator;
+mod repo_detect;
 mod security_engineer;
 
 pub use coder::CoderTool;

@@ -130,6 +130,9 @@ struct MockLlm {
     /// Records the `model` field of every `CompletionConfig` the client
     /// receives so tests can assert which model a subagent billed.
     models_seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Records the `system` prompt the client is called with — used to
+    /// assert which cheatsheets were injected by the orchestrator.
+    systems_seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl MockLlm {
@@ -137,6 +140,7 @@ impl MockLlm {
         Self {
             responses: std::sync::Mutex::new(responses),
             models_seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            systems_seen: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -145,6 +149,10 @@ impl MockLlm {
     fn models_seen_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
         std::sync::Arc::clone(&self.models_seen)
     }
+
+    fn systems_seen_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        std::sync::Arc::clone(&self.systems_seen)
+    }
 }
 
 #[async_trait]
@@ -152,12 +160,13 @@ impl crate::llm::LlmClient for MockLlm {
     async fn stream(
         &self,
         _messages: &[crate::message::Message],
-        _system: &str,
+        system: &str,
         _system_suffix: &str,
         _tools: &[crate::llm::ToolDefinition],
         config: &crate::llm::CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
         self.models_seen.lock().unwrap().push(config.model.clone());
+        self.systems_seen.lock().unwrap().push(system.to_string());
         let events = self.responses.lock().unwrap().remove(0);
         Ok(crate::llm::StreamResponse {
             stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
@@ -879,6 +888,7 @@ fn orchestrator_tool_uses_config_name_and_description() {
         max_iterations: 10,
         max_tokens: 4096,
         injects_protocol: None,
+        inject_cheatsheets: false,
     };
     let tool = OrchestratorTool::new(
         config,
@@ -1034,6 +1044,7 @@ fn orchestrator_with_custom_config() {
         max_iterations: 20,
         max_tokens: 4096,
         injects_protocol: Some("\n## DevOps Protocol\nUse for infra changes."),
+        inject_cheatsheets: false,
     };
 
     let parent_tools: Vec<Arc<dyn Tool>> = vec![
@@ -1221,6 +1232,7 @@ async fn orchestrator_propagates_path_to_child_working_dir() {
         max_iterations: 5,
         max_tokens: 1024,
         injects_protocol: None,
+        inject_cheatsheets: false,
     };
 
     let tool = OrchestratorTool::new(
@@ -1295,6 +1307,7 @@ async fn orchestrator_without_path_keeps_process_cwd() {
         max_iterations: 5,
         max_tokens: 1024,
         injects_protocol: None,
+        inject_cheatsheets: false,
     };
     let tool = OrchestratorTool::new(
         config,
@@ -1322,4 +1335,179 @@ async fn orchestrator_without_path_keeps_process_cwd() {
     // used in that fallback path, matching the previous behaviour.
     let process_cwd = std::env::current_dir().unwrap();
     assert_eq!(captured_dir, process_cwd);
+}
+
+// -----------------------------------------------------------------------
+// Cheatsheet injection — integration between repo_detect and the
+// security_engineer OrchestratorTool.  These tests run the real
+// orchestrator `run()` with a MockLlm that records the system prompt,
+// so they cover the full composition path: detection → compose →
+// concatenate onto the base security_engineer.md prompt.
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn security_engineer_injects_express_cheatsheet_for_js_repo() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"name":"demo","dependencies":{"express":"^4.18"}}"#,
+    )
+    .unwrap();
+    let target = tmp.path().canonicalize().unwrap();
+
+    let llm = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("# Security Review: demo\n\nNo findings.".into()),
+        StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        },
+    ]]);
+    let systems = llm.systems_seen_handle();
+
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+        vec![],
+    );
+
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({
+        "task": "Audit",
+        "path": target.display().to_string(),
+    });
+    let result = tool.run(&input, &ctx).await.unwrap();
+    assert!(!result.is_error, "orch error: {}", result.content);
+
+    let seen = systems.lock().unwrap();
+    assert_eq!(seen.len(), 1, "expected one child LLM turn");
+    let system = &seen[0];
+    // The base security_engineer.md content is still present.
+    assert!(
+        system.contains("Response shape"),
+        "base security_engineer prompt missing"
+    );
+    // The JS lang sheet and Express framework sheet were appended.
+    assert!(
+        system.contains("Cheatsheet: lang/javascript"),
+        "lang/javascript sheet missing from composed prompt"
+    );
+    assert!(
+        system.contains("Cheatsheet: framework/express"),
+        "framework/express sheet missing from composed prompt"
+    );
+}
+
+#[tokio::test]
+async fn security_engineer_injects_nothing_for_repo_without_manifests() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("README.md"), "# demo").unwrap();
+    let target = tmp.path().canonicalize().unwrap();
+
+    let llm = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("# done".into()),
+        StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        },
+    ]]);
+    let systems = llm.systems_seen_handle();
+
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+        vec![],
+    );
+
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({
+        "task": "Audit",
+        "path": target.display().to_string(),
+    });
+    let _ = tool.run(&input, &ctx).await.unwrap();
+
+    let seen = systems.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    let system = &seen[0];
+    // Base prompt present; no cheatsheet section added when no langs
+    // were detected — that's the "no manifests" invariant.
+    assert!(system.contains("Response shape"));
+    assert!(
+        !system.contains("Language and framework cheatsheets"),
+        "unexpected cheatsheet header on manifest-free repo"
+    );
+}
+
+#[tokio::test]
+async fn orchestrator_without_inject_cheatsheets_flag_skips_detection() {
+    // Custom orchestrator with inject_cheatsheets: false — even when
+    // pointed at a JS repo, its system prompt must stay exactly the
+    // configured literal.  Confirms scope is security_engineer-only.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("package.json"),
+        r#"{"dependencies":{"express":"^4"}}"#,
+    )
+    .unwrap();
+    let target = tmp.path().canonicalize().unwrap();
+
+    let llm = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("ok".into()),
+        StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        },
+    ]]);
+    let systems = llm.systems_seen_handle();
+
+    let config = OrchestratorConfig {
+        name: "no_sheets_orch",
+        description: "test",
+        system_prompt: "BASE_PROMPT_SENTINEL",
+        direct_tool_names: &[],
+        max_iterations: 2,
+        max_tokens: 512,
+        injects_protocol: None,
+        inject_cheatsheets: false,
+    };
+    let tool = OrchestratorTool::new(
+        config,
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+        vec![],
+    );
+
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({
+        "task": "x",
+        "path": target.display().to_string(),
+    });
+    let _ = tool.run(&input, &ctx).await.unwrap();
+
+    let seen = systems.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    // The agent loop appends a short model/provider suffix — accept
+    // that, but assert nothing from the cheatsheet composer leaked in.
+    assert!(
+        seen[0].starts_with("BASE_PROMPT_SENTINEL"),
+        "system prompt did not start with orchestrator's configured base: {}",
+        seen[0]
+    );
+    assert!(
+        !seen[0].contains("Language and framework cheatsheets"),
+        "cheatsheet header appeared even though inject_cheatsheets was false"
+    );
 }

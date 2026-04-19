@@ -40,5 +40,8 @@ pub fn security_engineer_config() -> OrchestratorConfig {
         max_iterations: 40,
         max_tokens: 8192,
         injects_protocol: Some(include_str!("prompts/security_engineer_protocol.md")),
+        // Only the security_engineer wants lang/framework vuln sheets;
+        // other orchestrators leave this false.
+        inject_cheatsheets: true,
     }
 }
