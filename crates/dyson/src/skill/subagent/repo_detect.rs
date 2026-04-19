@@ -826,6 +826,206 @@ mod tests {
         path
     }
 
+    /// Every `Language` variant in the enum.  Kept as a const so the
+    /// exhaustive-coverage tests can iterate it without drifting from
+    /// the enum definition — adding a variant without updating this
+    /// list is a compile error via the `_match_guard`.
+    const ALL_LANGUAGES: &[Language] = &[
+        Language::Python,
+        Language::JavaScript,
+        Language::Go,
+        Language::Rust,
+        Language::Ruby,
+        Language::Java,
+        Language::Kotlin,
+        Language::CSharp,
+        Language::Php,
+        Language::Cpp,
+        Language::Elixir,
+        Language::Haskell,
+        Language::Swift,
+        Language::Ocaml,
+        Language::Erlang,
+        Language::Zig,
+        Language::Nix,
+    ];
+
+    const ALL_FRAMEWORKS: &[Framework] = &[
+        Framework::Django,
+        Framework::Flask,
+        Framework::FastApi,
+        Framework::Express,
+        Framework::NextJs,
+        Framework::Actix,
+        Framework::Axum,
+        Framework::Rails,
+        Framework::Spring,
+        Framework::AspNet,
+        Framework::Laravel,
+        Framework::Phoenix,
+        Framework::Gin,
+    ];
+
+    /// Compile-time guard: if a new variant is added to either enum
+    /// without updating `ALL_LANGUAGES` / `ALL_FRAMEWORKS` above, this
+    /// function fails to compile — the `match` loses exhaustivity.
+    /// Never called; exists purely for the compiler check.
+    #[allow(dead_code)]
+    fn _match_guard(lang: Language, fw: Framework) {
+        match lang {
+            Language::Python
+            | Language::JavaScript
+            | Language::Go
+            | Language::Rust
+            | Language::Ruby
+            | Language::Java
+            | Language::Kotlin
+            | Language::CSharp
+            | Language::Php
+            | Language::Cpp
+            | Language::Elixir
+            | Language::Haskell
+            | Language::Swift
+            | Language::Ocaml
+            | Language::Erlang
+            | Language::Zig
+            | Language::Nix => {}
+        }
+        match fw {
+            Framework::Django
+            | Framework::Flask
+            | Framework::FastApi
+            | Framework::Express
+            | Framework::NextJs
+            | Framework::Actix
+            | Framework::Axum
+            | Framework::Rails
+            | Framework::Spring
+            | Framework::AspNet
+            | Framework::Laravel
+            | Framework::Phoenix
+            | Framework::Gin => {}
+        }
+    }
+
+    /// For every variant: `lang_sheet` returns a non-empty name and a
+    /// non-empty body that begins with the documented "Starting points"
+    /// opener.  Catches a forgotten `include_str!` wiring (missing
+    /// match arm would be a compile error — this asserts the content).
+    #[test]
+    fn every_language_has_a_nonempty_sheet() {
+        for &lang in ALL_LANGUAGES {
+            let (name, body) = lang_sheet(lang);
+            assert!(
+                name.starts_with("lang/"),
+                "language name should be under lang/: got {name:?}"
+            );
+            assert!(!body.is_empty(), "{name} body is empty");
+            assert!(
+                body.starts_with("Starting points"),
+                "{name} must open with the 'Starting points' opener (non-negotiable — \
+                 it anchors the model against over-applying the sheet).  \
+                 First 60 chars were: {:?}",
+                &body[..body.len().min(60)]
+            );
+        }
+    }
+
+    #[test]
+    fn every_framework_has_a_nonempty_sheet() {
+        for &fw in ALL_FRAMEWORKS {
+            let (name, body) = framework_sheet(fw);
+            assert!(
+                name.starts_with("framework/"),
+                "framework name should be under framework/: got {name:?}"
+            );
+            assert!(!body.is_empty(), "{name} body is empty");
+            assert!(
+                body.starts_with("Starting points"),
+                "{name} must open with 'Starting points'. First 60 chars: {:?}",
+                &body[..body.len().min(60)]
+            );
+        }
+    }
+
+    /// Every framework's `language()` maps to a real Language variant
+    /// — guards against dangling language references after an enum
+    /// refactor.
+    #[test]
+    fn every_framework_binds_to_a_known_language() {
+        for &fw in ALL_FRAMEWORKS {
+            let lang = fw.language();
+            assert!(
+                ALL_LANGUAGES.contains(&lang),
+                "framework {fw:?} binds to language {lang:?} which isn't in ALL_LANGUAGES"
+            );
+        }
+    }
+
+    /// For every Language variant: a synthetic detection containing
+    /// just that language composes a prompt whose included-sheet list
+    /// names that language's sheet.  Exercises the full detection →
+    /// compose pipeline per variant.
+    #[test]
+    fn compose_emits_sheet_name_for_every_language() {
+        for &lang in ALL_LANGUAGES {
+            let det = Detection {
+                languages: vec![lang],
+                frameworks: vec![],
+            };
+            let (_body, names) = compose_cheatsheets(&det);
+            let expected = lang_sheet(lang).0;
+            assert!(
+                names.contains(&expected),
+                "composing {lang:?} should emit {expected:?} in the sheet list, got {names:?}"
+            );
+        }
+    }
+
+    /// For every Framework variant: detection with the binding
+    /// language + the framework emits BOTH sheet names.
+    #[test]
+    fn compose_emits_sheet_name_for_every_framework() {
+        for &fw in ALL_FRAMEWORKS {
+            let det = Detection {
+                languages: vec![fw.language()],
+                frameworks: vec![fw],
+            };
+            let (_body, names) = compose_cheatsheets(&det);
+            let expected_lang = lang_sheet(fw.language()).0;
+            let expected_fw = framework_sheet(fw).0;
+            assert!(
+                names.contains(&expected_lang),
+                "composing {fw:?} on {:?} should include {expected_lang:?}, got {names:?}",
+                fw.language()
+            );
+            assert!(
+                names.contains(&expected_fw),
+                "composing {fw:?} should include {expected_fw:?}, got {names:?}"
+            );
+        }
+    }
+
+    /// Every individual lang sheet fits solo under the cap (one lang's
+    /// worth of content always ships, per the `compose_cheatsheets`
+    /// policy).  Protects against an out-of-bound sheet being silently
+    /// swallowed by the cap.
+    #[test]
+    fn every_language_sheet_fits_the_line_cap_solo() {
+        for &lang in ALL_LANGUAGES {
+            let det = Detection {
+                languages: vec![lang],
+                frameworks: vec![],
+            };
+            let (body, _names) = compose_cheatsheets(&det);
+            assert!(
+                line_count(&body) <= MAX_CHEATSHEET_LINES,
+                "single-language composition for {lang:?} exceeded the cap ({} lines)",
+                line_count(&body)
+            );
+        }
+    }
+
     #[test]
     fn language_discriminant_roundtrips() {
         for lang in [
