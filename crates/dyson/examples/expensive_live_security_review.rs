@@ -552,6 +552,51 @@ const TARGETS: &[Target] = &[
         summary: "Meilisearch — Rust / actix-web search engine HTTP server.",
         git_ref: Some("v1.4.0"),
     },
+    Target {
+        name: "rocketchat-6.0.0",
+        slug: "RocketChat/Rocket.Chat",
+        sub: "apps/meteor/server/methods",
+        description: "Rocket.Chat 6.0.0 - CVE-2023-28359 (sensitive data leak via \
+                      subscription record exposure).  Meteor DDP subscription \
+                      handlers return records containing fields the subscriber \
+                      should not see (password-hash metadata, internal user \
+                      attributes) because the publish function does not project \
+                      / filter fields by role.  Expected finding: a Meteor method \
+                      / publish handler that returns a collection query result \
+                      without trimming sensitive fields based on the caller's \
+                      permission level.",
+        summary: "Rocket.Chat — Node.js / Meteor team-chat platform.",
+        git_ref: Some("6.0.0"),
+    },
+    Target {
+        name: "filebrowser-2.23.0",
+        slug: "filebrowser/filebrowser",
+        sub: "http",
+        description: "File Browser v2.23.0 - path-traversal class (CVE-2021-46102 \
+                      and similar).  The download / archive / zip endpoints \
+                      accept user-supplied paths that, without canonicalisation \
+                      + prefix check, traverse outside the configured root \
+                      directory.  Expected finding: a Gin handler that joins \
+                      a request-supplied path to the configured root without \
+                      `filepath.Clean` + `strings.HasPrefix(realRoot)` guard.",
+        summary: "File Browser — Go / Gin self-hosted file-management web UI.",
+        git_ref: Some("v2.23.0"),
+    },
+    Target {
+        name: "plausible-2.0.0",
+        slug: "plausible/analytics",
+        sub: "lib/plausible_web",
+        description: "Plausible Analytics v2.0.0 - web-application review scoped to \
+                      the Phoenix controllers + views layer (`PlausibleWeb`).  No \
+                      single published CVE pinned — the target exercises the \
+                      Phoenix cheatsheet against a real production Elixir app.  \
+                      Expected-finding class: controller authorization gaps, \
+                      session-token handling, untemplated user input reaching \
+                      `raw/.html.heex` rendering, unsafe `String.to_atom` / \
+                      `:erlang.binary_to_term` on user input.",
+        summary: "Plausible Analytics — Elixir / Phoenix privacy-focused web analytics.",
+        git_ref: Some("v2.0.0"),
+    },
     // --- Deliberately-vulnerable teaching targets -------------------------
     //
     // Clear, well-documented intended vulnerabilities (no pinned CVE
