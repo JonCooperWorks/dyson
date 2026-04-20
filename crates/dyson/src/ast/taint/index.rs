@@ -331,6 +331,14 @@ impl Walker<'_> {
         if lhs.is_empty() && rhs.is_empty() {
             extract_kinded_children(node, self.source, self.config, &mut lhs, &mut rhs);
         }
+        // Positional fallback: Zig parses both `const x = req;` and
+        // `o.a = req;` as `variable_declaration` with unnamed children
+        // — `extract_kinded_children` finds the RHS via the tail
+        // identifier but the LHS stays empty.  Fill it in from the
+        // first named child when we have a recognisable RHS already.
+        if lhs.is_empty() {
+            extract_positional_children(node, self.source, self.config, &mut lhs, &mut rhs);
+        }
         if lhs.is_empty() && rhs.is_empty() {
             return;
         }
@@ -451,9 +459,17 @@ pub(crate) fn extract_parameters(node: Node<'_>, source: &str) -> Vec<String> {
                 .and_then(|d| d.child_by_field_name("parameters"))
         })
         .or_else(|| {
+            // Zig tags its `parameters` node with the parent-field-name
+            // "name", so the field probe above misses it — fall back to
+            // a kind-based lookup that also covers Kotlin/Swift shapes.
             find_child_of_kind(
                 node,
-                &["function_value_parameters", "parameter_clause", "parameter_list"],
+                &[
+                    "parameters",
+                    "function_value_parameters",
+                    "parameter_clause",
+                    "parameter_list",
+                ],
             )
         })
         .unwrap_or(node);
@@ -675,30 +691,48 @@ fn collect_chain_segments<'a>(
     Some(())
 }
 
-/// Object side of a member-chain node, spanning every per-language
-/// field name: `object` (JS/TS, Python, Java), `value` (Rust),
-/// `operand` (Go), `argument` (C, C++), `expression` (C#), `target`
-/// (Swift, Kotlin navigation_expression).
+/// Object side of a member-chain node.  Field names: `object` (JS/TS,
+/// Python, Java), `value` (Rust), `operand` (Go), `argument` (C, C++),
+/// `expression` (C#), `target` (Swift).  Kotlin's `navigation_expression`
+/// and Zig's `field_expression` property slot expose the children
+/// unnamed — fall back to the first named child in that case.
 fn chain_object(node: Node<'_>) -> Option<Node<'_>> {
     for field in ["object", "value", "operand", "argument", "expression", "target"] {
         if let Some(n) = node.child_by_field_name(field) {
             return Some(n);
         }
     }
-    None
+    first_named_child(node)
 }
 
 /// Property side of a member-chain node: `property` (JS/TS), `field`
 /// (Rust, Go, C, C++, Java), `attribute` (Python), `name` (C#),
-/// `suffix` (Swift/Kotlin navigation_expression, which wraps the name
-/// in a `navigation_suffix` the caller unwraps).
+/// `suffix` (Swift navigation_expression → `navigation_suffix` wrapper
+/// that the caller unwraps).  Kotlin's `navigation_expression` and
+/// Zig's `field_expression` leave the property slot unnamed; we take
+/// the last named child as the leaf segment.
 fn chain_property(node: Node<'_>) -> Option<Node<'_>> {
     for field in ["property", "field", "attribute", "name", "suffix"] {
         if let Some(n) = node.child_by_field_name(field) {
             return Some(n);
         }
     }
-    None
+    // Last named child, but only if it's distinct from the first —
+    // otherwise this is a single-identifier chain and we'd emit the
+    // root twice.
+    let first = first_named_child(node)?;
+    let last = last_named_child(node)?;
+    (last.id() != first.id()).then_some(last)
+}
+
+fn first_named_child(node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).find(|c| c.is_named())
+}
+
+fn last_named_child(node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor).filter(|c| c.is_named()).last()
 }
 
 fn first_identifier_child(node: Node<'_>) -> Option<Node<'_>> {
@@ -728,6 +762,26 @@ fn extract_field_idents(
         }
     }
     Vec::new()
+}
+
+/// Positional fallback for nodes with no LHS/RHS field names and no
+/// distinctive Kotlin-style wrapper children (Zig `variable_declaration`
+/// covers both `const x = req;` and `o.a = req;` this way).  First named
+/// child → LHS; last named child → RHS (when distinct from the first).
+fn extract_positional_children(
+    node: Node<'_>,
+    source: &str,
+    config: &LanguageConfig,
+    lhs: &mut Vec<String>,
+    rhs: &mut Vec<String>,
+) {
+    let mut cursor = node.walk();
+    let named: Vec<_> = node.children(&mut cursor).filter(|c| c.is_named()).collect();
+    if named.len() < 2 {
+        return;
+    }
+    collect_tainted_identifiers(named[0], source, config, lhs);
+    collect_tainted_identifiers(*named.last().unwrap(), source, config, rhs);
 }
 
 /// Child-kind fallback for field-less nodes (Kotlin `property_declaration`).

@@ -1300,6 +1300,52 @@ async fn csharp_member_access_precision_separates_siblings() {
 }
 
 #[tokio::test]
+async fn kotlin_navigation_expression_precision_separates_siblings() {
+    // Kotlin's `navigation_expression` exposes its children unnamed
+    // (neither `object`/`value`/… nor `property`/`name`), so the chain
+    // resolver falls back to first-named / last-named child positions.
+    let out = trace(
+        &[(
+            "app.kt",
+            "class Obj { var a: String = \"\"; var b: String = \"\" }\nfun handle(req: String) {\n    val o = Obj()\n    o.a = req\n    execute(o.b)\n}\nfun execute(s: String) {}\n",
+        )],
+        "kotlin",
+        ("app.kt", 2),
+        ("app.kt", 5),
+    )
+    .await;
+    assert_ok(&out);
+    assert!(
+        out.content.contains("NO_PATH"),
+        "Kotlin: write to o.a should not taint o.b read:\n{}",
+        out.content,
+    );
+}
+
+#[tokio::test]
+async fn zig_field_expression_precision_separates_siblings() {
+    // Zig's `field_expression` names the receiver `object` but leaves
+    // the field identifier unnamed — the positional last-named-child
+    // fallback has to kick in or the chain collapses to the root.
+    let out = trace(
+        &[(
+            "app.zig",
+            "const Obj = struct { a: []const u8, b: []const u8 };\nfn execute(s: []const u8) void { _ = s; }\nfn handle(req: []const u8) void {\n    var o: Obj = .{ .a = \"\", .b = \"\" };\n    o.a = req;\n    execute(o.b);\n}\n",
+        )],
+        "zig",
+        ("app.zig", 3),
+        ("app.zig", 6),
+    )
+    .await;
+    assert_ok(&out);
+    assert!(
+        out.content.contains("NO_PATH"),
+        "Zig: write to o.a should not taint o.b read:\n{}",
+        out.content,
+    );
+}
+
+#[tokio::test]
 async fn go_selector_expression_precision_separates_siblings() {
     let out = trace(
         &[(

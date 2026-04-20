@@ -540,6 +540,13 @@ fn identifiers_on_line(
 
 /// Walk parents until hitting a statement-like ancestor.  Used to scope
 /// identifier collection to the statement containing a given byte.
+///
+/// When a language wraps expressions in an explicit statement node
+/// (Python/JS/TS `expression_statement`, Rust `let_declaration`, etc.)
+/// we stop there.  When it doesn't — Kotlin puts a bare `call_expression`
+/// directly inside a `block`, for instance — stopping at the first
+/// block-like parent keeps the sink-identifier collection from sweeping
+/// every sibling statement in the whole function body.
 fn climb_to_statement(mut node: Node<'_>) -> Node<'_> {
     while let Some(parent) = node.parent() {
         let k = parent.kind();
@@ -551,7 +558,17 @@ fn climb_to_statement(mut node: Node<'_>) -> Node<'_> {
         {
             return parent;
         }
-        if matches!(k, "program" | "source_file" | "module" | "compilation_unit") {
+        if matches!(
+            k,
+            "block"
+                | "body_statement"
+                | "function_body"
+                | "compound_statement"
+                | "program"
+                | "source_file"
+                | "module"
+                | "compilation_unit"
+        ) {
             return node;
         }
         node = parent;
