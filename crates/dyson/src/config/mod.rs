@@ -208,6 +208,7 @@ pub struct ControllerConfig {
 ///   "description": "GPU workstation specialised in model fine-tuning and inference"
 /// }
 /// ```
+#[cfg(feature = "dangerous_swarm")]
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct SwarmControllerConfig {
     /// Base URL of the swarm hub.
@@ -224,6 +225,7 @@ pub struct SwarmControllerConfig {
     pub description: Option<String>,
 }
 
+#[cfg(feature = "dangerous_swarm")]
 impl SwarmControllerConfig {
     /// Resolve the node name: explicit config value or a default
     /// derived from the hub URL.

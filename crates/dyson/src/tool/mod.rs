@@ -63,6 +63,7 @@ pub mod read_file;
 pub mod search_files;
 pub mod send_file;
 pub mod skill_create;
+#[cfg(feature = "dangerous_swarm")]
 pub mod swarm_checkpoint;
 pub mod web_fetch;
 pub mod web_search;
