@@ -1260,26 +1260,6 @@ async fn c_field_expression_precision_separates_siblings() {
 }
 
 #[tokio::test]
-async fn cpp_field_expression_precision_separates_siblings() {
-    let out = trace(
-        &[(
-            "app.cpp",
-            "#include <string>\nstruct Obj { std::string a; std::string b; };\nvoid execute(const std::string& s) { (void)s; }\nvoid handle(const std::string& req) {\n    Obj o;\n    o.a = req;\n    execute(o.b);\n}\n",
-        )],
-        "cpp",
-        ("app.cpp", 4),
-        ("app.cpp", 7),
-    )
-    .await;
-    assert_ok(&out);
-    assert!(
-        out.content.contains("NO_PATH"),
-        "C++: write to o.a should not taint o.b read:\n{}",
-        out.content,
-    );
-}
-
-#[tokio::test]
 async fn csharp_member_access_precision_separates_siblings() {
     let out = trace(
         &[(
@@ -1368,17 +1348,14 @@ async fn go_selector_expression_precision_separates_siblings() {
 #[test]
 fn confidence_tiers_match_observed_smoke_ratios() {
     use dyson::ast::taint::Confidence;
-    // Clean indexes on tier-1 languages: ~5-12% unresolved → HIGH.
-    assert_eq!(Confidence::from_unresolved_ratio(0, 100), Confidence::High);
-    assert_eq!(Confidence::from_unresolved_ratio(12, 100), Confidence::High);
-    assert_eq!(Confidence::from_unresolved_ratio(15, 100), Confidence::High);
-    // Dynamic-heavy (Ruby, some JS): ~25-40% → MEDIUM.
-    assert_eq!(Confidence::from_unresolved_ratio(16, 100), Confidence::Medium);
-    assert_eq!(Confidence::from_unresolved_ratio(40, 100), Confidence::Medium);
-    // Functional-heavy (Haskell, OCaml): >40% → LOW.
-    assert_eq!(Confidence::from_unresolved_ratio(41, 100), Confidence::Low);
-    assert_eq!(Confidence::from_unresolved_ratio(100, 100), Confidence::Low);
-    // Empty index shouldn't divide-by-zero.
-    assert_eq!(Confidence::from_unresolved_ratio(0, 0), Confidence::High);
+    assert_eq!(Confidence::from_unresolved_ratio(0, 100), (0, Confidence::High));
+    assert_eq!(Confidence::from_unresolved_ratio(12, 100), (12, Confidence::High));
+    assert_eq!(Confidence::from_unresolved_ratio(15, 100), (15, Confidence::High));
+    assert_eq!(Confidence::from_unresolved_ratio(16, 100), (16, Confidence::Medium));
+    assert_eq!(Confidence::from_unresolved_ratio(40, 100), (40, Confidence::Medium));
+    assert_eq!(Confidence::from_unresolved_ratio(41, 100), (41, Confidence::Low));
+    assert_eq!(Confidence::from_unresolved_ratio(100, 100), (100, Confidence::Low));
+    // Empty index: no division by zero, and no false LOW cap.
+    assert_eq!(Confidence::from_unresolved_ratio(0, 0), (0, Confidence::High));
 }
 

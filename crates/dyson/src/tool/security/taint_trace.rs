@@ -175,12 +175,8 @@ fn render(index: &taint::SymbolIndex, result: &taint::TraceResult, input: &Input
         "taint_trace: lossy — verify every hop with read_file before filing",
     );
     let total_calls = index.call_sites.len();
-    let unresolved_pct = if total_calls == 0 {
-        0
-    } else {
-        (index.unresolved_callees * 100) / total_calls
-    };
-    let confidence = taint::Confidence::from_unresolved_ratio(index.unresolved_callees, total_calls);
+    let (unresolved_pct, confidence) =
+        taint::Confidence::from_unresolved_ratio(index.unresolved_callees, total_calls);
     let _ = writeln!(
         out,
         "index: language={}, files={}, defs={}, calls={}, unresolved_callees={} ({}% of calls){}",

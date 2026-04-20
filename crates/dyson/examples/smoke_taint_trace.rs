@@ -193,17 +193,12 @@ async fn run_repo(
         }
     };
     let elapsed = started.elapsed();
-    let unresolved_pct = if index.call_sites.is_empty() {
-        0.0
-    } else {
-        index.unresolved_callees as f32 / index.call_sites.len() as f32 * 100.0
-    };
-    let confidence =
-        taint::Confidence::from_unresolved_ratio(index.unresolved_callees, index.call_sites.len());
-    // Count assignments that exercise field-path precision (dotted LHS
-    // or RHS paths) — lets us spot corpora where the new path collector
-    // earns its keep vs. corpora where everything still degenerates to
-    // bare identifiers.
+    let (unresolved_pct, confidence) = taint::Confidence::from_unresolved_ratio(
+        index.unresolved_callees,
+        index.call_sites.len(),
+    );
+    // Dotted LHS / RHS paths are the direct signal that the new
+    // path-collector engaged on this corpus (vs. bare-identifier fallback).
     let field_assigns = index
         .assignments
         .iter()
@@ -213,7 +208,7 @@ async fn run_repo(
         })
         .count();
     println!(
-        "  index: {} files, {} defs, {} calls, {} assigns ({} field-path), {} unresolved ({:.0}%, max_confidence={}), build {:.2}s{}",
+        "  index: {} files, {} defs, {} calls, {} assigns ({} field-path), {} unresolved ({}%, max_confidence={}), build {:.2}s{}",
         index.file_mtimes.len(),
         index.fn_defs.len(),
         index.call_sites.len(),

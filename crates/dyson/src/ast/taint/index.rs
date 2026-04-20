@@ -445,12 +445,10 @@ fn is_identifier_kind(kind: &str) -> bool {
 }
 
 pub(crate) fn extract_parameters(node: Node<'_>, source: &str) -> Vec<String> {
-    // The wrapper varies by language: `parameters`/`formal_parameters`/`params`
-    // as named fields, or an unnamed child of one of a handful of kinds
-    // (Swift, Kotlin).  Swift has no wrapper at all — `parameter` nodes
-    // sit directly under function_declaration.  C / C++ park the
-    // parameter_list inside `declarator → parameters`; without the
-    // declarator descent the top-level field probe misses it entirely.
+    // Field-name probes cover most grammars.  C/C++ hide the list inside
+    // `declarator → parameters`.  Zig exposes it as a child tagged with
+    // the parent-field-name "name" instead of "parameters" — so after the
+    // field probes we fall back to a kind-based lookup.
     let wrapper = ["parameters", "formal_parameters", "params"]
         .iter()
         .find_map(|f| node.child_by_field_name(f))
@@ -459,9 +457,6 @@ pub(crate) fn extract_parameters(node: Node<'_>, source: &str) -> Vec<String> {
                 .and_then(|d| d.child_by_field_name("parameters"))
         })
         .or_else(|| {
-            // Zig tags its `parameters` node with the parent-field-name
-            // "name", so the field probe above misses it — fall back to
-            // a kind-based lookup that also covers Kotlin/Swift shapes.
             find_child_of_kind(
                 node,
                 &[
