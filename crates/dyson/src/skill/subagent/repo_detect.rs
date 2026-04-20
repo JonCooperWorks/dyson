@@ -95,6 +95,7 @@ pub enum Framework {
     Rocket,
     Warp,
     Tonic,
+    Solana,
     Rails,
     Sinatra,
     Spring,
@@ -164,7 +165,12 @@ impl Framework {
             | Self::Adonis
             | Self::Meteor
             | Self::Nuxt => Language::JavaScript,
-            Self::Actix | Self::Axum | Self::Rocket | Self::Warp | Self::Tonic => Language::Rust,
+            Self::Actix
+            | Self::Axum
+            | Self::Rocket
+            | Self::Warp
+            | Self::Tonic
+            | Self::Solana => Language::Rust,
             Self::Rails | Self::Sinatra => Language::Ruby,
             Self::Spring
             | Self::Quarkus
@@ -621,6 +627,17 @@ fn scan_cargo_toml(
     if has_dep("tonic") {
         push_framework(Framework::Tonic, frameworks, seen);
     }
+    // Solana programs — trigger on any of the core SDK crates.  Modern
+    // Anchor programs pull `anchor-lang`; native programs pull
+    // `solana-program`; the newer lightweight framework is `pinocchio`.
+    // One sheet covers all three since the vuln classes overlap.
+    if has_dep("anchor-lang")
+        || has_dep("solana-program")
+        || has_dep("pinocchio")
+        || has_dep("solana-program-runtime")
+    {
+        push_framework(Framework::Solana, frameworks, seen);
+    }
 }
 
 fn push_framework(fw: Framework, frameworks: &mut Vec<Framework>, seen: &mut HashSet<Framework>) {
@@ -1067,6 +1084,10 @@ fn framework_sheet(fw: Framework) -> (&'static str, &'static str) {
             "framework/axum",
             include_str!("prompts/cheatsheets/framework/axum.md"),
         ),
+        Framework::Solana => (
+            "framework/solana",
+            include_str!("prompts/cheatsheets/framework/solana.md"),
+        ),
         Framework::Rails => (
             "framework/rails",
             include_str!("prompts/cheatsheets/framework/rails.md"),
@@ -1392,6 +1413,7 @@ mod tests {
         Framework::Meteor,
         Framework::Nuxt,
         Framework::OpenResty,
+        Framework::Solana,
     ];
 
     /// Compile-time guard: if a new variant is added to either enum
@@ -1478,7 +1500,8 @@ mod tests {
             | Framework::Adonis
             | Framework::Meteor
             | Framework::Nuxt
-            | Framework::OpenResty => {}
+            | Framework::OpenResty
+            | Framework::Solana => {}
         }
     }
 
@@ -1636,6 +1659,46 @@ mod tests {
         );
         let det = detect_repo(tmp.path());
         assert_eq!(det.frameworks, vec![Framework::Axum]);
+    }
+
+    #[test]
+    fn detects_solana_anchor_program() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Cargo.toml",
+            "[package]\nname = \"my-program\"\n[dependencies]\nanchor-lang = \"0.30\"\nsolana-program = \"1.18\"\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.languages, vec![Language::Rust]);
+        assert_eq!(det.frameworks, vec![Framework::Solana]);
+    }
+
+    #[test]
+    fn detects_solana_native_program() {
+        // Native (no Anchor) program — only `solana-program` as a dep.
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Cargo.toml",
+            "[package]\nname = \"native-prog\"\n[dependencies]\nsolana-program = \"1.18\"\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.frameworks, vec![Framework::Solana]);
+    }
+
+    #[test]
+    fn detects_pinocchio_program() {
+        // Pinocchio is a newer zero-dep Solana program framework —
+        // covered by the same sheet since the vuln classes overlap.
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Cargo.toml",
+            "[package]\nname = \"pin\"\n[dependencies]\npinocchio = \"0.5\"\n",
+        );
+        let det = detect_repo(tmp.path());
+        assert_eq!(det.frameworks, vec![Framework::Solana]);
     }
 
     #[test]

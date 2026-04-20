@@ -706,6 +706,23 @@ const TARGETS: &[Target] = &[
         summary: "React server-components Webpack adapter.",
         git_ref: Some("v19.2.0"),
     },
+    // Solana / Anchor — sealevel-attacks is the canonical teaching corpus
+    // for Solana vulnerability classes (one program per class under
+    // `programs/`, each in `insecure`/`recommended` pairs).  Grading
+    // signal: the reviewer should flag every `insecure` program's
+    // planted bug (missing signer check, missing owner check, PDA bump
+    // canonicalization, account-type confusion, etc.) while leaving the
+    // `recommended` programs in `Checked and Cleared`.  Stress-tests
+    // whether the Solana cheatsheet actually fires the constraint-audit
+    // posture the sheet prescribes.
+    Target {
+        name: "sealevel-attacks",
+        slug: "coral-xyz/sealevel-attacks",
+        sub: "programs",
+        description: "sealevel-attacks - deliberately vulnerable Anchor programs, one per attack class (signer-authorization, account-data-matching, owner-checks, type-cosplay, bump-seed-canonicalization, pda-sharing, closing-accounts, duplicate-mutable-accounts, arbitrary-cpi). Every `insecure/` subdir should produce a CRITICAL; every `recommended/` subdir should be clean.",
+        summary: "Solana / Anchor on-chain program collection.",
+        git_ref: None,
+    },
 ];
 
 /// Task body.  The target path is no longer interpolated — it's passed
