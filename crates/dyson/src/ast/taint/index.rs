@@ -586,11 +586,7 @@ pub(crate) fn collect_tainted_identifiers(
         // Not a pure chain (contains a call / subscript).  Descend into
         // the object only — this preserves the pre-path behaviour of
         // surfacing the chain's root identifier.
-        if let Some(obj) = node
-            .child_by_field_name("object")
-            .or_else(|| node.child_by_field_name("value"))
-            .or_else(|| node.child_by_field_name("operand"))
-        {
+        if let Some(obj) = chain_object(node) {
             collect_tainted_identifiers(obj, source, config, out);
         }
         return;
@@ -603,10 +599,29 @@ pub(crate) fn collect_tainted_identifiers(
 
 /// Member-chain node kinds across the covered languages.  Order matches
 /// the field-name probe order in `collect_chain_segments`.
+///
+/// Coverage matrix (verified by the smoke test's `field-path` counter):
+/// - `member_expression`       — JS, TS, TSX
+/// - `attribute`               — Python
+/// - `field_expression`        — Rust, C, C++
+/// - `selector_expression`     — Go
+/// - `field_access`            — Java, Zig
+/// - `member_access_expression`— C#
+/// - `navigation_expression`   — Swift, Kotlin (via `target`/`suffix`)
+///
+/// Ruby is intentionally absent: `obj.field = x` parses as a method
+/// call to `field=`, not a member chain, and would need its own
+/// "assignment-via-setter" path.
 fn is_member_chain_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "member_expression" | "field_expression" | "selector_expression" | "attribute"
+        "member_expression"
+            | "field_expression"
+            | "selector_expression"
+            | "attribute"
+            | "field_access"
+            | "member_access_expression"
+            | "navigation_expression"
     )
 }
 
@@ -640,23 +655,63 @@ fn collect_chain_segments<'a>(
     if !is_member_chain_kind(kind) {
         return None;
     }
-    let object = node
-        .child_by_field_name("object")
-        .or_else(|| node.child_by_field_name("value"))
-        .or_else(|| node.child_by_field_name("operand"))?;
+    let object = chain_object(node)?;
     collect_chain_segments(object, source, out)?;
-    let property = node
-        .child_by_field_name("property")
-        .or_else(|| node.child_by_field_name("field"))
-        .or_else(|| node.child_by_field_name("attribute"))?;
+    let property = chain_property(node)?;
     if !is_identifier_kind(property.kind()) {
-        return None;
+        // Swift/Kotlin `navigation_suffix` wraps the property identifier.
+        // Descend once to find the real name before giving up.
+        let inner = first_identifier_child(property)?;
+        let text = &source[inner.byte_range()];
+        if !text.is_empty() {
+            out.push(text);
+        }
+        return Some(());
     }
     let text = &source[property.byte_range()];
     if !text.is_empty() {
         out.push(text);
     }
     Some(())
+}
+
+/// Object side of a member-chain node, spanning every per-language
+/// field name: `object` (JS/TS, Python, Java), `value` (Rust),
+/// `operand` (Go), `argument` (C, C++), `expression` (C#), `target`
+/// (Swift, Kotlin navigation_expression).
+fn chain_object(node: Node<'_>) -> Option<Node<'_>> {
+    for field in ["object", "value", "operand", "argument", "expression", "target"] {
+        if let Some(n) = node.child_by_field_name(field) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// Property side of a member-chain node: `property` (JS/TS), `field`
+/// (Rust, Go, C, C++, Java), `attribute` (Python), `name` (C#),
+/// `suffix` (Swift/Kotlin navigation_expression, which wraps the name
+/// in a `navigation_suffix` the caller unwraps).
+fn chain_property(node: Node<'_>) -> Option<Node<'_>> {
+    for field in ["property", "field", "attribute", "name", "suffix"] {
+        if let Some(n) = node.child_by_field_name(field) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn first_identifier_child(node: Node<'_>) -> Option<Node<'_>> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if is_identifier_kind(child.kind()) {
+            return Some(child);
+        }
+        if let Some(found) = first_identifier_child(child) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn extract_field_idents(

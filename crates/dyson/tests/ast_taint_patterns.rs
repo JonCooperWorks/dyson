@@ -1214,6 +1214,111 @@ async fn output_header_surfaces_unresolved_pct_and_confidence() {
     );
 }
 
+// Field-path precision across every language whose grammar exposes a
+// member-chain node kind.  Each test writes a tainted value to `obj.a`
+// and reads a sibling `obj.b` at the sink — the pre-path root-only
+// flattener false-positives every one of these.
+
+#[tokio::test]
+async fn java_field_access_precision_separates_siblings() {
+    let out = trace(
+        &[(
+            "App.java",
+            "class Obj { String a; String b; }\nclass App {\n    void handle(String req) {\n        Obj o = new Obj();\n        o.a = req;\n        execute(o.b);\n    }\n    void execute(String s) {}\n}\n",
+        )],
+        "java",
+        ("App.java", 3),
+        ("App.java", 6),
+    )
+    .await;
+    assert_ok(&out);
+    assert!(
+        out.content.contains("NO_PATH"),
+        "Java: write to o.a should not taint o.b read:\n{}",
+        out.content,
+    );
+}
+
+#[tokio::test]
+async fn c_field_expression_precision_separates_siblings() {
+    let out = trace(
+        &[(
+            "app.c",
+            "struct Obj { char *a; char *b; };\nvoid execute(const char *s) { (void)s; }\nvoid handle(const char *req) {\n    struct Obj o = {0};\n    o.a = req;\n    execute(o.b);\n}\n",
+        )],
+        "c",
+        ("app.c", 3),
+        ("app.c", 6),
+    )
+    .await;
+    assert_ok(&out);
+    assert!(
+        out.content.contains("NO_PATH"),
+        "C: write to o.a should not taint o.b read:\n{}",
+        out.content,
+    );
+}
+
+#[tokio::test]
+async fn cpp_field_expression_precision_separates_siblings() {
+    let out = trace(
+        &[(
+            "app.cpp",
+            "#include <string>\nstruct Obj { std::string a; std::string b; };\nvoid execute(const std::string& s) { (void)s; }\nvoid handle(const std::string& req) {\n    Obj o;\n    o.a = req;\n    execute(o.b);\n}\n",
+        )],
+        "cpp",
+        ("app.cpp", 4),
+        ("app.cpp", 7),
+    )
+    .await;
+    assert_ok(&out);
+    assert!(
+        out.content.contains("NO_PATH"),
+        "C++: write to o.a should not taint o.b read:\n{}",
+        out.content,
+    );
+}
+
+#[tokio::test]
+async fn csharp_member_access_precision_separates_siblings() {
+    let out = trace(
+        &[(
+            "App.cs",
+            "class Obj { public string a; public string b; }\nclass App {\n    void Handle(string req) {\n        var o = new Obj();\n        o.a = req;\n        Execute(o.b);\n    }\n    void Execute(string s) {}\n}\n",
+        )],
+        "csharp",
+        ("App.cs", 3),
+        ("App.cs", 6),
+    )
+    .await;
+    assert_ok(&out);
+    assert!(
+        out.content.contains("NO_PATH"),
+        "C#: write to o.a should not taint o.b read:\n{}",
+        out.content,
+    );
+}
+
+#[tokio::test]
+async fn go_selector_expression_precision_separates_siblings() {
+    let out = trace(
+        &[(
+            "app.go",
+            "package p\ntype Obj struct { A string; B string }\nfunc execute(s string) {}\nfunc handle(req string) {\n    var o Obj\n    o.A = req\n    execute(o.B)\n}\n",
+        )],
+        "go",
+        ("app.go", 4),
+        ("app.go", 7),
+    )
+    .await;
+    assert_ok(&out);
+    assert!(
+        out.content.contains("NO_PATH"),
+        "Go: write to o.A should not taint o.B read:\n{}",
+        out.content,
+    );
+}
+
 #[test]
 fn confidence_tiers_match_observed_smoke_ratios() {
     use dyson::ast::taint::Confidence;
