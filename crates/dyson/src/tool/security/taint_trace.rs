@@ -174,19 +174,35 @@ fn render(index: &taint::SymbolIndex, result: &taint::TraceResult, input: &Input
         out,
         "taint_trace: lossy — verify every hop with read_file before filing",
     );
+    let total_calls = index.call_sites.len();
+    let unresolved_pct = if total_calls == 0 {
+        0
+    } else {
+        (index.unresolved_callees * 100) / total_calls
+    };
+    let confidence = taint::Confidence::from_unresolved_ratio(index.unresolved_callees, total_calls);
     let _ = writeln!(
         out,
-        "index: language={}, files={}, defs={}, calls={}, unresolved_callees={}{}",
+        "index: language={}, files={}, defs={}, calls={}, unresolved_callees={} ({}% of calls){}",
         index.language,
         index.file_mtimes.len(),
         index.fn_defs.len(),
-        index.call_sites.len(),
+        total_calls,
         index.unresolved_callees,
+        unresolved_pct,
         if index.truncated {
             " [TRUNCATED: MAX_FILES hit]"
         } else {
             ""
         },
+    );
+    // Deterministic severity ceiling based on how much of the call graph
+    // the BFS can actually see.  Prompts use this to cap findings rather
+    // than arguing about coverage in prose.
+    let _ = writeln!(
+        out,
+        "max_confidence={} — ceiling on any finding derived from this trace (unresolved callees hide real call chains)",
+        confidence.as_str(),
     );
 
     if result.truncated_frontier {

@@ -1081,3 +1081,153 @@ async fn index_rebuilds_on_file_modification() {
         "rebuilt index should reflect the added call",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Field-path precision: writes to `obj.a` don't falsely taint reads of
+// `obj.b`.  The pre-path behaviour flattened any member chain to its root
+// identifier, so both fields aliased to the same symbol `obj` and any
+// write contaminated every read — a steady source of false positives on
+// object-heavy codebases.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn python_field_write_does_not_taint_sibling_field_read() {
+    let out = trace(
+        &[(
+            "app.py",
+            "def handler(req):\n    obj = make()\n    obj.name = req\n    obj.safe = get_safe()\n    execute(obj.safe)\n",
+        )],
+        "python",
+        ("app.py", 1),
+        ("app.py", 5),
+    )
+    .await;
+    assert_ok(&out);
+    assert!(
+        out.content.contains("NO_PATH"),
+        "obj.safe should not be tainted by a write to obj.name:\n{}",
+        out.content,
+    );
+}
+
+#[tokio::test]
+async fn python_field_write_reaches_same_field_read() {
+    let out = trace(
+        &[(
+            "app.py",
+            "def handler(req):\n    obj = make()\n    obj.name = req\n    execute(obj.name)\n",
+        )],
+        "python",
+        ("app.py", 1),
+        ("app.py", 4),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+#[tokio::test]
+async fn typescript_member_chain_source_propagates_to_descendant_reads() {
+    // Source taint extracted from `req.body.user` should flow through an
+    // intermediate assignment to a bare local (`user = …`) and then back
+    // out to a sink that reads the local — covers the common RSC-style
+    // handler shape where the entry point unwraps a wire-format struct.
+    let out = trace(
+        &[(
+            "app.ts",
+            "function handler(req: any) { const user = req.body.user; query(user); }\nfunction query(x: any) { conn.exec(x); }\n",
+        )],
+        "typescript",
+        ("app.ts", 1),
+        ("app.ts", 1),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+#[tokio::test]
+async fn rust_field_write_precision_separates_siblings() {
+    // Mirror of the Python test but on Rust's `field_expression`.  Fields
+    // in Rust parse with `value`/`field` rather than `object`/`property`;
+    // a regression on either language would surface here.
+    let out = trace(
+        &[(
+            "app.rs",
+            "fn handler(req: String) {\n    let mut obj = Obj::new();\n    obj.name = req;\n    obj.safe = String::new();\n    execute(obj.safe);\n}\nfn execute(s: String) { let _ = s; }\n",
+        )],
+        "rust",
+        ("app.rs", 1),
+        ("app.rs", 5),
+    )
+    .await;
+    assert_ok(&out);
+    assert!(
+        out.content.contains("NO_PATH"),
+        "Rust: write to obj.name should not taint obj.safe:\n{}",
+        out.content,
+    );
+}
+
+#[tokio::test]
+async fn field_chain_truncates_at_max_depth_but_prefix_still_matches() {
+    // A chain deeper than MAX_FIELD_DEPTH (5) is kept from the root end;
+    // shorter reads of its prefix still match by the prefix rule.  Using
+    // Python because its `attribute` node chains cleanly.
+    let out = trace(
+        &[(
+            "app.py",
+            "def handler(req):\n    x = req.a.b.c.d.e.f.g\n    execute(x)\n",
+        )],
+        "python",
+        ("app.py", 1),
+        ("app.py", 3),
+    )
+    .await;
+    assert_reaches(&out);
+}
+
+// ---------------------------------------------------------------------------
+// Confidence / unresolved-callee ratio header
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn output_header_surfaces_unresolved_pct_and_confidence() {
+    let out = trace(
+        &[(
+            "app.py",
+            "def handler(req):\n    execute(req)\n",
+        )],
+        "python",
+        ("app.py", 1),
+        ("app.py", 2),
+    )
+    .await;
+    assert_ok(&out);
+    assert!(
+        out.content.contains("% of calls"),
+        "header missing unresolved percentage:\n{}",
+        out.content,
+    );
+    assert!(
+        out.content.contains("max_confidence="),
+        "header missing max_confidence cap:\n{}",
+        out.content,
+    );
+}
+
+#[test]
+fn confidence_tiers_match_observed_smoke_ratios() {
+    use dyson::ast::taint::Confidence;
+    // Clean indexes on tier-1 languages: ~5-12% unresolved → HIGH.
+    assert_eq!(Confidence::from_unresolved_ratio(0, 100), Confidence::High);
+    assert_eq!(Confidence::from_unresolved_ratio(12, 100), Confidence::High);
+    assert_eq!(Confidence::from_unresolved_ratio(15, 100), Confidence::High);
+    // Dynamic-heavy (Ruby, some JS): ~25-40% → MEDIUM.
+    assert_eq!(Confidence::from_unresolved_ratio(16, 100), Confidence::Medium);
+    assert_eq!(Confidence::from_unresolved_ratio(40, 100), Confidence::Medium);
+    // Functional-heavy (Haskell, OCaml): >40% → LOW.
+    assert_eq!(Confidence::from_unresolved_ratio(41, 100), Confidence::Low);
+    assert_eq!(Confidence::from_unresolved_ratio(100, 100), Confidence::Low);
+    // Empty index shouldn't divide-by-zero.
+    assert_eq!(Confidence::from_unresolved_ratio(0, 0), Confidence::High);
+}
+

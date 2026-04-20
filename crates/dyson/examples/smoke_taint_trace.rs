@@ -198,14 +198,30 @@ async fn run_repo(
     } else {
         index.unresolved_callees as f32 / index.call_sites.len() as f32 * 100.0
     };
+    let confidence =
+        taint::Confidence::from_unresolved_ratio(index.unresolved_callees, index.call_sites.len());
+    // Count assignments that exercise field-path precision (dotted LHS
+    // or RHS paths) — lets us spot corpora where the new path collector
+    // earns its keep vs. corpora where everything still degenerates to
+    // bare identifiers.
+    let field_assigns = index
+        .assignments
+        .iter()
+        .filter(|a| {
+            a.lhs.iter().any(|s| s.contains('.'))
+                || a.rhs_idents.iter().any(|s| s.contains('.'))
+        })
+        .count();
     println!(
-        "  index: {} files, {} defs, {} calls, {} assigns, {} unresolved ({:.0}%), build {:.2}s{}",
+        "  index: {} files, {} defs, {} calls, {} assigns ({} field-path), {} unresolved ({:.0}%, max_confidence={}), build {:.2}s{}",
         index.file_mtimes.len(),
         index.fn_defs.len(),
         index.call_sites.len(),
         index.assignments.len(),
+        field_assigns,
         index.unresolved_callees,
         unresolved_pct,
+        confidence.as_str(),
         elapsed.as_secs_f32(),
         if index.truncated { " [TRUNCATED]" } else { "" },
     );

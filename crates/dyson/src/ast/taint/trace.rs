@@ -33,6 +33,44 @@ pub struct TraceResult {
     pub truncated_frontier: bool,
 }
 
+/// Severity ceiling derived from the index's unresolved-callee ratio.
+/// The BFS can't see into dynamic dispatch / alias imports / out-of-index
+/// callees, so the more of those exist, the less confident the agent
+/// should be in any reachability claim — this makes that deterministic
+/// instead of prose the prompt argues about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
+impl Confidence {
+    /// Tier boundaries: <=15% unresolved → HIGH; <=40% → MEDIUM; else LOW.
+    /// Chosen from observed smoke-test ratios — tier-1 languages (Rust,
+    /// TS, Python, Go) index at 5-12%; dynamic-heavy corpora (Ruby, some
+    /// JS) sit at 25-40%; functional langs regularly exceed 50%.
+    pub fn from_unresolved_ratio(unresolved: usize, total_calls: usize) -> Self {
+        if total_calls == 0 {
+            return Self::High;
+        }
+        let pct = (unresolved * 100) / total_calls;
+        match pct {
+            0..=15 => Self::High,
+            16..=40 => Self::Medium,
+            _ => Self::Low,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "HIGH",
+            Self::Medium => "MEDIUM",
+            Self::Low => "LOW",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TraceError {
     #[error("no enclosing function at {file}:{line}")]
@@ -125,7 +163,12 @@ pub fn trace(
         },
     })?;
     let sink_src = sink_parsed.source.as_str();
-    let sink_byte = byte_offset_of_line(sink_src, sink_line);
+    // Use the first non-whitespace byte so `descendant_for_byte_range`
+    // lands on the statement, not the leading-whitespace gap whose
+    // enclosing node is the whole `block` — that would sweep up
+    // identifiers from every sibling statement into `sink_identifiers`
+    // and produce false-positive sink hits.
+    let sink_byte = first_non_whitespace_byte(sink_src, sink_line);
     let sink_fn = index.fn_enclosing(&sink_rel, sink_byte, sink_line);
     let sink_identifiers = identifiers_on_line(&sink_parsed.tree, sink_src, sink_line, config);
     let sink_line_range = byte_range_of_line(sink_src, sink_line);
@@ -169,7 +212,7 @@ pub fn trace(
         // then check overlap.  Only run when we're actually in the sink's fn.
         if sink_fn == Some(frame.fn_id) {
             let running = propagate_until(&frame.tainted, local_assigns, index, |a| a.line < sink_line);
-            if sink_identifiers.iter().any(|s| running.contains(s)) {
+            if sink_identifiers.iter().any(|s| path_is_tainted(s, &running)) {
                 let mut hops = frame.hops.clone();
                 hops.push(Hop {
                     file: sink_rel.clone(),
@@ -179,7 +222,7 @@ pub fn trace(
                         "[SINK REACHED] — tainted at sink: {}",
                         sink_identifiers
                             .iter()
-                            .filter(|s| running.contains(*s))
+                            .filter(|s| path_is_tainted(s, &running))
                             .cloned()
                             .collect::<Vec<_>>()
                             .join(", "),
@@ -308,11 +351,37 @@ fn assigns_for(index: &SymbolIndex, fn_id: FnId) -> &[usize] {
 }
 
 fn apply_assignment(running: &mut BTreeSet<String>, a: &super::types::Assignment) {
-    if a.rhs_idents.iter().any(|r| running.contains(r)) {
+    if a.rhs_idents.iter().any(|r| path_is_tainted(r, running)) {
         for l in &a.lhs {
             running.insert(l.clone());
         }
     }
+}
+
+/// Prefix-aware membership test over the tainted path set.  A path is
+/// tainted if it matches a tainted path exactly, OR any tainted path is
+/// a prefix of it (reading `obj.a.c` when `obj.a` is tainted), OR it is
+/// a prefix of any tainted path (passing `obj` wholesale when `obj.a` is
+/// tainted).  The second case keeps the pre-path coarse-grained
+/// behaviour; the first adds field-level precision without it.
+fn path_is_tainted(path: &str, tainted: &BTreeSet<String>) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    if tainted.contains(path) {
+        return true;
+    }
+    tainted.iter().any(|t| is_dotted_prefix(path, t) || is_dotted_prefix(t, path))
+}
+
+/// Whether `prefix` is a dotted-path prefix of `path`.  Requires that
+/// the next char after the prefix is `.`, so `obj` is a prefix of
+/// `obj.a` but not `object`.
+fn is_dotted_prefix(prefix: &str, path: &str) -> bool {
+    if prefix.len() >= path.len() {
+        return false;
+    }
+    path.starts_with(prefix) && path.as_bytes()[prefix.len()] == b'.'
 }
 
 fn propagate_until(
@@ -336,7 +405,7 @@ fn tainted_arg_positions(arg_idents: &[Vec<String>], running: &BTreeSet<String>)
     arg_idents
         .iter()
         .enumerate()
-        .filter_map(|(i, args)| args.iter().any(|id| running.contains(id)).then_some(i))
+        .filter_map(|(i, args)| args.iter().any(|id| path_is_tainted(id, running)).then_some(i))
         .collect()
 }
 
@@ -454,7 +523,11 @@ fn identifiers_on_line(
     line: usize,
     config: &LanguageConfig,
 ) -> Vec<String> {
-    let byte = byte_offset_of_line(src, line);
+    // Match the sink-byte chosen upstream — land on the first non-blank
+    // char so `descendant_for_byte_range` returns the statement rather
+    // than the enclosing block, which would pull in identifiers from
+    // every sibling line.
+    let byte = first_non_whitespace_byte(src, line);
     let node = tree
         .root_node()
         .descendant_for_byte_range(byte, byte)

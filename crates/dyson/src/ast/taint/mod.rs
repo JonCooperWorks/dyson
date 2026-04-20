@@ -12,6 +12,6 @@ pub mod index;
 pub mod trace;
 pub mod types;
 
-pub use index::{build_index, is_stale};
-pub use trace::{TraceError, TraceOptions, TraceResult, trace};
+pub use index::{MAX_FIELD_DEPTH, build_index, is_stale};
+pub use trace::{Confidence, TraceError, TraceOptions, TraceResult, trace};
 pub use types::{Assignment, CallSite, FnDef, FnId, Hop, HopKind, SymbolIndex, TaintPath};

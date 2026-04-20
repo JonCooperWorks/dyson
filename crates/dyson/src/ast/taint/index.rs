@@ -263,6 +263,19 @@ impl Walker<'_> {
 
     fn record_definition(&mut self, node: Node<'_>) -> Option<FnId> {
         let id = self.builder.fn_defs.len();
+        let mut params = extract_parameters(node, self.source);
+        // Python exposes `self`/`cls` as ordinary first parameters, but
+        // method dispatch `obj.foo(x)` passes the receiver implicitly —
+        // so callers never supply it at position 0.  Dropping here lines
+        // Python up with the Rust/Go convention where `self_parameter`
+        // already sits outside the params list, keeping positional
+        // binding consistent across languages.
+        if self.config.display_name == "Python"
+            && let Some(first) = params.first()
+            && (first == "self" || first == "cls")
+        {
+            params.remove(0);
+        }
         self.builder.fn_defs.push(FnDef {
             file: self.rel_path.to_path_buf(),
             line: node.start_position().row + 1,
@@ -274,7 +287,7 @@ impl Walker<'_> {
                 .unwrap_or_else(|| node.byte_range()),
             name: nodes::extract_definition_name(&node, self.source.as_bytes())
                 .unwrap_or_default(),
-            params: extract_parameters(node, self.source),
+            params,
         });
         self.builder
             .fn_by_file
@@ -427,10 +440,16 @@ pub(crate) fn extract_parameters(node: Node<'_>, source: &str) -> Vec<String> {
     // The wrapper varies by language: `parameters`/`formal_parameters`/`params`
     // as named fields, or an unnamed child of one of a handful of kinds
     // (Swift, Kotlin).  Swift has no wrapper at all — `parameter` nodes
-    // sit directly under function_declaration.
+    // sit directly under function_declaration.  C / C++ park the
+    // parameter_list inside `declarator → parameters`; without the
+    // declarator descent the top-level field probe misses it entirely.
     let wrapper = ["parameters", "formal_parameters", "params"]
         .iter()
         .find_map(|f| node.child_by_field_name(f))
+        .or_else(|| {
+            node.child_by_field_name("declarator")
+                .and_then(|d| d.child_by_field_name("parameters"))
+        })
         .or_else(|| {
             find_child_of_kind(
                 node,
@@ -520,9 +539,17 @@ pub(crate) fn extract_arg_idents(
     out
 }
 
-/// Collect identifiers considered "data" (not callees).  For member
-/// chains like `req.body.url`, take only the root object — property
-/// identifiers would cause `body`/`url` to match unrelated repo-wide vars.
+/// Maximum number of segments kept when flattening a field chain like
+/// `a.b.c.d.e.f.g` into a tainted path.  Segments past the cap are
+/// dropped from the leaf end so the root remains intact — the BFS
+/// prefix check matches from the root, so keeping it preserves reach.
+pub const MAX_FIELD_DEPTH: usize = 5;
+
+/// Collect tainted identifiers or field paths for the given subtree.
+/// Pure chains of identifiers + field selectors — `obj.a.b`, `req.body`
+/// — become a single dotted path; anything else (calls, subscripts,
+/// operators) recurses through children.  Property identifiers outside
+/// a chain are dropped (they'd match unrelated repo-wide vars).
 pub(crate) fn collect_tainted_identifiers(
     node: Node<'_>,
     source: &str,
@@ -547,10 +574,22 @@ pub(crate) fn collect_tainted_identifiers(
         }
         return;
     }
-    if matches!(kind, "member_expression" | "field_expression" | "attribute") {
+    if is_member_chain_kind(kind) {
+        if let Some(path) = flatten_field_chain(node, source, MAX_FIELD_DEPTH)
+            && !path.is_empty()
+        {
+            if !out.contains(&path) {
+                out.push(path);
+            }
+            return;
+        }
+        // Not a pure chain (contains a call / subscript).  Descend into
+        // the object only — this preserves the pre-path behaviour of
+        // surfacing the chain's root identifier.
         if let Some(obj) = node
             .child_by_field_name("object")
             .or_else(|| node.child_by_field_name("value"))
+            .or_else(|| node.child_by_field_name("operand"))
         {
             collect_tainted_identifiers(obj, source, config, out);
         }
@@ -560,6 +599,64 @@ pub(crate) fn collect_tainted_identifiers(
     for child in node.children(&mut cursor) {
         collect_tainted_identifiers(child, source, config, out);
     }
+}
+
+/// Member-chain node kinds across the covered languages.  Order matches
+/// the field-name probe order in `collect_chain_segments`.
+fn is_member_chain_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "member_expression" | "field_expression" | "selector_expression" | "attribute"
+    )
+}
+
+/// If `node` is a pure chain of identifiers and field selectors,
+/// returns the dotted path (capped at `max_depth` segments from the
+/// root).  Returns `None` if the chain contains a call, subscript,
+/// or other non-chain node.
+fn flatten_field_chain(node: Node<'_>, source: &str, max_depth: usize) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    collect_chain_segments(node, source, &mut parts)?;
+    if parts.is_empty() {
+        return None;
+    }
+    let end = parts.len().min(max_depth);
+    Some(parts[..end].join("."))
+}
+
+fn collect_chain_segments<'a>(
+    node: Node<'_>,
+    source: &'a str,
+    out: &mut Vec<&'a str>,
+) -> Option<()> {
+    let kind = node.kind();
+    if is_identifier_kind(kind) {
+        let text = &source[node.byte_range()];
+        if !text.is_empty() {
+            out.push(text);
+        }
+        return Some(());
+    }
+    if !is_member_chain_kind(kind) {
+        return None;
+    }
+    let object = node
+        .child_by_field_name("object")
+        .or_else(|| node.child_by_field_name("value"))
+        .or_else(|| node.child_by_field_name("operand"))?;
+    collect_chain_segments(object, source, out)?;
+    let property = node
+        .child_by_field_name("property")
+        .or_else(|| node.child_by_field_name("field"))
+        .or_else(|| node.child_by_field_name("attribute"))?;
+    if !is_identifier_kind(property.kind()) {
+        return None;
+    }
+    let text = &source[property.byte_range()];
+    if !text.is_empty() {
+        out.push(text);
+    }
+    Some(())
 }
 
 fn extract_field_idents(
