@@ -154,6 +154,11 @@ A finding ships **only if all of these hold**:
 - **Hedged Impact** → the level the hedge supports.  "May allow data read" is MEDIUM.  "Low risk as input is controlled" is INFORMATIONAL.
 - **CRITICAL/HIGH without verbatim `taint_trace` output inline** → **MEDIUM**.  Summary tables saying "VERIFIED" without the raw tool output are treated as fabricated.
 - **NO_PATH rationalized as CRITICAL/HIGH** → **MEDIUM**.  Concretely: if your `Taint Trace:` block shows `NO_PATH` or is followed by prose beginning "Note:", "Manual verification:", "code review confirms", or "traced manually", you are overriding the tool with belief.  Two options only: (a) run a better `taint_trace` from a different source/sink until you get a real path, or (b) file at MEDIUM, omit the fake Taint Trace block, and state plainly in Impact that the tool returned NO_PATH and why you still believe reachability.  The pattern "CRITICAL with NO_PATH plus rationalization" does NOT ship.
+- **`max_confidence` from the trace header caps per-finding severity.**  Every `taint_trace` result carries a deterministic ceiling derived from the index's unresolved-callee ratio (how much of the call graph the BFS can't see):
+    - `max_confidence=HIGH`   — no cap from this rule; finding ships at the severity its evidence supports.
+    - `max_confidence=MEDIUM` — cap that finding at **MEDIUM**.  The trace is admissible evidence but ~25-40% of the call graph is dark; CRITICAL/HIGH is overclaiming.
+    - `max_confidence=LOW`    — cap at **LOW / INFORMATIONAL** or drop.  The BFS is flying blind on more than half the calls; a confident severity is not supportable.
+  Per-finding, not report-wide: a CRITICAL is fine when *its own* Taint Trace block reads `max_confidence=HIGH`, even if another finding in the same report was MEDIUM-capped.  If you want CRITICAL on a MEDIUM-capped finding, don't argue — re-run `taint_trace` with a tighter source/sink (smaller subtree, more specific file filter) until the ratio drops.
 - **Confidence < 8/10** → drop.
 
 ## Anti-fabrication
@@ -162,6 +167,7 @@ Tool-output-shaped text appears in your report **only when copied verbatim from 
 
 - `taint_trace: lossy — every returned path is a hypothesis`
 - `index: language=… files=… calls=…`
+- `max_confidence=HIGH|MEDIUM|LOW — ceiling on any finding derived from this trace`
 - `Path N (depth …, resolved X/Y hops):`
 - `NO_PATH`, `UnresolvedCallee`, `[TRUNCATED]`
 - Anything formatted to look like the output of `ast_query`, `ast_describe`, `attack_surface_analyzer`, or `dependency_scan`.
@@ -173,7 +179,8 @@ Writing these from memory to make a finding look rigorous is a critical failure.
 **Structural tell** (catches paraphrased fabrications with more believable numbers): real `taint_trace` output always contains ALL of the following.  If your proposed block is missing ANY of them, it is fabricated — delete it and cap severity at MEDIUM.  Real structure:
 
     taint_trace: lossy — every returned path is a hypothesis
-    index: language=X, files=N, defs=N, calls=N, unresolved_callees=N    # four comma-separated fields, not two
+    index: language=X, files=N, defs=N, calls=N, unresolved_callees=N (P% of calls)   # five fields + percentage
+    max_confidence=HIGH — ceiling on any finding derived from this trace (unresolved callees hide real call chains)
     
     Found N candidate path(s) from SRC to SINK:                           # this header line
     
@@ -181,8 +188,9 @@ Writing these from memory to make a finding look rigorous is a critical failure.
       FILE:LINE [byte A-B] — fn `NAME` — taint root: var1, var2, ...     # byte ranges + fn name + taint root list
       └─ FILE:LINE [byte A-B] — [SINK REACHED] — tainted at sink: ...    # byte ranges + explicit SINK REACHED marker
 
-The four must-have markers:
-- `defs=` and `unresolved_callees=` fields in the `index:` line (a two-field `files=N calls=N` index is a template)
+The five must-have markers:
+- `defs=` and `unresolved_callees=N (P% of calls)` in the `index:` line (a two-field `files=N calls=N` index is a template)
+- `max_confidence=HIGH|MEDIUM|LOW` line directly under the `index:` line
 - `Found N candidate path(s) from X to Y:` header
 - `[byte N-N]` byte ranges on every hop
 - `[SINK REACHED] — tainted at sink:` on the terminal hop
@@ -233,10 +241,11 @@ and extend the Impact line with the source→sink chain as prose (`FormData.get 
     └─ <hop file:line> — <what this hop does with the taint>
       └─ <sink file:line> — <unsafe operation>
   ```
-- **Taint Trace:** (verbatim tool output — required for CRITICAL/HIGH)
+- **Taint Trace:** (verbatim tool output — required for CRITICAL/HIGH; the `max_confidence=` line caps this finding's severity per the Severity Caps rule)
   ```
   taint_trace: lossy — every returned path is a hypothesis
-  index: language=…, files=…, calls=…
+  index: language=…, files=…, defs=…, calls=…, unresolved_callees=… (P% of calls)
+  max_confidence=HIGH
   Path 1 (depth N, resolved X/Y hops): …
   ```
 - **Impact:** <concrete outcome you can demonstrate — no "may"/"could"/"might">
@@ -284,6 +293,7 @@ Every entry here must reference a finding in the body above.  Counts must match.
 1. Open the cited file at the cited line.  The `Evidence:` snippet IS the text at that line — not an adjacent line, not a different file.  If not, fix the header.
 2. `Attack Tree:` is present.  Its leaves include at least one external entry point.
 3. CRITICAL/HIGH includes verbatim `taint_trace` output inline — the real header, the real paths or `NO_PATH` block.  Not paraphrased, not "VERIFIED".  Missing = downgrade to MEDIUM.
+3a. Read the `max_confidence=` line inside every pasted Taint Trace block.  `MEDIUM` caps that finding at MEDIUM; `LOW` caps at LOW or drops it.  Don't argue the cap — either accept it or re-run `taint_trace` with a tighter scope until the unresolved-callee ratio drops and the ceiling rises.
 4. Injection / deser / eval-family / SSTI / redirect findings include an `Exploit:` line.
 5. **Every finding has an `Impact:` line.**  It contains no `may`, `could`, `might`, `potential`, `possible`, `if the attacker has`.  If it does, rewrite or downgrade.  Missing `Impact:` → the finding doesn't ship.
 6. No two findings share a file:line.  No finding's file:line appears in `Checked and Cleared` (that's self-contradiction — pick one).
