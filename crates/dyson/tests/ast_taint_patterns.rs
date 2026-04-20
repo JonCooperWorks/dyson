@@ -1260,6 +1260,26 @@ async fn c_field_expression_precision_separates_siblings() {
 }
 
 #[tokio::test]
+async fn cpp_field_expression_precision_separates_siblings() {
+    let out = trace(
+        &[(
+            "app.cpp",
+            "#include <string>\nstruct Obj { std::string a; std::string b; };\nvoid execute(const std::string& s) { (void)s; }\nvoid handle(const std::string& req) {\n    Obj o;\n    o.a = req;\n    execute(o.b);\n}\n",
+        )],
+        "cpp",
+        ("app.cpp", 4),
+        ("app.cpp", 7),
+    )
+    .await;
+    assert_ok(&out);
+    assert!(
+        out.content.contains("NO_PATH"),
+        "C++: write to o.a should not taint o.b read:\n{}",
+        out.content,
+    );
+}
+
+#[tokio::test]
 async fn csharp_member_access_precision_separates_siblings() {
     let out = trace(
         &[(
