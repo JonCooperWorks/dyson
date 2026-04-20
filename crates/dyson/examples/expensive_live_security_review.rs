@@ -723,6 +723,72 @@ const TARGETS: &[Target] = &[
         summary: "Solana / Anchor on-chain program collection.",
         git_ref: None,
     },
+    // Wormhole token bridge (Solana side).  The Feb 2022 $320M exploit
+    // was a missing sysvar-account check in `verify_signature` — the
+    // program used the deprecated `load_instruction_at` which trusted
+    // whichever account was passed as the instructions sysvar instead
+    // of validating its address.  Attacker substituted a sysvar they
+    // controlled, forged the signature list, and the bridge accepted
+    // the forged VAA.  Fix commit `e8b9181` (2022-02-02) switched to
+    // `load_instruction_at_checked`; pinning to the parent commit
+    // reproduces the vulnerable state.
+    Target {
+        name: "wormhole-solana",
+        slug: "wormhole-foundation/wormhole",
+        sub: "solana/bridge/program",
+        description: "Wormhole token bridge, Solana side.  Historical CVE (Feb 2022, $320M): missing sysvar-account validation in `verify_signature.rs` — `load_instruction_at` trusted an attacker-supplied account.  Pinned to parent of fix commit e8b9181 so the vulnerable code is present.",
+        summary: "Solana cross-chain bridge program.",
+        git_ref: Some("79ab522f802ccc5ba34278d3c648fa62e06f4f1c"),
+    },
+    // Mango Markets v3.  Oct 2022 $114M drain was technically an
+    // oracle-manipulation economic attack rather than a missing-check
+    // bug — attacker inflated MNGO spot price on thin books, then
+    // borrowed against the inflated collateral.  A rigorous review
+    // should still flag "protocol trusts on-chain spot price of a
+    // thin-book token as collateral oracle" as HIGH/CRITICAL even if
+    // no individual line is broken.  Stress-test for whether the
+    // reviewer can spot economic bugs in addition to code bugs.
+    Target {
+        name: "mango-v3",
+        slug: "blockworks-foundation/mango-v3",
+        sub: "program/src",
+        description: "Mango Markets v3.  Historical incident: oracle manipulation via thin-book MNGO spot price inflation, $114M drain (Oct 2022).  Economic attack, not a missing-check bug - a good reviewer still flags the oracle design as CRITICAL.",
+        summary: "Solana DeFi margin / perps protocol.",
+        git_ref: None,
+    },
+    // Cashio.  March 2022 $52M infinite-mint hack.  The `print_cash`
+    // instruction accepted a `crate_collateral_tokens` PDA whose
+    // `saber_swap.arrow` account wasn't validated — attacker crafted
+    // a fake arrow account pointing at a worthless token and minted
+    // 2B CASH against it.  Classic missing-owner-check / account-
+    // spoofing primitive, textbook case for the Solana cheatsheet.
+    // Fix commit (2022-03-23, `7df6581`) patched `print_cash`/
+    // `burn_cash` to bail — by then the funds were gone.  Pinned to
+    // the commit immediately before the patch to keep the vulnerable
+    // code in place for review.
+    Target {
+        name: "cashio",
+        slug: "cashioapp/cashio",
+        sub: "programs/brrr",
+        description: "Cashio stablecoin (Solana).  Historical CVE (Mar 2022, $52M): missing account validation on `saber_swap.arrow` in `print_cash` allowed infinite-mint via fake collateral PDAs.  Pinned to last pre-hack commit (parent of `7df6581` fix).",
+        summary: "Solana algorithmic-stablecoin program.",
+        git_ref: Some("a51c3c59d544a5763b64abb4a8d82c49b0abd6d0"),
+    },
+    // Solana Program Library — the production Rust programs for SPL
+    // Token, Token-Swap, Token-Lending, Stake Pool, etc.  Widely
+    // deployed infrastructure; multiple historical advisories (rounding
+    // bugs in swap math, stake-pool fee calculation).  Scoped to
+    // token-lending because lending programs have the richest
+    // constraint surface (collateral accounts, interest accrual,
+    // liquidation paths) and are where most real Solana DeFi bugs live.
+    Target {
+        name: "spl-token-lending",
+        slug: "solana-labs/solana-program-library",
+        sub: "token-lending/program/src",
+        description: "SPL Token Lending.  Production Solana DeFi infrastructure.  Constraint-audit target: collateral account validation, interest math overflow, liquidation authority checks, oracle integration.  Historical advisories around rounding and fee math.",
+        summary: "Solana reference lending program.",
+        git_ref: None,
+    },
 ];
 
 /// Task body.  The target path is no longer interpolated — it's passed
