@@ -1701,6 +1701,41 @@ mod tests {
         assert_eq!(det.frameworks, vec![Framework::Solana]);
     }
 
+    /// End-to-end: an Anchor program's Cargo.toml triggers detection
+    /// AND the composed prompt carries the Solana cheatsheet body
+    /// (not just the sheet name).  A missing `framework_sheet` arm,
+    /// a typo'd `include_str!` path, or a wrong sheet opener would
+    /// all slip past the per-framework structural guards — this
+    /// walks the full detect → compose path end-to-end.
+    #[test]
+    fn solana_program_composes_solana_cheatsheet_into_prompt() {
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Cargo.toml",
+            "[package]\nname = \"my-anchor-program\"\n[dependencies]\nanchor-lang = \"0.30\"\n",
+        );
+        let (body, names) = detect_and_compose(tmp.path());
+        assert!(
+            names.contains(&"framework/solana"),
+            "composed sheet list missing framework/solana: {names:?}"
+        );
+        // Unique-enough strings from framework/solana.md — a generic
+        // Rust-lang sheet wouldn't contain any of these.
+        assert!(
+            body.contains("Starting points for Solana programs"),
+            "solana sheet opener missing from composed body"
+        );
+        assert!(
+            body.contains("#[derive(Accounts)]"),
+            "Anchor constraint-audit section missing from composed body"
+        );
+        assert!(
+            body.contains("Missing signer check"),
+            "signer-check vuln class missing from composed body"
+        );
+    }
+
     #[test]
     fn detects_javascript_via_package_json() {
         let tmp = TempDir::new().unwrap();
