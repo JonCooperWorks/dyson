@@ -21,6 +21,12 @@ The same program often mixes both (Anchor entrypoints with native CPI helpers). 
 - Anchor with `Account<'info, T>`: owner is checked implicitly against `T::owner()`. With `AccountInfo` / `UncheckedAccount`: NOT checked. A `#[account(owner = crate::ID)]` constraint is required.
 - Native: `if account.owner != program_id { return Err(...) }`. Missing = spoofable.
 
+**Unanchored validation chain (typed accounts ≠ canonical accounts)** — the `#[derive(Accounts)]` struct or a `Validate` impl chains `assert_keys_eq!(self.X, self.Y.field)` calls that prove the supplied accounts are *internally consistent with each other*, but no link in the chain is anchored to a hardcoded address, a `crate::ID`-derived PDA, or a globally-trusted account. Anchor's `Account<'info, T>` proves "owned by program P" — it does NOT prove "this is the canonical instance the protocol uses." Anyone can permissionlessly call program P to mint a fresh `T` instance with attacker-chosen fields, then thread a fully-self-consistent fake chain through the validator. The exploit pattern: attacker registers fake `Bank` → fake `Collateral` (attacker-chosen `mint`) → token account whose `owner` is set to the **real** crate authority (SPL `initialize_account` lets the creator pick `owner`) → fake `Saber` pool with fake reserves. Every `assert_keys_eq!` passes; the CPI to the real mint authority signs anyway because the program's PDA seeds are static. **This is the Cashio bug — $52M in March 2022.**
+- Audit move: open the `Validate` impl (or `#[derive(Accounts)]` constraints). Tally each comparison. Are *all* of them relative (`self.a == self.b.field`)? If yes — and at least one of `a`/`b` is a struct an attacker can permissionlessly create — it's vulnerable. The chain needs at least one comparison against (a) a hardcoded `Pubkey` constant in the program (like `ISSUE_AUTHORITY_ADDRESS`), (b) a PDA re-derived from `crate::ID` with fixed seeds, or (c) a `has_one` whose target field traces back to (a) or (b).
+- Anchor fix: `#[account(has_one = bank)]` on `Collateral`, paired with `#[account(address = CANONICAL_BANK)]` on `bank` (or a single-bank-per-program design where `bank` is itself a PDA of `crate::ID`).
+- Native fix: explicit `assert_keys_eq!(bank.key(), CANONICAL_BANK_ADDRESS)` somewhere in the chain.
+- Finding shape: the `Evidence` block should paste the `Validate` impl in full, then enumerate each `assert_keys_eq!` and label which are relative-only. The vuln lives in the *absence* of a check, so the snippet is the proof.
+
 **Account type confusion / no discriminator check** — manual deserialization of `AccountInfo.data` via `try_from_slice` / `bytemuck::from_bytes` without verifying the type tag at the front of the buffer. Anchor prepends an 8-byte discriminator derived from the account struct name; native programs typically use the first byte as a manual tag.
 - Finding shape: `T::try_from_slice(&account.data.borrow()[..])` with no preceding byte/tag check.
 
@@ -122,6 +128,21 @@ For every `#[derive(Accounts)]` struct, a constraint is implicit-or-explicit on 
 ; where a `checked_*` call would be safer.  Works as a broad scan.
 (binary_expression operator: ["+" "-" "*"])
 
+; Validate impl block — every project that uses `vipers` puts its constraint
+; chain here. Open every one and check that at least one assert_keys_eq! /
+; require_keys_eq! compares against a hardcoded Pubkey constant or a PDA
+; derived from crate::ID — not just `self.foo == self.bar.field`.
+(impl_item
+  trait: (type_identifier) @t
+  type: (type_identifier) @ty
+  (#eq? @t "Validate"))
+
+; assert_keys_eq! / require_keys_eq! / has_one constraint sites — count them
+; per Validate impl and classify each as anchored (one side is a constant /
+; ID-derived address) vs. relative (both sides are self.*).
+(macro_invocation macro: (identifier) @m
+  (#match? @m "^(assert_keys_eq|assert_keys_neq|require_keys_eq|require_keys_neq)$"))
+
 ; Sysvar account taken from accounts slice instead of ::get()
 (call_expression function: (scoped_identifier
     path: (identifier) @ty
@@ -137,6 +158,7 @@ When filing Solana findings, the `Taint Trace:` block is often less informative 
 Severity defaults:
 - Missing signer check on an authority path → **CRITICAL** (anyone can call).
 - Missing owner check on an account used for state mutation → **CRITICAL** (account spoofing → arbitrary state).
+- Unanchored validation chain that gates a CPI to a privileged authority (mint, vault withdrawal) → **CRITICAL**. **Do not downgrade because the downstream program is out of scope.** This program signs the CPI with its own static PDA seeds — that signature is the attacker's payload. Whether the downstream program *also* re-validates is irrelevant: assume it does not (most don't, including Cashio's `crate_token`), file CRITICAL, and let the reviewer decide. Hedging this to HIGH is the exact failure mode that let the Cashio bug ship.
 - Non-canonical PDA bump on an account used for funds custody → **CRITICAL**.
 - Arbitrary CPI → **CRITICAL** (delegated authority).
 - Integer overflow on funds math → **HIGH** or **CRITICAL** depending on whether overflow reaches a transfer.
