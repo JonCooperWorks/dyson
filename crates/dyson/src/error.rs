@@ -100,6 +100,7 @@ pub enum DysonError {
     RateLimit { limit: usize, window_secs: u64 },
 
     /// A swarm operation failed (signature verification, connection, etc.).
+    #[cfg(feature = "dangerous_swarm")]
     #[error("Swarm error: {0}")]
     Swarm(String),
 }
@@ -153,6 +154,7 @@ pub fn classify_llm_error(err: &str) -> LlmErrorKind {
 // From impls for types that don't use #[from]
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "dangerous_swarm")]
 impl From<dyson_swarm_protocol::ProtocolError> for DysonError {
     fn from(e: dyson_swarm_protocol::ProtocolError) -> Self {
         Self::Swarm(e.to_string())

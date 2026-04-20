@@ -4,8 +4,20 @@ version = "0.1.0"
 edition = "2024"
 description = "Streaming, composable AI agent loop in Rust"
 
+[features]
+# No features enabled by default — keeps the baseline binary lean.
+default = []
+
+# Opt-in to the swarm controller, `swarm_checkpoint` tool, and signed-task
+# transport.  Binaries without this feature still parse swarm entries in
+# dyson.json, they just log a warning and skip them at startup.  Named
+# `dangerous_swarm` because the swarm accepts remotely-signed tasks and
+# automatically wires every agent to the hub's MCP skill — only turn it on
+# if you actually operate a hub and understand that blast radius.
+dangerous_swarm = ["dep:dyson-swarm-protocol"]
+
 [dependencies]
-dyson-swarm-protocol = { path = "../dyson-swarm-protocol" }
+dyson-swarm-protocol = { path = "../dyson-swarm-protocol", optional = true }
 
 # Shared across workspace crates — inherit from [workspace.dependencies]
 # so version bumps live in one place and cargo always dedupes.

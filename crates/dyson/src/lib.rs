@@ -58,6 +58,7 @@ pub mod message;
 pub mod sandbox;
 pub mod secret;
 pub mod skill;
+#[cfg(feature = "dangerous_swarm")]
 pub mod swarm;
 pub mod tool;
 pub(crate) mod tool_hooks;

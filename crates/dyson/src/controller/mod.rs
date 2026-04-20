@@ -53,6 +53,7 @@
 
 pub mod background;
 pub mod recording;
+#[cfg(feature = "dangerous_swarm")]
 pub mod swarm;
 pub mod telegram;
 pub mod terminal;

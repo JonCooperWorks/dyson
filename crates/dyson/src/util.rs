@@ -95,6 +95,7 @@ pub fn resolve_tilde(path: &str) -> std::path::PathBuf {
 ///
 /// Used to create deterministic-but-readable identifiers from URLs, paths,
 /// etc.  Not cryptographic — just a short fingerprint for display.
+#[cfg(feature = "dangerous_swarm")]
 pub fn short_hash(s: &str) -> String {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(s.as_bytes());
