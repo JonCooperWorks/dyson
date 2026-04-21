@@ -315,15 +315,15 @@ struct JsonToolPolicy {
 ///
 /// Supports both new-style `backend` + `connection_string` and legacy `path`:
 /// ```json
-/// { "workspace": { "backend": "openclaw", "connection_string": "~/.dyson" } }
+/// { "workspace": { "backend": "filesystem", "connection_string": "~/.dyson" } }
 /// { "workspace": { "path": "~/.dyson" } }
 /// ```
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JsonWorkspace {
-    /// Backend type: "openclaw" (default).
+    /// Backend type: "filesystem" (default).
     backend: Option<String>,
-    /// Connection string (path for openclaw).  Supports secret resolution.
+    /// Connection string (path for filesystem).  Supports secret resolution.
     connection_string: Option<SecretValue>,
     /// Legacy: plain path.  Falls back to this if connection_string is absent.
     path: Option<String>,

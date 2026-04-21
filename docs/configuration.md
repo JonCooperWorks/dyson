@@ -139,7 +139,7 @@ Dyson's native config format.  Example:
     }
   ],
   "workspace": {
-    "backend": "openclaw",
+    "backend": "filesystem",
     "connection_string": "~/.dyson",
     "memory": {
       "limits": { "MEMORY.md": 2500, "USER.md": 1375 },
@@ -534,7 +534,7 @@ See [Sandbox](sandbox.md) for the full capability model and policy system.
 ```json
 {
   "workspace": {
-    "backend": "openclaw",
+    "backend": "filesystem",
     "connection_string": "~/.dyson",
     "memory": {
       "limits": { "MEMORY.md": 2500, "USER.md": 1375 },
@@ -553,7 +553,7 @@ Legacy shorthand (still supported):
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `backend` | `"openclaw"` | Workspace backend type |
+| `backend` | `"filesystem"` | Workspace backend type |
 | `connection_string` | `"~/.dyson"` | Path (supports secret resolver) |
 | `memory.limits` | `{ "MEMORY.md": 2500, "USER.md": 1375 }` | Per-file **soft** character targets (curator aims here) |
 | `memory.overflow_factor` | `1.35` | Multiplier — hard ceiling = soft target × factor. Writes between the two succeed with a warning. |

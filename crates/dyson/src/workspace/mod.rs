@@ -10,15 +10,15 @@
 //
 // Module layout:
 //   mod.rs        — Workspace trait + factory (this file)
-//   openclaw.rs — OpenClawWorkspace (filesystem, OpenClaw format)
+//   filesystem.rs — FilesystemWorkspace (filesystem, filesystem format)
 //   in_memory.rs  — InMemoryWorkspace (for testing)
 //
 // Backends:
 //   The Workspace trait abstracts storage.  Implementations decide where
 //   and how files are stored:
 //
-//   - OpenClawWorkspace: reads/writes markdown files on the local filesystem
-//     in the OpenClaw format.  Compatible with OpenClaw/TARS workspaces.
+//   - FilesystemWorkspace: reads/writes markdown files on the local filesystem
+//     in the filesystem format.  Compatible with filesystem/TARS workspaces.
 //   - InMemoryWorkspace: in-memory HashMap, no persistence.  For tests.
 //   - (future) Cloud, database, or API-backed workspaces.
 //
@@ -27,7 +27,7 @@
 //   ```json
 //   {
 //     "workspace": {
-//       "backend": "openclaw",
+//       "backend": "filesystem",
 //       "connection_string": "~/.dyson"
 //     }
 //   }
@@ -42,10 +42,10 @@ pub mod channel;
 pub mod in_memory;
 pub mod memory_store;
 pub mod migrate;
-pub mod openclaw;
+pub mod filesystem;
 
 pub use in_memory::InMemoryWorkspace;
-pub use openclaw::OpenClawWorkspace;
+pub use filesystem::FilesystemWorkspace;
 
 use std::sync::Arc;
 
@@ -234,15 +234,15 @@ pub fn migrate_workspace(
 /// Dispatches on `config.backend` to construct the appropriate implementation.
 pub fn create_workspace(config: &WorkspaceConfig) -> Result<Box<dyn Workspace>> {
     match config.backend.as_str() {
-        "openclaw" => {
-            let ws = OpenClawWorkspace::load_from_connection_string(
+        "filesystem" => {
+            let ws = FilesystemWorkspace::load_from_connection_string(
                 config.connection_string.expose(),
                 config.memory.clone(),
             )?;
             Ok(Box::new(ws))
         }
         other => Err(DysonError::Config(format!(
-            "unknown workspace backend: '{other}'.  Supported: 'openclaw'."
+            "unknown workspace backend: '{other}'.  Supported: 'filesystem'."
         ))),
     }
 }
@@ -258,7 +258,7 @@ pub fn create_workspace(config: &WorkspaceConfig) -> Result<Box<dyn Workspace>> 
 /// On first creation:
 /// 1. The `channels/{channel_id}/` directory is created.
 /// 2. SOUL.md and IDENTITY.md are symlinked to the main workspace's copies.
-/// 3. `OpenClawWorkspace::load()` creates default MEMORY.md, etc.
+/// 3. `FilesystemWorkspace::load()` creates default MEMORY.md, etc.
 ///
 /// On subsequent loads, existing symlinks are left in place.
 pub fn create_channel_workspace(
@@ -293,7 +293,7 @@ pub fn create_channel_workspace(
             }
     }
 
-    let ws = OpenClawWorkspace::load(&channel_path, config.memory.clone())?;
+    let ws = FilesystemWorkspace::load(&channel_path, config.memory.clone())?;
 
     // Wrap in ChannelWorkspace — only explicitly allowed keys are writable.
     // Everything else (SOUL.md, IDENTITY.md, AGENTS.md, etc.) is protected
@@ -339,12 +339,12 @@ mod tests {
     }
 
     #[test]
-    fn migrate_openclaw_to_in_memory() {
+    fn migrate_filesystem_to_in_memory() {
         let dir = std::env::temp_dir().join(format!("dyson-migrate-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
         let mut source =
-            OpenClawWorkspace::load(&dir, crate::config::MemoryConfig::default()).unwrap();
+            FilesystemWorkspace::load(&dir, crate::config::MemoryConfig::default()).unwrap();
         source.set("SOUL.md", "Custom soul.");
         source.set("MEMORY.md", "Important memory.");
         source.save().unwrap();
@@ -360,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_in_memory_to_openclaw() {
+    fn migrate_in_memory_to_filesystem() {
         let source = InMemoryWorkspace::new()
             .with_file("SOUL.md", "Migrated soul.")
             .with_file("memory/2026-03-20.md", "Journal entry.");
@@ -369,7 +369,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let mut target =
-            OpenClawWorkspace::load(&dir, crate::config::MemoryConfig::default()).unwrap();
+            FilesystemWorkspace::load(&dir, crate::config::MemoryConfig::default()).unwrap();
         let result = migrate_workspace(&source, &mut target).unwrap();
 
         assert_eq!(result.files_migrated, 2);

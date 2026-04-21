@@ -22,7 +22,7 @@
 //     ├── agent         — Agent loop, stream handler, dependency analysis,
 //     │                   result formatting, rate limiting
 //     ├── tool_hooks    — Pre/post tool execution lifecycle hooks
-//     ├── workspace     — Workspace trait + OpenClawWorkspace (agent identity/memory)
+//     ├── workspace     — Workspace trait + FilesystemWorkspace (agent identity/memory)
 //     ├── chat_history  — ChatHistory trait + DiskChatHistory (per-chat messages)
 //     ├── controller    — Controller trait, terminal REPL, Telegram bot
 //     └── secret        — Secret resolution (env vars, vault, etc.)
@@ -37,7 +37,7 @@
 //   - Sandbox gates everything: every tool call goes through a Sandbox trait
 //   - Extensible by default: new providers, skills, tools — all traits
 //   - Storage is pluggable: workspace and chat history are traits with
-//     configurable backends (OpenClaw filesystem, disk JSON, future: cloud)
+//     configurable backends (filesystem filesystem, disk JSON, future: cloud)
 // ===========================================================================
 
 pub mod advisor;

@@ -13,7 +13,7 @@
 // Why split from main.rs?
 //   main.rs defines the CLI structure (clap) and dispatches to these
 //   functions.  Each command has enough logic to warrant its own file:
-//   init handles directory scaffolding, systemd, OpenClaw import;
+//   init handles directory scaffolding, systemd, filesystem import;
 //   listen handles controller creation and concurrent execution;
 //   run handles single-shot agent invocation.
 //

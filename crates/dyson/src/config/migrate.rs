@@ -740,7 +740,7 @@ mod tests {
             "skills": { "builtin": { "tools": ["bash"] } },
             "controllers": [{ "type": "terminal" }],
             "sandbox": { "disabled": [] },
-            "workspace": { "backend": "openclaw", "connection_string": "~/.dyson" }
+            "workspace": { "backend": "filesystem", "connection_string": "~/.dyson" }
         });
 
         let applied = migrate(&mut root).unwrap();
@@ -764,7 +764,7 @@ mod tests {
         // All other top-level sections untouched.
         assert_eq!(root["skills"]["builtin"]["tools"][0], "bash");
         assert_eq!(root["controllers"][0]["type"], "terminal");
-        assert_eq!(root["workspace"]["backend"], "openclaw");
+        assert_eq!(root["workspace"]["backend"], "filesystem");
     }
 
     #[test]

@@ -14,7 +14,7 @@ wiki/knowledge base
 
 - `src/tool/kb_search.rs` — `KbSearchTool` (FTS5 search with scope filtering)
 - `src/tool/kb_status.rs` — `KbStatusTool` (file counts, sizes, directory listing)
-- `src/workspace/openclaw.rs` — KB loading, `INDEX.md` injection into system prompt
+- `src/workspace/filesystem.rs` — KB loading, `INDEX.md` injection into system prompt
 - `src/workspace/memory_store.rs` — FTS5 indexing (`memory_fts` virtual table)
 - `src/workspace/migrate.rs` — v2 → v3 migration (creates `kb/` structure)
 
@@ -68,7 +68,7 @@ Subdirectories are fully supported — files are loaded recursively from both
 └──────────────┘                          └─────────────────┘
 ```
 
-1. On startup, `OpenClawWorkspace::load()` recursively scans `kb/raw/` and
+1. On startup, `FilesystemWorkspace::load()` recursively scans `kb/raw/` and
    `kb/wiki/`, loading all `.md` files into the workspace.
 2. All loaded KB files are indexed into the `memory_fts` FTS5 virtual table
    (shared with the memory system).
@@ -173,7 +173,7 @@ on `memory/`.  Both use the same underlying `MemoryStore::search()` method.
 |-----------|------|
 | KbSearchTool | `src/tool/kb_search.rs` |
 | KbStatusTool | `src/tool/kb_status.rs` |
-| KB loading & INDEX.md | `src/workspace/openclaw.rs` |
+| KB loading & INDEX.md | `src/workspace/filesystem.rs` |
 | FTS5 index | `src/workspace/memory_store.rs` |
 | v2 → v3 migration | `src/workspace/migrate.rs` |
 | Workspace trait | `src/workspace/mod.rs` |

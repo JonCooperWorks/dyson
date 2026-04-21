@@ -94,10 +94,10 @@ enum Commands {
         #[arg(long)]
         daemonize: bool,
 
-        /// Import an existing OpenClaw workspace directory.
+        /// Import an existing filesystem workspace directory.
         /// Copies its contents into ~/.dyson/workspace/.
         #[arg(long)]
-        import_openclaw: Option<PathBuf>,
+        import_filesystem: Option<PathBuf>,
 
         /// Directory to initialize.  Default: ~/.dyson
         #[arg(long)]
@@ -191,14 +191,14 @@ async fn main() -> dyson::error::Result<()> {
         Commands::Init {
             noinput,
             daemonize,
-            import_openclaw,
+            import_filesystem,
             path,
             env_vars,
             dangerous_no_sandbox,
         } => command::init::run(
             noinput,
             daemonize,
-            import_openclaw,
+            import_filesystem,
             path,
             env_vars,
             dangerous_no_sandbox,

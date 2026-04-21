@@ -5,7 +5,7 @@
 //
 // What this file does:
 //   Creates the Dyson directory structure, writes a default config file,
-//   optionally imports an existing OpenClaw workspace, installs the binary
+//   optionally imports an existing filesystem workspace, installs the binary
 //   to PATH, and optionally sets up a systemd service.
 //
 // Directory layout (~/.dyson/):
@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 pub fn run(
     noinput: bool,
     daemonize: bool,
-    import_openclaw: Option<PathBuf>,
+    import_filesystem: Option<PathBuf>,
     path: Option<PathBuf>,
     env_vars: Vec<String>,
     dangerous_no_sandbox: bool,
@@ -96,16 +96,16 @@ pub fn run(
         eprintln!("  {} already exists — skipping", config_path.display());
     }
 
-    // Import OpenClaw workspace if requested.
-    if let Some(ref source) = import_openclaw {
-        import_openclaw_workspace(source, &workspace_dir)?;
-    } else if is_openclaw_workspace(&workspace_dir) {
-        eprintln!("  detected existing OpenClaw workspace — migrating in place");
+    // Import filesystem workspace if requested.
+    if let Some(ref source) = import_filesystem {
+        import_filesystem_workspace(source, &workspace_dir)?;
+    } else if is_filesystem_workspace(&workspace_dir) {
+        eprintln!("  detected existing filesystem workspace — migrating in place");
     }
 
     // Load workspace — runs migrations (v0 → current), then creates
     // default files for anything missing (USER.md, HEARTBEAT.md, etc.).
-    let _ = dyson::workspace::OpenClawWorkspace::load(
+    let _ = dyson::workspace::FilesystemWorkspace::load(
         &workspace_dir,
         dyson::config::MemoryConfig::default(),
     )?;
@@ -129,31 +129,31 @@ pub fn run(
 }
 
 // ---------------------------------------------------------------------------
-// OpenClaw detection and import
+// filesystem detection and import
 // ---------------------------------------------------------------------------
 
-/// Check if a directory looks like an existing OpenClaw workspace.
+/// Check if a directory looks like an existing filesystem workspace.
 ///
 /// Returns `true` if it contains at least SOUL.md and IDENTITY.md.
-/// These are the two files every OpenClaw/TARS workspace has.
-fn is_openclaw_workspace(path: &Path) -> bool {
+/// These are the two files every filesystem/TARS workspace has.
+fn is_filesystem_workspace(path: &Path) -> bool {
     path.join("SOUL.md").exists() && path.join("IDENTITY.md").exists()
 }
 
-/// Copy an OpenClaw workspace directory into the Dyson workspace.
+/// Copy an filesystem workspace directory into the Dyson workspace.
 ///
 /// Copies all .md files from the source root and the memory/ subdirectory.
 /// Existing files in the destination are overwritten.
-fn import_openclaw_workspace(source: &Path, dest: &Path) -> dyson::error::Result<()> {
+fn import_filesystem_workspace(source: &Path, dest: &Path) -> dyson::error::Result<()> {
     if !source.exists() {
         return Err(dyson::error::DysonError::Config(format!(
-            "OpenClaw workspace not found: {}",
+            "filesystem workspace not found: {}",
             source.display()
         )));
     }
 
     eprintln!(
-        "  importing OpenClaw workspace from {}...",
+        "  importing filesystem workspace from {}...",
         source.display()
     );
 

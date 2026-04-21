@@ -129,7 +129,7 @@ fn workspace_search_does_not_hang_on_pathological_regex() {
         InMemoryWorkspace::new().with_file("test.md", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!");
 
     // A pattern that could cause catastrophic backtracking without size limits.
-    // The OpenClawWorkspace has a 10MB compiled size limit; InMemoryWorkspace
+    // The FilesystemWorkspace has a 10MB compiled size limit; InMemoryWorkspace
     // falls back to substring match on invalid/huge regex. Either way, it
     // should complete quickly.
     let long_pattern = format!("(a+)+{}", "b".repeat(100));

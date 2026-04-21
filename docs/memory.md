@@ -65,7 +65,7 @@ included in the system prompt for session continuity.
 ```
 
 Default files are created automatically when the workspace is first loaded
-(`src/workspace/openclaw.rs`).
+(`src/workspace/filesystem.rs`).
 
 ---
 
@@ -80,7 +80,7 @@ Workspaces are versioned via `.workspace_version` (missing = version 0). Migrati
 
 To add a migration: bump `CURRENT_WORKSPACE_VERSION` in `src/workspace/migrate.rs` and add a `Migration` to `migrations()`.
 
-`dyson init` auto-detects existing OpenClaw workspaces (presence of `SOUL.md` + `IDENTITY.md`) and migrates in place, or use `--import_openclaw <path>` to import from another directory.
+`dyson init` auto-detects existing filesystem workspaces (presence of `SOUL.md` + `IDENTITY.md`) and migrates in place, or use `--import_filesystem <path>` to import from another directory.
 
 ---
 
@@ -141,7 +141,7 @@ Memory settings live in `dyson.json` under `workspace.memory`:
 ```json
 {
   "workspace": {
-    "backend": "openclaw",
+    "backend": "filesystem",
     "connection_string": "~/.dyson",
     "memory": {
       "limits": {
@@ -213,7 +213,7 @@ reassembly, and orphaned tool pair repair.  See
 | Component | File |
 |-----------|------|
 | MemoryStore (FTS5) | `src/workspace/memory_store.rs` |
-| OpenClawWorkspace | `src/workspace/openclaw.rs` |
+| FilesystemWorkspace | `src/workspace/filesystem.rs` |
 | Workspace trait | `src/workspace/mod.rs` |
 | Workspace migration | `src/workspace/migrate.rs` |
 | MemoryConfig | `src/config/mod.rs` |
@@ -231,7 +231,7 @@ The tiered memory architecture — agent-curated files with character limits,
 FTS5 search for overflow, periodic nudges, and daily journals — is inspired
 by [Hermes Agent](https://github.com/nousresearch/hermes-agent) by
 [Nous Research](https://nousresearch.com/).  Dyson's workspace file format
-is also compatible with the OpenClaw/TARS format used by Hermes.
+is also compatible with the filesystem/TARS format used by Hermes.
 
 ---
 

@@ -114,7 +114,7 @@ src/
     silent_output.rs      Null output sink for internal LLM calls (compaction, learning)
   workspace/
     mod.rs                Workspace trait, skill_files() discovery
-    openclaw.rs           OpenClawWorkspace (filesystem, skills/ auto-discovery)
+    filesystem.rs           FilesystemWorkspace (filesystem, skills/ auto-discovery)
     in_memory.rs          InMemoryWorkspace (for testing)
     memory_store.rs       SQLite FTS5 index for Tier 2 memory
     migrate.rs            Workspace versioning and migrations

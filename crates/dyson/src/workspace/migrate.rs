@@ -9,7 +9,7 @@
 //   migration is a sequence of filesystem-level `Step` operations.
 //
 // How it works:
-//   1. `OpenClawWorkspace::load()` calls `migrate(path)` before reading files.
+//   1. `FilesystemWorkspace::load()` calls `migrate(path)` before reading files.
 //   2. `migrate()` reads `.workspace_version` (default: 0 if missing).
 //   3. It runs each migration's steps in order, skipping versions
 //      below the current workspace version.
@@ -19,7 +19,7 @@
 //
 // Version detection:
 //   Directories without a `.workspace_version` file are treated as version 0.
-//   This means existing OpenClaw/TARS workspaces enter the chain at v0 and
+//   This means existing filesystem/TARS workspaces enter the chain at v0 and
 //   get migrated forward automatically.  Content defaults (USER.md, etc.)
 //   are handled separately by `ensure_defaults()` — migrations only handle
 //   structural changes.
@@ -108,7 +108,7 @@ struct Migration {
 /// 3. Define the steps using the Step enum.
 const fn migrations() -> &'static [Migration] {
     &[
-        // v0 → v1: OpenClaw format → Dyson workspace.
+        // v0 → v1: filesystem format → Dyson workspace.
         //
         // Structural changes only — new default files (USER.md, HEARTBEAT.md)
         // are created by ensure_defaults(), not here.

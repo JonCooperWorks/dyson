@@ -660,7 +660,7 @@ pub struct SubagentAgentConfig {
 /// ```json
 /// {
 ///   "workspace": {
-///     "backend": "openclaw",
+///     "backend": "filesystem",
 ///     "connection_string": "~/.dyson"
 ///   }
 /// }
@@ -672,10 +672,10 @@ pub struct SubagentAgentConfig {
 /// ```
 #[derive(Debug, Clone)]
 pub struct WorkspaceConfig {
-    /// Backend type.  Currently supported: "openclaw".
+    /// Backend type.  Currently supported: "filesystem".
     pub backend: String,
 
-    /// Connection string (path for openclaw).  Resolved via secret system.
+    /// Connection string (path for filesystem).  Resolved via secret system.
     /// Uses `Credential` because connection strings can contain passwords
     /// (e.g., database URLs with embedded credentials).
     pub connection_string: crate::auth::Credential,
@@ -687,7 +687,7 @@ pub struct WorkspaceConfig {
 impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
-            backend: "openclaw".into(),
+            backend: "filesystem".into(),
             connection_string: crate::auth::Credential::new("~/.dyson".into()),
             memory: MemoryConfig::default(),
         }

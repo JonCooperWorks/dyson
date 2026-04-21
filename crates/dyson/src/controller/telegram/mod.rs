@@ -1658,7 +1658,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 fn save_memory_note(settings: &Settings, note: &str) -> crate::Result<()> {
     let mut workspace = crate::workspace::create_workspace(&settings.workspace)?;
 
-    let today = crate::workspace::OpenClawWorkspace::today_date();
+    let today = crate::workspace::FilesystemWorkspace::today_date();
     let entry = format!("\n- [{today}] {note}");
 
     workspace.append("MEMORY.md", &entry);

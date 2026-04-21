@@ -116,7 +116,7 @@ build_agent(settings, prompt, mode, client, registry, channel_id)
   │
   └── AgentMode::Public
         → create_channel_workspace()   # loads ~/.dyson/channels/{id}/
-        │   → OpenClawWorkspace::load()
+        │   → FilesystemWorkspace::load()
         │   → wrapped in ChannelWorkspace (default-deny writes)
         │   → expire old journals (>90 days)
         → filtered skills (workspace memory + web only)

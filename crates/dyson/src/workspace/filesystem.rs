@@ -1,12 +1,13 @@
 // ===========================================================================
-// OpenClawWorkspace — OpenClaw-compatible agent memory and identity.
-//
-// LEARNING OVERVIEW
+// FilesystemWorkspace — agent memory + identity stored as markdown
+// files on disk.
 //
 // What this file does:
 //   Manages the agent's persistent state: identity, personality, memory,
-//   and daily journals.  Uses the OpenClaw file format so Dyson can be a
-//   drop-in replacement for OpenClaw-powered agents like TARS.
+//   and daily journals — one markdown file per concept, all under a
+//   single directory (default `~/.dyson/`).  Files are plain markdown
+//   so the operator can read and edit them in any editor; the agent
+//   can also rewrite them via the `workspace` tool.
 //
 // File layout (~/.dyson/ by default):
 //
@@ -24,10 +25,8 @@
 //       code-review.md — local skill files (auto-discovered, Hermes-style)
 //       ...
 //
-// OpenClaw compatibility:
-//   These files are the same format as OpenClaw/TARS.  If you have an
-//   existing OpenClaw workspace, point Dyson at it and it reads the same
-//   files.  If you don't, Dyson creates sensible defaults.
+// On first run any missing files are created from sensible defaults so
+// a fresh `~/.dyson/` is bootstrap-ready.
 // ===========================================================================
 
 use std::collections::{HashMap, HashSet};
@@ -41,14 +40,14 @@ use crate::workspace::Workspace;
 use crate::workspace::memory_store::MemoryStore;
 
 // ---------------------------------------------------------------------------
-// OpenClawWorkspace — the persistent state directory.
+// FilesystemWorkspace — the persistent state directory.
 // ---------------------------------------------------------------------------
 
 /// The agent's persistent workspace — identity, memory, and journals.
 ///
-/// Reads/writes markdown files in the OpenClaw format.  The workspace
+/// Reads/writes markdown files in the filesystem format.  The workspace
 /// directory defaults to `~/.dyson/` but can be configured.
-pub struct OpenClawWorkspace {
+pub struct FilesystemWorkspace {
     /// Root directory of the workspace.
     path: PathBuf,
 
@@ -65,7 +64,7 @@ pub struct OpenClawWorkspace {
     memory_store: MemoryStore,
 }
 
-impl OpenClawWorkspace {
+impl FilesystemWorkspace {
     /// Load a workspace from a directory.
     ///
     /// Creates the directory and default files if they don't exist.
@@ -326,7 +325,7 @@ Capture what matters. Decisions, context, things to remember.
 // Workspace trait implementation
 // ---------------------------------------------------------------------------
 
-impl Workspace for OpenClawWorkspace {
+impl Workspace for FilesystemWorkspace {
     fn get(&self, name: &str) -> Option<String> {
         self.files.get(name).cloned()
     }
@@ -599,13 +598,13 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn temp_workspace() -> (PathBuf, OpenClawWorkspace) {
+    fn temp_workspace() -> (PathBuf, FilesystemWorkspace) {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("dyson-test-{}-{id}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let ws = OpenClawWorkspace::load(&dir, MemoryConfig::default()).unwrap();
+        let ws = FilesystemWorkspace::load(&dir, MemoryConfig::default()).unwrap();
         (dir, ws)
     }
 
@@ -629,7 +628,7 @@ mod tests {
         std::fs::write(dir.join("SOUL.md"), "I am custom").unwrap();
 
         // Reload — should keep the custom content.
-        let ws = OpenClawWorkspace::load(&dir, MemoryConfig::default()).unwrap();
+        let ws = FilesystemWorkspace::load(&dir, MemoryConfig::default()).unwrap();
         assert_eq!(ws.get("SOUL.md").unwrap(), "I am custom");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -640,7 +639,7 @@ mod tests {
         ws.journal("## Session started");
         ws.journal("Did some work");
 
-        let today = OpenClawWorkspace::today_journal();
+        let today = FilesystemWorkspace::today_journal();
         let content = ws.get(&today).unwrap();
         assert!(content.contains("Session started"));
         assert!(content.contains("Did some work"));
@@ -905,7 +904,7 @@ mod tests {
         .unwrap();
 
         // Reload workspace — skill should now be in the files HashMap.
-        let ws = OpenClawWorkspace::load(&dir, MemoryConfig::default()).unwrap();
+        let ws = FilesystemWorkspace::load(&dir, MemoryConfig::default()).unwrap();
         let content = ws.get("skills/diagnostics/SKILL.md");
         assert!(
             content.is_some(),
@@ -974,7 +973,7 @@ mod tests {
         // Modify on disk outside the workspace.
         std::fs::write(dir.join("MEMORY.md"), "modified on disk").unwrap();
 
-        let ws = OpenClawWorkspace::load(&dir, MemoryConfig::default()).unwrap();
+        let ws = FilesystemWorkspace::load(&dir, MemoryConfig::default()).unwrap();
         assert_eq!(ws.get("MEMORY.md").unwrap(), "modified on disk");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1015,7 +1014,7 @@ mod tests {
         .unwrap();
 
         // Reload workspace — KB files should be in the HashMap.
-        let ws = OpenClawWorkspace::load(&dir, MemoryConfig::default()).unwrap();
+        let ws = FilesystemWorkspace::load(&dir, MemoryConfig::default()).unwrap();
 
         assert!(ws.get("kb/raw/article.md").is_some());
         assert!(ws.get("kb/wiki/rust/ownership.md").is_some());
@@ -1055,7 +1054,7 @@ mod tests {
         drop(ws);
 
         // Reload — the file should be re-indexed from disk.
-        let ws = OpenClawWorkspace::load(&dir, MemoryConfig::default()).unwrap();
+        let ws = FilesystemWorkspace::load(&dir, MemoryConfig::default()).unwrap();
         let results = ws.memory_search("diffusion denoise");
         assert!(!results.is_empty());
         assert_eq!(results[0].0, "kb/wiki/diffusion.md");
