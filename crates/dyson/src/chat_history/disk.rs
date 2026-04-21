@@ -145,7 +145,10 @@ impl ChatHistory for DiskChatHistory {
                 continue;
             }
             let stem = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(s) if !s.contains('.') => s.to_string(),
+                // Skip rotated archives (`{id}.{ts}.json` → stem has `.`).
+                // Skip feedback sidecars (`{id}_feedback.json`) so they
+                // don't appear as phantom conversations in the UI.
+                Some(s) if !s.contains('.') && !s.ends_with("_feedback") => s.to_string(),
                 _ => continue,
             };
             // mtime fallback: UNIX_EPOCH if the platform won't tell us.
