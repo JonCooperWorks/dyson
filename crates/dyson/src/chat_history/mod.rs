@@ -66,6 +66,16 @@ pub trait ChatHistory: Send + Sync {
     /// and a fresh conversation starts.  Old history files are preserved
     /// for review or RAG indexing.
     fn rotate(&self, chat_id: &str) -> Result<()>;
+
+    /// Enumerate the chat IDs that have a current (non-archived) history.
+    ///
+    /// Used by controllers (e.g. the HTTP controller) to repopulate their
+    /// in-memory chat list at startup.  Default returns empty for
+    /// backends that don't support enumeration; the disk backend
+    /// overrides it to scan its directory.
+    fn list(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 // ---------------------------------------------------------------------------

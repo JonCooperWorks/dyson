@@ -168,12 +168,14 @@ impl Tool for ReadFileTool {
         // Read the requested range.
         let max_lines = limit.unwrap_or(usize::MAX);
         let mut output = String::new();
+        let mut raw_lines: Vec<String> = Vec::new();
         let mut count = 0;
         while count < max_lines {
             match lines.next_line().await {
                 Ok(Some(line)) => {
                     let line_num = start + count + 1;
                     let _ = writeln!(output, "{line_num:>6}\t{line}");
+                    raw_lines.push(line);
                     count += 1;
                 }
                 Ok(None) => break,
@@ -190,7 +192,12 @@ impl Tool for ReadFileTool {
             return Ok(ToolOutput::success("(empty file)"));
         }
 
-        Ok(ToolOutput::success(output))
+        let view = crate::tool::view::ToolView::Read {
+            path: path.display().to_string(),
+            lines: raw_lines,
+            highlight: None,
+        };
+        Ok(ToolOutput::success(output).with_view(view))
     }
 }
 

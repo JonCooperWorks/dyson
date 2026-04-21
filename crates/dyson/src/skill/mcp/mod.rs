@@ -407,6 +407,7 @@ impl Tool for McpRemoteTool {
         Ok(ToolOutput {
             content,
             is_error: tool_result.is_error,
+            view: None,
             metadata: None,
             files: vec![],
             checkpoints: vec![],

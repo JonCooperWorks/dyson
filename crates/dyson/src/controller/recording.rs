@@ -223,6 +223,7 @@ mod tests {
         ToolOutput {
             content: content.to_owned(),
             is_error,
+            view: None,
             metadata: None,
             files: Vec::new(),
             checkpoints: Vec::new(),

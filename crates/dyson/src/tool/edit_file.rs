@@ -103,11 +103,62 @@ impl Tool for EditFileTool {
 
         let new_content = content.replacen(old_string, new_string, 1);
 
+        // Find the line number of the first changed line so the diff
+        // renders with real line numbers from the source file.
+        let match_byte = content.find(old_string).unwrap_or(0);
+        let start_line = content[..match_byte].chars().filter(|c| *c == '\n').count() + 1;
+
         if let Err(e) = tokio::fs::write(&path, &new_content).await {
             return Ok(ToolOutput::error(path_err("write", &path, e)));
         }
 
-        Ok(ToolOutput::success(format!("Applied edit to {file_path}")))
+        let view = build_diff_view(file_path, start_line, old_string, new_string);
+        Ok(ToolOutput::success(format!("Applied edit to {file_path}")).with_view(view))
+    }
+}
+
+/// Build a minimal `Diff` view: removed lines from `old_string`, added
+/// lines from `new_string`, no surrounding context.  Sufficient for the
+/// right-rail panel to render the change clearly.
+fn build_diff_view(
+    file_path: &str,
+    start_line: usize,
+    old_string: &str,
+    new_string: &str,
+) -> crate::tool::view::ToolView {
+    use crate::tool::view::{DiffFile, DiffRow, ToolView};
+    let old_lines: Vec<&str> = old_string.lines().collect();
+    let new_lines: Vec<&str> = new_string.lines().collect();
+    let mut rows: Vec<DiffRow> = Vec::with_capacity(old_lines.len() + new_lines.len());
+    for (i, l) in old_lines.iter().enumerate() {
+        rows.push(DiffRow {
+            t: "rem".into(),
+            ln: start_line + i,
+            sn: "-".into(),
+            l: (*l).to_string(),
+        });
+    }
+    for (i, l) in new_lines.iter().enumerate() {
+        rows.push(DiffRow {
+            t: "add".into(),
+            ln: start_line + i,
+            sn: "+".into(),
+            l: (*l).to_string(),
+        });
+    }
+    let hunk = format!(
+        "@@ -{start_line},{ol} +{start_line},{nl} @@",
+        ol = old_lines.len(),
+        nl = new_lines.len()
+    );
+    ToolView::Diff {
+        files: vec![DiffFile {
+            path: file_path.to_string(),
+            add: new_lines.len(),
+            rem: old_lines.len(),
+            hunk,
+            rows,
+        }],
     }
 }
 

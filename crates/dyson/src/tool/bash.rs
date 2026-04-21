@@ -136,6 +136,7 @@ impl Tool for BashTool {
     /// - Timeout → `ToolOutput::error` (not DysonError — the tool *ran*, it just took too long)
     /// - Non-zero exit → `ToolOutput { is_error: true }` (normal tool-level error)
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let started = std::time::Instant::now();
         // -- Extract the command string --
         let command = input["command"]
             .as_str()
@@ -222,6 +223,17 @@ impl Tool for BashTool {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
 
+                // Build the typed view first while both streams are still
+                // borrowed, before `combined` consumes them via into_owned().
+                let duration_ms = started.elapsed().as_millis() as u64;
+                let view = build_bash_view(
+                    command,
+                    &stdout,
+                    &stderr,
+                    output.status.code(),
+                    duration_ms,
+                );
+
                 // Combine stdout and stderr.  If both are non-empty, label
                 // the stderr section so the LLM can distinguish them.
                 // Use into_owned() only when needed to avoid cloning
@@ -257,6 +269,7 @@ impl Tool for BashTool {
                 Ok(ToolOutput {
                     content: truncated.into_owned(),
                     is_error,
+                    view: Some(view),
                     metadata: Some(serde_json::json!({
                         "exit_code": output.status.code(),
                         "stdout_bytes": output.stdout.len(),
@@ -363,6 +376,49 @@ fn is_safe_env_var(name: &str) -> bool {
     }
 
     false
+}
+
+/// Build the typed terminal view for the HTTP controller.
+///
+/// Lines are classified `'p'` for the prompt, `'c'` for stdout, `'e'` for
+/// stderr, `'d'` for dim/ancillary.  Truncates each stream to a sane line
+/// count so the SSE payload stays small (full output still goes to the LLM).
+fn build_bash_view(
+    command: &str,
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+    duration_ms: u64,
+) -> crate::tool::view::ToolView {
+    use crate::tool::view::{TermLine, ToolView};
+    const MAX_LINES_PER_STREAM: usize = 200;
+    let mut lines: Vec<TermLine> = Vec::new();
+    lines.push(TermLine {
+        c: 'p',
+        t: format!("$ {command}"),
+    });
+    let mut take_lines = |s: &str, c: char| {
+        for (i, l) in s.lines().enumerate() {
+            if i == MAX_LINES_PER_STREAM {
+                lines.push(TermLine {
+                    c: 'd',
+                    t: format!("… ({} more lines)", s.lines().count() - i),
+                });
+                break;
+            }
+            lines.push(TermLine {
+                c,
+                t: l.to_string(),
+            });
+        }
+    };
+    take_lines(stdout, 'c');
+    take_lines(stderr, 'e');
+    ToolView::Bash {
+        lines,
+        exit_code,
+        duration_ms,
+    }
 }
 
 // ===========================================================================

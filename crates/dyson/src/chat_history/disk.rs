@@ -128,6 +128,38 @@ impl ChatHistory for DiskChatHistory {
         );
         Ok(())
     }
+
+    /// Scan the chat directory for current (non-archived) chat files,
+    /// returned newest-first by file modification time.  Archived files
+    /// embed a timestamp in their stem (`{id}.{ts}.json`) so we filter
+    /// them out via the `.` test.
+    fn list(&self) -> Result<Vec<String>> {
+        let dir_iter = match std::fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(_) => return Ok(Vec::new()), // dir missing = no chats yet
+        };
+        let mut rows: Vec<(String, std::time::SystemTime)> = Vec::new();
+        for entry in dir_iter.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) if !s.contains('.') => s.to_string(),
+                _ => continue,
+            };
+            // mtime fallback: UNIX_EPOCH if the platform won't tell us.
+            // Treats unknowable dates as oldest, which is the safer
+            // default than newest.
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            rows.push((stem, mtime));
+        }
+        rows.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(rows.into_iter().map(|(id, _)| id).collect())
+    }
 }
 
 // ---------------------------------------------------------------------------

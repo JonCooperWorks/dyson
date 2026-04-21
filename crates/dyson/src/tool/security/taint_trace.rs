@@ -163,8 +163,36 @@ impl Tool for TaintTraceTool {
             Err(e) => return Ok(ToolOutput::error(format!("{e}"))),
         };
 
-        Ok(ToolOutput::success(render(&index, &result, &parsed)))
+        let view = build_taint_view(&result);
+        Ok(ToolOutput::success(render(&index, &result, &parsed)).with_view(view))
     }
+}
+
+/// Render the first taint path as a `Taint` view (source → propagator(s)
+/// → sink).  Empty `flow` means no path was found; the panel handles that.
+fn build_taint_view(result: &taint::TraceResult) -> crate::tool::view::ToolView {
+    use crate::ast::taint::HopKind;
+    use crate::tool::view::{TaintNode, ToolView};
+    let mut flow: Vec<TaintNode> = Vec::new();
+    if let Some(path) = result.paths.first() {
+        let last_idx = path.hops.len().saturating_sub(1);
+        for (i, hop) in path.hops.iter().enumerate() {
+            let kind = match hop.kind {
+                HopKind::Source => "source",
+                HopKind::Sink => "sink",
+                _ if i == 0 => "source",
+                _ if i == last_idx => "sink",
+                _ => "prop",
+            };
+            flow.push(TaintNode {
+                kind: kind.into(),
+                loc: format!("{}:{}", hop.file.display(), hop.line),
+                sym: hop.detail.clone(),
+                note: format!("{:?}", hop.kind),
+            });
+        }
+    }
+    ToolView::Taint { flow }
 }
 
 fn render(index: &taint::SymbolIndex, result: &taint::TraceResult, input: &Input) -> String {

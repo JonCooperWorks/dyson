@@ -52,6 +52,7 @@
 // ===========================================================================
 
 pub mod background;
+pub mod http;
 pub mod recording;
 #[cfg(feature = "dangerous_swarm")]
 pub mod swarm;
@@ -585,7 +586,7 @@ pub fn create_hot_reloader(
             let p = PathBuf::from("dyson.json");
             if p.exists() { Some(p) } else { None }
         });
-    let workspace_path = crate::workspace::OpenClawWorkspace::resolve_path(Some(
+    let workspace_path = crate::workspace::FilesystemWorkspace::resolve_path(Some(
         settings.workspace.connection_string.expose(),
     ));
     let reloader = crate::config::hot_reload::HotReloader::new(

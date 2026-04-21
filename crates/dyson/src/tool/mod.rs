@@ -61,6 +61,7 @@ pub mod load_skill;
 pub mod memory_search;
 pub mod read_file;
 pub mod search_files;
+pub mod view;
 pub mod send_file;
 pub mod skill_create;
 #[cfg(feature = "dangerous_swarm")]
@@ -342,6 +343,15 @@ pub struct ToolOutput {
     /// decide to retry, try a different approach, or report the error.
     pub is_error: bool,
 
+    /// Optional typed UI payload — what a controller renders natively.
+    ///
+    /// Side-channel to the controller (not sent to the LLM).  Tools that
+    /// can produce a richer view than plain text (terminal, diff, SBOM,
+    /// taint flow, file read) attach a `ToolView` here; the HTTP
+    /// controller forwards it over SSE so the right-rail panel renders
+    /// the right shape.  Tools that don't bother leave it `None`.
+    pub view: Option<view::ToolView>,
+
     /// Optional structured metadata (not sent to the LLM).
     ///
     /// Used for internal tracking: timing info, exit codes, byte counts,
@@ -507,6 +517,7 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: false,
+            view: None,
             metadata: None,
             files: Vec::new(),
             checkpoints: Vec::new(),
@@ -518,10 +529,17 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: true,
+            view: None,
             metadata: None,
             files: Vec::new(),
             checkpoints: Vec::new(),
         }
+    }
+
+    /// Attach a typed `ToolView` for native UI rendering.
+    pub fn with_view(mut self, view: view::ToolView) -> Self {
+        self.view = Some(view);
+        self
     }
 
     /// Attach a file to be sent to the user via the controller.

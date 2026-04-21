@@ -79,6 +79,15 @@ pub async fn run(
                         tracing::warn!("telegram controller missing bot_token — skipping");
                     }
                 }
+                "http" => {
+                    if let Some(ctrl) =
+                        dyson::controller::http::HttpController::from_config(config)
+                    {
+                        controllers.push(Box::new(ctrl));
+                    } else {
+                        tracing::warn!("http controller config invalid — skipping");
+                    }
+                }
                 "swarm" => {
                     #[cfg(feature = "dangerous_swarm")]
                     {

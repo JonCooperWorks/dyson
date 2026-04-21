@@ -82,8 +82,54 @@ impl Tool for DependencyScanTool {
                 .map_err(|e| DysonError::tool("dependency_scan", format!("cyclonedx encode: {e}")))?,
             _ => render_text(&report),
         };
-        Ok(ToolOutput::success(out))
+        let view = build_sbom_view(&report);
+        Ok(ToolOutput::success(out).with_view(view))
     }
+}
+
+/// Build the SBOM panel view: vulnerable rows + per-severity counts.
+/// Reachability is `"unknown"` because Dyson doesn't compute it here yet
+/// — the prototype renders the value as-is, and a future taint-trace
+/// pass can fill it in.
+fn build_sbom_view(report: &ScanReport) -> crate::tool::view::ToolView {
+    use crate::tool::view::{SbomCounts, SbomRow, ToolView};
+    let mut rows = Vec::with_capacity(report.findings.len());
+    let mut counts = SbomCounts {
+        total: report.deps.len(),
+        ..Default::default()
+    };
+    for (dep, vulns) in &report.findings {
+        for v in vulns {
+            let sev_str = match v.severity {
+                Severity::Critical => {
+                    counts.crit += 1;
+                    "crit"
+                }
+                Severity::High => {
+                    counts.high += 1;
+                    "high"
+                }
+                Severity::Medium => {
+                    counts.med += 1;
+                    "med"
+                }
+                Severity::Low => {
+                    counts.low += 1;
+                    "low"
+                }
+                Severity::Unknown => "unknown",
+            };
+            rows.push(SbomRow {
+                pkg: dep.name.clone(),
+                ver: dep.version.clone().unwrap_or_default(),
+                sev: sev_str.into(),
+                id: v.id.clone(),
+                reach: "unknown".into(),
+                note: v.summary.clone(),
+            });
+        }
+    }
+    ToolView::Sbom { rows, counts }
 }
 
 fn parse_severity(s: Option<&str>) -> Severity {

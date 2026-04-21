@@ -52,6 +52,43 @@ LLM says: tool_use("bash", {"command": "rm -rf /"})
 
 Dyson refuses to start without the OS sandbox binary unless `--dangerous-no-sandbox` is passed.
 
+## Web UI
+
+A built-in HTTP controller serves a local web UI plus a JSON + SSE API
+so you can talk to your agent in a browser instead of the terminal.
+Add it to `dyson.json`:
+
+```json
+{ "type": "http", "bind": "127.0.0.1:7878" }
+```
+
+Open `http://127.0.0.1:7878/`.  Same `ChatHistory` and `FeedbackStore`
+as the Telegram controller — chats and ratings sync both ways.
+
+> ## ⚠️ DO NOT EXPOSE THE WEB UI TO THE PUBLIC INTERNET
+>
+> **The HTTP controller has no inbound authentication.**  Anyone who
+> can reach the bind address can talk to your agent, edit your
+> workspace files (`SOUL.md`, `MEMORY.md`, journal entries), switch
+> your model, read every chat in `~/.dyson/chats`, and burn your
+> provider credits.  The default `127.0.0.1` bind is the **only**
+> supported deployment.
+>
+> **For remote access, tunnel — never expose:**
+> - **SSH:** `ssh -L 7878:127.0.0.1:7878 user@your-host` then open
+>   `http://127.0.0.1:7878/` on your laptop.
+> - **Tailscale:** bind to `127.0.0.1:7878`, install Tailscale on
+>   server + client, reach the loopback over the mesh — Tailscale
+>   ACLs gate who can connect.
+> - **Cloudflare Tunnel / WireGuard:** same pattern.
+>
+> Do **not** bind to `0.0.0.0` on a public host.  Do **not** put a
+> reverse proxy in front of it without your own auth in the proxy.
+> The web UI assumes a single trusted operator behind loopback.
+
+See [docs/web.md](docs/web.md) for the full API, SSE event schema,
+typed `ToolView` payloads, persistence story, and known limits.
+
 ## Swarm (trusted-network only)
 
 The swarm distributes tasks across Dyson nodes. A central hub signs work with Ed25519; nodes verify before executing.
@@ -258,6 +295,6 @@ This returns freed pages to the OS within ~1 second at the cost of a little extr
 
 ## Inspired by
 
-- **[OpenClaw](https://github.com/openclaw/openclaw)** — Multi-channel AI assistant. Dyson's controller architecture and workspace format come from OpenClaw.
 - **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — Self-improving agent from [Nous Research](https://nousresearch.com/). Dyson's memory system is modeled after Hermes.
+- **[OpenClaw](https://github.com/openclaw/openclaw)** — Multi-channel AI assistant. Dyson's controller architecture and workspace format come from OpenClaw.
 - **[zeroclaw](https://github.com/zeroclaw-labs/zeroclaw)** — Minimal agent focused on resource consumption.
