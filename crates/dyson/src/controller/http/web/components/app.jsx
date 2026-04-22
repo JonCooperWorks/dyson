@@ -92,11 +92,18 @@ function App() {
     };
   }, [conv, bump]);
 
-  // In-chat artefact chip → flip to the Artefacts tab.  The chip fires
-  // `dyson:open-artefact` with the id; ArtefactsView picks the same
-  // event up to set the selected artefact.
+  // In-chat artefact chip → flip to the Artefacts tab.  The chip
+  // fires `dyson:open-artefact` with the id; we also stash it on a
+  // global so ArtefactsView's initial mount can pick it up even
+  // though its own listener isn't attached yet (the tab switch and
+  // the listener-attach happen in the same microtask, racing
+  // against the event dispatch).
   useEffect(() => {
-    const h = () => setView('artefacts');
+    const h = (e) => {
+      const id = e.detail && e.detail.id;
+      if (id) window.__dysonOpenArtefactId = id;
+      setView('artefacts');
+    };
     window.addEventListener('dyson:open-artefact', h);
     return () => window.removeEventListener('dyson:open-artefact', h);
   }, []);
@@ -280,7 +287,23 @@ function ConversationView({ conv, session, bump }) {
               title: b.title,
               url: b.url,
               bytes: b.bytes,
+              tool_use_id: b.tool_use_id,
+              metadata: b.metadata,
             });
+            // Image artefact with a known tool_use_id: flip the
+            // matching tool panel into image-kind so the right-rail
+            // shows the picture instead of text.  This is the refresh
+            // path's counterpart to `onFile` during live streaming.
+            if (b.kind === 'image' && b.tool_use_id && D.tools[b.tool_use_id]) {
+              const t = D.tools[b.tool_use_id];
+              const fileUrl = (b.metadata && b.metadata.file_url) || b.url;
+              t.kind = 'image';
+              t.body = {
+                url: fileUrl,
+                name: (b.metadata && b.metadata.file_name) || b.title,
+                mime: 'image/*',
+              };
+            }
           }
         }
         return { role, ts: '', blocks };
@@ -298,7 +321,51 @@ function ConversationView({ conv, session, bump }) {
               title: b.title,
               bytes: b.bytes,
               created_at: 0,
+              metadata: b.metadata,
             });
+          }
+        }
+      }
+
+      // Retroactive wiring: image artefacts emitted BEFORE tool_use_id
+      // tracking landed have no correlation to their originating tool.
+      // Fall back to a positional heuristic — pair the i-th unassigned
+      // image artefact with the i-th `image_generate` tool panel that
+      // isn't already showing an image.  This is how old chats get
+      // their images back after the user upgrades.
+      const orphanImages = [];
+      for (const t of turns) {
+        for (const b of t.blocks) {
+          if (b.type === 'artefact' && b.kind === 'image' && !b.tool_use_id) {
+            orphanImages.push(b);
+          }
+        }
+      }
+      if (orphanImages.length > 0) {
+        for (const t of turns) {
+          for (const b of t.blocks) {
+            if (b.type !== 'tool') continue;
+            const tool = D.tools[b.ref];
+            if (!tool || tool.name !== 'image_generate' || tool.kind === 'image') continue;
+            const art = orphanImages.shift();
+            if (!art) break;
+            // Image-artefact body is the served file URL (stored
+            // verbatim in `/api/artefacts/<id>`).  Prefer metadata
+            // when present (newer emissions) — otherwise fetch the
+            // body to resolve the URL.
+            const metaUrl = art.metadata && art.metadata.file_url;
+            const fileName = (art.metadata && art.metadata.file_name) || art.title;
+            tool.kind = 'image';
+            tool.body = { url: metaUrl || '', name: fileName, mime: 'image/*' };
+            if (!metaUrl) {
+              fetch(art.url)
+                .then(r => r.ok ? r.text() : Promise.reject(r.status))
+                .then(text => {
+                  tool.body = { ...tool.body, url: text.trim() };
+                  bump();
+                })
+                .catch(() => {});
+            }
           }
         }
       }
@@ -325,6 +392,16 @@ function ConversationView({ conv, session, bump }) {
   const ensureRailOpen = () => window.dispatchEvent(new CustomEvent('dyson:open-rail'));
 
   const handleOpenTool = (ref) => {
+    // Toggle: clicking an already-open tool chip closes its panel.
+    // Matches the user expectation that the chip is a switch, not a
+    // single-shot opener — the right-rail can get crowded fast and
+    // click-to-close is the natural way to dismiss.
+    if (session.openTool === ref && session.panels.includes(ref)) {
+      session.panels = session.panels.filter(x => x !== ref);
+      session.openTool = null;
+      bump();
+      return;
+    }
     session.openTool = ref;
     if (!session.panels.includes(ref)) session.panels = [...session.panels, ref];
     ensureRailOpen();

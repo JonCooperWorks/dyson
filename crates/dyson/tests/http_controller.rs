@@ -1265,6 +1265,92 @@ async fn emitted_images_survive_refresh_via_artefacts() {
 }
 
 #[tokio::test]
+async fn image_artefact_stamps_tool_use_id_for_panel_rehydration() {
+    // Regression: when image_generate emits its file during an active
+    // tool call, the ArtefactEntry must record the originating
+    // tool_use_id and the chat-load DTO must expose it.  The frontend
+    // uses this to flip the `image_generate` tool panel from its
+    // default text fallback into image-kind on refresh — without it
+    // the refreshed page shows the tool as "ok (33037ms) / Generated
+    // 1 image(s)..." and the image never reaches the panel.
+    let r = rig().await;
+
+    let created = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "tool_use_id" }),
+    ).await).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let mut sse = request(
+        &format!("{}/api/conversations/{}/events", r.base, id),
+        Method::GET,
+        None,
+    ).await;
+    assert_eq!(sse.status(), StatusCode::OK);
+    test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("gen.png");
+    std::fs::write(&png_path, PNG_1X1).expect("write png");
+
+    // Emit the file as if during an active `image_generate` tool call —
+    // exactly what SseOutput does after tool_use_start.
+    test_helpers::emit_agent_file_for_tool(
+        r.state.clone(),
+        &id,
+        &png_path,
+        Some("tool_use_image_generate_42"),
+    )
+    .await
+    .expect("emit png");
+
+    // Drain the `file` + `artefact` events.
+    let _ = read_sse_event(&mut sse).await;
+    let art_evt = read_sse_event(&mut sse).await;
+    assert_eq!(art_evt["type"], "artefact");
+    let art_id = art_evt["url"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("/api/artefacts/")
+        .to_string();
+
+    // The entry must carry the tool_use_id for the frontend to pair
+    // it with the right tool panel.
+    assert_eq!(
+        r.state.artefact_tool_use_id_for_test(&art_id).as_deref(),
+        Some("tool_use_image_generate_42"),
+        "ArtefactEntry.tool_use_id must be stamped at emission",
+    );
+
+    // The chat-load DTO must expose it as well.
+    let convo = body_json(
+        get(&format!("{}/api/conversations/{}", r.base, id)).await,
+    ).await;
+    let messages = convo["messages"].as_array().expect("messages");
+    let artefact_chip = messages
+        .last()
+        .unwrap()["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["type"] == "artefact")
+        .expect("artefact chip");
+    assert_eq!(
+        artefact_chip["tool_use_id"], "tool_use_image_generate_42",
+        "chat-load DTO must expose tool_use_id: {artefact_chip}",
+    );
+    assert_eq!(artefact_chip["kind"], "image");
+    // metadata carries file_url so the reader / tool panel can render
+    // without a second round-trip.
+    assert!(
+        artefact_chip["metadata"]["file_url"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("/api/files/")),
+        "metadata.file_url missing: {artefact_chip}",
+    );
+}
+
+#[tokio::test]
 async fn chat_reload_shows_emitted_images_in_transcript() {
     // Regression: on browser refresh the chat-scroll must still show
     // agent-emitted images as artefact chips.  Files are side-channel

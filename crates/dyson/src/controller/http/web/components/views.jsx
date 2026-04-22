@@ -330,7 +330,16 @@ function ActivityView() {
 // ---------------------------------------------------------------------------
 
 function ArtefactsView({ conv, session, bump }) {
-  const [selected, setSelected] = vUS(null);
+  // Seed the selection from the global stash written by App.onOpenArtefact
+  // so deep-linked clicks from chat chips land on the right artefact
+  // even though our own event listener isn't attached until after the
+  // view switch.  Clear the stash after consuming so it doesn't
+  // re-select an old id on the next mount.
+  const [selected, setSelected] = vUS(() => {
+    const pending = window.__dysonOpenArtefactId;
+    if (pending) delete window.__dysonOpenArtefactId;
+    return pending || null;
+  });
 
   // Lazy hydrate the per-chat artefact list from the API.  Subsequent
   // switches do nothing — live SSE keeps it current.

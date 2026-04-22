@@ -173,6 +173,16 @@ enum BlockDto {
         /// without the frontend having to reconstruct the URL.
         url: String,
         bytes: usize,
+        /// The originating tool call, when known.  The client uses
+        /// this to hydrate an image-kind artefact into the matching
+        /// `image_generate` tool panel on chat reload.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
+        /// Optional structured metadata — for image artefacts this
+        /// carries `file_url` so the reader and the tool panel can
+        /// render the image without a second round-trip.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
     },
 }
 
@@ -423,6 +433,11 @@ struct ArtefactEntry {
     content: String,
     mime_type: String,
     metadata: Option<serde_json::Value>,
+    /// The tool call that produced this artefact, when known.  Lets
+    /// the UI wire image artefacts back to the tool panel on chat
+    /// reload — without this, a refreshed page shows `image_generate`
+    /// as a text-only tool panel with the image orphaned in chat.
+    tool_use_id: Option<String>,
     /// UNIX seconds at emission.  UI sorts the list by this.
     created_at: u64,
 }
@@ -467,6 +482,7 @@ impl ArtefactStore {
             "mime_type": entry.mime_type,
             "created_at": entry.created_at,
             "metadata": entry.metadata,
+            "tool_use_id": entry.tool_use_id,
         });
         if let Err(e) = std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default()) {
             tracing::warn!(error = %e, id, "failed to persist artefact metadata");
@@ -491,6 +507,7 @@ impl ArtefactStore {
             content: body,
             mime_type: meta.get("mime_type").and_then(|v| v.as_str()).unwrap_or("text/markdown").to_string(),
             metadata: meta.get("metadata").cloned().filter(|v| !v.is_null()),
+            tool_use_id: meta.get("tool_use_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
             created_at: meta.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
         })
     }
@@ -716,6 +733,19 @@ impl HttpState {
             .as_ref()
             .and_then(|d| FileStore::load_from_disk(d, id))
             .map(|e| e.bytes)
+    }
+
+    /// Test hook — returns the `tool_use_id` stamped on an artefact
+    /// entry, if one is set.  Used by the regression test that
+    /// guarantees image_generate's image correlates back to its tool
+    /// panel on refresh.
+    #[doc(hidden)]
+    pub fn artefact_tool_use_id_for_test(&self, id: &str) -> Option<String> {
+        let s = match self.artefacts.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        s.items.get(id).and_then(|e| e.tool_use_id.clone())
     }
 }
 
@@ -957,6 +987,20 @@ pub mod test_helpers {
         chat_id: &str,
         path: &std::path::Path,
     ) -> crate::Result<()> {
+        emit_agent_file_for_tool(state, chat_id, path, None).await
+    }
+
+    /// Variant of `emit_agent_file` that simulates emission during a
+    /// specific tool call — stamps the artefact entry with the given
+    /// `tool_use_id` exactly like the live agent loop would after
+    /// `Output::tool_use_start`.  Used by the image-generate
+    /// tool-panel round-trip test.
+    pub async fn emit_agent_file_for_tool(
+        state: Arc<HttpState>,
+        chat_id: &str,
+        path: &std::path::Path,
+        tool_use_id: Option<&str>,
+    ) -> crate::Result<()> {
         let handle = state
             .chats
             .lock()
@@ -972,6 +1016,7 @@ pub mod test_helpers {
             artefacts: state.artefacts.clone(),
             next_artefact_id: state.artefact_id.clone(),
             data_dir: state.data_dir.clone(),
+            current_tool_use_id: tool_use_id.map(|s| s.to_string()),
         };
         out.send_file(path)
     }
@@ -1001,6 +1046,7 @@ pub mod test_helpers {
             artefacts: state.artefacts.clone(),
             next_artefact_id: state.artefact_id.clone(),
             data_dir: state.data_dir.clone(),
+            current_tool_use_id: None,
         };
         out.send_artefact(&artefact)
     }
@@ -1137,6 +1183,17 @@ async fn create_conversation(req: Request<hyper::body::Incoming>, state: &HttpSt
     state.chats.lock().await.insert(id.clone(), handle);
     // Newest first — push to front so the sidebar shows new chats on top.
     state.order.lock().await.insert(0, id.clone());
+    // Persist immediately so every conversation lives on disk 1:1 with
+    // the in-memory list.  Without this an empty chat vanishes on
+    // restart — the user would see "1 chat" in the sidebar, restart,
+    // and the chat would be gone because nothing was ever saved.  The
+    // save is best-effort: an IO failure is logged but doesn't fail
+    // creation (the in-memory chat still works for this session).
+    if let Some(h) = state.history.as_ref() {
+        if let Err(e) = h.save(&id, &[]) {
+            tracing::warn!(error = %e, chat_id = %id, "failed to persist new chat");
+        }
+    }
     json_ok(&serde_json::json!({ "id": id, "title": title }))
 }
 
@@ -1196,6 +1253,8 @@ async fn get_conversation(state: &HttpState, id: &str) -> Resp {
                 title: e.title.clone(),
                 url: format!("/api/artefacts/{aid}"),
                 bytes: e.content.len(),
+                tool_use_id: e.tool_use_id.clone(),
+                metadata: e.metadata.clone(),
             })
             .collect()
     };
@@ -1270,6 +1329,8 @@ fn block_to_dto(b: &ContentBlock) -> BlockDto {
             title: title.clone(),
             url: format!("/api/artefacts/{id}"),
             bytes: 0,
+            tool_use_id: None,
+            metadata: None,
         },
         // Fallback: treat image/document as a text marker so the wire
         // protocol stays simple.
@@ -1362,6 +1423,7 @@ async fn post_turn(
             artefacts,
             next_artefact_id: artefact_id,
             data_dir,
+            current_tool_use_id: None,
         };
 
         // Lazily build the agent on first use.  If a transcript exists
@@ -1706,6 +1768,13 @@ struct SseOutput {
     next_artefact_id: Arc<std::sync::atomic::AtomicU64>,
     /// Optional write-through disk directory for persistence.
     data_dir: Option<PathBuf>,
+    /// Currently-executing tool's id.  Set in `tool_use_start` and
+    /// carried across subsequent `send_file` / `send_artefact` calls
+    /// that the agent loop triggers from the same `ToolOutput`.  The
+    /// id is stamped on every file and artefact entry so the UI can
+    /// wire image artefacts back to the originating tool panel on
+    /// chat reload.
+    current_tool_use_id: Option<String>,
 }
 
 impl SseOutput {
@@ -1733,6 +1802,12 @@ impl Output for SseOutput {
     }
 
     fn tool_use_start(&mut self, id: &str, name: &str) -> std::result::Result<(), DysonError> {
+        // Remember which tool is running so any `send_file` /
+        // `send_artefact` calls that follow this turn's `tool_result`
+        // can stamp the same id on their FileEntry / ArtefactEntry.
+        // Reset in `flush` at turn end; NOT reset in `tool_result` —
+        // files are emitted AFTER the tool result per execution.rs.
+        self.current_tool_use_id = Some(id.to_string());
         self.send(SseEvent::ToolStart {
             id: id.to_string(),
             name: name.to_string(),
@@ -1868,6 +1943,7 @@ impl Output for SseOutput {
             content: artefact.content.clone(),
             mime_type: artefact.mime_type.clone(),
             metadata: artefact.metadata.clone(),
+            tool_use_id: self.current_tool_use_id.clone(),
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -1898,6 +1974,9 @@ impl Output for SseOutput {
     }
 
     fn flush(&mut self) -> std::result::Result<(), DysonError> {
+        // End of turn — the next turn's `tool_use_start` will set a
+        // new id; until then there's no "current" tool.
+        self.current_tool_use_id = None;
         Ok(())
     }
 }
