@@ -614,9 +614,15 @@ function ConversationView({ conv, session, bump }) {
         bump();
       },
       onArtefact: ({ id, kind, title, url, bytes, metadata }) => {
-        // Inline chip in chat + add to the per-chat artefacts list so
-        // the Artefacts tab lists it without a second fetch.
-        aTurn.blocks.push({ type: 'artefact', id, kind, title, url, bytes });
+        // Image artefacts double up on screen during live turns — the
+        // preceding `file` event already rendered a FileBlock with the
+        // same <img>.  Skip the transcript chip for images but still
+        // track them in session.artefacts so the Artefacts tab lists
+        // them.  On reload the server only sends artefact blocks (no
+        // `file` events to replay), so ArtefactBlock renders there.
+        if (kind !== 'image') {
+          aTurn.blocks.push({ type: 'artefact', id, kind, title, url, bytes });
+        }
         session.artefacts = [
           { id, kind, title, bytes, created_at: Math.floor(Date.now() / 1000), metadata },
           ...session.artefacts,
