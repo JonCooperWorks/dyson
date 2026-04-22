@@ -2,12 +2,13 @@
 
 > ## ⚠️ Loopback only.  Do not expose this to the public internet.
 >
-> The HTTP controller has **no inbound authentication**.  Anyone who can
-> reach the bind address can talk to your agent, edit your workspace
-> files, switch your model, and read every chat in `~/.dyson/chats`.
-> Bind to `127.0.0.1` (the default) and reach it remotely via SSH
-> tunnel or Tailscale — never via `0.0.0.0` on a host with public
-> network exposure.  See [README — Web UI](../README.md#web-ui).
+> The HTTP controller has two inbound-auth modes: `bearer` (shared
+> token on every `/api/*` request) and `dangerous_no_auth` (anonymous,
+> every request accepted).  Either way, the controller is designed for
+> a single trusted operator behind loopback or a VPN mesh.  Bind to
+> `127.0.0.1` (the default) and reach it remotely via SSH tunnel or
+> Tailscale — never via `0.0.0.0` on a host with public network
+> exposure.  See [README — Web UI](../README.md#web-ui).
 
 ---
 
@@ -40,13 +41,57 @@ vice versa.
 Add to your `dyson.json` `controllers` array:
 
 ```json
-{ "type": "http", "bind": "127.0.0.1:7878" }
+{
+  "type": "http",
+  "bind": "127.0.0.1:7878",
+  "auth": { "type": "dangerous_no_auth" }
+}
 ```
 
 | field | type | default | description |
 |---|---|---|---|
 | `bind` | `string` | `"127.0.0.1:7878"` | Address to bind.  Loopback-only is the only supported deployment.  Listening on `0.0.0.0` exposes the agent. |
 | `webroot` | `string?` | `null` | Optional path to a directory of UI files (`prototype.html`, `styles/`, `js/`, `components/`) for live-edit dev.  Unset means use the prototype embedded in the dyson binary. |
+| `auth` | `object` | **required** | Inbound authentication.  See below. |
+
+### Authentication
+
+Every HTTP controller config must declare an `auth` mechanism.  There
+is no default — omitting the field makes the controller refuse to
+start.  This forces the operator to name the chosen posture in writing,
+the same way `--dangerous-no-sandbox` works for the sandbox boundary.
+
+Two variants today:
+
+```json
+{ "auth": { "type": "dangerous_no_auth" } }
+```
+
+Accepts every request as anonymous.  Opt-in escape hatch for local
+development behind loopback — the controller logs a loud warning at
+startup.
+
+```json
+{
+  "auth": {
+    "type": "bearer",
+    "token": { "resolver": "insecure_env", "name": "DYSON_WEB_TOKEN" }
+  }
+}
+```
+
+Requires `Authorization: Bearer <token>` on every `/api/*` request;
+mismatches return `401 {"error":"unauthorized"}`.  Static-shell paths
+(`/`, `/styles/*`, `/js/*`, `/components/*`) are exempt so the UI can
+load before the browser has presented the credential.  The `token`
+field flows through the same secret-resolver pipeline that Telegram's
+`bot_token` uses, so it can be a literal string or a
+`{ "resolver": …, "name": … }` reference.
+
+Both variants are implementations of the shared `Auth` trait at
+`crates/dyson/src/auth/mod.rs`, which is also used by the MCP server.
+A future config variant can plug in any other `Auth` implementation
+without touching `dispatch()`.
 
 The web assets live in
 [crates/dyson/src/controller/http/web/](../crates/dyson/src/controller/http/web/)

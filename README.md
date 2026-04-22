@@ -59,16 +59,28 @@ so you can talk to your agent in a browser instead of the terminal.
 Add it to `dyson.json`:
 
 ```json
-{ "type": "http", "bind": "127.0.0.1:7878" }
+{
+  "type": "http",
+  "bind": "127.0.0.1:7878",
+  "auth": { "type": "dangerous_no_auth" }
+}
 ```
+
+Every HTTP controller config must declare an `auth` mechanism — there
+is no default.  `dangerous_no_auth` is the opt-in escape hatch that
+mirrors `--dangerous-no-sandbox`; switch to
+`{ "type": "bearer", "token": "…" }` (or a secret-resolver reference)
+to require `Authorization: Bearer <token>` on every `/api/*` request.
 
 Open `http://127.0.0.1:7878/`.  Same `ChatHistory` and `FeedbackStore`
 as the Telegram controller — chats and ratings sync both ways.
 
 > ## ⚠️ DO NOT EXPOSE THE WEB UI TO THE PUBLIC INTERNET
 >
-> **The HTTP controller has no inbound authentication.**  Anyone who
-> can reach the bind address can talk to your agent, edit your
+> Even with `bearer` auth enabled, the controller is designed for a
+> single trusted operator behind loopback or a VPN mesh.  With
+> `dangerous_no_auth` there is **no inbound authentication** — anyone
+> who can reach the bind address can talk to your agent, edit your
 > workspace files (`SOUL.md`, `MEMORY.md`, journal entries), switch
 > your model, read every chat in `~/.dyson/chats`, and burn your
 > provider credits.  The default `127.0.0.1` bind is the **only**

@@ -44,7 +44,6 @@ pub mod bearer;
 pub mod composite;
 pub mod credential;
 pub mod deferred_bearer;
-#[cfg(test)]
 pub mod no_auth;
 pub mod oauth;
 pub mod static_headers;
@@ -55,8 +54,7 @@ pub use bearer::BearerTokenAuth;
 pub use composite::CompositeAuth;
 pub use credential::Credential;
 pub use deferred_bearer::DeferredBearerAuth;
-#[cfg(test)]
-pub use no_auth::NoAuth;
+pub use no_auth::DangerousNoAuth;
 pub use oauth::OAuth;
 pub use static_headers::StaticHeadersAuth;
 
