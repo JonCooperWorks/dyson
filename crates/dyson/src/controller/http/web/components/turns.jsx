@@ -143,6 +143,13 @@ function markdown(s) {
     return `${FBEG}${i}${FEND}`;
   });
 
+  // Headers that aren't separated from the following content by a
+  // blank line (`## CRITICAL\nNo findings.`) fell through to the
+  // paragraph branch and rendered as literal `## CRITICAL` text.
+  // Inject an extra newline after every header line so block splitting
+  // on `\n{2,}` peels the header into its own block.
+  s = s.replace(/^(#{1,6}\s+.+)$/gm, '$1\n');
+
   // Block-level pass: split on blank lines, classify each block.
   const fenceRe = new RegExp(`^${FBEG}(\\d+)${FEND}$`);
   const out = s.split(/\n{2,}/).map(block => {

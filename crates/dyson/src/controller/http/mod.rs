@@ -2768,6 +2768,22 @@ mod tests {
     }
 
     #[test]
+    fn markdown_header_splits_from_following_paragraph() {
+        // Regression for "## CRITICAL\nNo findings. rendered as literal
+        // ## text" in the artefact reader.  The block-level header
+        // match only accepts a standalone line, so a header without a
+        // blank line before its paragraph fell through to the
+        // paragraph branch.  The fix injects a newline after every
+        // header line so block splitting on `\n{2,}` peels headers
+        // into their own block.
+        let t = jsx("/components/turns.jsx");
+        assert!(
+            t.contains("replace(/^(#{1,6}\\s+.+)$/gm, '$1\\n')"),
+            "turns.jsx must inject a blank line after header lines",
+        );
+    }
+
+    #[test]
     fn file_block_renders_inline_image_or_download_link() {
         // Regression for "agent can't deliver files to the UI".  The
         // SSE `file` event must be dispatched into the transcript as
