@@ -47,9 +47,35 @@ function makeSession() {
   };
 }
 
+// Hash-based router: URLs are shareable (send the link to another
+// Tailscale node and they land on the same conversation / view).
+//   #/                → conv view, default to the first conversation
+//   #/c/<chat_id>     → conv view, specific chat
+//   #/mind            → mind view
+//   #/artefacts       → artefacts view
+//   #/activity        → activity view
+// Hash keeps us out of the server's routing — `/`, `/c/id`, `/mind`
+// all serve the same SPA shell and the client reads the fragment.
+function parseHash() {
+  const raw = (typeof window !== 'undefined' && window.location.hash) || '';
+  const parts = raw.replace(/^#\/?/, '').split('/').filter(Boolean);
+  if (!parts.length) return { view: 'conv', conv: null };
+  if (parts[0] === 'c' && parts[1]) {
+    return { view: 'conv', conv: decodeURIComponent(parts[1]) };
+  }
+  if (VIEW_IDS.includes(parts[0])) return { view: parts[0], conv: null };
+  return { view: 'conv', conv: null };
+}
+
+function buildHash(view, conv) {
+  if (view === 'conv') return conv ? `#/c/${encodeURIComponent(conv)}` : '#/';
+  return `#/${view}`;
+}
+
 function App() {
-  const [view, setView] = useState('conv');
-  const [conv, setConv] = useState(null);
+  const initialRoute = parseHash();
+  const [view, setView] = useState(initialRoute.view);
+  const [conv, setConv] = useState(initialRoute.conv);
   const [showLeft, setShowLeft] = useState(false);
   const [showRight, setShowRight] = useState(false);
   // Desktop-only: collapse the right column entirely.
@@ -91,6 +117,35 @@ function App() {
       window.removeEventListener('dyson:live-update', h);
     };
   }, [conv, bump]);
+
+  // state → URL: push a new hash entry when view or conv changes so
+  // back/forward walk through the user's navigation history.  Skip the
+  // push when the hash already matches to avoid redundant entries
+  // (first mount, bounce from URL → state → URL).
+  useEffect(() => {
+    const target = buildHash(view, conv);
+    if (window.location.hash !== target) {
+      window.history.pushState(null, '', target);
+    }
+  }, [view, conv]);
+
+  // URL → state: popstate fires on back/forward; hashchange covers
+  // manual address-bar edits and shared links pasted in.  Parse and
+  // sync — setState is a no-op when the value is unchanged, so no
+  // loop with the state → URL effect above.
+  useEffect(() => {
+    const h = () => {
+      const r = parseHash();
+      setView(r.view);
+      if (r.conv != null) setConv(r.conv);
+    };
+    window.addEventListener('popstate', h);
+    window.addEventListener('hashchange', h);
+    return () => {
+      window.removeEventListener('popstate', h);
+      window.removeEventListener('hashchange', h);
+    };
+  }, []);
 
   // In-chat artefact chip → flip to the Artefacts tab.  The chip
   // fires `dyson:open-artefact` with the id; we also stash it on a
@@ -272,6 +327,13 @@ function ConversationView({ conv, session, bump }) {
             // chats minting `live-1` would otherwise collide.
             const id = b.id || `${conv}-tu-${++session.counter}`;
             if (!D.tools[id]) D.tools[id] = mkTool(b.name);
+            // Capture image_generate's prompt so ImagePanel can show
+            // it alongside the picture.  Kept off `sig` intentionally —
+            // the transcript chip stays clean; the prompt lives in the
+            // right-rail panel only.
+            if (b.name === 'image_generate' && b.input && typeof b.input.prompt === 'string') {
+              D.tools[id].prompt = b.input.prompt;
+            }
             blocks.push({ type: 'tool', ref: id });
           } else if (b.type === 'tool_result') {
             const t = D.tools[b.tool_use_id];
@@ -302,6 +364,7 @@ function ConversationView({ conv, session, bump }) {
                 url: fileUrl,
                 name: (b.metadata && b.metadata.file_name) || b.title,
                 mime: 'image/*',
+                prompt: t.prompt || '',
               };
             }
           }
@@ -506,6 +569,15 @@ function ConversationView({ conv, session, bump }) {
         const ref = session.liveToolRef;
         const t = ref && D.tools[ref];
         if (t) applyToolView(t, content, is_error, view);
+        // image_generate's content is `Generated N image(s) for: "…"`
+        // (prompt truncated to 100 chars server-side).  The file event
+        // fires after this one and overwrites body with url/name/mime,
+        // so capture the prompt on a sibling field first — ImagePanel
+        // reads it back off `tool.prompt`.
+        if (t && t.name === 'image_generate' && typeof content === 'string') {
+          const m = content.match(/^Generated \d+ image\(s\) for: "(.+)"$/s);
+          if (m) t.prompt = m[1];
+        }
         // Keep `liveToolRef` pointing at the completed tool so any
         // follow-up `file` / `artefact` / `checkpoint` events that
         // belong to the same tool call can find it.  `onToolStart`
@@ -536,7 +608,7 @@ function ConversationView({ conv, session, bump }) {
           const t = ref && D.tools[ref];
           if (t) {
             t.kind = 'image';
-            t.body = { url, name, mime: mime_type };
+            t.body = { url, name, mime: mime_type, prompt: t.prompt || '' };
           }
         }
         bump();

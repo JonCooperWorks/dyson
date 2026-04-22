@@ -70,6 +70,12 @@
           body: JSON.stringify(body),
         });
         if (!r.ok) throw new Error('create failed: ' + r.status);
+        // Drop the cached in-memory session for the rotated chat so
+        // clicking back into that tab re-hydrates from the now-empty
+        // disk file rather than showing the pre-rotation turns.
+        if (rotatePrevious && window.__dysonSessions) {
+          window.__dysonSessions.delete(rotatePrevious);
+        }
         return r.json();
       },
 

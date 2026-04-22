@@ -226,18 +226,26 @@ function ThinkingPanel({ text, running }) {
 
 // Image-result panel — surfaces the generated image in the right-rail
 // tool stack so it's visible alongside the tool call that produced it.
-function ImagePanel({ url, name }) {
+function ImagePanel({ url, name, prompt }) {
   if (!url) {
     return <div style={{padding:16, color:'var(--mute)', fontSize:12}}>No image URL.</div>;
   }
   return (
     <div style={{overflow:'auto', flex:1, padding:14, display:'flex',
-                 alignItems:'flex-start', justifyContent:'center', background:'var(--bg)'}}>
-      <a href={url} target="_blank" rel="noopener" title={name}>
+                 flexDirection:'column', alignItems:'center', gap:10,
+                 background:'var(--bg)'}}>
+      <a href={url} target="_blank" rel="noopener" title={name}
+         style={{display:'block', maxWidth:'100%'}}>
         <img src={url} alt={name || 'generated image'}
              style={{maxWidth:'100%', maxHeight:'100%', objectFit:'contain',
                      borderRadius:4, boxShadow:'0 2px 10px rgba(0,0,0,0.15)'}}/>
       </a>
+      {prompt && (
+        <div style={{alignSelf:'stretch', fontSize:12, lineHeight:1.4,
+                     color:'var(--fg-dim)', fontStyle:'italic'}}>
+          {prompt}
+        </div>
+      )}
     </div>
   );
 }
@@ -253,7 +261,7 @@ function ToolPanel({ tool, onClose }) {
     case 'taint': body = <TaintPanel flow={tool.body.flow || []}/>; break;
     case 'read': body = <ReadPanel path={tool.body.path} lines={tool.body.lines || []} highlight={tool.body.highlight}/>; break;
     case 'thinking': body = <ThinkingPanel text={tool.body?.text || ''} running={running}/>; break;
-    case 'image': body = <ImagePanel url={tool.body?.url} name={tool.body?.name}/>; break;
+    case 'image': body = <ImagePanel url={tool.body?.url} name={tool.body?.name} prompt={tool.body?.prompt || tool.prompt}/>; break;
     default: body = <FallbackPanel text={tool.body?.text || ''}/>;
   }
   return (
