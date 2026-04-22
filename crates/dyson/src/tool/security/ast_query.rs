@@ -290,11 +290,31 @@ fn run_query(
 
         let source_bytes = parsed.source.as_bytes();
         let mut cursor = QueryCursor::new();
-        cursor.set_timeout_micros(QUERY_TIMEOUT_MICROS);
+
+        // tree-sitter 0.25+ removed set_timeout_micros; the replacement
+        // is a progress_callback that returns ControlFlow::Break to
+        // abort.  Same 5s wall-clock budget as before, but enforced via
+        // the callback rather than an internal deadline.
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_micros(QUERY_TIMEOUT_MICROS);
+        let mut on_progress = move |_: &tree_sitter::QueryCursorState| {
+            if std::time::Instant::now() >= deadline {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        };
+        let options = tree_sitter::QueryCursorOptions::new()
+            .progress_callback(&mut on_progress);
 
         // QueryMatches implements StreamingIterator (not Iterator) because
         // the underlying C library reuses the match struct on each advance.
-        let mut matches = cursor.matches(query, parsed.tree.root_node(), source_bytes);
+        let mut matches = cursor.matches_with_options(
+            query,
+            parsed.tree.root_node(),
+            source_bytes,
+            options,
+        );
         while let Some(m) = matches.next() {
             if results.len() >= MAX_MATCHES || total_bytes >= MAX_OUTPUT_BYTES {
                 break;
