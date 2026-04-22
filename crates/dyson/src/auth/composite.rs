@@ -56,7 +56,7 @@ impl Auth for CompositeAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{ApiKeyAuth, BearerTokenAuth, NoAuth};
+    use crate::auth::{ApiKeyAuth, BearerTokenAuth, DangerousNoAuth};
 
     #[tokio::test]
     async fn apply_chains_all_layers() {
@@ -80,10 +80,10 @@ mod tests {
     async fn validate_first_success_wins() {
         let composite = CompositeAuth::new(vec![
             Box::new(BearerTokenAuth::new("token-a".into())),
-            Box::new(NoAuth),
+            Box::new(DangerousNoAuth),
         ]);
 
-        // Bearer check fails (no header), but NoAuth succeeds.
+        // Bearer check fails (no header), but DangerousNoAuth succeeds.
         let headers = hyper::HeaderMap::new();
         let info = composite.validate_request(&headers).await.unwrap();
         assert_eq!(info.identity, "anonymous");

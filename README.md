@@ -62,13 +62,30 @@ Add it to `dyson.json`:
 { "type": "http", "bind": "127.0.0.1:7878" }
 ```
 
+On a loopback bind (`127.0.0.1` or `::1`) the `auth` field is optional
+and defaults to `dangerous_no_auth` — the loopback threat model is a
+single trusted operator.  On any other bind (`0.0.0.0`, a LAN IP, etc.)
+the controller refuses to start without an explicit `auth` mechanism.
+Today the two choices are:
+
+```json
+{ "auth": { "type": "dangerous_no_auth" } }
+{ "auth": { "type": "bearer", "token": "…" } }
+```
+
+`bearer` requires `Authorization: Bearer <token>` on every `/api/*`
+request; the `token` value accepts a literal string or a secret-resolver
+reference.
+
 Open `http://127.0.0.1:7878/`.  Same `ChatHistory` and `FeedbackStore`
 as the Telegram controller — chats and ratings sync both ways.
 
 > ## ⚠️ DO NOT EXPOSE THE WEB UI TO THE PUBLIC INTERNET
 >
-> **The HTTP controller has no inbound authentication.**  Anyone who
-> can reach the bind address can talk to your agent, edit your
+> Even with `bearer` auth enabled, the controller is designed for a
+> single trusted operator behind loopback or a VPN mesh.  With
+> `dangerous_no_auth` there is **no inbound authentication** — anyone
+> who can reach the bind address can talk to your agent, edit your
 > workspace files (`SOUL.md`, `MEMORY.md`, journal entries), switch
 > your model, read every chat in `~/.dyson/chats`, and burn your
 > provider credits.  The default `127.0.0.1` bind is the **only**

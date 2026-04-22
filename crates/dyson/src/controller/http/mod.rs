@@ -17,8 +17,14 @@
 //
 // Conversations live in memory for the controller's lifetime.  Persistence
 // to ChatHistory is a future addition; for now the focus is talking to a
-// real agent in a browser.  Bind to 127.0.0.1 by default — there is no
-// inbound auth and the agent has full sandboxed tool access.
+// real agent in a browser.  Bind to 127.0.0.1 by default.
+//
+// Inbound auth: on a loopback bind the `auth` field is optional and
+// defaults to `DangerousNoAuth` (the loopback threat model is a single
+// trusted operator).  On any other bind the field is required;
+// omitting it refuses to start.  `DangerousNoAuth` is the opt-in
+// escape hatch, modeled on `--dangerous-no-sandbox`; `Bearer` is
+// enforced on every `/api/*` request via the shared `Auth` trait.
 // ===========================================================================
 
 use std::collections::HashMap;
@@ -39,6 +45,7 @@ use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::Agent;
+use crate::auth::{Auth, BearerTokenAuth, DangerousNoAuth};
 use crate::chat_history::{ChatHistory, create_chat_history};
 use crate::config::{ControllerConfig, Settings};
 use crate::error::DysonError;
@@ -70,10 +77,51 @@ struct HttpControllerConfigRaw {
     /// the controller serves the prototype embedded in the dyson binary.
     #[serde(default)]
     webroot: Option<String>,
+
+    /// Inbound authentication mechanism.  Optional on a loopback bind
+    /// (127.0.0.1 / ::1) — the loopback assumption is a single trusted
+    /// operator, so a missing field defaults to `DangerousNoAuth` there.
+    /// On any other bind the field is required: omitting it refuses to
+    /// start the controller so you can't silently expose an
+    /// unauthenticated endpoint.
+    #[serde(default)]
+    auth: Option<HttpAuthConfig>,
+}
+
+/// Which inbound auth mechanism guards the HTTP API.
+///
+/// `DangerousNoAuth` is the explicit opt-in to an unauthenticated
+/// endpoint — the controller still starts, but logs a loud warning.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum HttpAuthConfig {
+    /// No authentication.  Every request is accepted as `anonymous`.
+    DangerousNoAuth,
+    /// `Authorization: Bearer <token>` validated against a shared secret.
+    /// `token` flows through the secret-resolver pipeline, so the config
+    /// value may be either a literal string or a `{ resolver, name }`
+    /// reference resolved before this struct is parsed.
+    Bearer { token: String },
 }
 
 fn default_bind() -> String {
     "127.0.0.1:7878".to_string()
+}
+
+/// True when `bind` resolves to a loopback address (`127.0.0.0/8` or
+/// `::1`).  Used to gate the `auth`-field default: the loopback threat
+/// model is a single trusted operator, so `DangerousNoAuth` is fine
+/// there; any other bind must name a mechanism explicitly.
+///
+/// `localhost` is intentionally NOT treated as loopback without a DNS
+/// lookup — if an operator writes `localhost:7878` they're trusting
+/// `/etc/hosts`, which is a different story; safer to force them to be
+/// explicit.  `0.0.0.0` / `::` are NOT loopback, which is the whole
+/// point.
+fn is_loopback_bind(bind: &str) -> bool {
+    bind.parse::<std::net::SocketAddr>()
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +331,9 @@ impl ChatHandle {
 pub struct HttpState {
     settings: Settings,
     registry: Arc<ClientRegistry>,
+    /// Inbound auth guard.  Every `/api/*` request is validated against
+    /// this before `dispatch` routes it.  See `HttpAuthConfig`.
+    auth: Arc<dyn Auth>,
     /// `Some` when the controller was configured with `webroot: "..."` —
     /// serve from disk for live-edit dev.  `None` means use the bundled
     /// embedded prototype.
@@ -319,10 +370,12 @@ impl HttpState {
         webroot: Option<PathBuf>,
         history: Option<Arc<dyn ChatHistory>>,
         feedback: Option<Arc<FeedbackStore>>,
+        auth: Arc<dyn Auth>,
     ) -> Self {
         Self {
             settings,
             registry,
+            auth,
             webroot,
             history,
             feedback,
@@ -359,6 +412,9 @@ pub struct HttpController {
     bind: String,
     /// Disk webroot override, or `None` to use the embedded prototype.
     webroot: Option<PathBuf>,
+    /// Inbound auth.  Built once from `HttpAuthConfig` and shared with
+    /// every request handler via `HttpState`.
+    auth: Arc<dyn Auth>,
 }
 
 impl HttpController {
@@ -369,13 +425,49 @@ impl HttpController {
         let raw: HttpControllerConfigRaw = match serde_json::from_value(config.config.clone()) {
             Ok(c) => c,
             Err(e) => {
-                tracing::error!(error = %e, "failed to parse http controller config");
+                tracing::error!(
+                    error = %e,
+                    "failed to parse http controller config — is `auth` set? \
+                     (use {{\"type\":\"dangerous_no_auth\"}} to run unauthenticated)"
+                );
                 return None;
+            }
+        };
+        let auth_config = match raw.auth {
+            Some(a) => a,
+            None => {
+                // Loopback gets the break: a single trusted operator is
+                // the loopback threat model, so unset `auth` defaults to
+                // DangerousNoAuth.  Any other bind must name a mechanism
+                // — otherwise we'd be silently exposing an
+                // unauthenticated endpoint.
+                if is_loopback_bind(&raw.bind) {
+                    HttpAuthConfig::DangerousNoAuth
+                } else {
+                    tracing::error!(
+                        bind = %raw.bind,
+                        "http controller: non-loopback bind requires an explicit `auth` field \
+                         (use {{\"type\":\"dangerous_no_auth\"}} to run unauthenticated, or \
+                         {{\"type\":\"bearer\",\"token\":\"...\"}} to require a token)"
+                    );
+                    return None;
+                }
+            }
+        };
+        let auth: Arc<dyn Auth> = match auth_config {
+            HttpAuthConfig::DangerousNoAuth => Arc::new(DangerousNoAuth),
+            HttpAuthConfig::Bearer { token } => {
+                if token.is_empty() {
+                    tracing::error!("http controller: bearer auth configured with empty token");
+                    return None;
+                }
+                Arc::new(BearerTokenAuth::new(token))
             }
         };
         Some(Self {
             bind: raw.bind,
             webroot: raw.webroot.map(PathBuf::from),
+            auth,
         })
     }
 }
@@ -417,6 +509,7 @@ impl Controller for HttpController {
             self.webroot.clone(),
             history.clone(),
             feedback.clone(),
+            Arc::clone(&self.auth),
         ));
 
         // Hydrate the chat list from disk so existing conversations show
@@ -462,6 +555,25 @@ impl Controller for HttpController {
             "HTTP controller listening — open http://{} in a browser",
             self.bind,
         );
+
+        // Probe the configured auth to log which mechanism is active.
+        // DangerousNoAuth is the only variant that validates an empty
+        // HeaderMap successfully; treat that success as the loud warning
+        // signal.  Bearer and anything else falls through to the info
+        // branch.
+        let empty_headers = hyper::HeaderMap::new();
+        match self.auth.validate_request(&empty_headers).await {
+            Ok(info) if info.identity == "anonymous" => {
+                tracing::warn!(
+                    bind = %self.bind,
+                    "HTTP controller running with DangerousNoAuth — every \
+                     request is accepted. Only safe on loopback."
+                );
+            }
+            _ => {
+                tracing::info!(bind = %self.bind, "HTTP controller inbound auth enforced");
+            }
+        }
 
         serve_loop(state, listener).await
     }
@@ -509,8 +621,11 @@ pub mod test_helpers {
         webroot: Option<PathBuf>,
         history: Option<Arc<dyn ChatHistory>>,
         feedback: Option<Arc<FeedbackStore>>,
+        auth: Arc<dyn Auth>,
     ) -> Arc<HttpState> {
-        Arc::new(HttpState::new(settings, registry, webroot, history, feedback))
+        Arc::new(HttpState::new(
+            settings, registry, webroot, history, feedback, auth,
+        ))
     }
 
     pub async fn serve(state: Arc<HttpState>, listener: TcpListener) -> crate::Result<()> {
@@ -527,6 +642,13 @@ type Resp = Response<BoxBody<Bytes, Infallible>>;
 async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) -> Resp {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+
+    // Enforce inbound auth on every API route.  Static-shell assets
+    // (`/`, `/styles/*`, `/js/*`, `/components/*`) are exempt so the UI
+    // can load before the browser has presented its credential.
+    if path.starts_with("/api/") && state.auth.validate_request(req.headers()).await.is_err() {
+        return unauthorized();
+    }
 
     // API routes first.
     if path == "/api/conversations" && method == Method::GET {
@@ -1500,6 +1622,14 @@ fn method_not_allowed() -> Resp {
         .body(boxed(Bytes::from_static(
             br#"{"error":"method not allowed"}"#,
         )))
+        .unwrap()
+}
+
+fn unauthorized() -> Resp {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header("Content-Type", "application/json")
+        .body(boxed(Bytes::from_static(br#"{"error":"unauthorized"}"#)))
         .unwrap()
 }
 

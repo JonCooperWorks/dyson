@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dyson::auth::Credential;
+use dyson::auth::{Auth, BearerTokenAuth, Credential, DangerousNoAuth};
 use dyson::chat_history::{ChatHistory, DiskChatHistory};
 use dyson::config::{ChatHistoryConfig, LlmProvider, ProviderConfig, Settings};
 use dyson::controller::ClientRegistry;
@@ -35,6 +35,10 @@ struct Rig {
 }
 
 async fn rig() -> Rig {
+    rig_with_auth(Arc::new(DangerousNoAuth)).await
+}
+
+async fn rig_with_auth(auth: Arc<dyn Auth>) -> Rig {
     let chat_dir = tempfile::tempdir().expect("chat tempdir");
     let workspace_dir = tempfile::tempdir().expect("workspace tempdir");
 
@@ -77,6 +81,7 @@ async fn rig() -> Rig {
         None,
         Some(history),
         Some(feedback),
+        auth,
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -104,12 +109,25 @@ async fn get(url: &str) -> Response<Incoming> {
     request(url, Method::GET, None).await
 }
 
+async fn get_with_header(url: &str, name: &str, value: &str) -> Response<Incoming> {
+    request_with_headers(url, Method::GET, None, &[(name, value)]).await
+}
+
 async fn post_json<B: serde::Serialize>(url: &str, body: &B) -> Response<Incoming> {
     let bytes = serde_json::to_vec(body).expect("serialize");
     request(url, Method::POST, Some(bytes)).await
 }
 
 async fn request(url: &str, method: Method, body: Option<Vec<u8>>) -> Response<Incoming> {
+    request_with_headers(url, method, body, &[]).await
+}
+
+async fn request_with_headers(
+    url: &str,
+    method: Method,
+    body: Option<Vec<u8>>,
+    extra_headers: &[(&str, &str)],
+) -> Response<Incoming> {
     use hyper::client::conn::http1;
     // Tiny inline URL parse — every test URL is `http://127.0.0.1:N/path`,
     // so a hand-split is enough and saves pulling in the `url` crate.
@@ -132,6 +150,9 @@ async fn request(url: &str, method: Method, body: Option<Vec<u8>>) -> Response<I
         .method(method)
         .uri(path_q)
         .header(hyper::header::HOST, authority);
+    for (k, v) in extra_headers {
+        builder = builder.header(*k, *v);
+    }
 
     let req = if let Some(b) = body {
         builder = builder.header(hyper::header::CONTENT_TYPE, "application/json");
@@ -723,4 +744,141 @@ async fn root_path_serves_prototype_html() {
     let html = body_string(resp).await;
     assert!(html.contains("<div id=\"root\">"));
     assert!(html.contains("js/bridge.js"), "must load bridge.js");
+}
+
+// ---------------------------------------------------------------------------
+// Auth — DangerousNoAuth is exercised implicitly by every test above; here
+// we lock in the Bearer-protected path and the static-shell exemption.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bearer_auth_rejects_unauthenticated_api_request() {
+    let auth = Arc::new(BearerTokenAuth::new("s3cret".into()));
+    let r = rig_with_auth(auth).await;
+    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let body = body_json(resp).await;
+    assert_eq!(body["error"], "unauthorized");
+}
+
+#[tokio::test]
+async fn bearer_auth_rejects_wrong_token() {
+    let auth = Arc::new(BearerTokenAuth::new("correct".into()));
+    let r = rig_with_auth(auth).await;
+    let resp = get_with_header(
+        &format!("{}/api/conversations", r.base),
+        "authorization",
+        "Bearer wrong",
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn bearer_auth_accepts_matching_token() {
+    let auth = Arc::new(BearerTokenAuth::new("right-token".into()));
+    let r = rig_with_auth(auth).await;
+    let resp = get_with_header(
+        &format!("{}/api/conversations", r.base),
+        "authorization",
+        "Bearer right-token",
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn bearer_auth_still_serves_static_shell_without_token() {
+    // The UI has to load before the browser can present any credential,
+    // so `/`, `/styles/*`, `/js/*`, `/components/*` are exempt.  Without
+    // this the prototype would 401 on the very first GET /.
+    let auth = Arc::new(BearerTokenAuth::new("s3cret".into()));
+    let r = rig_with_auth(auth).await;
+    for path in ["/", "/styles/tokens.css", "/js/bridge.js", "/components/app.jsx"] {
+        let resp = get(&format!("{}{}", r.base, path)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "GET {path} must be exempt");
+    }
+}
+
+#[tokio::test]
+async fn http_controller_rejects_non_loopback_bind_without_auth() {
+    // Non-loopback bind + missing `auth` → from_config returns None.
+    // This is the guardrail against silently exposing an
+    // unauthenticated endpoint to the network.
+    use dyson::config::ControllerConfig;
+    use dyson::controller::http::HttpController;
+
+    let cfg = ControllerConfig {
+        controller_type: "http".into(),
+        config: serde_json::json!({
+            "bind": "0.0.0.0:7878",
+        }),
+    };
+    assert!(HttpController::from_config(&cfg).is_none());
+}
+
+#[tokio::test]
+async fn http_controller_allows_loopback_bind_without_auth() {
+    // Loopback bind + missing `auth` → defaults to DangerousNoAuth.
+    // The loopback threat model is a single trusted operator, so this
+    // preserves the existing dev ergonomics of just writing
+    // `{ "type": "http", "bind": "127.0.0.1:7878" }`.
+    use dyson::config::ControllerConfig;
+    use dyson::controller::http::HttpController;
+
+    for bind in ["127.0.0.1:0", "127.0.0.1:7878", "[::1]:0"] {
+        let cfg = ControllerConfig {
+            controller_type: "http".into(),
+            config: serde_json::json!({ "bind": bind }),
+        };
+        assert!(
+            HttpController::from_config(&cfg).is_some(),
+            "loopback bind {bind} should default to DangerousNoAuth",
+        );
+    }
+}
+
+#[tokio::test]
+async fn http_controller_accepts_dangerous_no_auth_config() {
+    use dyson::config::ControllerConfig;
+    use dyson::controller::http::HttpController;
+
+    let cfg = ControllerConfig {
+        controller_type: "http".into(),
+        config: serde_json::json!({
+            "bind": "127.0.0.1:0",
+            "auth": { "type": "dangerous_no_auth" },
+        }),
+    };
+    assert!(HttpController::from_config(&cfg).is_some());
+}
+
+#[tokio::test]
+async fn http_controller_accepts_bearer_config() {
+    use dyson::config::ControllerConfig;
+    use dyson::controller::http::HttpController;
+
+    let cfg = ControllerConfig {
+        controller_type: "http".into(),
+        config: serde_json::json!({
+            "bind": "127.0.0.1:0",
+            "auth": { "type": "bearer", "token": "abc123" },
+        }),
+    };
+    assert!(HttpController::from_config(&cfg).is_some());
+}
+
+#[tokio::test]
+async fn http_controller_rejects_bearer_with_empty_token() {
+    use dyson::config::ControllerConfig;
+    use dyson::controller::http::HttpController;
+
+    let cfg = ControllerConfig {
+        controller_type: "http".into(),
+        config: serde_json::json!({
+            "bind": "127.0.0.1:0",
+            "auth": { "type": "bearer", "token": "" },
+        }),
+    };
+    assert!(HttpController::from_config(&cfg).is_none());
 }
