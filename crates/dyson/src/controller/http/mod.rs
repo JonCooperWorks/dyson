@@ -189,6 +189,13 @@ enum BlockDto {
 #[derive(Deserialize)]
 struct CreateChatBody {
     title: Option<String>,
+    /// Chat id whose on-disk transcript should be rotated (archived)
+    /// before the new conversation is minted.  The web sidebar's
+    /// "+ New Conversation" button passes the currently-active chat id
+    /// so starting a fresh chat also preserves the prior one as a
+    /// dated archive — same shape Telegram gets on `/clear`.
+    #[serde(default)]
+    rotate_previous: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1177,6 +1184,24 @@ async fn create_conversation(req: Request<hyper::body::Incoming>, state: &HttpSt
         Ok(b) => b,
         Err(e) => return bad_request(&e),
     };
+    // Rotate the caller-supplied previous chat first so "+ New
+    // Conversation" produces a dated archive the same way /clear does.
+    // Best-effort: a missing chat or IO error is logged but doesn't
+    // block creation.  The in-memory agent (if any) gets its messages
+    // cleared so a future turn on that id doesn't resurrect stale
+    // context from the agent cache.
+    if let Some(prev) = body.rotate_previous.as_deref() {
+        if let Some(prev_handle) = state.chats.lock().await.get(prev).cloned() {
+            if let Some(agent) = prev_handle.agent.lock().await.as_mut() {
+                agent.clear();
+            }
+        }
+        if let Some(h) = state.history.as_ref() {
+            if let Err(e) = h.rotate(prev) {
+                tracing::warn!(error = %e, chat_id = %prev, "failed to rotate previous chat");
+            }
+        }
+    }
     let id = state.mint_id().await;
     let title = body.title.unwrap_or_else(|| "New conversation".to_string());
     let handle = Arc::new(ChatHandle::new(title.clone()));

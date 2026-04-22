@@ -57,11 +57,17 @@
     });
 
     window.DysonLive = {
-      createChat: async (title) => {
+      createChat: async (title, rotatePrevious) => {
+        const body = { title: title || 'New conversation' };
+        // Server rotates the prior chat's disk file (dated archive)
+        // before minting this one.  Matches /clear's shape so
+        // "+ New Conversation" preserves rather than strands the
+        // transcript the user is walking away from.
+        if (rotatePrevious) body.rotate_previous = rotatePrevious;
         const r = await fetch('/api/conversations', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: title || 'New conversation' }),
+          body: JSON.stringify(body),
         });
         if (!r.ok) throw new Error('create failed: ' + r.status);
         return r.json();

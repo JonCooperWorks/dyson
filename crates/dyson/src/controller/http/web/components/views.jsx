@@ -126,7 +126,7 @@ function LeftRail({ active, setActive }) {
   const items = (window.DYSON_DATA.conversations.http) || [];
   const newConv = () => {
     if (!window.DysonLive) return;
-    window.DysonLive.createChat('New conversation').then(c => {
+    window.DysonLive.createChat('New conversation', active).then(c => {
       window.DYSON_DATA.conversations.http.unshift({ id: c.id, title: c.title, live: false });
       setActive(c.id);
     });

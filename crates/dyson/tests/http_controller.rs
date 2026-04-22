@@ -743,6 +743,62 @@ async fn post_turn_with_slash_clear_rotates_chat_history() {
 }
 
 #[tokio::test]
+async fn create_conversation_rotates_previous_chat_when_requested() {
+    // Regression: clicking "+ New Conversation" in the web sidebar is
+    // supposed to archive the currently-active chat the same way
+    // /clear does — otherwise the "separate chat" the user thinks
+    // they're starting shares disk storage with the previous one and
+    // looks identical on reload.  The create endpoint accepts an
+    // optional `rotate_previous` id and rotates that chat's file
+    // before minting the new one.
+    let r = rig().await;
+
+    let prev = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "old" }),
+    ).await).await["id"].as_str().unwrap().to_string();
+
+    let store = DiskChatHistory::new(r.chat_dir.path().to_path_buf())
+        .expect("seed store");
+    store
+        .save(&prev, &[dyson::message::Message::user("first thought")])
+        .expect("seed save");
+
+    let resp = post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({
+            "title": "new",
+            "rotate_previous": prev,
+        }),
+    ).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let created = body_json(resp).await;
+    assert_ne!(created["id"].as_str().unwrap(), prev);
+
+    // Old chat's current file is empty (or missing); exactly one
+    // rotated archive sits alongside it holding the seeded message.
+    let old_current = r.chat_dir.path().join(format!("{prev}.json"));
+    let after: Vec<dyson::message::Message> = if old_current.exists() {
+        serde_json::from_str(&std::fs::read_to_string(&old_current).unwrap()).unwrap()
+    } else {
+        Vec::new()
+    };
+    assert!(after.is_empty(), "prev chat's current file should be cleared");
+
+    let rotated: Vec<_> = std::fs::read_dir(r.chat_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with(&format!("{prev}."))
+                && name != format!("{prev}.json")
+                && name.ends_with(".json")
+        })
+        .collect();
+    assert_eq!(rotated.len(), 1, "one rotated archive expected for prev chat");
+}
+
+#[tokio::test]
 async fn turn_with_attachments_accepts_base64_payload() {
     // Upload path: POST /turn with an `attachments` array.  The
     // controller decodes base64 up front and returns 202 — failures
