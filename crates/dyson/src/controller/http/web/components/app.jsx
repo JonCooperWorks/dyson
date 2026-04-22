@@ -389,7 +389,21 @@ function ConversationView({ conv, session, bump }) {
   }, [session, openRating, bump]);
 
   if (!session) {
-    return <div className="centre"><div className="transcript"/></div>;
+    // First paint before live-ready lands.  Render the centre shell
+    // (context + empty transcript + composer dock) so the user sees
+    // the app frame instead of a blank screen while conversations
+    // hydrate.  Composer sends no-op since there's no chat yet.
+    return (
+      <div className="centre">
+        <div className="context"><div className="crumbs"/></div>
+        <div className="transcript"><div className="inner"><EmptyState/></div></div>
+        <div className="composer-dock">
+          <div style={{width:'100%',maxWidth:820,display:'flex',flexDirection:'column',alignItems:'stretch'}}>
+            <Composer onSend={() => {}} onCancel={() => {}} running={false}/>
+          </div>
+        </div>
+      </div>
+    );
   }
   const liveConv = (D.conversations.http || []).find(c => c.id === conv);
   const title = (liveConv && liveConv.title) || conv || '';
@@ -414,14 +428,17 @@ function ConversationView({ conv, session, bump }) {
             ))
           )}
         </div>
-        <div className="composer-dock">
-          <div style={{width:'100%',maxWidth:820,display:'flex',flexDirection:'column',alignItems:'stretch'}}>
-            {session.running && (
-              <TypingIndicator phase={session.phase} tname={session.tname}
-                               onJump={() => session.liveToolRef && handleOpenTool(session.liveToolRef)}/>
-            )}
-            <Composer onSend={sendMsg} onCancel={onCancel} running={session.running}/>
-          </div>
+      </div>
+      {/* Sibling to .transcript so .transcript's overflow:auto doesn't
+          clip the dock and the dock's bottom:0 resolves to the bottom
+          of .centre (which is position: relative). */}
+      <div className="composer-dock">
+        <div style={{width:'100%',maxWidth:820,display:'flex',flexDirection:'column',alignItems:'stretch'}}>
+          {session.running && (
+            <TypingIndicator phase={session.phase} tname={session.tname}
+                             onJump={() => session.liveToolRef && handleOpenTool(session.liveToolRef)}/>
+          )}
+          <Composer onSend={sendMsg} onCancel={onCancel} running={session.running}/>
         </div>
       </div>
     </div>

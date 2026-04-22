@@ -206,6 +206,12 @@
     margin-top: 6px;
     align-self: flex-start;
   }
+  /* Width clamp — ensures a turn's grid track can shrink below its
+     intrinsic content width so long words / pre blocks / tool chips
+     don't force the transcript wider than the viewport. */
+  .turn { min-width: 0; }
+  .turn .col { min-width: 0; max-width: 100%; }
+  .prose, .prose p { max-width: 100%; word-break: break-word; }
   /* Composer row collapses to icons + truncated model chip so the send
      button always stays reachable regardless of model-id length. */
   .composer .row { flex-wrap: nowrap; min-width: 0; }
