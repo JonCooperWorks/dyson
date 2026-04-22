@@ -277,6 +277,7 @@ impl Tool for BashTool {
                     })),
                     files: Vec::new(),
                     checkpoints: Vec::new(),
+                    artefacts: Vec::new(),
                 })
             }
 

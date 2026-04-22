@@ -266,6 +266,8 @@ fn message_to_gemini(msg: &Message) -> serde_json::Value {
             ContentBlock::Thinking { .. } => None,
             // ToolResult handled above at the message level.
             ContentBlock::ToolResult { .. } => None,
+            // Artefact is a UI side-channel; never sent to the LLM.
+            ContentBlock::Artefact { .. } => None,
         })
         .collect();
 

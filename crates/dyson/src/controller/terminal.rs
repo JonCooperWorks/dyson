@@ -296,6 +296,25 @@ impl Output for TerminalOutput {
         Ok(())
     }
 
+    fn send_artefact(
+        &mut self,
+        artefact: &crate::message::Artefact,
+    ) -> Result<(), DysonError> {
+        // The terminal has no artefact panel — print a terse notice so
+        // the user knows the report was emitted and how big it is.  The
+        // full content is still in ToolOutput.content above, so a user
+        // who wants the actual markdown can scroll up.
+        writeln!(
+            self.stdout,
+            "[Artefact: {:?} — {} ({} bytes)]",
+            artefact.kind,
+            artefact.title,
+            artefact.content.len(),
+        )?;
+        self.stdout.flush()?;
+        Ok(())
+    }
+
     fn error(&mut self, error: &DysonError) -> Result<(), DysonError> {
         eprintln!("\n[Error]: {error}");
         Ok(())

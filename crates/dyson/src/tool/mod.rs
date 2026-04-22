@@ -379,6 +379,16 @@ pub struct ToolOutput {
     /// impl drops events on the floor, so the `swarm_checkpoint` tool
     /// is a harmless no-op for terminal / telegram agents.
     pub checkpoints: Vec<CheckpointEvent>,
+
+    /// Rendered artefacts produced by this tool call.
+    ///
+    /// Side-channel to the controller — not sent to the LLM.  Delivered
+    /// via `Output::send_artefact`.  Used for outputs that are
+    /// "document-shaped" (full-page markdown reports) rather than
+    /// chat-shaped (streamed text).  The HTTP controller stores the body
+    /// in memory and emits an SSE `artefact` event so the UI can render
+    /// it in the Artefacts tab.
+    pub artefacts: Vec<crate::message::Artefact>,
 }
 
 /// A single progress/checkpoint event emitted by a tool during its run.
@@ -521,6 +531,7 @@ impl ToolOutput {
             metadata: None,
             files: Vec::new(),
             checkpoints: Vec::new(),
+            artefacts: Vec::new(),
         }
     }
 
@@ -533,6 +544,7 @@ impl ToolOutput {
             metadata: None,
             files: Vec::new(),
             checkpoints: Vec::new(),
+            artefacts: Vec::new(),
         }
     }
 
@@ -568,6 +580,18 @@ impl ToolOutput {
     /// tool a safe no-op for other controllers.
     pub fn with_checkpoint(mut self, event: CheckpointEvent) -> Self {
         self.checkpoints.push(event);
+        self
+    }
+
+    /// Attach a rendered artefact to the output.
+    ///
+    /// Artefacts are delivered to the controller's `Output::send_artefact`
+    /// hook as a side-channel — the LLM never sees them.  The HTTP
+    /// controller stores the body in an in-memory FIFO store and emits
+    /// an SSE `artefact` event so the UI can render it in the Artefacts
+    /// tab.  Other controllers' default impl is a no-op.
+    pub fn with_artefact(mut self, artefact: crate::message::Artefact) -> Self {
+        self.artefacts.push(artefact);
         self
     }
 }

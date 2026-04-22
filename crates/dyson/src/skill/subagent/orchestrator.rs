@@ -27,8 +27,9 @@ use crate::agent::rate_limiter::RateLimitedHandle;
 use crate::config::{AgentSettings, LlmProvider};
 use crate::error::{DysonError, Result};
 use crate::llm::LlmClient;
+use crate::message::{Artefact, ArtefactKind};
 use crate::sandbox::Sandbox;
-use crate::tool::{Tool, ToolContext, ToolOutput};
+use crate::tool::{CheckpointEvent, Tool, ToolContext, ToolOutput};
 use crate::workspace::WorkspaceHandle;
 
 use super::{ChildSpawn, spawn_child};
@@ -64,6 +65,15 @@ pub struct OrchestratorConfig {
     /// vuln cheatsheets.  Detection cost: one shallow directory walk
     /// and 1–3 `toml` / `json` parses per invocation.
     pub inject_cheatsheets: bool,
+    /// When set, the child's final text is wrapped as an `Artefact` of
+    /// this kind and attached to the returned `ToolOutput` — the HTTP
+    /// controller renders it in the Artefacts tab.  The full text is
+    /// still returned as `ToolOutput.content` so the parent LLM sees
+    /// the report too.
+    ///
+    /// `None` (the default) keeps the orchestrator chat-only.  The
+    /// security engineer opts in; devops/architect/… remain opt-out.
+    pub emit_artefact: Option<ArtefactKind>,
 }
 
 /// A composable `Tool` that spawns an orchestrator child agent.
@@ -213,11 +223,28 @@ impl Tool for OrchestratorTool {
         all_tools.extend(self.direct_tools.iter().cloned());
         all_tools.extend(self.inner_subagent_tools.iter().cloned());
 
+        // Phase checkpoints for UX.  Accumulate events here and attach
+        // them to the final ToolOutput so Output::checkpoint is called
+        // as each phase boundary crosses — gives the HTTP controller's
+        // Artefacts-view UI progress signal instead of multi-minute
+        // silence.  Only orchestrators with `emit_artefact` set opt in,
+        // to avoid spamming checkpoints on every devops / architect
+        // run (those are typically fast chat-shaped calls).
+        let mut phase_checkpoints: Vec<CheckpointEvent> = Vec::new();
+        let emits_progress = self.config.emit_artefact.is_some();
+        if emits_progress {
+            phase_checkpoints.push(CheckpointEvent {
+                message: format!("{}: preparing review", self.config.name),
+                progress: Some(0.0),
+            });
+        }
+
         // Compose the child's system prompt.  Cheatsheets attach only
         // for orchestrators that opt in (security_engineer today).
         // Detection runs against the effective review root — the
         // scoped `path` if provided, else the parent's working dir.
         let mut system_prompt = self.config.system_prompt.to_string();
+        let mut active_sheets: Vec<String> = Vec::new();
         if self.config.inject_cheatsheets && cheatsheets_enabled_via_env() {
             let detect_root: &std::path::Path = scoped_dir
                 .as_deref()
@@ -232,12 +259,30 @@ impl Tool for OrchestratorTool {
                 );
                 system_prompt.push_str("\n\n");
                 system_prompt.push_str(&body);
+                active_sheets = sheets.iter().map(|s| s.to_string()).collect();
             } else {
                 tracing::info!(
                     tool = self.config.name,
                     "no cheatsheets matched — injecting none"
                 );
             }
+        }
+
+        if emits_progress {
+            let msg = if active_sheets.is_empty() {
+                format!("{}: no language cheatsheets matched", self.config.name)
+            } else {
+                format!(
+                    "{}: cheatsheets loaded ({})",
+                    self.config.name,
+                    active_sheets.join(", "),
+                )
+            };
+            phase_checkpoints.push(CheckpointEvent { message: msg, progress: Some(0.05) });
+            phase_checkpoints.push(CheckpointEvent {
+                message: format!("{}: subagent analysing — this may take several minutes", self.config.name),
+                progress: Some(0.1),
+            });
         }
 
         let settings = AgentSettings {
@@ -249,7 +294,11 @@ impl Tool for OrchestratorTool {
             ..AgentSettings::default()
         };
 
-        spawn_child(ChildSpawn {
+        let started_at = std::time::SystemTime::now();
+        let started_epoch = unix_seconds(started_at);
+
+        let child_working_dir = scoped_dir.clone();
+        let mut out = spawn_child(ChildSpawn {
             name: self.config.name,
             settings,
             inherited_tools: all_tools,
@@ -257,11 +306,181 @@ impl Tool for OrchestratorTool {
             workspace: self.workspace.clone(),
             client: self.client.clone(),
             parent_depth: ctx.depth,
-            working_dir: scoped_dir,
+            working_dir: child_working_dir,
             user_message,
         })
-        .await
+        .await?;
+
+        // Pre-pend the phase checkpoints we queued BEFORE the child
+        // ran, then add a terminal checkpoint reporting the outcome.
+        // Outer Vec::splice keeps ordering stable.
+        if emits_progress {
+            let elapsed = unix_seconds(std::time::SystemTime::now()).saturating_sub(started_epoch);
+            let terminal = if out.is_error {
+                CheckpointEvent {
+                    message: format!("{}: failed after {}s", self.config.name, elapsed),
+                    progress: Some(1.0),
+                }
+            } else {
+                CheckpointEvent {
+                    message: format!(
+                        "{}: completed in {}s · {} bytes",
+                        self.config.name, elapsed, out.content.len(),
+                    ),
+                    progress: Some(1.0),
+                }
+            };
+            phase_checkpoints.push(terminal);
+            // Front-load phase checkpoints so they fire before any
+            // artefact emission on the controller side.
+            let mut merged = phase_checkpoints;
+            merged.append(&mut out.checkpoints);
+            out.checkpoints = merged;
+        }
+
+        if let Some(kind) = self.config.emit_artefact
+            && !out.is_error
+            && looks_like_report(&out.content)
+        {
+            let finished_at = std::time::SystemTime::now();
+            let finished_epoch = unix_seconds(finished_at);
+            let duration_seconds = finished_epoch.saturating_sub(started_epoch);
+            let target_name = target_name_for(scoped_dir.as_deref(), ctx.working_dir.as_path());
+            let title = match kind {
+                ArtefactKind::SecurityReview => format!("Security review: {target_name}"),
+                ArtefactKind::Other => format!("Report: {target_name}"),
+            };
+
+            // Pull token stats out of the child's ToolOutput.metadata
+            // (stamped by spawn_child) and compute USD cost via the
+            // first-class pricing registry.  A model without a known
+            // rate card simply omits the cost field rather than faking
+            // a zero.
+            let input_tokens = out
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("input_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let output_tokens = out
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("output_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let llm_calls = out
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("llm_calls"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let pricing = crate::llm::pricing::lookup(&self.provider, &self.model);
+            let cost_usd = pricing.map(|p| p.cost_usd(input_tokens, output_tokens));
+
+            let mut metadata = serde_json::json!({
+                "model": self.model,
+                "provider": provider_label(&self.provider),
+                "target_name": target_name,
+                "target_path": scoped_dir
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| ctx.working_dir.display().to_string()),
+                "started_at": started_epoch,
+                "finished_at": finished_epoch,
+                "duration_seconds": duration_seconds,
+                "bytes": out.content.len(),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "llm_calls": llm_calls,
+            });
+            if let Some(cost) = cost_usd {
+                metadata["cost_usd"] = serde_json::json!(cost);
+            }
+            if let Some(p) = pricing {
+                metadata["pricing"] = serde_json::json!({
+                    "input_per_mtok": p.input_per_mtok,
+                    "output_per_mtok": p.output_per_mtok,
+                });
+            }
+
+            // Emit a terminal "cost summary" checkpoint — lands in the
+            // same SSE stream as the phase checkpoints so the UI chip
+            // line shows the final cost even if the user never opens
+            // the artefact reader.
+            let summary = match cost_usd {
+                Some(c) => format!(
+                    "{}: {} calls · {} in / {} out · ${:.2}",
+                    self.config.name,
+                    llm_calls,
+                    kfmt(input_tokens),
+                    kfmt(output_tokens),
+                    c,
+                ),
+                None => format!(
+                    "{}: {} calls · {} in / {} out",
+                    self.config.name,
+                    llm_calls,
+                    kfmt(input_tokens),
+                    kfmt(output_tokens),
+                ),
+            };
+            out.checkpoints.push(CheckpointEvent {
+                message: summary,
+                progress: Some(1.0),
+            });
+
+            let artefact = Artefact::markdown(kind, title, out.content.clone())
+                .with_metadata(metadata);
+            out.artefacts.push(artefact);
+        }
+
+        Ok(out)
     }
+}
+
+/// Format an integer with `k` / `M` suffix for human-readable token
+/// counts.  Used in checkpoint messages where real estate is tight.
+fn kfmt(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", (n as f64) / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", (n as f64) / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Seconds since UNIX epoch, saturating to 0 if the clock is before 1970.
+fn unix_seconds(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Quick sanity check that the child actually produced a report-shaped
+/// output — guards against empty/truncated/stub emissions being
+/// promoted to artefacts.  Mirrors the "first char is `#`" rule from
+/// the security_engineer prompt.
+fn looks_like_report(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.len() > 500 && trimmed.starts_with('#')
+}
+
+/// Derive a short target name from the scoped path (preferred) or the
+/// parent working dir.  Used for the artefact title and metadata.
+fn target_name_for(scoped: Option<&std::path::Path>, fallback: &std::path::Path) -> String {
+    let path = scoped.unwrap_or(fallback);
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("target")
+        .to_string()
+}
+
+/// Human-readable provider label for the artefact metadata.
+fn provider_label(provider: &LlmProvider) -> String {
+    // Debug print gives us "Anthropic", "OpenAi", etc. for the enum —
+    // good enough for a metadata string without a new Display impl.
+    format!("{provider:?}")
 }
 
 /// Environment-level kill switch for cheatsheet injection.  The

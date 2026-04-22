@@ -149,6 +149,71 @@ pub enum ContentBlock {
         /// Text extracted from the PDF via `pdf-extract`.
         extracted_text: String,
     },
+
+    /// A reference to an agent-produced artefact (e.g. a security review
+    /// report).  The body lives in the controller's `ArtefactStore`, keyed
+    /// by `id`; the UI fetches it on demand.  This block is a side-channel
+    /// to the user only — it is NOT serialised back to the LLM (see
+    /// `message_to_anthropic` / `message_to_openai`).
+    Artefact {
+        id: String,
+        kind: ArtefactKind,
+        title: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Artefact — a first-class rendered document produced by a tool.
+// ---------------------------------------------------------------------------
+
+/// Classification of an artefact, used by the UI to pick rendering and
+/// by future tooling to filter by type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtefactKind {
+    /// A security review report produced by the `security_engineer`
+    /// subagent.  Rendered in the Artefacts tab as full-page markdown.
+    SecurityReview,
+    /// Fallback for generic markdown artefacts.
+    Other,
+}
+
+/// An artefact emitted by a tool and delivered to the controller as a
+/// side-channel (not sent to the LLM).  The HTTP controller stores the
+/// body in-memory and streams an `Artefact` SSE event pointing at
+/// `/api/artefacts/<id>`.
+///
+/// `id` is minted by the controller on receipt — tool code emits with an
+/// empty string and the controller stamps the real id before forwarding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artefact {
+    pub id: String,
+    pub kind: ArtefactKind,
+    pub title: String,
+    pub content: String,
+    pub mime_type: String,
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl Artefact {
+    /// Construct a markdown artefact without an id — the controller mints
+    /// one on receipt.
+    pub fn markdown(kind: ArtefactKind, title: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            id: String::new(),
+            kind,
+            title: title.into(),
+            content: content.into(),
+            mime_type: "text/markdown".to_string(),
+            metadata: None,
+        }
+    }
+
+    /// Attach structured metadata (model, target, tokens, cost, …).
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +279,10 @@ impl ContentBlock {
                 // what most providers will actually consume.
                 extracted_text.split_whitespace().count().max(1)
             }
+            // Artefact blocks are UI-only and stripped before hitting the
+            // provider (see message_to_anthropic / message_to_openai), so
+            // they don't charge tokens.  Returning 0 reflects reality.
+            Self::Artefact { .. } => 0,
         }
     }
 }

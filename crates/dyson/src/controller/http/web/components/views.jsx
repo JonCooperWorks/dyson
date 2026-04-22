@@ -4,9 +4,10 @@ const { useState: vUS, useEffect: vUE } = React;
 
 function TopBar({ view, setView, onToggleLeft, onToggleRight, rightHidden }) {
   const navs = [
-    { id: 'conv',     name: 'Conversations', k: '1', icon: 'chat' },
-    { id: 'mind',     name: 'Mind',          k: '2', icon: 'brain' },
-    { id: 'activity', name: 'Activity',      k: '3', icon: 'activity' },
+    { id: 'conv',      name: 'Conversations', k: '1', icon: 'chat' },
+    { id: 'mind',      name: 'Mind',          k: '2', icon: 'brain' },
+    { id: 'artefacts', name: 'Artefacts',     k: '3', icon: 'file' },
+    { id: 'activity',  name: 'Activity',      k: '4', icon: 'activity' },
   ];
   const D = window.DYSON_DATA || {};
   const model = D.activeModel || '';
@@ -321,6 +322,207 @@ function ActivityView() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// ArtefactsView — lists artefacts for the active chat; clicking opens a
+// full-screen markdown reader.  Lives at view === 'artefacts'.  The
+// per-chat list is hydrated lazily from /api/conversations/:id/artefacts
+// once per chat, then kept live by the `onArtefact` SSE callback in App.
+// ---------------------------------------------------------------------------
+
+function ArtefactsView({ conv, session, bump }) {
+  const [selected, setSelected] = vUS(null);
+
+  // Lazy hydrate the per-chat artefact list from the API.  Subsequent
+  // switches do nothing — live SSE keeps it current.
+  vUE(() => {
+    if (!conv || !session || !window.DysonLive) return;
+    if (session.artefactsLoaded) return;
+    session.artefactsLoaded = true;
+    window.DysonLive.listArtefacts(conv)
+      .then(list => {
+        session.artefacts = list || [];
+        bump();
+      })
+      .catch(() => {});
+  }, [conv]);
+
+  // Allow in-chat chips to jump straight to a specific artefact.  The
+  // event is fired by ArtefactBlock.onClick — if we're already on the
+  // Artefacts tab we pick it up; otherwise App's view state change will
+  // mount this component and the last-selected id wins.
+  vUE(() => {
+    const h = (e) => {
+      const id = e.detail && e.detail.id;
+      if (id) setSelected(id);
+    };
+    window.addEventListener('dyson:open-artefact', h);
+    return () => window.removeEventListener('dyson:open-artefact', h);
+  }, []);
+
+  if (!conv) {
+    return (
+      <section className="mind-pane" style={{alignItems:'center', justifyContent:'center'}}>
+        <div style={{color:'var(--mute)', fontSize:13}}>Select a conversation to see its artefacts.</div>
+      </section>
+    );
+  }
+
+  const list = (session && session.artefacts) || [];
+
+  return (
+    <div className="mind show-side">
+      <aside className="mind-side">
+        <div style={{padding:'10px 14px', borderBottom:'1px solid var(--line)'}}>
+          <div className="eyebrow">artefacts · {list.length}</div>
+          <div style={{fontSize:12, color:'var(--fg-dim)', marginTop:4}}>Full-page reports emitted by agents.</div>
+        </div>
+        <div style={{overflowY:'auto', flex:1, padding:'6px 0'}}>
+          {list.length === 0 && (
+            <div style={{padding:'14px', color:'var(--mute)', fontSize:12}}>
+              No artefacts yet in this chat.  The security_engineer subagent
+              emits its final report here.
+            </div>
+          )}
+          {list.map(a => (
+            <div key={a.id}
+                 onClick={() => setSelected(a.id)}
+                 style={{display:'flex', flexDirection:'column', gap:3, padding:'8px 14px',
+                         cursor:'pointer',
+                         background: selected === a.id ? 'var(--panel)' : 'transparent',
+                         borderLeft: selected === a.id ? '2px solid var(--accent)' : '2px solid transparent'}}>
+              <div style={{display:'flex', alignItems:'center', gap:8}}>
+                <Icon name="file" size={11} style={{color:'var(--mute)'}}/>
+                <span style={{fontSize:12.5, color:'var(--fg)', flex:1, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{a.title}</span>
+                <span className="mono" style={{fontSize:10, color:'var(--mute)'}}>{prettySize(a.bytes || 0)}</span>
+              </div>
+              <div style={{fontSize:10.5, color:'var(--fg-dim)', paddingLeft:19}}>
+                <span className="mono">{(a.kind || 'other').replace(/_/g, ' ')}</span>
+                {a.created_at && <span style={{marginLeft:8}}>· {formatAgo(a.created_at)}</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </aside>
+      <ArtefactReader id={selected}/>
+    </div>
+  );
+}
+
+// Full-page markdown reader.  Fetches the body from /api/artefacts/:id,
+// renders it through the shared `markdown()` helper, and surfaces the
+// metadata header (model, target, tokens, cost) in a sticky top bar.
+function ArtefactReader({ id }) {
+  const [body, setBody] = vUS('');
+  const [meta, setMeta] = vUS(null);
+  const [err, setErr]  = vUS('');
+
+  vUE(() => {
+    if (!id || !window.DysonLive) { setBody(''); setMeta(null); setErr(''); return; }
+    setErr('');
+    window.DysonLive.loadArtefact(id)
+      .then(text => setBody(text))
+      .catch(e => setErr(String(e.message || e)));
+    // Look up metadata from whichever session has this id (artefacts are
+    // stored per chat but small enough to walk every cached list).
+    // Falls back to an empty meta if not found.
+    setMeta(findArtefactMeta(id));
+  }, [id]);
+
+  if (!id) {
+    return (
+      <section className="mind-pane" style={{alignItems:'center', justifyContent:'center'}}>
+        <div style={{color:'var(--mute)', fontSize:13}}>Select an artefact to read.</div>
+      </section>
+    );
+  }
+
+  const download = () => {
+    const blob = new Blob([body], { type: 'text/markdown' });
+    const u = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = u;
+    a.download = ((meta && meta.title) || 'artefact') + '.md';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(u);
+  };
+  const copy = () => { navigator.clipboard && navigator.clipboard.writeText(body); };
+
+  return (
+    <section className="mind-pane">
+      <div style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
+                   borderBottom:'1px solid var(--line)', background:'var(--bg)', flexWrap:'wrap'}}>
+        <span style={{fontSize:13, color:'var(--fg)', fontWeight:500}}>{(meta && meta.title) || 'Artefact'}</span>
+        {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
+        {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
+        <span style={{flex:1}}/>
+        <button className="btn sm ghost" onClick={copy} disabled={!body}>copy</button>
+        <button className="btn sm primary" onClick={download} disabled={!body}>download .md</button>
+      </div>
+      {meta && meta.metadata && (
+        <div style={{display:'flex', flexWrap:'wrap', gap:14, padding:'8px 18px',
+                     borderBottom:'1px solid var(--line)', background:'var(--panel)', fontSize:11.5}}>
+          {metaRow('model',     meta.metadata.model)}
+          {metaRow('target',    meta.metadata.target_name)}
+          {metaRow('duration',  meta.metadata.duration_seconds, v => `${v}s`)}
+          {metaRow('tokens',    meta.metadata.input_tokens, v =>
+            `${kfmt(v)} in / ${kfmt(meta.metadata.output_tokens || 0)} out`)}
+          {metaRow('cost',      meta.metadata.cost_usd, v => `$${Number(v).toFixed(2)}`)}
+          {metaRow('iterations', meta.metadata.iterations)}
+        </div>
+      )}
+      <div className="prose"
+           style={{overflowY:'auto', flex:1, padding:'18px 28px', lineHeight:1.6}}
+           dangerouslySetInnerHTML={{__html: window.markdown(body || '')}}/>
+    </section>
+  );
+}
+
+function metaRow(label, value, fmt) {
+  if (value === null || value === undefined || value === '') return null;
+  const out = fmt ? fmt(value) : String(value);
+  return (
+    <div style={{display:'flex', gap:5, alignItems:'baseline'}}>
+      <span style={{color:'var(--mute)'}}>{label}</span>
+      <span className="mono" style={{color:'var(--fg)'}}>{out}</span>
+    </div>
+  );
+}
+
+function kfmt(n) {
+  const v = Number(n) || 0;
+  if (v >= 1000) return `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k`;
+  return String(v);
+}
+
+// Walk every session's cached artefact list looking for `id`.  Used by
+// ArtefactReader to surface the metadata header without a second fetch.
+// Falls through to an empty metadata hit when the id isn't in any
+// cached list (e.g. reloaded directly from a URL before the list
+// hydrated — rare but non-fatal; the header simply stays blank).
+function findArtefactMeta(id) {
+  const D = window.DYSON_DATA;
+  if (!D) return null;
+  // Sessions live in a Map owned by App, not in DYSON_DATA.  Stash a
+  // pointer there when App mounts ArtefactsView so this helper can find
+  // them without a prop-drill.  See `window.__dysonSessions` below.
+  const sessions = window.__dysonSessions;
+  if (!sessions) return null;
+  for (const s of sessions.values()) {
+    const hit = (s.artefacts || []).find(a => a.id === id);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function formatAgo(epochSeconds) {
+  const now = Math.floor(Date.now() / 1000);
+  const d = Math.max(0, now - epochSeconds);
+  if (d < 60) return `${d}s ago`;
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+}
+
 // Each component file is wrapped in its own IIFE by Babel-in-browser,
 // so cross-file references must be hung off `window`.
-Object.assign(window, { TopBar, LeftRail, RightRail, MindView, ActivityView });
+Object.assign(window, { TopBar, LeftRail, RightRail, MindView, ActivityView, ArtefactsView, ArtefactReader });

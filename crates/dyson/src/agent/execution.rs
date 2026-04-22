@@ -166,6 +166,16 @@ impl Agent {
                     }
                 }
 
+                // Forward any artefacts (e.g. security-review reports)
+                // emitted by the tool.  Side-channel — the LLM never
+                // sees these; the HTTP controller renders them in the
+                // Artefacts tab.  Other controllers drop them.
+                for artefact in &tool_output.artefacts {
+                    if let Err(e) = output.send_artefact(artefact) {
+                        tracing::warn!(error = %e, "failed to deliver artefact");
+                    }
+                }
+
                 // Format the result for the LLM with the actual execution duration.
                 let formatted = self.formatter.format(call, tool_output, duration);
                 let content = formatted.to_llm_message();

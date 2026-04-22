@@ -1028,3 +1028,128 @@ async fn send_file_inlines_images_and_attaches_everything_else() {
     );
     assert!(cd.contains("report.pdf"), "filename missing from disposition: {cd:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Artefact delivery round-trip (Output::send_artefact → SSE → GET)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn agent_artefact_round_trips_through_sse_and_disk() {
+    // End-to-end: agent emits an artefact via `Output::send_artefact` →
+    // SSE `artefact` event → `/api/artefacts/<id>` serves the markdown
+    // body with the right mime → the per-chat listing endpoint shows
+    // the entry → a fresh HttpState pointed at the same directory
+    // rehydrates the artefact (so the report survives controller
+    // restarts and is reachable from other browser profiles).
+    let r = rig().await;
+
+    let created = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "artefacts" }),
+    ).await).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let mut sse = request(
+        &format!("{}/api/conversations/{}/events", r.base, id),
+        Method::GET,
+        None,
+    ).await;
+    assert_eq!(sse.status(), StatusCode::OK);
+    test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
+
+    let markdown = "# Security review: juice-shop\n\nFindings go here.\n";
+    let artefact = dyson::message::Artefact::markdown(
+        dyson::message::ArtefactKind::SecurityReview,
+        "Security review: juice-shop",
+        markdown,
+    )
+    .with_metadata(serde_json::json!({
+        "model": "claude-opus-4-7",
+        "input_tokens": 120_000,
+        "output_tokens": 8_000,
+    }));
+
+    test_helpers::emit_agent_artefact(r.state.clone(), &id, artefact)
+        .await
+        .expect("emit artefact");
+
+    let evt = read_sse_event(&mut sse).await;
+    assert_eq!(evt["type"], "artefact", "event type: {evt}");
+    assert_eq!(evt["title"], "Security review: juice-shop");
+    assert_eq!(evt["kind"], "security_review");
+    assert_eq!(evt["bytes"], markdown.len());
+    let url = evt["url"].as_str().expect("url").to_string();
+    assert!(url.starts_with("/api/artefacts/"), "url shape: {url}");
+    let art_id = url.trim_start_matches("/api/artefacts/").to_string();
+
+    // GET the body — must come back verbatim with text/markdown.
+    let resp = get(&format!("{}{}", r.base, url)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        resp.headers().get("content-type").unwrap().to_str().unwrap()
+            .starts_with("text/markdown"),
+    );
+    let body = resp.into_body().collect().await.expect("collect").to_bytes();
+    assert_eq!(std::str::from_utf8(&body[..]).unwrap(), markdown);
+
+    // Per-chat listing must include the artefact with its metadata.
+    let list = body_json(get(&format!(
+        "{}/api/conversations/{}/artefacts",
+        r.base, id,
+    )).await).await;
+    let arr = list.as_array().expect("artefact list is array");
+    assert_eq!(arr.len(), 1, "one artefact expected, got: {list}");
+    assert_eq!(arr[0]["id"], art_id);
+    assert_eq!(arr[0]["title"], "Security review: juice-shop");
+    assert_eq!(arr[0]["kind"], "security_review");
+    assert_eq!(arr[0]["metadata"]["model"], "claude-opus-4-7");
+
+    // Disk persistence: the underlying bytes must be reachable from a
+    // fresh HttpState that has never held the artefact in memory —
+    // this is the "different browser profile" / "server restart"
+    // scenario.  Build a second state over the same directory and
+    // confirm the artefact rehydrates.
+    let mut rebuilt_settings = Settings::default();
+    rebuilt_settings.chat_history = ChatHistoryConfig {
+        backend: "disk".into(),
+        connection_string: Credential::new(
+            r.chat_dir.path().to_string_lossy().into_owned(),
+        ),
+    };
+    rebuilt_settings.workspace.connection_string =
+        Credential::new(r.workspace_dir.path().to_string_lossy().into_owned());
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        "default".to_string(),
+        ProviderConfig {
+            provider_type: LlmProvider::OpenRouter,
+            api_key: Credential::new("sk-test".into()),
+            base_url: None,
+            models: vec!["qwen/qwen3.6-plus".to_string()],
+        },
+    );
+    rebuilt_settings.providers = providers;
+    rebuilt_settings.agent.provider = LlmProvider::OpenRouter;
+    rebuilt_settings.agent.model = "qwen/qwen3.6-plus".into();
+
+    let registry2 = Arc::new(ClientRegistry::new(&rebuilt_settings, None));
+    let history2: Arc<dyn ChatHistory> = Arc::new(
+        DiskChatHistory::new(r.chat_dir.path().to_path_buf()).expect("disk history"),
+    );
+    let feedback2 = Arc::new(FeedbackStore::new(r.chat_dir.path().to_path_buf()));
+    let state2 = test_helpers::build_state(
+        rebuilt_settings,
+        registry2,
+        None,
+        Some(history2),
+        Some(feedback2),
+        Arc::new(DangerousNoAuth),
+    );
+    // The hydrate path populates `items` directly, so the body is
+    // readable via the normal store access.
+    let stored = state2
+        .artefacts_for_test(&art_id)
+        .expect("artefact rehydrated from disk");
+    assert_eq!(stored, markdown);
+}
+

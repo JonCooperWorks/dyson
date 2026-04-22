@@ -223,6 +223,55 @@ impl Output for TelegramOutput {
         }
     }
 
+    fn send_artefact(
+        &mut self,
+        artefact: &crate::message::Artefact,
+    ) -> Result<(), DysonError> {
+        // Telegram has no inline-markdown surface, so dump the report
+        // to a throwaway temp file and send it as a document — the user
+        // gets the same .md they'd download from the web UI.  We flush
+        // any buffered text first so the report doesn't arrive ahead
+        // of the narrative it belongs to.
+        self.force_flush_text()?;
+
+        let suffix = match artefact.mime_type.as_str() {
+            "text/markdown" => "md",
+            _ => "txt",
+        };
+        let mut safe_title: String = artefact
+            .title
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '-' })
+            .collect();
+        if safe_title.is_empty() {
+            safe_title.push_str("artefact");
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut path = std::env::temp_dir();
+        path.push(format!("dyson-{safe_title}-{nanos}.{suffix}"));
+        if let Err(e) = std::fs::write(&path, &artefact.content) {
+            tracing::error!(error = %e, "failed to write artefact to temp file");
+            return Err(DysonError::Io(e));
+        }
+        let result = self.block_on(self.bot.send_document(self.chat_id, &path));
+        // Best-effort cleanup; ignore failure.
+        let _ = std::fs::remove_file(&path);
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    title = %artefact.title,
+                    "failed to send artefact via Telegram",
+                );
+                Err(e)
+            }
+        }
+    }
+
     fn error(&mut self, error: &DysonError) -> Result<(), DysonError> {
         let text = format!("Error: {error}");
         self.send_message(&text)?;

@@ -6,6 +6,7 @@
 // ===========================================================================
 
 use super::orchestrator::OrchestratorConfig;
+use crate::message::ArtefactKind;
 
 const DIRECT_TOOLS: &[&str] = &[
     "bash",
@@ -43,5 +44,10 @@ pub fn security_engineer_config() -> OrchestratorConfig {
         // Only the security_engineer wants lang/framework vuln sheets;
         // other orchestrators leave this false.
         inject_cheatsheets: true,
+        // The final report is a first-class artefact: the web UI
+        // renders it in the Artefacts tab instead of as a wall of
+        // chat text.  Full content also flows to the parent LLM via
+        // ToolOutput.content as before.
+        emit_artefact: Some(ArtefactKind::SecurityReview),
     }
 }

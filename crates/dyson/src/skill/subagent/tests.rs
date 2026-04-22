@@ -955,6 +955,7 @@ fn orchestrator_tool_uses_config_name_and_description() {
         max_tokens: 4096,
         injects_protocol: None,
         inject_cheatsheets: false,
+        emit_artefact: None,
     };
     let tool = OrchestratorTool::new(
         config,
@@ -1111,6 +1112,7 @@ fn orchestrator_with_custom_config() {
         max_tokens: 4096,
         injects_protocol: Some("\n## DevOps Protocol\nUse for infra changes."),
         inject_cheatsheets: false,
+        emit_artefact: None,
     };
 
     let parent_tools: Vec<Arc<dyn Tool>> = vec![
@@ -1299,6 +1301,7 @@ async fn orchestrator_propagates_path_to_child_working_dir() {
         max_tokens: 1024,
         injects_protocol: None,
         inject_cheatsheets: false,
+        emit_artefact: None,
     };
 
     let tool = OrchestratorTool::new(
@@ -1480,6 +1483,7 @@ async fn orchestrator_without_path_keeps_process_cwd() {
         max_tokens: 1024,
         injects_protocol: None,
         inject_cheatsheets: false,
+        emit_artefact: None,
     };
     let tool = OrchestratorTool::new(
         config,
@@ -1650,6 +1654,7 @@ async fn orchestrator_without_inject_cheatsheets_flag_skips_detection() {
         max_tokens: 512,
         injects_protocol: None,
         inject_cheatsheets: false,
+        emit_artefact: None,
     };
     let tool = OrchestratorTool::new(
         config,

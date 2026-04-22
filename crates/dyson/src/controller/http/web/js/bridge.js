@@ -97,6 +97,20 @@
         return r.json();
       },
 
+      // Artefacts for a chat — returns [{id, kind, title, bytes, created_at, metadata?}].
+      listArtefacts: async (chatId) => {
+        const r = await fetch('/api/conversations/' + encodeURIComponent(chatId) + '/artefacts');
+        if (!r.ok) return [];
+        return r.json();
+      },
+
+      // Fetch the raw markdown body of an artefact.  Returns the text.
+      loadArtefact: async (id) => {
+        const r = await fetch('/api/artefacts/' + encodeURIComponent(id));
+        if (!r.ok) throw new Error('artefact load failed: ' + r.status);
+        return r.text();
+      },
+
       // Send a turn.  `files` is an optional array of File objects
       // (from <input type="file"> or drag-drop).  Each is read into
       // base64 and sent as an attachment — controller dispatches
@@ -119,6 +133,7 @@
             case 'tool_result': cb.onToolResult  && cb.onToolResult(msg); break;
             case 'checkpoint':  cb.onCheckpoint  && cb.onCheckpoint(msg); break;
             case 'file':        cb.onFile        && cb.onFile(msg); break;
+            case 'artefact':    cb.onArtefact    && cb.onArtefact(msg); break;
             case 'llm_error':   cb.onError       && cb.onError(msg.message); break;
             case 'done':        es.close(); cb.onDone && cb.onDone(); break;
           }

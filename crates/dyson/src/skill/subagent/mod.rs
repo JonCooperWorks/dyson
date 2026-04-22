@@ -46,19 +46,30 @@ use crate::workspace::WorkspaceHandle;
 
 /// An `Output` that accumulates a child agent's streamed text into a
 /// buffer.  Tool events are logged at `debug` but never captured —
-/// only the final text reaches the parent.
+/// only the final text (and side-channel artefacts) reach the parent.
 #[derive(Default)]
 pub struct CaptureOutput {
     text: String,
+    artefacts: Vec<crate::message::Artefact>,
 }
 
 impl CaptureOutput {
     pub const fn new() -> Self {
-        Self { text: String::new() }
+        Self {
+            text: String::new(),
+            artefacts: Vec::new(),
+        }
     }
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Drain the buffered artefacts out of the capture.  Called by
+    /// `spawn_child` after the child agent completes so the artefacts
+    /// bubble up to the parent controller.
+    pub fn take_artefacts(&mut self) -> Vec<crate::message::Artefact> {
+        std::mem::take(&mut self.artefacts)
     }
 }
 
@@ -88,6 +99,17 @@ impl Output for CaptureOutput {
 
     fn send_file(&mut self, path: &std::path::Path) -> Result<()> {
         tracing::debug!(path = %path.display(), "subagent file send (ignored in capture)");
+        Ok(())
+    }
+
+    fn send_artefact(&mut self, artefact: &crate::message::Artefact) -> Result<()> {
+        tracing::debug!(
+            kind = ?artefact.kind,
+            title = %artefact.title,
+            bytes = artefact.content.len(),
+            "subagent artefact buffered for parent",
+        );
+        self.artefacts.push(artefact.clone());
         Ok(())
     }
 
@@ -185,12 +207,31 @@ pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
     let mut capture = CaptureOutput::new();
     match child_agent.run(&spec.user_message, &mut capture).await {
         Ok(final_text) => {
+            let buffered = capture.take_artefacts();
+            // Snapshot token usage from the child before it's dropped so
+            // the orchestrator can surface a cost line in the artefact
+            // metadata.  Budget lives on Conversation so stats persist
+            // if the child is kept around for a future turn (it isn't
+            // currently, but the accessor is cheap).
+            let budget = child_agent.token_budget();
+            let stats = serde_json::json!({
+                "input_tokens": budget.input_tokens_used,
+                "output_tokens": budget.output_tokens_used,
+                "llm_calls": budget.llm_calls,
+            });
             tracing::info!(
                 tool = spec.name,
                 result_len = final_text.len(),
+                artefacts = buffered.len(),
+                input_tokens = budget.input_tokens_used,
+                output_tokens = budget.output_tokens_used,
+                llm_calls = budget.llm_calls,
                 "child agent completed successfully"
             );
-            Ok(ToolOutput::success(final_text))
+            let mut out = ToolOutput::success(final_text);
+            out.artefacts = buffered;
+            out.metadata = Some(stats);
+            Ok(out)
         }
         Err(e) => {
             tracing::warn!(

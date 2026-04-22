@@ -92,59 +92,49 @@ fn message_to_anthropic(msg: &Message) -> serde_json::Value {
     let content: Vec<serde_json::Value> = msg
         .content
         .iter()
-        .map(|block| match block {
-            ContentBlock::Text { text } => {
-                serde_json::json!({
-                    "type": "text",
-                    "text": text,
-                })
-            }
-            ContentBlock::ToolUse { id, name, input } => {
-                serde_json::json!({
-                    "type": "tool_use",
-                    "id": id,
-                    "name": name,
-                    "input": input,
-                })
-            }
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(serde_json::json!({
+                "type": "text",
+                "text": text,
+            })),
+            ContentBlock::ToolUse { id, name, input } => Some(serde_json::json!({
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                "input": input,
+            })),
             ContentBlock::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
-            } => {
-                serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": content,
-                    "is_error": is_error,
-                })
-            }
-            ContentBlock::Thinking { thinking } => {
-                serde_json::json!({
-                    "type": "thinking",
-                    "thinking": thinking,
-                })
-            }
-            ContentBlock::Image { data, media_type } => {
-                serde_json::json!({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": data,
-                    }
-                })
-            }
-            ContentBlock::Document { data, .. } => {
-                serde_json::json!({
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": data,
-                    }
-                })
-            }
+            } => Some(serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+                "is_error": is_error,
+            })),
+            ContentBlock::Thinking { thinking } => Some(serde_json::json!({
+                "type": "thinking",
+                "thinking": thinking,
+            })),
+            ContentBlock::Image { data, media_type } => Some(serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                }
+            })),
+            ContentBlock::Document { data, .. } => Some(serde_json::json!({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": data,
+                }
+            })),
+            // Artefact is a UI side-channel; the LLM never sees it.
+            ContentBlock::Artefact { .. } => None,
         })
         .collect();
 

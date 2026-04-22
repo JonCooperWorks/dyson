@@ -15,7 +15,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // must list these in the same order; the keyboard handler in App keys
 // off this list so adding/removing a view requires updating only one
 // place.  See tests/http_controller.rs for the regression check.
-const VIEW_IDS = ['conv', 'mind', 'activity'];
+const VIEW_IDS = ['conv', 'mind', 'artefacts', 'activity'];
 
 // Map chat_id → per-chat session.  Held outside React state because
 // each Session contains live mutable refs (an EventSource, a counter,
@@ -39,6 +39,11 @@ function makeSession() {
     counter: 0,
     loaded: false,
     justScrollOnNextRender: false,
+    // Per-chat list of artefacts produced by the agent.  Populated from
+    // SSE `artefact` events (live) and from `/api/conversations/:id/artefacts`
+    // on chat reload.
+    artefacts: [],
+    artefactsLoaded: false,
   };
 }
 
@@ -55,8 +60,14 @@ function App() {
   const bump = useCallback(() => force(n => n + 1), []);
 
   // chat_id → Session.  Created lazily on first access so unopened
-  // chats cost nothing.
+  // chats cost nothing.  Exposed on window so the Artefacts reader can
+  // pull cached metadata without prop-drilling — see findArtefactMeta
+  // in views.jsx.
   const sessionsRef = useRef(new Map());
+  useEffect(() => {
+    window.__dysonSessions = sessionsRef.current;
+    return () => { if (window.__dysonSessions === sessionsRef.current) delete window.__dysonSessions; };
+  }, []);
   const getSession = useCallback((id) => {
     if (!id) return null;
     let s = sessionsRef.current.get(id);
@@ -80,6 +91,15 @@ function App() {
       window.removeEventListener('dyson:live-update', h);
     };
   }, [conv, bump]);
+
+  // In-chat artefact chip → flip to the Artefacts tab.  The chip fires
+  // `dyson:open-artefact` with the id; ArtefactsView picks the same
+  // event up to set the selected artefact.
+  useEffect(() => {
+    const h = () => setView('artefacts');
+    window.addEventListener('dyson:open-artefact', h);
+    return () => window.removeEventListener('dyson:open-artefact', h);
+  }, []);
 
   // ⌘1..N view switching (bounds-checked against VIEW_IDS — pressing
   // ⌘4/⌘5 used to point at the deleted Providers/Sandbox views and
@@ -192,6 +212,13 @@ function App() {
           {showLeft && <div className="scrim" onClick={closeRails}/>}
           <LeftRailMind/>
           <MindView showSide={showLeft} onHideSide={() => setShowLeft(false)}/>
+        </div>
+      )}
+      {view === 'artefacts' && (
+        <div className="body no-right">
+          {showLeft && <div className="scrim" onClick={closeRails}/>}
+          <LeftRail active={conv} setActive={(id) => { setConv(id); setShowLeft(false); }}/>
+          <ArtefactsView conv={conv} session={session} bump={bump}/>
         </div>
       )}
       {view === 'activity' && <div style={{display:'flex', flex:1, minHeight:0}}><ActivityView/></div>}
@@ -343,6 +370,16 @@ function ConversationView({ conv, session, bump }) {
         // Agent-produced files (e.g. image_generate, exploit_builder).
         // Renders inline as <img> for images, otherwise a download link.
         aTurn.blocks.push({ type: 'file', name, mime: mime_type, url, inline: !!inline_image });
+        bump();
+      },
+      onArtefact: ({ id, kind, title, url, bytes, metadata }) => {
+        // Inline chip in chat + add to the per-chat artefacts list so
+        // the Artefacts tab lists it without a second fetch.
+        aTurn.blocks.push({ type: 'artefact', id, kind, title, url, bytes });
+        session.artefacts = [
+          { id, kind, title, bytes, created_at: Math.floor(Date.now() / 1000), metadata },
+          ...session.artefacts,
+        ];
         bump();
       },
       onDone: () => { session.running = false; session.es = null; bump(); },

@@ -227,6 +227,7 @@ mod tests {
             metadata: None,
             files: Vec::new(),
             checkpoints: Vec::new(),
+            artefacts: Vec::new(),
         }
     }
 

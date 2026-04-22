@@ -44,6 +44,7 @@ pub mod ollama_cloud;
 pub mod openai;
 pub mod openai_compat;
 pub mod openrouter;
+pub mod pricing;
 pub mod registry;
 pub(crate) mod sse_parser;
 pub mod stream;
@@ -673,6 +674,7 @@ pub(crate) fn format_prompt(messages: &[Message], tools: &[&ToolDefinition]) -> 
                         let _ = write!(prompt, "[PDF document]\n{extracted_text}\n\n");
                     }
                     ContentBlock::Thinking { .. } => {}
+                    ContentBlock::Artefact { .. } => {}
                 }
             }
         }

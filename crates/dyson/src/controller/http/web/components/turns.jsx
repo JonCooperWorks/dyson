@@ -96,6 +96,9 @@ function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
           if (b.type === 'file') {
             return <FileBlock key={i} block={b}/>;
           }
+          if (b.type === 'artefact') {
+            return <ArtefactBlock key={i} block={b}/>;
+          }
           return null;
         })}
         {ratable && <Reactions turnIndex={turnIndex} current={rating} onPick={(e) => onRate(turnIndex, e)}/>}
@@ -266,6 +269,30 @@ function FileBlock({ block }) {
   );
 }
 
+// Chip rendered in the chat scroll when the agent emits an artefact
+// (e.g. a security-review report).  Clicking flips to the Artefacts
+// tab with this id selected — see dyson:open-artefact below.
+//
+// `block` shape: { type:'artefact', id, kind, title, url, bytes }
+function ArtefactBlock({ block }) {
+  const open = (e) => {
+    e.preventDefault();
+    window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: block.id } }));
+  };
+  const kind = (block.kind || 'other').replace(/_/g, ' ');
+  return (
+    <a href={block.url || '#'} onClick={open} className="fileblock" title="Open artefact">
+      <Icon name="file" size={14}/>
+      <span className="name">{block.title || 'Artefact'}</span>
+      <span className="sz mono" style={{color:'var(--fg-dim)'}}>{kind}</span>
+      {typeof block.bytes === 'number' && (
+        <span className="sz mono">{prettySize(block.bytes)}</span>
+      )}
+      <span className="dl mono">open →</span>
+    </a>
+  );
+}
+
 function TypingIndicator({ phase, tname, onJump }) {
   if (phase === 'thinking') {
     return <div className="typing"><span className="dots"><span/><span/><span/></span> thinking…</div>;
@@ -425,4 +452,4 @@ function fileToBase64(file) {
   });
 }
 
-Object.assign(window, { Turn, ThinkingBlock, ToolChip, FileBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64 });
+Object.assign(window, { Turn, ThinkingBlock, ToolChip, FileBlock, ArtefactBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64 });

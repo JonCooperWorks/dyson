@@ -159,6 +159,9 @@ pub fn to_sharegpt_with_feedback(
                     text_parts.push(format!("[PDF document]\n{extracted_text}"));
                 }
                 ContentBlock::Thinking { .. } => {}
+                // Artefact is a UI side-channel; ShareGPT export is for
+                // LLM training corpora, so skip it.
+                ContentBlock::Artefact { .. } => {}
             }
         }
 

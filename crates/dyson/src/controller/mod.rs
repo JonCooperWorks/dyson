@@ -1227,6 +1227,23 @@ pub trait Output: Send {
         Ok(())
     }
 
+    /// Receive a rendered artefact emitted by a tool call (e.g. a
+    /// security-review report).  Called by the agent loop whenever a
+    /// tool attaches one or more `Artefact`s to its output.
+    ///
+    /// Side-channel: the LLM never sees these.  The HTTP controller
+    /// stores the body in-memory and emits an SSE `artefact` event so
+    /// the UI renders it in the Artefacts tab.  The default impl drops
+    /// the artefact, which is correct for terminal / telegram /
+    /// recording / swarm / capture controllers.
+    fn send_artefact(
+        &mut self,
+        artefact: &crate::message::Artefact,
+    ) -> std::result::Result<(), DysonError> {
+        let _ = artefact;
+        Ok(())
+    }
+
     /// An error occurred.
     fn error(&mut self, error: &DysonError) -> std::result::Result<(), DysonError>;
 

@@ -411,6 +411,7 @@ impl Tool for McpRemoteTool {
             metadata: None,
             files: vec![],
             checkpoints: vec![],
+            artefacts: vec![],
         })
     }
 }

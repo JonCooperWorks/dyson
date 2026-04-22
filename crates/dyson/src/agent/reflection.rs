@@ -271,6 +271,9 @@ pub(super) fn summarize_for_reflection(messages: &[Message]) -> String {
                     .unwrap();
                 }
                 ContentBlock::Thinking { .. } => {}
+                ContentBlock::Artefact { kind, title, .. } => {
+                    writeln!(&mut summary, "[Artefact: {kind:?} — {title}]").unwrap();
+                }
             }
         }
     }

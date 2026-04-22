@@ -161,6 +161,15 @@ enum BlockDto {
         content: String,
         is_error: bool,
     },
+    /// Reference to an artefact rendered in the Artefacts tab.  The body
+    /// lives in `HttpState.artefacts` and is fetched via
+    /// `/api/artefacts/<id>` — not inlined here to keep history payloads
+    /// small when a chat has produced multiple long reports.
+    Artefact {
+        id: String,
+        kind: crate::message::ArtefactKind,
+        title: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -234,6 +243,19 @@ enum SseEvent {
         url: String,
         inline_image: bool,
     },
+    /// An agent-produced artefact (e.g. a security-review report) ready
+    /// for full-page markdown rendering.  The body is served at
+    /// `/api/artefacts/<id>` and the metadata list at
+    /// `/api/conversations/<chat>/artefacts`.
+    Artefact {
+        id: String,
+        kind: crate::message::ArtefactKind,
+        title: String,
+        url: String,
+        bytes: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
+    },
     LlmError {
         message: String,
     },
@@ -276,10 +298,9 @@ struct FileEntry {
 }
 
 impl FileStore {
-    /// Cap on stored files — beyond this, oldest are evicted.  64 is
-    /// generous: a chat with 64 image-generate calls would still hold
-    /// ~64 MB max (1 MB/image typical) which is fine for a localhost
-    /// process.  Bump if needed.
+    /// In-memory cap — beyond this, oldest entries are evicted from
+    /// the hot cache.  When disk persistence is enabled the bytes stay
+    /// addressable on disk, so FIFO eviction is purely a memory cap.
     const MAX_FILES: usize = 64;
 
     fn put(&mut self, id: String, entry: FileEntry) {
@@ -290,6 +311,216 @@ impl FileStore {
         }
         self.order.push_back(id.clone());
         self.items.insert(id, entry);
+    }
+
+    /// Read a persisted file from disk.  Returns `None` if the entry
+    /// is missing or unreadable.  Called by `get_file` when the
+    /// in-memory cache has evicted the id.
+    fn load_from_disk(data_dir: &std::path::Path, id: &str) -> Option<FileEntry> {
+        let sub = data_dir.join("files");
+        let meta_path = sub.join(format!("{id}.meta.json"));
+        let bytes_path = sub.join(format!("{id}.bin"));
+        let meta_txt = std::fs::read_to_string(&meta_path).ok()?;
+        let meta: serde_json::Value = serde_json::from_str(&meta_txt).ok()?;
+        let bytes = std::fs::read(&bytes_path).ok()?;
+        Some(FileEntry {
+            bytes,
+            mime: meta.get("mime").and_then(|v| v.as_str()).unwrap_or("application/octet-stream").to_string(),
+            name: meta.get("name").and_then(|v| v.as_str()).unwrap_or("file").to_string(),
+        })
+    }
+
+    /// Write an entry to disk so it survives controller restarts and
+    /// is visible from every browser profile pointed at this instance.
+    /// Best-effort: disk errors are logged but don't fail the tool
+    /// call (the in-memory cache still serves the request).
+    fn persist_static(data_dir: &std::path::Path, id: &str, entry: &FileEntry) {
+        let sub = data_dir.join("files");
+        if let Err(e) = std::fs::create_dir_all(&sub) {
+            tracing::warn!(error = %e, "failed to create files dir");
+            return;
+        }
+        let bytes_path = sub.join(format!("{id}.bin"));
+        let meta_path = sub.join(format!("{id}.meta.json"));
+        if let Err(e) = std::fs::write(&bytes_path, &entry.bytes) {
+            tracing::warn!(error = %e, id, "failed to persist file bytes");
+            return;
+        }
+        let meta = serde_json::json!({
+            "mime": entry.mime,
+            "name": entry.name,
+        });
+        if let Err(e) = std::fs::write(&meta_path, meta.to_string()) {
+            tracing::warn!(error = %e, id, "failed to persist file metadata");
+        }
+    }
+
+    /// On controller startup, scan the persistence dir for existing
+    /// files and populate the in-memory index with just enough to serve
+    /// them.  Bytes aren't loaded here — `get_file` hydrates on demand.
+    /// Returns the largest numeric id seen so the controller's monotonic
+    /// counter resumes above any pre-existing entry.
+    fn hydrate_from_disk(&mut self, data_dir: &std::path::Path) -> u64 {
+        let sub = data_dir.join("files");
+        let entries = match std::fs::read_dir(&sub) {
+            Ok(e) => e,
+            Err(_) => return 0,
+        };
+        let mut max_n: u64 = 0;
+        for e in entries.flatten() {
+            let name = match e.file_name().into_string() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            if !name.ends_with(".meta.json") { continue; }
+            let id = name.trim_end_matches(".meta.json").to_string();
+            // Don't eagerly load bytes — register the id in the LRU
+            // so listing works; get_file pulls bytes on first hit.
+            // We stash a sentinel FileEntry with empty bytes to mark
+            // the slot; load_from_disk replaces it when needed.
+            // But to avoid serving zero-byte files, we skip
+            // registration and let get_file lazy-load instead.  Just
+            // track max id.
+            if let Some(rest) = id.strip_prefix('f')
+                && let Ok(n) = rest.parse::<u64>()
+            {
+                max_n = max_n.max(n);
+            }
+        }
+        max_n
+    }
+}
+
+/// In-memory store for agent-produced artefacts (security-review
+/// reports, etc.).  Mirrors `FileStore` but stores the markdown
+/// body as a `String` and keeps the per-chat index, kind, title and
+/// metadata alongside each entry so the Artefacts view can list
+/// everything without downloading bodies.  FIFO eviction keeps memory
+/// bounded.
+#[derive(Default)]
+struct ArtefactStore {
+    items: HashMap<String, ArtefactEntry>,
+    order: std::collections::VecDeque<String>,
+}
+
+struct ArtefactEntry {
+    /// Chat this artefact belongs to — used to filter
+    /// `/api/conversations/<chat>/artefacts`.
+    chat_id: String,
+    kind: crate::message::ArtefactKind,
+    title: String,
+    content: String,
+    mime_type: String,
+    metadata: Option<serde_json::Value>,
+    /// UNIX seconds at emission.  UI sorts the list by this.
+    created_at: u64,
+}
+
+impl ArtefactStore {
+    /// In-memory cap — beyond this, oldest are evicted from the hot
+    /// cache.  When disk persistence is enabled, the markdown stays
+    /// addressable on disk so FIFO eviction is purely a memory cap.
+    const MAX_ARTEFACTS: usize = 32;
+
+    fn put(&mut self, id: String, entry: ArtefactEntry) {
+        while self.order.len() >= Self::MAX_ARTEFACTS {
+            if let Some(old) = self.order.pop_front() {
+                self.items.remove(&old);
+            }
+        }
+        self.order.push_back(id.clone());
+        self.items.insert(id, entry);
+    }
+
+    /// Best-effort write-through to disk.  Two files per artefact:
+    /// `<id>.body` (raw content) and `<id>.meta.json` (kind, title,
+    /// chat id, mime, created_at, optional metadata blob).
+    fn persist_static(data_dir: &std::path::Path, id: &str, entry: &ArtefactEntry) {
+        let sub = data_dir.join("artefacts");
+        if let Err(e) = std::fs::create_dir_all(&sub) {
+            tracing::warn!(error = %e, "failed to create artefacts dir");
+            return;
+        }
+        let body_path = sub.join(format!("{id}.body"));
+        let meta_path = sub.join(format!("{id}.meta.json"));
+        if let Err(e) = std::fs::write(&body_path, &entry.content) {
+            tracing::warn!(error = %e, id, "failed to persist artefact body");
+            return;
+        }
+        let kind_str = serde_json::to_value(entry.kind)
+            .unwrap_or_else(|_| serde_json::Value::String("other".to_string()));
+        let meta = serde_json::json!({
+            "chat_id": entry.chat_id,
+            "kind": kind_str,
+            "title": entry.title,
+            "mime_type": entry.mime_type,
+            "created_at": entry.created_at,
+            "metadata": entry.metadata,
+        });
+        if let Err(e) = std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default()) {
+            tracing::warn!(error = %e, id, "failed to persist artefact metadata");
+        }
+    }
+
+    /// Load a persisted artefact (meta + body) from disk.  Returns
+    /// `None` if the entry is missing or malformed.
+    fn load_from_disk(data_dir: &std::path::Path, id: &str) -> Option<ArtefactEntry> {
+        let sub = data_dir.join("artefacts");
+        let body = std::fs::read_to_string(sub.join(format!("{id}.body"))).ok()?;
+        let meta_txt = std::fs::read_to_string(sub.join(format!("{id}.meta.json"))).ok()?;
+        let meta: serde_json::Value = serde_json::from_str(&meta_txt).ok()?;
+        let kind: crate::message::ArtefactKind = meta
+            .get("kind")
+            .and_then(|k| serde_json::from_value(k.clone()).ok())
+            .unwrap_or(crate::message::ArtefactKind::Other);
+        Some(ArtefactEntry {
+            chat_id: meta.get("chat_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            kind,
+            title: meta.get("title").and_then(|v| v.as_str()).unwrap_or("Artefact").to_string(),
+            content: body,
+            mime_type: meta.get("mime_type").and_then(|v| v.as_str()).unwrap_or("text/markdown").to_string(),
+            metadata: meta.get("metadata").cloned().filter(|v| !v.is_null()),
+            created_at: meta.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+        })
+    }
+
+    /// Scan the persistence dir on startup and populate the in-memory
+    /// index so the list endpoint returns everything immediately.
+    /// Returns the largest numeric id seen.
+    fn hydrate_from_disk(&mut self, data_dir: &std::path::Path) -> u64 {
+        let sub = data_dir.join("artefacts");
+        let entries = match std::fs::read_dir(&sub) {
+            Ok(e) => e,
+            Err(_) => return 0,
+        };
+        let mut ids: Vec<String> = Vec::new();
+        for e in entries.flatten() {
+            let name = match e.file_name().into_string() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            if !name.ends_with(".meta.json") { continue; }
+            let id = name.trim_end_matches(".meta.json").to_string();
+            ids.push(id);
+        }
+        // Sort by numeric id so `order` mirrors creation order.
+        ids.sort_by_key(|s| {
+            s.strip_prefix('a')
+                .and_then(|r| r.parse::<u64>().ok())
+                .unwrap_or(0)
+        });
+        let mut max_n: u64 = 0;
+        for id in ids {
+            if let Some(rest) = id.strip_prefix('a')
+                && let Ok(n) = rest.parse::<u64>()
+            {
+                max_n = max_n.max(n);
+            }
+            if let Some(entry) = Self::load_from_disk(data_dir, &id) {
+                self.put(id, entry);
+            }
+        }
+        max_n
     }
 }
 
@@ -357,6 +588,19 @@ pub struct HttpState {
     /// Monotonic id source for entries in `files`.  Atomic so multiple
     /// concurrent turns can mint without locking the store.
     file_id: Arc<std::sync::atomic::AtomicU64>,
+    /// In-memory store for agent-produced artefacts (security-review
+    /// reports, etc.).  The HTTP controller stamps each artefact with
+    /// the chat id on emission so `/api/conversations/<id>/artefacts`
+    /// can filter; the body is served from `/api/artefacts/<id>`.
+    artefacts: Arc<std::sync::Mutex<ArtefactStore>>,
+    artefact_id: Arc<std::sync::atomic::AtomicU64>,
+    /// Root directory for on-disk persistence of agent-produced files
+    /// and artefacts.  Derived from `chat_history.connection_string`
+    /// when that backend is in use — this way files/artefacts survive
+    /// controller restarts and are reachable from every browser
+    /// profile pointed at this instance.  `None` means memory-only
+    /// (the FIFO eviction still bounds memory).
+    data_dir: Option<PathBuf>,
     chats: Mutex<HashMap<String, Arc<ChatHandle>>>,
     /// Insertion order so the UI can render a stable list.
     order: Mutex<Vec<String>>,
@@ -372,6 +616,26 @@ impl HttpState {
         feedback: Option<Arc<FeedbackStore>>,
         auth: Arc<dyn Auth>,
     ) -> Self {
+        // Piggy-back on the ChatHistory directory so artefacts / files /
+        // chats / ratings all live in one place on disk.  Memory-only
+        // deployments (no chat_history backend) stay in memory.
+        let data_dir = if history.is_some() {
+            Some(resolve_tilde(
+                settings.chat_history.connection_string.expose(),
+            ))
+        } else {
+            None
+        };
+
+        let mut files = FileStore::default();
+        let mut artefacts = ArtefactStore::default();
+        let mut file_next: u64 = 1;
+        let mut artefact_next: u64 = 1;
+        if let Some(dir) = data_dir.as_ref() {
+            file_next = files.hydrate_from_disk(dir).saturating_add(1);
+            artefact_next = artefacts.hydrate_from_disk(dir).saturating_add(1);
+        }
+
         Self {
             settings,
             registry,
@@ -379,8 +643,11 @@ impl HttpState {
             webroot,
             history,
             feedback,
-            files: Arc::new(std::sync::Mutex::new(FileStore::default())),
-            file_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            files: Arc::new(std::sync::Mutex::new(files)),
+            file_id: Arc::new(std::sync::atomic::AtomicU64::new(file_next)),
+            artefacts: Arc::new(std::sync::Mutex::new(artefacts)),
+            artefact_id: Arc::new(std::sync::atomic::AtomicU64::new(artefact_next)),
+            data_dir,
             chats: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             next_id: std::sync::atomic::AtomicU64::new(1),
@@ -401,6 +668,19 @@ impl HttpState {
             }
             return id;
         }
+    }
+
+    /// Test hook — returns the stored artefact body for `id` if the
+    /// store has it loaded.  Used by the integration test for the
+    /// "disk-backed rehydration" scenario (see
+    /// `tests/http_controller.rs::agent_artefact_round_trips_*`).
+    #[doc(hidden)]
+    pub fn artefacts_for_test(&self, id: &str) -> Option<String> {
+        let s = match self.artefacts.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        s.items.get(id).map(|e| e.content.clone())
     }
 }
 
@@ -650,11 +930,44 @@ pub mod test_helpers {
             .cloned()
             .ok_or_else(|| crate::DysonError::Config(format!("no chat {chat_id}")))?;
         let mut out = SseOutput {
+            chat_id: chat_id.to_string(),
             tx: handle.events.clone(),
             files: state.files.clone(),
             next_file_id: state.file_id.clone(),
+            artefacts: state.artefacts.clone(),
+            next_artefact_id: state.artefact_id.clone(),
+            data_dir: state.data_dir.clone(),
         };
         out.send_file(path)
+    }
+
+    /// Mirror of `emit_agent_file` for artefacts: stash the given
+    /// artefact in the controller's store and emit an SSE event over
+    /// the chat's broadcast channel.  Used by integration tests to
+    /// validate the full round-trip without standing up a real
+    /// subagent.
+    pub async fn emit_agent_artefact(
+        state: Arc<HttpState>,
+        chat_id: &str,
+        artefact: crate::message::Artefact,
+    ) -> crate::Result<()> {
+        let handle = state
+            .chats
+            .lock()
+            .await
+            .get(chat_id)
+            .cloned()
+            .ok_or_else(|| crate::DysonError::Config(format!("no chat {chat_id}")))?;
+        let mut out = SseOutput {
+            chat_id: chat_id.to_string(),
+            tx: handle.events.clone(),
+            files: state.files.clone(),
+            next_file_id: state.file_id.clone(),
+            artefacts: state.artefacts.clone(),
+            next_artefact_id: state.artefact_id.clone(),
+            data_dir: state.data_dir.clone(),
+        };
+        out.send_artefact(&artefact)
     }
 
     /// Spin until the chat's broadcast channel has at least one
@@ -722,6 +1035,12 @@ async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) ->
         }
         return method_not_allowed();
     }
+    if let Some(id) = path.strip_prefix("/api/artefacts/") {
+        if method == Method::GET {
+            return get_artefact(&state, id).await;
+        }
+        return method_not_allowed();
+    }
     if let Some(id) = path.strip_prefix("/api/conversations/") {
         if let Some((id, rest)) = split_once(id, '/') {
             match (method.clone(), rest) {
@@ -730,6 +1049,7 @@ async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) ->
                 (Method::GET, "events") => return sse_events(&state, id).await,
                 (Method::GET, "feedback") => return get_feedback(&state, id).await,
                 (Method::POST, "feedback") => return post_feedback(req, &state, id).await,
+                (Method::GET, "artefacts") => return list_artefacts(&state, id).await,
                 _ => return not_found(),
             }
         } else if method == Method::GET {
@@ -875,8 +1195,13 @@ fn block_to_dto(b: &ContentBlock) -> BlockDto {
             content: content.clone(),
             is_error: *is_error,
         },
-        // Fallback: treat unknown blocks (image/document) as a text marker so
-        // the wire protocol stays simple.
+        ContentBlock::Artefact { id, kind, title } => BlockDto::Artefact {
+            id: id.clone(),
+            kind: *kind,
+            title: title.clone(),
+        },
+        // Fallback: treat image/document as a text marker so the wire
+        // protocol stays simple.
         _ => BlockDto::Text {
             text: "[non-text content]".to_string(),
         },
@@ -953,12 +1278,19 @@ async fn post_turn(
     let state_for_task = Arc::clone(&state);
     let files = Arc::clone(&state.files);
     let file_id = Arc::clone(&state.file_id);
+    let artefacts = Arc::clone(&state.artefacts);
+    let artefact_id = Arc::clone(&state.artefact_id);
+    let data_dir = state.data_dir.clone();
 
     tokio::spawn(async move {
         let mut output = SseOutput {
+            chat_id: chat_id.clone(),
             tx: chat_handle.events.clone(),
             files,
             next_file_id: file_id,
+            artefacts,
+            next_artefact_id: artefact_id,
+            data_dir,
         };
 
         // Lazily build the agent on first use.  If a transcript exists
@@ -1287,6 +1619,9 @@ fn content_type_for(path: &str) -> &'static str {
 // ---------------------------------------------------------------------------
 
 struct SseOutput {
+    /// Which chat this output is scoped to — stamped onto every
+    /// artefact so `/api/conversations/<id>/artefacts` can filter.
+    chat_id: String,
     tx: broadcast::Sender<SseEvent>,
     /// Shared file store so `send_file` can stash agent-produced bytes
     /// for the UI to fetch via `/api/files/<id>`.
@@ -1295,6 +1630,11 @@ struct SseOutput {
     /// unnamed file.  Wraps; collisions are vanishingly unlikely
     /// inside the FileStore::MAX_FILES window.
     next_file_id: Arc<std::sync::atomic::AtomicU64>,
+    /// Shared artefact store for `send_artefact`.
+    artefacts: Arc<std::sync::Mutex<ArtefactStore>>,
+    next_artefact_id: Arc<std::sync::atomic::AtomicU64>,
+    /// Optional write-through disk directory for persistence.
+    data_dir: Option<PathBuf>,
 }
 
 impl SseOutput {
@@ -1379,10 +1719,17 @@ impl Output for SseOutput {
         );
         let inline_image = mime.starts_with("image/");
         let url = format!("/api/files/{id}");
+        let entry = FileEntry { bytes, mime: mime.clone(), name: name.clone() };
+        // Write-through to disk first so a controller crash between
+        // the memory put and the disk write doesn't leak a dangling
+        // in-memory reference that can't be rehydrated.
+        if let Some(dir) = self.data_dir.as_ref() {
+            FileStore::persist_static(dir, &id, &entry);
+        }
         // std::sync::Mutex — blocking but the critical section is a
         // HashMap insert + a Vec push.  Negligible contention.
         if let Ok(mut s) = self.files.lock() {
-            s.put(id.clone(), FileEntry { bytes, mime: mime.clone(), name: name.clone() });
+            s.put(id.clone(), entry);
         }
         self.send(SseEvent::File { name, mime_type: mime, url, inline_image });
         Ok(())
@@ -1393,6 +1740,46 @@ impl Output for SseOutput {
         // UI's progress feed in v1.  Replace with a typed event later.
         self.send(SseEvent::Checkpoint {
             text: format!("{event:?}"),
+        });
+        Ok(())
+    }
+
+    fn send_artefact(
+        &mut self,
+        artefact: &crate::message::Artefact,
+    ) -> std::result::Result<(), DysonError> {
+        let id = format!(
+            "a{}",
+            self.next_artefact_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let url = format!("/api/artefacts/{id}");
+        let bytes = artefact.content.len();
+        let entry = ArtefactEntry {
+            chat_id: self.chat_id.clone(),
+            kind: artefact.kind,
+            title: artefact.title.clone(),
+            content: artefact.content.clone(),
+            mime_type: artefact.mime_type.clone(),
+            metadata: artefact.metadata.clone(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        };
+        if let Some(dir) = self.data_dir.as_ref() {
+            ArtefactStore::persist_static(dir, &id, &entry);
+        }
+        if let Ok(mut s) = self.artefacts.lock() {
+            s.put(id.clone(), entry);
+        }
+        self.send(SseEvent::Artefact {
+            id,
+            kind: artefact.kind,
+            title: artefact.title.clone(),
+            url,
+            bytes,
+            metadata: artefact.metadata.clone(),
         });
         Ok(())
     }
@@ -1454,14 +1841,40 @@ async fn get_mind_file(state: &HttpState, query: &str) -> Resp {
 /// Inline content-disposition for images so they preview in `<img>`;
 /// attachment for everything else so the browser downloads.
 async fn get_file(state: &HttpState, id: &str) -> Resp {
-    let (bytes, mime, name) = {
+    // Check the in-memory cache first, then fall back to disk.  Files
+    // evicted from the FIFO cache stay reachable as long as the
+    // controller has a data_dir configured — which is always true when
+    // the operator has chat_history on.
+    let cached = {
         let store = match state.files.lock() {
             Ok(s) => s,
             Err(p) => p.into_inner(),
         };
-        match store.items.get(id) {
-            Some(e) => (e.bytes.clone(), e.mime.clone(), e.name.clone()),
-            None => return not_found(),
+        store
+            .items
+            .get(id)
+            .map(|e| (e.bytes.clone(), e.mime.clone(), e.name.clone()))
+    };
+    let (bytes, mime, name) = match cached {
+        Some(t) => t,
+        None => {
+            let loaded = state
+                .data_dir
+                .as_ref()
+                .and_then(|dir| FileStore::load_from_disk(dir, id));
+            match loaded {
+                Some(e) => {
+                    // Warm the cache so subsequent hits don't re-read
+                    // disk for the same id (browser preview, repeated
+                    // downloads, etc.).
+                    let out = (e.bytes.clone(), e.mime.clone(), e.name.clone());
+                    if let Ok(mut s) = state.files.lock() {
+                        s.put(id.to_string(), e);
+                    }
+                    out
+                }
+                None => return not_found(),
+            }
         }
     };
     let cd = if mime.starts_with("image/") {
@@ -1476,6 +1889,105 @@ async fn get_file(state: &HttpState, id: &str) -> Resp {
         .header("Cache-Control", "no-cache")
         .body(boxed(Bytes::from(bytes)))
         .unwrap()
+}
+
+/// Serve the raw markdown body of a stored artefact.  The client-side
+/// renderer in `turns.jsx` turns it into HTML; we just hand over the
+/// bytes with the right mime type so "copy" / "download" on the reader
+/// get what they expect.  Returns 404 when the FIFO has evicted the
+/// entry (expected after ~32 reports on a long session) — the UI shows
+/// a "no longer in memory — rerun to regenerate" fallback.
+async fn get_artefact(state: &HttpState, id: &str) -> Resp {
+    let cached = {
+        let store = match state.artefacts.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        store.items.get(id).map(|e| {
+            (
+                e.content.clone().into_bytes(),
+                e.mime_type.clone(),
+                e.title.clone(),
+            )
+        })
+    };
+    let (bytes, mime, title) = match cached {
+        Some(t) => t,
+        None => {
+            let loaded = state
+                .data_dir
+                .as_ref()
+                .and_then(|dir| ArtefactStore::load_from_disk(dir, id));
+            match loaded {
+                Some(e) => {
+                    let out = (
+                        e.content.clone().into_bytes(),
+                        e.mime_type.clone(),
+                        e.title.clone(),
+                    );
+                    if let Ok(mut s) = state.artefacts.lock() {
+                        s.put(id.to_string(), e);
+                    }
+                    out
+                }
+                None => return not_found(),
+            }
+        }
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", format!("{mime}; charset=utf-8"))
+        .header(
+            "Content-Disposition",
+            format!("inline; filename=\"{}.md\"", title.replace('"', "")),
+        )
+        .header("Cache-Control", "no-cache")
+        .body(boxed(Bytes::from(bytes)))
+        .unwrap()
+}
+
+/// Wire shape for `GET /api/conversations/<chat>/artefacts`.  One entry
+/// per artefact emitted for this chat, ordered newest first.  The
+/// reader fetches the body separately from `/api/artefacts/<id>` so the
+/// list is cheap to render even when reports are multi-KB.
+#[derive(Serialize)]
+struct ArtefactDto {
+    id: String,
+    kind: crate::message::ArtefactKind,
+    title: String,
+    bytes: usize,
+    created_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<serde_json::Value>,
+}
+
+/// List artefacts for a given chat.  Empty list if none exist yet.
+async fn list_artefacts(state: &HttpState, chat_id: &str) -> Resp {
+    let items: Vec<ArtefactDto> = {
+        let store = match state.artefacts.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        // Walk `order` back-to-front so the newest sit on top.  The
+        // FIFO ordering IS creation order — artefacts never reorder,
+        // they only evict from the front.
+        store
+            .order
+            .iter()
+            .rev()
+            .filter_map(|id| store.items.get(id).map(|e| (id, e)))
+            .filter(|(_, e)| e.chat_id == chat_id)
+            .map(|(id, e)| ArtefactDto {
+                id: id.clone(),
+                kind: e.kind,
+                title: e.title.clone(),
+                bytes: e.content.len(),
+                created_at: e.created_at,
+                metadata: e.metadata.clone(),
+            })
+            .collect()
+    };
+    json_ok(&items)
 }
 
 /// Background-agents / dreams / swarm activity.  The HTTP controller

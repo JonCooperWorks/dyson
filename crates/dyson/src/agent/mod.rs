@@ -288,6 +288,13 @@ pub(crate) struct Conversation {
 
     /// Token usage tracking and optional budget enforcement.
     pub token_budget: TokenBudget,
+
+    /// True once the iteration-budget warning has been injected for
+    /// this run.  Gate to ensure we inject the synthetic user message
+    /// exactly once even if the iteration counter re-enters the
+    /// warning band (shouldn't happen in practice, but the flag is
+    /// cheap insurance).  Reset at the start of each `run()`.
+    pub(crate) budget_warning_fired: bool,
 }
 
 impl Conversation {
@@ -296,6 +303,7 @@ impl Conversation {
             messages: Vec::new(),
             turn_count: 0,
             token_budget: TokenBudget::default(),
+            budget_warning_fired: false,
         }
     }
 }
@@ -1099,6 +1107,7 @@ impl Agent {
     /// `self.conversation.messages`.
     async fn run_inner(&mut self, output: &mut dyn Output) -> Result<String> {
         self.conversation.turn_count += 1;
+        self.conversation.budget_warning_fired = false;
 
         self.fire_dreams(DreamEvent::TurnComplete {
             turn_count: self.conversation.turn_count,
@@ -1308,6 +1317,46 @@ impl Agent {
             self.execute_tool_calls(&tool_calls, output).await?;
             self.limiter.reset_turn();
 
+            // Budget warning: once we've spent most of the iteration
+            // budget, inject a synthetic user message so the model
+            // knows to stop investigating and write the final report.
+            // Fires exactly once per run (gated by a flag on
+            // conversation state) so re-entering the budget band
+            // doesn't re-inject the message and retrigger the warning
+            // for the model.
+            //
+            // The threshold of 20 iterations of runway mirrors the
+            // security_engineer prompt's "turn 140 is your 'write the
+            // report' line" advisory — we enforce it in code because
+            // weaker models drift past advisory thresholds when the
+            // report is near.
+            const BUDGET_WARN_OFFSET: usize = 20;
+            if !self.conversation.budget_warning_fired
+                && self.max_iterations > BUDGET_WARN_OFFSET
+                && iteration == self.max_iterations - BUDGET_WARN_OFFSET
+            {
+                let remaining = self.max_iterations - iteration - 1;
+                tracing::info!(
+                    iteration,
+                    remaining,
+                    "injecting budget warning"
+                );
+                self.conversation.messages.push(Message::user(&format!(
+                    "[BUDGET WARNING: you have {remaining} iterations left before the \
+                     agent loop terminates. Stop all further investigation and write \
+                     the final report now with the findings you already have. Do not \
+                     start new tool calls that don't directly contribute to the \
+                     report you are about to emit.]"
+                )));
+                let _ = output.checkpoint(&crate::tool::CheckpointEvent {
+                    message: format!(
+                        "approaching budget — {remaining} iterations left, writing report now"
+                    ),
+                    progress: Some(0.9),
+                });
+                self.conversation.budget_warning_fired = true;
+            }
+
             if iteration == self.max_iterations - 1 {
                 tracing::warn!(
                     max = self.max_iterations,
@@ -1412,6 +1461,9 @@ impl Agent {
                     crate::message::ContentBlock::Image { .. } => "image".to_string(),
                     crate::message::ContentBlock::Document { .. } => "document".to_string(),
                     crate::message::ContentBlock::Thinking { .. } => "thinking".to_string(),
+                    crate::message::ContentBlock::Artefact { kind, .. } => {
+                        format!("artefact({kind:?})")
+                    }
                 }).collect();
                 tracing::debug!(
                     msg_index = i,
