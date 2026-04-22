@@ -642,6 +642,41 @@ pub struct HttpState {
     next_id: std::sync::atomic::AtomicU64,
 }
 
+/// Scan the chat directory (files + archives + artefact metadata) for
+/// the highest `c-NNNN` ever used.  Ensures a new chat id never reuses
+/// a slot that another record still points at — otherwise the empty
+/// new chat would surface orphan artefacts filtered by the old id.
+fn max_chat_id_n(data_dir: &std::path::Path, artefacts: &ArtefactStore) -> u64 {
+    fn extract(name: &str) -> Option<u64> {
+        let stem = name.strip_prefix("c-")?;
+        let digits: String = stem.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            return None;
+        }
+        digits.parse().ok()
+    }
+
+    let mut max_n: u64 = 0;
+    if let Ok(iter) = std::fs::read_dir(data_dir) {
+        for entry in iter.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && let Some(n) = extract(name)
+            {
+                max_n = max_n.max(n);
+            }
+        }
+    }
+    // Artefacts retain the owning chat_id even when the chat file has
+    // been purged — rotation leaves them orphaned on disk.  Walk the
+    // in-memory index (already hydrated from disk) for c-NNNN hits.
+    for entry in artefacts.items.values() {
+        if let Some(n) = extract(&entry.chat_id) {
+            max_n = max_n.max(n);
+        }
+    }
+    max_n
+}
+
 impl HttpState {
     fn new(
         settings: Settings,
@@ -666,9 +701,11 @@ impl HttpState {
         let mut artefacts = ArtefactStore::default();
         let mut file_next: u64 = 1;
         let mut artefact_next: u64 = 1;
+        let mut chat_next: u64 = 1;
         if let Some(dir) = data_dir.as_ref() {
             file_next = files.hydrate_from_disk(dir).saturating_add(1);
             artefact_next = artefacts.hydrate_from_disk(dir).saturating_add(1);
+            chat_next = max_chat_id_n(dir, &artefacts).saturating_add(1);
         }
 
         Self {
@@ -685,12 +722,15 @@ impl HttpState {
             data_dir,
             chats: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
-            next_id: std::sync::atomic::AtomicU64::new(1),
+            next_id: std::sync::atomic::AtomicU64::new(chat_next),
         }
     }
 
     /// Mint a fresh chat id that doesn't collide with any existing chat
-    /// (in-memory or on disk).  We use `c-N` and bump until unused.
+    /// (in-memory, rotated archive, or referenced by an artefact).
+    /// `next_id` is primed at startup from the max `c-NNNN` ever seen
+    /// on disk so freshly-minted ids never reuse a slot that still has
+    /// artefact metadata tagged to it.
     async fn mint_id(&self) -> String {
         loop {
             let n = self

@@ -804,6 +804,92 @@ async fn create_conversation_rotates_previous_chat_when_requested() {
 }
 
 #[tokio::test]
+async fn mint_id_skips_ids_used_by_rotated_archives_or_orphan_artefacts() {
+    // Regression: a freshly minted chat was inheriting artefacts from
+    // a prior chat_id because `mint_id` only checked in-memory chats.
+    // If c-0042 was rotated away (only archive survives) or its
+    // current file was deleted but an artefact still carries
+    // chat_id=c-0042, the next create must NOT reuse c-0042 — or the
+    // new empty chat surfaces someone else's generated images.
+    let chat_dir = tempfile::tempdir().expect("chat tempdir");
+    let workspace_dir = tempfile::tempdir().expect("workspace tempdir");
+
+    // Seed a rotated archive for c-0042 (no current file).
+    std::fs::write(
+        chat_dir.path().join("c-0042.2026-04-22T12-00-00.json"),
+        b"[]",
+    ).unwrap();
+
+    // Seed an orphan artefact that claims chat_id=c-0099.
+    let art_dir = chat_dir.path().join("artefacts");
+    std::fs::create_dir_all(&art_dir).unwrap();
+    std::fs::write(art_dir.join("a1.body"), b"/api/files/f1").unwrap();
+    std::fs::write(
+        art_dir.join("a1.meta.json"),
+        br#"{"chat_id":"c-0099","created_at":0,"kind":"image","title":"stray.png","mime_type":"image/png"}"#,
+    ).unwrap();
+
+    // Build the rig with our pre-seeded dirs so startup hydration sees them.
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        "default".to_string(),
+        ProviderConfig {
+            provider_type: LlmProvider::OpenRouter,
+            api_key: Credential::new("sk-test".into()),
+            base_url: None,
+            models: vec!["qwen/qwen3.6-plus".into()],
+        },
+    );
+    let mut settings = Settings::default();
+    settings.agent.provider = LlmProvider::OpenRouter;
+    settings.agent.model = "qwen/qwen3.6-plus".into();
+    settings.providers = providers;
+    settings.workspace.connection_string =
+        Credential::new(workspace_dir.path().to_string_lossy().into_owned());
+    settings.chat_history = ChatHistoryConfig {
+        backend: "disk".into(),
+        connection_string: Credential::new(chat_dir.path().to_string_lossy().into_owned()),
+    };
+    let registry = Arc::new(ClientRegistry::new(&settings, None));
+    let history: Arc<dyn ChatHistory> = Arc::new(
+        DiskChatHistory::new(chat_dir.path().to_path_buf()).expect("disk history"),
+    );
+    let feedback = Arc::new(FeedbackStore::new(chat_dir.path().to_path_buf()));
+    let state = test_helpers::build_state(
+        settings, registry, None, Some(history), Some(feedback),
+        Arc::new(DangerousNoAuth),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{}", addr);
+    let _handle = tokio::spawn(test_helpers::serve(state.clone(), listener));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // Mint enough ids to walk past 0042 and 0099 — 110 calls is
+    // generous and catches both in one sweep.  Any reuse would mean
+    // the next conversation silently inherits a5's artefact list.
+    let mut minted = Vec::new();
+    for _ in 0..110 {
+        let body = body_json(post_json(
+            &format!("{}/api/conversations", base),
+            &serde_json::json!({ "title": "x" }),
+        ).await).await;
+        minted.push(body["id"].as_str().unwrap().to_string());
+    }
+    assert!(
+        !minted.contains(&"c-0042".to_string()),
+        "mint must skip rotated-archive ids — minted: {minted:?}",
+    );
+    assert!(
+        !minted.contains(&"c-0099".to_string()),
+        "mint must skip ids carried by orphan artefacts — minted: {minted:?}",
+    );
+    // Keep dirs alive until here.
+    drop(chat_dir);
+    drop(workspace_dir);
+}
+
+#[tokio::test]
 async fn delete_empty_chat_removes_file_and_drops_from_list() {
     // Empty chat → hard delete.  No rotated archive, no current file;
     // a freshly-minted conversation the user immediately removes
