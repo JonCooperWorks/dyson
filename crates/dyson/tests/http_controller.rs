@@ -14,7 +14,7 @@ use dyson::auth::{Auth, BearerTokenAuth, Credential, DangerousNoAuth};
 use dyson::chat_history::{ChatHistory, DiskChatHistory};
 use dyson::config::{ChatHistoryConfig, LlmProvider, ProviderConfig, Settings};
 use dyson::controller::ClientRegistry;
-use dyson::controller::http::test_helpers;
+use dyson::controller::http::{HttpState, test_helpers};
 use dyson::feedback::FeedbackStore;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::{Bytes, Incoming};
@@ -29,6 +29,7 @@ use tokio::task::JoinHandle;
 
 struct Rig {
     base: String,
+    state: Arc<HttpState>,
     chat_dir: tempfile::TempDir,
     workspace_dir: tempfile::TempDir,
     _handle: JoinHandle<dyson::error::Result<()>>,
@@ -87,7 +88,7 @@ async fn rig_with_auth(auth: Arc<dyn Auth>) -> Rig {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
     let base = format!("http://{}", addr);
-    let handle = tokio::spawn(test_helpers::serve(state, listener));
+    let handle = tokio::spawn(test_helpers::serve(state.clone(), listener));
 
     // Tiny settle so the spawn is in the accept loop before the first
     // request races it.
@@ -95,6 +96,7 @@ async fn rig_with_auth(auth: Arc<dyn Auth>) -> Rig {
 
     Rig {
         base,
+        state,
         chat_dir,
         workspace_dir,
         _handle: handle,
@@ -881,4 +883,148 @@ async fn http_controller_rejects_bearer_with_empty_token() {
         }),
     };
     assert!(HttpController::from_config(&cfg).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Agent-produced file delivery (image inline, everything else as download)
+// ---------------------------------------------------------------------------
+
+/// Block on the next `data: {...}\n\n` SSE record on a live stream and
+/// return the parsed JSON payload.  Accumulates across frame boundaries
+/// because hyper doesn't guarantee one SSE record per body frame.
+async fn read_sse_event(resp: &mut Response<Incoming>) -> serde_json::Value {
+    let mut buf = String::new();
+    loop {
+        let frame = resp
+            .body_mut()
+            .frame()
+            .await
+            .expect("stream ended before SSE event")
+            .expect("frame error");
+        let data = match frame.into_data() {
+            Ok(d) => d,
+            Err(_) => continue, // trailers frame — skip
+        };
+        buf.push_str(std::str::from_utf8(&data).expect("sse utf-8"));
+        while let Some(i) = buf.find("\n\n") {
+            let record: String = buf.drain(..i + 2).collect();
+            let record = record.trim_end_matches('\n');
+            if let Some(payload) = record.strip_prefix("data: ") {
+                return serde_json::from_str(payload).expect("sse json");
+            }
+            // Comment-only frames (": lag\n\n") or empty records → keep
+            // reading for the real event.
+        }
+    }
+}
+
+/// Smallest valid PNG — 1×1 transparent pixel.  The server routes on
+/// extension, not magic bytes, so any payload works; using a real PNG
+/// is just a courtesy to anyone who tails a failing test's temp dir.
+const PNG_1X1: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H', b'D',
+    b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+    0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, b'I', b'D', b'A', b'T', 0x78, 0x9c, 0x62, 0x00,
+    0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, b'I',
+    b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82,
+];
+
+#[tokio::test]
+async fn send_file_inlines_images_and_attaches_everything_else() {
+    // End-to-end: agent emits a file via `Output::send_file` → SSE `file`
+    // event with `inline_image` set per MIME → `/api/files/<id>` serves
+    // with the matching `Content-Disposition`.  Covers the contract the
+    // web UI's `FileBlock` depends on (inline `<img>` for images,
+    // download card for everything else).
+    let r = rig().await;
+
+    // Create a chat so there's a broadcast channel to publish on.
+    let created = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "files" }),
+    ).await).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Open the SSE stream BEFORE emitting — broadcast drops events
+    // with zero receivers, so we need the subscription to land first.
+    let mut sse = request(
+        &format!("{}/api/conversations/{}/events", r.base, id),
+        Method::GET,
+        None,
+    ).await;
+    assert_eq!(sse.status(), StatusCode::OK);
+    assert_eq!(
+        sse.headers().get("content-type").unwrap().to_str().unwrap(),
+        "text/event-stream",
+    );
+    test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // --- PNG: must be delivered as inline image ---
+    let png_path = dir.path().join("chart.png");
+    std::fs::write(&png_path, PNG_1X1).expect("write png");
+    test_helpers::emit_agent_file(r.state.clone(), &id, &png_path)
+        .await
+        .expect("emit png");
+
+    let evt = read_sse_event(&mut sse).await;
+    assert_eq!(evt["type"], "file", "event type: {evt}");
+    assert_eq!(evt["name"], "chart.png");
+    assert_eq!(evt["mime_type"], "image/png");
+    assert_eq!(evt["inline_image"], true, "images must be flagged inline");
+    let png_url = evt["url"].as_str().expect("url").to_string();
+    assert!(png_url.starts_with("/api/files/"), "url shape: {png_url}");
+
+    let resp = get(&format!("{}{}", r.base, png_url)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap().to_str().unwrap(),
+        "image/png",
+    );
+    let cd = resp
+        .headers()
+        .get("content-disposition")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        cd.starts_with("inline;"),
+        "image must be served inline, got: {cd:?}",
+    );
+    assert!(cd.contains("chart.png"), "filename missing from disposition: {cd:?}");
+    let body = resp.into_body().collect().await.expect("collect").to_bytes();
+    assert_eq!(&body[..], PNG_1X1, "served bytes must match what was emitted");
+
+    // --- PDF: must be delivered as an attachment ---
+    let pdf_path = dir.path().join("report.pdf");
+    std::fs::write(&pdf_path, b"%PDF-1.4\n% not a real pdf\n").expect("write pdf");
+    test_helpers::emit_agent_file(r.state.clone(), &id, &pdf_path)
+        .await
+        .expect("emit pdf");
+
+    let evt = read_sse_event(&mut sse).await;
+    assert_eq!(evt["type"], "file");
+    assert_eq!(evt["name"], "report.pdf");
+    assert_eq!(evt["mime_type"], "application/pdf");
+    assert_eq!(evt["inline_image"], false, "non-images must NOT be inline");
+    let pdf_url = evt["url"].as_str().expect("url").to_string();
+
+    let resp = get(&format!("{}{}", r.base, pdf_url)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap().to_str().unwrap(),
+        "application/pdf",
+    );
+    let cd = resp
+        .headers()
+        .get("content-disposition")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        cd.starts_with("attachment;"),
+        "non-image must be served as attachment, got: {cd:?}",
+    );
+    assert!(cd.contains("report.pdf"), "filename missing from disposition: {cd:?}");
 }
