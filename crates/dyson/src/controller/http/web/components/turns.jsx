@@ -53,12 +53,26 @@ function Reactions({ turnIndex, current, onPick }) {
   );
 }
 
-function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate }) {
+function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
+                reactionsOpen, onToggleReactions }) {
   const isUser = turn.role === 'user';
   const avatarL = isUser ? 'JC' : 'DY';
   const ratable = !isUser && turnIndex != null && typeof onRate === 'function';
+
+  // Tap-to-reveal the reactions bar on touch.  Desktop hover path is
+  // preserved by CSS gated on @media (hover: hover) and (pointer: fine).
+  // Skip interactive descendants so they keep their own semantics, and
+  // skip when a text selection exists so copy-from-prose still works.
+  const onTurnPointerUp = (e) => {
+    if (!ratable || typeof onToggleReactions !== 'function') return;
+    if (e.target.closest('button, a, summary, .toolchip, .reactions, .fileblock')) return;
+    if (window.getSelection && window.getSelection().toString().length > 0) return;
+    onToggleReactions();
+  };
+
+  const cls = `turn ${ratable ? 'ratable' : ''} ${reactionsOpen ? 'reactions-open' : ''}`.trim();
   return (
-    <div className={`turn ${ratable ? 'ratable' : ''}`}>
+    <div className={cls} onPointerUp={onTurnPointerUp}>
       <div className={`avatar ${isUser ? 'user' : 'agent'}`}>{avatarL}</div>
       <div className="col">
         <div className="who">
