@@ -976,6 +976,13 @@ async fn send_file_inlines_images_and_attaches_everything_else() {
     let png_url = evt["url"].as_str().expect("url").to_string();
     assert!(png_url.starts_with("/api/files/"), "url shape: {png_url}");
 
+    // Images are also discoverable in the Artefacts tab — consume the
+    // follow-up artefact event so subsequent reads see the next file.
+    let art = read_sse_event(&mut sse).await;
+    assert_eq!(art["type"], "artefact", "images must also emit artefact: {art}");
+    assert_eq!(art["kind"], "image");
+    assert_eq!(art["title"], "chart.png");
+
     let resp = get(&format!("{}{}", r.base, png_url)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(

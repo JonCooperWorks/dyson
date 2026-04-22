@@ -1719,6 +1719,7 @@ impl Output for SseOutput {
         );
         let inline_image = mime.starts_with("image/");
         let url = format!("/api/files/{id}");
+        let bytes_len = bytes.len();
         let entry = FileEntry { bytes, mime: mime.clone(), name: name.clone() };
         // Write-through to disk first so a controller crash between
         // the memory put and the disk write doesn't leak a dangling
@@ -1731,7 +1732,34 @@ impl Output for SseOutput {
         if let Ok(mut s) = self.files.lock() {
             s.put(id.clone(), entry);
         }
-        self.send(SseEvent::File { name, mime_type: mime, url, inline_image });
+        self.send(SseEvent::File {
+            name: name.clone(),
+            mime_type: mime.clone(),
+            url: url.clone(),
+            inline_image,
+        });
+
+        // Images are also artefacts — listing them in the Artefacts
+        // tab makes a chat's generated images discoverable after the
+        // original chat scroll has paged them away.  The body here is
+        // the served URL (not the raw bytes); the reader notices the
+        // `image/*` mime and renders with `<img>` instead of markdown.
+        if inline_image {
+            let artefact = crate::message::Artefact {
+                id: String::new(),
+                kind: crate::message::ArtefactKind::Image,
+                title: name.clone(),
+                content: url.clone(),
+                mime_type: mime.clone(),
+                metadata: Some(serde_json::json!({
+                    "file_url": url,
+                    "file_name": name,
+                    "bytes": bytes_len,
+                })),
+            };
+            let _ = self.send_artefact(&artefact);
+        }
+
         Ok(())
     }
 

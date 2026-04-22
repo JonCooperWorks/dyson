@@ -348,6 +348,7 @@ impl Tool for OrchestratorTool {
             let target_name = target_name_for(scoped_dir.as_deref(), ctx.working_dir.as_path());
             let title = match kind {
                 ArtefactKind::SecurityReview => format!("Security review: {target_name}"),
+                ArtefactKind::Image => format!("Image: {target_name}"),
                 ArtefactKind::Other => format!("Report: {target_name}"),
             };
 

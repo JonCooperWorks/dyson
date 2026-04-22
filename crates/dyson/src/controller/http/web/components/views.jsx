@@ -419,13 +419,15 @@ function ArtefactReader({ id }) {
   vUE(() => {
     if (!id || !window.DysonLive) { setBody(''); setMeta(null); setErr(''); return; }
     setErr('');
+    const hit = findArtefactMeta(id);
+    setMeta(hit);
+    // For image artefacts the body returned by /api/artefacts/<id> is
+    // just the served URL (pointing at /api/files/<id>).  For markdown
+    // artefacts it's the raw content.  Fetching works the same way —
+    // the renderer switches on mime_type at display time.
     window.DysonLive.loadArtefact(id)
       .then(text => setBody(text))
       .catch(e => setErr(String(e.message || e)));
-    // Look up metadata from whichever session has this id (artefacts are
-    // stored per chat but small enough to walk every cached list).
-    // Falls back to an empty meta if not found.
-    setMeta(findArtefactMeta(id));
   }, [id]);
 
   if (!id) {
@@ -436,7 +438,19 @@ function ArtefactReader({ id }) {
     );
   }
 
+  const isImage = meta && typeof meta.kind === 'string' && meta.kind === 'image';
+  const imageUrl = isImage
+    ? (body && body.startsWith('/') ? body : (meta && meta.metadata && meta.metadata.file_url) || '')
+    : '';
+
   const download = () => {
+    if (isImage && imageUrl) {
+      const a = document.createElement('a');
+      a.href = imageUrl;
+      a.download = (meta && meta.metadata && meta.metadata.file_name) || 'image';
+      document.body.appendChild(a); a.click(); a.remove();
+      return;
+    }
     const blob = new Blob([body], { type: 'text/markdown' });
     const u = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -445,7 +459,11 @@ function ArtefactReader({ id }) {
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(u);
   };
-  const copy = () => { navigator.clipboard && navigator.clipboard.writeText(body); };
+  const copy = () => {
+    if (!navigator.clipboard) return;
+    const text = isImage ? imageUrl : body;
+    navigator.clipboard.writeText(text);
+  };
 
   return (
     <section className="mind-pane">
@@ -455,10 +473,14 @@ function ArtefactReader({ id }) {
         {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
         {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
         <span style={{flex:1}}/>
-        <button className="btn sm ghost" onClick={copy} disabled={!body}>copy</button>
-        <button className="btn sm primary" onClick={download} disabled={!body}>download .md</button>
+        <button className="btn sm ghost" onClick={copy} disabled={isImage ? !imageUrl : !body}>
+          {isImage ? 'copy url' : 'copy'}
+        </button>
+        <button className="btn sm primary" onClick={download} disabled={isImage ? !imageUrl : !body}>
+          {isImage ? 'download image' : 'download .md'}
+        </button>
       </div>
-      {meta && meta.metadata && (
+      {meta && meta.metadata && !isImage && (
         <div style={{display:'flex', flexWrap:'wrap', gap:14, padding:'8px 18px',
                      borderBottom:'1px solid var(--line)', background:'var(--panel)', fontSize:11.5}}>
           {metaRow('model',     meta.metadata.model)}
@@ -470,9 +492,20 @@ function ArtefactReader({ id }) {
           {metaRow('iterations', meta.metadata.iterations)}
         </div>
       )}
-      <div className="prose"
-           style={{overflowY:'auto', flex:1, padding:'18px 28px', lineHeight:1.6}}
-           dangerouslySetInnerHTML={{__html: window.markdown(body || '')}}/>
+      {isImage ? (
+        <div style={{overflow:'auto', flex:1, padding:'24px', display:'flex',
+                     alignItems:'flex-start', justifyContent:'center', background:'var(--bg)'}}>
+          {imageUrl
+            ? <img src={imageUrl} alt={(meta && meta.title) || 'image'}
+                   style={{maxWidth:'100%', maxHeight:'100%', objectFit:'contain',
+                           borderRadius:4, boxShadow:'0 2px 10px rgba(0,0,0,0.1)'}}/>
+            : <div style={{color:'var(--mute)', fontSize:13}}>Image no longer available.</div>}
+        </div>
+      ) : (
+        <div className="prose"
+             style={{overflowY:'auto', flex:1, padding:'18px 28px', lineHeight:1.6}}
+             dangerouslySetInnerHTML={{__html: window.markdown(body || '')}}/>
+      )}
     </section>
   );
 }
