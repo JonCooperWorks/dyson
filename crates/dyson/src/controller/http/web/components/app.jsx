@@ -28,6 +28,9 @@ function makeSession() {
     ratings: {},
     panels: [],
     openTool: null,
+    // turnIndex whose reaction bar is currently open via explicit tap;
+    // null = none.  Mirrors openTool's single-active pattern.
+    openRating: null,
     running: false,
     phase: 'thinking',
     tname: '',
@@ -330,6 +333,28 @@ function ConversationView({ conv, session, bump }) {
     });
   };
 
+  const setOpenRating = (turnIndex) => {
+    if (!session) return;
+    session.openRating = session.openRating === turnIndex ? null : turnIndex;
+    bump();
+  };
+
+  // Dismiss the reaction bar when the user taps outside any open turn.
+  // One document listener for all turns because only one bar is open at
+  // a time (single-active, mirrors .scrim on sidebar rails in App).
+  const openRating = session && session.openRating;
+  useEffect(() => {
+    if (!session || openRating == null) return;
+    const h = (e) => {
+      if (!e.target.closest('.turn.reactions-open')) {
+        session.openRating = null;
+        bump();
+      }
+    };
+    document.addEventListener('pointerdown', h);
+    return () => document.removeEventListener('pointerdown', h);
+  }, [session, openRating, bump]);
+
   if (!session) {
     return <div className="centre"><div className="transcript"/></div>;
   }
@@ -350,7 +375,9 @@ function ConversationView({ conv, session, bump }) {
             session.liveTurns.map((t, i) => (
               <Turn key={i} turn={t} tools={D.tools}
                     onOpenTool={handleOpenTool} activeTool={session.openTool}
-                    turnIndex={i} rating={session.ratings[i]} onRate={onRate}/>
+                    turnIndex={i} rating={session.ratings[i]} onRate={onRate}
+                    reactionsOpen={session.openRating === i}
+                    onToggleReactions={() => setOpenRating(i)}/>
             ))
           )}
         </div>

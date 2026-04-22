@@ -147,8 +147,18 @@
   transition: opacity 0.12s ease, transform 0.12s ease;
   pointer-events: none;
 }
-.turn.ratable:hover .reactions,
-.turn.ratable:focus-within .reactions {
+/* Hover/focus reveal is desktop-only.  `@media (hover: hover) and (pointer: fine)`
+   gates out touch devices, where `:hover` sticks after a tap and would leak the
+   bar into view — mobile uses the `.reactions-open` class below instead. */
+@media (hover: hover) and (pointer: fine) {
+  .turn.ratable:hover .reactions,
+  .turn.ratable:focus-within .reactions {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+}
+.turn.ratable.reactions-open .reactions {
   opacity: 1;
   transform: translateY(0);
   pointer-events: auto;
@@ -186,11 +196,9 @@
   cursor: default;
 }
 @media (max-width: 760px) {
-  /* Touch: keep the bar visible once a turn is tapped. */
+  /* Narrow viewports: drop the bar into flow so it doesn't overlap the
+     composer.  Visibility is driven by the .reactions-open class set on tap. */
   .turn .reactions {
-    opacity: 1;
-    transform: translateY(0);
-    pointer-events: auto;
     position: static;
     margin-top: 6px;
     align-self: flex-start;
