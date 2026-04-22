@@ -631,6 +631,47 @@ pub mod test_helpers {
     pub async fn serve(state: Arc<HttpState>, listener: TcpListener) -> crate::Result<()> {
         super::serve_loop(state, listener).await
     }
+
+    /// Drive the `image_generate` / agent `send_file` path from a test
+    /// without standing up a real LLM turn: look up the chat, build a
+    /// one-shot `SseOutput` over its broadcast channel, and call the
+    /// same `Output::send_file` the agent would.  Round-trips through
+    /// `FileStore` so `/api/files/<id>` serves the bytes afterwards.
+    pub async fn emit_agent_file(
+        state: Arc<HttpState>,
+        chat_id: &str,
+        path: &std::path::Path,
+    ) -> crate::Result<()> {
+        let handle = state
+            .chats
+            .lock()
+            .await
+            .get(chat_id)
+            .cloned()
+            .ok_or_else(|| crate::DysonError::Config(format!("no chat {chat_id}")))?;
+        let mut out = SseOutput {
+            tx: handle.events.clone(),
+            files: state.files.clone(),
+            next_file_id: state.file_id.clone(),
+        };
+        out.send_file(path)
+    }
+
+    /// Spin until the chat's broadcast channel has at least one
+    /// subscriber — the only way to close the race between a client
+    /// connecting to `/events` and a producer emitting into the
+    /// channel (broadcast drops events that have no receivers).
+    pub async fn wait_for_sse_subscriber(state: Arc<HttpState>, chat_id: &str) {
+        for _ in 0..200 {
+            if let Some(h) = state.chats.lock().await.get(chat_id).cloned() {
+                if h.events.receiver_count() > 0 {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("no SSE subscriber for chat {chat_id} after 2s");
+    }
 }
 
 // ---------------------------------------------------------------------------
