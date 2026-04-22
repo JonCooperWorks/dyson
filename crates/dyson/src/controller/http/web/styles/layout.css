@@ -499,6 +499,12 @@
   }
   .mind.show-side .mind-side { transform: translateX(0); }
   .mind-editor { padding: 14px 18px; }
+  /* In Mind view the hamburger drives .mind.show-side (file list), so
+     the stats-only LeftRailMind drawer would be redundant. Hide it. */
+  .body.no-right .left,
+  .body.no-right.show-left .left { display: none; }
+  /* Hide visual keyboard shortcut chips on mobile — no physical keys. */
+  .kbd { display: none; }
 }
 
 /* mobile menu toggles in topbar */
