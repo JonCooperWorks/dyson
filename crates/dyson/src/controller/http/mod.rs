@@ -1200,6 +1200,12 @@ async fn create_conversation(req: Request<hyper::body::Incoming>, state: &HttpSt
             if let Err(e) = h.rotate(prev) {
                 tracing::warn!(error = %e, chat_id = %prev, "failed to rotate previous chat");
             }
+            // Keep the rotated chat visible across restarts by seeding
+            // an empty current file — otherwise `list()` skips it and
+            // the sidebar loses both the chat and its artefacts.
+            if let Err(e) = h.save(prev, &[]) {
+                tracing::warn!(error = %e, chat_id = %prev, "failed to seed empty chat after rotate");
+            }
         }
     }
     let id = state.mint_id().await;
@@ -1422,6 +1428,14 @@ async fn post_turn(
         if let Some(h) = state.history.as_ref() {
             if let Err(e) = h.rotate(id) {
                 tracing::warn!(error = %e, chat_id = %id, "failed to rotate chat history");
+            }
+            // Re-create the current file as an empty transcript so the
+            // chat stays visible across restarts.  Without this,
+            // DiskChatHistory::list() skips it (no current file, only
+            // archives) and the sidebar loses the chat — along with the
+            // artefacts filtered by its id.
+            if let Err(e) = h.save(id, &[]) {
+                tracing::warn!(error = %e, chat_id = %id, "failed to seed empty chat after rotate");
             }
         }
         let _ = handle.events.send(SseEvent::Done);

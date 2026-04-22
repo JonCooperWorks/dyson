@@ -714,11 +714,12 @@ async fn post_turn_with_slash_clear_rotates_chat_history() {
     let body = body_json(resp).await;
     assert_eq!(body["cleared"], true);
 
-    let after: Vec<dyson::message::Message> = if current.exists() {
-        serde_json::from_str(&std::fs::read_to_string(&current).unwrap()).unwrap()
-    } else {
-        Vec::new()
-    };
+    // The current file must still exist (empty) so DiskChatHistory::list
+    // keeps the chat visible on restart — otherwise the rotation would
+    // strand any artefacts filtered by this chat_id.
+    assert!(current.exists(), "current file must be re-seeded empty after rotate");
+    let after: Vec<dyson::message::Message> =
+        serde_json::from_str(&std::fs::read_to_string(&current).unwrap()).unwrap();
     assert!(after.is_empty(), "current transcript should be cleared");
 
     let rotated: Vec<_> = std::fs::read_dir(r.chat_dir.path())
@@ -778,11 +779,15 @@ async fn create_conversation_rotates_previous_chat_when_requested() {
     // Old chat's current file is empty (or missing); exactly one
     // rotated archive sits alongside it holding the seeded message.
     let old_current = r.chat_dir.path().join(format!("{prev}.json"));
-    let after: Vec<dyson::message::Message> = if old_current.exists() {
-        serde_json::from_str(&std::fs::read_to_string(&old_current).unwrap()).unwrap()
-    } else {
-        Vec::new()
-    };
+    // Empty current file must remain so the rotated chat stays
+    // enumerable — list() skips rotated archives, so without this the
+    // chat (and its artefacts) would vanish from the sidebar on restart.
+    assert!(
+        old_current.exists(),
+        "prev chat's current file must be re-seeded empty after rotate",
+    );
+    let after: Vec<dyson::message::Message> =
+        serde_json::from_str(&std::fs::read_to_string(&old_current).unwrap()).unwrap();
     assert!(after.is_empty(), "prev chat's current file should be cleared");
 
     let rotated: Vec<_> = std::fs::read_dir(r.chat_dir.path())
