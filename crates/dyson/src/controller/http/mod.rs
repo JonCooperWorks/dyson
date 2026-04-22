@@ -1383,6 +1383,26 @@ async fn post_turn(
         None => return not_found(),
     };
 
+    // Intercept `/clear` before the busy latch + spawn path.  Without
+    // this, the slash command listed in data.js would land at the LLM
+    // as a plain prompt and nothing on disk would rotate.  Telegram's
+    // `handle_per_chat_command` does the same thing via
+    // `execute_agent_command` → `chat_store.rotate`.  Other slash
+    // commands (`/compact`, `/model`) require an LLM call or have
+    // dedicated endpoints, so they continue to fall through.
+    if body.prompt.trim() == "/clear" && decoded.is_empty() {
+        if let Some(agent) = handle.agent.lock().await.as_mut() {
+            agent.clear();
+        }
+        if let Some(h) = state.history.as_ref() {
+            if let Err(e) = h.rotate(id) {
+                tracing::warn!(error = %e, chat_id = %id, "failed to rotate chat history");
+            }
+        }
+        let _ = handle.events.send(SseEvent::Done);
+        return json_ok(&serde_json::json!({ "ok": true, "cleared": true }));
+    }
+
     if handle
         .busy
         .swap(true, std::sync::atomic::Ordering::SeqCst)

@@ -675,6 +675,74 @@ async fn feedback_overwrites_existing_rating_for_same_turn() {
 }
 
 #[tokio::test]
+async fn post_turn_with_slash_clear_rotates_chat_history() {
+    // Regression: /clear is a listed controller command in the web
+    // composer's slash menu (data.js), but post_turn did not intercept
+    // it — the prompt went straight to the LLM and nothing on disk
+    // changed.  Hitting /clear must rotate the chat (archive the
+    // current transcript, reset the current file) the same way the
+    // Telegram controller does via execute_agent_command.
+    let r = rig().await;
+
+    let id = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "seed" }),
+    ).await).await["id"].as_str().unwrap().to_string();
+
+    // Seed the on-disk transcript so rotation has something real to
+    // archive.  (The controller calls save(id, &[]) during create, so
+    // an empty file already exists — we overwrite it with a message.)
+    let store = DiskChatHistory::new(r.chat_dir.path().to_path_buf())
+        .expect("seed store");
+    store
+        .save(&id, &[dyson::message::Message::user("hello world")])
+        .expect("seed save");
+
+    let current = r.chat_dir.path().join(format!("{id}.json"));
+    let before: Vec<dyson::message::Message> =
+        serde_json::from_str(&std::fs::read_to_string(&current).unwrap()).unwrap();
+    assert_eq!(before.len(), 1, "pre-clear transcript should have 1 message");
+
+    // POST /clear — must return synchronously (no agent spawn) with a
+    // 2xx.  The current file is empty afterwards and exactly one
+    // rotated archive holds the original message.
+    let resp = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "/clear" }),
+    ).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["cleared"], true);
+
+    let after: Vec<dyson::message::Message> = if current.exists() {
+        serde_json::from_str(&std::fs::read_to_string(&current).unwrap()).unwrap()
+    } else {
+        Vec::new()
+    };
+    assert!(after.is_empty(), "current transcript should be cleared");
+
+    let rotated: Vec<_> = std::fs::read_dir(r.chat_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with(&format!("{id}."))
+                && name != format!("{id}.json")
+                && name.ends_with(".json")
+        })
+        .collect();
+    assert_eq!(
+        rotated.len(),
+        1,
+        "exactly one rotated archive expected — found: {:?}",
+        rotated.iter().map(|e| e.file_name()).collect::<Vec<_>>(),
+    );
+    let rotated_msgs: Vec<dyson::message::Message> =
+        serde_json::from_str(&std::fs::read_to_string(rotated[0].path()).unwrap()).unwrap();
+    assert_eq!(rotated_msgs.len(), 1, "archive preserves prior transcript");
+}
+
+#[tokio::test]
 async fn turn_with_attachments_accepts_base64_payload() {
     // Upload path: POST /turn with an `attachments` array.  The
     // controller decodes base64 up front and returns 202 — failures

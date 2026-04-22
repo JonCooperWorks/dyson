@@ -410,6 +410,29 @@ function ConversationView({ conv, session, bump }) {
 
   const sendMsg = (val, files) => {
     if (!conv || !session || !window.DysonLive) return;
+    // /clear is controller-side — the server rotates the chat file and
+    // clears the agent context.  Skip the optimistic user/agent turn
+    // append (there's no LLM reply coming) and reset the local
+    // transcript once the POST returns.  Without this the sidebar and
+    // the chat scroll would still show the pre-clear turns even though
+    // disk and agent state have been rotated.
+    if (val.trim() === '/clear' && !(files && files.length)) {
+      fetch('/api/conversations/' + encodeURIComponent(conv) + '/turn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: '/clear' }),
+      }).then(r => {
+        if (!r.ok) return;
+        session.liveTurns = [];
+        session.artefacts = [];
+        session.panels = [];
+        session.openTool = null;
+        session.thinkingRef = null;
+        session.liveToolRef = null;
+        bump();
+      });
+      return;
+    }
     session.running = true;
     session.phase = 'thinking';
     const ts = new Date().toTimeString().slice(0, 8);
