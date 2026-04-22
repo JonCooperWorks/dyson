@@ -106,6 +106,28 @@ function App() {
     return () => window.removeEventListener('keydown', h);
   }, [bump]);
 
+  // iOS keyboard dodge.  On iOS the layout viewport stays fixed when
+  // the on-screen keyboard opens — only visualViewport shrinks — so a
+  // composer anchored to the viewport bottom ends up hidden behind the
+  // keyboard.  Publish the delta as --kb-inset; composer-dock reads it
+  // and rides above the keyboard.  Safe on platforms without
+  // visualViewport (no-op, --kb-inset stays unset, falls back to 0).
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const sync = () => {
+      const inset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      document.documentElement.style.setProperty('--kb-inset', inset + 'px');
+    };
+    vv.addEventListener('resize', sync);
+    vv.addEventListener('scroll', sync);
+    sync();
+    return () => {
+      vv.removeEventListener('resize', sync);
+      vv.removeEventListener('scroll', sync);
+    };
+  }, []);
+
   const closeRails = useCallback(() => { setShowLeft(false); setShowRight(false); }, []);
 
   // Plug button is dual-purpose: on mobile it opens the drawer, on

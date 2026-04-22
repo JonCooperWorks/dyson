@@ -338,7 +338,7 @@ function Composer({ onSend, onCancel, running }) {
         <textarea
           ref={taRef}
           value={val}
-          placeholder={running ? "Dyson is working — this queues" : "Reply to Dyson. `/` for commands, ↵ to send · ⇧↵ newline."}
+          placeholder={running ? "Dyson is working — this queues" : "Reply to Dyson…"}
           onChange={e => {
             setVal(e.target.value);
             setSlash(e.target.value.startsWith('/'));
@@ -359,11 +359,11 @@ function Composer({ onSend, onCancel, running }) {
             <Icon name="paperclip" size={12}/>
           </button>
           <button className={`btn ${slash?'' : ''}`} onClick={() => { setVal('/'); setSlash(true); taRef.current?.focus(); }} title="Slash menu">
-            <Icon name="slash" size={12}/> commands
+            <Icon name="slash" size={12}/> <span className="btn-label">commands</span>
           </button>
           <span className="sep"/>
           {(window.DYSON_DATA && window.DYSON_DATA.activeModel) && (
-            <span style={{fontFamily:'var(--font-mono)', fontSize:10.5, color:'var(--mute)'}}>{window.DYSON_DATA.activeModel}</span>
+            <span className="model-label" style={{fontFamily:'var(--font-mono)', fontSize:10.5, color:'var(--mute)'}}>{window.DYSON_DATA.activeModel}</span>
           )}
           {running ? (
             <button className="btn sm" onClick={onCancel} style={{color:'var(--err)', borderColor:'oklch(0.70 0.21 25 / 0.3)'}}>

@@ -436,12 +436,15 @@
 
 /* ---------- mobile ---------- */
 @media (max-width: 760px) {
+  /* Grow the topbar row by the device safe-area so the clock/notch
+     doesn't clip nav buttons on notched iPhones in standalone PWA mode. */
+  .app { grid-template-rows: calc(44px + env(safe-area-inset-top)) 1fr; }
   .body { grid-template-columns: 1fr !important; }
   .body .left, .body .right { display: none; }
   .body.show-left .left {
     display: flex;
     position: fixed;
-    top: 44px; left: 0; bottom: 0;
+    top: calc(44px + env(safe-area-inset-top)); left: 0; bottom: 0;
     width: min(86vw, 320px);
     z-index: 30;
     box-shadow: 0 0 24px oklch(0 0 0 / 0.5);
@@ -449,24 +452,32 @@
   .body.show-right .right {
     display: flex;
     position: fixed;
-    top: 44px; right: 0; bottom: 0;
+    top: calc(44px + env(safe-area-inset-top)); right: 0; bottom: 0;
     width: min(94vw, 380px);
     z-index: 30;
     box-shadow: 0 0 24px oklch(0 0 0 / 0.5);
   }
   .scrim {
-    position: fixed; inset: 44px 0 0 0;
+    position: fixed; inset: calc(44px + env(safe-area-inset-top)) 0 0 0;
     background: oklch(0 0 0 / 0.55);
     z-index: 25;
   }
-  .topbar { padding: 0 8px; gap: 6px; }
+  .topbar { padding: env(safe-area-inset-top) 8px 0; gap: 6px; }
   .topbar .meta .cmdk { display: none; }
   .topbar nav button .k { display: none; }
   .topbar nav button span:not(.k) { display: none; }
   .topbar nav button { padding: 0 8px; }
   .transcript { padding: 16px 0 200px; }
-  .transcript .inner { padding: 0 14px; }
-  .composer-dock { padding: 60px 14px 14px; }
+  .transcript .inner { padding: 0 14px; min-width: 0; }
+  /* --kb-inset is set from App's visualViewport listener; it is
+     roughly the iOS on-screen keyboard height, so the dock rides above
+     it instead of being hidden.  Falls back to 0 when no listener ran
+     (desktop, no-JS render).  safe-area-inset-bottom keeps the dock
+     clear of the iPhone home indicator when the keyboard is closed. */
+  .composer-dock {
+    padding: 60px 14px calc(14px + env(safe-area-inset-bottom));
+    bottom: var(--kb-inset, 0px);
+  }
   .mind { grid-template-columns: 1fr; }
   .mind-side {
     position: absolute;

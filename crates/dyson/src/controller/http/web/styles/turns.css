@@ -31,7 +31,10 @@
 .turn .who .when { margin-left: auto; }
 .turn .who .model { color: var(--mute-2); text-transform: none; font-weight: 400; letter-spacing: 0; }
 
-.prose { font: 400 14.5px/1.65 var(--font-ui); color: var(--fg); }
+/* overflow-wrap: anywhere lets long unbreakable tokens (URLs, hashes)
+   wrap inside the viewport on narrow screens, instead of forcing the
+   transcript to scroll horizontally and clip the tail of messages. */
+.prose { font: 400 14.5px/1.65 var(--font-ui); color: var(--fg); overflow-wrap: anywhere; min-width: 0; }
 .prose p { margin: 0 0 10px; }
 .prose p:last-child { margin-bottom: 0; }
 .prose code {
@@ -202,6 +205,17 @@
     position: static;
     margin-top: 6px;
     align-self: flex-start;
+  }
+  /* Composer row collapses to icons + truncated model chip so the send
+     button always stays reachable regardless of model-id length. */
+  .composer .row { flex-wrap: nowrap; min-width: 0; }
+  .composer .row .btn-label { display: none; }
+  .composer .row .model-label {
+    min-width: 0;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
