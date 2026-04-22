@@ -406,7 +406,13 @@ function ConversationView({ conv, session, bump }) {
         const ref = session.liveToolRef;
         const t = ref && D.tools[ref];
         if (t) applyToolView(t, content, is_error, view);
-        session.liveToolRef = null;
+        // Keep `liveToolRef` pointing at the completed tool so any
+        // follow-up `file` / `artefact` / `checkpoint` events that
+        // belong to the same tool call can find it.  `onToolStart`
+        // replaces it when the next tool runs, and `onDone` is the
+        // natural end-of-turn cleanup — we don't need to null it
+        // here, and nulling broke image_generate's inline preview
+        // (file events arrive after tool_result per execution.rs).
         bump();
       },
       onCheckpoint: ({ text }) => {
