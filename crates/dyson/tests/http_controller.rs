@@ -314,9 +314,9 @@ async fn feedback_round_trip_telegram_compatible() {
     assert_eq!(arr[0]["rating"], "good");
     assert_eq!(arr[0]["score"], 1);
 
-    // Confirm it landed in the SAME file the Telegram controller writes
-    // — chat_id_feedback.json under chat_history.connection_string.
-    let path = r.chat_dir.path().join(format!("{id}_feedback.json"));
+    // Feedback lives at {chat_dir}/{chat_id}/feedback.json — same
+    // per-chat layout the Telegram controller reads from.
+    let path = r.chat_dir.path().join(&id).join("feedback.json");
     assert!(path.exists(), "feedback file not on disk: {path:?}");
 
     // Empty emoji removes.
@@ -698,7 +698,7 @@ async fn post_turn_with_slash_clear_rotates_chat_history() {
         .save(&id, &[dyson::message::Message::user("hello world")])
         .expect("seed save");
 
-    let current = r.chat_dir.path().join(format!("{id}.json"));
+    let current = r.chat_dir.path().join(&id).join("transcript.json");
     let before: Vec<dyson::message::Message> =
         serde_json::from_str(&std::fs::read_to_string(&current).unwrap()).unwrap();
     assert_eq!(before.len(), 1, "pre-clear transcript should have 1 message");
@@ -722,15 +722,11 @@ async fn post_turn_with_slash_clear_rotates_chat_history() {
         serde_json::from_str(&std::fs::read_to_string(&current).unwrap()).unwrap();
     assert!(after.is_empty(), "current transcript should be cleared");
 
-    let rotated: Vec<_> = std::fs::read_dir(r.chat_dir.path())
+    let archives = r.chat_dir.path().join(&id).join("archives");
+    let rotated: Vec<_> = std::fs::read_dir(&archives)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            name.starts_with(&format!("{id}."))
-                && name != format!("{id}.json")
-                && name.ends_with(".json")
-        })
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
         .collect();
     assert_eq!(
         rotated.len(),
@@ -778,7 +774,7 @@ async fn create_conversation_rotates_previous_chat_when_requested() {
 
     // Old chat's current file is empty (or missing); exactly one
     // rotated archive sits alongside it holding the seeded message.
-    let old_current = r.chat_dir.path().join(format!("{prev}.json"));
+    let old_current = r.chat_dir.path().join(&prev).join("transcript.json");
     // Empty current file must remain so the rotated chat stays
     // enumerable — list() skips rotated archives, so without this the
     // chat (and its artefacts) would vanish from the sidebar on restart.
@@ -790,15 +786,11 @@ async fn create_conversation_rotates_previous_chat_when_requested() {
         serde_json::from_str(&std::fs::read_to_string(&old_current).unwrap()).unwrap();
     assert!(after.is_empty(), "prev chat's current file should be cleared");
 
-    let rotated: Vec<_> = std::fs::read_dir(r.chat_dir.path())
+    let archives = r.chat_dir.path().join(&prev).join("archives");
+    let rotated: Vec<_> = std::fs::read_dir(&archives)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            name.starts_with(&format!("{prev}."))
-                && name != format!("{prev}.json")
-                && name.ends_with(".json")
-        })
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
         .collect();
     assert_eq!(rotated.len(), 1, "one rotated archive expected for prev chat");
 }
@@ -899,7 +891,8 @@ async fn delete_empty_chat_removes_file_and_drops_from_list() {
         &format!("{}/api/conversations", r.base),
         &serde_json::json!({ "title": "trash me" }),
     ).await).await["id"].as_str().unwrap().to_string();
-    let current = r.chat_dir.path().join(format!("{id}.json"));
+    let chat_root = r.chat_dir.path().join(&id);
+    let current = chat_root.join("transcript.json");
     assert!(current.exists(), "create should seed an empty current file");
 
     let resp = request(
@@ -912,7 +905,8 @@ async fn delete_empty_chat_removes_file_and_drops_from_list() {
     assert_eq!(body["deleted"], true);
     assert_eq!(body["preserved"], false);
 
-    assert!(!current.exists(), "empty chat's file should be gone");
+    // Cascade delete: the whole chat subdir is gone.
+    assert!(!chat_root.exists(), "empty chat's subdir should be gone");
     let listed = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
     let ids: Vec<&str> = listed.as_array().unwrap().iter()
         .map(|c| c["id"].as_str().unwrap()).collect();
@@ -945,17 +939,13 @@ async fn delete_non_empty_chat_rotates_then_drops_from_list() {
     assert_eq!(body["deleted"], true);
     assert_eq!(body["preserved"], true);
 
-    let current = r.chat_dir.path().join(format!("{id}.json"));
+    let current = r.chat_dir.path().join(&id).join("transcript.json");
     assert!(!current.exists(), "current file is archived away, not re-seeded");
-    let rotated: Vec<_> = std::fs::read_dir(r.chat_dir.path())
+    let archives = r.chat_dir.path().join(&id).join("archives");
+    let rotated: Vec<_> = std::fs::read_dir(&archives)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            name.starts_with(&format!("{id}."))
-                && name != format!("{id}.json")
-                && name.ends_with(".json")
-        })
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
         .collect();
     assert_eq!(rotated.len(), 1, "one dated archive preserves the transcript");
     let archived: Vec<dyson::message::Message> =

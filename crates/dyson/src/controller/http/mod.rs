@@ -465,11 +465,18 @@ impl ArtefactStore {
         self.items.insert(id, entry);
     }
 
+    /// Per-chat artefact dir: `{data_dir}/{chat_id}/artefacts/`.
+    /// The migration in `chat_history::migrate` fans the legacy shared
+    /// `artefacts/` dir out into these subdirs at startup.
+    fn dir_for_chat(data_dir: &std::path::Path, chat_id: &str) -> std::path::PathBuf {
+        data_dir.join(chat_id).join("artefacts")
+    }
+
     /// Best-effort write-through to disk.  Two files per artefact:
     /// `<id>.body` (raw content) and `<id>.meta.json` (kind, title,
     /// chat id, mime, created_at, optional metadata blob).
     fn persist_static(data_dir: &std::path::Path, id: &str, entry: &ArtefactEntry) {
-        let sub = data_dir.join("artefacts");
+        let sub = Self::dir_for_chat(data_dir, &entry.chat_id);
         if let Err(e) = std::fs::create_dir_all(&sub) {
             tracing::warn!(error = %e, "failed to create artefacts dir");
             return;
@@ -496,67 +503,114 @@ impl ArtefactStore {
         }
     }
 
-    /// Load a persisted artefact (meta + body) from disk.  Returns
-    /// `None` if the entry is missing or malformed.
+    /// Load a persisted artefact (meta + body) from disk.  Walks each
+    /// per-chat `artefacts/` subdir looking for the id — callers don't
+    /// need to know the owning chat up front.  Returns `None` if no
+    /// chat subdir carries the id.
     fn load_from_disk(data_dir: &std::path::Path, id: &str) -> Option<ArtefactEntry> {
-        let sub = data_dir.join("artefacts");
-        let body = std::fs::read_to_string(sub.join(format!("{id}.body"))).ok()?;
-        let meta_txt = std::fs::read_to_string(sub.join(format!("{id}.meta.json"))).ok()?;
-        let meta: serde_json::Value = serde_json::from_str(&meta_txt).ok()?;
-        let kind: crate::message::ArtefactKind = meta
-            .get("kind")
-            .and_then(|k| serde_json::from_value(k.clone()).ok())
-            .unwrap_or(crate::message::ArtefactKind::Other);
-        Some(ArtefactEntry {
-            chat_id: meta.get("chat_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            kind,
-            title: meta.get("title").and_then(|v| v.as_str()).unwrap_or("Artefact").to_string(),
-            content: body,
-            mime_type: meta.get("mime_type").and_then(|v| v.as_str()).unwrap_or("text/markdown").to_string(),
-            metadata: meta.get("metadata").cloned().filter(|v| !v.is_null()),
-            tool_use_id: meta.get("tool_use_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            created_at: meta.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
-        })
+        for entry in std::fs::read_dir(data_dir).ok()?.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let sub = path.join("artefacts");
+            let meta_path = sub.join(format!("{id}.meta.json"));
+            if !meta_path.exists() {
+                continue;
+            }
+            let body = std::fs::read_to_string(sub.join(format!("{id}.body"))).ok()?;
+            let meta_txt = std::fs::read_to_string(&meta_path).ok()?;
+            let meta: serde_json::Value = serde_json::from_str(&meta_txt).ok()?;
+            let kind: crate::message::ArtefactKind = meta
+                .get("kind")
+                .and_then(|k| serde_json::from_value(k.clone()).ok())
+                .unwrap_or(crate::message::ArtefactKind::Other);
+            return Some(ArtefactEntry {
+                chat_id: meta.get("chat_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                kind,
+                title: meta.get("title").and_then(|v| v.as_str()).unwrap_or("Artefact").to_string(),
+                content: body,
+                mime_type: meta.get("mime_type").and_then(|v| v.as_str()).unwrap_or("text/markdown").to_string(),
+                metadata: meta.get("metadata").cloned().filter(|v| !v.is_null()),
+                tool_use_id: meta.get("tool_use_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                created_at: meta.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+            });
+        }
+        None
     }
 
-    /// Scan the persistence dir on startup and populate the in-memory
-    /// index so the list endpoint returns everything immediately.
-    /// Returns the largest numeric id seen.
+    /// Walk every `{chat_id}/artefacts/` subdir on startup and populate
+    /// the in-memory index so the list endpoint returns everything
+    /// immediately.  Returns the largest numeric id seen.
     fn hydrate_from_disk(&mut self, data_dir: &std::path::Path) -> u64 {
-        let sub = data_dir.join("artefacts");
-        let entries = match std::fs::read_dir(&sub) {
-            Ok(e) => e,
+        let mut ids: Vec<(String, std::path::PathBuf)> = Vec::new();
+        let dir_iter = match std::fs::read_dir(data_dir) {
+            Ok(it) => it,
             Err(_) => return 0,
         };
-        let mut ids: Vec<String> = Vec::new();
-        for e in entries.flatten() {
-            let name = match e.file_name().into_string() {
-                Ok(n) => n,
+        for chat_entry in dir_iter.flatten() {
+            let chat_path = chat_entry.path();
+            if !chat_path.is_dir() {
+                continue;
+            }
+            let sub = chat_path.join("artefacts");
+            let art_iter = match std::fs::read_dir(&sub) {
+                Ok(it) => it,
                 Err(_) => continue,
             };
-            if !name.ends_with(".meta.json") { continue; }
-            let id = name.trim_end_matches(".meta.json").to_string();
-            ids.push(id);
+            for e in art_iter.flatten() {
+                let name = match e.file_name().into_string() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                if !name.ends_with(".meta.json") {
+                    continue;
+                }
+                let id = name.trim_end_matches(".meta.json").to_string();
+                ids.push((id, sub.clone()));
+            }
         }
         // Sort by numeric id so `order` mirrors creation order.
-        ids.sort_by_key(|s| {
+        ids.sort_by_key(|(s, _)| {
             s.strip_prefix('a')
                 .and_then(|r| r.parse::<u64>().ok())
                 .unwrap_or(0)
         });
         let mut max_n: u64 = 0;
-        for id in ids {
+        for (id, sub) in ids {
             if let Some(rest) = id.strip_prefix('a')
                 && let Ok(n) = rest.parse::<u64>()
             {
                 max_n = max_n.max(n);
             }
-            if let Some(entry) = Self::load_from_disk(data_dir, &id) {
+            if let Some(entry) = load_artefact_from_subdir(&sub, &id) {
                 self.put(id, entry);
             }
         }
         max_n
     }
+}
+
+/// Load a single artefact from a known per-chat subdir.  Extracted so
+/// hydrate avoids re-walking the whole tree per entry.
+fn load_artefact_from_subdir(sub: &std::path::Path, id: &str) -> Option<ArtefactEntry> {
+    let body = std::fs::read_to_string(sub.join(format!("{id}.body"))).ok()?;
+    let meta_txt = std::fs::read_to_string(sub.join(format!("{id}.meta.json"))).ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&meta_txt).ok()?;
+    let kind: crate::message::ArtefactKind = meta
+        .get("kind")
+        .and_then(|k| serde_json::from_value(k.clone()).ok())
+        .unwrap_or(crate::message::ArtefactKind::Other);
+    Some(ArtefactEntry {
+        chat_id: meta.get("chat_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        kind,
+        title: meta.get("title").and_then(|v| v.as_str()).unwrap_or("Artefact").to_string(),
+        content: body,
+        mime_type: meta.get("mime_type").and_then(|v| v.as_str()).unwrap_or("text/markdown").to_string(),
+        metadata: meta.get("metadata").cloned().filter(|v| !v.is_null()),
+        tool_use_id: meta.get("tool_use_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        created_at: meta.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
 }
 
 /// Per-chat handle.  Agent built lazily on first turn so that listing chats

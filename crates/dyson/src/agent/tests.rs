@@ -1397,14 +1397,13 @@ async fn compact_rotates_pre_compaction_history() {
     let current = store.load("test_chat").unwrap();
     assert!(current.is_empty(), "current chat should be empty after rotation");
 
-    // A rotated file should exist with the pre-compaction messages.
-    let files: Vec<_> = std::fs::read_dir(&dir)
+    // A rotated file should exist with the pre-compaction messages —
+    // per-chat layout puts archives under {id}/archives/.
+    let archives = dir.join("test_chat").join("archives");
+    let files: Vec<_> = std::fs::read_dir(&archives)
         .unwrap()
         .filter_map(std::result::Result::ok)
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            name.starts_with("test_chat.") && name.ends_with(".json")
-        })
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
         .collect();
     assert_eq!(files.len(), 1, "should have exactly one rotated file");
 

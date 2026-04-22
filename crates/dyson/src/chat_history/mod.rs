@@ -31,6 +31,7 @@
 // ===========================================================================
 
 pub mod disk;
+pub mod migrate;
 
 pub use disk::DiskChatHistory;
 

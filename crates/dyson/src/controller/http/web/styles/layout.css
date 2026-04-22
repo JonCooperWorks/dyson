@@ -140,6 +140,7 @@
 }
 .body.no-right { grid-template-columns: 256px 1fr; }
 .body.no-left { grid-template-columns: 1fr 380px; }
+.body.no-left.no-right { grid-template-columns: 1fr; }
 
 /* ---------- left rail ---------- */
 .left {

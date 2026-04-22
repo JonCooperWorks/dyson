@@ -1,16 +1,31 @@
 // ===========================================================================
-// DiskChatHistory — JSON files on disk, one per chat.
+// DiskChatHistory — per-chat subdirectory on disk.
 //
-// Active conversations use `{chat_id}.json`.  When rotated, the file
-// is renamed to `{chat_id}.{timestamp}.json` and a fresh file is
-// created on the next save.
+// Each chat owns everything it produced under `{dir}/{chat_id}/`:
 //
 // ```text
 // ~/.dyson/chats/
-//   2102424765.json                      ← current conversation
-//   2102424765.2026-03-19T14-30-00.json  ← rotated (old) conversation
-//   2102424765.2026-03-18T09-15-22.json  ← even older
+//   c-0001/
+//     transcript.json          ← current conversation
+//     archives/
+//       2026-03-19T14-30-00.json
+//       2026-03-18T09-15-22.json
+//     media/                    ← externalised image refs
+//     artefacts/                ← ArtefactStore populates this
+//     files/                    ← FileStore populates this
+//     feedback.json             ← FeedbackStore populates this
 // ```
+//
+// Delete-cascade is then `fs::remove_dir_all({chat_id})`.  Rotation is
+// a rename inside `{chat_id}/archives/`.  The whole class of
+// "orphan artefact tagged with a reused id" bugs goes away because
+// an id's artefacts, files, media, and transcript all share a parent
+// directory and die together.
+//
+// A one-shot migration at `DiskChatHistory::new` moves any legacy
+// flat-layout files (`{id}.json`, `{id}.TIMESTAMP.json`, `{id}_feedback.json`,
+// `{id}_media/`) into the per-chat shape so existing deployments don't
+// need manual cleanup.
 // ===========================================================================
 
 use std::collections::HashMap;
@@ -29,18 +44,22 @@ const MEDIA_REF_PREFIX: &str = "@media/";
 // DiskChatHistory
 // ---------------------------------------------------------------------------
 
-/// File-based chat store: one JSON file per chat in a directory.
+/// File-based chat store: one directory per chat.
 pub struct DiskChatHistory {
-    /// Directory where chat JSON files are stored.
+    /// Root directory holding every chat subdir.
     dir: PathBuf,
 }
 
 impl DiskChatHistory {
-    /// Create a new disk chat history in the given directory.
+    /// Create a new disk chat history rooted at the given directory.
     ///
-    /// Creates the directory if it doesn't exist.
+    /// Creates the directory if it doesn't exist and runs any pending
+    /// chat-dir migrations (no-op on a current-version dir).
     pub fn new(dir: PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&dir)?;
+        if let Err(e) = crate::chat_history::migrate::migrate(&dir) {
+            tracing::warn!(error = %e, dir = %dir.display(), "chats migration failed");
+        }
         Ok(Self { dir })
     }
 
@@ -50,13 +69,22 @@ impl DiskChatHistory {
         Self::new(path)
     }
 
-    fn chat_path(&self, chat_id: &str) -> PathBuf {
-        self.dir.join(format!("{chat_id}.json"))
+    /// Per-chat root: `{dir}/{chat_id}`.
+    pub(crate) fn chat_root(&self, chat_id: &str) -> PathBuf {
+        self.dir.join(chat_id)
     }
 
-    /// Directory for externalized media files for a given chat.
+    fn transcript_path(&self, chat_id: &str) -> PathBuf {
+        self.chat_root(chat_id).join("transcript.json")
+    }
+
+    fn archives_dir(&self, chat_id: &str) -> PathBuf {
+        self.chat_root(chat_id).join("archives")
+    }
+
+    /// Directory for externalised media files for a given chat.
     fn media_dir(&self, chat_id: &str) -> PathBuf {
-        self.dir.join(format!("{chat_id}_media"))
+        self.chat_root(chat_id).join("media")
     }
 
     /// Generate a timestamp string for rotation filenames.
@@ -79,12 +107,13 @@ impl DiskChatHistory {
 
 impl ChatHistory for DiskChatHistory {
     fn save(&self, chat_id: &str, messages: &[Message]) -> Result<()> {
-        let path = self.chat_path(chat_id);
-        let media_dir = self.media_dir(chat_id);
+        let root = self.chat_root(chat_id);
+        std::fs::create_dir_all(&root)?;
 
-        // Externalize image data to avoid bloating the JSON file.
+        let media_dir = self.media_dir(chat_id);
         let messages = externalize_images(messages, &media_dir)?;
 
+        let path = self.transcript_path(chat_id);
         let file = std::fs::File::create(&path)?;
         let writer = std::io::BufWriter::new(file);
         serde_json::to_writer_pretty(writer, &messages)?;
@@ -93,15 +122,13 @@ impl ChatHistory for DiskChatHistory {
     }
 
     fn load(&self, chat_id: &str) -> Result<Vec<Message>> {
-        let path = self.chat_path(chat_id);
+        let path = self.transcript_path(chat_id);
         if !path.exists() {
             return Ok(Vec::new());
         }
         let content = std::fs::read_to_string(&path)?;
         let mut messages: Vec<Message> = serde_json::from_str(&content)?;
         let media_dir = self.media_dir(chat_id);
-
-        // Restore externalized image data.
         restore_images(&mut messages, &media_dir);
 
         tracing::debug!(
@@ -113,13 +140,16 @@ impl ChatHistory for DiskChatHistory {
     }
 
     fn rotate(&self, chat_id: &str) -> Result<()> {
-        let path = self.chat_path(chat_id);
+        let path = self.transcript_path(chat_id);
         if !path.exists() {
             return Ok(());
         }
 
+        let archives = self.archives_dir(chat_id);
+        std::fs::create_dir_all(&archives)?;
+
         let timestamp = Self::rotation_timestamp();
-        let rotated = self.dir.join(format!("{chat_id}.{timestamp}.json"));
+        let rotated = archives.join(format!("{timestamp}.json"));
         std::fs::rename(&path, &rotated)?;
         tracing::info!(
             chat_id = chat_id,
@@ -129,45 +159,43 @@ impl ChatHistory for DiskChatHistory {
         Ok(())
     }
 
+    /// Cascade delete: remove the entire chat subdir — transcript,
+    /// archives, media, artefacts, files, feedback all go together.
     fn remove(&self, chat_id: &str) -> Result<()> {
-        let path = self.chat_path(chat_id);
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-            tracing::info!(chat_id = chat_id, path = %path.display(), "chat history removed");
+        let root = self.chat_root(chat_id);
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+            tracing::info!(chat_id = chat_id, path = %root.display(), "chat removed");
         }
         Ok(())
     }
 
-    /// Scan the chat directory for current (non-archived) chat files,
-    /// returned newest-first by file modification time.  Archived files
-    /// embed a timestamp in their stem (`{id}.{ts}.json`) so we filter
-    /// them out via the `.` test.
+    /// Enumerate chat ids with a current transcript on disk.  Scans
+    /// subdirectories of the root — any that contain `transcript.json`
+    /// is a live chat, sorted newest-first by transcript mtime.
     fn list(&self) -> Result<Vec<String>> {
         let dir_iter = match std::fs::read_dir(&self.dir) {
             Ok(e) => e,
-            Err(_) => return Ok(Vec::new()), // dir missing = no chats yet
+            Err(_) => return Ok(Vec::new()),
         };
         let mut rows: Vec<(String, std::time::SystemTime)> = Vec::new();
         for entry in dir_iter.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            if !path.is_dir() {
                 continue;
             }
-            let stem = match path.file_stem().and_then(|s| s.to_str()) {
-                // Skip rotated archives (`{id}.{ts}.json` → stem has `.`).
-                // Skip feedback sidecars (`{id}_feedback.json`) so they
-                // don't appear as phantom conversations in the UI.
-                Some(s) if !s.contains('.') && !s.ends_with("_feedback") => s.to_string(),
-                _ => continue,
+            let transcript = path.join("transcript.json");
+            if !transcript.exists() {
+                continue;
+            }
+            let chat_id = match entry.file_name().to_str() {
+                Some(s) => s.to_string(),
+                None => continue,
             };
-            // mtime fallback: UNIX_EPOCH if the platform won't tell us.
-            // Treats unknowable dates as oldest, which is the safer
-            // default than newest.
-            let mtime = entry
-                .metadata()
+            let mtime = std::fs::metadata(&transcript)
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::UNIX_EPOCH);
-            rows.push((stem, mtime));
+            rows.push((chat_id, mtime));
         }
         rows.sort_by(|a, b| b.1.cmp(&a.1));
         Ok(rows.into_iter().map(|(id, _)| id).collect())
@@ -184,9 +212,6 @@ impl ChatHistory for DiskChatHistory {
 /// the `data` field with `@media/{hash}`.  Skips images that are already
 /// externalized.
 fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<Message>> {
-    // Build a map from raw data pointer → hash in a single pass.
-    // Uses the data string's pointer as key to avoid rehashing in the
-    // replacement pass.  The hash is computed once per unique image.
     let mut hash_cache: HashMap<*const str, String> = HashMap::new();
     let mut to_write: HashMap<String, &str> = HashMap::new();
     let mut needs_externalization = false;
@@ -215,7 +240,6 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
         return Ok(messages.to_vec());
     }
 
-    // Create media directory and write files.
     std::fs::create_dir_all(media_dir)?;
     for (hash, data) in &to_write {
         let file_path = media_dir.join(format!("{hash}.b64"));
@@ -224,7 +248,6 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
         }
     }
 
-    // Clone messages with data replaced by references (hash lookup, no rehash).
     let messages: Vec<Message> = messages
         .iter()
         .map(|msg| {
@@ -272,10 +295,6 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
     Ok(messages)
 }
 
-/// Restore externalized image data from files.
-///
-/// Scans for Image blocks where `data` starts with `@media/`, reads the
-/// referenced file, and restores the full base64 data.
 fn restore_images(messages: &mut [Message], media_dir: &std::path::Path) {
     for msg in messages.iter_mut() {
         for block in msg.content.iter_mut() {
@@ -304,15 +323,11 @@ fn restore_images(messages: &mut [Message], media_dir: &std::path::Path) {
 }
 
 /// Simple hash of a string — first 16 hex chars of a basic hash.
-///
-/// Not cryptographic, just needs to be deterministic and collision-resistant
-/// enough for a handful of images per conversation.
 fn simple_hash(data: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     data.hash(&mut hasher);
     let h1 = hasher.finish();
-    // Hash again with a different seed for 128 bits of collision resistance.
     data.len().hash(&mut hasher);
     let h2 = hasher.finish();
     format!("{h1:016x}{h2:016x}")
@@ -352,6 +367,8 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].role, crate::message::Role::User);
         assert_eq!(loaded[1].role, crate::message::Role::Assistant);
+        // Per-chat layout: transcript lives in chat_1/transcript.json
+        assert!(dir.join("chat_1").join("transcript.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -374,21 +391,20 @@ mod tests {
 
         store.rotate("chat_1").unwrap();
 
-        // Current chat should be empty (file renamed).
+        // Current transcript removed (until next save re-seeds it).
+        assert!(!dir.join("chat_1").join("transcript.json").exists());
         assert!(store.load("chat_1").unwrap().is_empty());
 
-        // A rotated file should exist in the directory.
-        let files: Vec<_> = std::fs::read_dir(&dir)
+        // A single archive preserves the rotated transcript.
+        let archives = dir.join("chat_1").join("archives");
+        let files: Vec<_> = std::fs::read_dir(&archives)
             .unwrap()
             .filter_map(std::result::Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().starts_with("chat_1."))
             .collect();
         assert_eq!(files.len(), 1);
-
-        // The rotated file should contain the old messages.
-        let rotated_content = std::fs::read_to_string(files[0].path()).unwrap();
-        let rotated_msgs: Vec<Message> = serde_json::from_str(&rotated_content).unwrap();
-        assert_eq!(rotated_msgs.len(), 1);
+        let archived: Vec<Message> =
+            serde_json::from_str(&std::fs::read_to_string(files[0].path()).unwrap()).unwrap();
+        assert_eq!(archived.len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -410,7 +426,7 @@ mod tests {
                     text: "What's this?".into(),
                 },
                 ContentBlock::Image {
-                    data: "aGVsbG8gd29ybGQ=".into(), // "hello world" in base64
+                    data: "aGVsbG8gd29ybGQ=".into(),
                     media_type: "image/jpeg".into(),
                 },
             ]),
@@ -421,16 +437,17 @@ mod tests {
 
         store.save("img_chat", &messages).unwrap();
 
-        // The JSON file should NOT contain the raw base64 data.
-        let json = std::fs::read_to_string(dir.join("img_chat.json")).unwrap();
+        // The transcript should NOT contain the raw base64 data.
+        let transcript = dir.join("img_chat").join("transcript.json");
+        let json = std::fs::read_to_string(&transcript).unwrap();
         assert!(
             !json.contains("aGVsbG8gd29ybGQ="),
             "base64 should be externalized"
         );
         assert!(json.contains("@media/"), "should contain media reference");
 
-        // Media directory should exist with a .b64 file.
-        let media_dir = dir.join("img_chat_media");
+        // Media lives under the chat's subdir.
+        let media_dir = dir.join("img_chat").join("media");
         assert!(media_dir.exists(), "media dir should exist");
         let media_files: Vec<_> = std::fs::read_dir(&media_dir)
             .unwrap()
@@ -438,7 +455,6 @@ mod tests {
             .collect();
         assert_eq!(media_files.len(), 1, "should have one media file");
 
-        // Load should restore the original data.
         let loaded = store.load("img_chat").unwrap();
         assert_eq!(loaded.len(), 2);
         match &loaded[0].content[1] {
@@ -467,14 +483,46 @@ mod tests {
             other => panic!("expected Text, got: {other:?}"),
         }
 
-        // Two files: current + one rotated.
-        let files: Vec<_> = std::fs::read_dir(&dir)
+        // Current transcript + exactly one archive.
+        assert!(dir.join("chat_1").join("transcript.json").exists());
+        let archives: Vec<_> = std::fs::read_dir(dir.join("chat_1").join("archives"))
             .unwrap()
             .filter_map(std::result::Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().starts_with("chat_1"))
             .collect();
-        assert_eq!(files.len(), 2);
+        assert_eq!(archives.len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn remove_wipes_the_whole_subdir() {
+        let (dir, store) = temp_store("remove_cascade");
+        store.save("chat_x", &[Message::user("alive")]).unwrap();
+        // Drop an unrelated sub-asset in the chat's dir to prove cascade.
+        let extra = dir.join("chat_x").join("artefacts");
+        std::fs::create_dir_all(&extra).unwrap();
+        std::fs::write(extra.join("a1.meta.json"), b"{}").unwrap();
+
+        store.remove("chat_x").unwrap();
+        assert!(!dir.join("chat_x").exists(), "chat dir must be gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_returns_chats_with_current_transcript_only() {
+        let (dir, store) = temp_store("list");
+        store.save("a", &[Message::user("a")]).unwrap();
+        store.save("b", &[Message::user("b")]).unwrap();
+        // `c` has only an archive — list() must skip it.
+        store.save("c", &[Message::user("c")]).unwrap();
+        store.rotate("c").unwrap();
+
+        let ids: std::collections::HashSet<String> =
+            store.list().unwrap().into_iter().collect();
+        assert!(ids.contains("a"));
+        assert!(ids.contains("b"));
+        assert!(!ids.contains("c"), "archive-only chats should not list");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

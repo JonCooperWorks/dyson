@@ -270,9 +270,8 @@ function App() {
         </div>
       )}
       {view === 'mind' && (
-        <div className="body no-right">
+        <div className="body no-left no-right">
           {showLeft && <div className="scrim" onClick={closeRails}/>}
-          <LeftRailMind/>
           <MindView showSide={showLeft} onHideSide={() => setShowLeft(false)}/>
         </div>
       )}
@@ -786,22 +785,6 @@ function applyToolView(t, content, isError, view) {
     t.meta = `+${view.files[0].add} −${view.files[0].rem}`;
   }
   if (view.kind === 'read' && view.path) t.sig = view.path;
-}
-
-function LeftRailMind() {
-  const files = (window.DYSON_DATA && window.DYSON_DATA.mind && window.DYSON_DATA.mind.files) || [];
-  const journal = files.filter(f => f.path && f.path.startsWith('memory/')).length;
-  return (
-    <aside className="left">
-      <div style={{padding:'14px'}}>
-        <div className="eyebrow" style={{marginBottom:8}}>WORKSPACE</div>
-        <div style={{display:'flex', flexDirection:'column', gap:6, fontSize:12, color:'var(--fg-dim)'}}>
-          <div style={{display:'flex', justifyContent:'space-between'}}><span>Files</span><span className="mono">{files.length}</span></div>
-          <div style={{display:'flex', justifyContent:'space-between'}}><span>Journal entries</span><span className="mono">{journal}</span></div>
-        </div>
-      </div>
-    </aside>
-  );
 }
 
 const root = ReactDOM.createRoot(document.getElementById('root'));

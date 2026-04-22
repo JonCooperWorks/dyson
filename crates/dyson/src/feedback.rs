@@ -89,8 +89,12 @@ impl FeedbackStore {
     }
 
     /// Path to the feedback file for a given chat.
+    ///
+    /// Per-chat layout: `{dir}/{chat_id}/feedback.json`.  The migration
+    /// in `chat_history::migrate` moves legacy `{chat_id}_feedback.json`
+    /// files into this shape on startup.
     fn feedback_path(&self, chat_id: &str) -> PathBuf {
-        self.dir.join(format!("{chat_id}_feedback.json"))
+        self.dir.join(chat_id).join("feedback.json")
     }
 
     /// Load all feedback entries for a chat.
@@ -109,7 +113,9 @@ impl FeedbackStore {
     /// Save feedback entries for a chat (replaces the file).
     fn save(&self, chat_id: &str, entries: &[FeedbackEntry]) -> Result<()> {
         let path = self.feedback_path(chat_id);
-        std::fs::create_dir_all(&self.dir)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let file = std::fs::File::create(&path)?;
         let writer = std::io::BufWriter::new(file);
         serde_json::to_writer_pretty(writer, entries)?;
