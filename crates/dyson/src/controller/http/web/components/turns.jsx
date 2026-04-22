@@ -113,6 +113,12 @@ function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
 // is HTML safely escaped on the way in.
 function markdown(s) {
   if (!s) return '';
+  // Strip the broken `![alt](sandbox:///…)` / `![alt](attachment:…)`
+  // markdown the model hallucinates alongside a real image_generate
+  // tool call — the "URL" isn't fetchable and the raw syntax leaks
+  // into the chat.  Image delivery always comes through the tool's
+  // file event, not inline markdown.
+  s = s.replace(/!\[[^\]]*\]\((?:sandbox:|attachment:)[^)]*\)/gi, '');
   const esc = (t) => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
   // Placeholder bytes for fenced code + inline code MUST be characters

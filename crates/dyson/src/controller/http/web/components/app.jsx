@@ -371,7 +371,12 @@ function ConversationView({ conv, session, bump }) {
         }
         return { role, ts: '', blocks };
       });
-      session.liveTurns = turns;
+      // Drop turns that have no renderable blocks — happens when a
+      // role='user' message carries only tool_result content (the
+      // loader folds that into the tool chip state rather than pushing
+      // a block), which would otherwise show up as a named-but-empty
+      // user avatar in the transcript.
+      session.liveTurns = turns.filter(t => t.blocks.length > 0);
       // Seed the Artefacts tab so findArtefactMeta in the reader finds
       // the metadata without a second fetch.
       session.artefacts = [];
