@@ -1,10 +1,16 @@
 /* Dyson — layout */
 
 /* ---------- app shell ---------- */
+/* 100dvh tracks the dynamic viewport so on iOS Safari the shell
+   shrinks when the URL bar slides in or the keyboard opens — this
+   keeps the composer-dock anchored to the visible bottom instead of
+   drifting under the URL bar.  100vh is a fallback for browsers
+   without dvh (Safari <15.4, old Chrome). */
 .app {
   display: grid;
   grid-template-rows: 44px 1fr;
   height: 100vh;
+  height: 100dvh;
 }
 
 .topbar {
@@ -228,11 +234,17 @@
 }
 
 /* ---------- centre ---------- */
+/* position: relative makes .centre the containing block for the
+   absolutely-positioned composer-dock, so `bottom: 0` resolves to the
+   visible bottom of the centre column.  Without this, the dock falls
+   back to the initial containing block (viewport) and on iOS Safari
+   the URL-bar area shifts it off visually. */
 .centre {
   display: flex; flex-direction: column;
   background: var(--bg-1);
   min-width: 0;
   min-height: 0;
+  position: relative;
 }
 .centre .context {
   display: flex; align-items: center; gap: 10px;

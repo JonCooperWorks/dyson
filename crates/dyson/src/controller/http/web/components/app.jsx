@@ -109,22 +109,33 @@ function App() {
   // iOS keyboard dodge.  On iOS the layout viewport stays fixed when
   // the on-screen keyboard opens — only visualViewport shrinks — so a
   // composer anchored to the viewport bottom ends up hidden behind the
-  // keyboard.  Publish the delta as --kb-inset; composer-dock reads it
-  // and rides above the keyboard.  Safe on platforms without
-  // visualViewport (no-op, --kb-inset stays unset, falls back to 0).
+  // keyboard.  Publish the delta as --kb-inset while an editable field
+  // is focused; composer-dock reads it and rides above the keyboard.
+  // The focus gate matters because Safari's URL-bar show/hide also
+  // shrinks visualViewport, and without the gate the composer drifts
+  // into the middle of the transcript when the URL bar is visible.
   useEffect(() => {
     const vv = window.visualViewport;
     if (!vv) return;
+    const set = (px) => document.documentElement.style.setProperty('--kb-inset', px + 'px');
+    const isEditing = () => {
+      const a = document.activeElement;
+      return !!a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT' || a.isContentEditable);
+    };
     const sync = () => {
-      const inset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
-      document.documentElement.style.setProperty('--kb-inset', inset + 'px');
+      if (!isEditing()) { set(0); return; }
+      set(Math.max(0, window.innerHeight - vv.height - vv.offsetTop));
     };
     vv.addEventListener('resize', sync);
     vv.addEventListener('scroll', sync);
+    window.addEventListener('focusin', sync);
+    window.addEventListener('focusout', sync);
     sync();
     return () => {
       vv.removeEventListener('resize', sync);
       vv.removeEventListener('scroll', sync);
+      window.removeEventListener('focusin', sync);
+      window.removeEventListener('focusout', sync);
     };
   }, []);
 
