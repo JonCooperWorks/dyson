@@ -67,6 +67,16 @@ pub trait ChatHistory: Send + Sync {
     /// for review or RAG indexing.
     fn rotate(&self, chat_id: &str) -> Result<()>;
 
+    /// Hard-delete the current conversation file for a chat.
+    ///
+    /// Callers use this for empty chats that the user dismissed — no
+    /// transcript worth archiving.  Rotated archives for the same
+    /// chat_id are untouched.  Default is a no-op for backends that
+    /// can't express deletion; the disk backend overrides it.
+    fn remove(&self, _chat_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Enumerate the chat IDs that have a current (non-archived) history.
     ///
     /// Used by controllers (e.g. the HTTP controller) to repopulate their

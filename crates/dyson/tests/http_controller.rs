@@ -804,6 +804,96 @@ async fn create_conversation_rotates_previous_chat_when_requested() {
 }
 
 #[tokio::test]
+async fn delete_empty_chat_removes_file_and_drops_from_list() {
+    // Empty chat → hard delete.  No rotated archive, no current file;
+    // a freshly-minted conversation the user immediately removes
+    // shouldn't leave a zero-byte `[]` file stranded on disk.
+    let r = rig().await;
+    let id = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "trash me" }),
+    ).await).await["id"].as_str().unwrap().to_string();
+    let current = r.chat_dir.path().join(format!("{id}.json"));
+    assert!(current.exists(), "create should seed an empty current file");
+
+    let resp = request(
+        &format!("{}/api/conversations/{id}", r.base),
+        Method::DELETE,
+        None,
+    ).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["deleted"], true);
+    assert_eq!(body["preserved"], false);
+
+    assert!(!current.exists(), "empty chat's file should be gone");
+    let listed = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
+    let ids: Vec<&str> = listed.as_array().unwrap().iter()
+        .map(|c| c["id"].as_str().unwrap()).collect();
+    assert!(!ids.contains(&id.as_str()), "deleted chat must not appear in list");
+}
+
+#[tokio::test]
+async fn delete_non_empty_chat_rotates_then_drops_from_list() {
+    // Non-empty chat → keep the transcript on disk (as a dated
+    // archive) but drop the chat from the sidebar.  Same shape
+    // `/clear` produces, without the re-seeded current file.
+    let r = rig().await;
+    let id = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "keep" }),
+    ).await).await["id"].as_str().unwrap().to_string();
+
+    let store = DiskChatHistory::new(r.chat_dir.path().to_path_buf()).expect("seed store");
+    store
+        .save(&id, &[dyson::message::Message::user("dont lose this")])
+        .expect("seed save");
+
+    let resp = request(
+        &format!("{}/api/conversations/{id}", r.base),
+        Method::DELETE,
+        None,
+    ).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["deleted"], true);
+    assert_eq!(body["preserved"], true);
+
+    let current = r.chat_dir.path().join(format!("{id}.json"));
+    assert!(!current.exists(), "current file is archived away, not re-seeded");
+    let rotated: Vec<_> = std::fs::read_dir(r.chat_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with(&format!("{id}."))
+                && name != format!("{id}.json")
+                && name.ends_with(".json")
+        })
+        .collect();
+    assert_eq!(rotated.len(), 1, "one dated archive preserves the transcript");
+    let archived: Vec<dyson::message::Message> =
+        serde_json::from_str(&std::fs::read_to_string(rotated[0].path()).unwrap()).unwrap();
+    assert_eq!(archived.len(), 1, "archive still holds the original message");
+
+    let listed = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
+    let ids: Vec<&str> = listed.as_array().unwrap().iter()
+        .map(|c| c["id"].as_str().unwrap()).collect();
+    assert!(!ids.contains(&id.as_str()), "deleted chat must not appear in list");
+}
+
+#[tokio::test]
+async fn delete_unknown_chat_returns_404() {
+    let r = rig().await;
+    let resp = request(
+        &format!("{}/api/conversations/c-missing", r.base),
+        Method::DELETE,
+        None,
+    ).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn turn_with_attachments_accepts_base64_payload() {
     // Upload path: POST /turn with an `attachments` array.  The
     // controller decodes base64 up front and returns 202 — failures

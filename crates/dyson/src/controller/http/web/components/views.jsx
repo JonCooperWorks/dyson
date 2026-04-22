@@ -126,10 +126,34 @@ function LeftRail({ active, setActive }) {
   const items = (window.DYSON_DATA.conversations.http) || [];
   const newConv = () => {
     if (!window.DysonLive) return;
-    window.DysonLive.createChat('New conversation', active).then(c => {
+    // Don't pass `rotate_previous`: auto-rotating the active chat on
+    // every "+ New Conversation" click hollowed out the user's prior
+    // transcript (messages went to an archive file they couldn't see
+    // without CLI access).  Rotation is opt-in via /clear; explicit
+    // removal is via the per-row delete button.
+    window.DysonLive.createChat('New conversation').then(c => {
       window.DYSON_DATA.conversations.http.unshift({ id: c.id, title: c.title, live: false });
       setActive(c.id);
     });
+  };
+  const deleteConv = (id, e) => {
+    // Stop the row's onClick from firing and switching to the chat
+    // we're about to remove.
+    e.stopPropagation();
+    if (!window.DysonLive) return;
+    window.DysonLive.deleteChat(id).then(() => {
+      const list = window.DYSON_DATA.conversations.http;
+      const idx = list.findIndex(c => c.id === id);
+      if (idx !== -1) list.splice(idx, 1);
+      if (active === id) {
+        // Jump to the next chat (or null if none left) so the main
+        // pane doesn't keep showing a tab that no longer exists.
+        const next = list[0];
+        setActive(next ? next.id : null);
+      } else {
+        window.dispatchEvent(new CustomEvent('dyson:live-update'));
+      }
+    }).catch(() => {});
   };
   return (
     <aside className="left">
@@ -151,7 +175,13 @@ function LeftRail({ active, setActive }) {
             {items.map(c => (
               <div key={c.id} className={`conv ${c.live ? 'live' : ''} ${active === c.id ? 'active' : ''}`}
                    onClick={() => setActive(c.id)}>
-                <div className="row1"><span className="title">{c.title || c.id}</span></div>
+                <div className="row1">
+                  <span className="title">{c.title || c.id}</span>
+                  <button className="conv-del" title="Delete conversation"
+                          onClick={(e) => deleteConv(c.id, e)}>
+                    <Icon name="x" size={11}/>
+                  </button>
+                </div>
                 <div className="row2">
                   <span className="last mono" style={{fontSize:10.5, opacity:0.6}}>{c.id}</span>
                 </div>

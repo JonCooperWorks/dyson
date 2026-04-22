@@ -129,6 +129,15 @@ impl ChatHistory for DiskChatHistory {
         Ok(())
     }
 
+    fn remove(&self, chat_id: &str) -> Result<()> {
+        let path = self.chat_path(chat_id);
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+            tracing::info!(chat_id = chat_id, path = %path.display(), "chat history removed");
+        }
+        Ok(())
+    }
+
     /// Scan the chat directory for current (non-archived) chat files,
     /// returned newest-first by file modification time.  Archived files
     /// embed a timestamp in their stem (`{id}.{ts}.json`) so we filter

@@ -85,6 +85,19 @@
         return r.json();
       },
 
+      // Sidebar dismiss.  Server rotates non-empty chats (transcript
+      // survives as a dated archive) and hard-deletes empty ones.
+      // Returns { deleted, preserved } so the caller can surface
+      // whether the history was archived or discarded outright.
+      deleteChat: async (id) => {
+        const r = await fetch('/api/conversations/' + encodeURIComponent(id), {
+          method: 'DELETE',
+        });
+        if (!r.ok) throw new Error('delete failed: ' + r.status);
+        if (window.__dysonSessions) window.__dysonSessions.delete(id);
+        return r.json();
+      },
+
       mindFile: async (path) => {
         const r = await fetch('/api/mind/file?path=' + encodeURIComponent(path));
         if (!r.ok) throw new Error('mind file failed: ' + r.status);

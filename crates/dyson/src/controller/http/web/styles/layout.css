@@ -214,6 +214,17 @@
 }
 .conv .row1 .title { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .conv .row1 .when { font: 500 10.5px/1 var(--font-mono); color: var(--mute); flex: 0 0 auto; }
+.conv .row1 .conv-del {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px;
+  padding: 0; border: none; background: transparent;
+  color: var(--mute); cursor: pointer;
+  opacity: 0;
+  border-radius: 3px;
+}
+.conv:hover .row1 .conv-del { opacity: 0.7; }
+.conv .row1 .conv-del:hover { opacity: 1; background: var(--line); color: var(--fg); }
 .conv .row2 {
   display: flex; align-items: center; gap: 6px;
   font: 400 11.5px/1.2 var(--font-ui);

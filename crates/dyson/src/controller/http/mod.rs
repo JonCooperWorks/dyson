@@ -1142,6 +1142,8 @@ async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) ->
             }
         } else if method == Method::GET {
             return get_conversation(&state, id).await;
+        } else if method == Method::DELETE {
+            return delete_conversation(&state, id).await;
         } else {
             return method_not_allowed();
         }
@@ -1556,6 +1558,47 @@ async fn post_turn(
         .header("Content-Type", "application/json")
         .body(boxed(Bytes::from_static(br#"{"ok":true}"#)))
         .unwrap()
+}
+
+async fn delete_conversation(state: &HttpState, id: &str) -> Resp {
+    // Sidebar dismiss.  Empty chats (no in-memory agent messages AND
+    // no saved transcript) hard-delete their `{id}.json` — otherwise
+    // a freshly-minted chat the user cancels leaves a zero-byte file
+    // stranded on disk.  Non-empty chats rotate instead so the
+    // transcript survives as a dated archive the user can still grep.
+    let handle = match state.chats.lock().await.remove(id) {
+        Some(h) => h,
+        None => return not_found(),
+    };
+    state.order.lock().await.retain(|x| x != id);
+
+    // Cancel any in-flight turn before we drop the handle so the
+    // agent doesn't keep streaming into a chat the sidebar forgot.
+    if let Some(cancel) = handle.cancel.lock().await.as_ref() {
+        cancel.cancel();
+    }
+
+    let in_memory_empty = match handle.agent.lock().await.as_ref() {
+        Some(a) => a.messages().is_empty(),
+        None => true,
+    };
+
+    let mut preserved = false;
+    if let Some(h) = state.history.as_ref() {
+        let disk_empty = h.load(id).map(|m| m.is_empty()).unwrap_or(true);
+        if in_memory_empty && disk_empty {
+            if let Err(e) = h.remove(id) {
+                tracing::warn!(error = %e, chat_id = %id, "failed to remove empty chat");
+            }
+        } else {
+            if let Err(e) = h.rotate(id) {
+                tracing::warn!(error = %e, chat_id = %id, "failed to rotate deleted chat");
+            }
+            preserved = true;
+        }
+    }
+
+    json_ok(&serde_json::json!({ "ok": true, "deleted": true, "preserved": preserved }))
 }
 
 async fn post_cancel(state: &HttpState, id: &str) -> Resp {

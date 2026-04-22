@@ -177,7 +177,7 @@ function App() {
         }
       } else if (e.key === 'n' && window.DysonLive) {
         e.preventDefault();
-        window.DysonLive.createChat('New conversation', conv).then(c => {
+        window.DysonLive.createChat('New conversation').then(c => {
           window.DYSON_DATA.conversations.http.unshift({ id: c.id, title: c.title, live: false });
           setConv(c.id);
           bump();
