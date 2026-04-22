@@ -269,9 +269,12 @@ function FileBlock({ block }) {
   );
 }
 
-// Chip rendered in the chat scroll when the agent emits an artefact
-// (e.g. a security-review report).  Clicking flips to the Artefacts
-// tab with this id selected — see dyson:open-artefact below.
+// Rendered in the chat scroll when the agent emits an artefact.
+// For image artefacts we render the actual image inline (the file URL
+// comes through either SSE `file` events for live turns, or is reached
+// via `/api/artefacts/<id>` → redirect-style resolve on refresh).
+// For markdown / report artefacts, a compact chip that opens the
+// Artefacts tab on click.
 //
 // `block` shape: { type:'artefact', id, kind, title, url, bytes }
 function ArtefactBlock({ block }) {
@@ -279,6 +282,31 @@ function ArtefactBlock({ block }) {
     e.preventDefault();
     window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: block.id } }));
   };
+
+  if (block.kind === 'image') {
+    // `block.url` is `/api/artefacts/<id>` which returns the served
+    // file URL (e.g. `/api/files/fN`).  For a zero-hop preview we
+    // fetch once on mount and swap to <img> — until then show a
+    // placeholder so the chat scroll isn't jumpy.
+    const [src, setSrc] = React.useState('');
+    React.useEffect(() => {
+      if (!block.url) return;
+      fetch(block.url)
+        .then(r => r.ok ? r.text() : Promise.reject(r.status))
+        .then(text => setSrc(text.trim()))
+        .catch(() => {});
+    }, [block.url, block.id]);
+    return (
+      <a href={src || '#'} target="_blank" rel="noopener" onClick={open}
+         className="fileblock image" title={block.title || 'image'}>
+        {src
+          ? <img src={src} alt={block.title || 'image'}/>
+          : <div style={{width:220, height:160, background:'var(--panel)', borderRadius:4}}/>}
+        <span className="cap">{block.title || 'image'}</span>
+      </a>
+    );
+  }
+
   const kind = (block.kind || 'other').replace(/_/g, ' ');
   return (
     <a href={block.url || '#'} onClick={open} className="fileblock" title="Open artefact">

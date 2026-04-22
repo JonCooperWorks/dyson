@@ -269,11 +269,39 @@ function ConversationView({ conv, session, bump }) {
           } else if (b.type === 'tool_result') {
             const t = D.tools[b.tool_use_id];
             if (t) { t.status = 'done'; t.exit = b.is_error ? 'err' : 'ok'; t.body = { text: b.content }; }
+          } else if (b.type === 'artefact') {
+            // Server synthesises a trailing assistant turn from the
+            // ArtefactStore on chat reload — render those as chips so
+            // images / reports stay visible across refreshes.
+            blocks.push({
+              type: 'artefact',
+              id: b.id,
+              kind: b.kind,
+              title: b.title,
+              url: b.url,
+              bytes: b.bytes,
+            });
           }
         }
         return { role, ts: '', blocks };
       });
       session.liveTurns = turns;
+      // Seed the Artefacts tab so findArtefactMeta in the reader finds
+      // the metadata without a second fetch.
+      session.artefacts = [];
+      for (const t of turns) {
+        for (const b of t.blocks) {
+          if (b.type === 'artefact') {
+            session.artefacts.push({
+              id: b.id,
+              kind: b.kind,
+              title: b.title,
+              bytes: b.bytes,
+              created_at: 0,
+            });
+          }
+        }
+      }
       bump();
     }).catch(() => {});
   }, [conv, session, bump]);
