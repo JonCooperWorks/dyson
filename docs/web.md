@@ -41,25 +41,23 @@ vice versa.
 Add to your `dyson.json` `controllers` array:
 
 ```json
-{
-  "type": "http",
-  "bind": "127.0.0.1:7878",
-  "auth": { "type": "dangerous_no_auth" }
-}
+{ "type": "http", "bind": "127.0.0.1:7878" }
 ```
 
 | field | type | default | description |
 |---|---|---|---|
 | `bind` | `string` | `"127.0.0.1:7878"` | Address to bind.  Loopback-only is the only supported deployment.  Listening on `0.0.0.0` exposes the agent. |
 | `webroot` | `string?` | `null` | Optional path to a directory of UI files (`prototype.html`, `styles/`, `js/`, `components/`) for live-edit dev.  Unset means use the prototype embedded in the dyson binary. |
-| `auth` | `object` | **required** | Inbound authentication.  See below. |
+| `auth` | `object` | `dangerous_no_auth` on loopback, **required** otherwise | Inbound authentication.  See below. |
 
 ### Authentication
 
-Every HTTP controller config must declare an `auth` mechanism.  There
-is no default — omitting the field makes the controller refuse to
-start.  This forces the operator to name the chosen posture in writing,
-the same way `--dangerous-no-sandbox` works for the sandbox boundary.
+On a loopback bind (`127.0.0.1` or `::1`) the `auth` field is optional:
+the loopback threat model is a single trusted operator, so an unset
+field defaults to `dangerous_no_auth`.  On any other bind the field is
+**required** — omitting it makes the controller refuse to start rather
+than silently expose an unauthenticated endpoint.  This mirrors the
+posture `--dangerous-no-sandbox` takes for the sandbox boundary.
 
 Two variants today:
 

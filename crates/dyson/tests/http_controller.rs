@@ -801,20 +801,41 @@ async fn bearer_auth_still_serves_static_shell_without_token() {
 }
 
 #[tokio::test]
-async fn http_controller_rejects_config_without_auth_field() {
-    // Missing `auth` → from_config returns None so the controller never
-    // starts.  This is the guardrail that forces every operator to name
-    // a mechanism (even `dangerous_no_auth`).
+async fn http_controller_rejects_non_loopback_bind_without_auth() {
+    // Non-loopback bind + missing `auth` → from_config returns None.
+    // This is the guardrail against silently exposing an
+    // unauthenticated endpoint to the network.
     use dyson::config::ControllerConfig;
     use dyson::controller::http::HttpController;
 
     let cfg = ControllerConfig {
         controller_type: "http".into(),
         config: serde_json::json!({
-            "bind": "127.0.0.1:0",
+            "bind": "0.0.0.0:7878",
         }),
     };
     assert!(HttpController::from_config(&cfg).is_none());
+}
+
+#[tokio::test]
+async fn http_controller_allows_loopback_bind_without_auth() {
+    // Loopback bind + missing `auth` → defaults to DangerousNoAuth.
+    // The loopback threat model is a single trusted operator, so this
+    // preserves the existing dev ergonomics of just writing
+    // `{ "type": "http", "bind": "127.0.0.1:7878" }`.
+    use dyson::config::ControllerConfig;
+    use dyson::controller::http::HttpController;
+
+    for bind in ["127.0.0.1:0", "127.0.0.1:7878", "[::1]:0"] {
+        let cfg = ControllerConfig {
+            controller_type: "http".into(),
+            config: serde_json::json!({ "bind": bind }),
+        };
+        assert!(
+            HttpController::from_config(&cfg).is_some(),
+            "loopback bind {bind} should default to DangerousNoAuth",
+        );
+    }
 }
 
 #[tokio::test]

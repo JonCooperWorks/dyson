@@ -19,11 +19,12 @@
 // to ChatHistory is a future addition; for now the focus is talking to a
 // real agent in a browser.  Bind to 127.0.0.1 by default.
 //
-// Inbound auth is mandatory: every configuration must name an `auth`
-// variant (`dangerous_no_auth` or `bearer`).  `DangerousNoAuth` is the
-// opt-in escape hatch, modeled on `--dangerous-no-sandbox`; anything
-// else is enforced on every `/api/*` request via the shared `Auth`
-// trait.
+// Inbound auth: on a loopback bind the `auth` field is optional and
+// defaults to `DangerousNoAuth` (the loopback threat model is a single
+// trusted operator).  On any other bind the field is required;
+// omitting it refuses to start.  `DangerousNoAuth` is the opt-in
+// escape hatch, modeled on `--dangerous-no-sandbox`; `Bearer` is
+// enforced on every `/api/*` request via the shared `Auth` trait.
 // ===========================================================================
 
 use std::collections::HashMap;
@@ -77,17 +78,20 @@ struct HttpControllerConfigRaw {
     #[serde(default)]
     webroot: Option<String>,
 
-    /// Inbound authentication mechanism.  Required — there is no default,
-    /// so the operator must explicitly choose `dangerous_no_auth` to run
-    /// the controller unauthenticated.  Mirrors `--dangerous-no-sandbox`.
-    auth: HttpAuthConfig,
+    /// Inbound authentication mechanism.  Optional on a loopback bind
+    /// (127.0.0.1 / ::1) — the loopback assumption is a single trusted
+    /// operator, so a missing field defaults to `DangerousNoAuth` there.
+    /// On any other bind the field is required: omitting it refuses to
+    /// start the controller so you can't silently expose an
+    /// unauthenticated endpoint.
+    #[serde(default)]
+    auth: Option<HttpAuthConfig>,
 }
 
 /// Which inbound auth mechanism guards the HTTP API.
 ///
-/// Every configuration must name one.  Picking `dangerous_no_auth` is an
-/// explicit opt-in to an unauthenticated endpoint — the controller still
-/// starts, but logs a loud warning at startup.
+/// `DangerousNoAuth` is the explicit opt-in to an unauthenticated
+/// endpoint — the controller still starts, but logs a loud warning.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum HttpAuthConfig {
@@ -102,6 +106,22 @@ enum HttpAuthConfig {
 
 fn default_bind() -> String {
     "127.0.0.1:7878".to_string()
+}
+
+/// True when `bind` resolves to a loopback address (`127.0.0.0/8` or
+/// `::1`).  Used to gate the `auth`-field default: the loopback threat
+/// model is a single trusted operator, so `DangerousNoAuth` is fine
+/// there; any other bind must name a mechanism explicitly.
+///
+/// `localhost` is intentionally NOT treated as loopback without a DNS
+/// lookup — if an operator writes `localhost:7878` they're trusting
+/// `/etc/hosts`, which is a different story; safer to force them to be
+/// explicit.  `0.0.0.0` / `::` are NOT loopback, which is the whole
+/// point.
+fn is_loopback_bind(bind: &str) -> bool {
+    bind.parse::<std::net::SocketAddr>()
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +433,28 @@ impl HttpController {
                 return None;
             }
         };
-        let auth: Arc<dyn Auth> = match raw.auth {
+        let auth_config = match raw.auth {
+            Some(a) => a,
+            None => {
+                // Loopback gets the break: a single trusted operator is
+                // the loopback threat model, so unset `auth` defaults to
+                // DangerousNoAuth.  Any other bind must name a mechanism
+                // — otherwise we'd be silently exposing an
+                // unauthenticated endpoint.
+                if is_loopback_bind(&raw.bind) {
+                    HttpAuthConfig::DangerousNoAuth
+                } else {
+                    tracing::error!(
+                        bind = %raw.bind,
+                        "http controller: non-loopback bind requires an explicit `auth` field \
+                         (use {{\"type\":\"dangerous_no_auth\"}} to run unauthenticated, or \
+                         {{\"type\":\"bearer\",\"token\":\"...\"}} to require a token)"
+                    );
+                    return None;
+                }
+            }
+        };
+        let auth: Arc<dyn Auth> = match auth_config {
             HttpAuthConfig::DangerousNoAuth => Arc::new(DangerousNoAuth),
             HttpAuthConfig::Bearer { token } => {
                 if token.is_empty() {
