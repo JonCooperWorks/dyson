@@ -129,6 +129,7 @@
           try { msg = JSON.parse(ev.data); } catch { return; }
           switch (msg.type) {
             case 'text':        cb.onText        && cb.onText(msg.delta); break;
+            case 'thinking':    cb.onThinking    && cb.onThinking(msg.delta); break;
             case 'tool_start':  cb.onToolStart   && cb.onToolStart(msg); break;
             case 'tool_result': cb.onToolResult  && cb.onToolResult(msg); break;
             case 'checkpoint':  cb.onCheckpoint  && cb.onCheckpoint(msg); break;

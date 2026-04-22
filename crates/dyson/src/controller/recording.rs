@@ -46,6 +46,7 @@ use crate::tool::ToolOutput;
 #[derive(Debug, Clone)]
 pub enum OutputEvent {
     TextDelta { text: String },
+    ThinkingDelta { text: String },
     ToolUseStart { id: String, name: String },
     ToolUseComplete,
     ToolResult { content: String, is_error: bool },
@@ -91,6 +92,19 @@ impl RecordingOutput {
         let mut result = String::new();
         for recorded in &self.events {
             if let OutputEvent::TextDelta { text } = &recorded.event {
+                result.push_str(text);
+            }
+        }
+        result
+    }
+
+    /// Concatenate the text from all `ThinkingDelta` events.  Used in
+    /// stream-handler tests that assert reasoning reaches the
+    /// controller's side-channel but stays out of `text()`.
+    pub fn thinking(&self) -> String {
+        let mut result = String::new();
+        for recorded in &self.events {
+            if let OutputEvent::ThinkingDelta { text } = &recorded.event {
                 result.push_str(text);
             }
         }
@@ -162,6 +176,13 @@ impl RecordingOutput {
 impl Output for RecordingOutput {
     fn text_delta(&mut self, text: &str) -> std::result::Result<(), DysonError> {
         self.record(OutputEvent::TextDelta {
+            text: text.to_owned(),
+        });
+        Ok(())
+    }
+
+    fn thinking_delta(&mut self, text: &str) -> std::result::Result<(), DysonError> {
+        self.record(OutputEvent::ThinkingDelta {
             text: text.to_owned(),
         });
         Ok(())

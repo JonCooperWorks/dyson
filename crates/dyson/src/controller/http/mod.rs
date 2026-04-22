@@ -169,6 +169,10 @@ enum BlockDto {
         id: String,
         kind: crate::message::ArtefactKind,
         title: String,
+        /// `/api/artefacts/<id>` — lets the chip's "open" link work
+        /// without the frontend having to reconstruct the URL.
+        url: String,
+        bytes: usize,
     },
 }
 
@@ -218,6 +222,13 @@ const MAX_TURN_BODY: usize = 25 * 1024 * 1024;
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SseEvent {
     Text {
+        delta: String,
+    },
+    /// A fragment of the model's extended-thinking / reasoning stream.
+    /// Rendered in a dedicated right-rail panel — see `ThinkingPanel`
+    /// in the web UI.  Arrives before any `text` event on turns where
+    /// the model reasons before answering.
+    Thinking {
         delta: String,
     },
     ToolStart {
@@ -671,16 +682,40 @@ impl HttpState {
     }
 
     /// Test hook — returns the stored artefact body for `id` if the
-    /// store has it loaded.  Used by the integration test for the
-    /// "disk-backed rehydration" scenario (see
+    /// store has it loaded (memory cache or freshly rehydrated from
+    /// disk).  Used by the integration test for the "disk-backed
+    /// rehydration" scenario (see
     /// `tests/http_controller.rs::agent_artefact_round_trips_*`).
     #[doc(hidden)]
     pub fn artefacts_for_test(&self, id: &str) -> Option<String> {
-        let s = match self.artefacts.lock() {
-            Ok(s) => s,
-            Err(p) => p.into_inner(),
-        };
-        s.items.get(id).map(|e| e.content.clone())
+        if let Ok(s) = self.artefacts.lock()
+            && let Some(entry) = s.items.get(id)
+        {
+            return Some(entry.content.clone());
+        }
+        // Fall through to disk — simulates the first hit after a
+        // restart where the in-memory index may not be populated.
+        self.data_dir
+            .as_ref()
+            .and_then(|d| ArtefactStore::load_from_disk(d, id))
+            .map(|e| e.content)
+    }
+
+    /// Test hook — returns the stored file bytes for `id` via the same
+    /// memory-then-disk lookup chain that `GET /api/files/:id` uses.
+    /// Lets the refresh-regression test assert bytes survive controller
+    /// restarts.
+    #[doc(hidden)]
+    pub fn file_bytes_for_test(&self, id: &str) -> Option<Vec<u8>> {
+        if let Ok(s) = self.files.lock()
+            && let Some(entry) = s.items.get(id)
+        {
+            return Some(entry.bytes.clone());
+        }
+        self.data_dir
+            .as_ref()
+            .and_then(|d| FileStore::load_from_disk(d, id))
+            .map(|e| e.bytes)
     }
 }
 
@@ -1124,7 +1159,7 @@ async fn get_conversation(state: &HttpState, id: &str) -> Resp {
         None => return not_found(),
     };
     let agent_guard = handle.agent.lock().await;
-    let messages: Vec<MessageDto> = match agent_guard.as_ref() {
+    let mut messages: Vec<MessageDto> = match agent_guard.as_ref() {
         // Agent already loaded for this chat — its messages are the truth.
         Some(a) => a.messages().iter().map(message_to_dto).collect(),
         // Agent not built yet — load straight from disk so the transcript
@@ -1137,6 +1172,40 @@ async fn get_conversation(state: &HttpState, id: &str) -> Resp {
             None => Vec::new(),
         },
     };
+    drop(agent_guard);
+
+    // Artefacts are side-channel — they never land in the conversation
+    // history, so a fresh page load from disk shows no chips.  Walk the
+    // ArtefactStore for this chat and append a synthetic assistant
+    // turn with one `Artefact` block per entry so the chat scroll
+    // preserves image / report chips across browser refreshes and
+    // controller restarts.
+    let artefact_blocks: Vec<BlockDto> = {
+        let store = match state.artefacts.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        store
+            .order
+            .iter()
+            .filter_map(|aid| store.items.get(aid).map(|e| (aid, e)))
+            .filter(|(_, e)| e.chat_id == id)
+            .map(|(aid, e)| BlockDto::Artefact {
+                id: aid.clone(),
+                kind: e.kind,
+                title: e.title.clone(),
+                url: format!("/api/artefacts/{aid}"),
+                bytes: e.content.len(),
+            })
+            .collect()
+    };
+    if !artefact_blocks.is_empty() {
+        messages.push(MessageDto {
+            role: "assistant".to_string(),
+            blocks: artefact_blocks,
+        });
+    }
+
     json_ok(&serde_json::json!({
         "id": id,
         "title": handle.title,
@@ -1199,6 +1268,8 @@ fn block_to_dto(b: &ContentBlock) -> BlockDto {
             id: id.clone(),
             kind: *kind,
             title: title.clone(),
+            url: format!("/api/artefacts/{id}"),
+            bytes: 0,
         },
         // Fallback: treat image/document as a text marker so the wire
         // protocol stays simple.
@@ -1649,6 +1720,13 @@ impl SseOutput {
 impl Output for SseOutput {
     fn text_delta(&mut self, text: &str) -> std::result::Result<(), DysonError> {
         self.send(SseEvent::Text {
+            delta: text.to_string(),
+        });
+        Ok(())
+    }
+
+    fn thinking_delta(&mut self, text: &str) -> std::result::Result<(), DysonError> {
+        self.send(SseEvent::Thinking {
             delta: text.to_string(),
         });
         Ok(())

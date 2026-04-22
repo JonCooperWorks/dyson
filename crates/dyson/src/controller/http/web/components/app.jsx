@@ -327,6 +327,7 @@ function ConversationView({ conv, session, bump }) {
     const userTurn = { role: 'user', ts, blocks: userBlocks };
     const aTurn = { role: 'agent', ts, blocks: [{ type: 'text', text: '' }] };
     session.liveTurns = [...session.liveTurns, userTurn, aTurn];
+    session.thinkingRef = null; // one thinking panel per turn
     let activeText = aTurn.blocks[0];
     bump();
 
@@ -337,6 +338,28 @@ function ConversationView({ conv, session, bump }) {
           aTurn.blocks.push(activeText);
         }
         activeText.text += delta;
+        bump();
+      },
+      onThinking: (delta) => {
+        // Live-stream the model's extended-thinking into a right-rail
+        // panel.  The panel is a synthetic "tool" with kind='thinking'
+        // so ToolPanel renders it through the existing pipeline.  We
+        // reuse one ref per turn (keyed off the turn's start counter)
+        // so all deltas land in the same panel.
+        const ref = session.thinkingRef || `${conv}-thinking-${++session.counter}`;
+        session.thinkingRef = ref;
+        if (!D.tools[ref]) {
+          D.tools[ref] = mkTool('thinking', {
+            kind: 'thinking',
+            status: 'running',
+            dur: '…',
+            body: { text: '' },
+          });
+          aTurn.blocks.push({ type: 'tool', ref });
+          if (!session.panels.includes(ref)) session.panels = [...session.panels, ref];
+          session.openTool = ref;
+        }
+        D.tools[ref].body.text = (D.tools[ref].body.text || '') + delta;
         bump();
       },
       onToolStart: ({ id, name }) => {
@@ -370,6 +393,18 @@ function ConversationView({ conv, session, bump }) {
         // Agent-produced files (e.g. image_generate, exploit_builder).
         // Renders inline as <img> for images, otherwise a download link.
         aTurn.blocks.push({ type: 'file', name, mime: mime_type, url, inline: !!inline_image });
+        // For images: also attach the URL to the active tool panel so
+        // the right-rail's ToolPanel shows the generated image without
+        // the user having to scroll chat.  Targets whichever tool
+        // call is currently live (typically `image_generate`).
+        if (inline_image) {
+          const ref = session.liveToolRef;
+          const t = ref && D.tools[ref];
+          if (t) {
+            t.kind = 'image';
+            t.body = { url, name, mime: mime_type };
+          }
+        }
         bump();
       },
       onArtefact: ({ id, kind, title, url, bytes, metadata }) => {
@@ -382,7 +417,17 @@ function ConversationView({ conv, session, bump }) {
         ];
         bump();
       },
-      onDone: () => { session.running = false; session.es = null; bump(); },
+      onDone: () => {
+        // Mark the thinking panel (if any) as complete so it stops
+        // showing the "running" pulse.
+        if (session.thinkingRef && D.tools[session.thinkingRef]) {
+          D.tools[session.thinkingRef].status = 'done';
+          D.tools[session.thinkingRef].dur = '';
+        }
+        session.running = false;
+        session.es = null;
+        bump();
+      },
     }, files);
   };
 

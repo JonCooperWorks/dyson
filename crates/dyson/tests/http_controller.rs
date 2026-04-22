@@ -1160,3 +1160,160 @@ async fn agent_artefact_round_trips_through_sse_and_disk() {
     assert_eq!(stored, markdown);
 }
 
+#[tokio::test]
+async fn emitted_images_survive_refresh_via_artefacts() {
+    // Regression: images emitted via Output::send_file must survive a
+    // browser refresh AND a controller restart.  The chat-scroll chip
+    // is purely a live-stream artefact (not in message history), so
+    // the Artefacts tab is the durable surface — it must list every
+    // image ever emitted for this chat, even on a fresh HttpState.
+    let r = rig().await;
+
+    let created = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "images-persist" }),
+    ).await).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Subscribe before emission so the broadcast has a receiver.
+    let mut sse = request(
+        &format!("{}/api/conversations/{}/events", r.base, id),
+        Method::GET,
+        None,
+    ).await;
+    assert_eq!(sse.status(), StatusCode::OK);
+    test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("generated.png");
+    std::fs::write(&png_path, PNG_1X1).expect("write png");
+    test_helpers::emit_agent_file(r.state.clone(), &id, &png_path)
+        .await
+        .expect("emit png");
+
+    // Drain the `file` + `artefact` events from the stream.
+    let evt_file = read_sse_event(&mut sse).await;
+    assert_eq!(evt_file["type"], "file");
+    let file_url = evt_file["url"].as_str().unwrap().to_string();
+    let evt_art = read_sse_event(&mut sse).await;
+    assert_eq!(evt_art["type"], "artefact");
+    assert_eq!(evt_art["kind"], "image");
+
+    // Simulate a refresh: re-fetch the artefact list via the API the
+    // frontend uses on chat load.  The image MUST be there.
+    let list = body_json(get(&format!(
+        "{}/api/conversations/{}/artefacts",
+        r.base, id,
+    )).await).await;
+    let arr = list.as_array().expect("list array");
+    assert_eq!(arr.len(), 1, "image artefact missing on refresh: {list}");
+    assert_eq!(arr[0]["kind"], "image");
+    let art_id = arr[0]["id"].as_str().unwrap().to_string();
+
+    // Simulate a controller restart: build a fresh HttpState pointed
+    // at the same chat dir.  The image body must rehydrate from disk.
+    let mut rebuilt_settings = Settings::default();
+    rebuilt_settings.chat_history = ChatHistoryConfig {
+        backend: "disk".into(),
+        connection_string: Credential::new(
+            r.chat_dir.path().to_string_lossy().into_owned(),
+        ),
+    };
+    rebuilt_settings.workspace.connection_string =
+        Credential::new(r.workspace_dir.path().to_string_lossy().into_owned());
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        "default".to_string(),
+        ProviderConfig {
+            provider_type: LlmProvider::OpenRouter,
+            api_key: Credential::new("sk-test".into()),
+            base_url: None,
+            models: vec!["qwen/qwen3.6-plus".to_string()],
+        },
+    );
+    rebuilt_settings.providers = providers;
+    rebuilt_settings.agent.provider = LlmProvider::OpenRouter;
+    rebuilt_settings.agent.model = "qwen/qwen3.6-plus".into();
+
+    let registry2 = Arc::new(ClientRegistry::new(&rebuilt_settings, None));
+    let history2: Arc<dyn ChatHistory> = Arc::new(
+        DiskChatHistory::new(r.chat_dir.path().to_path_buf()).expect("disk history"),
+    );
+    let feedback2 = Arc::new(FeedbackStore::new(r.chat_dir.path().to_path_buf()));
+    let state2 = test_helpers::build_state(
+        rebuilt_settings,
+        registry2,
+        None,
+        Some(history2),
+        Some(feedback2),
+        Arc::new(DangerousNoAuth),
+    );
+
+    // The rebuilt store must have the artefact entry indexed AND the
+    // file bytes must be retrievable from the new controller's own
+    // /api/files/<id> (which falls through to disk for IDs the
+    // in-memory FileStore doesn't have yet).
+    assert!(
+        state2.artefacts_for_test(&art_id).is_some(),
+        "image artefact must rehydrate from disk",
+    );
+    let file_id = file_url.trim_start_matches("/api/files/");
+    assert!(
+        state2.file_bytes_for_test(file_id).is_some(),
+        "image file bytes must be reachable from fresh state via disk fallback",
+    );
+}
+
+#[tokio::test]
+async fn chat_reload_shows_emitted_images_in_transcript() {
+    // Regression: on browser refresh the chat-scroll must still show
+    // agent-emitted images as artefact chips.  Files are side-channel
+    // (not in message history), so the /api/conversations/:id response
+    // must synthesise an artefact-chip turn from the ArtefactStore.
+    let r = rig().await;
+
+    let created = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "chat-reload" }),
+    ).await).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let mut sse = request(
+        &format!("{}/api/conversations/{}/events", r.base, id),
+        Method::GET,
+        None,
+    ).await;
+    assert_eq!(sse.status(), StatusCode::OK);
+    test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let png_path = dir.path().join("hello.png");
+    std::fs::write(&png_path, PNG_1X1).expect("write png");
+    test_helpers::emit_agent_file(r.state.clone(), &id, &png_path)
+        .await
+        .expect("emit png");
+
+    // Drain the two live events so the broadcast doesn't back up.
+    let _ = read_sse_event(&mut sse).await;
+    let _ = read_sse_event(&mut sse).await;
+
+    // Now simulate a refresh — fetch the conversation fresh.  The last
+    // turn of the transcript must carry an artefact chip pointing at
+    // the image.
+    let convo = body_json(
+        get(&format!("{}/api/conversations/{}", r.base, id)).await,
+    ).await;
+    let messages = convo["messages"].as_array().expect("messages array");
+    assert!(!messages.is_empty(), "transcript must not be empty on reload");
+    let last = messages.last().unwrap();
+    let blocks = last["blocks"].as_array().expect("blocks array");
+    let artefact_chip = blocks
+        .iter()
+        .find(|b| b["type"] == "artefact")
+        .expect("refresh transcript must contain an artefact chip");
+    assert_eq!(artefact_chip["kind"], "image");
+    assert_eq!(artefact_chip["title"], "hello.png");
+    let url = artefact_chip["url"].as_str().expect("url on chip");
+    assert!(url.starts_with("/api/artefacts/"), "chip url: {url}");
+}
+

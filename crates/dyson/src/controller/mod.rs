@@ -1188,6 +1188,19 @@ pub trait Output: Send {
     /// A fragment of text from the LLM's response.
     fn text_delta(&mut self, text: &str) -> std::result::Result<(), DysonError>;
 
+    /// A fragment of extended-thinking / chain-of-thought reasoning.
+    ///
+    /// Default no-op so controllers that don't want to surface reasoning
+    /// (terminal, telegram, swarm) don't have to opt out.  The HTTP
+    /// controller forwards these over SSE so the right-rail can stream
+    /// a live reasoning panel.  Not sent to the LLM (the stream_handler
+    /// still gathers thinking into `ContentBlock::Thinking` for history
+    /// so the model can reference its prior reasoning on the next turn).
+    fn thinking_delta(&mut self, text: &str) -> std::result::Result<(), DysonError> {
+        let _ = text;
+        Ok(())
+    }
+
     /// The LLM is starting a tool call.
     fn tool_use_start(&mut self, id: &str, name: &str) -> std::result::Result<(), DysonError>;
 

@@ -129,7 +129,6 @@ pub async fn process_stream(
 
     // Buffer for accumulating thinking deltas into a Thinking content block.
     let mut current_thinking = String::new();
-    let mut thinking_indicator_sent = false;
 
     // Detects <think>…</think> tags in TextDelta events from OpenAI-compat
     // servers and reclassifies them as thinking content.
@@ -151,16 +150,17 @@ pub async fn process_stream(
         match event {
             StreamEvent::ThinkingDelta(text) => {
                 tracing::debug!(thinking = text, "model thinking");
-                // Send a one-time "thinking" indicator so the user knows
-                // the model is reasoning, but don't reveal the full text.
-                if !thinking_indicator_sent {
-                    if !typing_cleared {
-                        output.typing_indicator(false)?;
-                        typing_cleared = true;
-                    }
-                    output.text_delta("I'm thinking …\n")?;
-                    thinking_indicator_sent = true;
+                if !typing_cleared {
+                    output.typing_indicator(false)?;
+                    typing_cleared = true;
                 }
+                // Stream reasoning to the controller as it arrives —
+                // the HTTP right-rail shows it live in a dedicated
+                // panel; terminal/telegram controllers drop it via the
+                // default no-op impl.  The one-time `I'm thinking …`
+                // text spam is gone now that controllers have a real
+                // channel for reasoning.
+                output.thinking_delta(&text)?;
                 current_thinking.push_str(&text);
             }
 
@@ -172,14 +172,14 @@ pub async fn process_stream(
                 for (is_thinking, segment) in segments {
                     if is_thinking {
                         tracing::debug!(thinking = segment, "model thinking (think tag)");
-                        if !thinking_indicator_sent {
-                            if !typing_cleared {
-                                output.typing_indicator(false)?;
-                                typing_cleared = true;
-                            }
-                            output.text_delta("I'm thinking …\n")?;
-                            thinking_indicator_sent = true;
+                        if !typing_cleared {
+                            output.typing_indicator(false)?;
+                            typing_cleared = true;
                         }
+                        // Same live-stream path as native ThinkingDelta
+                        // above; supports OpenAI-compat models that
+                        // embed reasoning in <think>…</think> tags.
+                        output.thinking_delta(&segment)?;
                         current_thinking.push_str(&segment);
                     } else {
                         // Flush any accumulated thinking before text starts.
@@ -559,8 +559,10 @@ mod tests {
 
     #[tokio::test]
     async fn thinking_deltas_saved_to_history_but_hidden_from_output() {
-        // Thinking tokens should be saved to the message content blocks
-        // for history, but only a brief indicator shown to the user.
+        // Thinking tokens go to the thinking_delta side-channel (so the
+        // HTTP right-rail shows them live) AND to the message content
+        // blocks for history — but never to text_delta, which is the
+        // user-visible transcript.
         let stream = events_to_stream(vec![
             StreamEvent::ThinkingDelta("Let me think...".into()),
             StreamEvent::ThinkingDelta("The answer is 42.".into()),
@@ -574,8 +576,11 @@ mod tests {
         let mut output = RecordingOutput::new();
         let (message, tool_calls, _tokens, _stop) = process_stream(stream, &mut output).await.unwrap();
 
-        // Output should show the thinking indicator + the visible text.
-        assert_eq!(output.text(), "I'm thinking …\nThe answer is 42.");
+        // Transcript text is just the visible assistant text — no
+        // "I'm thinking …" breadcrumb.
+        assert_eq!(output.text(), "The answer is 42.");
+        // Reasoning flows via thinking_delta.
+        assert_eq!(output.thinking(), "Let me think...The answer is 42.");
         assert!(tool_calls.is_empty());
         // Message should have a Thinking block + a Text block.
         assert_eq!(message.content.len(), 2);
@@ -681,8 +686,9 @@ mod tests {
         let mut output = RecordingOutput::new();
         let (message, _, _, _stop) = process_stream(stream, &mut output).await.unwrap();
 
-        // Output should show indicator + visible text only.
-        assert_eq!(output.text(), "I'm thinking …\nFinal answer.");
+        // Transcript is visible text only; reasoning side-channeled.
+        assert_eq!(output.text(), "Final answer.");
+        assert_eq!(output.thinking(), "Let me reason.");
 
         // Message should have Thinking + Text blocks.
         assert_eq!(message.content.len(), 2);
@@ -711,7 +717,8 @@ mod tests {
         let mut output = RecordingOutput::new();
         let (message, _, _, _stop) = process_stream(stream, &mut output).await.unwrap();
 
-        assert_eq!(output.text(), "I'm thinking …\nanswer");
+        assert_eq!(output.text(), "answer");
+        assert_eq!(output.thinking(), "reasoning");
         assert_eq!(message.content.len(), 2);
         match &message.content[0] {
             ContentBlock::Thinking { thinking } => assert_eq!(thinking, "reasoning"),
