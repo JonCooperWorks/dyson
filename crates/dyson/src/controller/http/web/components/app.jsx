@@ -187,7 +187,13 @@ function App() {
           {!rightHidden && <RightRail panels={session ? session.panels : []} onClose={removePanel}/>}
         </div>
       )}
-      {view === 'mind' && <div className="body no-right"><LeftRailMind/><MindView/></div>}
+      {view === 'mind' && (
+        <div className="body no-right">
+          {showLeft && <div className="scrim" onClick={closeRails}/>}
+          <LeftRailMind/>
+          <MindView showSide={showLeft} onHideSide={() => setShowLeft(false)}/>
+        </div>
+      )}
       {view === 'activity' && <div style={{display:'flex', flex:1, minHeight:0}}><ActivityView/></div>}
     </div>
   );

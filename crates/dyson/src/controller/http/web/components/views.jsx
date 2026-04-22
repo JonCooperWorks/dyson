@@ -163,7 +163,7 @@ function LeftRail({ active, setActive }) {
   );
 }
 
-function MindView() {
+function MindView({ showSide, onHideSide }) {
   const m = window.DYSON_DATA.mind;
   const initial = (m.files[0] && m.files[0].path) || '';
   const [selected, setSelected] = vUS(initial);
@@ -209,7 +209,7 @@ function MindView() {
   }, [dirty, saving, draft, selected]);
 
   return (
-    <div className="mind">
+    <div className={`mind${showSide ? ' show-side' : ''}`}>
       <aside className="mind-side">
         <div style={{padding:'10px 14px', borderBottom:'1px solid var(--line)'}}>
           <div className="eyebrow">workspace</div>
@@ -218,7 +218,7 @@ function MindView() {
         <div style={{overflowY:'auto', flex:1, padding:'6px 0'}}>
           {(m.files.length === 0) && <div style={{padding:'14px', color:'var(--mute)', fontSize:12}}>No workspace files.</div>}
           {m.files.map(f => (
-            <div key={f.path} onClick={() => setSelected(f.path)}
+            <div key={f.path} onClick={() => { setSelected(f.path); onHideSide && onHideSide(); }}
                  style={{display:'flex', alignItems:'center', gap:8, padding:'6px 14px', cursor:'pointer',
                          background: selected === f.path ? 'var(--panel)' : 'transparent',
                          borderLeft: selected === f.path ? '2px solid var(--accent)' : '2px solid transparent'}}>
