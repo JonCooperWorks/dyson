@@ -1557,6 +1557,20 @@ async fn post_turn(
         }
         let agent = guard.as_mut().expect("agent built above");
         agent.set_cancellation_token(cancel);
+        // Checkpoint-save the transcript to disk after every message
+        // push.  Without this, a process kill during a long subagent
+        // run (e.g. security_engineer streams for minutes) loses the
+        // whole conversation — the end-of-turn save below is
+        // unreachable if the tokio task is aborted mid-run.
+        if let Some(h) = history.as_ref() {
+            let h = Arc::clone(h);
+            let chat_id_for_hook = chat_id.clone();
+            agent.set_persist_hook(std::sync::Arc::new(move |messages| {
+                if let Err(e) = h.save(&chat_id_for_hook, messages) {
+                    tracing::warn!(error = %e, chat_id = %chat_id_for_hook, "persist hook failed to save chat history");
+                }
+            }));
+        }
 
         // Branch on attachments: with attachments, dispatch through
         // run_with_attachments so images/audio/PDF are resolved into

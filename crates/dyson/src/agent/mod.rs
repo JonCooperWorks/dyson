@@ -410,6 +410,13 @@ pub struct Agent {
     /// Ephemeral prompt fragment when an advisor is active.
     /// Appended to skill_fragments (dynamic area) to avoid busting KV cache.
     advisor_prompt: Option<&'static str>,
+
+    /// Optional hook fired whenever the agent's message history changes.
+    /// Controllers use it to checkpoint the transcript to disk during a
+    /// long turn (e.g. a subagent that streams for minutes) so a crash
+    /// or kill doesn't lose the conversation — the end-of-turn save is
+    /// unreachable if the tokio task gets aborted mid-run.
+    persist_hook: Option<std::sync::Arc<dyn Fn(&[crate::message::Message]) + Send + Sync>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -619,7 +626,26 @@ impl Agent {
             feedback_store: None,
             transcriber,
             advisor_prompt,
+            persist_hook: None,
         })
+    }
+
+    /// Install a callback that runs after every message push.  Used by the
+    /// HTTP controller to checkpoint the transcript to disk mid-turn.
+    pub fn set_persist_hook(
+        &mut self,
+        hook: std::sync::Arc<dyn Fn(&[crate::message::Message]) + Send + Sync>,
+    ) {
+        self.persist_hook = Some(hook);
+    }
+
+    /// Fire the persist hook with the current transcript.  Cheap and
+    /// idempotent when no hook is installed; controllers decide whether
+    /// to actually hit disk.
+    pub(crate) fn persist(&self) {
+        if let Some(hook) = &self.persist_hook {
+            hook(&self.conversation.messages);
+        }
     }
 
     /// Compose the system prompt from base + model info + skill fragments.
@@ -1032,6 +1058,7 @@ impl Agent {
         );
         // Append the user's message to history.
         self.conversation.messages.push(Message::user(user_input));
+        self.persist();
         self.run_inner(output).await
     }
 
@@ -1050,6 +1077,7 @@ impl Agent {
             "user multimodal message received"
         );
         self.conversation.messages.push(Message::user_multimodal(blocks));
+        self.persist();
         self.run_inner(output).await
     }
 
@@ -1097,6 +1125,7 @@ impl Agent {
         self.conversation
             .messages
             .push(Message::user_multimodal(blocks));
+        self.persist();
         self.run_inner(output).await
     }
 

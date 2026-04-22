@@ -185,6 +185,7 @@ impl Agent {
         };
 
         self.conversation.messages.push(tool_result_msg);
+        self.persist();
         Ok(())
     }
 
