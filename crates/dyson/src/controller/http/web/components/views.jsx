@@ -1,6 +1,6 @@
 /* Dyson — TopBar / LeftRail / MindView / ActivityView. */
 
-const { useState: vUS, useEffect: vUE } = React;
+const { useState: vUS, useEffect: vUE, useRef: vUR } = React;
 
 function TopBar({ view, setView, onToggleLeft, onToggleRight, rightHidden }) {
   const navs = [
@@ -398,18 +398,42 @@ function ArtefactsView({ conv, session, bump }) {
       .catch(() => {});
   }, [conv]);
 
-  // Auto-select the newest artefact whenever the chat changes and
-  // nothing is selected yet.  Keeps the "click a chat → see a report"
-  // flow zero-click and makes the URL reflect the reader position so
-  // a back-button or share-link round-trips cleanly.
+  // When the chat changes from one non-null value to another
+  // (= the user clicked a different chat in the sidebar), drop the
+  // previous chat's selection so the auto-select effect below picks
+  // the newest artefact of the new chat.  A pending id from a chip
+  // click or deep-link wins over the auto-pick.  We skip clearing
+  // the first time `conv` transitions from null → something (the
+  // cold-deep-link case, where the reader has just told App which
+  // chat owns the artefact being read — clobbering would throw away
+  // the user's actual target).
+  const prevConvRef = vUR(conv);
+  vUE(() => {
+    const prev = prevConvRef.current;
+    prevConvRef.current = conv;
+    if (!prev) return;
+    const pending = window.__dysonOpenArtefactId;
+    if (pending) {
+      delete window.__dysonOpenArtefactId;
+      setSelected(pending);
+    } else {
+      setSelected(null);
+    }
+  }, [conv]);
+
+  // Auto-select the newest artefact for the current chat whenever
+  // selection is empty and the list is ready.  Keeps the "click a
+  // chat → see a report" flow zero-click and makes the URL reflect
+  // the reader position so a back-button or share-link round-trips
+  // cleanly.
+  const listForAutoselect = (session && session.artefacts) || [];
   vUE(() => {
     if (selected) return;
-    const list = (session && session.artefacts) || [];
-    if (!list.length) return;
-    const first = list[0].id;
+    if (!listForAutoselect.length) return;
+    const first = listForAutoselect[0].id;
     setSelected(first);
     window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: first } }));
-  }, [conv, session && session.artefacts, selected]);
+  }, [conv, listForAutoselect.length, selected]);
 
   // Allow in-chat chips to jump straight to a specific artefact.  The
   // event is fired by ArtefactBlock.onClick — if we're already on the
