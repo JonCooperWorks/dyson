@@ -132,28 +132,47 @@ function DiffPanel({ files }) {
 }
 
 function SbomPanel({ rows, counts }) {
+  const c = counts || {};
+  const total = typeof c.total === 'number' ? c.total : rows.length;
+  const crit = c.crit || 0;
+  const high = c.high || 0;
+  const med = c.med || 0;
+  const low = c.low || 0;
+  // Reachability isn't computed server-side yet (every row carries
+  // `reach: "unknown"` from `build_sbom_view`) — tally whatever did
+  // arrive so if a future taint pass fills it in the count shows up.
+  const reachable = rows.filter(r => r.reach === 'reachable').length;
+  const clean = rows.length === 0;
   return (
     <div className="p-body flush">
-      <table className="sbom">
-        <thead><tr><th className="sev">sev</th><th>package</th><th>advisory</th><th>reach</th></tr></thead>
-        <tbody>
-          {rows.map((r, i) => (
-            <tr key={i}>
-              <td className="sev"><span className={`b ${r.sev === 'high' ? 'high' : r.sev === 'med' ? 'med' : r.sev === 'low' ? 'low' : 'crit'}`}>{r.sev}</span></td>
-              <td><span className="pkg">{r.pkg}</span> <span className="ver">{r.ver}</span><div style={{color:'var(--mute)',fontSize:10.5,marginTop:3}}>{r.note}</div></td>
-              <td style={{color:'var(--mute-2)'}}>{r.id}</td>
-              <td><span className={`reach ${r.reach==='unreachable'?'no':''}`}>{r.reach}</span></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      {clean ? (
+        <div style={{padding:'20px 16px', color:'var(--mute)', fontSize:12, lineHeight:1.5}}>
+          No known vulnerabilities across <strong style={{color:'var(--fg)'}}>{total.toLocaleString()}</strong> {total === 1 ? 'dependency' : 'dependencies'}.
+        </div>
+      ) : (
+        <table className="sbom">
+          <thead><tr><th className="sev">sev</th><th>package</th><th>advisory</th><th>reach</th></tr></thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i}>
+                <td className="sev"><span className={`b ${r.sev === 'high' ? 'high' : r.sev === 'med' ? 'med' : r.sev === 'low' ? 'low' : r.sev === 'crit' ? 'crit' : ''}`}>{r.sev}</span></td>
+                <td><span className="pkg">{r.pkg}</span> <span className="ver">{r.ver}</span><div style={{color:'var(--mute)',fontSize:10.5,marginTop:3}}>{r.note}</div></td>
+                <td style={{color:'var(--mute-2)'}}>{r.id}</td>
+                <td><span className={`reach ${r.reach==='unreachable'?'no':''}`}>{r.reach}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
       <div className="sbom-foot">
-        <span>247 crates</span>
-        <span style={{color:'var(--err)'}}>1 high</span>
-        <span style={{color:'var(--warn)'}}>2 med</span>
-        <span>1 low</span>
+        <span>{total.toLocaleString()} {total === 1 ? 'crate' : 'crates'}</span>
+        {crit > 0 && <span style={{color:'var(--err)'}}>{crit} crit</span>}
+        {high > 0 && <span style={{color:'var(--err)'}}>{high} high</span>}
+        {med > 0 && <span style={{color:'var(--warn)'}}>{med} med</span>}
+        {low > 0 && <span>{low} low</span>}
+        {clean && <span style={{color:'var(--ok, var(--fg))'}}>✓ clean</span>}
         <span style={{flex:1}}/>
-        <span style={{color:'var(--mute)'}}>2 reachable</span>
+        {reachable > 0 && <span style={{color:'var(--mute)'}}>{reachable} reachable</span>}
       </div>
     </div>
   );
