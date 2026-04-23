@@ -53,11 +53,42 @@ function Reactions({ turnIndex, current, onPick }) {
   );
 }
 
+// Plain-text serialisation of a turn for the copy button.  Includes
+// text and thinking blocks (the actual prose); skips tool chips, files,
+// and artefact chips since those are UI affordances, not content.
+function turnToText(turn) {
+  const parts = [];
+  for (const b of (turn.blocks || [])) {
+    if (b.type === 'text' && b.text) parts.push(b.text);
+    else if (b.type === 'thinking' && b.text) parts.push(b.text);
+  }
+  return parts.join('\n\n');
+}
+
+async function copyText(text) {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    return true;
+  } catch (_) { return false; }
+}
+
 function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
                 reactionsOpen, onToggleReactions }) {
   const isUser = turn.role === 'user';
   const avatarL = isUser ? 'JC' : 'DY';
   const ratable = !isUser && turnIndex != null && typeof onRate === 'function';
+  const [copied, setCopied] = uS2(false);
 
   // Tap-to-reveal the reactions bar on touch.  Desktop hover path is
   // preserved by CSS gated on @media (hover: hover) and (pointer: fine).
@@ -70,6 +101,14 @@ function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
     onToggleReactions();
   };
 
+  const onCopy = async (e) => {
+    e.stopPropagation();
+    const ok = await copyText(turnToText(turn));
+    if (!ok) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+
   const cls = `turn ${ratable ? 'ratable' : ''} ${reactionsOpen ? 'reactions-open' : ''}`.trim();
   return (
     <div className={cls} onPointerUp={onTurnPointerUp}>
@@ -80,6 +119,12 @@ function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
           {turn.model && <span className="model">{turn.model}</span>}
           <span className="when">{turn.ts}</span>
           {rating && <span className="rating-badge" title={`rated ${rating}`}>{rating}</span>}
+          <button
+            className={`copy-turn ${copied ? 'on' : ''}`}
+            onClick={onCopy}
+            title={copied ? 'Copied' : 'Copy message'}>
+            <Icon name={copied ? 'rate' : 'copy'} size={11}/>
+          </button>
         </div>
         {turn.blocks.map((b, i) => {
           if (b.type === 'text') {

@@ -198,6 +198,37 @@
   border: 1px solid var(--accent-ln);
   cursor: default;
 }
+/* Copy-message button — subtle, revealed on hover (desktop) or always
+   on touch, so the affordance doesn't clutter the header by default. */
+.turn .copy-turn {
+  margin-left: 4px;
+  padding: 3px 5px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--mute);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.turn:hover .copy-turn { opacity: 0.7; }
+.turn .copy-turn:hover {
+  opacity: 1;
+  color: var(--fg);
+  border-color: var(--line-2);
+  background: var(--bg-1);
+}
+.turn .copy-turn.on {
+  opacity: 1;
+  color: var(--accent);
+  border-color: var(--accent-ln);
+  background: var(--accent-dim);
+}
+@media (hover: none), (pointer: coarse) {
+  .turn .copy-turn { opacity: 0.6; }
+}
 @media (max-width: 760px) {
   /* Narrow viewports: drop the bar into flow so it doesn't overlap the
      composer.  Visibility is driven by the .reactions-open class set on tap. */
