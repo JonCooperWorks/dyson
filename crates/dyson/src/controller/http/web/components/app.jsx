@@ -9,7 +9,7 @@
  * mod tests` for the regression checks that lock this behaviour in.
  */
 
-const { useState, useEffect, useRef, useCallback } = React;
+const { useState, useEffect, useRef, useCallback, useLayoutEffect } = React;
 
 // Single source of truth for the views that exist.  TopBar's nav array
 // must list these in the same order; the keyboard handler in App keys
@@ -504,11 +504,15 @@ function ConversationView({ conv, session, bump }) {
     }).catch(() => {});
   }, [conv, session, bump]);
 
-  // Auto-scroll: force-bottom the first time we render with content
-  // for this conv (handles "open at bottom"), then "near-bottom only"
-  // for subsequent streaming deltas (don't yank a user reading older
-  // context).  Re-runs on every bump so streaming follows.
-  useEffect(() => {
+  // Auto-scroll: pin to the bottom the first time we render content
+  // for this conv (so opening a chat drops the user at the latest
+  // message instead of at the top and then scrolling down), then
+  // "near-bottom only" for subsequent streaming deltas — don't yank
+  // a user who has scrolled up to read older context.  Runs inside
+  // `useLayoutEffect` so the scroll lands BEFORE the browser paints
+  // the new DOM: without that, switching chats briefly showed the
+  // transcript's top and then jumped down, which read as jank.
+  useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el || !session) return;
     if (session.justScrollOnNextRender && session.liveTurns.length > 0) {
