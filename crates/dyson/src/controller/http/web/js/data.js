@@ -52,6 +52,12 @@ window.DYSON_DATA = {
     { cmd: '/stop',      desc: 'Cancel the current turn',                           src: 'controller' },
     { cmd: '/agents',    desc: 'List running background agents',                    src: 'controller' },
     { cmd: '/fork-from', desc: 'Fork a new conversation from a point',              src: 'web' },
-    { cmd: '/export',    desc: 'Export transcript (md, json)',                      src: 'web' },
+    // `/export` used to live here as a slash command but the server-
+    // side tool writes to the workspace, and on the web deployment
+    // that path doesn't resolve the same way Telegram's does — the
+    // result was "this file does not exist: .../SESSION_ANALYZER.md".
+    // Replaced with a download button in the transcript header that
+    // hits `GET /api/conversations/<id>/export` directly (bridge's
+    // `exportConversation` helper builds the blob client-side).
   ],
 };

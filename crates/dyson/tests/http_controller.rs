@@ -1503,6 +1503,63 @@ async fn agent_artefact_round_trips_through_sse_and_disk() {
 }
 
 #[tokio::test]
+async fn export_conversation_returns_sharegpt_json() {
+    // The web UI's download button hits this endpoint.  Regression:
+    // a conversation with zero messages 404s cleanly (nothing to
+    // export), a populated chat returns valid ShareGPT JSON with the
+    // chat id stamped.  Replaces the old `/export` slash command
+    // which relied on workspace paths that don't exist everywhere.
+    let r = rig().await;
+
+    // Empty chat → 404 (nothing to export yet).
+    let a = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "empty" }),
+    ).await).await;
+    let a_id = a["id"].as_str().unwrap().to_string();
+    let empty = get(&format!("{}/api/conversations/{}/export", r.base, a_id)).await;
+    assert_eq!(empty.status(), StatusCode::NOT_FOUND);
+
+    // Populated chat → 200 with a ShareGPT array and attachment
+    // disposition so the browser prompts a save.
+    let b = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "with turns" }),
+    ).await).await;
+    let b_id = b["id"].as_str().unwrap().to_string();
+    test_helpers::seed_transcript(
+        r.state.clone(),
+        &b_id,
+        &[
+            ("user", "hello"),
+            ("assistant", "hi there"),
+        ],
+    )
+    .await
+    .expect("seed");
+
+    let resp = get(&format!("{}/api/conversations/{}/export", r.base, b_id)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cd = resp
+        .headers()
+        .get("content-disposition")
+        .expect("CD header must be present")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(cd.contains("attachment"), "CD must trigger save dialog: {cd}");
+    assert!(cd.contains(&b_id), "filename stamps chat id: {cd}");
+    let body = body_json(resp).await;
+    let arr = body.as_array().expect("sharegpt is a JSON array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["id"], b_id);
+    let turns = arr[0]["conversations"].as_array().expect("turns array");
+    assert!(!turns.is_empty(), "turns must not be empty: {body}");
+    assert_eq!(turns[0]["from"], "human");
+    assert_eq!(turns[0]["value"], "hello");
+}
+
+#[tokio::test]
 async fn list_conversations_flags_chats_with_artefacts() {
     // The Artefacts view filters the sidebar to chats that have at
     // least one report — `/api/conversations` must surface the flag

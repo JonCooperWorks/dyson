@@ -1201,6 +1201,40 @@ pub mod test_helpers {
         out.send_artefact(&artefact)
     }
 
+    /// Write a fixture transcript straight to the configured chat
+    /// history backend.  Used by tests that need realistic messages
+    /// without standing up an LLM — `role` is either `"user"` or
+    /// `"assistant"`.  Panics on unknown role (test-only helper).
+    pub async fn seed_transcript(
+        state: Arc<HttpState>,
+        chat_id: &str,
+        messages: &[(&str, &str)],
+    ) -> crate::Result<()> {
+        use crate::message::{ContentBlock, Message, Role};
+        let history = state
+            .history
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| crate::DysonError::Config("no chat_history backend".into()))?;
+        let msgs: Vec<Message> = messages
+            .iter()
+            .map(|(role, text)| {
+                let role = match *role {
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
+                    other => panic!("unknown role in seed_transcript: {other}"),
+                };
+                Message {
+                    role,
+                    content: vec![ContentBlock::Text {
+                        text: (*text).to_string(),
+                    }],
+                }
+            })
+            .collect();
+        history.save(chat_id, &msgs)
+    }
+
     /// Spin until the chat's broadcast channel has at least one
     /// subscriber — the only way to close the race between a client
     /// connecting to `/events` and a producer emitting into the
@@ -1296,6 +1330,7 @@ async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) ->
                 (Method::GET, "feedback") => return get_feedback(&state, id).await,
                 (Method::POST, "feedback") => return post_feedback(req, &state, id).await,
                 (Method::GET, "artefacts") => return list_artefacts(&state, id).await,
+                (Method::GET, "export") => return export_conversation(&state, id).await,
                 _ => return not_found(),
             }
         } else if method == Method::GET {
@@ -2574,6 +2609,82 @@ struct ArtefactDto {
 }
 
 /// List artefacts for a given chat.  Empty list if none exist yet.
+/// Stream a ShareGPT-format dump of a conversation for the web UI's
+/// download button.  Reads the transcript from `ChatHistory` (or the
+/// in-memory agent's messages if history is absent), folds in the
+/// per-turn feedback ratings, and serialises via the same
+/// `sharegpt::to_sharegpt_with_feedback` path the `export_conversation`
+/// tool uses.  Returns `{"error":..}` JSON on 404 so the bridge can
+/// surface the message inline.
+async fn export_conversation(state: &HttpState, chat_id: &str) -> Resp {
+    // Transcript: prefer disk (authoritative, has everything ever sent
+    // for this chat) and fall back to the live agent's in-memory
+    // message buffer when no history backend is configured.
+    let messages = if let Some(h) = state.history.as_ref() {
+        match h.load(chat_id) {
+            Ok(m) => m,
+            Err(e) => return bad_request(&format!("load transcript: {e}")),
+        }
+    } else {
+        let chats = state.chats.lock().await;
+        let Some(handle) = chats.get(chat_id) else {
+            return not_found();
+        };
+        let guard = handle.agent.lock().await;
+        match guard.as_ref() {
+            Some(a) => a.messages().to_vec(),
+            None => Vec::new(),
+        }
+    };
+    if messages.is_empty() {
+        return not_found();
+    }
+
+    // System prompt mirrors the behaviour of the in-tree tool — use
+    // the live agent's current prompt when available so exports
+    // capture the persona/role the chat was actually run with.
+    let system_prompt: Option<String> = {
+        let chats = state.chats.lock().await;
+        let handle = chats.get(chat_id).cloned();
+        drop(chats);
+        if let Some(h) = handle {
+            let guard = h.agent.lock().await;
+            guard.as_ref().map(|a| a.system_prompt().to_string())
+        } else {
+            None
+        }
+    };
+
+    let feedback = state
+        .feedback
+        .as_ref()
+        .and_then(|f| f.load(chat_id).ok())
+        .unwrap_or_default();
+
+    let convo = crate::export::sharegpt::to_sharegpt_with_feedback(
+        &messages,
+        system_prompt.as_deref(),
+        Some(chat_id.to_string()),
+        &feedback,
+    );
+    let body = match crate::export::sharegpt::to_sharegpt_json(&[convo]) {
+        Ok(s) => s,
+        Err(e) => return bad_request(&format!("serialise sharegpt: {e}")),
+    };
+
+    let filename = format!("{chat_id}.sharegpt.json");
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json; charset=utf-8")
+        .header(
+            "Content-Disposition",
+            format!("attachment; filename=\"{}\"", sanitize_filename(&filename)),
+        )
+        .header("Cache-Control", "no-cache")
+        .body(boxed(Bytes::from(body)))
+        .unwrap()
+}
+
 async fn list_artefacts(state: &HttpState, chat_id: &str) -> Resp {
     let items: Vec<ArtefactDto> = {
         let store = match state.artefacts.lock() {

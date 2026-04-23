@@ -786,10 +786,24 @@ function ConversationView({ conv, session, bump }) {
   const title = (liveConv && liveConv.title) || conv || '';
   const showEmpty = session.liveTurns.length === 0 && !session.running;
 
+  const onExport = () => {
+    if (!conv || !window.DysonLive) return;
+    window.DysonLive.exportConversation(conv).catch(e => {
+      console.warn('[dyson] export failed', e);
+      alert(`Export failed: ${e.message || e}`);
+    });
+  };
   return (
     <div className="centre">
       <div className="context">
         <div className="crumbs"><span className="c-leaf">{title}</span></div>
+        <div className="right">
+          <button className="btn sm ghost" title="Download ShareGPT export"
+                  onClick={onExport} disabled={!conv}
+                  style={{padding:'4px 8px'}}>
+            <Icon name="download" size={13}/>
+          </button>
+        </div>
       </div>
       <div className="transcript" ref={scrollRef}>
         <div className="inner">

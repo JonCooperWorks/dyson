@@ -150,6 +150,27 @@
         return r.json();
       },
 
+      // ShareGPT download for a chat.  Triggers the browser's save
+      // dialog with a chat-id-stamped filename.  Replaces the old
+      // `/export` slash command, which relied on workspace paths
+      // that don't exist on every deployment.
+      exportConversation: async (chatId) => {
+        const r = await fetch(
+          '/api/conversations/' + encodeURIComponent(chatId) + '/export',
+        );
+        if (!r.ok) {
+          const txt = await r.text().catch(() => '');
+          throw new Error('export failed: ' + r.status + (txt ? ` — ${txt}` : ''));
+        }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${chatId}.sharegpt.json`;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+      },
+
       // Fetch the raw markdown body of an artefact.  Returns
       // `{ body, chatId }` — chatId lets a cold deep-link
       // (`/#/artefacts/<id>` pasted into a fresh tab) restore the

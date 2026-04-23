@@ -29,6 +29,7 @@ function Icon({ name, size = 14, style, className }) {
     case 'folder':    return <svg {...common}><path d="M2 4a1 1 0 0 1 1-1h3l1 1.5h6a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4z"/></svg>;
     case 'dot':       return <svg {...common}><circle cx="8" cy="8" r="2" fill="currentColor"/></svg>;
     case 'arr-down':  return <svg {...common}><path d="M8 3v10M4 9l4 4 4-4"/></svg>;
+    case 'download':  return <svg {...common}><path d="M8 2v8M4 7l4 4 4-4"/><path d="M3 12v1.5h10V12"/></svg>;
     case 'arr-right': return <svg {...common}><path d="M3 8h10M9 4l4 4-4 4"/></svg>;
     case 'refresh':   return <svg {...common}><path d="M2 8a6 6 0 0 1 10-4.5L14 5M14 8a6 6 0 0 1-10 4.5L2 11"/><path d="M14 2v3h-3M2 14v-3h3"/></svg>;
     case 'rate':      return <svg {...common}><path d="M3 9l2.5 2.5L13 4"/></svg>;
