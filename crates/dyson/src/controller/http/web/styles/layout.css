@@ -336,6 +336,64 @@
   min-height: 0;
 }
 
+/* Running-subagents block at the top of the Tool Stack.  Appears
+   whenever the ActivityRegistry has a `Running` entry for the active
+   chat — lets the operator see live subagents without having to
+   click the chip in the transcript or jump to the Activity tab. */
+.right .r-section {
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--sub);
+  border-radius: var(--rad);
+  background: var(--bg);
+  overflow: hidden;
+}
+.right .r-section-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px;
+  font: 500 10.5px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sub);
+  border-bottom: 1px solid var(--line);
+}
+.right .r-section-head .count {
+  margin-left: auto;
+  color: var(--mute);
+  font-size: 10.5px;
+}
+.right .r-running {
+  display: flex; flex-direction: column;
+}
+.right .r-running-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  border-top: 1px solid var(--line);
+}
+.right .r-running-row:first-child { border-top: none; }
+.right .r-running-row .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--mute); flex: 0 0 auto;
+}
+.right .r-running-row .dot.running {
+  background: var(--accent);
+  animation: pulse 1.4s infinite;
+}
+.right .r-running-row .name {
+  font-weight: 600;
+  color: var(--fg);
+  flex: 0 0 auto;
+}
+.right .r-running-row .note {
+  color: var(--fg-dim);
+  font-style: italic;
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ---------- mind view ---------- */
 .mind {
   display: grid;

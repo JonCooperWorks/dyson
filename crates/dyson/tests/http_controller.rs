@@ -673,7 +673,12 @@ async fn static_path_traversal_is_blocked() {
     for evil in [
         "/../../../../etc/passwd",
         "/styles/../../etc/hosts",
-        "/components/..%2Fapp.jsx",  // url-decoded `..` would still fail
+        "/components/..%2Fapp.jsx",
+        // Fully-encoded variants — the check must run after url_decode,
+        // otherwise %2e%2e%2f sails past a literal `..` string-contains.
+        "/%2e%2e%2f%2e%2e%2fetc/passwd",
+        "/styles/%2e%2e/%2e%2e/etc/hosts",
+        "/%2E%2E%2Fetc/hosts",
     ] {
         let resp = get(&format!("{}{}", r.base, evil)).await;
         assert!(
@@ -1757,6 +1762,52 @@ async fn artefact_deep_link_is_shareable() {
 }
 
 #[tokio::test]
+async fn artefact_id_rejects_url_encoded_traversal() {
+    // Before the gate landed, `/api/artefacts/<id>` url-decoded the id
+    // and handed it to ArtefactStore::load_from_disk, which joined it
+    // into `sub.join(format!("{id}.meta.json"))`.  A decoded `../`
+    // would have escaped the store dir.  `/artefacts/<id>` had the
+    // analogous bypass — its `!id.contains('/')` check ran before
+    // url_decode so `%2F` slipped through and landed in the Location
+    // header.  Both must 404 now regardless of encoding.
+    let r = rig().await;
+    for evil in [
+        "..%2F..%2Fetc%2Fpasswd",
+        "%2e%2e%2fsecret",
+        "..%2fx",
+        "a0%2F..",
+        "a0/b1", // raw `/` — structurally bogus for a single id
+    ] {
+        let api = get(&format!("{}/api/artefacts/{}", r.base, evil)).await;
+        assert_eq!(
+            api.status(),
+            StatusCode::NOT_FOUND,
+            "/api/artefacts/{} should 404, got {}",
+            evil,
+            api.status(),
+        );
+        let redir = get(&format!("{}/artefacts/{}", r.base, evil)).await;
+        assert_eq!(
+            redir.status(),
+            StatusCode::NOT_FOUND,
+            "/artefacts/{} should 404, got {}",
+            evil,
+            redir.status(),
+        );
+    }
+    for evil in ["..%2Ffoo", "%2e%2e"] {
+        let resp = get(&format!("{}/api/files/{}", r.base, evil)).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "/api/files/{} should 404, got {}",
+            evil,
+            resp.status(),
+        );
+    }
+}
+
+#[tokio::test]
 async fn emitted_images_survive_refresh_via_artefacts() {
     // Regression: images emitted via Output::send_file must survive a
     // browser refresh AND a controller restart.  The chat-scroll chip
@@ -1997,5 +2048,198 @@ async fn chat_reload_shows_emitted_images_in_transcript() {
     assert_eq!(artefact_chip["title"], "hello.png");
     let url = artefact_chip["url"].as_str().expect("url on chip");
     assert!(url.starts_with("/#/artefacts/"), "chip url: {url}");
+}
+
+// ---------------------------------------------------------------------------
+// Activity registry + /api/activity
+//
+// The Activity tab's Subagents lane needs live state AND persistence.
+// Three tests:
+//   (1) round-trip — start/finish an activity entry and confirm
+//       `/api/activity` surfaces it with the right shape.
+//   (2) chat filter — `?chat=<id>` returns only one chat's entries.
+//   (3) restart survival — entries written by one HttpState survive
+//       a drop + re-init against the same data_dir.
+//
+// We go direct via `test_helpers::activity_handle` rather than driving
+// a real subagent (which would require a full LLM mock wired all the
+// way through `build_agent`) — the tool-side emission is already
+// covered by `skill::subagent::tests::orchestrator_emits_artefact_*`
+// and the aim here is the HTTP contract.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn activity_endpoint_returns_running_then_finished_entries() {
+    let r = rig().await;
+    // Mint a chat so the activity entry has a valid chat_id context
+    // (not strictly required by the registry but mirrors live usage).
+    let chat = create_chat(&r, "activity test").await;
+
+    let handle = dyson::controller::http::test_helpers::activity_handle(
+        &r.state,
+        &chat,
+    );
+
+    // 1. Start — endpoint shows Running.
+    let tok = handle.start(
+        dyson::controller::LANE_SUBAGENT,
+        "security_engineer",
+        "review crates/dyson",
+    );
+    let running = body_json(get(&format!("{}/api/activity", r.base)).await).await;
+    let lanes = running["lanes"].as_array().expect("lanes array");
+    assert_eq!(lanes.len(), 1, "one entry expected while running");
+    assert_eq!(lanes[0]["lane"], "subagent");
+    assert_eq!(lanes[0]["name"], "security_engineer");
+    assert_eq!(lanes[0]["status"], "running");
+    assert_eq!(lanes[0]["chat_id"], chat);
+    assert!(
+        lanes[0]["note"].as_str().unwrap().contains("review crates/dyson"),
+        "note should carry truncated task input: {:?}", lanes[0]["note"],
+    );
+
+    // 2. Finish Ok — status flips, finished_at populated.
+    tok.finish(dyson::controller::ActivityStatus::Ok, Some("42s"));
+    let finished = body_json(get(&format!("{}/api/activity", r.base)).await).await;
+    let lanes = finished["lanes"].as_array().expect("lanes array");
+    assert_eq!(lanes[0]["status"], "ok");
+    assert!(lanes[0]["finished_at"].is_number());
+    assert!(
+        lanes[0]["note"].as_str().unwrap().contains("42s"),
+        "note suffix should have been appended: {:?}", lanes[0]["note"],
+    );
+}
+
+#[tokio::test]
+async fn activity_endpoint_filters_by_chat() {
+    let r = rig().await;
+    let chat_a = create_chat(&r, "chat a").await;
+    let chat_b = create_chat(&r, "chat b").await;
+
+    let h_a = dyson::controller::http::test_helpers::activity_handle(&r.state, &chat_a);
+    let h_b = dyson::controller::http::test_helpers::activity_handle(&r.state, &chat_b);
+    let _t1 = h_a.start(dyson::controller::LANE_SUBAGENT, "se", "a1");
+    let _t2 = h_b.start(dyson::controller::LANE_SUBAGENT, "se", "b1");
+    let _t3 = h_b.start(dyson::controller::LANE_SUBAGENT, "se", "b2");
+
+    let all = body_json(get(&format!("{}/api/activity", r.base)).await).await;
+    assert_eq!(all["lanes"].as_array().unwrap().len(), 3);
+
+    let scoped = body_json(
+        get(&format!("{}/api/activity?chat={}", r.base, chat_b)).await,
+    ).await;
+    let scoped_lanes = scoped["lanes"].as_array().expect("lanes array");
+    assert_eq!(scoped_lanes.len(), 2, "only chat_b entries");
+    for lane in scoped_lanes {
+        assert_eq!(lane["chat_id"], chat_b);
+    }
+}
+
+#[tokio::test]
+async fn activity_entries_survive_controller_restart() {
+    // Spin rig A, record an entry, drop it, spin rig B against the
+    // same data_dir, hit /api/activity, confirm the entry is present.
+    let chat_dir = tempfile::tempdir().expect("chat tempdir");
+    let workspace_dir = tempfile::tempdir().expect("workspace tempdir");
+    let chat_id = "c-0042";
+    // Pre-seed the chat dir so the registry's disk path exists.
+    std::fs::create_dir_all(chat_dir.path().join(chat_id)).unwrap();
+
+    // --- rig A: write one completed entry ---
+    {
+        let r = rig_pointing_at(&chat_dir, &workspace_dir).await;
+        let h = dyson::controller::http::test_helpers::activity_handle(&r.state, chat_id);
+        let tok = h.start(
+            dyson::controller::LANE_SUBAGENT,
+            "security_engineer",
+            "persisted review",
+        );
+        tok.finish(dyson::controller::ActivityStatus::Ok, Some("17s"));
+        // Drop rig A (chat_dir kept alive at outer scope).
+    }
+
+    // --- rig B: fresh HttpState pointing at the same disk ---
+    let r = rig_pointing_at(&chat_dir, &workspace_dir).await;
+    let j = body_json(
+        get(&format!("{}/api/activity?chat={}", r.base, chat_id)).await,
+    ).await;
+    let lanes = j["lanes"].as_array().expect("lanes array");
+    assert_eq!(lanes.len(), 1, "entry should survive restart");
+    assert_eq!(lanes[0]["name"], "security_engineer");
+    assert_eq!(lanes[0]["status"], "ok");
+    assert!(
+        lanes[0]["note"].as_str().unwrap().contains("17s"),
+        "note suffix should round-trip through disk: {:?}", lanes[0]["note"],
+    );
+}
+
+/// Helper that mints a chat and returns its id.  The `/api/activity`
+/// endpoint doesn't strictly require a chat to exist (the registry
+/// keys by arbitrary string) but the real HTTP flow always has one.
+async fn create_chat(r: &Rig, title: &str) -> String {
+    let body = serde_json::json!({ "title": title });
+    let resp = post_json(&format!("{}/api/conversations", r.base), &body).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp).await;
+    j["id"].as_str().expect("chat id").to_string()
+}
+
+/// Build a Rig pointing at specific tempdirs — used by the
+/// restart-survival test so rig A and rig B share the same disk.
+async fn rig_pointing_at(
+    chat_dir: &tempfile::TempDir,
+    workspace_dir: &tempfile::TempDir,
+) -> Rig {
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        "default".to_string(),
+        ProviderConfig {
+            provider_type: LlmProvider::OpenRouter,
+            api_key: Credential::new("sk-test".into()),
+            base_url: None,
+            models: vec!["qwen/qwen3.6-plus".to_string()],
+        },
+    );
+    let mut settings = Settings::default();
+    settings.agent.provider = LlmProvider::OpenRouter;
+    settings.agent.model = "qwen/qwen3.6-plus".into();
+    settings.providers = providers;
+    settings.workspace.connection_string =
+        Credential::new(workspace_dir.path().to_string_lossy().into_owned());
+    settings.chat_history = ChatHistoryConfig {
+        backend: "disk".into(),
+        connection_string: Credential::new(
+            chat_dir.path().to_string_lossy().into_owned(),
+        ),
+    };
+    let registry = Arc::new(ClientRegistry::new(&settings, None));
+    let history: Arc<dyn ChatHistory> = Arc::new(
+        DiskChatHistory::new(chat_dir.path().to_path_buf()).expect("disk history"),
+    );
+    let feedback = Arc::new(FeedbackStore::new(chat_dir.path().to_path_buf()));
+    let state = test_helpers::build_state(
+        settings,
+        registry,
+        None,
+        Some(history),
+        Some(feedback),
+        Arc::new(DangerousNoAuth),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let base = format!("http://{}", addr);
+    let handle = tokio::spawn(test_helpers::serve(state.clone(), listener));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    Rig {
+        base,
+        state,
+        // Can't move/clone the TempDirs here — we don't own them.  The
+        // restart-survival test keeps the originals alive in its own
+        // scope so the disk stays valid for the second rig.  Stash
+        // throwaway tempdirs to satisfy the Rig shape.
+        chat_dir: tempfile::tempdir().expect("placeholder chat_dir"),
+        workspace_dir: tempfile::tempdir().expect("placeholder workspace_dir"),
+        _handle: handle,
+    }
 }
 

@@ -293,8 +293,31 @@ function MindView({ showSide, onHideSide }) {
   );
 }
 
-function RightRail({ panels, onClose }) {
+function RightRail({ panels, onClose, activeChatId }) {
   const tools = window.DYSON_DATA.tools || {};
+  // Poll /api/activity so the Tool Stack surfaces any running subagent
+  // for this chat even when the user hasn't clicked the chip to open
+  // its panel.  Scoped to the active chat — stack-wide lists live in
+  // the Activity tab.  Refresh cadence matches ActivityView (3s).
+  const [runningSubagents, setRunningSubagents] = vUS([]);
+  vUE(() => {
+    if (!activeChatId) { setRunningSubagents([]); return; }
+    let cancelled = false;
+    const refresh = () => {
+      fetch(`/api/activity?chat=${encodeURIComponent(activeChatId)}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(j => {
+          if (cancelled || !j) return;
+          const running = (j.lanes || []).filter(a => a.status === 'running');
+          setRunningSubagents(running);
+        })
+        .catch(() => {});
+    };
+    refresh();
+    const id = setInterval(() => { if (!document.hidden) refresh(); }, 3000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [activeChatId]);
+  const pulseCount = runningSubagents.length;
   return (
     <aside className="right">
       <div className="r-head">
@@ -303,7 +326,24 @@ function RightRail({ panels, onClose }) {
         <div className="spacer"/>
       </div>
       <div className="r-stack">
-        {panels.length === 0 && (
+        {pulseCount > 0 && (
+          <div className="r-section">
+            <div className="r-section-head">
+              <span>Running</span>
+              <span className="count mono">{pulseCount}</span>
+            </div>
+            <div className="r-running">
+              {runningSubagents.map((a, i) => (
+                <div key={i} className="r-running-row" title={a.note}>
+                  <span className="dot running"/>
+                  <span className="name mono">{a.name}</span>
+                  <span className="note">{a.note}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {panels.length === 0 && pulseCount === 0 && (
           <div style={{color:'var(--mute)', fontSize:12, padding:24, textAlign:'center', lineHeight:1.5}}>
             Tool panels appear here when Dyson runs tools.
             Click <span className="mono">[open]</span> on a tool chip in the transcript.
@@ -320,11 +360,40 @@ function RightRail({ panels, onClose }) {
 }
 
 function ActivityView() {
+  // Poll /api/activity so the Subagents lane updates live while a
+  // security_engineer run streams.  The registry is authoritative
+  // (disk-backed, per chat) — re-fetching is cheap and keeps the
+  // tab honest even across tab switches.
+  const [tick, setTick] = vUS(0);
+  vUE(() => {
+    const refresh = () => {
+      fetch('/api/activity').then(r => r.ok ? r.json() : null).then(act => {
+        if (act && Array.isArray(act.lanes)) {
+          window.DYSON_DATA.activity = act.lanes;
+          setTick(t => t + 1);
+        }
+      }).catch(() => {});
+    };
+    refresh();
+    const id = setInterval(() => { if (!document.hidden) refresh(); }, 3000);
+    return () => clearInterval(id);
+  }, []);
   const lanes = (window.DYSON_DATA.activity) || [];
   const running = lanes.filter(a => a.status === 'running').length;
-  const grouped = ['loop','dream','swarm']
+  const grouped = ['subagent','loop','dream','swarm']
     .map(lane => ({ lane, items: lanes.filter(a => a.lane === lane) }))
     .filter(g => g.items.length > 0);
+  const fmtDuration = (a) => {
+    if (a.status === 'running') return 'running';
+    const start = a.started_at || 0;
+    const end = a.finished_at || 0;
+    if (!start || !end) return '';
+    const secs = Math.max(0, end - start);
+    if (secs < 60) return `${secs}s`;
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}m${s.toString().padStart(2,'0')}s`;
+  };
   return (
     <div style={{flex:1, overflowY:'auto', padding:'22px 32px', background:'var(--bg-1)'}}>
       <div style={{maxWidth: 980, margin:'0 auto'}}>
@@ -337,7 +406,8 @@ function ActivityView() {
           </div>
         )}
         {grouped.map(({ lane, items }) => {
-          const label = lane === 'loop' ? 'Loops · recurring'
+          const label = lane === 'subagent' ? 'Subagents · orchestrators'
+                     : lane === 'loop' ? 'Loops · recurring'
                      : lane === 'dream' ? 'Dreams · background compaction'
                      : 'Swarm · parallel tasks';
           return (
@@ -347,11 +417,12 @@ function ActivityView() {
                 {items.map((a, i) => (
                   <div key={i} style={{display:'flex', alignItems:'center', gap:14, padding:'10px 14px', background:'var(--bg)', border:'1px solid var(--line)', borderRadius:6}}>
                     <span style={{width:6, height:6, borderRadius:'50%',
-                                  background: a.status === 'running' ? 'var(--accent)' : a.status === 'ok' ? 'var(--ok)' : 'var(--mute)',
+                                  background: a.status === 'running' ? 'var(--accent)' : a.status === 'ok' ? 'var(--ok)' : 'var(--err)',
                                   animation: a.status === 'running' ? 'pulse 1.4s infinite' : ''}}/>
                     <span className="mono" style={{fontSize:12.5, color:'var(--fg)', minWidth:200}}>{a.name}</span>
                     <span style={{fontSize:12.5, color:'var(--fg-dim)', flex:1}}>{a.note}</span>
-                    {a.last && <span className="mono" style={{fontSize:11, color:'var(--mute-2)'}}>{a.last}</span>}
+                    {a.chat_id && <span className="mono" style={{fontSize:10.5, color:'var(--mute-2)', opacity:0.75}}>{a.chat_id}</span>}
+                    <span className="mono" style={{fontSize:11, color:'var(--mute-2)'}}>{fmtDuration(a)}</span>
                   </div>
                 ))}
               </div>

@@ -694,6 +694,7 @@ impl Agent {
             depth: 0,
             dangerous_no_sandbox: sandbox.skip_path_validation(),
             taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            activity: None,
         };
         tool_context.workspace = workspace;
         tool_context
@@ -765,6 +766,17 @@ impl Agent {
     /// naturally when the agent future is dropped).
     pub fn set_cancellation_token(&mut self, token: CancellationToken) {
         self.tool_context.cancellation = token;
+    }
+
+    /// Install a chat-scoped activity handle on this agent's tool
+    /// context.  Populated by the HTTP controller per chat; other
+    /// controllers leave it unset.  UI-only side channel — see
+    /// `ToolContext::activity` for the LLM-boundary note.
+    pub fn set_activity_handle(
+        &mut self,
+        handle: crate::controller::ActivityHandle,
+    ) {
+        self.tool_context.activity = Some(handle);
     }
 
     /// Send a dream event to the persistent dream thread.

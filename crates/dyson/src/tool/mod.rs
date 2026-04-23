@@ -235,6 +235,17 @@ pub struct ToolContext {
     /// re-walking the codebase for each trace — a typical security
     /// review issues many taint_trace calls against the same language.
     pub taint_indexes: Arc<RwLock<HashMap<&'static str, Arc<crate::ast::taint::SymbolIndex>>>>,
+
+    /// UI-only activity sink.  When populated (currently only by the
+    /// HTTP controller), orchestrator / subagent tools record a
+    /// `Running` entry before dispatching the child agent and flip
+    /// it to `Ok` / `Err` on return.  Powers the Activity tab's
+    /// "Subagents" lane.
+    ///
+    /// Side-channel: never flows into the LLM conversation.  See
+    /// `crates/dyson/src/skill/subagent/mod.rs` on `CaptureOutput`
+    /// for the LLM-boundary invariant this respects.
+    pub activity: Option<crate::controller::ActivityHandle>,
 }
 
 impl Clone for ToolContext {
@@ -247,6 +258,7 @@ impl Clone for ToolContext {
             depth: self.depth,
             dangerous_no_sandbox: self.dangerous_no_sandbox,
             taint_indexes: Arc::clone(&self.taint_indexes),
+            activity: self.activity.clone(),
         }
     }
 }
@@ -265,6 +277,7 @@ impl ToolContext {
             depth: 0,
             dangerous_no_sandbox: false,
             taint_indexes: Arc::new(RwLock::new(HashMap::new())),
+            activity: None,
         })
     }
 
@@ -282,6 +295,7 @@ impl ToolContext {
             depth: 0,
             dangerous_no_sandbox: false,
             taint_indexes: Arc::new(RwLock::new(HashMap::new())),
+            activity: None,
         }
     }
 
@@ -300,6 +314,7 @@ impl ToolContext {
             depth: 0,
             dangerous_no_sandbox: false,
             taint_indexes: Arc::new(RwLock::new(HashMap::new())),
+            activity: None,
         }
     }
 

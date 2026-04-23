@@ -317,7 +317,7 @@ function App() {
           {(showLeft || showRight) && <div className="scrim" onClick={closeRails}/>}
           <LeftRail active={conv} setActive={(id) => { setConv(id); setShowLeft(false); }}/>
           <ConversationView conv={conv} session={session} bump={bump}/>
-          {!rightHidden && <RightRail panels={session ? session.panels : []} onClose={removePanel}/>}
+          {!rightHidden && <RightRail panels={session ? session.panels : []} onClose={removePanel} activeChatId={conv}/>}
         </div>
       )}
       {view === 'mind' && (

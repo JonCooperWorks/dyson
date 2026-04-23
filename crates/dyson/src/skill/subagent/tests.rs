@@ -313,6 +313,7 @@ async fn subagent_depth_limit_prevents_recursion() {
         depth: MAX_SUBAGENT_DEPTH,
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        activity: None,
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -809,6 +810,7 @@ async fn coder_depth_limit_prevents_recursion() {
         depth: MAX_SUBAGENT_DEPTH,
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        activity: None,
     };
 
     let input = serde_json::json!({"path": ".", "task": "should fail"});
@@ -1060,6 +1062,7 @@ async fn orchestrator_depth_limit_prevents_recursion() {
         depth: MAX_SUBAGENT_DEPTH,
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        activity: None,
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -1497,6 +1500,7 @@ async fn subagent_inherits_parents_working_dir() {
         depth: 1,
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        activity: None,
     };
 
     let input = serde_json::json!({ "task": "call the spy" });

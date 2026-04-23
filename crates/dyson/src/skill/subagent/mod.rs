@@ -381,7 +381,19 @@ impl Tool for SubagentTool {
             ..AgentSettings::default()
         };
 
-        spawn_child(ChildSpawn {
+        // Activity tab registration — UI-only side channel.  `None`
+        // on non-HTTP controllers.  See `ToolContext::activity` for
+        // the LLM-boundary note.
+        let mut activity_token = ctx.activity.as_ref().map(|a| {
+            a.start(
+                crate::controller::LANE_SUBAGENT,
+                &self.config.name,
+                &crate::controller::truncate_note(&user_message, 80),
+            )
+        });
+        let started_at = std::time::SystemTime::now();
+
+        let result = spawn_child(ChildSpawn {
             name: &self.config.name,
             settings,
             inherited_tools: self.inherited_tools.clone(),
@@ -401,7 +413,21 @@ impl Tool for SubagentTool {
             working_dir: Some(ctx.working_dir.clone()),
             user_message,
         })
-        .await
+        .await;
+
+        if let Some(tok) = activity_token.take() {
+            let elapsed = std::time::SystemTime::now()
+                .duration_since(started_at)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let suffix = format!("{elapsed}s");
+            let status = match &result {
+                Ok(out) if !out.is_error => crate::controller::ActivityStatus::Ok,
+                _ => crate::controller::ActivityStatus::Err,
+            };
+            tok.finish(status, Some(&suffix));
+        }
+        result
     }
 }
 

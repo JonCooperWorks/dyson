@@ -51,6 +51,7 @@
 //   controller creates an Output instance and passes it to the agent.
 // ===========================================================================
 
+pub mod activity;
 pub mod background;
 pub mod http;
 pub mod recording;
@@ -58,6 +59,11 @@ pub mod recording;
 pub mod swarm;
 pub mod telegram;
 pub mod terminal;
+
+pub use activity::{
+    ActivityEntry, ActivityHandle, ActivityRegistry, ActivityStatus, ActivityToken, LANE_SUBAGENT,
+    truncate_note,
+};
 
 use std::path::{Path, PathBuf};
 

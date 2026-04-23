@@ -688,6 +688,7 @@ impl McpHttpServer {
             depth: 0,
             dangerous_no_sandbox: false,
             taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            activity: None,
         };
 
         // -- Execute the tool and format the response --

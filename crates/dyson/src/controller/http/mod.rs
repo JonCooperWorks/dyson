@@ -727,6 +727,13 @@ pub struct HttpState {
     /// profile pointed at this instance.  `None` means memory-only
     /// (the FIFO eviction still bounds memory).
     data_dir: Option<PathBuf>,
+    /// Per-chat registry of running / recently-finished tool activity
+    /// (subagents today; other lanes later).  Backs `/api/activity`
+    /// and the Activity tab in the web UI.  Disk-backed via
+    /// `{data_dir}/{chat_id}/activity.jsonl` so entries survive
+    /// controller restarts.  UI-only side channel — never feeds any
+    /// LLM prompt.
+    activity: Arc<crate::controller::ActivityRegistry>,
     chats: Mutex<HashMap<String, Arc<ChatHandle>>>,
     /// Insertion order so the UI can render a stable list.
     order: Mutex<Vec<String>>,
@@ -815,6 +822,10 @@ impl HttpState {
             chat_next = max_chat_id_n(dir, &artefacts).saturating_add(1);
         }
 
+        let activity = Arc::new(crate::controller::ActivityRegistry::new(
+            data_dir.clone(),
+        ));
+
         Self {
             settings: std::sync::RwLock::new(settings),
             registry,
@@ -827,6 +838,7 @@ impl HttpState {
             artefacts: Arc::new(std::sync::Mutex::new(artefacts)),
             artefact_id: Arc::new(std::sync::atomic::AtomicU64::new(artefact_next)),
             data_dir,
+            activity,
             chats: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             next_id: std::sync::atomic::AtomicU64::new(chat_next),
@@ -1316,6 +1328,23 @@ pub mod test_helpers {
         history.save(chat_id, &msgs)
     }
 
+    /// Reach the per-chat activity handle a real turn would receive.
+    /// Used by integration tests to drive the Activity registry
+    /// without standing up a subagent tool call.
+    pub fn activity_handle(
+        state: &HttpState,
+        chat_id: &str,
+    ) -> crate::controller::ActivityHandle {
+        state.activity.handle_for(chat_id)
+    }
+
+    /// Accessor for the raw registry — lets tests assert directly
+    /// against its snapshot methods (verifies restart-survival and
+    /// stale-Running reconciliation without going through HTTP).
+    pub fn activity_registry(state: &HttpState) -> Arc<crate::controller::ActivityRegistry> {
+        Arc::clone(&state.activity)
+    }
+
     /// Spin until the chat's broadcast channel has at least one
     /// subscriber — the only way to close the race between a client
     /// connecting to `/events` and a producer emitting into the
@@ -1370,20 +1399,28 @@ async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) ->
         return post_mind_file(req, &state).await;
     }
     if path == "/api/activity" && method == Method::GET {
-        return get_activity();
+        return get_activity(&state, req.uri().query().unwrap_or(""));
     }
     if path == "/api/model" && method == Method::POST {
         return post_model(req, Arc::clone(&state)).await;
     }
     if let Some(id) = path.strip_prefix("/api/files/") {
         if method == Method::GET {
-            return get_file(&state, id).await;
+            let id = url_decode(id);
+            if !safe_store_id(&id) {
+                return not_found();
+            }
+            return get_file(&state, &id).await;
         }
         return method_not_allowed();
     }
     if let Some(id) = path.strip_prefix("/api/artefacts/") {
         if method == Method::GET {
-            return get_artefact(&state, &url_decode(id)).await;
+            let id = url_decode(id);
+            if !safe_store_id(&id) {
+                return not_found();
+            }
+            return get_artefact(&state, &id).await;
         }
         return method_not_allowed();
     }
@@ -1392,14 +1429,18 @@ async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) ->
     // with that artefact selected.  Keeps the URL short enough to paste
     // into chat / docs without leaking the internal API path.
     if let Some(id) = path.strip_prefix("/artefacts/") {
-        if method == Method::GET && !id.is_empty() && !id.contains('/') {
-            let loc = format!("/#/artefacts/{}", url_decode(id));
-            return Response::builder()
-                .status(StatusCode::FOUND)
-                .header("Location", loc)
-                .header("Cache-Control", "no-cache")
-                .body(boxed(Bytes::new()))
-                .unwrap();
+        if method == Method::GET {
+            let id = url_decode(id);
+            if safe_store_id(&id) {
+                let loc = format!("/#/artefacts/{id}");
+                return Response::builder()
+                    .status(StatusCode::FOUND)
+                    .header("Location", loc)
+                    .header("Cache-Control", "no-cache")
+                    .body(boxed(Bytes::new()))
+                    .unwrap();
+            }
+            return not_found();
         }
     }
     if let Some(id) = path.strip_prefix("/api/conversations/") {
@@ -1978,6 +2019,12 @@ async fn post_turn(
         // streaming reads cooperatively.
         let cancel_for_select = cancel.clone();
         agent.set_cancellation_token(cancel);
+        // Wire the chat-scoped activity handle so the Activity tab
+        // shows running subagents for this chat.  Rebound on every
+        // turn (cheap Arc clone) because the agent is cached and
+        // re-used, but handle binding carries chat_id which we only
+        // know at this dispatch site.
+        agent.set_activity_handle(state.activity.handle_for(&chat_id));
         // Checkpoint-save the transcript to disk after every message
         // push.  Without this, a process kill during a long subagent
         // run (e.g. security_engineer streams for minutes) loses the
@@ -2281,19 +2328,39 @@ async fn post_feedback(
 // ---------------------------------------------------------------------------
 
 async fn serve_static(state: &HttpState, path: &str) -> Resp {
-    if path.contains("..") {
+    // Decode before the traversal check — raw `%2e%2e%2f` would otherwise
+    // slip past `contains("..")` and resolve to `..` when the OS opens
+    // the file.  Reject backslashes too; we don't serve on Windows but
+    // the embedded-asset lookup is case-sensitive and `\` is never a
+    // legitimate URL path byte.
+    let decoded = url_decode(path);
+    if decoded.contains("..") || decoded.contains('\\') || decoded.contains('\0') {
         return not_found();
     }
     // Disk webroot wins when configured (dev mode — edit + reload without
     // recompile).  Otherwise serve from the embedded prototype.
     if let Some(webroot) = state.webroot.as_ref() {
-        let rel = if path == "/" {
+        let rel = if decoded == "/" {
             "prototype.html"
         } else {
-            path.trim_start_matches('/')
+            decoded.trim_start_matches('/')
         };
         let full = webroot.join(rel);
-        match tokio::fs::read(&full).await {
+        // Canonicalize and confirm the result is still under webroot.
+        // Defence in depth — symlinks inside webroot could otherwise
+        // aim at `/etc/passwd` and the `..` check wouldn't catch it.
+        let canon_root = match tokio::fs::canonicalize(webroot).await {
+            Ok(p) => p,
+            Err(_) => return not_found(),
+        };
+        let canon_full = match tokio::fs::canonicalize(&full).await {
+            Ok(p) => p,
+            Err(_) => return not_found(),
+        };
+        if !canon_full.starts_with(&canon_root) {
+            return not_found();
+        }
+        match tokio::fs::read(&canon_full).await {
             Ok(bytes) => {
                 return Response::builder()
                     .status(StatusCode::OK)
@@ -2305,7 +2372,7 @@ async fn serve_static(state: &HttpState, path: &str) -> Resp {
             Err(_) => return not_found(),
         }
     }
-    match assets::lookup(path) {
+    match assets::lookup(&decoded) {
         Some((bytes, ct)) => Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", ct)
@@ -2887,14 +2954,66 @@ async fn list_artefacts(state: &HttpState, chat_id: &str) -> Resp {
     json_ok(&items)
 }
 
-/// Background-agents / dreams / swarm activity.  The HTTP controller
-/// doesn't currently own a `BackgroundAgentRegistry` (each controller
-/// has its own — coordinating one across controllers is a follow-up).
-/// Returns an empty list so the prototype's Activity view doesn't 500;
-/// the seed data still paints the page until cross-controller state
-/// lands.
-fn get_activity() -> Resp {
-    json_ok(&serde_json::json!({ "lanes": [] }))
+/// Per-lane activity surfaced in the web UI's Activity tab.
+///
+/// Reads from `HttpState.activity` (the `ActivityRegistry`, disk-backed
+/// per chat).  Returns a JSON payload the frontend's `ActivityView`
+/// consumes directly:
+///
+/// ```json
+/// { "lanes": [
+///     { "lane": "subagent", "name": "security_engineer",
+///       "note": "Review crate for OWASP...", "status": "running",
+///       "last": "1714053234", "chat_id": "c-0023" },
+///     ...
+/// ] }
+/// ```
+///
+/// Query params:
+/// - `?chat=<id>` — filter to one chat (single-chat view)
+/// - default     — all chats, newest-first
+///
+/// Other lanes (`loop` / `dream` / `swarm`) don't feed this registry
+/// yet; the frontend already renders them from separate data sources.
+/// Keeping the response schema uniform means extending the registry
+/// later is additive, not a rewrite.
+fn get_activity(state: &HttpState, query: &str) -> Resp {
+    let chat_filter = parse_query(query)
+        .into_iter()
+        .find(|(k, _)| k == "chat")
+        .map(|(_, v)| v);
+
+    let entries = match chat_filter.as_deref() {
+        Some(cid) => state.activity.snapshot_chat(cid),
+        None => state.activity.snapshot_all(),
+    };
+
+    let lanes: Vec<serde_json::Value> = entries
+        .into_iter()
+        .map(|e| {
+            let status = match e.status {
+                crate::controller::ActivityStatus::Running => "running",
+                crate::controller::ActivityStatus::Ok => "ok",
+                crate::controller::ActivityStatus::Err => "err",
+            };
+            let last = e
+                .finished_at
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| e.started_at.to_string());
+            serde_json::json!({
+                "lane": e.lane,
+                "name": e.name,
+                "note": e.note,
+                "status": status,
+                "last": last,
+                "chat_id": e.chat_id,
+                "started_at": e.started_at,
+                "finished_at": e.finished_at,
+            })
+        })
+        .collect();
+
+    json_ok(&serde_json::json!({ "lanes": lanes }))
 }
 
 #[derive(Deserialize)]
@@ -3017,6 +3136,18 @@ fn parse_query(q: &str) -> Vec<(String, String)> {
             Some((url_decode(k), url_decode(v)))
         })
         .collect()
+}
+
+/// Gate for path components that become filesystem names in on-disk
+/// stores (`<id>.meta.json`, `<id>.body`, `<id>.bin`).  Minted IDs are
+/// `a<u64>` / `f<u64>`, but the value reaches us through a URL, so an
+/// attacker can submit `../etc/passwd` after `url_decode` turns `%2F`
+/// into `/`.  We're strict rather than blacklist-y — anything outside
+/// the minted alphabet is suspicious.
+fn safe_store_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn url_decode(s: &str) -> String {

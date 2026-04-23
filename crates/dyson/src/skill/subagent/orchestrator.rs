@@ -297,8 +297,19 @@ impl Tool for OrchestratorTool {
         let started_at = std::time::SystemTime::now();
         let started_epoch = unix_seconds(started_at);
 
+        // Activity tab registration — UI-only side channel.  Records a
+        // `Running` row for the Subagents lane; finished explicitly
+        // below with duration + outcome.  `None` on non-HTTP controllers.
+        let mut activity_token = ctx.activity.as_ref().map(|a| {
+            a.start(
+                crate::controller::LANE_SUBAGENT,
+                self.config.name,
+                &crate::controller::truncate_note(&user_message, 80),
+            )
+        });
+
         let child_working_dir = scoped_dir.clone();
-        let mut out = spawn_child(ChildSpawn {
+        let spawn_result = spawn_child(ChildSpawn {
             name: self.config.name,
             settings,
             inherited_tools: all_tools,
@@ -309,7 +320,19 @@ impl Tool for OrchestratorTool {
             working_dir: child_working_dir,
             user_message,
         })
-        .await?;
+        .await;
+        let mut out = match spawn_result {
+            Ok(o) => o,
+            Err(e) => {
+                if let Some(tok) = activity_token.take() {
+                    tok.finish(
+                        crate::controller::ActivityStatus::Err,
+                        Some("spawn failed"),
+                    );
+                }
+                return Err(e);
+            }
+        };
 
         // Pre-pend the phase checkpoints we queued BEFORE the child
         // ran, then add a terminal checkpoint reporting the outcome.
@@ -442,6 +465,26 @@ impl Tool for OrchestratorTool {
             let artefact = Artefact::markdown(kind, title, out.content.clone())
                 .with_metadata(metadata);
             out.artefacts.push(artefact);
+        }
+
+        // Close out the Activity row with duration + outcome.  Fallback
+        // via Drop is Ok-without-suffix, which loses the duration and
+        // misreports an error result — always finish() explicitly.
+        if let Some(tok) = activity_token.take() {
+            let elapsed = unix_seconds(std::time::SystemTime::now())
+                .saturating_sub(started_epoch);
+            let suffix = format!("{elapsed}s");
+            if out.is_error {
+                tok.finish(
+                    crate::controller::ActivityStatus::Err,
+                    Some(&suffix),
+                );
+            } else {
+                tok.finish(
+                    crate::controller::ActivityStatus::Ok,
+                    Some(&suffix),
+                );
+            }
         }
 
         Ok(out)

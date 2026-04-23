@@ -567,6 +567,7 @@ mod tests {
             depth: 0,
             dangerous_no_sandbox: false,
             taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            activity: None,
         }
     }
 
