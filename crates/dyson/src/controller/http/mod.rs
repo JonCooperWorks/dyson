@@ -679,7 +679,14 @@ impl ChatHandle {
 /// from public docs.
 #[doc(hidden)]
 pub struct HttpState {
-    settings: Settings,
+    /// Live runtime settings.  Wrapped in a RwLock so the hot-reload
+    /// task spawned in `HttpController::run` can swap in a fresh
+    /// snapshot when `dyson.json` changes on disk — without this, a
+    /// model added to the config file would never show up in the web
+    /// UI's provider list (the /api/providers endpoint used to read
+    /// from a frozen startup clone).  Reads are short (usually a
+    /// field lookup or a clone); no observable lock contention.
+    settings: std::sync::RwLock<Settings>,
     registry: Arc<ClientRegistry>,
     /// Inbound auth guard.  Every `/api/*` request is validated against
     /// this before `dispatch` routes it.  See `HttpAuthConfig`.
@@ -809,7 +816,7 @@ impl HttpState {
         }
 
         Self {
-            settings,
+            settings: std::sync::RwLock::new(settings),
             registry,
             auth,
             webroot,
@@ -904,6 +911,36 @@ impl HttpState {
     #[doc(hidden)]
     pub fn history_for_test(&self) -> Option<Arc<dyn ChatHistory>> {
         self.history.clone()
+    }
+
+    /// Test hook — swap the live settings snapshot.  Lets the
+    /// hot-reload regression test verify that a config change
+    /// (e.g. a new model added to a provider) propagates through
+    /// `/api/providers` without restarting the controller.
+    #[doc(hidden)]
+    pub fn replace_settings_for_test(&self, settings: Settings) {
+        let mut guard = match self.settings.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *guard = settings;
+    }
+
+    #[doc(hidden)]
+    pub fn settings_snapshot_for_test(&self) -> Settings {
+        self.settings_snapshot()
+    }
+
+    /// Clone the live settings under a short read lock.  Callers that
+    /// need more than one field should call this once — repeatedly
+    /// re-acquiring the read guard is cheap but noisier.  Poisoned
+    /// locks are recovered via `into_inner` because a writer that
+    /// panicked mid-swap still leaves a valid `Settings` behind.
+    fn settings_snapshot(&self) -> Settings {
+        match self.settings.read() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
     }
 }
 
@@ -1092,6 +1129,26 @@ impl Controller for HttpController {
             _ => {
                 tracing::info!(bind = %self.bind, "HTTP controller inbound auth enforced");
             }
+        }
+
+        // Subscribe to the program-level hot-reload broadcast (owned
+        // by `command::listen`).  A single watcher polls dyson.json,
+        // reloads the shared ClientRegistry, and publishes a fresh
+        // `Arc<Settings>` here so every controller sees the change
+        // without each running its own file watcher.  If nothing is
+        // broadcasting (tests, controllers-that-don't-plumb-it-in),
+        // the task becomes a no-op.
+        if let Some(mut rx) = super::subscribe_settings_updates() {
+            let state_for_task = Arc::clone(&state);
+            tokio::spawn(async move {
+                while rx.changed().await.is_ok() {
+                    let fresh = rx.borrow().clone();
+                    if let Ok(mut guard) = state_for_task.settings.write() {
+                        *guard = (*fresh).clone();
+                    }
+                    tracing::info!("http controller: settings hot-reloaded");
+                }
+            });
         }
 
         serve_loop(state, listener).await
@@ -1837,7 +1894,7 @@ async fn post_turn(
     // `build_agent` so a brand-new chat picks up the operator's last
     // model choice instead of the startup default.  `runtime_model`
     // is set by `post_model`; when unset this is a no-op clone.
-    let mut settings = state.settings.clone();
+    let mut settings = state.settings_snapshot();
     let override_pm: Option<(String, String)> = match state.runtime_model.lock() {
         Ok(g) => g.clone(),
         Err(p) => p.into_inner().clone(),
@@ -2100,7 +2157,10 @@ fn list_providers(state: &HttpState) -> Resp {
     // The startup settings name an active provider + model, but the
     // operator may have switched since then via `POST /api/model` —
     // let the runtime override win so the UI's active-model label
-    // matches what actually runs on the next turn.
+    // matches what actually runs on the next turn.  Snapshot once so
+    // the list and the active-model calculation read the same
+    // settings (no cross-call torn reads if a hot-reload races this).
+    let snapshot = state.settings_snapshot();
     let runtime = state
         .runtime_model
         .lock()
@@ -2109,11 +2169,10 @@ fn list_providers(state: &HttpState) -> Resp {
     let active_name = runtime
         .as_ref()
         .map(|(p, _)| p.clone())
-        .or_else(|| super::active_provider_name(&state.settings));
+        .or_else(|| super::active_provider_name(&snapshot));
     let active_model_override = runtime.as_ref().map(|(_, m)| m.clone());
 
-    let mut dtos: Vec<ProviderDto> = state
-        .settings
+    let mut dtos: Vec<ProviderDto> = snapshot
         .providers
         .iter()
         .map(|(id, pc)| {
@@ -2121,7 +2180,7 @@ fn list_providers(state: &HttpState) -> Resp {
             let active_model = if is_active {
                 active_model_override
                     .clone()
-                    .unwrap_or_else(|| state.settings.agent.model.clone())
+                    .unwrap_or_else(|| snapshot.agent.model.clone())
             } else {
                 pc.models.first().cloned().unwrap_or_default()
             };
@@ -2546,7 +2605,8 @@ impl Output for SseOutput {
 /// List workspace files for the Mind view.  Pulls metadata from disk
 /// (size, modified-at) when the workspace lives on a real filesystem.
 async fn get_mind(state: &HttpState) -> Resp {
-    let ws = match crate::workspace::create_workspace(&state.settings.workspace) {
+    let snapshot = state.settings_snapshot();
+    let ws = match crate::workspace::create_workspace(&snapshot.workspace) {
         Ok(w) => w,
         Err(e) => return bad_request(&format!("workspace open failed: {e}")),
     };
@@ -2559,7 +2619,7 @@ async fn get_mind(state: &HttpState) -> Resp {
         }));
     }
     json_ok(&serde_json::json!({
-        "backend": state.settings.workspace.backend,
+        "backend": snapshot.workspace.backend,
         "files": files,
     }))
 }
@@ -2570,7 +2630,8 @@ async fn get_mind_file(state: &HttpState, query: &str) -> Resp {
         Some((_, v)) => v,
         None => return bad_request("missing 'path' query parameter"),
     };
-    let ws = match crate::workspace::create_workspace(&state.settings.workspace) {
+    let snapshot = state.settings_snapshot();
+    let ws = match crate::workspace::create_workspace(&snapshot.workspace) {
         Ok(w) => w,
         Err(e) => return bad_request(&format!("workspace open failed: {e}")),
     };
@@ -2852,7 +2913,8 @@ async fn post_mind_file(req: Request<hyper::body::Incoming>, state: &HttpState) 
         Ok(b) => b,
         Err(e) => return bad_request(&e),
     };
-    let mut ws = match crate::workspace::create_workspace(&state.settings.workspace) {
+    let snapshot = state.settings_snapshot();
+    let mut ws = match crate::workspace::create_workspace(&snapshot.workspace) {
         Ok(w) => w,
         Err(e) => return bad_request(&format!("workspace open failed: {e}")),
     };
@@ -2883,7 +2945,8 @@ async fn post_model(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) 
         Ok(b) => b,
         Err(e) => return bad_request(&e),
     };
-    let provider_cfg = match state.settings.providers.get(&body.provider) {
+    let snapshot = state.settings_snapshot();
+    let provider_cfg = match snapshot.providers.get(&body.provider) {
         Some(c) => c,
         None => return bad_request(&format!("unknown provider '{}'", body.provider)),
     };

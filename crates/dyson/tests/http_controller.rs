@@ -258,6 +258,42 @@ async fn providers_returns_full_models_list_with_active_first() {
 }
 
 #[tokio::test]
+async fn providers_list_reflects_hot_reloaded_models() {
+    // Regression: a model added to dyson.json while the controller
+    // was running never surfaced in `GET /api/providers` because
+    // state.settings was a frozen clone from startup.  Fix wraps
+    // settings in an RwLock and a background task swaps it on a
+    // dyson.json change.  This test skips the filesystem side and
+    // drives the swap directly.
+    let r = rig().await;
+
+    let before = body_json(get(&format!("{}/api/providers", r.base)).await).await;
+    let initial_models: Vec<&str> = before[0]["models"].as_array().unwrap()
+        .iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(!initial_models.contains(&"anthropic/claude-opus-4-7"),
+        "pre-condition: new model must not already be listed: {initial_models:?}");
+
+    // Build a fresh Settings with an extra model appended to the
+    // existing provider — simulates the operator editing dyson.json.
+    let mut new_settings = r.state.settings_snapshot_for_test();
+    new_settings
+        .providers
+        .get_mut("default")
+        .expect("default provider")
+        .models
+        .push("anthropic/claude-opus-4-7".to_string());
+    r.state.replace_settings_for_test(new_settings);
+
+    let after = body_json(get(&format!("{}/api/providers", r.base)).await).await;
+    let updated_models: Vec<&str> = after[0]["models"].as_array().unwrap()
+        .iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(
+        updated_models.contains(&"anthropic/claude-opus-4-7"),
+        "hot-reloaded model must appear in /api/providers: {updated_models:?}",
+    );
+}
+
+#[tokio::test]
 async fn skills_endpoint_is_gone() {
     // Regression: /api/skills was removed when the Sandbox view was
     // deleted.  Hitting it must 404 rather than silently succeed.

@@ -168,6 +168,13 @@ pub async fn run(
         ));
     }
 
+    // Install the program-level hot-reload broadcast so controllers
+    // can subscribe for live settings updates instead of each spinning
+    // up its own file watcher.  The companion task below does the
+    // actual polling + registry reload + publish.
+    dyson::controller::install_settings_bus(std::sync::Arc::new(settings.clone()));
+    spawn_program_hot_reload_task(&settings, std::sync::Arc::clone(&registry));
+
     let shutdown = async {
         // Wait for Ctrl-C (SIGINT).
         let ctrl_c = tokio::signal::ctrl_c();
@@ -237,4 +244,48 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Spawn the program-level hot-reload task.  One per process; reacts
+/// to `dyson.json` changes by:
+///
+/// 1. Reloading the shared `ClientRegistry` so new API keys / base
+///    URLs take effect across every controller and every chat.
+/// 2. Publishing the fresh `Settings` onto the `controller::SETTINGS_BUS`
+///    watch channel so subscribed controllers (HTTP, Telegram) can
+///    react: HTTP refreshes its in-memory snapshot, Telegram rebuilds
+///    its agents.  Controllers that don't subscribe (terminal) keep
+///    the initial snapshot — they run a single agent and a fresh
+///    start picks up whatever's on disk anyway.
+///
+/// Skipped when no config path was resolved (in-memory dev scenarios).
+fn spawn_program_hot_reload_task(
+    settings: &dyson::config::Settings,
+    registry: std::sync::Arc<dyson::controller::ClientRegistry>,
+) {
+    let (config_path, mut reloader) = dyson::controller::create_hot_reloader(settings);
+    if config_path.is_none() {
+        tracing::debug!("no config path — program-level hot-reload disabled");
+        return;
+    }
+    let dangerous_no_sandbox = settings.dangerous_no_sandbox;
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            match reloader.check().await {
+                Ok((true, Some(mut new_settings))) => {
+                    // CLI-only flag, not in the JSON — preserve.
+                    new_settings.dangerous_no_sandbox = dangerous_no_sandbox;
+                    registry.reload(&new_settings, None);
+                    dyson::controller::publish_settings(std::sync::Arc::new(new_settings));
+                    tracing::info!("dyson.json hot-reloaded — subscribed controllers notified");
+                }
+                Ok((true, None)) => {
+                    tracing::debug!("hot-reload detected change but settings unreadable");
+                }
+                Ok((false, _)) => {}
+                Err(e) => tracing::debug!(error = %e, "hot-reload check failed"),
+            }
+        }
+    });
 }

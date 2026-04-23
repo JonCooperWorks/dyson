@@ -789,6 +789,166 @@ const TARGETS: &[Target] = &[
         summary: "Solana reference lending program.",
         git_ref: None,
     },
+    // Kamino lending — live $1.5M Immunefi bug-bounty target as of
+    // 2026-04, the largest in Solana DeFi.  Anchor-based lending
+    // program with collateral accounts, oracle integration, vault
+    // PDAs, and CPIs into both klend itself and SPL Token — the full
+    // constraint-audit surface that the `solana.md` cheatsheet
+    // (incl. the post-Cashio "unanchored validation chain" rule)
+    // is built to attack.  Run against HEAD because it's a live
+    // target, not a pinned-CVE rediscovery.
+    Target {
+        name: "klend",
+        slug: "Kamino-Finance/klend",
+        sub: "programs/klend/src",
+        description: "Kamino Lending (klend).  Live Immunefi bounty: up to $1.5M (10% of funds-at-risk, $150k floor) for critical smart-contract bugs.  Anchor-based lending program; constraint-audit target — collateral account validation, oracle CPIs, vault PDAs, liquidation authority checks.  Run against HEAD (no pinned CVE).",
+        summary: "Solana lending and borrowing protocol.",
+        git_ref: None,
+    },
+    // Kamino Vault (kvault) — sister program to klend.  Same $1.5M
+    // Immunefi bounty.  Smaller code base (~5.8k SLOC vs klend's 26k);
+    // its primary risk surface is the *cross-program CPI to klend*
+    // — exactly where unanchored validation chains tend to hide.
+    // Run against HEAD.
+    Target {
+        name: "kvault",
+        slug: "Kamino-Finance/kvault",
+        sub: "programs/kvault/src",
+        description: "Kamino Vault (kvault).  Live Immunefi bounty under the same Kamino program as klend.  Anchor vault that earns yield by lending into klend via CPI — primary attack surface is cross-program account validation across the kvault → klend boundary.",
+        summary: "Solana yield-bearing vault.",
+        git_ref: None,
+    },
+    // Drift Protocol v2 — perpetuals DEX on Solana.  Live bug bounty
+    // (max $500k, 10% of hack value), PoC on a privately deployed
+    // mainnet contract required for critical and moderate.  Scoped
+    // to `programs/drift/src` — the perps program itself, ~149k
+    // SLOC across instructions/, state/, controller/, math/, and
+    // validation/.  Excludes the pyth/switchboard/openbook adapter
+    // programs in the same repo.
+    Target {
+        name: "drift-v2",
+        slug: "drift-labs/protocol-v2",
+        sub: "programs/drift/src",
+        description: "Drift Protocol v2 perps DEX (Solana).  Live bug bounty: up to $500k (10% of hack value).  Perpetual futures + spot, multiple liquidity mechanisms (vAMM, JIT auctions, DLOB).  Constraint-audit target — large surface across instructions/, state/, controller/, math/, validation/.  Run against HEAD (no pinned CVE).",
+        summary: "Solana perpetuals decentralised exchange.",
+        git_ref: None,
+    },
+    // Pyth Network Solana receiver program — live Immunefi bounty up
+    // to $250k.  Consumes cross-chain Pythnet price updates and
+    // writes them to on-chain accounts.  Classic Solana constraint-
+    // audit surface: sysvar usage for signature verification, account
+    // ownership, account-data integrity (Wormhole VAA parsing).  Run
+    // against HEAD.
+    Target {
+        name: "pyth-solana-receiver",
+        slug: "pyth-network/pyth-crosschain",
+        sub: "target_chains/solana/programs/pyth-solana-receiver/src",
+        description: "Pyth Network Solana receiver program.  Live Immunefi bounty up to $250k.  Reads Wormhole VAAs carrying Pythnet price updates and writes them to on-chain accounts.  Attack surface includes signature-verification instruction parsing (sysvar access), VAA integrity, account owner checks, and price-update replay.",
+        summary: "Solana oracle price update receiver.",
+        git_ref: None,
+    },
+    // Marinade liquid-staking-program — live Immunefi bounty (amount
+    // varies, PoC required).  First-on-mainnet liquid-staking protocol
+    // on Solana.  Moderate size (~7.6k SLOC); structural-validation
+    // surface includes stake account delegation, unstake queues,
+    // liquidity pool add/remove, mSOL mint authority, validator list
+    // management.  Run against HEAD.
+    Target {
+        name: "marinade",
+        slug: "marinade-finance/liquid-staking-program",
+        sub: "programs/marinade-finance/src",
+        description: "Marinade liquid-staking-program.  Live Immunefi bounty (amount varies, PoC required for all severities).  First-on-mainnet Solana liquid-staking protocol.  Constraint-audit surface: stake delegation, unstake queues, liquidity pool add/remove, mSOL mint authority, validator list management.",
+        summary: "Solana liquid-staking protocol.",
+        git_ref: None,
+    },
+    // Jito (Re)staking program — live Immunefi bounty up to $250k.
+    // The restaking program itself is a node-consensus-network +
+    // operator registry (~1.7k SLOC).  Small and focused.  Paired
+    // with the vault_program (~3.1k SLOC) which holds the actual
+    // staked assets.  The restaking_program is the governance /
+    // registration layer; the vault_program is where funds live.
+    // Run both against HEAD.
+    Target {
+        name: "jito-restaking-program",
+        slug: "jito-foundation/restaking",
+        sub: "restaking_program/src",
+        description: "Jito (Re)staking — restaking_program.  Live Immunefi bounty up to $250k.  Node-consensus-network and operator registry layer.  Small focused program (~1.7k SLOC).  Attack surface is access control on NCN / operator registration and slashing authority.",
+        summary: "Solana restaking registry program.",
+        git_ref: None,
+    },
+    Target {
+        name: "jito-vault-program",
+        slug: "jito-foundation/restaking",
+        sub: "vault_program/src",
+        description: "Jito (Re)staking — vault_program.  Live Immunefi bounty up to $250k.  The vault holds the actual staked assets (stSOL, JitoSOL-VRT, etc.).  Constraint-audit surface: deposit / withdraw invariants, VRT (vault receipt token) mint authority, slashing CPI from restaking_program, delegation to NCNs.",
+        summary: "Solana restaking vault program.",
+        git_ref: None,
+    },
+    // Rocket.Chat latest-stable run — pinned version 6.0.0 already
+    // hit in iter11.  Running the newest release to look for any
+    // method-level authorisation regressions added since, or CVEs
+    // since-known but not in 6.0.0.  Scope matches the iter11 run.
+    Target {
+        name: "rocketchat-8.3.2",
+        slug: "RocketChat/Rocket.Chat",
+        sub: "apps/meteor/server/methods",
+        description: "Rocket.Chat 8.3.2 — latest stable.  Public HackerOne bounty up to $7500.  Scoped to Meteor DDP method handlers.  Paired with iter11's 6.0.0 run; this one exists to look for regressions / newly-introduced methods without auth gates.",
+        summary: "Rocket.Chat — Node.js / Meteor team-chat platform.",
+        git_ref: Some("8.3.2"),
+    },
+    Target {
+        name: "ghost-6.9.3",
+        slug: "TryGhost/Ghost",
+        sub: "ghost/core/core/server/api",
+        description: "Ghost 6.9.3 — latest stable.  Public HackerOne bounty up to $1500.  Scoped to admin / content API endpoints.  Paired with iter8's 5.59.0 run; this one exists to look for auth / validation regressions, novel endpoints added since 5.59, and filter-parameter SQL injection in new query paths.",
+        summary: "Ghost — Node.js content management platform.",
+        git_ref: Some("v6.9.3"),
+    },
+    // Rocket.Chat subsystem-targeted runs against latest 8.3.2.  The
+    // strategy: broad-scope iter1 found nothing actionable, but the
+    // CVE history clusters in three subsystems.  Pointing Dyson at
+    // each one in isolation gives the agent a smaller surface to
+    // navigate and more iterations per file.
+    //
+    // 1. REST API v1 — historical NoSQL-injection class (CVE-2021-22911
+    //    `getPasswordPolicy`, `users.list`, `listEmojiCustom` — all in
+    //    this directory family).  91 endpoints, every one parses
+    //    `query` / `filter` from the request and feeds it to a model
+    //    method.  The bug class is "model method takes raw object,
+    //    Mongo treats $-keys as operators."  Same class still lives
+    //    here unless every endpoint sanitises.
+    Target {
+        name: "rocketchat-8.3.2-api-v1",
+        slug: "RocketChat/Rocket.Chat",
+        sub: "apps/meteor/app/api/server/v1",
+        description: "Rocket.Chat 8.3.2 REST API v1 endpoints — historical NoSQL-injection cluster (CVE-2021-22911 family).  Public HackerOne bounty up to $7500.  91 endpoint files; the recurring pattern is `query`/`filter`/`fields` parameters from the request body flowing into MongoDB query construction without `$`-key stripping.",
+        summary: "Rocket.Chat REST API v1 endpoint handlers.",
+        git_ref: Some("8.3.2"),
+    },
+    // 2. SAML — historical auth bypass class (CVE-2020-29594) plus the
+    //    `@xmldom/xmldom@0.8.11` XML-injection CVE (GHSA-wh4c-j3r5-mjhp)
+    //    flagged by dependency_review on the iter1 run.  XML signature
+    //    parsing + assertion handling + relay-state are all classic
+    //    SAML attack surfaces.
+    Target {
+        name: "rocketchat-8.3.2-saml",
+        slug: "RocketChat/Rocket.Chat",
+        sub: "apps/meteor/app/meteor-accounts-saml/server",
+        description: "Rocket.Chat 8.3.2 SAML server — historical auth-bypass class (CVE-2020-29594) plus reachable @xmldom/xmldom XML-injection (GHSA-wh4c-j3r5-mjhp).  Public HackerOne bounty up to $7500.  Attack surface: signature verification, assertion parsing, RelayState handling, identity-mapping, logout request/response.",
+        summary: "Rocket.Chat SAML SSO authentication server.",
+        git_ref: Some("8.3.2"),
+    },
+    // 3. Integrations / webhooks — historical SSRF class (CVE-2024-39713
+    //    Twilio webhook).  External services post to these endpoints
+    //    with attacker-influenceable URLs / payloads.
+    Target {
+        name: "rocketchat-8.3.2-integrations",
+        slug: "RocketChat/Rocket.Chat",
+        sub: "apps/meteor/app/integrations/server",
+        description: "Rocket.Chat 8.3.2 integrations / webhooks server — historical SSRF class (CVE-2024-39713 Twilio webhook).  Public HackerOne bounty up to $7500.  Attack surface: outgoing webhook URL handling, incoming-webhook script execution sandbox, header/body forwarding.",
+        summary: "Rocket.Chat integrations and webhook handlers.",
+        git_ref: Some("8.3.2"),
+    },
 ];
 
 /// Task body.  The target path is no longer interpolated — it's passed

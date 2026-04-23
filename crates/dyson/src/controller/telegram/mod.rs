@@ -357,7 +357,14 @@ impl super::Controller for TelegramController {
         let mut current_settings = settings.clone();
         let controller_prompt = self.system_prompt().map(std::string::ToString::to_string);
 
-        let (config_path, mut reloader) = super::create_hot_reloader(settings);
+        // Resolve the config path for `/model` persistence only — the
+        // actual file watcher has moved to `command::listen` so the
+        // registry reload + settings broadcast happens once per
+        // process regardless of how many controllers subscribe.
+        // Telegram now subscribes to the shared bus and limits itself
+        // to rebuilding its own agents when a change arrives.
+        let (config_path, _unused_reloader) = super::create_hot_reloader(settings);
+        let mut settings_rx = super::subscribe_settings_updates();
 
         let bg_registry = std::sync::Arc::new(super::background::BackgroundAgentRegistry::new());
 
@@ -379,22 +386,26 @@ impl super::Controller for TelegramController {
         let mut backoff_secs: u64 = 1;
 
         loop {
-            if let Ok((true, new_settings)) = reloader.check().await {
-                if let Some(s) = new_settings {
-                    current_settings = s;
-                    current_settings.dangerous_no_sandbox = settings.dangerous_no_sandbox;
+            // Pull any published settings change since the last
+            // iteration.  `has_changed` is cheap (one atomic load);
+            // `borrow_and_update` marks the latest value as seen so
+            // the next check doesn't retrigger until the program
+            // broadcaster sends again.  Registry + config-file
+            // reload already happened centrally before this fires.
+            if let Some(rx) = settings_rx.as_mut() {
+                if rx.has_changed().unwrap_or(false) {
+                    let fresh = rx.borrow_and_update().clone();
+                    current_settings = (*fresh).clone();
+                    rebuild_agents_on_reload(
+                        &agents,
+                        &current_settings,
+                        controller_prompt.as_deref(),
+                        &chat_store,
+                        &feedback_dir,
+                        registry,
+                    )
+                    .await;
                 }
-                // Reload the client registry so new API keys take effect.
-                registry.reload(&current_settings, None);
-                rebuild_agents_on_reload(
-                    &agents,
-                    &current_settings,
-                    controller_prompt.as_deref(),
-                    &chat_store,
-                    &feedback_dir,
-                    registry,
-                )
-                .await;
             }
 
             // Poll for updates with a timeout, racing against Ctrl-C.

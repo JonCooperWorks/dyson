@@ -597,6 +597,47 @@ pub fn create_hot_reloader(
 }
 
 // ---------------------------------------------------------------------------
+// Program-level settings broadcast — single hot-reload source for all
+// controllers.
+// ---------------------------------------------------------------------------
+
+/// Global publisher handle for the program-wide settings watcher.
+/// `command::listen` installs a `tokio::sync::watch::Sender` here
+/// before starting controllers; each controller that wants to react
+/// to hot-reloads calls `subscribe_settings_updates()` during its
+/// `run()` and gets a matching `Receiver`.  Stored via a `OnceLock`
+/// so controllers don't need to thread the handle through method
+/// signatures — the trait stays stable for the 4+ impls.
+pub(crate) static SETTINGS_BUS: std::sync::OnceLock<
+    tokio::sync::watch::Sender<std::sync::Arc<Settings>>,
+> = std::sync::OnceLock::new();
+
+/// Install the program-level settings publisher.  Called once by
+/// `command::listen` before controllers spawn.  Subsequent calls are
+/// ignored (the `OnceLock` keeps the first writer).
+pub fn install_settings_bus(initial: std::sync::Arc<Settings>) {
+    let (tx, _rx) = tokio::sync::watch::channel(initial);
+    let _ = SETTINGS_BUS.set(tx);
+}
+
+/// Publish a fresh settings snapshot to everyone subscribed.  No-op
+/// when the bus hasn't been installed (most tests).
+pub fn publish_settings(new: std::sync::Arc<Settings>) {
+    if let Some(tx) = SETTINGS_BUS.get() {
+        let _ = tx.send(new);
+    }
+}
+
+/// Subscribe to settings updates.  `None` when the bus hasn't been
+/// installed — e.g. an http_controller integration test that stands
+/// up `HttpState` directly without going through `command::listen`.
+pub fn subscribe_settings_updates()
+    -> Option<tokio::sync::watch::Receiver<std::sync::Arc<Settings>>>
+{
+    SETTINGS_BUS.get().map(tokio::sync::watch::Sender::subscribe)
+}
+
+// ---------------------------------------------------------------------------
 // Single-agent reload — used by terminal controller.
 // ---------------------------------------------------------------------------
 
