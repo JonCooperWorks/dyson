@@ -76,6 +76,14 @@ pub async fn scan(root: &Path, opts: &ScanOptions, client: &OsvClient) -> Result
         }
     }
 
+    // Ecosystem-level lockfile hints — one warning per ecosystem, not
+    // per manifest.  A Cargo workspace keeps its lockfile at the root
+    // and every member's `Cargo.toml` resolves through it, so warning
+    // per-Cargo.toml (the old behaviour) fired spuriously with "no
+    // Cargo.lock present in any crate" even when the workspace had a
+    // root lockfile.  Same structural pattern for npm/yarn/pnpm.
+    append_lockfile_warnings(&mut report);
+
     report.deps_total = all_deps.len();
     let queryable: Vec<&Dependency> = all_deps
         .iter()
@@ -124,6 +132,48 @@ pub async fn scan(root: &Path, opts: &ScanOptions, client: &OsvClient) -> Result
     Ok(report)
 }
 
+/// Emit ONE warning per ecosystem when a manifest was scanned but no
+/// matching lockfile was found anywhere in the scan.  Replaces the old
+/// per-file warnings in the individual parsers, which couldn't see
+/// sibling files and so mis-fired on workspace members whose lockfile
+/// lives at the project root.
+///
+/// Policy: if `manifest_any` && `!lock_any` → one warning.  Silence
+/// when either no manifest was seen (nothing to warn about) or a
+/// lockfile was seen (versions are pinned somewhere in the tree, even
+/// if not alongside every member manifest).
+fn append_lockfile_warnings(report: &mut ScanReport) {
+    let has_name = |names: &[&str]| -> bool {
+        report.scanned_files.iter().any(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| names.iter().any(|want| n.eq_ignore_ascii_case(want)))
+        })
+    };
+    // Cargo: `Cargo.toml` is a constraint manifest; `Cargo.lock` is
+    // the resolved lockfile.  One workspace lock covers every member,
+    // so we only warn when NO `Cargo.lock` was seen in the scan.
+    if has_name(&["Cargo.toml"]) && !has_name(&["Cargo.lock"]) {
+        report.warnings.push(
+            "no Cargo.lock found in scan — versions may drift on the next `cargo update`. \
+             In a Cargo workspace the lockfile lives at the workspace root; if you expected \
+             one, re-run the scan against the workspace root."
+                .to_string(),
+        );
+    }
+    // npm / yarn / pnpm: any of the three lockfile flavours satisfies
+    // the "pinned somewhere" check.
+    if has_name(&["package.json"])
+        && !has_name(&["package-lock.json", "yarn.lock", "pnpm-lock.yaml"])
+    {
+        report.warnings.push(
+            "no npm/yarn/pnpm lockfile found in scan — package.json carries ranges, not \
+             pinned versions.  Commit a lockfile for reproducible builds."
+                .to_string(),
+        );
+    }
+}
+
 fn discover(root: &Path, opts: &ScanOptions) -> Result<Vec<PathBuf>> {
     let meta = std::fs::metadata(root).map_err(|e| {
         DysonError::tool("dependency_scan", format!("stat {}: {e}", root.display()))
@@ -151,4 +201,75 @@ fn discover(root: &Path, opts: &ScanOptions) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report_with(files: &[&str]) -> ScanReport {
+        let mut r = ScanReport::default();
+        for f in files {
+            r.scanned_files.push(PathBuf::from(f));
+        }
+        r
+    }
+
+    #[test]
+    fn no_lockfile_warning_skipped_when_workspace_root_has_one() {
+        // Regression: the old cargo parser emitted a per-Cargo.toml
+        // warning that fired for every workspace member, even though
+        // the workspace root's `Cargo.lock` already pinned versions.
+        let mut r = report_with(&[
+            "Cargo.lock",
+            "crates/a/Cargo.toml",
+            "crates/b/Cargo.toml",
+        ]);
+        append_lockfile_warnings(&mut r);
+        assert!(
+            r.warnings.is_empty(),
+            "lockfile warning must not fire when Cargo.lock is present: {:?}",
+            r.warnings,
+        );
+    }
+
+    #[test]
+    fn no_lockfile_warning_when_only_cargo_toml_and_no_lock() {
+        // Genuine case: no lockfile anywhere in the scan.
+        let mut r = report_with(&["Cargo.toml"]);
+        append_lockfile_warnings(&mut r);
+        assert_eq!(r.warnings.len(), 1, "one workspace-level warning expected");
+        assert!(
+            r.warnings[0].contains("no Cargo.lock found"),
+            "message must name the file: {:?}",
+            r.warnings,
+        );
+    }
+
+    #[test]
+    fn no_warnings_when_neither_manifest_nor_lock_present() {
+        // E.g. scan of a non-Rust repo — nothing to warn about.
+        let mut r = report_with(&["package.json", "package-lock.json"]);
+        append_lockfile_warnings(&mut r);
+        assert!(r.warnings.is_empty(), "no-op when manifest absent: {:?}", r.warnings);
+    }
+
+    #[test]
+    fn npm_lockfile_warning_is_single_and_satisfied_by_any_flavour() {
+        // package-lock.json, yarn.lock, or pnpm-lock.yaml all
+        // satisfy the "pinned somewhere" requirement — not all three.
+        for lock in ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"] {
+            let mut r = report_with(&["package.json", lock]);
+            append_lockfile_warnings(&mut r);
+            assert!(
+                r.warnings.is_empty(),
+                "{lock} should satisfy the npm lockfile check: {:?}",
+                r.warnings,
+            );
+        }
+        let mut r = report_with(&["package.json"]);
+        append_lockfile_warnings(&mut r);
+        assert_eq!(r.warnings.len(), 1);
+        assert!(r.warnings[0].contains("npm/yarn/pnpm lockfile"));
+    }
 }

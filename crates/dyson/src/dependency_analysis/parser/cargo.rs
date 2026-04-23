@@ -67,10 +67,12 @@ fn parse_toml(path: &Path, text: &str) -> Result<Parsed, ParseError> {
     let manifest: CargoToml = toml::from_str(text)
         .map_err(|e| ParseError::malformed(path, format!("Cargo.toml decode: {e}")))?;
     let mut parsed = Parsed::default();
-    parsed.warnings.push(format!(
-        "{}: no Cargo.lock present; versions may not be exact",
-        path.display()
-    ));
+    // Whether to warn about the missing lockfile is decided at the
+    // scan-orchestrator level in `dependency_analysis::scan` — a
+    // workspace's `Cargo.lock` sits at the root and every member's
+    // `Cargo.toml` resolves through it, so a per-manifest warning
+    // here fires spuriously on every member ("no Cargo.lock present
+    // in any crate" in a repo that does have one at the root).
     for (section, direct) in [
         (manifest.dependencies, true),
         (manifest.dev_dependencies, false),
@@ -136,6 +138,15 @@ proptest = "1"
         assert!(names.contains(&"serde"));
         assert!(names.contains(&"tokio"));
         assert!(names.contains(&"proptest"));
-        assert!(!parsed.warnings.is_empty());
+        // Per-manifest warnings used to fire here ("no Cargo.lock
+        // present; versions may not be exact") even when the
+        // workspace root did carry one.  The decision moved to the
+        // scan orchestrator, which can see every file it scanned.
+        assert!(
+            parsed.warnings.is_empty(),
+            "Cargo.toml parser no longer emits per-file lockfile warnings; \
+             got: {:?}",
+            parsed.warnings,
+        );
     }
 }
