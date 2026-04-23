@@ -284,10 +284,13 @@ function FileBlock({ block }) {
 
 // Rendered in the chat scroll when the agent emits an artefact.
 // For image artefacts we render the actual image inline (the file URL
-// comes through either SSE `file` events for live turns, or is reached
-// via `/api/artefacts/<id>` → redirect-style resolve on refresh).
-// For markdown / report artefacts, a compact chip that opens the
-// Artefacts tab on click.
+// is reached by asking `/api/artefacts/<id>`, which hands back the
+// `/api/files/<id>` URL as plain text).  For markdown / report
+// artefacts, a compact chip that opens the Artefacts tab on click.
+//
+// `block.url` is an SPA deep-link (`/#/artefacts/<id>`) — set so that
+// cmd-click / copy-paste of the chip lands on the reader instead of
+// the raw bytes endpoint.
 //
 // `block` shape: { type:'artefact', id, kind, title, url, bytes }
 function ArtefactBlock({ block }) {
@@ -295,22 +298,26 @@ function ArtefactBlock({ block }) {
     e.preventDefault();
     window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: block.id } }));
   };
+  // Deep-link to the reader, used as the href fallback so cmd-click
+  // always has somewhere sensible to go — never `#` (which would jump
+  // the page to the top).
+  const reader = block.url || (block.id ? `/#/artefacts/${encodeURIComponent(block.id)}` : '#');
 
   if (block.kind === 'image') {
-    // `block.url` is `/api/artefacts/<id>` which returns the served
-    // file URL (e.g. `/api/files/fN`).  For a zero-hop preview we
-    // fetch once on mount and swap to <img> — until then show a
-    // placeholder so the chat scroll isn't jumpy.
+    // For a zero-hop preview we fetch the file URL once on mount and
+    // swap to <img>.  Until the fetch lands, cmd-click opens the
+    // reader (via `reader`); once resolved, cmd-click opens the image
+    // itself in a new tab — which is what users reach for on an image.
     const [src, setSrc] = React.useState('');
     React.useEffect(() => {
-      if (!block.url) return;
-      fetch(block.url)
+      if (!block.id) return;
+      fetch(`/api/artefacts/${encodeURIComponent(block.id)}`)
         .then(r => r.ok ? r.text() : Promise.reject(r.status))
         .then(text => setSrc(text.trim()))
         .catch(() => {});
-    }, [block.url, block.id]);
+    }, [block.id]);
     return (
-      <a href={src || '#'} target="_blank" rel="noopener" onClick={open}
+      <a href={src || reader} target="_blank" rel="noopener" onClick={open}
          className="fileblock image" title={block.title || 'image'}>
         {src
           ? <img src={src} alt={block.title || 'image'}/>
@@ -322,7 +329,7 @@ function ArtefactBlock({ block }) {
 
   const kind = (block.kind || 'other').replace(/_/g, ' ');
   return (
-    <a href={block.url || '#'} onClick={open} className="fileblock" title="Open artefact">
+    <a href={reader} onClick={open} className="fileblock" title="Open artefact">
       <Icon name="file" size={14}/>
       <span className="name">{block.title || 'Artefact'}</span>
       <span className="sz mono" style={{color:'var(--fg-dim)'}}>{kind}</span>

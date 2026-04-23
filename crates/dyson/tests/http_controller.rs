@@ -228,12 +228,17 @@ async fn create_then_list_returns_chat_with_only_real_fields() {
     assert_eq!(only["id"], id);
     assert_eq!(only["title"], "smoke");
     assert_eq!(only["live"], false);
+    // Fresh chat has never emitted an artefact; the Artefacts view's
+    // sidebar filter relies on this being accurate.
+    assert_eq!(only["has_artefacts"], false);
+    // HTTP-minted id → source=http.  The sidebar badges non-http rows.
+    assert_eq!(only["source"], "http");
 
     // No fabricated fields — assert the contract the bridge depends on.
     let keys: Vec<&str> = only.as_object().unwrap().keys().map(|s| s.as_str()).collect();
     let mut sorted = keys.clone();
     sorted.sort();
-    assert_eq!(sorted, vec!["id", "live", "title"]);
+    assert_eq!(sorted, vec!["has_artefacts", "id", "live", "source", "title"]);
 }
 
 #[tokio::test]
@@ -1380,12 +1385,16 @@ async fn agent_artefact_round_trips_through_sse_and_disk() {
     assert_eq!(evt["title"], "Security review: juice-shop");
     assert_eq!(evt["kind"], "security_review");
     assert_eq!(evt["bytes"], markdown.len());
+    // The emitted `url` is a shareable SPA deep-link, not the raw
+    // bytes endpoint — cmd-click / copy-paste on the chip should land
+    // in the reader, not download markdown.  The body still lives at
+    // `/api/artefacts/<id>` and the client fetches it from there.
     let url = evt["url"].as_str().expect("url").to_string();
-    assert!(url.starts_with("/api/artefacts/"), "url shape: {url}");
-    let art_id = url.trim_start_matches("/api/artefacts/").to_string();
+    assert!(url.starts_with("/#/artefacts/"), "url shape: {url}");
+    let art_id = url.trim_start_matches("/#/artefacts/").to_string();
 
     // GET the body — must come back verbatim with text/markdown.
-    let resp = get(&format!("{}{}", r.base, url)).await;
+    let resp = get(&format!("{}/api/artefacts/{}", r.base, art_id)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
         resp.headers().get("content-type").unwrap().to_str().unwrap()
@@ -1453,6 +1462,106 @@ async fn agent_artefact_round_trips_through_sse_and_disk() {
         .artefacts_for_test(&art_id)
         .expect("artefact rehydrated from disk");
     assert_eq!(stored, markdown);
+}
+
+#[tokio::test]
+async fn list_conversations_flags_chats_with_artefacts() {
+    // The Artefacts view filters the sidebar to chats that have at
+    // least one report — `/api/conversations` must surface the flag
+    // for that filter to work.  Create two chats, emit into one, and
+    // assert only that one reports `has_artefacts`.
+    let r = rig().await;
+
+    let a = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "has reports" }),
+    ).await).await;
+    let a_id = a["id"].as_str().unwrap().to_string();
+    let b = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "no reports" }),
+    ).await).await;
+    let b_id = b["id"].as_str().unwrap().to_string();
+
+    let mut sse = request(
+        &format!("{}/api/conversations/{}/events", r.base, a_id),
+        Method::GET,
+        None,
+    ).await;
+    assert_eq!(sse.status(), StatusCode::OK);
+    test_helpers::wait_for_sse_subscriber(r.state.clone(), &a_id).await;
+    test_helpers::emit_agent_artefact(
+        r.state.clone(),
+        &a_id,
+        dyson::message::Artefact::markdown(
+            dyson::message::ArtefactKind::SecurityReview,
+            "R",
+            "body",
+        ),
+    )
+    .await
+    .expect("emit");
+    let _ = read_sse_event(&mut sse).await;
+
+    let listed = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
+    let rows = listed.as_array().unwrap();
+    let find = |id: &str| rows.iter().find(|c| c["id"] == id).unwrap().clone();
+    assert_eq!(find(&a_id)["has_artefacts"], true, "emitting chat must flag true");
+    assert_eq!(find(&b_id)["has_artefacts"], false, "silent chat must stay false");
+}
+
+#[tokio::test]
+async fn artefact_deep_link_is_shareable() {
+    // Two linked contracts the UI relies on to make artefact URLs
+    // "go straight to the artefact":
+    //   1. Naked `/artefacts/<id>` 302-redirects to the SPA deep-link
+    //      `/#/artefacts/<id>` so a link pasted into chat/docs opens
+    //      the reader, not a download.
+    //   2. The raw bytes endpoint surfaces the owning chat id via an
+    //      `X-Dyson-Chat-Id` header so a cold deep-link can restore
+    //      the sidebar without a second round-trip.
+    let r = rig().await;
+
+    let created = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "permalinks" }),
+    ).await).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let mut sse = request(
+        &format!("{}/api/conversations/{}/events", r.base, id),
+        Method::GET,
+        None,
+    ).await;
+    assert_eq!(sse.status(), StatusCode::OK);
+    test_helpers::wait_for_sse_subscriber(r.state.clone(), &id).await;
+
+    let artefact = dyson::message::Artefact::markdown(
+        dyson::message::ArtefactKind::SecurityReview,
+        "Report",
+        "body",
+    );
+    test_helpers::emit_agent_artefact(r.state.clone(), &id, artefact)
+        .await
+        .expect("emit artefact");
+    let evt = read_sse_event(&mut sse).await;
+    let spa_url = evt["url"].as_str().unwrap().to_string();
+    let art_id = spa_url.trim_start_matches("/#/artefacts/").to_string();
+
+    // 1. Naked `/artefacts/<id>` 302s to the SPA deep-link.
+    let redir = get(&format!("{}/artefacts/{}", r.base, art_id)).await;
+    assert_eq!(redir.status(), StatusCode::FOUND);
+    let loc = redir.headers().get("location").expect("location header");
+    assert_eq!(loc.to_str().unwrap(), format!("/#/artefacts/{art_id}"));
+
+    // 2. The raw endpoint carries the chat id.
+    let body = get(&format!("{}/api/artefacts/{}", r.base, art_id)).await;
+    assert_eq!(body.status(), StatusCode::OK);
+    let chat_hdr = body
+        .headers()
+        .get("x-dyson-chat-id")
+        .expect("X-Dyson-Chat-Id header must be present");
+    assert_eq!(chat_hdr.to_str().unwrap(), id);
 }
 
 #[tokio::test]
@@ -1606,7 +1715,7 @@ async fn image_artefact_stamps_tool_use_id_for_panel_rehydration() {
     let art_id = art_evt["url"]
         .as_str()
         .unwrap()
-        .trim_start_matches("/api/artefacts/")
+        .trim_start_matches("/#/artefacts/")
         .to_string();
 
     // The entry must carry the tool_use_id for the frontend to pair
@@ -1695,6 +1804,6 @@ async fn chat_reload_shows_emitted_images_in_transcript() {
     assert_eq!(artefact_chip["kind"], "image");
     assert_eq!(artefact_chip["title"], "hello.png");
     let url = artefact_chip["url"].as_str().expect("url on chip");
-    assert!(url.starts_with("/api/artefacts/"), "chip url: {url}");
+    assert!(url.starts_with("/#/artefacts/"), "chip url: {url}");
 }
 

@@ -49,33 +49,57 @@ function makeSession() {
 
 // Hash-based router: URLs are shareable (send the link to another
 // Tailscale node and they land on the same conversation / view).
-//   #/                → conv view, default to the first conversation
-//   #/c/<chat_id>     → conv view, specific chat
-//   #/mind            → mind view
-//   #/artefacts       → artefacts view
-//   #/activity        → activity view
+//   #/                    → conv view, default to the first conversation
+//   #/c/<chat_id>         → conv view, specific chat
+//   #/mind                → mind view
+//   #/artefacts           → artefacts view (list)
+//   #/artefacts/<id>      → artefacts view, reader open on that id
+//   #/activity            → activity view
 // Hash keeps us out of the server's routing — `/`, `/c/id`, `/mind`
 // all serve the same SPA shell and the client reads the fragment.
 function parseHash() {
   const raw = (typeof window !== 'undefined' && window.location.hash) || '';
   const parts = raw.replace(/^#\/?/, '').split('/').filter(Boolean);
-  if (!parts.length) return { view: 'conv', conv: null };
+  if (!parts.length) return { view: 'conv', conv: null, artefactId: null };
   if (parts[0] === 'c' && parts[1]) {
-    return { view: 'conv', conv: decodeURIComponent(parts[1]) };
+    return { view: 'conv', conv: decodeURIComponent(parts[1]), artefactId: null };
   }
-  if (VIEW_IDS.includes(parts[0])) return { view: parts[0], conv: null };
-  return { view: 'conv', conv: null };
+  if (parts[0] === 'artefacts' && parts[1]) {
+    return { view: 'artefacts', conv: null, artefactId: decodeURIComponent(parts[1]) };
+  }
+  if (VIEW_IDS.includes(parts[0])) return { view: parts[0], conv: null, artefactId: null };
+  return { view: 'conv', conv: null, artefactId: null };
 }
 
-function buildHash(view, conv) {
+function buildHash(view, conv, artefactId) {
   if (view === 'conv') return conv ? `#/c/${encodeURIComponent(conv)}` : '#/';
+  if (view === 'artefacts' && artefactId) return `#/artefacts/${encodeURIComponent(artefactId)}`;
   return `#/${view}`;
 }
 
 function App() {
   const initialRoute = parseHash();
+  // Prime the deep-link stash on first render so ArtefactsView's mount
+  // effect picks the right id.  We clear it in the hashchange handler
+  // below whenever the hash moves away from `#/artefacts/<id>`.
+  if (initialRoute.artefactId) {
+    window.__dysonOpenArtefactId = initialRoute.artefactId;
+  }
   const [view, setView] = useState(initialRoute.view);
   const [conv, setConv] = useState(initialRoute.conv);
+  // The id in `#/artefacts/<id>`, tracked as state so the URL
+  // round-trips when conv gets filled in from the deep-link's response
+  // header (otherwise the state→URL effect would clobber `#/artefacts/a0`
+  // back down to `#/artefacts` the moment we restore the sidebar).
+  const [artefactId, setArtefactId] = useState(initialRoute.artefactId);
+  // Tab-click entry point into the view nav: clears the artefact
+  // deep-link so a stale id doesn't re-stick when the user taps the
+  // Artefacts tab after coming from `#/artefacts/<id>`.  Deep-link
+  // and chip-click paths bypass this and set `artefactId` explicitly.
+  const selectView = useCallback((v) => {
+    setView(v);
+    setArtefactId(null);
+  }, []);
   const [showLeft, setShowLeft] = useState(false);
   const [showRight, setShowRight] = useState(false);
   // Desktop-only: collapse the right column entirely.
@@ -123,11 +147,11 @@ function App() {
   // push when the hash already matches to avoid redundant entries
   // (first mount, bounce from URL → state → URL).
   useEffect(() => {
-    const target = buildHash(view, conv);
+    const target = buildHash(view, conv, view === 'artefacts' ? artefactId : null);
     if (window.location.hash !== target) {
       window.history.pushState(null, '', target);
     }
-  }, [view, conv]);
+  }, [view, conv, artefactId]);
 
   // URL → state: popstate fires on back/forward; hashchange covers
   // manual address-bar edits and shared links pasted in.  Parse and
@@ -138,6 +162,15 @@ function App() {
       const r = parseHash();
       setView(r.view);
       if (r.conv != null) setConv(r.conv);
+      setArtefactId(r.artefactId || null);
+      // Deep-link into a specific artefact.  We stash the id on window
+      // so ArtefactsView's mount effect picks it up synchronously —
+      // React state propagation through context would land one frame
+      // late and the reader would briefly show the empty state.
+      if (r.artefactId) {
+        window.__dysonOpenArtefactId = r.artefactId;
+        window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: r.artefactId } }));
+      }
     };
     window.addEventListener('popstate', h);
     window.addEventListener('hashchange', h);
@@ -156,16 +189,34 @@ function App() {
   useEffect(() => {
     const h = (e) => {
       const id = e.detail && e.detail.id;
-      if (id) window.__dysonOpenArtefactId = id;
+      if (id) {
+        window.__dysonOpenArtefactId = id;
+        setArtefactId(id);
+      }
       setView('artefacts');
     };
     window.addEventListener('dyson:open-artefact', h);
     return () => window.removeEventListener('dyson:open-artefact', h);
   }, []);
 
+  // Cold deep-link restore: the Artefact reader learns the owning
+  // chat_id from the fetch response header and fires this event so
+  // the sidebar can hydrate.  No-op when we already have a conv (the
+  // in-chat click path).
+  useEffect(() => {
+    const h = (e) => {
+      const id = e.detail && e.detail.id;
+      if (id && id !== conv) setConv(id);
+    };
+    window.addEventListener('dyson:set-conv', h);
+    return () => window.removeEventListener('dyson:set-conv', h);
+  }, [conv]);
+
   // ⌘1..N view switching (bounds-checked against VIEW_IDS — pressing
   // ⌘4/⌘5 used to point at the deleted Providers/Sandbox views and
-  // grey-screen the app), ⌘N for new conversation.
+  // grey-screen the app), ⌘K for new conversation.  ⌘N is claimed by
+  // the browser (opens a new window in Chrome/Safari/Firefox on macOS
+  // and is not web-preventable) so we don't try to bind it.
   useEffect(() => {
     const h = (e) => {
       if (!(e.metaKey || e.ctrlKey)) return;
@@ -173,9 +224,9 @@ function App() {
         const idx = Number(e.key) - 1;
         if (idx < VIEW_IDS.length) {
           e.preventDefault();
-          setView(VIEW_IDS[idx]);
+          selectView(VIEW_IDS[idx]);
         }
-      } else if (e.key === 'n' && window.DysonLive) {
+      } else if (e.key === 'k' && window.DysonLive) {
         e.preventDefault();
         window.DysonLive.createChat('New conversation').then(c => {
           window.DYSON_DATA.conversations.http.unshift({ id: c.id, title: c.title, live: false });
@@ -186,7 +237,7 @@ function App() {
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [bump]);
+  }, [bump, selectView]);
 
   // iOS keyboard dodge.  On iOS the layout viewport stays fixed when
   // the on-screen keyboard opens — only visualViewport shrinks — so a
@@ -257,7 +308,7 @@ function App() {
 
   return (
     <div className="app">
-      <TopBar view={view} setView={setView}
+      <TopBar view={view} setView={selectView}
               rightHidden={rightHidden}
               onToggleLeft={() => { setShowLeft(s => !s); setShowRight(false); }}
               onToggleRight={onToggleRight}/>
@@ -278,7 +329,20 @@ function App() {
       {view === 'artefacts' && (
         <div className="body no-right">
           {showLeft && <div className="scrim" onClick={closeRails}/>}
-          <LeftRail active={conv} setActive={(id) => { setConv(id); setShowLeft(false); }}/>
+          <LeftRail active={conv}
+                    setActive={(id) => {
+                      // Switching a chat in the Artefacts sidebar should
+                      // land on something readable — clear the current
+                      // selection so ArtefactsView's hydrate effect
+                      // picks the first artefact of the new chat and
+                      // updates the URL to match.
+                      setConv(id);
+                      setArtefactId(null);
+                      window.__dysonOpenArtefactId = null;
+                      setShowLeft(false);
+                    }}
+                    filter={(c) => c.hasArtefacts}
+                    emptyLabel="No chats with artefacts yet. Run a /security-review in any conversation to create one."/>
           <ArtefactsView conv={conv} session={session} bump={bump}/>
         </div>
       )}
@@ -631,6 +695,11 @@ function ConversationView({ conv, session, bump }) {
           { id, kind, title, bytes, created_at: Math.floor(Date.now() / 1000), metadata },
           ...session.artefacts,
         ];
+        // Mark the conversation as having artefacts so the Artefacts
+        // view's filtered sidebar picks it up without waiting for a
+        // full /api/conversations refresh.
+        const convRow = (D.conversations.http || []).find(c => c.id === conv);
+        if (convRow) convRow.hasArtefacts = true;
         bump();
       },
       onDone: () => {

@@ -118,12 +118,15 @@ function TopBar({ view, setView, onToggleLeft, onToggleRight, rightHidden }) {
   );
 }
 
-function LeftRail({ active, setActive }) {
+function LeftRail({ active, setActive, filter, emptyLabel }) {
   // Chat history is shared across controllers; one flat list is the
   // accurate shape (Telegram-originated and HTTP-originated chats both
   // live in ~/.dyson/chats and the controller has no honest way to
   // attribute origin without metadata that doesn't exist yet).
-  const items = (window.DYSON_DATA.conversations.http) || [];
+  // `filter` trims the list for views that only care about a subset
+  // (e.g. Artefacts hides chats with nothing to read).
+  const all = (window.DYSON_DATA.conversations.http) || [];
+  const items = typeof filter === 'function' ? all.filter(filter) : all;
   const newConv = () => {
     if (!window.DysonLive) return;
     // Don't pass `rotate_previous`: auto-rotating the active chat on
@@ -160,23 +163,31 @@ function LeftRail({ active, setActive }) {
       <div className="newc">
         <button className="btn primary" onClick={newConv}>
           <span><Icon name="plus" size={12}/> New conversation</span>
-          <Kbd>⌘N</Kbd>
+          <Kbd>⌘K</Kbd>
         </button>
       </div>
       <div className="search"><input placeholder="Filter conversations"/></div>
       <div className="scroll">
         {items.length === 0 ? (
           <div style={{padding:'18px 14px', color:'var(--mute)', fontSize:12, lineHeight:1.5}}>
-            No conversations yet. <span className="mono" style={{color:'var(--fg-dim)'}}>⌘N</span> to start one.
+            {emptyLabel || <>No conversations yet. <span className="mono" style={{color:'var(--fg-dim)'}}>⌘K</span> to start one.</>}
           </div>
         ) : (
           <div className="group">
             <h4>Conversations <span className="n">· {items.length}</span></h4>
             {items.map(c => (
-              <div key={c.id} className={`conv ${c.live ? 'live' : ''} ${active === c.id ? 'active' : ''}`}
+              <div key={c.id} className={`conv ${c.live ? 'live' : ''} ${active === c.id ? 'active' : ''} src-${c.source || 'http'}`}
                    onClick={() => setActive(c.id)}>
                 <div className="row1">
                   <span className="title">{c.title || c.id}</span>
+                  {c.source === 'telegram' && (
+                    <span className="chip tg" title="Telegram-originated chat"
+                          style={{fontSize:9, padding:'1px 5px', marginRight:4,
+                                  background:'#229ED9', color:'#fff', borderRadius:3,
+                                  letterSpacing:0.3, textTransform:'uppercase', fontWeight:600}}>
+                      TG
+                    </span>
+                  )}
                   <button className="conv-del" title="Delete conversation"
                           onClick={(e) => deleteConv(c.id, e)}>
                     <Icon name="x" size={11}/>
@@ -372,7 +383,9 @@ function ArtefactsView({ conv, session, bump }) {
   });
 
   // Lazy hydrate the per-chat artefact list from the API.  Subsequent
-  // switches do nothing — live SSE keeps it current.
+  // switches do nothing — live SSE keeps it current.  We re-run the
+  // auto-select below once the fetch resolves so a freshly-loaded
+  // chat lands on its newest artefact immediately.
   vUE(() => {
     if (!conv || !session || !window.DysonLive) return;
     if (session.artefactsLoaded) return;
@@ -384,6 +397,19 @@ function ArtefactsView({ conv, session, bump }) {
       })
       .catch(() => {});
   }, [conv]);
+
+  // Auto-select the newest artefact whenever the chat changes and
+  // nothing is selected yet.  Keeps the "click a chat → see a report"
+  // flow zero-click and makes the URL reflect the reader position so
+  // a back-button or share-link round-trips cleanly.
+  vUE(() => {
+    if (selected) return;
+    const list = (session && session.artefacts) || [];
+    if (!list.length) return;
+    const first = list[0].id;
+    setSelected(first);
+    window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: first } }));
+  }, [conv, session && session.artefacts, selected]);
 
   // Allow in-chat chips to jump straight to a specific artefact.  The
   // event is fired by ArtefactBlock.onClick — if we're already on the
@@ -398,7 +424,26 @@ function ArtefactsView({ conv, session, bump }) {
     return () => window.removeEventListener('dyson:open-artefact', h);
   }, []);
 
+  // Deep-link case: `/#/artefacts/<id>` opened cold (no chat selected
+  // yet).  Render the reader anyway so the URL genuinely lands the
+  // user on the artefact — the reader will learn the owning chat from
+  // the fetch response header and restore the sidebar once loaded.
   if (!conv) {
+    if (selected) {
+      return (
+        <div className="mind show-side">
+          <aside className="mind-side">
+            <div style={{padding:'10px 14px', borderBottom:'1px solid var(--line)'}}>
+              <div className="eyebrow">artefact</div>
+              <div style={{fontSize:12, color:'var(--fg-dim)', marginTop:4}}>
+                Loading conversation context…
+              </div>
+            </div>
+          </aside>
+          <ArtefactReader id={selected}/>
+        </div>
+      );
+    }
     return (
       <section className="mind-pane" style={{alignItems:'center', justifyContent:'center'}}>
         <div style={{color:'var(--mute)', fontSize:13}}>Select a conversation to see its artefacts.</div>
@@ -424,7 +469,13 @@ function ArtefactsView({ conv, session, bump }) {
           )}
           {list.map(a => (
             <div key={a.id}
-                 onClick={() => setSelected(a.id)}
+                 onClick={() => {
+                   setSelected(a.id);
+                   // Surface the id to App so the URL becomes
+                   // `#/artefacts/<id>` — clicking through the list
+                   // is navigation, not just a local selection.
+                   window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: a.id } }));
+                 }}
                  style={{display:'flex', flexDirection:'column', gap:3, padding:'8px 14px',
                          cursor:'pointer',
                          background: selected === a.id ? 'var(--panel)' : 'transparent',
@@ -465,7 +516,15 @@ function ArtefactReader({ id }) {
     // artefacts it's the raw content.  Fetching works the same way —
     // the renderer switches on mime_type at display time.
     window.DysonLive.loadArtefact(id)
-      .then(text => setBody(text))
+      .then(({ body, chatId }) => {
+        setBody(body);
+        // Cold deep-link: tell App which chat owns this artefact so
+        // the sidebar restores and the list hydrates.  App listens for
+        // this event and calls setConv.
+        if (chatId) {
+          window.dispatchEvent(new CustomEvent('dyson:set-conv', { detail: { id: chatId } }));
+        }
+      })
       .catch(e => setErr(String(e.message || e)));
   }, [id]);
 

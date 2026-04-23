@@ -134,6 +134,17 @@ struct ConversationDto {
     title: String,
     /// `true` while a turn is currently executing for this chat.
     live: bool,
+    /// `true` when at least one artefact has ever been emitted for
+    /// this chat (in-memory or still on disk).  The Artefacts view
+    /// filters the sidebar on this so chats with nothing to read
+    /// don't clutter the list.
+    has_artefacts: bool,
+    /// Origin of the chat.  HTTP-minted chats have ids of the form
+    /// `c-NNNN` (see `mint_id`); Telegram chats are the numeric
+    /// Telegram chat id as a string.  The UI badges Telegram rows so
+    /// the operator can tell at a glance where a conversation came
+    /// from when both transports share the same on-disk chat dir.
+    source: &'static str,
 }
 
 #[derive(Serialize)]
@@ -169,8 +180,12 @@ enum BlockDto {
         id: String,
         kind: crate::message::ArtefactKind,
         title: String,
-        /// `/api/artefacts/<id>` — lets the chip's "open" link work
-        /// without the frontend having to reconstruct the URL.
+        /// `/#/artefacts/<id>` — an SPA deep-link that opens the reader
+        /// directly.  We intentionally do NOT hand out the raw
+        /// `/api/artefacts/<id>` bytes URL here: cmd-click / copy-paste
+        /// of the chip should land in a viewer, not on raw markdown.
+        /// The reader still fetches the body through the API endpoint;
+        /// the client constructs that URL itself from the id.
         url: String,
         bytes: usize,
         /// The originating tool call, when known.  The client uses
@@ -1219,9 +1234,24 @@ async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) ->
     }
     if let Some(id) = path.strip_prefix("/api/artefacts/") {
         if method == Method::GET {
-            return get_artefact(&state, id).await;
+            return get_artefact(&state, &url_decode(id)).await;
         }
         return method_not_allowed();
+    }
+    // Naked `/artefacts/<id>` (no `/api/` prefix) is a shareable
+    // permalink — bounce it to the SPA deep-link so the reader mounts
+    // with that artefact selected.  Keeps the URL short enough to paste
+    // into chat / docs without leaking the internal API path.
+    if let Some(id) = path.strip_prefix("/artefacts/") {
+        if method == Method::GET && !id.is_empty() && !id.contains('/') {
+            let loc = format!("/#/artefacts/{}", url_decode(id));
+            return Response::builder()
+                .status(StatusCode::FOUND)
+                .header("Location", loc)
+                .header("Cache-Control", "no-cache")
+                .body(boxed(Bytes::new()))
+                .unwrap();
+        }
     }
     if let Some(id) = path.strip_prefix("/api/conversations/") {
         if let Some((id, rest)) = split_once(id, '/') {
@@ -1260,7 +1290,88 @@ fn split_once(s: &str, c: char) -> Option<(&str, &str)> {
 // ---------------------------------------------------------------------------
 
 async fn list_conversations(state: &HttpState) -> Resp {
-    let order = state.order.lock().await.clone();
+    // Prefer the disk's mtime-sorted list when a ChatHistory is
+    // configured — Telegram and HTTP share the same on-disk chat dir,
+    // so asking disk rather than our in-memory `order` vec means a
+    // message sent on Telegram bubbles that chat to the top of the
+    // HTTP sidebar at the next list call.  `disk::list()` already
+    // sorts newest-first by `transcript.json` mtime.
+    let disk_order: Option<Vec<String>> = state
+        .history
+        .as_ref()
+        .and_then(|h| h.list().ok());
+    let mut order = match disk_order {
+        Some(o) if !o.is_empty() => o,
+        _ => state.order.lock().await.clone(),
+    };
+    // Merge in any in-memory chat ids the disk didn't surface (brand
+    // new, transcript not yet flushed) so a just-minted HTTP chat
+    // still shows up immediately.
+    {
+        let mem_order = state.order.lock().await;
+        let seen: std::collections::HashSet<&str> =
+            order.iter().map(String::as_str).collect();
+        let extras: Vec<String> = mem_order
+            .iter()
+            .filter(|id| !seen.contains(id.as_str()))
+            .cloned()
+            .collect();
+        for id in extras.into_iter().rev() {
+            order.insert(0, id);
+        }
+    }
+
+    // Hydrate handles for chat ids we learned about from disk
+    // (typically Telegram chats created while this process was
+    // running).  Title is a best-effort read of the first user-text
+    // line; a missing/corrupt transcript falls back to the id.
+    {
+        let mut chats = state.chats.lock().await;
+        for id in order.iter() {
+            if chats.contains_key(id) {
+                continue;
+            }
+            let title = state
+                .history
+                .as_ref()
+                .and_then(|h| h.load(id).ok())
+                .and_then(|msgs| first_user_text(&msgs))
+                .unwrap_or_else(|| id.clone());
+            chats.insert(id.clone(), Arc::new(ChatHandle::new(title)));
+        }
+    }
+
+    // Build a set of chat ids that own at least one artefact.  Cheap
+    // because it's just the in-memory index plus a one-shot scan of
+    // each chat's `artefacts/` subdir for chats whose reports have
+    // aged out of the FIFO cache.
+    let mut with_artefacts: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    if let Ok(store) = state.artefacts.lock() {
+        for entry in store.items.values() {
+            with_artefacts.insert(entry.chat_id.clone());
+        }
+    }
+    if let Some(dir) = state.data_dir.as_ref() {
+        for id in order.iter() {
+            if with_artefacts.contains(id) {
+                continue;
+            }
+            let sub = ArtefactStore::dir_for_chat(dir, id);
+            if std::fs::read_dir(&sub)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|e| {
+                    e.path()
+                        .extension()
+                        .is_some_and(|x| x == "json")
+                })
+            {
+                with_artefacts.insert(id.clone());
+            }
+        }
+    }
     let chats = state.chats.lock().await;
     let mut dtos = Vec::with_capacity(order.len());
     for id in order.iter() {
@@ -1269,10 +1380,24 @@ async fn list_conversations(state: &HttpState) -> Resp {
                 id: id.clone(),
                 title: h.title.clone(),
                 live: h.busy.load(std::sync::atomic::Ordering::Relaxed),
+                has_artefacts: with_artefacts.contains(id),
+                source: source_for_chat_id(id),
             });
         }
     }
     json_ok(&dtos)
+}
+
+/// Classify a chat id by its mint convention.  HTTP-minted ids are
+/// `c-NNNN` (see `mint_id`); everything else is a Telegram chat id
+/// (bare numeric string from `teloxide::types::ChatId`).  Used by the
+/// conversation DTO so the sidebar can badge Telegram rows.
+fn source_for_chat_id(id: &str) -> &'static str {
+    if id.starts_with("c-") {
+        "http"
+    } else {
+        "telegram"
+    }
 }
 
 async fn create_conversation(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
@@ -1378,7 +1503,7 @@ async fn get_conversation(state: &HttpState, id: &str) -> Resp {
                 id: aid.clone(),
                 kind: e.kind,
                 title: e.title.clone(),
-                url: format!("/api/artefacts/{aid}"),
+                url: format!("/#/artefacts/{aid}"),
                 bytes: e.content.len(),
                 tool_use_id: e.tool_use_id.clone(),
                 metadata: e.metadata.clone(),
@@ -1454,7 +1579,7 @@ fn block_to_dto(b: &ContentBlock) -> BlockDto {
             id: id.clone(),
             kind: *kind,
             title: title.clone(),
-            url: format!("/api/artefacts/{id}"),
+            url: format!("/#/artefacts/{id}"),
             bytes: 0,
             tool_use_id: None,
             metadata: None,
@@ -2144,7 +2269,11 @@ impl Output for SseOutput {
             self.next_artefact_id
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        let url = format!("/api/artefacts/{id}");
+        // The `url` surfaces to the client as the chip's href — use the
+        // SPA deep-link so cmd-click / copy-paste lands on the reader.
+        // The raw bytes still live at `/api/artefacts/<id>` and the
+        // reader fetches them itself once mounted.
+        let url = format!("/#/artefacts/{id}");
         let bytes = artefact.content.len();
         let entry = ArtefactEntry {
             chat_id: self.chat_id.clone(),
@@ -2303,10 +2432,11 @@ async fn get_artefact(state: &HttpState, id: &str) -> Resp {
                 e.content.clone().into_bytes(),
                 e.mime_type.clone(),
                 e.title.clone(),
+                e.chat_id.clone(),
             )
         })
     };
-    let (bytes, mime, title) = match cached {
+    let (bytes, mime, title, chat_id) = match cached {
         Some(t) => t,
         None => {
             let loaded = state
@@ -2319,6 +2449,7 @@ async fn get_artefact(state: &HttpState, id: &str) -> Resp {
                         e.content.clone().into_bytes(),
                         e.mime_type.clone(),
                         e.title.clone(),
+                        e.chat_id.clone(),
                     );
                     if let Ok(mut s) = state.artefacts.lock() {
                         s.put(id.to_string(), e);
@@ -2334,11 +2465,26 @@ async fn get_artefact(state: &HttpState, id: &str) -> Resp {
         .header("Content-Type", format!("{mime}; charset=utf-8"))
         .header(
             "Content-Disposition",
-            format!("inline; filename=\"{}.md\"", title.replace('"', "")),
+            format!("inline; filename=\"{}.md\"", sanitize_filename(&title)),
         )
+        // Surfaces the owning chat to the SPA so a direct deep-link
+        // (`/#/artefacts/<id>` opened cold) can restore the sidebar
+        // context without a second round-trip.
+        .header("X-Dyson-Chat-Id", chat_id)
         .header("Cache-Control", "no-cache")
         .body(boxed(Bytes::from(bytes)))
         .unwrap()
+}
+
+/// Sanitise a title for use inside a `filename="..."` Content-Disposition
+/// parameter.  Strips characters that would either break the header
+/// (`\r`, `\n`, `"`) or confuse downstream shells / archivers (`/`,
+/// `\\`).  Non-ASCII passes through — browsers tolerate it in quoted
+/// filenames and the UI already uses it as the display title.
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '"' | '\r' | '\n' | '/' | '\\'))
+        .collect()
 }
 
 /// Wire shape for `GET /api/conversations/<chat>/artefacts`.  One entry

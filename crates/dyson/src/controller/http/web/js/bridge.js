@@ -22,11 +22,32 @@
     D.mind = { backend: '', files: [], open: { path: '', content: '' } };
     D.tools = {};
 
-    D.conversations.http = list.map(c => ({
+    const toRow = (c) => ({
       id: c.id,
       title: c.title,
       live: !!c.live,
-    }));
+      hasArtefacts: !!c.has_artefacts,
+      source: c.source || 'http',
+    });
+    D.conversations.http = list.map(toRow);
+
+    // Telegram and HTTP share the chat dir, so a message sent on
+    // Telegram only surfaces here on the next list call.  Poll at a
+    // lazy cadence — the server sorts by transcript mtime, so this
+    // is the cheapest way to keep the sidebar's order honest without
+    // inventing a cross-controller push channel.  Skipped when the
+    // tab is hidden to stay quiet on battery.
+    setInterval(() => {
+      if (document.hidden) return;
+      fetch('/api/conversations', { headers: { Accept: 'application/json' } })
+        .then(r => r.ok ? r.json() : null)
+        .then(next => {
+          if (!Array.isArray(next)) return;
+          D.conversations.http = next.map(toRow);
+          window.dispatchEvent(new CustomEvent('dyson:live-update'));
+        })
+        .catch(() => {});
+    }, 10_000);
 
     fetch('/api/providers').then(r => r.json()).then(provs => {
       D.providers = (provs || []).map(p => ({
@@ -129,11 +150,16 @@
         return r.json();
       },
 
-      // Fetch the raw markdown body of an artefact.  Returns the text.
+      // Fetch the raw markdown body of an artefact.  Returns
+      // `{ body, chatId }` — chatId lets a cold deep-link
+      // (`/#/artefacts/<id>` pasted into a fresh tab) restore the
+      // sidebar context without a second round-trip.
       loadArtefact: async (id) => {
         const r = await fetch('/api/artefacts/' + encodeURIComponent(id));
         if (!r.ok) throw new Error('artefact load failed: ' + r.status);
-        return r.text();
+        const body = await r.text();
+        const chatId = r.headers.get('X-Dyson-Chat-Id') || null;
+        return { body, chatId };
       },
 
       // Send a turn.  `files` is an optional array of File objects
