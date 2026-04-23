@@ -1911,6 +1911,15 @@ async fn post_turn(
             }
         }
         let agent = guard.as_mut().expect("agent built above");
+        // The agent polls `cancellation.is_cancelled()` at iteration
+        // boundaries, which is fine for /stop between tool calls but
+        // useless during a long LLM stream or a multi-second tool.
+        // Keep a separate clone of the token so the outer `select!`
+        // below can tear the whole run down when the user clicks
+        // cancel — the agent future drops at its next await point,
+        // which cancels in-flight HTTP requests, tool processes, and
+        // streaming reads cooperatively.
+        let cancel_for_select = cancel.clone();
         agent.set_cancellation_token(cancel);
         // Checkpoint-save the transcript to disk after every message
         // push.  Without this, a process kill during a long subagent
@@ -1930,10 +1939,30 @@ async fn post_turn(
         // Branch on attachments: with attachments, dispatch through
         // run_with_attachments so images/audio/PDF are resolved into
         // multimodal ContentBlocks (same path Telegram takes).
-        let result = if attachments.is_empty() {
-            agent.run(&prompt, &mut output).await
-        } else {
-            agent.run_with_attachments(&prompt, attachments, &mut output).await
+        //
+        // Wrap in `tokio::select!` so POST /cancel aborts the run at
+        // the next await point instead of waiting for the current LLM
+        // stream / tool call to finish on its own.  The persist hook
+        // installed above has already checkpointed every message the
+        // agent committed to its conversation, so dropping the future
+        // mid-run is safe: the state that survives is exactly what
+        // the agent had decided on.
+        let result = tokio::select! {
+            biased;
+            _ = cancel_for_select.cancelled() => {
+                tracing::info!(chat_id = %chat_id, "turn aborted by cancel request");
+                let _ = chat_handle.events.send(SseEvent::LlmError {
+                    message: "cancelled".to_string(),
+                });
+                Ok(String::new())
+            }
+            r = async {
+                if attachments.is_empty() {
+                    agent.run(&prompt, &mut output).await
+                } else {
+                    agent.run_with_attachments(&prompt, attachments, &mut output).await
+                }
+            } => r,
         };
         match result {
             Ok(_) => {}
