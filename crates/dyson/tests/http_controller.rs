@@ -1503,6 +1503,67 @@ async fn agent_artefact_round_trips_through_sse_and_disk() {
 }
 
 #[tokio::test]
+async fn chat_reload_rehydrates_user_uploaded_images_as_file_blocks() {
+    // Regression: a chat that once carried an image-bearing user turn
+    // reloaded with `{ type: "text", text: "[non-text content]" }`
+    // placeholders, which the UI rendered as literal "[non-text
+    // content]" where the screenshot used to be.  After this fix the
+    // same turn comes back as a `{ type: "file", mime, url, inline_image }`
+    // block so `FileBlock` renders the image inline with the data URL.
+    let r = rig().await;
+
+    let created = body_json(post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "image recall" }),
+    ).await).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Seed a user turn with an Image block directly — simulates what
+    // `run_with_attachments` writes to disk after a Telegram photo
+    // or a web composer upload.
+    {
+        use dyson::message::{ContentBlock, Message, Role};
+        let history = r.state.history_for_test().expect("disk history");
+        let msgs = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text { text: "what's in this image?".into() },
+                ContentBlock::Image {
+                    data: "R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==".into(),
+                    media_type: "image/gif".into(),
+                },
+            ],
+        }];
+        history.save(&id, &msgs).expect("save seeded transcript");
+    }
+
+    let convo = body_json(
+        get(&format!("{}/api/conversations/{}", r.base, id)).await,
+    ).await;
+    let messages = convo["messages"].as_array().expect("messages");
+    let user = messages.iter().find(|m| m["role"] == "user").expect("user msg");
+    let blocks = user["blocks"].as_array().expect("blocks");
+    let file_block = blocks
+        .iter()
+        .find(|b| b["type"] == "file")
+        .expect("image must rehydrate as file block, not '[non-text content]' placeholder");
+    assert_eq!(file_block["mime"], "image/gif");
+    assert_eq!(file_block["inline_image"], true);
+    let url = file_block["url"].as_str().expect("file block url");
+    assert!(
+        url.starts_with("data:image/gif;base64,"),
+        "url must be a self-contained data URL: {url}",
+    );
+    // And the old "[non-text content]" text marker must not be
+    // present — that's the exact string the UI was rendering before.
+    for block in blocks {
+        if let Some(t) = block["text"].as_str() {
+            assert_ne!(t, "[non-text content]", "legacy placeholder must be gone: {blocks:?}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn export_conversation_returns_sharegpt_json() {
     // The web UI's download button hits this endpoint.  Regression:
     // a conversation with zero messages 404s cleanly (nothing to

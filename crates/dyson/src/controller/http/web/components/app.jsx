@@ -385,6 +385,19 @@ function ConversationView({ conv, session, bump }) {
         for (const b of m.blocks) {
           if (b.type === 'text') blocks.push({ type: 'text', text: b.text });
           else if (b.type === 'thinking') blocks.push({ type: 'thinking', text: b.thinking });
+          else if (b.type === 'file') {
+            // User-uploaded image/document restored from disk on chat
+            // reload.  FileBlock already knows this shape — the server
+            // emits a data URL so there's no extra round-trip.
+            blocks.push({
+              type: 'file',
+              name: b.name,
+              mime: b.mime,
+              size: b.bytes,
+              url: b.url,
+              inline: !!b.inline_image,
+            });
+          }
           else if (b.type === 'tool_use') {
             // Namespace tool ids by chat_id — D.tools is global so two
             // chats minting `live-1` would otherwise collide.

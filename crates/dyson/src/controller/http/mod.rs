@@ -172,6 +172,21 @@ enum BlockDto {
         content: String,
         is_error: bool,
     },
+    /// User-uploaded image or document reconstituted from chat history
+    /// on reload.  The web UI's `FileBlock` component expects this
+    /// shape and renders images inline (`<img>` when `inline_image`)
+    /// and other files as download chips.  `url` is a data URL so the
+    /// transcript is self-contained — chat history already externalises
+    /// the bytes to `{chat_dir}/media/<hash>.b64` and restores them to
+    /// inline base64 on load; we just repackage the base64 as a
+    /// `data:<mime>;base64,…` URL instead of surfacing the raw bytes.
+    File {
+        name: String,
+        mime: String,
+        bytes: usize,
+        url: String,
+        inline_image: bool,
+    },
     /// Reference to an artefact rendered in the Artefacts tab.  The body
     /// lives in `HttpState.artefacts` and is fetched via
     /// `/api/artefacts/<id>` — not inlined here to keep history payloads
@@ -880,6 +895,15 @@ impl HttpState {
             Err(p) => p.into_inner(),
         };
         s.items.get(id).and_then(|e| e.tool_use_id.clone())
+    }
+
+    /// Test hook — grants raw access to the configured `ChatHistory`
+    /// so integration tests can seed transcripts directly, bypassing
+    /// the agent loop.  `None` when the state was built without a
+    /// history backend.
+    #[doc(hidden)]
+    pub fn history_for_test(&self) -> Option<Arc<dyn ChatHistory>> {
+        self.history.clone()
     }
 }
 
@@ -1653,11 +1677,71 @@ fn block_to_dto(b: &ContentBlock) -> BlockDto {
             tool_use_id: None,
             metadata: None,
         },
-        // Fallback: treat image/document as a text marker so the wire
-        // protocol stays simple.
-        _ => BlockDto::Text {
-            text: "[non-text content]".to_string(),
-        },
+        // User-uploaded image from chat history.  Emit as a data URL
+        // so the FileBlock renders inline without a second round-trip.
+        // Chat history already shrinks the transcript itself by
+        // externalising these to `{chat_dir}/media/<hash>.b64` — we're
+        // just the last-hop re-hydration for the browser.
+        ContentBlock::Image { data, media_type } => {
+            // Rough decoded byte count: base64 is ~4/3 of the raw size.
+            let bytes = data.len().saturating_mul(3) / 4;
+            BlockDto::File {
+                name: format!("image.{}", image_ext_for(media_type)),
+                mime: media_type.clone(),
+                bytes,
+                url: format!("data:{media_type};base64,{data}"),
+                inline_image: true,
+            }
+        }
+        // PDFs: render as a download chip.  The extracted text lives
+        // in `extracted_text` but isn't useful to surface inline in
+        // the transcript — the download link lets the user open the
+        // original.
+        ContentBlock::Document {
+            data,
+            extracted_text,
+        } => {
+            let bytes = data.len().saturating_mul(3) / 4;
+            BlockDto::File {
+                name: if extracted_text.is_empty() {
+                    "document.pdf".to_string()
+                } else {
+                    // Cheap title: first non-empty line of the extract,
+                    // truncated.  Falls back to `document.pdf`.
+                    let title = extracted_text
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("document.pdf")
+                        .trim()
+                        .chars()
+                        .take(60)
+                        .collect::<String>();
+                    if title.is_empty() {
+                        "document.pdf".to_string()
+                    } else {
+                        format!("{title}.pdf")
+                    }
+                },
+                mime: "application/pdf".to_string(),
+                bytes,
+                url: format!("data:application/pdf;base64,{data}"),
+                inline_image: false,
+            }
+        }
+    }
+}
+
+/// Best-effort MIME-to-extension mapping for user-uploaded images.
+/// Falls back to `png` for unknown types so the browser at least has
+/// something to save under when the user clicks the attachment.
+fn image_ext_for(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/heic" => "heic",
+        _ => "png",
     }
 }
 
