@@ -44,7 +44,17 @@ impl Default for ScanOptions {
 /// problems are recorded in `warnings` / `unsupported`; the outer
 /// `Err` is reserved for I/O on `root` itself.
 pub async fn scan(root: &Path, opts: &ScanOptions, client: &OsvClient) -> Result<ScanReport> {
-    let manifests = discover(root, opts)?;
+    let discovered = discover(root, opts)?;
+    // Drop constraint-only manifests when an authoritative lockfile of
+    // the same ecosystem is in the scan.  A Cargo workspace's root
+    // `Cargo.lock` pins every member's deps; parsing the members'
+    // `Cargo.toml` in addition is not only redundant, it's actively
+    // wrong — version strings like `"1"` or `"0.3"` are ranges, not
+    // exact versions, and OSV returns "every advisory that ever
+    // matched tokio 1.x" when queried with `"1"`.  The UI then shows
+    // those as unknown-severity false positives alongside the real
+    // lockfile scan.  Same pattern for npm/yarn/pnpm.
+    let manifests = filter_redundant_manifests(discovered);
     let mut report = ScanReport::default();
     let mut all_deps: Vec<Dependency> = Vec::new();
 
@@ -85,9 +95,14 @@ pub async fn scan(root: &Path, opts: &ScanOptions, client: &OsvClient) -> Result
     append_lockfile_warnings(&mut report);
 
     report.deps_total = all_deps.len();
+    // Belt-and-braces: refuse to query OSV with non-exact version
+    // strings.  A `version: "1"` from a stray constraint-only
+    // manifest would otherwise trigger "match everything" on the
+    // OSV side and produce unknown-severity false positives.  Real
+    // lockfile versions (`1.52.1`, `0.3.32`, …) pass this gate.
     let queryable: Vec<&Dependency> = all_deps
         .iter()
-        .filter(|d| d.purl.is_some() || d.version.is_some())
+        .filter(|d| d.purl.is_some() || d.version.as_deref().is_some_and(is_exact_version))
         .collect();
     report.deps_queried = queryable.len();
     if queryable.is_empty() {
@@ -174,6 +189,81 @@ fn append_lockfile_warnings(report: &mut ScanReport) {
     }
 }
 
+/// Drop constraint-only manifests when an authoritative lockfile of
+/// the same ecosystem is in the discovered set.  Rationale:
+///
+/// - Cargo's lockfile is workspace-wide.  The root `Cargo.lock`
+///   already has every member's resolved version; scanning the
+///   member `Cargo.toml`s adds redundant constraint strings
+///   (`"1"`, `"0.3"`) that OSV interprets as wildcards.
+/// - npm / yarn / pnpm follow the same pattern: one lockfile covers
+///   the workspace; `package.json` holds semver ranges, not pins.
+///
+/// We can't suppress the entries entirely — the agent-visible tool
+/// output lists `scanned_files`, and dropping the constraint manifest
+/// from that list would be a silent change.  Instead we skip the
+/// parse (no deps contributed) and leave a trace via the existing
+/// `append_lockfile_warnings` summary.
+fn filter_redundant_manifests(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let name_of = |p: &Path| -> Option<String> {
+        p.file_name().and_then(|n| n.to_str()).map(|s| s.to_ascii_lowercase())
+    };
+    let has = |target: &str| -> bool {
+        paths.iter().any(|p| name_of(p).is_some_and(|n| n == target))
+    };
+    let cargo_lock = has("cargo.lock");
+    let npm_lock =
+        has("package-lock.json") || has("yarn.lock") || has("pnpm-lock.yaml");
+    paths
+        .into_iter()
+        .filter(|p| {
+            let Some(name) = name_of(p) else { return true };
+            // Cargo.toml without authoritative lockfile stays; with
+            // one, it's redundant and gets dropped.
+            if name == "cargo.toml" && cargo_lock {
+                return false;
+            }
+            if name == "package.json" && npm_lock {
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
+/// True iff `v` is an exact semver-looking version (`1.52.1`,
+/// `0.3.32+git.abc`, `2.0.0-alpha.1`).  Rejects range / prefix
+/// specifiers that are legal in Cargo.toml / package.json but not in
+/// OSV's `version` parameter: `"1"`, `"^1.2"`, `">=0.3"`, `"~1"`,
+/// `"1.*"`, `"1 || 2"`, the empty string, etc.  Only used as a
+/// defensive gate before sending to OSV — the `filter_redundant_manifests`
+/// step should already have removed the usual source of non-exact
+/// versions (constraint manifests in lockfile-covered trees).
+fn is_exact_version(v: &str) -> bool {
+    let v = v.trim();
+    if v.is_empty() {
+        return false;
+    }
+    // Any range operator or wildcard → not exact.
+    if v.contains(|c: char| matches!(c, '^' | '~' | '*' | '<' | '>' | '=' | '|' | ' ' | ','))
+    {
+        return false;
+    }
+    // Must have at least `MAJOR.MINOR.PATCH`.  Semver's pre-release
+    // (`-alpha`) and build-metadata (`+git.abc`) suffixes are fine —
+    // we only require three numeric leading components separated
+    // by `.`.
+    let core_end = v
+        .find(|c: char| c == '-' || c == '+')
+        .unwrap_or(v.len());
+    let core = &v[..core_end];
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() < 3 {
+        return false;
+    }
+    parts.iter().take(3).all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
 fn discover(root: &Path, opts: &ScanOptions) -> Result<Vec<PathBuf>> {
     let meta = std::fs::metadata(root).map_err(|e| {
         DysonError::tool("dependency_scan", format!("stat {}: {e}", root.display()))
@@ -252,6 +342,66 @@ mod tests {
         let mut r = report_with(&["package.json", "package-lock.json"]);
         append_lockfile_warnings(&mut r);
         assert!(r.warnings.is_empty(), "no-op when manifest absent: {:?}", r.warnings);
+    }
+
+    #[test]
+    fn redundant_cargo_toml_is_dropped_when_workspace_lockfile_present() {
+        // Regression: the false-positive dump where constraint
+        // strings like "tokio 1" / "futures-util 0.3" got flagged
+        // with unknown severity because OSV matched everything when
+        // handed a non-exact version.  With Cargo.lock present,
+        // member Cargo.tomls must not be scanned.
+        let paths = vec![
+            PathBuf::from("Cargo.lock"),
+            PathBuf::from("Cargo.toml"),
+            PathBuf::from("crates/a/Cargo.toml"),
+            PathBuf::from("crates/b/Cargo.toml"),
+        ];
+        let kept = filter_redundant_manifests(paths);
+        assert_eq!(kept, vec![PathBuf::from("Cargo.lock")]);
+    }
+
+    #[test]
+    fn cargo_toml_kept_when_no_lockfile() {
+        // If the workspace truly has no lockfile, the constraint
+        // manifest is the only input we have — must still scan it
+        // (and emit the warning in `append_lockfile_warnings`).
+        let paths = vec![PathBuf::from("Cargo.toml")];
+        let kept = filter_redundant_manifests(paths.clone());
+        assert_eq!(kept, paths);
+    }
+
+    #[test]
+    fn npm_lockfile_any_flavour_supersedes_package_json() {
+        for lock in ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"] {
+            let kept = filter_redundant_manifests(vec![
+                PathBuf::from(lock),
+                PathBuf::from("package.json"),
+                PathBuf::from("packages/foo/package.json"),
+            ]);
+            assert_eq!(kept, vec![PathBuf::from(lock)], "lock={lock}");
+        }
+    }
+
+    #[test]
+    fn exact_version_gate_rejects_constraint_strings() {
+        // Anything a user would write in a Cargo.toml / package.json
+        // that isn't a fully-resolved pin must be rejected so OSV
+        // doesn't return "every advisory that ever mentioned this
+        // package" as a match.
+        for bad in [
+            "", "1", "1.0", "^1.2", "~1.2.3", ">=1.0,<2.0", "1.2.*",
+            "1.0 || 2.0", " ", "latest",
+        ] {
+            assert!(!is_exact_version(bad), "must reject: {bad:?}");
+        }
+        // Real lockfile-resolved versions.
+        for good in [
+            "1.52.1", "0.3.32", "2.0.0-alpha.1", "1.0.0+git.abcdef",
+            "0.0.1", "10.0.0",
+        ] {
+            assert!(is_exact_version(good), "must accept: {good:?}");
+        }
     }
 
     #[test]
