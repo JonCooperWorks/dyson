@@ -600,6 +600,7 @@ function ArtefactReader({ id }) {
   const [body, setBody] = vUS('');
   const [meta, setMeta] = vUS(null);
   const [err, setErr]  = vUS('');
+  const [copied, setCopied] = vUS(false);
 
   vUE(() => {
     if (!id || !window.DysonLive) { setBody(''); setMeta(null); setErr(''); return; }
@@ -652,10 +653,27 @@ function ArtefactReader({ id }) {
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(u);
   };
-  const copy = () => {
-    if (!navigator.clipboard) return;
+  // Clipboard API requires a secure context — on HTTP (Tailscale IP,
+  // local LAN) `navigator.clipboard` is undefined, so fall back to the
+  // hidden-textarea + execCommand dance before giving up.
+  const copy = async () => {
     const text = isImage ? imageUrl : body;
-    navigator.clipboard.writeText(text);
+    if (!text) return;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch (_) { /* clipboard denied — swallow */ }
   };
 
   return (
@@ -667,7 +685,7 @@ function ArtefactReader({ id }) {
         {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
         <span style={{flex:1}}/>
         <button className="btn sm ghost" onClick={copy} disabled={isImage ? !imageUrl : !body}>
-          {isImage ? 'copy url' : 'copy'}
+          {copied ? 'copied' : (isImage ? 'copy url' : 'copy')}
         </button>
         <button className="btn sm primary" onClick={download} disabled={isImage ? !imageUrl : !body}>
           {isImage ? 'download image' : 'download .md'}
