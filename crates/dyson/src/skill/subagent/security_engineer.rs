@@ -38,7 +38,13 @@ pub fn security_engineer_config() -> OrchestratorConfig {
              security-sensitive changes.",
         system_prompt: include_str!("prompts/security_engineer.md"),
         direct_tool_names: DIRECT_TOOLS,
-        max_iterations: 150,
+        // Capped at 80 to bound *context* consumption, not just turn count:
+        // every tool result stays in the transcript, so an unbounded iteration
+        // budget pushes the subagent past the ~200k-token window and yields
+        // a 400 error (or, worse, garbage output from a truncated request).
+        // 80 turns is enough for a focused review of one module/crate; broader
+        // reviews should be split across multiple invocations with scoped paths.
+        max_iterations: 80,
         max_tokens: 8192,
         injects_protocol: Some(include_str!("prompts/security_engineer_protocol.md")),
         // Only the security_engineer wants lang/framework vuln sheets;
