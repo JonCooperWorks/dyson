@@ -528,6 +528,44 @@ async fn post_model_returns_zero_swapped_when_no_agents_loaded() {
 }
 
 #[tokio::test]
+async fn post_model_surfaces_choice_in_providers_listing() {
+    // Regression: the bug was that web's model switch evaporated the
+    // next time an agent was built — `/api/providers` reflected the
+    // startup setting, not the operator's most recent choice.  After
+    // `POST /api/model`, the active provider/model in the listing
+    // must match what was just set.
+    let r = rig().await;
+
+    // Pick a non-default model from the provider's configured set.
+    let before = body_json(get(&format!("{}/api/providers", r.base)).await).await;
+    let provider_id = before.as_array().unwrap()[0]["id"].as_str().unwrap().to_string();
+    let models = before.as_array().unwrap()[0]["models"].as_array().unwrap().clone();
+    assert!(models.len() >= 2, "fixture provider must list >=2 models for this test: {models:?}");
+    let current = before.as_array().unwrap()[0]["active_model"].as_str().unwrap().to_string();
+    let switch_to = models
+        .iter()
+        .filter_map(|v| v.as_str())
+        .find(|m| *m != current)
+        .expect("another model exists")
+        .to_string();
+
+    let resp = body_json(post_json(
+        &format!("{}/api/model", r.base),
+        &serde_json::json!({ "provider": provider_id, "model": switch_to }),
+    ).await).await;
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["model"], switch_to);
+
+    // Providers listing must now report the switched model as active —
+    // this is what the web UI reads on each poll and what new chats
+    // get wired to via the runtime override applied in `post_turn`.
+    let after = body_json(get(&format!("{}/api/providers", r.base)).await).await;
+    let active = &after.as_array().unwrap()[0];
+    assert_eq!(active["active"], true);
+    assert_eq!(active["active_model"], switch_to, "providers listing must reflect the switch");
+}
+
+#[tokio::test]
 async fn post_model_targets_specific_chat_404_when_unknown() {
     let r = rig().await;
     let resp = post_json(

@@ -709,6 +709,21 @@ pub struct HttpState {
     /// Insertion order so the UI can render a stable list.
     order: Mutex<Vec<String>>,
     next_id: std::sync::atomic::AtomicU64,
+    /// Path to `dyson.json` resolved from `--config` / default at
+    /// startup.  `None` when Dyson was launched without a config on
+    /// disk (in-memory-only scenario).  Used by `post_model` to
+    /// persist the operator's model choice across restarts — Telegram
+    /// already does this, and without the HTTP side participating the
+    /// web UI's choice got silently reverted the next time the
+    /// process rebuilt an agent from settings.
+    config_path: Option<PathBuf>,
+    /// In-memory override for `(provider, model)` applied to any
+    /// agent built after `post_model` has run — `state.settings` is a
+    /// frozen snapshot from startup, so without this override a new
+    /// conversation (and any first-use agent build) would reuse the
+    /// startup model.  Cleared on process restart — the persisted
+    /// `dyson.json` write is what carries the choice across restarts.
+    runtime_model: std::sync::Mutex<Option<(String, String)>>,
 }
 
 /// Scan the chat directory (files + archives + artefact metadata) for
@@ -754,6 +769,7 @@ impl HttpState {
         history: Option<Arc<dyn ChatHistory>>,
         feedback: Option<Arc<FeedbackStore>>,
         auth: Arc<dyn Auth>,
+        config_path: Option<PathBuf>,
     ) -> Self {
         // Piggy-back on the ChatHistory directory so artefacts / files /
         // chats / ratings all live in one place on disk.  Memory-only
@@ -792,6 +808,8 @@ impl HttpState {
             chats: Mutex::new(HashMap::new()),
             order: Mutex::new(Vec::new()),
             next_id: std::sync::atomic::AtomicU64::new(chat_next),
+            config_path,
+            runtime_model: std::sync::Mutex::new(None),
         }
     }
 
@@ -964,6 +982,21 @@ impl Controller for HttpController {
             None
         };
 
+        // Resolve the dyson.json path the operator started with so
+        // `post_model` can persist the web UI's choice the same way
+        // Telegram's /model command does.  Matches the resolution
+        // used by `create_hot_reloader` (which HTTP doesn't itself
+        // use since it has no per-process agent cache to flush, but
+        // the path is still the right one to write back to).
+        let config_path = std::env::args()
+            .skip_while(|a| a != "--config" && a != "-c")
+            .nth(1)
+            .map(PathBuf::from)
+            .or_else(|| {
+                let p = PathBuf::from("dyson.json");
+                if p.exists() { Some(p) } else { None }
+            });
+
         let state = Arc::new(HttpState::new(
             settings.clone(),
             Arc::clone(registry),
@@ -971,6 +1004,7 @@ impl Controller for HttpController {
             history.clone(),
             feedback.clone(),
             Arc::clone(&self.auth),
+            config_path,
         ));
 
         // Hydrate the chat list from disk so existing conversations show
@@ -1085,7 +1119,7 @@ pub mod test_helpers {
         auth: Arc<dyn Auth>,
     ) -> Arc<HttpState> {
         Arc::new(HttpState::new(
-            settings, registry, webroot, history, feedback, auth,
+            settings, registry, webroot, history, feedback, auth, None,
         ))
     }
 
@@ -1680,7 +1714,24 @@ async fn post_turn(
     let cancel = CancellationToken::new();
     *handle.cancel.lock().await = Some(cancel.clone());
 
-    let settings = state.settings.clone();
+    // Apply the runtime model override before handing settings to
+    // `build_agent` so a brand-new chat picks up the operator's last
+    // model choice instead of the startup default.  `runtime_model`
+    // is set by `post_model`; when unset this is a no-op clone.
+    let mut settings = state.settings.clone();
+    let override_pm: Option<(String, String)> = match state.runtime_model.lock() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    };
+    let override_provider_name = if let Some((prov, model)) = override_pm {
+        if let Some(pc) = settings.providers.get(&prov) {
+            settings.agent.provider = pc.provider_type.clone();
+            settings.agent.model = model;
+        }
+        Some(prov)
+    } else {
+        None
+    };
     let registry = Arc::clone(&state.registry);
     let history = state.history.clone();
     let prompt = body.prompt;
@@ -1711,7 +1762,13 @@ async fn post_turn(
         // carries across sessions.
         let mut guard = chat_handle.agent.lock().await;
         if guard.is_none() {
-            let client = registry.get_default();
+            // Prefer the runtime-selected provider's client when one
+            // is set — falls back to the registry default otherwise
+            // (unknown provider name or no override set).
+            let client = match override_provider_name.as_deref() {
+                Some(p) => registry.get(p).unwrap_or_else(|_| registry.get_default()),
+                None => registry.get_default(),
+            };
             match build_agent(&settings, None, AgentMode::Private, client, &registry, None).await {
                 Ok(mut a) => {
                     if let Some(h) = history.as_ref() {
@@ -1892,17 +1949,31 @@ fn format_sse(evt: &SseEvent) -> String {
 // ---------------------------------------------------------------------------
 
 fn list_providers(state: &HttpState) -> Resp {
-    // Sort the active provider first so /api/providers[0] is the source of
-    // truth for the UI's "active model" label.
-    let active = super::active_provider_name(&state.settings);
+    // The startup settings name an active provider + model, but the
+    // operator may have switched since then via `POST /api/model` —
+    // let the runtime override win so the UI's active-model label
+    // matches what actually runs on the next turn.
+    let runtime = state
+        .runtime_model
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    let active_name = runtime
+        .as_ref()
+        .map(|(p, _)| p.clone())
+        .or_else(|| super::active_provider_name(&state.settings));
+    let active_model_override = runtime.as_ref().map(|(_, m)| m.clone());
+
     let mut dtos: Vec<ProviderDto> = state
         .settings
         .providers
         .iter()
         .map(|(id, pc)| {
-            let is_active = active.as_deref() == Some(id.as_str());
+            let is_active = active_name.as_deref() == Some(id.as_str());
             let active_model = if is_active {
-                state.settings.agent.model.clone()
+                active_model_override
+                    .clone()
+                    .unwrap_or_else(|| state.settings.agent.model.clone())
             } else {
                 pc.models.first().cloned().unwrap_or_default()
             };
@@ -2624,6 +2695,25 @@ async fn post_model(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) 
             swapped += 1;
         }
     }
+
+    // Persist to dyson.json so the choice survives a restart and a
+    // new conversation picks it up as the default.  Before this
+    // fix the web UI silently lost its model switch the next time
+    // any code rebuilt an agent from `Settings` — Telegram's
+    // `/model` command already writes through the same helper, so
+    // without this HTTP the two controllers fought each other.
+    if let Some(cp) = state.config_path.as_ref() {
+        crate::config::loader::persist_model_selection(cp, &body.provider, &model);
+    }
+    // In-memory override so the *next* agent this process builds
+    // (new chat, first-use hydration, etc.) also picks up the
+    // choice without needing a restart.  `state.settings` is
+    // frozen from startup; without this, post_model would only
+    // affect already-running agents.
+    if let Ok(mut slot) = state.runtime_model.lock() {
+        *slot = Some((body.provider.clone(), model.clone()));
+    }
+
     json_ok(&serde_json::json!({
         "ok": true,
         "provider": body.provider,
