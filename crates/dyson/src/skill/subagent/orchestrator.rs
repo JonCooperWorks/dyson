@@ -338,9 +338,18 @@ impl Tool for OrchestratorTool {
             out.checkpoints = merged;
         }
 
+        // Programmatic artefact emission: ANY successful orchestrator
+        // run with non-empty output produces an artefact when the config
+        // opts in.  We deliberately do NOT gate on output shape — a
+        // prior `looks_like_report` heuristic (>500 chars, leading `#`)
+        // caused silent data loss when a weaker model returned an
+        // answer that didn't hit those markers, producing a run with a
+        // security review in `ToolOutput.content` but no artefact in
+        // the UI.  The user-visible contract is: opt-in configs always
+        // emit; emptiness or error is the only suppression.
         if let Some(kind) = self.config.emit_artefact
             && !out.is_error
-            && looks_like_report(&out.content)
+            && !out.content.trim().is_empty()
         {
             let finished_at = std::time::SystemTime::now();
             let finished_epoch = unix_seconds(finished_at);
@@ -456,15 +465,6 @@ fn unix_seconds(t: std::time::SystemTime) -> u64 {
     t.duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Quick sanity check that the child actually produced a report-shaped
-/// output — guards against empty/truncated/stub emissions being
-/// promoted to artefacts.  Mirrors the "first char is `#`" rule from
-/// the security_engineer prompt.
-fn looks_like_report(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    trimmed.len() > 500 && trimmed.starts_with('#')
 }
 
 /// Derive a short target name from the scoped path (preferred) or the

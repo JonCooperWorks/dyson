@@ -47,6 +47,39 @@ use crate::workspace::WorkspaceHandle;
 /// An `Output` that accumulates a child agent's streamed text into a
 /// buffer.  Tool events are logged at `debug` but never captured —
 /// only the final text (and side-channel artefacts) reach the parent.
+///
+/// ## LLM boundary vs. UI sink — design note
+///
+/// Two distinct things are called "the parent": the parent's **LLM
+/// conversation** (what the parent model sees in its next turn) and
+/// the parent's **UI stream** (what the browser / Telegram client
+/// renders).  These are NOT the same channel, and the distinction
+/// matters for context budget and privacy.
+///
+/// - **LLM boundary** (enforced here): only the child's final text and
+///   its buffered artefacts flow up.  The child's intermediate tool
+///   calls, tool results, thinking fragments, and LLM errors are
+///   swallowed deliberately — injecting them into the parent's
+///   conversation would blow past the context window after two or
+///   three subagent calls and leak implementation noise into the
+///   parent's reasoning.  `tool_use_start` / `tool_result` / `error`
+///   here are debug-log only.  Do not ever make them append to
+///   `self.text` — that text is what the parent LLM reads back.
+///
+/// - **UI sink** (TODO, not wired yet): rendering a subagent's nested
+///   tool calls inside a collapsible card under the subagent chip,
+///   plus listing running subagents in the Activity tab, requires a
+///   second event path that bypasses `CaptureOutput` entirely and
+///   reaches the HTTP controller's per-chat broadcast channel.  That
+///   channel drives SSE and never flows into any LLM prompt, so
+///   forwarding intermediate events through it does not violate the
+///   boundary above.  Implementation plan: thread an optional
+///   `Arc<tokio::sync::broadcast::Sender<UiEvent>>` into `ChildSpawn`,
+///   have `CaptureOutput` tee `tool_use_start` / `tool_result` /
+///   `send_file` / `send_artefact` to it tagged with the spawning
+///   tool's `tool_use_id` (the "parent_tool_id" on the frontend), and
+///   grow a new `SseEvent::SubagentStart` / `SubagentEnd` pair for the
+///   card's lifecycle.  The LLM-facing code path stays untouched.
 #[derive(Default)]
 pub struct CaptureOutput {
     text: String,

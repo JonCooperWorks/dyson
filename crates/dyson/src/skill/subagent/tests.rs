@@ -1100,6 +1100,83 @@ async fn orchestrator_runs_child_and_returns_result() {
     assert_eq!(result.content, "Security review complete. No critical issues found.");
 }
 
+// Programmatic artefact emission regression test.  Prior to this change,
+// `looks_like_report` (>500 chars + leading `#`) silently suppressed
+// artefact emission when a weaker model produced a short or
+// unformatted reply, so the UI's Artefacts tab went empty even on a
+// successful review.  The contract is now: if `emit_artefact` is set
+// and the run didn't error and content is non-empty, emit — regardless
+// of shape.
+#[tokio::test]
+async fn orchestrator_emits_artefact_for_non_report_shaped_output() {
+    // Short, non-markdown reply — would have failed the old heuristic
+    // (48 chars, no leading `#`).  Still must produce an artefact.
+    let llm = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("Security review complete. No critical issues found.".into()),
+        StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        },
+    ]]);
+
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+        vec![],
+    );
+
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({ "task": "Review the module" });
+    let result = tool.run(&input, &ctx).await.unwrap();
+
+    assert!(!result.is_error);
+    assert_eq!(
+        result.artefacts.len(),
+        1,
+        "expected 1 artefact from short non-report reply, got {}",
+        result.artefacts.len(),
+    );
+    let art = &result.artefacts[0];
+    assert!(matches!(art.kind, crate::message::ArtefactKind::SecurityReview));
+    assert_eq!(art.content, "Security review complete. No critical issues found.");
+    assert!(art.title.starts_with("Security review: "));
+}
+
+// Whitespace-only content must NOT produce an artefact — the single
+// remaining gate (empty after `trim()`) prevents stashing blank
+// reports in the Artefacts tab when a model returns a pad-only reply.
+#[tokio::test]
+async fn orchestrator_suppresses_artefact_when_output_is_whitespace_only() {
+    let llm = MockLlm::new(vec![vec![
+        StreamEvent::TextDelta("   \n  \t  \n".into()),
+        StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        },
+    ]]);
+
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+        vec![],
+    );
+
+    let ctx = ToolContext::from_cwd().unwrap();
+    let input = serde_json::json!({ "task": "Review the module" });
+    let result = tool.run(&input, &ctx).await.unwrap();
+    assert!(result.artefacts.is_empty(), "whitespace-only content should not emit");
+}
+
 #[test]
 fn orchestrator_with_custom_config() {
     // Demonstrate composability: any role can be an orchestrator.
