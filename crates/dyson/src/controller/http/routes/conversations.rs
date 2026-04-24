@@ -78,7 +78,11 @@ pub(super) async fn list(state: &HttpState) -> Resp {
     // aged out of the FIFO cache.
     let mut with_artefacts: std::collections::HashSet<String> =
         std::collections::HashSet::new();
-    if let Ok(store) = state.artefacts.lock() {
+    {
+        let store = match state.artefacts.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
         for entry in store.items.values() {
             with_artefacts.insert(entry.chat_id.clone());
         }

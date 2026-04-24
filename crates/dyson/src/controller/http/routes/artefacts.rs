@@ -51,9 +51,12 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
                         e.title.clone(),
                         e.chat_id.clone(),
                     );
-                    if let Ok(mut s) = state.artefacts.lock() {
-                        s.put(id.to_string(), e);
-                    }
+                    let mut s = match state.artefacts.lock() {
+                        Ok(s) => s,
+                        Err(p) => p.into_inner(),
+                    };
+                    s.put(id.to_string(), e);
+                    drop(s);
                     out
                 }
                 None => return not_found(),

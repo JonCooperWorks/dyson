@@ -44,11 +44,16 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
                 Some(e) => {
                     // Warm the cache so subsequent hits don't re-read
                     // disk for the same id (browser preview, repeated
-                    // downloads, etc.).
+                    // downloads, etc.).  Recover from poisoning so a
+                    // panicked previous holder doesn't silently disable
+                    // the cache.
                     let out = (e.bytes.clone(), e.mime.clone(), e.name.clone());
-                    if let Ok(mut s) = state.files.lock() {
-                        s.put(id.to_string(), e);
-                    }
+                    let mut s = match state.files.lock() {
+                        Ok(s) => s,
+                        Err(p) => p.into_inner(),
+                    };
+                    s.put(id.to_string(), e);
+                    drop(s);
                     out
                 }
                 None => return not_found(),

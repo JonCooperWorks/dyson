@@ -154,9 +154,14 @@ impl Output for SseOutput {
         }
         // std::sync::Mutex — blocking but the critical section is a
         // HashMap insert + a Vec push.  Negligible contention.
-        if let Ok(mut s) = self.files.lock() {
-            s.put(id.clone(), entry);
-        }
+        // Recover from poisoning so a panicked previous holder doesn't
+        // silently disable the cache for the rest of the process.
+        let mut s = match self.files.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        s.put(id.clone(), entry);
+        drop(s);
         self.send(SseEvent::File {
             name: name.clone(),
             mime_type: mime.clone(),
@@ -228,9 +233,12 @@ impl Output for SseOutput {
         if let Some(dir) = self.data_dir.as_ref() {
             ArtefactStore::persist_static(dir, &id, &entry);
         }
-        if let Ok(mut s) = self.artefacts.lock() {
-            s.put(id.clone(), entry);
-        }
+        let mut s = match self.artefacts.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        s.put(id.clone(), entry);
+        drop(s);
         self.send(SseEvent::Artefact {
             id,
             kind: artefact.kind,
@@ -341,5 +349,47 @@ mod tests {
             }
             _ => panic!("expected fallback text event"),
         }
+    }
+
+    #[test]
+    fn send_artefact_recovers_from_poisoned_artefact_lock() {
+        // Regression: the cache write used to be `if let Ok(mut s) =
+        // self.artefacts.lock() { s.put(...) }`, which silently dropped
+        // the insert if the lock was poisoned.  After a single panic-
+        // while-holding-lock anywhere in the process, every subsequent
+        // emission would be invisible to the in-memory index, even
+        // though the disk write still happened.
+        //
+        // Drive the failure shape directly: poison the lock by panicking
+        // in a thread that holds it, then verify a subsequent
+        // send_artefact still lands in the cache.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut out, _rx) = fixture(Some(dir.path().to_path_buf()));
+        // Poison: spawn a thread that locks the artefacts mutex and
+        // panics, then join it.
+        let artefacts = out.artefacts.clone();
+        let h = std::thread::spawn(move || {
+            let _guard = artefacts.lock().unwrap();
+            panic!("intentional poisoning");
+        });
+        let _ = h.join();
+        assert!(out.artefacts.is_poisoned(), "lock must be poisoned");
+
+        // Send an artefact through the now-poisoned mutex.  Must not
+        // panic, must end up in the cache.
+        let art = Artefact {
+            id: String::new(),
+            kind: ArtefactKind::SecurityReview,
+            title: "post-panic.md".to_string(),
+            content: "still works".to_string(),
+            mime_type: "text/markdown".to_string(),
+            metadata: None,
+        };
+        out.send_artefact(&art).unwrap();
+        let s = match out.artefacts.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        assert_eq!(s.items.len(), 1, "send_artefact must land despite poisoned lock");
     }
 }

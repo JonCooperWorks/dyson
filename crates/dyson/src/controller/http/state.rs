@@ -269,11 +269,17 @@ impl HttpState {
     /// `tests/http_controller.rs::agent_artefact_round_trips_*`).
     #[doc(hidden)]
     pub fn artefacts_for_test(&self, id: &str) -> Option<String> {
-        if let Ok(s) = self.artefacts.lock()
-            && let Some(entry) = s.items.get(id)
-        {
+        // Recover from poisoning: a previous holder that panicked still
+        // left a valid `ArtefactStore` behind.  Skipping on Err would
+        // silently disable this accessor for the rest of the process.
+        let s = match self.artefacts.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(entry) = s.items.get(id) {
             return Some(entry.content.clone());
         }
+        drop(s);
         // Fall through to disk — simulates the first hit after a
         // restart where the in-memory index may not be populated.
         self.data_dir
@@ -288,11 +294,14 @@ impl HttpState {
     /// restarts.
     #[doc(hidden)]
     pub fn file_bytes_for_test(&self, id: &str) -> Option<Vec<u8>> {
-        if let Ok(s) = self.files.lock()
-            && let Some(entry) = s.items.get(id)
-        {
+        let s = match self.files.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(entry) = s.items.get(id) {
             return Some(entry.bytes.clone());
         }
+        drop(s);
         self.data_dir
             .as_ref()
             .and_then(|d| FileStore::load_from_disk(d, id))
@@ -415,9 +424,16 @@ impl HttpState {
         if let Some(dir) = self.data_dir.as_ref() {
             FileStore::persist_static(dir, &file_id, &file_entry);
         }
-        if let Ok(mut s) = self.files.lock() {
-            s.put(file_id.clone(), file_entry);
-        }
+        // Recover from poisoning so a previous panicked holder doesn't
+        // permanently stop the cache from accepting new entries (the
+        // disk write above already happened, so a silent skip on Err
+        // would orphan the bytes for in-process readers until restart).
+        let mut s = match self.files.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        s.put(file_id.clone(), file_entry);
+        drop(s);
 
         let kind = if inline_image {
             crate::message::ArtefactKind::Image
@@ -455,9 +471,12 @@ impl HttpState {
         if let Some(dir) = self.data_dir.as_ref() {
             ArtefactStore::persist_static(dir, &artefact_id, &entry);
         }
-        if let Ok(mut s) = self.artefacts.lock() {
-            s.put(artefact_id.clone(), entry);
-        }
+        let mut s = match self.artefacts.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        s.put(artefact_id.clone(), entry);
+        drop(s);
 
         // Best-effort live SSE broadcast: if a browser is currently
         // subscribed to this chat, it sees the new file + artefact

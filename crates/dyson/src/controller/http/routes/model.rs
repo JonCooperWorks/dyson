@@ -71,9 +71,17 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: Arc<HttpSta
     // choice without needing a restart.  `state.settings` is
     // frozen from startup; without this, post_model would only
     // affect already-running agents.
-    if let Ok(mut slot) = state.runtime_model.lock() {
-        *slot = Some((body.provider.clone(), model.clone()));
-    }
+    //
+    // Recover from poisoning — silently skipping the assignment
+    // would mean the operator's model choice is dropped on the
+    // floor for the rest of the process if any prior caller
+    // panicked.
+    let mut slot = match state.runtime_model.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    *slot = Some((body.provider.clone(), model.clone()));
+    drop(slot);
 
     json_ok(&serde_json::json!({
         "ok": true,
