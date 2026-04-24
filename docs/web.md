@@ -28,6 +28,9 @@ flowchart LR
     UI["React app<br>Vite-built bundle"]
   end
 
+  TGUser(("Telegram user"))
+  TGAPI["Telegram Bot API<br>api.telegram.org"]
+
   subgraph Dyson["dyson process"]
     HC["HttpController<br>hyper http1"]
     TG[TelegramController]
@@ -42,6 +45,9 @@ flowchart LR
   UI -- "GET /, /assets/*" --> HC
   UI -- "JSON /api/*" --> HC
   HC -. "SSE /events" .-> UI
+
+  TGUser <-- "chat messages" --> TGAPI
+  TGAPI <-- "long-poll getUpdates<br>sendMessage" --> TG
 
   HC --> AG
   TG --> AG
