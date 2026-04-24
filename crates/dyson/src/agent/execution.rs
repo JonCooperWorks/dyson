@@ -122,16 +122,6 @@ impl Agent {
         }
     }
 
-    /// Check if an LLM error is retryable (rate limit, overloaded, network).
-    pub(super) const fn is_retryable(err: &DysonError) -> bool {
-        matches!(
-            err,
-            DysonError::LlmRateLimit(_)
-                | DysonError::LlmOverloaded(_)
-                | DysonError::Http(_)
-        )
-    }
-
     /// Process a tool execution result: render to output, format for the LLM,
     /// send attached files, and append the tool_result message to history.
     fn handle_tool_result(

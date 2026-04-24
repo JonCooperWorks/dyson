@@ -269,7 +269,8 @@ pub(crate) fn create_client(
         workspace,
         dangerous_no_sandbox,
     };
-    (entry.create_client)(&config)
+    let inner = (entry.create_client)(&config);
+    Box::new(RetryingLlmClient::new(inner, settings.max_retries))
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +483,108 @@ pub(crate) async fn map_http_error(
             DysonError::LlmOverloaded(format!("{provider} API returned {status}: {body}"))
         }
         _ => DysonError::Llm(format!("{provider} API returned {status}: {body}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Retry decorator — transparent exponential backoff for every LlmClient.
+//
+// Every concrete client goes through `create_client()`, which wraps it in
+// `RetryingLlmClient`.  Call sites (agent loop, compaction, reflection,
+// quick_response, learning synthesis) all see retries automatically —
+// previously only the main agent loop retried, so a 429 during compaction
+// or reflection would abort that operation after a single attempt.
+// ---------------------------------------------------------------------------
+
+/// Classify an LLM error as worth retrying.
+///
+/// Rate limits, provider-overloaded responses, and transport errors are
+/// transient.  Everything else — auth failures, malformed requests,
+/// tool_use / vision rejections — will fail the same way on retry.
+pub fn is_retryable(err: &DysonError) -> bool {
+    matches!(
+        err,
+        DysonError::LlmRateLimit(_) | DysonError::LlmOverloaded(_) | DysonError::Http(_)
+    )
+}
+
+/// Wraps an `LlmClient` with exponential-backoff retry for retryable errors.
+///
+/// Backoff schedule: base 1s doubled per attempt, with up to 50% jitter
+/// (1s → 2s → 4s → 8s → 16s...).  `max_retries` counts retries *after* the
+/// initial attempt; 0 disables retry.
+pub(crate) struct RetryingLlmClient {
+    inner: Box<dyn LlmClient>,
+    max_retries: usize,
+    base_delay_ms: u64,
+}
+
+impl RetryingLlmClient {
+    pub fn new(inner: Box<dyn LlmClient>, max_retries: usize) -> Self {
+        Self {
+            inner,
+            max_retries,
+            base_delay_ms: 1000,
+        }
+    }
+
+    /// Test-only constructor that lets tests run the retry loop without
+    /// waiting seconds for each backoff.
+    #[cfg(test)]
+    fn with_base_delay(
+        inner: Box<dyn LlmClient>,
+        max_retries: usize,
+        base_delay_ms: u64,
+    ) -> Self {
+        Self {
+            inner,
+            max_retries,
+            base_delay_ms,
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClient for RetryingLlmClient {
+    async fn stream(
+        &self,
+        messages: &[Message],
+        system: &str,
+        system_suffix: &str,
+        tools: &[ToolDefinition],
+        config: &CompletionConfig,
+    ) -> Result<StreamResponse> {
+        let mut attempt: usize = 0;
+        loop {
+            match self
+                .inner
+                .stream(messages, system, system_suffix, tools, config)
+                .await
+            {
+                Ok(r) => return Ok(r),
+                Err(e) if attempt < self.max_retries && is_retryable(&e) => {
+                    let base_ms = self
+                        .base_delay_ms
+                        .saturating_mul(1u64 << attempt.min(6));
+                    let jitter_ms = rand::random::<u64>() % (base_ms / 2 + 1);
+                    let delay_ms = base_ms + jitter_ms;
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max = self.max_retries,
+                        delay_ms,
+                        error = %e,
+                        "LLM call failed — backing off before retry"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    fn set_mcp_tools(&self, tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>) {
+        self.inner.set_mcp_tools(tools);
     }
 }
 
@@ -913,5 +1016,131 @@ mod tests {
             }
             other => panic!("expected ToolUseComplete, got: {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // RetryingLlmClient tests
+    // -----------------------------------------------------------------------
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Test-only client that returns a prepared sequence of `Result`s on each
+    /// `stream()` call.  Counts attempts so tests can assert retry behavior.
+    /// `attempts` is an `Arc<AtomicUsize>` so the test can observe the count
+    /// after the client is moved into `RetryingLlmClient`.
+    struct ScriptedClient {
+        results: std::sync::Mutex<Vec<Result<()>>>,
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl ScriptedClient {
+        fn new(results: Vec<Result<()>>) -> (Self, Arc<AtomicUsize>) {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let client = Self {
+                results: std::sync::Mutex::new(results),
+                attempts: Arc::clone(&attempts),
+            };
+            (client, attempts)
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for ScriptedClient {
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _system_suffix: &str,
+            _tools: &[ToolDefinition],
+            _config: &CompletionConfig,
+        ) -> Result<StreamResponse> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let next = self.results.lock().unwrap().remove(0);
+            next.map(|()| StreamResponse {
+                stream: Box::pin(tokio_stream::iter(std::iter::empty())),
+                tool_mode: ToolMode::Execute,
+                input_tokens: None,
+            })
+        }
+    }
+
+    fn empty_config() -> CompletionConfig {
+        CompletionConfig {
+            model: "test".into(),
+            max_tokens: 1,
+            temperature: None,
+            api_tool_injections: vec![],
+        }
+    }
+
+    fn assert_err(r: Result<StreamResponse>) -> DysonError {
+        match r {
+            Ok(_) => panic!("expected Err, got Ok"),
+            Err(e) => e,
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_rate_limit_then_succeeds() {
+        let (scripted, attempts) = ScriptedClient::new(vec![
+            Err(DysonError::LlmRateLimit("429".into())),
+            Err(DysonError::LlmRateLimit("429".into())),
+            Ok(()),
+        ]);
+        let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 3, 1);
+
+        let result = client.stream(&[], "", "", &[], &empty_config()).await;
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn gives_up_after_max_retries() {
+        let (scripted, attempts) = ScriptedClient::new(vec![
+            Err(DysonError::LlmRateLimit("429".into())),
+            Err(DysonError::LlmRateLimit("429".into())),
+            Err(DysonError::LlmRateLimit("429".into())),
+        ]);
+        let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 2, 1);
+
+        let err = assert_err(
+            client
+                .stream(&[], "", "", &[], &empty_config())
+                .await,
+        );
+        assert!(matches!(err, DysonError::LlmRateLimit(_)));
+        // initial + 2 retries = 3 attempts.
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn non_retryable_error_is_not_retried() {
+        let (scripted, attempts) =
+            ScriptedClient::new(vec![Err(DysonError::Llm("auth failed".into()))]);
+        let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 5, 1);
+
+        let err = assert_err(
+            client
+                .stream(&[], "", "", &[], &empty_config())
+                .await,
+        );
+        assert!(matches!(err, DysonError::Llm(_)));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn zero_max_retries_disables_retry() {
+        let (scripted, attempts) =
+            ScriptedClient::new(vec![Err(DysonError::LlmOverloaded("529".into()))]);
+        let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 0, 1);
+
+        let err = assert_err(
+            client
+                .stream(&[], "", "", &[], &empty_config())
+                .await,
+        );
+        assert!(matches!(err, DysonError::LlmOverloaded(_)));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }

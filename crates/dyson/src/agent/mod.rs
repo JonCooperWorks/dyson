@@ -1516,98 +1516,68 @@ impl Agent {
         }
     }
 
-    /// Stream an LLM response with retry/backoff and error recovery.
+    /// Stream an LLM response, invoking controller recovery on failure.
+    ///
+    /// Transient failures (429, overloaded, transport errors) are retried
+    /// *inside* the `LlmClient` by `RetryingLlmClient` with exponential
+    /// backoff — by the time an error reaches this function, the client
+    /// has already exhausted its retries.  All that's left for this layer
+    /// is to ask the controller whether a non-retryable error (e.g. "model
+    /// doesn't support tools") should trigger a `RetryWithoutTools` or
+    /// `RetryWithoutImages` recovery.
     async fn stream_with_retry(
         &mut self,
         skill_fragments: &str,
         recovered_this_turn: &mut bool,
         output: &mut dyn Output,
     ) -> StreamResult {
-        let mut last_err = None;
-        let mut response_opt = None;
-        let mut recovery: Option<LlmRecovery> = None;
+        let tools_for_llm = self.tool_registry.definitions_for_llm();
 
-        for attempt in 0..=self.max_retries {
-            let tools_for_llm = self.tool_registry.definitions_for_llm();
+        let client = match self.client.access() {
+            Ok(c) => c,
+            Err(e) => return StreamResult::Error(e),
+        };
 
-            match self
-                .client
-                .access()
-                .map_err(StreamResult::Error)
-            {
-                Ok(client) => {
-                    match client
-                        .stream(
-                            &self.conversation.messages,
-                            &self.system_prompt,
-                            skill_fragments,
-                            tools_for_llm,
-                            &self.config,
-                        )
-                        .await
-                    {
-                        Ok(s) => {
-                            response_opt = Some(s);
-                            break;
-                        }
-                        Err(e) if attempt < self.max_retries && Self::is_retryable(&e) => {
-                            let base_ms = 1000 * 2u64.pow(attempt as u32);
-                            let jitter_ms = rand::random::<u64>() % (base_ms / 2 + 1);
-                            let delay_ms = base_ms + jitter_ms;
-                            tracing::warn!(
-                                attempt = attempt + 1,
-                                max = self.max_retries,
-                                delay_ms,
-                                error = %e,
-                                "LLM call failed, retrying"
-                            );
-                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                            last_err = Some(e);
-                        }
-                        Err(e) => {
-                            if *recovered_this_turn {
-                                return StreamResult::Error(e);
-                            }
-                            let action = output.on_llm_error(&e);
-                            if action == LlmRecovery::GiveUp {
-                                return StreamResult::Error(e);
-                            }
-                            recovery = Some(action);
-                            break;
-                        }
-                    }
-                }
-                Err(result) => return result,
-            }
+        let err = match client
+            .stream(
+                &self.conversation.messages,
+                &self.system_prompt,
+                skill_fragments,
+                tools_for_llm,
+                &self.config,
+            )
+            .await
+        {
+            Ok(s) => return StreamResult::Response(s),
+            Err(e) => e,
+        };
+
+        if *recovered_this_turn {
+            return StreamResult::Error(err);
+        }
+        let action = output.on_llm_error(&err);
+        if action == LlmRecovery::GiveUp {
+            return StreamResult::Error(err);
         }
 
-        if let Some(action) = recovery {
-            let user_msg = self.pop_last_message();
-            match action {
-                LlmRecovery::RetryWithoutTools => {
-                    tracing::warn!("controller requested retry without tools");
-                    self.disable_tools();
-                    self.strip_tool_history();
-                }
-                LlmRecovery::RetryWithoutImages => {
-                    tracing::warn!("controller requested retry without images");
-                    self.strip_images();
-                }
-                LlmRecovery::GiveUp => unreachable!(),
+        let user_msg = self.pop_last_message();
+        match action {
+            LlmRecovery::RetryWithoutTools => {
+                tracing::warn!("controller requested retry without tools");
+                self.disable_tools();
+                self.strip_tool_history();
             }
-            if let Some(msg) = user_msg {
-                self.conversation.messages.push(msg);
+            LlmRecovery::RetryWithoutImages => {
+                tracing::warn!("controller requested retry without images");
+                self.strip_images();
             }
-            *recovered_this_turn = true;
-            return StreamResult::Recovered;
+            LlmRecovery::GiveUp => unreachable!(),
         }
-
-        match response_opt {
-            Some(r) => StreamResult::Response(r),
-            None => StreamResult::Error(last_err.unwrap_or_else(|| {
-                DysonError::Llm("retries exhausted with no error captured".into())
-            })),
+        if let Some(msg) = user_msg {
+            self.conversation.messages.push(msg);
         }
+        *recovered_this_turn = true;
+        StreamResult::Recovered
     }
 
     /// Log a summary of the assistant response.

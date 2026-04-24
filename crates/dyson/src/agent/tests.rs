@@ -454,18 +454,18 @@ fn token_budget_unlimited_never_fails() {
 #[test]
 fn retryable_error_detection() {
     // Structured retryable variants.
-    assert!(Agent::is_retryable(&DysonError::LlmRateLimit("rate limited".into())));
-    assert!(Agent::is_retryable(&DysonError::LlmOverloaded("overloaded".into())));
+    assert!(crate::llm::is_retryable(&DysonError::LlmRateLimit("rate limited".into())));
+    assert!(crate::llm::is_retryable(&DysonError::LlmOverloaded("overloaded".into())));
 
     // Generic LLM errors are NOT retryable — retryable errors should use
     // the structured variants.
-    assert!(!Agent::is_retryable(&DysonError::Llm(
+    assert!(!crate::llm::is_retryable(&DysonError::Llm(
         "authentication failed".into()
     )));
-    assert!(!Agent::is_retryable(&DysonError::Config(
+    assert!(!crate::llm::is_retryable(&DysonError::Config(
         "bad config".into()
     )));
-    assert!(!Agent::is_retryable(&DysonError::Cancelled));
+    assert!(!crate::llm::is_retryable(&DysonError::Cancelled));
 }
 
 #[tokio::test]
@@ -2062,16 +2062,16 @@ fn build_compaction_prompt_without_previous() {
 
 #[test]
 fn is_retryable_rate_limit() {
-    assert!(Agent::is_retryable(&DysonError::LlmRateLimit("rate limit exceeded".into())));
-    assert!(Agent::is_retryable(&DysonError::LlmRateLimit("HTTP 429 Too Many Requests".into())));
+    assert!(crate::llm::is_retryable(&DysonError::LlmRateLimit("rate limit exceeded".into())));
+    assert!(crate::llm::is_retryable(&DysonError::LlmRateLimit("HTTP 429 Too Many Requests".into())));
 }
 
 #[test]
 fn is_retryable_overloaded() {
-    assert!(Agent::is_retryable(&DysonError::LlmOverloaded("server overloaded".into())));
-    assert!(Agent::is_retryable(&DysonError::LlmOverloaded("HTTP 529".into())));
-    assert!(Agent::is_retryable(&DysonError::LlmOverloaded("HTTP 502 Bad Gateway".into())));
-    assert!(Agent::is_retryable(&DysonError::LlmOverloaded("HTTP 503 Service Unavailable".into())));
+    assert!(crate::llm::is_retryable(&DysonError::LlmOverloaded("server overloaded".into())));
+    assert!(crate::llm::is_retryable(&DysonError::LlmOverloaded("HTTP 529".into())));
+    assert!(crate::llm::is_retryable(&DysonError::LlmOverloaded("HTTP 502 Bad Gateway".into())));
+    assert!(crate::llm::is_retryable(&DysonError::LlmOverloaded("HTTP 503 Service Unavailable".into())));
 }
 
 #[tokio::test]
@@ -2083,14 +2083,14 @@ async fn is_retryable_http_error() {
         .send()
         .await
         .unwrap_err();
-    assert!(Agent::is_retryable(&DysonError::Http(err)));
+    assert!(crate::llm::is_retryable(&DysonError::Http(err)));
 }
 
 #[test]
 fn is_retryable_other() {
-    assert!(!Agent::is_retryable(&DysonError::Config("bad config".into())));
-    assert!(!Agent::is_retryable(&DysonError::tool("bash", "command failed")));
-    assert!(!Agent::is_retryable(&DysonError::Cancelled));
+    assert!(!crate::llm::is_retryable(&DysonError::Config("bad config".into())));
+    assert!(!crate::llm::is_retryable(&DysonError::tool("bash", "command failed")));
+    assert!(!crate::llm::is_retryable(&DysonError::Cancelled));
 }
 
 // -----------------------------------------------------------------------
