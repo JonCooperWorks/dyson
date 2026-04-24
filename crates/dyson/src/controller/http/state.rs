@@ -398,7 +398,7 @@ impl HttpState {
             .and_then(|s| s.to_str())
             .unwrap_or("file")
             .to_string();
-        let mime = super::mime_for_extension(path);
+        let mime = super::responses::mime_for_extension(path);
         let inline_image = mime.starts_with("image/");
         let bytes_len = bytes.len();
 
