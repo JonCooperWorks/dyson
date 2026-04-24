@@ -7,6 +7,13 @@
 
 import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { Icon, Kbd } from './icons.jsx';
+import { useApi } from '../hooks/useApi.js';
+import { useAppState } from '../hooks/useAppState.js';
+import {
+  selectActiveModel, selectProviders, selectConversations, selectTools,
+  switchProviderModel, removeConversation, upsertConversation,
+} from '../store/app.js';
+import { deleteSession } from '../store/sessions.js';
 
 // ToolPanel dispatches to ~8 tool-view renderers (bash/diff/sbom/taint
 // /read/image/thinking/fallback).  None of them are invoked on the
@@ -23,9 +30,9 @@ function TopBar({ view, setView, onToggleLeft, onToggleRight, rightHidden }) {
     { id: 'artefacts', name: 'Artefacts',     k: '3', icon: 'file' },
     { id: 'activity',  name: 'Activity',      k: '4', icon: 'activity' },
   ];
-  const D = window.DYSON_DATA || {};
-  const model = D.activeModel || '';
-  const providers = D.providers || [];
+  const client = useApi();
+  const model = useAppState(selectActiveModel);
+  const providers = useAppState(selectProviders);
   const totalModels = providers.reduce((n, p) => n + ((p.models && p.models.length) || 0), 0);
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -39,28 +46,15 @@ function TopBar({ view, setView, onToggleLeft, onToggleRight, rightHidden }) {
     const init = {};
     for (const p of providers) init[p.id] = !!p.active;
     setExpanded(init);
-  }, [menuOpen]);
+  }, [menuOpen, providers]);
 
   const toggle = (id) => setExpanded(e => ({ ...e, [id]: !e[id] }));
 
   const switchTo = async (provider, modelName) => {
-    if (!window.DysonLive) { setMenuOpen(false); return; }
     setBusy(true);
     try {
-      const r = await fetch('/api/model', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider, model: modelName }),
-      });
-      if (r.ok) {
-        D.activeModel = modelName;
-        D.providers = providers.map(p => ({
-          ...p,
-          active: p.id === provider,
-          activeModel: p.id === provider ? modelName : p.activeModel,
-        }));
-        window.dispatchEvent(new CustomEvent('dyson:live-update'));
-      }
+      await client.postModel(provider, modelName);
+      switchProviderModel(provider, modelName);
     } catch (e) { console.error(e); }
     setBusy(false);
     setMenuOpen(false);
@@ -136,40 +130,34 @@ function TopBar({ view, setView, onToggleLeft, onToggleRight, rightHidden }) {
 function LeftRail({ active, setActive, filter, emptyLabel }) {
   // Chat history is shared across controllers; one flat list is the
   // accurate shape (Telegram-originated and HTTP-originated chats both
-  // live in ~/.dyson/chats and the controller has no honest way to
-  // attribute origin without metadata that doesn't exist yet).
-  // `filter` trims the list for views that only care about a subset
-  // (e.g. Artefacts hides chats with nothing to read).
-  const all = (window.DYSON_DATA.conversations.http) || [];
+  // live in ~/.dyson/chats).  `filter` trims the list for views that
+  // only care about a subset (e.g. Artefacts hides chats with nothing
+  // to read).
+  const client = useApi();
+  const all = useAppState(selectConversations);
   const items = typeof filter === 'function' ? all.filter(filter) : all;
   const newConv = () => {
-    if (!window.DysonLive) return;
     // Don't pass `rotate_previous`: auto-rotating the active chat on
     // every "+ New Conversation" click hollowed out the user's prior
     // transcript (messages went to an archive file they couldn't see
     // without CLI access).  Rotation is opt-in via /clear; explicit
     // removal is via the per-row delete button.
-    window.DysonLive.createChat('New conversation').then(c => {
-      window.DYSON_DATA.conversations.http.unshift({ id: c.id, title: c.title, live: false });
+    client.createChat('New conversation').then(c => {
+      upsertConversation({ id: c.id, title: c.title, live: false, source: 'http' });
       setActive(c.id);
-    });
+    }).catch(() => {});
   };
   const deleteConv = (id, e) => {
     // Stop the row's onClick from firing and switching to the chat
     // we're about to remove.
     e.stopPropagation();
-    if (!window.DysonLive) return;
-    window.DysonLive.deleteChat(id).then(() => {
-      const list = window.DYSON_DATA.conversations.http;
-      const idx = list.findIndex(c => c.id === id);
-      if (idx !== -1) list.splice(idx, 1);
+    client.deleteChat(id).then(() => {
+      removeConversation(id);
+      deleteSession(id);
       if (active === id) {
-        // Jump to the next chat (or null if none left) so the main
-        // pane doesn't keep showing a tab that no longer exists.
+        const list = all.filter(c => c.id !== id);
         const next = list[0];
         setActive(next ? next.id : null);
-      } else {
-        window.dispatchEvent(new CustomEvent('dyson:live-update'));
       }
     }).catch(() => {});
   };
@@ -221,7 +209,8 @@ function LeftRail({ active, setActive, filter, emptyLabel }) {
 }
 
 function RightRail({ panels, onClose, activeChatId }) {
-  const tools = window.DYSON_DATA.tools || {};
+  const tools = useAppState(selectTools);
+  const client = useApi();
   // Poll /api/activity so the Tool Stack surfaces any running subagent
   // for this chat even when the user hasn't clicked the chip to open
   // its panel.  Scoped to the active chat — stack-wide lists live in
@@ -231,8 +220,7 @@ function RightRail({ panels, onClose, activeChatId }) {
     if (!activeChatId) { setRunningSubagents([]); return; }
     let cancelled = false;
     const refresh = () => {
-      fetch(`/api/activity?chat=${encodeURIComponent(activeChatId)}`)
-        .then(r => r.ok ? r.json() : null)
+      client.getActivity(activeChatId)
         .then(j => {
           if (cancelled || !j) return;
           const running = (j.lanes || []).filter(a => a.status === 'running');
@@ -243,7 +231,7 @@ function RightRail({ panels, onClose, activeChatId }) {
     refresh();
     const id = setInterval(() => { if (!document.hidden) refresh(); }, 3000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [activeChatId]);
+  }, [activeChatId, client]);
   const pulseCount = runningSubagents.length;
   return (
     <aside className="right">

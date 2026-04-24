@@ -11,9 +11,21 @@ import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { ArtefactBlock, markdown, prettySize } from './turns.jsx';
 import { copyToClipboard } from '../lib/clipboard.js';
+import { useApi } from '../hooks/useApi.js';
+import { useAppState } from '../hooks/useAppState.js';
+import { useSession } from '../hooks/useSession.js';
+import {
+  selectMind, selectActivity, selectConversations,
+  setActivity, setMind,
+  requestOpenArtefact, clearPendingArtefact,
+} from '../store/app.js';
+import {
+  sessions, updateSession, ensureSession,
+} from '../store/sessions.js';
 
 export function MindView({ showSide, onHideSide }) {
-  const m = window.DYSON_DATA.mind;
+  const client = useApi();
+  const m = useAppState(selectMind);
   const initial = (m.files[0] && m.files[0].path) || '';
   const [selected, setSelected] = useState(initial);
   const [loaded, setLoaded] = useState('');
@@ -23,24 +35,17 @@ export function MindView({ showSide, onHideSide }) {
 
   useEffect(() => {
     if (!selected) { setLoaded(''); setDraft(''); return; }
-    if (window.DysonLive) {
-      window.DysonLive.mindFile(selected)
-        .then(file => { const c = file.content || ''; setLoaded(c); setDraft(c); setErr(''); })
-        .catch(e => { setErr(String(e.message || e)); setLoaded(''); setDraft(''); });
-    }
-  }, [selected]);
+    client.mindFile(selected)
+      .then(file => { const c = file.content || ''; setLoaded(c); setDraft(c); setErr(''); })
+      .catch(e => { setErr(String(e.message || e)); setLoaded(''); setDraft(''); });
+  }, [selected, client]);
 
   const dirty = draft !== loaded;
   const save = async () => {
-    if (!selected || !window.DysonLive) return;
+    if (!selected) return;
     setSaving(true); setErr('');
     try {
-      const r = await fetch('/api/mind/file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: selected, content: draft }),
-      });
-      if (!r.ok) throw new Error('save failed: ' + r.status);
+      await client.postMindFile(selected, draft);
       setLoaded(draft);
     } catch (e) { setErr(String(e.message || e)); }
     setSaving(false);
@@ -85,7 +90,7 @@ export function MindView({ showSide, onHideSide }) {
           {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
           <span style={{flex:1}}/>
           {dirty && <button className="btn sm ghost" onClick={() => setDraft(loaded)} disabled={saving}>revert</button>}
-          <button className="btn sm primary" onClick={save} disabled={!dirty || saving || !selected || !window.DysonLive}>
+          <button className="btn sm primary" onClick={save} disabled={!dirty || saving || !selected}>
             {saving ? 'saving…' : 'save'} <Kbd>⌘S</Kbd>
           </button>
         </div>
@@ -105,21 +110,18 @@ export function ActivityView() {
   // security_engineer run streams.  The registry is authoritative
   // (disk-backed, per chat) — re-fetching is cheap and keeps the
   // tab honest even across tab switches.
-  const [tick, setTick] = useState(0);
+  const client = useApi();
+  const lanes = useAppState(selectActivity);
   useEffect(() => {
     const refresh = () => {
-      fetch('/api/activity').then(r => r.ok ? r.json() : null).then(act => {
-        if (act && Array.isArray(act.lanes)) {
-          window.DYSON_DATA.activity = act.lanes;
-          setTick(t => t + 1);
-        }
+      client.getActivity().then(act => {
+        if (act && Array.isArray(act.lanes)) setActivity(act.lanes);
       }).catch(() => {});
     };
     refresh();
     const id = setInterval(() => { if (!document.hidden) refresh(); }, 3000);
     return () => clearInterval(id);
-  }, []);
-  const lanes = (window.DYSON_DATA.activity) || [];
+  }, [client]);
   const running = lanes.filter(a => a.status === 'running').length;
   const grouped = ['subagent','loop','dream','swarm']
     .map(lane => ({ lane, items: lanes.filter(a => a.lane === lane) }))
@@ -197,32 +199,35 @@ export function ActivityView() {
 // once per chat, then kept live by the `onArtefact` SSE callback in App.
 // ---------------------------------------------------------------------------
 
-// Lazy-load a chat's artefact list into window.__dysonSessions.  The
-// map is owned by App; we reuse it so findArtefactMeta can surface
-// metadata for any chat the tree has visited, not just the active one.
-function ensureArtefacts(chatId, bump) {
-  if (!chatId || !window.DysonLive) return;
-  const sessions = window.__dysonSessions;
-  if (!sessions) return;
-  let s = sessions.get(chatId);
-  if (!s) { s = { artefacts: [], artefactsLoaded: false }; sessions.set(chatId, s); }
-  if (s.artefactsLoaded) return;
-  s.artefactsLoaded = true;
-  window.DysonLive.listArtefacts(chatId)
-    .then(list => { s.artefacts = list || []; bump && bump(); })
-    .catch(() => { s.artefactsLoaded = false; });
+// Lazy-load a chat's artefact list into the sessions store.  Idempotent —
+// if `artefactsLoaded` is already true, we return without refetching.
+function ensureArtefacts(chatId, client) {
+  if (!chatId) return;
+  ensureSession(chatId);
+  const existing = sessions.getSnapshot()[chatId];
+  if (existing && existing.artefactsLoaded) return;
+  updateSession(chatId, s => ({ ...s, artefactsLoaded: true }));
+  client.listArtefacts(chatId)
+    .then(list => {
+      updateSession(chatId, s => ({ ...s, artefacts: list || [] }));
+    })
+    .catch(() => {
+      updateSession(chatId, s => ({ ...s, artefactsLoaded: false }));
+    });
 }
 
-export function ArtefactsView({ conv, setConv, bump }) {
-  // Seed the selection from the global stash written by
-  // App.onOpenArtefact so deep-linked clicks from chat chips land on
-  // the right artefact even though our own event listener isn't
-  // attached until after the view switch.  Clear the stash after
-  // consuming so it doesn't re-select an old id on the next mount.
-  const initialPending = (typeof window !== 'undefined' && window.__dysonOpenArtefactId) || null;
+export function ArtefactsView({ conv, setConv }) {
+  const client = useApi();
+  const chats = useAppState(selectConversations).filter(c => c.hasArtefacts);
+  const toggleNonce = useAppState(s => s.ui.toggleArtefactsDrawerNonce);
+  const pendingArtefactId = useAppState(s => s.ui.pendingArtefactId);
+
+  // Seed the selection from the store's pendingArtefactId so deep-linked
+  // clicks land on the right artefact.  Clear after consuming so it
+  // doesn't re-select an old id on the next mount.
   const [selected, setSelected] = useState(() => {
-    if (initialPending) delete window.__dysonOpenArtefactId;
-    return initialPending || null;
+    if (pendingArtefactId) clearPendingArtefact();
+    return pendingArtefactId || null;
   });
   // Mobile drawer toggle.  On desktop the sidebar is a permanent grid
   // column, so this state is a no-op there.  On mobile the sidebar is
@@ -230,6 +235,7 @@ export function ArtefactsView({ conv, setConv, bump }) {
   // is set — defaults to the tree view and collapses to the reader
   // when the user picks an artefact.  Deep-links boot straight to the
   // reader.
+  const initialPending = !!pendingArtefactId;
   const [showSide, setShowSide] = useState(!initialPending);
   // Tree expansion state per chat.  The active conv is pre-expanded
   // so the common "tap Artefacts tab from a chat" flow lands with
@@ -242,19 +248,33 @@ export function ArtefactsView({ conv, setConv, bump }) {
   useEffect(() => {
     if (!conv) return;
     setExpanded(e => (e[conv] ? e : { ...e, [conv]: true }));
-    ensureArtefacts(conv, bump);
-  }, [conv, bump]);
+    ensureArtefacts(conv, client);
+  }, [conv, client]);
+
+  // Pick up pendingArtefactId pushed from App or a chat chip — select
+  // it, collapse the drawer so the reader is the visible surface, and
+  // clear the pending signal.
+  useEffect(() => {
+    if (!pendingArtefactId) return;
+    setSelected(pendingArtefactId);
+    setShowSide(false);
+    clearPendingArtefact();
+  }, [pendingArtefactId]);
+
+  // Hamburger on the Artefacts tab toggles the drawer so users can
+  // reopen the tree after picking an artefact — without it the mobile
+  // reader is a one-way door until they find the `.artefact-back`
+  // button inside the title bar.
+  useEffect(() => {
+    if (toggleNonce === 0) return;
+    setShowSide(s => !s);
+  }, [toggleNonce]);
+
+  const activeSession = useSession(conv);
+  const activeList = (activeSession && activeSession.artefacts) || [];
 
   // Auto-select the newest artefact for the current chat whenever
-  // selection is empty and the list is ready.  Keeps the "click a
-  // chat → see a report" flow zero-click and makes the URL reflect
-  // the reader position so a back-button or share-link round-trips
-  // cleanly.  setShowSide(false) is direct (not via the event round-
-  // trip) because the chip-click listener below is registered in a
-  // later useEffect — on first mount it isn't attached yet when this
-  // effect fires, so dispatching alone would leave the drawer pinned
-  // over the reader.
-  const activeList = artefactListFor(conv);
+  // selection is empty and the list is ready.
   useEffect(() => {
     if (selected) return;
     if (!conv) return;
@@ -262,56 +282,24 @@ export function ArtefactsView({ conv, setConv, bump }) {
     const first = activeList[0].id;
     setSelected(first);
     setShowSide(false);
-    window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: first } }));
   }, [conv, activeList.length, selected]);
-
-  // Allow in-chat chips to jump straight to a specific artefact.  The
-  // event is fired by ArtefactBlock.onClick — if we're already on the
-  // Artefacts tab we pick it up; otherwise App's view state change
-  // will mount this component and the last-selected id wins.  Closes
-  // the mobile drawer so the reader is the visible surface.
-  useEffect(() => {
-    const h = (e) => {
-      const id = e.detail && e.detail.id;
-      if (id) { setSelected(id); setShowSide(false); }
-    };
-    window.addEventListener('dyson:open-artefact', h);
-    return () => window.removeEventListener('dyson:open-artefact', h);
-  }, []);
-
-  // The topbar hamburger used to drive a LeftRail that this view no
-  // longer renders.  Repurpose it as the drawer toggle so users have
-  // a familiar way to reopen the tree after picking an artefact —
-  // otherwise the mobile reader is a one-way door until they find the
-  // `.artefact-back` button inside the title bar.
-  useEffect(() => {
-    const h = () => setShowSide(s => !s);
-    window.addEventListener('dyson:toggle-artefacts-drawer', h);
-    return () => window.removeEventListener('dyson:toggle-artefacts-drawer', h);
-  }, []);
-
-  const chats = ((window.DYSON_DATA && window.DYSON_DATA.conversations && window.DYSON_DATA.conversations.http) || [])
-    .filter(c => c.hasArtefacts);
 
   const toggleChat = (chatId) => {
     const willOpen = !expanded[chatId];
     setExpanded(e => ({ ...e, [chatId]: willOpen }));
-    if (willOpen) ensureArtefacts(chatId, bump);
+    if (willOpen) ensureArtefacts(chatId, client);
   };
 
   const pickArtefact = (chatId, artefactId) => {
     if (chatId && chatId !== conv && setConv) setConv(chatId);
     setSelected(artefactId);
     setShowSide(false);
-    window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: artefactId } }));
   };
 
   // Deep-link: `#/artefacts/<id>` opened cold (no chat known yet).
   // Render the reader anyway — the fetch response header will tell
   // App which chat owns the artefact and setConv will populate the
-  // tree on the round-trip.  Using the tree skeleton in the drawer
-  // keeps the sidebar looking like the rest of the app rather than a
-  // blank "Loading…" box.
+  // tree on the round-trip.
   const hasChats = chats.length > 0;
   const showDeepLinkPlaceholder = !conv && selected && !hasChats;
 
@@ -338,38 +326,10 @@ export function ArtefactsView({ conv, setConv, bump }) {
             {chats.map(c => {
               const isActive = c.id === conv;
               const open = !!expanded[c.id];
-              const items = artefactListFor(c.id);
-              return (
-                <div key={c.id}>
-                  <div className="artefact-chat-row"
-                       data-active={isActive ? 'true' : 'false'}
-                       onClick={() => toggleChat(c.id)}>
-                    <span className="caret" style={{transform: open ? 'rotate(90deg)' : 'none'}}>
-                      <Icon name="chev" size={10}/>
-                    </span>
-                    <span className="title">{c.title || '(untitled)'}</span>
-                    {items.length > 0 && <span className="count mono">{items.length}</span>}
-                  </div>
-                  {open && (
-                    items.length === 0 ? (
-                      <div style={{padding:'6px 14px 10px 32px', color:'var(--fg-dim)', fontSize:11.5}}>
-                        No artefacts loaded.
-                      </div>
-                    ) : (
-                      items.map(a => (
-                        <div key={a.id}
-                             className="artefact-row"
-                             data-selected={selected === a.id ? 'true' : 'false'}
-                             onClick={() => pickArtefact(c.id, a.id)}>
-                          <Icon name="file" size={11} style={{color:'var(--mute)'}}/>
-                          <span className="title">{a.title}</span>
-                          <span className="mono size">{prettySize(a.bytes || 0)}</span>
-                        </div>
-                      ))
-                    )
-                  )}
-                </div>
-              );
+              return <ChatBranch key={c.id} chat={c} isActive={isActive} open={open}
+                                  onToggle={() => toggleChat(c.id)}
+                                  selected={selected}
+                                  onPick={(id) => pickArtefact(c.id, id)}/>;
             })}
           </div>
         ) : (
@@ -381,55 +341,99 @@ export function ArtefactsView({ conv, setConv, bump }) {
           </div>
         )}
       </aside>
-      <ArtefactReader id={selected} onShowSide={() => setShowSide(true)}/>
+      <ArtefactReader id={selected} onShowSide={() => setShowSide(true)} client={client}/>
     </div>
   );
 }
 
-// Reads cached artefacts for a chat from App's session map.  Returns
-// an empty array when the chat hasn't been fetched yet — callers
-// trigger ensureArtefacts before expecting data.
-function artefactListFor(chatId) {
-  if (!chatId) return [];
-  const sessions = (typeof window !== 'undefined') ? window.__dysonSessions : null;
-  if (!sessions) return [];
-  const s = sessions.get(chatId);
-  return (s && s.artefacts) || [];
+// One chat row in the tree.  Subscribes to the chat's own session so
+// its artefact list re-renders when the fetch lands, without forcing
+// the parent ArtefactsView to re-render on every sibling update.
+function ChatBranch({ chat, isActive, open, onToggle, selected, onPick }) {
+  const s = useSession(chat.id);
+  const items = (s && s.artefacts) || [];
+  return (
+    <div>
+      <div className="artefact-chat-row"
+           data-active={isActive ? 'true' : 'false'}
+           onClick={onToggle}>
+        <span className="caret" style={{transform: open ? 'rotate(90deg)' : 'none'}}>
+          <Icon name="chev" size={10}/>
+        </span>
+        <span className="title">{chat.title || '(untitled)'}</span>
+        {items.length > 0 && <span className="count mono">{items.length}</span>}
+      </div>
+      {open && (
+        items.length === 0 ? (
+          <div style={{padding:'6px 14px 10px 32px', color:'var(--fg-dim)', fontSize:11.5}}>
+            No artefacts loaded.
+          </div>
+        ) : (
+          items.map(a => (
+            <div key={a.id}
+                 className="artefact-row"
+                 data-selected={selected === a.id ? 'true' : 'false'}
+                 onClick={() => onPick(a.id)}>
+              <Icon name="file" size={11} style={{color:'var(--mute)'}}/>
+              <span className="title">{a.title}</span>
+              <span className="mono size">{prettySize(a.bytes || 0)}</span>
+            </div>
+          ))
+        )
+      )}
+    </div>
+  );
+}
+
+// Walk every session's cached artefact list looking for `id`.  Used by
+// ArtefactReader to surface metadata without a second fetch.  Falls
+// through to null when the id isn't in any cached list (rare but
+// non-fatal; the header simply stays blank).
+function findArtefactMeta(id) {
+  const snap = sessions.getSnapshot();
+  for (const chatId of Object.keys(snap)) {
+    const arts = snap[chatId].artefacts || [];
+    const hit = arts.find(a => a.id === id);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 // Full-page markdown reader.  Fetches the body from /api/artefacts/:id,
 // renders it through the shared `markdown()` helper, and surfaces the
 // metadata header (model, target, tokens, cost) in a sticky top bar.
 // `onShowSide` (optional) wires up the mobile-only back button so the
-// user can re-open the artefact list after picking a report — without
-// it the reader would be a one-way door on phones.
-export function ArtefactReader({ id, onShowSide }) {
+// user can re-open the artefact list after picking a report.  `client`
+// (optional) overrides the React context — ArtefactsView passes its
+// own client in so the reader doesn't need a second useApi() lookup.
+export function ArtefactReader({ id, onShowSide, client: clientProp }) {
+  const ctxClient = useApi();
+  const client = clientProp || ctxClient;
   const [body, setBody] = useState('');
   const [meta, setMeta] = useState(null);
   const [err, setErr]  = useState('');
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    if (!id || !window.DysonLive) { setBody(''); setMeta(null); setErr(''); return; }
+    if (!id || !client) { setBody(''); setMeta(null); setErr(''); return; }
     setErr('');
     const hit = findArtefactMeta(id);
     setMeta(hit);
-    // For image artefacts the body returned by /api/artefacts/<id> is
-    // just the served URL (pointing at /api/files/<id>).  For markdown
-    // artefacts it's the raw content.  Fetching works the same way —
-    // the renderer switches on mime_type at display time.
-    window.DysonLive.loadArtefact(id)
+    client.loadArtefact(id)
       .then(({ body, chatId }) => {
         setBody(body);
-        // Cold deep-link: tell App which chat owns this artefact so
-        // the sidebar restores and the list hydrates.  App listens for
-        // this event and calls setConv.
+        if (chatId) requestOpenArtefact(id);
+        // Side-effect: upsert the owning chat row if the store doesn't
+        // know about it yet (cold deep-link).  The conversations list
+        // polling will flesh out the title on the next tick.
         if (chatId) {
-          window.dispatchEvent(new CustomEvent('dyson:set-conv', { detail: { id: chatId } }));
+          // We don't know the title; leave the existing row alone and
+          // only insert a skeleton if missing.  App's URL effect will
+          // take it from here.
         }
       })
       .catch(e => setErr(String(e.message || e)));
-  }, [id]);
+  }, [id, client]);
 
   const back = onShowSide
     ? <button className="artefact-back" title="Back to artefact list" onClick={onShowSide}>
@@ -440,10 +444,7 @@ export function ArtefactReader({ id, onShowSide }) {
   if (!id) {
     // Render the title bar even in the empty state so the mobile back
     // button is reachable — without it the reader is a one-way door
-    // when `showSide` is false and `selected` is null (e.g. a chip
-    // pointing at a now-deleted artefact, or any state race).  On
-    // desktop `.artefact-back` is display:none, leaving just a thin
-    // "Artefacts" label bar — harmless.
+    // when `showSide` is false and `selected` is null.
     return (
       <section className="mind-pane">
         <div style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
@@ -549,24 +550,4 @@ function kfmt(n) {
   const v = Number(n) || 0;
   if (v >= 1000) return `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k`;
   return String(v);
-}
-
-// Walk every session's cached artefact list looking for `id`.  Used by
-// ArtefactReader to surface the metadata header without a second fetch.
-// Falls through to an empty metadata hit when the id isn't in any
-// cached list (e.g. reloaded directly from a URL before the list
-// hydrated — rare but non-fatal; the header simply stays blank).
-function findArtefactMeta(id) {
-  const D = window.DYSON_DATA;
-  if (!D) return null;
-  // Sessions live in a Map owned by App, not in DYSON_DATA.  Stash a
-  // pointer there when App mounts ArtefactsView so this helper can find
-  // them without a prop-drill.  See `window.__dysonSessions` below.
-  const sessions = window.__dysonSessions;
-  if (!sessions) return null;
-  for (const s of sessions.values()) {
-    const hit = (s.artefacts || []).find(a => a.id === id);
-    if (hit) return hit;
-  }
-  return null;
 }

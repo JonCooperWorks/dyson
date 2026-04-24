@@ -83,20 +83,98 @@ describe('app.jsx — keyboard + session regressions', () => {
 
   it('per-chat session state survives conv switch', () => {
     // Regression for "moving from a chat seems to kill it" and "the tool
-    // stack is not per conversation".
-    expect(app).toContain('sessionsRef');
-    expect(app).toContain('makeSession');
+    // stack is not per conversation".  Sessions now live in a reactive
+    // store (src/store/sessions.js) keyed by chatId; ConversationView
+    // reads the active session via useSession() and mutates via
+    // updateSession() — switching `conv` swaps which slice it reads but
+    // does NOT touch any other session.
+    expect(app).toContain("useSession(conv)");
+    expect(app).toContain("ensureSession");
     expect(app, 'conv-change must NOT wipe liveTurns').not.toContain('setLiveTurns([])');
     expect(
       app.includes('session.panels') || app.includes('session ? session.panels'),
       'RightRail must take its panels from the active session',
     ).toBe(true);
-    expect(app).toContain('session.es =');
+    // EventSource + per-chat counter live in the non-reactive resources
+    // map — they're resources, not data, and can't be frozen.
+    expect(app).toContain('getResources(conv)');
   });
 
   it('live tool ids are namespaced per chat', () => {
-    // Two chats minting live-1 would collide in window.DYSON_DATA.tools.
-    expect(app).toContain('`${conv}-live-${');
+    // Two chats minting live-1 would collide in app.tools.  Refs flow
+    // through mintToolRef(chatId, kind) which prefixes with the chatId.
+    const sessionsSrc = src('store/sessions.js');
+    expect(sessionsSrc).toContain('mintToolRef');
+    expect(sessionsSrc).toContain('`${chatId}-${kind}-${r.counter}`');
+    // ConversationView calls it on every onToolStart / onThinking.
+    expect(app).toContain("mintToolRef(conv, 'live')");
+    expect(app).toContain("mintToolRef(conv, 'thinking')");
+  });
+});
+
+describe('architecture — no window globals + no bump counter', () => {
+  const app = src('components/app.jsx');
+  const views = src('components/views.jsx');
+  const viewsSec = src('components/views-secondary.jsx');
+  const turns = src('components/turns.jsx');
+  const panels = src('components/panels.jsx');
+  const main = src('main.jsx');
+
+  it('no component reads window.DYSON_DATA or window.DysonLive', () => {
+    // Regression for the window-globals + CustomEvent bus that silently
+    // dropped renders via the mutate-then-bump() pattern.  The reactive
+    // store (src/store/) is the single source of truth now.
+    for (const [path, txt] of [
+      ['components/app.jsx', app],
+      ['components/views.jsx', views],
+      ['components/views-secondary.jsx', viewsSec],
+      ['components/turns.jsx', turns],
+      ['components/panels.jsx', panels],
+      ['main.jsx', main],
+    ]) {
+      expect(txt, `${path} must not read window.DYSON_DATA`).not.toMatch(/window\.DYSON_DATA/);
+      expect(txt, `${path} must not read window.DysonLive`).not.toMatch(/window\.DysonLive/);
+      expect(txt, `${path} must not read window.__dyson*`).not.toMatch(/window\.__dyson/);
+    }
+  });
+
+  it('no force-rerender bump counter', () => {
+    // The old architecture re-rendered via a useState counter bumped on
+    // every mutation.  useSyncExternalStore replaces that — dropping
+    // the counter is the whole point of the refactor.
+    expect(app, 'app.jsx must not reintroduce bump()').not.toMatch(/const\s+bump\s*=/);
+  });
+
+  it('no dyson:* CustomEvent channel in components', () => {
+    // The CustomEvent bus (`dyson:live-update`, `dyson:open-artefact`,
+    // `dyson:set-conv`, `dyson:open-rail`, `dyson:toggle-artefacts-drawer`)
+    // is replaced by store UI nonces.  Sessions' resources map holds
+    // the EventSource — no cross-component events needed.
+    for (const [path, txt] of [
+      ['components/app.jsx', app],
+      ['components/views.jsx', views],
+      ['components/views-secondary.jsx', viewsSec],
+      ['components/turns.jsx', turns],
+    ]) {
+      expect(txt, `${path} must not dispatch dyson:* CustomEvents`).not.toMatch(/new CustomEvent\(['"]dyson:/);
+      expect(txt, `${path} must not listen for dyson:* events`).not.toMatch(/addEventListener\(['"]dyson:/);
+    }
+  });
+
+  it('main.jsx mounts the React tree inside ApiProvider', () => {
+    expect(main).toContain('ApiProvider');
+    expect(main).toContain('DysonClient');
+    expect(main).toContain('boot(client)');
+  });
+
+  it('bridge.js and data.js are gone', () => {
+    // These files are the window-globals scaffolding; their removal is
+    // the concrete end-state of the refactor.
+    const { existsSync } = require('node:fs');
+    const { join } = require('node:path');
+    const webRoot = join(__dirname, '..');
+    expect(existsSync(join(webRoot, 'bridge.js'))).toBe(false);
+    expect(existsSync(join(webRoot, 'data.js'))).toBe(false);
   });
 });
 
@@ -125,7 +203,9 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
   });
 
   it('ArtefactReader exposes a mobile back button', () => {
-    expect(viewsSrc, 'ArtefactReader must accept onShowSide').toContain('function ArtefactReader({ id, onShowSide })');
+    // Reader is now injectable for tests (client prop) but still takes
+    // the back-button handler.
+    expect(viewsSrc, 'ArtefactReader must accept onShowSide').toMatch(/function ArtefactReader\(\{[^}]*\bonShowSide\b/);
     expect(viewsSrc, 'reader chrome must render the back button').toContain('artefact-back');
     // ArtefactsView must wire the back button up to its setShowSide.
     expect(viewsSrc).toContain('onShowSide={() => setShowSide(true)}');
@@ -168,8 +248,12 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
     // including the back button.
     const emptyBranch = viewsSrc.match(/if\s*\(\s*!id\s*\)\s*\{[\s\S]*?return\s*\([\s\S]*?\);\s*\}/);
     expect(emptyBranch, 'ArtefactReader must have an if (!id) branch').toBeTruthy();
-    expect(emptyBranch[0], 'empty reader branch must render artefact-back')
-      .toContain('artefact-back');
+    // The empty branch renders `{back}` — the same JSX handle that the
+    // non-empty branch uses, which is the `.artefact-back` button.  The
+    // variable indirection is intentional: one definition, reused in
+    // both branches of the reader.
+    expect(emptyBranch[0], 'empty reader branch must render the back handle')
+      .toContain('{back}');
   });
 
   it('mobile drawer has a tap-to-close scrim', () => {
@@ -244,12 +328,14 @@ describe('turns.jsx — markdown + composer regressions', () => {
   });
 
   it('FileBlock renders inline image or download link', () => {
-    // Regression for "agent can't deliver files to the UI".
+    // Regression for "agent can't deliver files to the UI".  The SSE
+    // dispatcher lives in api/stream.js now (a pure function) and the
+    // file-event handler is in app.jsx's streamCallbacks().
     const app = src('components/app.jsx');
-    const bridge = src('bridge.js');
+    const stream = src('api/stream.js');
     expect(turnsSrc).toContain('function FileBlock');
     expect(turnsSrc).toContain("b.type === 'file'");
-    expect(bridge).toContain("case 'file':");
+    expect(stream).toContain("case 'file':");
     expect(app).toContain('onFile:');
   });
 

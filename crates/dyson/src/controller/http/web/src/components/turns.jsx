@@ -6,6 +6,9 @@ import { Icon, Kbd } from './icons.jsx';
 // fallback → swallow) used to live inline here and was copy-pasted
 // across panels.jsx / views-secondary.jsx.  One implementation now.
 import { copyToClipboard } from '../lib/clipboard.js';
+import { useAppState } from '../hooks/useAppState.js';
+import { selectActiveModel, selectMind, requestOpenArtefact } from '../store/app.js';
+import { SLASH_COMMANDS } from '../store/constants.js';
 
 function ThinkingBlock({ text }) {
   return (
@@ -329,7 +332,7 @@ function FileBlock({ block }) {
 function ArtefactBlock({ block }) {
   const open = (e) => {
     e.preventDefault();
-    window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: block.id } }));
+    if (block.id) requestOpenArtefact(block.id);
   };
   // Deep-link to the reader, used as the href fallback so cmd-click
   // always has somewhere sensible to go — never `#` (which would jump
@@ -391,13 +394,13 @@ function Composer({ onSend, onCancel, running }) {
   const [val, setVal] = useState('');
   const [slash, setSlash] = useState(false);
   // Real File objects from <input type="file"> or drag-drop.  Sent as
-  // base64 attachments through DysonLive.send → /api/.../turn → agent
+  // base64 attachments through DysonClient.send → /api/.../turn → agent
   // run_with_attachments (same path Telegram takes for media).
   const [atts, setAtts] = useState([]);
   const taRef = useRef();
   const fileRef = useRef();
-  const cmds = window.DYSON_DATA.slashCmds;
-  const filtered = slash ? cmds.filter(c => c.cmd.startsWith(val.split(/\s/)[0] || '/')) : [];
+  const activeModel = useAppState(selectActiveModel);
+  const filtered = slash ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(val.split(/\s/)[0] || '/')) : [];
 
   useEffect(() => {
     if (!taRef.current) return;
@@ -470,8 +473,8 @@ function Composer({ onSend, onCancel, running }) {
             <Icon name="slash" size={12}/> <span className="btn-label">commands</span>
           </button>
           <span className="sep"/>
-          {(window.DYSON_DATA && window.DYSON_DATA.activeModel) && (
-            <span className="model-label" style={{fontFamily:'var(--font-mono)', fontSize:10.5, color:'var(--mute)'}}>{window.DYSON_DATA.activeModel}</span>
+          {activeModel && (
+            <span className="model-label" style={{fontFamily:'var(--font-mono)', fontSize:10.5, color:'var(--mute)'}}>{activeModel}</span>
           )}
           {running ? (
             <button className="btn sm" onClick={onCancel} style={{color:'var(--err)', borderColor:'oklch(0.70 0.21 25 / 0.3)'}}>
@@ -488,14 +491,16 @@ function Composer({ onSend, onCancel, running }) {
   );
 }
 
-function EmptyState({ onSuggest }) {
-  // Real values only.  Model from /api/providers, tool count from
-  // /api/skills, both injected by bridge.js into window.DYSON_DATA.
-  const D = window.DYSON_DATA || {};
-  const model = D.activeModel || '';
-  const builtinCount = (D.skills && D.skills.builtin && D.skills.builtin.length) || 0;
-  const mcpCount = (D.skills && D.skills.mcp && D.skills.mcp.length) || 0;
-  const wsBackend = (D.mind && D.mind.backend) || '';
+function EmptyState() {
+  // Real values only.  Model from /api/providers, mind backend from
+  // /api/mind — both live in the app store.  Skills isn't populated by
+  // the current controller; left as-is so the count stays 0 until the
+  // endpoint exists.
+  const model = useAppState(selectActiveModel);
+  const mind = useAppState(selectMind);
+  const wsBackend = (mind && mind.backend) || '';
+  const builtinCount = 0;
+  const mcpCount = 0;
   return (
     <div style={{maxWidth:540, margin:'80px auto 0', padding:'0 32px', color:'var(--fg-dim)'}}>
       <div style={{fontSize:22, fontWeight:500, color:'var(--fg)', marginBottom:6, letterSpacing:'-0.01em'}}>
