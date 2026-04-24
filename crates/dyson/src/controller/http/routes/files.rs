@@ -5,7 +5,7 @@
 
 use hyper::{Response, StatusCode};
 
-use super::super::responses::{Resp, boxed, not_found, safe_store_id};
+use super::super::responses::{Resp, boxed, not_found, safe_store_id, sanitize_filename};
 use super::super::state::HttpState;
 use super::super::stores::FileStore;
 
@@ -60,10 +60,15 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
             }
         }
     };
+    // sanitize_filename strips `\r`, `\n`, `"`, `/`, `\\` — protects
+    // the Content-Disposition header from CRLF injection if a tool
+    // ever produced a maliciously-shaped filename.  The previous
+    // shape only stripped `"`, leaving CRLF unguarded.
+    let safe = sanitize_filename(&name);
     let cd = if mime.starts_with("image/") {
-        format!("inline; filename=\"{}\"", name.replace('"', ""))
+        format!("inline; filename=\"{safe}\"")
     } else {
-        format!("attachment; filename=\"{}\"", name.replace('"', ""))
+        format!("attachment; filename=\"{safe}\"")
     };
     Response::builder()
         .status(StatusCode::OK)

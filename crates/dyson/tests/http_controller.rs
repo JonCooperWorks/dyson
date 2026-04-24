@@ -2931,3 +2931,131 @@ async fn hot_reload_propagates_through_post_model_runtime_override() {
         .and_then(|p| p["id"].as_str());
     assert_eq!(active, Some("anthropic"), "post_model must flip the active provider");
 }
+
+// ---------------------------------------------------------------------------
+// list_artefacts disk fallback — long sessions evict from the FIFO cache
+// but the listing endpoint must still surface every persisted entry.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_artefacts_returns_evicted_entries_via_disk_fallback() {
+    // Emit more artefacts than the in-memory cap (MAX_ARTEFACTS = 32)
+    // so the FIFO ring boots an entry from the cache.  The previous
+    // shape walked only `store.order`, which silently dropped the
+    // evicted entry from the listing endpoint.  After the fix
+    // list_artefacts walks the chat's `artefacts/` subdir on disk and
+    // merges with whatever's still cached.
+    let r = rig().await;
+    let id = create_chat(&r, "many artefacts").await;
+
+    const MAX_ARTEFACTS: usize = 32;
+    const TOTAL: usize = MAX_ARTEFACTS + 4; // 36 — four past the cap
+
+    for n in 0..TOTAL {
+        let artefact = dyson::message::Artefact::markdown(
+            dyson::message::ArtefactKind::Other,
+            format!("report-{n:02}"),
+            format!("body-{n}"),
+        );
+        test_helpers::emit_agent_artefact(r.state.clone(), &id, artefact)
+            .await
+            .expect("emit");
+    }
+
+    let list = body_json(
+        get(&format!("{}/api/conversations/{}/artefacts", r.base, id)).await,
+    )
+    .await;
+    let arr = list.as_array().expect("array");
+    assert_eq!(
+        arr.len(),
+        TOTAL,
+        "every persisted artefact must appear in the listing; got {} of {TOTAL}",
+        arr.len(),
+    );
+
+    // Newest first — the freshly-emitted "report-35" must lead.
+    assert_eq!(arr[0]["title"], format!("report-{:02}", TOTAL - 1));
+    // The oldest entry — pushed out of the in-memory FIFO long ago —
+    // must still be present, demonstrating the disk fallback works.
+    let titles: Vec<&str> = arr.iter().filter_map(|p| p["title"].as_str()).collect();
+    assert!(titles.contains(&"report-00"), "evicted artefact must surface; titles: {titles:?}");
+}
+
+// ---------------------------------------------------------------------------
+// CRLF / quote injection in response headers — sanitisation defense.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unauthorized_strips_crlf_from_oidc_issuer_in_www_authenticate() {
+    // A misconfigured (or attacker-controlled) issuer URL with CRLF
+    // bytes must not let the value break out of `iss="..."` and inject
+    // a sibling header.  Sanitisation runs in `unauthorized()`.
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("placeholder"),
+        test_helpers::AuthMode::Oidc {
+            issuer: "https://idp.example.com\r\nX-Evil: yes".into(),
+            authorization_endpoint: "https://idp.example.com/authorize".into(),
+            token_endpoint: None,
+            client_id: "dyson-web".into(),
+            required_scopes: vec![],
+        },
+    )
+    .await;
+
+    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    // No injected sibling — only the canonical WWW-Authenticate.
+    assert!(resp.headers().get("X-Evil").is_none(), "no injected header allowed");
+    let www = resp
+        .headers()
+        .get("WWW-Authenticate")
+        .expect("WWW-Authenticate set")
+        .to_str()
+        .expect("ASCII");
+    assert!(!www.contains('\r') && !www.contains('\n'), "CRLF must be stripped");
+    // The remaining issuer text without the injection must still be
+    // present (sanitiser removes only the dangerous bytes, not the
+    // operator's actual host).
+    assert!(www.contains("idp.example.com"), "issuer host preserved");
+}
+
+#[tokio::test]
+async fn unauthorized_strips_quote_from_oidc_authorization_endpoint() {
+    // A `"` in the URL would close `as_uri="..."` and let the rest of
+    // the value land outside the parameter — defence-in-depth.
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("placeholder"),
+        test_helpers::AuthMode::Oidc {
+            issuer: "https://idp.example.com".into(),
+            authorization_endpoint: "https://idp.example.com/authorize\" injected=\"x".into(),
+            token_endpoint: None,
+            client_id: "dyson-web".into(),
+            required_scopes: vec![],
+        },
+    )
+    .await;
+
+    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    let www = resp
+        .headers()
+        .get("WWW-Authenticate")
+        .expect("challenge")
+        .to_str()
+        .expect("ASCII");
+    // The breakout signature an attacker would aim for is the exact
+    // sequence `" injected="` — closing the as_uri quoted-param and
+    // opening a sibling param.  Sanitisation strips the `"` from the
+    // value, so the post-fix header may still contain `injected=`
+    // (now safely inside the as_uri value) but never the closing-
+    // quote-then-new-param sequence.  This is strictly stronger than
+    // quote-counting, which can stay even either way.
+    assert!(
+        !www.contains(r#"" injected=""#),
+        "breakout sequence must be defanged; got: {www}",
+    );
+    // The legitimate `realm="dyson"` parameter must still be present —
+    // sanitisation only strips bytes from operator-supplied URLs.
+    assert!(www.contains(r#"realm="dyson""#));
+}
+

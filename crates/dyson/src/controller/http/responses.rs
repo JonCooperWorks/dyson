@@ -231,9 +231,18 @@ pub(crate) fn unauthorized(state: &HttpState) -> Resp {
             issuer,
             authorization_endpoint,
             ..
-        } => Some(format!(
-            r#"Bearer realm="dyson", error="invalid_token", as_uri="{authorization_endpoint}", iss="{issuer}""#
-        )),
+        } => {
+            // Defense-in-depth: strip CRLF / `"` from the URLs before
+            // interpolating into the challenge.  Quoting them into the
+            // header without sanitisation would let a misconfigured
+            // (or attacker-controlled) issuer break out of the
+            // parameter and inject a sibling header.
+            let safe_iss = sanitize_header_value(issuer);
+            let safe_auth = sanitize_header_value(authorization_endpoint);
+            Some(format!(
+                r#"Bearer realm="dyson", error="invalid_token", as_uri="{safe_auth}", iss="{safe_iss}""#
+            ))
+        }
         AuthMode::None => None,
     };
     if let Some(c) = challenge {
@@ -343,6 +352,21 @@ pub(crate) fn sanitize_filename(s: &str) -> String {
     s.chars()
         .filter(|c| !matches!(c, '"' | '\r' | '\n' | '/' | '\\'))
         .collect()
+}
+
+/// Sanitise a string value before interpolating into a header.  Strips
+/// CR / LF (the bytes that delimit headers — without this an
+/// attacker-controlled value would let them inject a whole second
+/// header) and `"` (so the value can sit inside a quoted parameter
+/// like `as_uri="…"` without escaping).  Defense-in-depth: the only
+/// callers today route through values the operator configured
+/// (issuer URLs in dyson.json) or the controller minted (chat ids),
+/// neither of which should carry these bytes.  But `header(name, val)`
+/// would silently drop the rest of the response on `\r\n` and the
+/// value layer doesn't enforce this in current hyper versions, so we
+/// keep our own gate.
+pub(crate) fn sanitize_header_value(s: &str) -> String {
+    s.chars().filter(|c| !matches!(c, '\r' | '\n' | '"')).collect()
 }
 
 #[cfg(test)]
@@ -547,5 +571,27 @@ mod tests {
     fn parse_query_extracts_path() {
         let pairs = parse_query("path=memory%2FSOUL.md&x=1");
         assert!(pairs.iter().any(|(k, v)| k == "path" && v == "memory/SOUL.md"));
+    }
+
+    #[test]
+    fn sanitize_header_value_strips_crlf_and_quote() {
+        // CRLF and `"` are the bytes that would let a maliciously-shaped
+        // value (issuer URL from dyson.json, chat_id from disk, etc.)
+        // break out of a quoted parameter or inject a sibling header.
+        assert_eq!(sanitize_header_value("normal-value"), "normal-value");
+        assert_eq!(
+            sanitize_header_value("https://idp.example.com\r\nX-Evil: yes"),
+            "https://idp.example.comX-Evil: yes",
+            "CRLF that would close the header line is stripped",
+        );
+        assert_eq!(
+            sanitize_header_value(r#"https://idp.example.com" injected="x"#),
+            "https://idp.example.com injected=x",
+            "double quote that would close `as_uri=\"…\"` is stripped",
+        );
+        // Non-ASCII passes through — header values that aren't valid in
+        // RFC 7230's visible-ASCII set are caught later by hyper's
+        // HeaderValue layer.
+        assert_eq!(sanitize_header_value("naïve"), "naïve");
     }
 }
