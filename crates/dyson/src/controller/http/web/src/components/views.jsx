@@ -141,7 +141,13 @@ function LeftRail({ active, setActive, filter, emptyLabel }) {
   // with nothing to read).
   const client = useApi();
   const all = useAppState(s => s.conversations);
-  const items = typeof filter === 'function' ? all.filter(filter) : all;
+  const [query, setQuery] = useState('');
+  const q = query.trim().toLowerCase();
+  const matchesQuery = (c) => !q
+    || (c.title || '').toLowerCase().includes(q)
+    || (c.id || '').toLowerCase().includes(q);
+  const items = (typeof filter === 'function' ? all.filter(filter) : all)
+    .filter(matchesQuery);
 
   // Don't auto-rotate on "+ New Conversation" — that once hollowed out
   // the active chat into an archive file the user couldn't see without
@@ -172,7 +178,11 @@ function LeftRail({ active, setActive, filter, emptyLabel }) {
           <Kbd>⌘K</Kbd>
         </button>
       </div>
-      <div className="search"><input placeholder="Filter conversations"/></div>
+      <div className="search">
+        <input placeholder="Filter conversations"
+               value={query}
+               onChange={e => setQuery(e.target.value)}/>
+      </div>
       <div className="scroll">
         {items.length === 0 ? (
           <div style={{padding:'18px 14px', color:'var(--mute)', fontSize:12, lineHeight:1.5}}>

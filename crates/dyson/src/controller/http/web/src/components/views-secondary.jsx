@@ -236,17 +236,38 @@ export function ArtefactsView({ conv, setConv }) {
   // reader.
   const initialPending = !!pendingArtefactId;
   const [showSide, setShowSide] = useState(!initialPending);
-  // Tree expansion state per chat.  The active conv is pre-expanded
-  // so the common "tap Artefacts tab from a chat" flow lands with
-  // that chat's artefacts already visible.
-  const [expanded, setExpanded] = useState(() => (conv ? { [conv]: true } : {}));
+  // Tree expansion state per chat.  Every chat with artefacts is
+  // pre-expanded — the Artefacts tab is a flat overview, and hiding
+  // sibling-chat reports behind a click made cross-chat browsing a
+  // chore.  Users can still collapse a branch they want to mute.
+  const [expanded, setExpanded] = useState(() => {
+    const init = {};
+    for (const c of chats) init[c.id] = true;
+    return init;
+  });
 
-  // Keep the active chat expanded — conv can change underneath us
-  // (deep-link restore, chip click, sibling-chat selection) and the
-  // tree should always reveal its artefacts without a second tap.
+  // Keep newly-arriving chats expanded too — the chats array fills in
+  // asynchronously as conversations load and as artefacts get marked,
+  // so any branch that wasn't in the initial snapshot still wants to
+  // open by default.  Also fetches artefacts for every expanded branch
+  // so the tree paints fully — otherwise pre-expanded branches sit on
+  // "No artefacts loaded." until the user clicks them.
+  useEffect(() => {
+    setExpanded(e => {
+      let next = e;
+      for (const c of chats) {
+        if (!(c.id in next)) {
+          if (next === e) next = { ...e };
+          next[c.id] = true;
+        }
+      }
+      return next;
+    });
+    for (const c of chats) ensureArtefacts(c.id, client);
+  }, [chats, client]);
+
   useEffect(() => {
     if (!conv) return;
-    setExpanded(e => (e[conv] ? e : { ...e, [conv]: true }));
     ensureArtefacts(conv, client);
   }, [conv, client]);
 

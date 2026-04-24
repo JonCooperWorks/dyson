@@ -58,7 +58,7 @@ describe('ArtefactsView — tree sidebar', () => {
     expect(queryByText(/No artefacts yet/)).toBeTruthy();
   });
 
-  it('renders every chat with artefacts, with the active one pre-expanded', () => {
+  it('renders every chat with artefacts and marks the active one', () => {
     setConversations([
       { id: 'c1', title: 'Alpha chat',  live: false, hasArtefacts: true, source: 'http' },
       { id: 'c2', title: 'Beta chat',   live: false, hasArtefacts: true, source: 'http' },
@@ -82,16 +82,40 @@ describe('ArtefactsView — tree sidebar', () => {
     expect(sideText).not.toContain('Gamma chat');
     expect(sideText).toContain('Alpha chat');
     expect(sideText).toContain('Beta chat');
-    // The ACTIVE chat (c1) is pre-expanded: its artefact row is
-    // visible.  c2 stays collapsed.
-    expect(side.querySelector('.artefact-row .title')?.textContent).toBe('First report');
-    expect(sideText).not.toContain('Second report');
     // data-active marker is on the active chat row for styling.
     const activeRow = side.querySelector('.artefact-chat-row[data-active="true"]');
     expect(activeRow?.textContent).toContain('Alpha chat');
   });
 
-  it('clicking a collapsed chat row expands it and reveals its artefacts', () => {
+  it('every chat with artefacts is expanded by default — not just the active one', () => {
+    // Users want a flat overview of all artefacts on the Artefacts tab.
+    // The previous behavior (only the active chat pre-expanded) hid
+    // sibling-chat artefacts behind an extra click.
+    setConversations([
+      { id: 'c1', title: 'Alpha chat', live: false, hasArtefacts: true, source: 'http' },
+      { id: 'c2', title: 'Beta chat',  live: false, hasArtefacts: true, source: 'http' },
+      { id: 'c3', title: 'Gamma chat', live: false, hasArtefacts: true, source: 'http' },
+    ]);
+    seedChatArtefacts('c1', [
+      { id: 'a1', title: 'First report',  bytes: 1024, kind: 'security_review', created_at: 0 },
+    ]);
+    seedChatArtefacts('c2', [
+      { id: 'b1', title: 'Second report', bytes: 2048, kind: 'security_review', created_at: 0 },
+    ]);
+    seedChatArtefacts('c3', [
+      { id: 'g1', title: 'Third report',  bytes: 4096, kind: 'security_review', created_at: 0 },
+    ]);
+    const { container } = renderWithApi(
+      <ArtefactsView conv="c1" setConv={() => {}}/>
+    );
+    const side = container.querySelector('.mind-side');
+    // All three artefacts must be visible without any click — i.e.
+    // every chat row is open at mount.
+    const titles = [...side.querySelectorAll('.artefact-row .title')].map(el => el.textContent);
+    expect(titles).toEqual(expect.arrayContaining(['First report', 'Second report', 'Third report']));
+  });
+
+  it('toggling a chat row collapses then re-expands its artefacts', () => {
     setConversations([
       { id: 'c1', title: 'Alpha chat', live: false, hasArtefacts: true, source: 'http' },
       { id: 'c2', title: 'Beta chat',  live: false, hasArtefacts: true, source: 'http' },
@@ -106,11 +130,15 @@ describe('ArtefactsView — tree sidebar', () => {
       <ArtefactsView conv="c1" setConv={() => {}}/>
     );
     const side = container.querySelector('.mind-side');
-    expect(side.textContent).not.toContain('Second report');
+    // Both chats are pre-expanded by default.
+    expect(side.textContent).toContain('Second report');
     const betaRow = [...side.querySelectorAll('.artefact-chat-row')]
       .find(r => r.textContent.includes('Beta chat'));
+    // First click collapses the branch (it started open).
     fireEvent.click(betaRow);
-    // After the click the row expands — c2's artefact shows.
+    expect(side.textContent).not.toContain('Second report');
+    // Second click re-expands.
+    fireEvent.click(betaRow);
     expect(side.textContent).toContain('Second report');
   });
 
@@ -132,11 +160,7 @@ describe('ArtefactsView — tree sidebar', () => {
       <ArtefactsView conv="c1" setConv={setConv}/>
     );
     const side = container.querySelector('.mind-side');
-    // Expand c2 first — collapsed rows don't expose their artefacts.
-    const betaRow = [...side.querySelectorAll('.artefact-chat-row')]
-      .find(r => r.textContent.includes('Beta chat'));
-    fireEvent.click(betaRow);
-    // Now click the artefact inside c2's expanded body.
+    // Every chat is open by default — c2's artefact is reachable.
     const secondArtRow = [...side.querySelectorAll('.artefact-row')]
       .find(r => r.textContent.includes('Second report'));
     fireEvent.click(secondArtRow);
