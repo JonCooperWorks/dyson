@@ -457,6 +457,68 @@
    Hidden on desktop, where the sidebar is a permanent grid column. */
 .mind-scrim { display: none; }
 
+/* ---------- artefact tree (mind-side) ---------- */
+/* The Artefacts tab collapsed its two-rail design into a single tree:
+   chats as expandable rows, artefacts nested under each.  Styles kept
+   next to .mind-side so the tree reads as part of the same drawer. */
+.artefact-tree-head {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.artefact-chat-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--fg);
+}
+.artefact-chat-row:hover { background: var(--bg-1); }
+.artefact-chat-row[data-active="true"] { background: var(--panel); }
+.artefact-chat-row .caret {
+  color: var(--mute);
+  display: inline-flex;
+  transition: transform 0.12s ease;
+  flex: 0 0 auto;
+}
+.artefact-chat-row .title {
+  font-size: 13px;
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.artefact-chat-row .count {
+  font-size: 10.5px;
+  color: var(--mute);
+  flex: 0 0 auto;
+}
+.artefact-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 14px 6px 32px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+}
+.artefact-row:hover { background: var(--bg-1); color: var(--fg); }
+.artefact-row[data-selected="true"] {
+  background: var(--panel);
+  color: var(--fg);
+  border-left-color: var(--accent);
+}
+.artefact-row .title {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.artefact-row .size {
+  font-size: 10px;
+  color: var(--mute);
+  flex: 0 0 auto;
+}
+
 /* ---------- model menu (top bar) ---------- */
 .modelmenu-scrim { position: fixed; inset: 0; z-index: 19; }
 .modelmenu {

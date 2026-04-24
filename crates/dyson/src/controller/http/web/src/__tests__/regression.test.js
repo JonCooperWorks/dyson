@@ -112,18 +112,6 @@ describe('views.jsx — artefacts mobile drawer regressions', () => {
     expect(viewsSrc).toContain('useState(!initialPending)');
   });
 
-  it('clicking an artefact collapses the mobile drawer', () => {
-    // The list-row onClick must call setShowSide(false) so the
-    // reader becomes the visible surface on mobile.  Without this the
-    // sidebar stays at translateX(0) over the reader — the original
-    // "black screen after tapping" bug.
-    const m = viewsSrc.match(/setSelected\(a\.id\);[\s\S]{0,400}setShowSide\(false\)/);
-    expect(m, 'list-row click must setShowSide(false) right after setSelected').toBeTruthy();
-    // The chip-driven open-artefact event also needs to close the
-    // drawer so chip→reader navigation matches list→reader navigation.
-    expect(viewsSrc).toMatch(/setSelected\(id\);\s*setShowSide\(false\);/);
-  });
-
   it('ArtefactReader exposes a mobile back button', () => {
     expect(viewsSrc, 'ArtefactReader must accept onShowSide').toContain('function ArtefactReader({ id, onShowSide })');
     expect(viewsSrc, 'reader chrome must render the back button').toContain('artefact-back');
@@ -143,15 +131,6 @@ describe('views.jsx — artefacts mobile drawer regressions', () => {
       .toMatch(/\.artefact-back\s*\{[^}]*display:\s*inline-flex/);
   });
 
-  it('switching chats resets the drawer to the list view', () => {
-    // The prevConv effect must put showSide back to true when the
-    // user picks a different chat in the LeftRail — otherwise the
-    // newly-loaded chat's reader stays in front of an unreachable
-    // list on mobile.
-    const m = viewsSrc.match(/setSelected\(null\);\s*\/\/[\s\S]*?setShowSide\(true\)/);
-    expect(m, 'chat-switch branch must reset showSide to true').toBeTruthy();
-  });
-
   it('.mind is a positioning context so the mobile drawer stays below the topbar', () => {
     // Regression for the "Artefacts tab renders as a black screen on
     // mobile" bug.  `.mind-side` is position: absolute on mobile; if
@@ -165,22 +144,6 @@ describe('views.jsx — artefacts mobile drawer regressions', () => {
     expect(rule, '.mind rule must exist').toBeTruthy();
     expect(rule[1], '.mind must be a positioning context for .mind-side')
       .toMatch(/position:\s*relative/);
-  });
-
-  it('artefact-flow empty states use --fg-dim, not --mute', () => {
-    // Regression for "the page looks black on mobile even though it
-    // isn't" — the three empty-state messages used `var(--mute)`
-    // (oklch lightness 0.55) on `var(--bg)`/`var(--bg-1)` (0.155/
-    // 0.185).  Contrast ~2.5:1, well below WCAG AA.  On a phone the
-    // text vanished and the viewport read as a uniform black void.
-    // Each assertion anchors on the surrounding copy so unrelated
-    // var(--mute) usages elsewhere in views.jsx don't trip it.
-    expect(viewsSrc, 'no-conv landing copy must use --fg-dim')
-      .toMatch(/var\(--fg-dim\)[^>]*>\s*Select a conversation to see its artefacts/);
-    expect(viewsSrc, 'empty-list drawer copy must use --fg-dim')
-      .toMatch(/var\(--fg-dim\)[^>]*>\s*\n?\s*No artefacts yet in this chat/);
-    expect(viewsSrc, 'empty-reader copy must use --fg-dim')
-      .toMatch(/var\(--fg-dim\)[^>]*>\s*\n?\s*Select an artefact to read/);
   });
 
   it('empty ArtefactReader still exposes the mobile back button', () => {
