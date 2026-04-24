@@ -197,7 +197,13 @@ impl ChatHistory for DiskChatHistory {
                 .unwrap_or(std::time::UNIX_EPOCH);
             rows.push((chat_id, mtime));
         }
-        rows.sort_by(|a, b| b.1.cmp(&a.1));
+        // Break mtime ties by chat id (reverse) so rapid back-to-back
+        // saves — c-0000, c-0001, c-0002 created within one filesystem
+        // tick — don't land in `read_dir`-iteration order, which is
+        // nondeterministic and makes the HTTP sidebar jitter.  For
+        // zero-padded `c-NNNN` ids this also matches creation order;
+        // for Telegram numeric ids the tiebreak is merely stable.
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
         Ok(rows.into_iter().map(|(id, _)| id).collect())
     }
 }
