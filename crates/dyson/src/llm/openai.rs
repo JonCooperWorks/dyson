@@ -383,9 +383,20 @@ impl SseJsonParser for OpenAiJsonParser {
             let delta = &choice["delta"];
 
             // -- Thinking / reasoning content --
-            if let Some(thinking) = delta["reasoning_content"].as_str()
-                && !thinking.is_empty()
-            {
+            //
+            // Three conventions in the wild:
+            //   - `reasoning_content` (OpenAI o-series, DeepSeek direct)
+            //   - `reasoning` (OpenRouter normalized)
+            //   - `reasoning_details[].text` (OpenRouter structured)
+            // Prefer reasoning_content, fall back to reasoning.  Skip
+            // reasoning_details to avoid double-counting when OpenRouter
+            // emits both `reasoning` and `reasoning_details` for the same
+            // chunk (observed for deepseek via OpenRouter).
+            let thinking = delta["reasoning_content"]
+                .as_str()
+                .or_else(|| delta["reasoning"].as_str())
+                .filter(|s| !s.is_empty());
+            if let Some(thinking) = thinking {
                 events.push(Ok(StreamEvent::ThinkingDelta(thinking.to_string())));
             }
 
@@ -543,6 +554,29 @@ mod tests {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
             }
             other => panic!("expected MessageComplete, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_openrouter_reasoning_field_as_thinking() {
+        // OpenRouter normalizes reasoning to `delta.reasoning` (and also
+        // emits `reasoning_details`).  Confirmed via live curl against
+        // deepseek-v4-pro through OpenRouter.  We fall back to `reasoning`
+        // when `reasoning_content` is absent so the Thinking block is
+        // captured for echoing back.
+        let events = parse_sse(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\"step one\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"step one\"}]},\"finish_reason\":null}]}\n\n\
+             data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        );
+
+        let thinking: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.as_ref().unwrap(), StreamEvent::ThinkingDelta(_)))
+            .collect();
+        assert_eq!(thinking.len(), 1, "reasoning field should emit one ThinkingDelta (not doubled by reasoning_details)");
+        match thinking[0].as_ref().unwrap() {
+            StreamEvent::ThinkingDelta(t) => assert_eq!(t, "step one"),
+            other => panic!("expected ThinkingDelta, got: {other:?}"),
         }
     }
 
