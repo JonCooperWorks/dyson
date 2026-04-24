@@ -222,9 +222,17 @@ pub(crate) struct ProviderDto {
 /// `auth: Arc<dyn Auth>` because the actual `Auth` trait hides
 /// everything except `validate_request` / `apply_to_request` — the
 /// discovery URL etc. don't belong in there.
+///
+/// Surfaced from `test_helpers::AuthMode` so integration tests can
+/// pin a specific mode and assert on the SPA-facing summary
+/// (`/api/auth/config`, the WWW-Authenticate header) without needing
+/// a real OIDC IdP behind the rig.  `#[doc(hidden)]` keeps it out of
+/// the published surface — the type is only `pub` for that test
+/// hook.
+#[doc(hidden)]
 #[derive(Clone, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
-pub(crate) enum AuthMode {
+pub enum AuthMode {
     None,
     Bearer,
     Oidc {

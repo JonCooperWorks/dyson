@@ -26,7 +26,8 @@ use super::ClientRegistry;
 use super::Output;
 use super::output::SseOutput;
 use super::state::HttpState;
-use super::wire::AuthMode;
+
+pub use super::wire::AuthMode;
 
 pub fn build_state(
     settings: Settings,
@@ -35,13 +36,31 @@ pub fn build_state(
     feedback: Option<Arc<FeedbackStore>>,
     auth: Arc<dyn Auth>,
 ) -> Arc<HttpState> {
+    build_state_with_auth_mode(settings, registry, history, feedback, auth, AuthMode::None)
+}
+
+/// Same as `build_state` but lets the test pin a specific `AuthMode`
+/// so the unauthenticated `/api/auth/config` discovery endpoint and the
+/// `WWW-Authenticate` header on a 401 carry the values the test wants
+/// to assert against.  The `auth: Arc<dyn Auth>` and the `AuthMode`
+/// are independent: the trait object is the validation gate, the
+/// `AuthMode` is the SPA-facing summary the controller surfaces to
+/// the browser before any credential is presented.
+pub fn build_state_with_auth_mode(
+    settings: Settings,
+    registry: Arc<ClientRegistry>,
+    history: Option<Arc<dyn ChatHistory>>,
+    feedback: Option<Arc<FeedbackStore>>,
+    auth: Arc<dyn Auth>,
+    auth_mode: AuthMode,
+) -> Arc<HttpState> {
     Arc::new(HttpState::new(
         settings,
         registry,
         history,
         feedback,
         auth,
-        AuthMode::None,
+        auth_mode,
         None,
     ))
 }

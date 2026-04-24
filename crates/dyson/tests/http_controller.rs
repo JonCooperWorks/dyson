@@ -2361,6 +2361,67 @@ async fn create_chat(r: &Rig, title: &str) -> String {
     j["id"].as_str().expect("chat id").to_string()
 }
 
+/// Build a rig with a custom `AuthMode`.  Lets the OIDC / Bearer
+/// /api/auth/config + WWW-Authenticate tests pin the SPA-facing
+/// summary the controller reports without needing a real IdP behind
+/// it (the validation gate uses whatever `auth: Arc<dyn Auth>` the
+/// caller supplies, independent of the AuthMode).
+async fn rig_with_auth_and_mode(
+    auth: Arc<dyn Auth>,
+    auth_mode: test_helpers::AuthMode,
+) -> Rig {
+    let chat_dir = tempfile::tempdir().expect("chat tempdir");
+    let workspace_dir = tempfile::tempdir().expect("workspace tempdir");
+
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        "default".to_string(),
+        ProviderConfig {
+            provider_type: LlmProvider::OpenRouter,
+            api_key: Credential::new("sk-test".into()),
+            base_url: None,
+            models: vec!["qwen/qwen3.6-plus".to_string()],
+        },
+    );
+    let mut settings = Settings::default();
+    settings.agent.provider = LlmProvider::OpenRouter;
+    settings.agent.model = "qwen/qwen3.6-plus".into();
+    settings.providers = providers;
+    settings.workspace.connection_string =
+        Credential::new(workspace_dir.path().to_string_lossy().into_owned());
+    settings.chat_history = ChatHistoryConfig {
+        backend: "disk".into(),
+        connection_string: Credential::new(
+            chat_dir.path().to_string_lossy().into_owned(),
+        ),
+    };
+    let registry = Arc::new(ClientRegistry::new(&settings, None));
+    let history: Arc<dyn ChatHistory> = Arc::new(
+        DiskChatHistory::new(chat_dir.path().to_path_buf()).expect("disk history"),
+    );
+    let feedback = Arc::new(FeedbackStore::new(chat_dir.path().to_path_buf()));
+    let state = test_helpers::build_state_with_auth_mode(
+        settings,
+        registry,
+        Some(history),
+        Some(feedback),
+        auth,
+        auth_mode,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let base = format!("http://{}", addr);
+    let handle = tokio::spawn(test_helpers::serve(state.clone(), listener));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    Rig {
+        base,
+        state,
+        chat_dir,
+        workspace_dir,
+        _handle: handle,
+    }
+}
+
 /// Build a Rig pointing at specific tempdirs — used by the
 /// restart-survival test so rig A and rig B share the same disk.
 async fn rig_pointing_at(
@@ -2419,3 +2480,454 @@ async fn rig_pointing_at(
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// /api/auth/config — unauthenticated discovery + WWW-Authenticate header
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn auth_config_returns_none_shape_for_dangerous_no_auth() {
+    let r = rig().await;
+    let resp = get(&format!("{}/api/auth/config", r.base)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp).await;
+    assert_eq!(j["mode"], "none");
+    // No WWW-Authenticate even on 401 in this mode.
+    let _r = r;
+}
+
+#[tokio::test]
+async fn auth_config_returns_bearer_shape_unauthenticated() {
+    // Bearer mode: GET /api/auth/config must succeed WITHOUT a token
+    // because the SPA calls it before it has one.  Body carries just
+    // the mode tag — nothing to discover, the operator pasted the
+    // plaintext into the browser already.
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("s3cret"),
+        test_helpers::AuthMode::Bearer,
+    )
+    .await;
+    let resp = get(&format!("{}/api/auth/config", r.base)).await;
+    assert_eq!(resp.status(), StatusCode::OK, "no token should still hit auth/config");
+    let j = body_json(resp).await;
+    assert_eq!(j["mode"], "bearer");
+}
+
+#[tokio::test]
+async fn auth_config_returns_oidc_shape_with_endpoints_unauthenticated() {
+    // OIDC mode: the SPA needs issuer + authorization_endpoint +
+    // (optional) token_endpoint + client_id + required_scopes to
+    // bootstrap an auth code flow before it has a token.
+    let r = rig_with_auth_and_mode(
+        Arc::new(DangerousNoAuth), // gate is wide open; the test only cares about the SPA-facing summary
+        test_helpers::AuthMode::Oidc {
+            issuer: "https://idp.example.com".into(),
+            authorization_endpoint: "https://idp.example.com/authorize".into(),
+            token_endpoint: Some("https://idp.example.com/token".into()),
+            client_id: "dyson-web".into(),
+            required_scopes: vec!["openid".into(), "dyson:api".into()],
+        },
+    )
+    .await;
+    let resp = get(&format!("{}/api/auth/config", r.base)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = body_json(resp).await;
+    assert_eq!(j["mode"], "oidc");
+    assert_eq!(j["issuer"], "https://idp.example.com");
+    assert_eq!(j["authorization_endpoint"], "https://idp.example.com/authorize");
+    assert_eq!(j["token_endpoint"], "https://idp.example.com/token");
+    assert_eq!(j["client_id"], "dyson-web");
+    let scopes = j["required_scopes"].as_array().expect("required_scopes is an array");
+    assert_eq!(scopes, &vec![serde_json::json!("openid"), serde_json::json!("dyson:api")]);
+}
+
+#[tokio::test]
+async fn auth_config_omits_token_endpoint_when_idp_did_not_advertise_one() {
+    // Pure-implicit-flow IdPs are rare but the controller must not
+    // synthesise a `token_endpoint` URL when the discovery doc didn't
+    // list one — surfacing a fake one would push the SPA into a
+    // broken code-for-token exchange against an unreachable URL.
+    let r = rig_with_auth_and_mode(
+        Arc::new(DangerousNoAuth),
+        test_helpers::AuthMode::Oidc {
+            issuer: "https://idp.example.com".into(),
+            authorization_endpoint: "https://idp.example.com/authorize".into(),
+            token_endpoint: None,
+            client_id: "dyson-web".into(),
+            required_scopes: vec![],
+        },
+    )
+    .await;
+    let resp = get(&format!("{}/api/auth/config", r.base)).await;
+    let j = body_json(resp).await;
+    assert!(j["token_endpoint"].is_null(), "token_endpoint must be null when missing");
+}
+
+#[tokio::test]
+async fn unauthorized_carries_bearer_www_authenticate_header() {
+    // RFC 6750 challenge: realm + error.  No issuer / as_uri because
+    // this is the static-token mode.
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("any"),
+        test_helpers::AuthMode::Bearer,
+    )
+    .await;
+    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let www = resp
+        .headers()
+        .get("WWW-Authenticate")
+        .expect("Bearer mode must set a 401 challenge")
+        .to_str()
+        .expect("ASCII");
+    assert!(www.contains(r#"realm="dyson""#));
+    assert!(www.contains(r#"error="invalid_token""#));
+    assert!(!www.contains("as_uri"), "static bearer has no IdP to point at");
+    assert!(!www.contains("iss="), "static bearer has no issuer");
+}
+
+#[tokio::test]
+async fn unauthorized_carries_oidc_www_authenticate_header_with_as_uri_and_iss() {
+    // OIDC challenge: include as_uri + iss so a non-browser client
+    // (curl wrapper, k6 load test, terraform provider) can find its
+    // way to the IdP without out-of-band config.  The auth gate has
+    // to actually reject for the 401 to fire — use a HashedBearer as
+    // the validator so a bare GET without a token comes back 401.
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("placeholder"),
+        test_helpers::AuthMode::Oidc {
+            issuer: "https://idp.example.com".into(),
+            authorization_endpoint: "https://idp.example.com/authorize".into(),
+            token_endpoint: Some("https://idp.example.com/token".into()),
+            client_id: "dyson-web".into(),
+            required_scopes: vec![],
+        },
+    )
+    .await;
+    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let www = resp
+        .headers()
+        .get("WWW-Authenticate")
+        .expect("OIDC mode must set a 401 challenge")
+        .to_str()
+        .expect("ASCII");
+    assert!(www.contains(r#"realm="dyson""#));
+    assert!(www.contains(r#"error="invalid_token""#));
+    assert!(www.contains(r#"as_uri="https://idp.example.com/authorize""#));
+    assert!(www.contains(r#"iss="https://idp.example.com""#));
+}
+
+#[tokio::test]
+async fn unauthorized_omits_www_authenticate_for_dangerous_no_auth() {
+    // Construct a rig where validation will reject every request even
+    // though the SPA-facing AuthMode is None.  Without a challenge
+    // header the SPA reads the body's `unauthorized` and decides
+    // whether to redirect to login on its own.
+    struct AlwaysDeny;
+    #[async_trait::async_trait]
+    impl Auth for AlwaysDeny {
+        async fn validate_request(
+            &self,
+            _h: &hyper::HeaderMap,
+        ) -> dyson::error::Result<dyson::auth::AuthInfo> {
+            Err(dyson::error::DysonError::Config("unauthorized".into()))
+        }
+    }
+    let r = rig_with_auth_and_mode(Arc::new(AlwaysDeny), test_helpers::AuthMode::None).await;
+    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        resp.headers().get("WWW-Authenticate").is_none(),
+        "AuthMode::None must not set a challenge header",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SSE access_token query-param folding
+// ---------------------------------------------------------------------------
+
+/// Same as `create_chat` but sends an Authorization header so it
+/// works against a Bearer-protected rig.
+async fn create_chat_with_token(r: &Rig, title: &str, token: &str) -> String {
+    let body = serde_json::json!({ "title": title });
+    let bytes = serde_json::to_vec(&body).expect("serialize");
+    let resp = request_with_headers(
+        &format!("{}/api/conversations", r.base),
+        Method::POST,
+        Some(bytes),
+        &[("authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "create_chat must succeed with token");
+    let j = body_json(resp).await;
+    j["id"].as_str().expect("chat id").to_string()
+}
+
+#[tokio::test]
+async fn sse_access_token_query_param_authorizes_events_endpoint() {
+    // EventSource can't send headers, so dispatch_inner folds
+    // `?access_token=<jwt>` into a synthetic Authorization header
+    // before the auth gate.  We don't drive a real SSE stream here —
+    // we just need to know the gate accepts it.  The test sends a
+    // GET to /events; the response is a 200 (text/event-stream) with
+    // a body that we don't read so the open is enough to know auth
+    // passed.
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("right-token"),
+        test_helpers::AuthMode::Bearer,
+    )
+    .await;
+    let chat_id = create_chat_with_token(&r, "sse-auth-test", "right-token").await;
+    let url = format!(
+        "{}/api/conversations/{}/events?access_token=right-token",
+        r.base, chat_id,
+    );
+    // We can't easily wait for the first frame here without standing
+    // up a longer SSE harness, so just check status code on connect.
+    let resp = get(&url).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "?access_token must authorise the SSE open",
+    );
+    assert_eq!(
+        resp.headers()
+            .get("Content-Type")
+            .and_then(|v| v.to_str().ok()),
+        Some("text/event-stream"),
+    );
+}
+
+#[tokio::test]
+async fn sse_access_token_query_param_with_wrong_token_still_401s() {
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("right"),
+        test_helpers::AuthMode::Bearer,
+    )
+    .await;
+    let chat_id = create_chat_with_token(&r, "x", "right").await;
+    let url = format!(
+        "{}/api/conversations/{}/events?access_token=wrong",
+        r.base, chat_id,
+    );
+    let resp = get(&url).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn access_token_query_param_only_applies_to_events_path() {
+    // A bare `?access_token=` on a non-events path must NOT bypass the
+    // header check — `auth_headers_for` is supposed to only kick in
+    // for paths ending in `/events`.  Otherwise a leaked log line with
+    // `?access_token=…` in the query would be a credentials disclosure.
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("right-token"),
+        test_helpers::AuthMode::Bearer,
+    )
+    .await;
+    let url = format!("{}/api/conversations?access_token=right-token", r.base);
+    let resp = get(&url).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "query token must NOT authorise non-events paths",
+    );
+}
+
+#[tokio::test]
+async fn sse_authorization_header_takes_precedence_over_query_token() {
+    // When the client provides BOTH a header and a query token, the
+    // header wins (auth_headers_for returns None and the validation
+    // path borrows req.headers() unchanged).  A header with the right
+    // token must succeed even if the query carries a wrong one.
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("real-token"),
+        test_helpers::AuthMode::Bearer,
+    )
+    .await;
+    let chat_id = create_chat_with_token(&r, "x", "real-token").await;
+    let url = format!(
+        "{}/api/conversations/{}/events?access_token=fake",
+        r.base, chat_id,
+    );
+    let resp =
+        get_with_header(&url, "authorization", "Bearer real-token").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "Authorization header must take precedence over a fake query token",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tuple-match dispatch — every route resolves; unknown routes 404, bogus
+// methods 405.  Most of the route-resolves checks already live elsewhere
+// in this file; this stitches the negative cases together so the dispatch
+// matrix has explicit coverage.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn dispatch_returns_405_for_known_route_with_wrong_method() {
+    let r = rig().await;
+    // /api/conversations only takes GET / POST.
+    let resp = request(
+        &format!("{}/api/conversations", r.base),
+        Method::PUT,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let resp = request(
+        &format!("{}/api/conversations", r.base),
+        Method::PATCH,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn dispatch_returns_405_for_unknown_api_path() {
+    // Anything under `/api/` that doesn't match a route falls through
+    // to method_not_allowed (the catch-all in dispatch_inner) — which
+    // means non-GET catches it; GET would land in serve_static, which
+    // 404s for unknown asset paths but does NOT 405.
+    let r = rig().await;
+    let resp = request(
+        &format!("{}/api/no-such-thing", r.base),
+        Method::POST,
+        Some(b"{}".to_vec()),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn dispatch_returns_404_for_unknown_get_path_via_static_fallback() {
+    let r = rig().await;
+    let resp = get(&format!("{}/api/no-such-thing", r.base)).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// safe_store_id boundary fuzzing — URL-decoded traversal must not escape.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn store_endpoints_reject_url_decoded_path_traversal() {
+    // dispatch hands the URL-decoded id to safe_store_id; verify
+    // every traversal shape an attacker is likely to try lands on
+    // a 404 (not 200, not 500).
+    let r = rig().await;
+    let cases = [
+        // %2F → '/'
+        "%2F..%2Fetc%2Fpasswd",
+        // double-encoded
+        "%252F..%252Fetc%252Fpasswd",
+        // bare `..`
+        "..",
+        // dotted segments after the slash strips don't appear here
+        // because dispatch picks the LAST segment, but %00 must reject.
+        "f1%00",
+        // backslash isn't in the alphabet
+        "f1%5C",
+        // Whitespace
+        "f1%20",
+        // Unicode (won't decode to ASCII alphanumeric)
+        "%C3%A9",
+    ];
+    for raw in cases {
+        let resp = get(&format!("{}/api/files/{}", r.base, raw)).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "/api/files/{raw} must 404, not traverse",
+        );
+        let resp = get(&format!("{}/api/artefacts/{}", r.base, raw)).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "/api/artefacts/{raw} must 404, not traverse",
+        );
+    }
+}
+
+#[tokio::test]
+async fn shareable_artefact_redirect_rejects_traversal_ids() {
+    // /artefacts/<id> redirects to /#/artefacts/<id> for the SPA
+    // reader.  An invalid id must NOT round-trip through Location
+    // — that would let an attacker craft a phishing URL on this
+    // host that forwards to an arbitrary fragment.
+    let r = rig().await;
+    let resp = get(&format!("{}/artefacts/%2Fevil", r.base)).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Hot-reload propagation through /api/providers AND post_model
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn hot_reload_propagates_through_post_model_runtime_override() {
+    // /api/model swaps the provider+model on every loaded chat AND
+    // installs a runtime override so the next agent built from
+    // settings inherits the choice.  The override has to survive a
+    // hot-reload of `state.settings` too — without that, a config
+    // change racing /api/model would silently discard the override.
+    use dyson::config::{LlmProvider, ProviderConfig};
+    let r = rig().await;
+    let _id = create_chat(&r, "hot reload model").await;
+
+    // Add a second provider via hot-reload.
+    let mut next = r.state.settings_snapshot();
+    next.providers.insert(
+        "anthropic".into(),
+        ProviderConfig {
+            provider_type: LlmProvider::OpenRouter,
+            api_key: Credential::new("sk-anth".into()),
+            base_url: None,
+            models: vec!["claude-haiku-4-5".to_string()],
+        },
+    );
+    r.state.replace_settings_for_test(next);
+
+    // /api/providers must surface the new entry immediately.
+    let resp = get(&format!("{}/api/providers", r.base)).await;
+    let providers = body_json(resp).await;
+    let names: Vec<&str> = providers
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["id"].as_str())
+        .collect();
+    assert!(names.contains(&"anthropic"), "hot-reload must surface anthropic; got {names:?}");
+
+    // /api/model on the new provider must succeed.  No persistence
+    // (config_path is None in the test rig) but the runtime override
+    // is set in-process.
+    let resp = post_json(
+        &format!("{}/api/model", r.base),
+        &serde_json::json!({
+            "provider": "anthropic",
+            "model": "claude-haiku-4-5",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["provider"], "anthropic");
+    assert_eq!(body["model"], "claude-haiku-4-5");
+
+    // Re-list providers — the active one must now be anthropic
+    // (the runtime override wins over settings.agent.provider).
+    let resp = get(&format!("{}/api/providers", r.base)).await;
+    let after = body_json(resp).await;
+    let active: Option<&str> = after
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["active"] == true)
+        .and_then(|p| p["id"].as_str());
+    assert_eq!(active, Some("anthropic"), "post_model must flip the active provider");
+}
