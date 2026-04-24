@@ -274,7 +274,7 @@ async fn providers_list_reflects_hot_reloaded_models() {
 
     // Build a fresh Settings with an extra model appended to the
     // existing provider — simulates the operator editing dyson.json.
-    let mut new_settings = r.state.settings_snapshot_for_test();
+    let mut new_settings = r.state.settings_snapshot();
     new_settings
         .providers
         .get_mut("default")

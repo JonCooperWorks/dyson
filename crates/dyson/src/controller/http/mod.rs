@@ -357,14 +357,55 @@ struct ProviderDto {
 // State
 // ---------------------------------------------------------------------------
 
-/// In-memory store for agent-produced files.  Keyed by short id;
-/// FIFO eviction once we exceed the cap so a long-running session
-/// doesn't grow without bound.  Files are bytes + mime type; the
-/// original filename is part of the SSE event the UI shows.
-#[derive(Default)]
-struct FileStore {
-    items: HashMap<String, FileEntry>,
+/// FIFO-evicting in-memory store keyed by short id.  Both `FileStore`
+/// and `ArtefactStore` wrap one of these, only differing in the disk
+/// layout (`load_from_disk` / `persist_static`).  The cap is purely a
+/// memory bound — bytes stay reachable on disk and the handlers
+/// hydrate on miss.
+struct EvictingStore<T> {
+    items: HashMap<String, T>,
     order: std::collections::VecDeque<String>,
+    cap: usize,
+}
+
+impl<T> EvictingStore<T> {
+    fn with_cap(cap: usize) -> Self {
+        Self { items: HashMap::new(), order: std::collections::VecDeque::new(), cap }
+    }
+
+    fn put(&mut self, id: String, entry: T) {
+        while self.order.len() >= self.cap {
+            if let Some(old) = self.order.pop_front() {
+                self.items.remove(&old);
+            }
+        }
+        self.order.push_back(id.clone());
+        self.items.insert(id, entry);
+    }
+}
+
+/// In-memory store for agent-produced files.  Files are bytes + mime
+/// type; the original filename is part of the SSE event the UI shows.
+struct FileStore {
+    inner: EvictingStore<FileEntry>,
+}
+
+impl Default for FileStore {
+    fn default() -> Self {
+        Self { inner: EvictingStore::with_cap(Self::MAX_FILES) }
+    }
+}
+
+// `state.files.lock().unwrap().items.get(id)` shows up in route
+// handlers and tests — keep the inner map reachable through `Deref`-
+// style accessors instead of a wrapper API that'd force every call
+// site to change.
+impl std::ops::Deref for FileStore {
+    type Target = EvictingStore<FileEntry>;
+    fn deref(&self) -> &Self::Target { &self.inner }
+}
+impl std::ops::DerefMut for FileStore {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.inner }
 }
 
 struct FileEntry {
@@ -374,19 +415,10 @@ struct FileEntry {
 }
 
 impl FileStore {
-    /// In-memory cap — beyond this, oldest entries are evicted from
-    /// the hot cache.  When disk persistence is enabled the bytes stay
-    /// addressable on disk, so FIFO eviction is purely a memory cap.
     const MAX_FILES: usize = 64;
 
     fn put(&mut self, id: String, entry: FileEntry) {
-        while self.order.len() >= Self::MAX_FILES {
-            if let Some(old) = self.order.pop_front() {
-                self.items.remove(&old);
-            }
-        }
-        self.order.push_back(id.clone());
-        self.items.insert(id, entry);
+        self.inner.put(id, entry);
     }
 
     /// Read a persisted file from disk.  Returns `None` if the entry
@@ -431,52 +463,47 @@ impl FileStore {
         }
     }
 
-    /// On controller startup, scan the persistence dir for existing
-    /// files and populate the in-memory index with just enough to serve
-    /// them.  Bytes aren't loaded here — `get_file` hydrates on demand.
-    /// Returns the largest numeric id seen so the controller's monotonic
-    /// counter resumes above any pre-existing entry.
-    fn hydrate_from_disk(&mut self, data_dir: &std::path::Path) -> u64 {
-        let sub = data_dir.join("files");
-        let entries = match std::fs::read_dir(&sub) {
-            Ok(e) => e,
-            Err(_) => return 0,
-        };
-        let mut max_n: u64 = 0;
-        for e in entries.flatten() {
-            let name = match e.file_name().into_string() {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-            if !name.ends_with(".meta.json") { continue; }
-            let id = name.trim_end_matches(".meta.json").to_string();
-            // Don't eagerly load bytes — register the id in the LRU
-            // so listing works; get_file pulls bytes on first hit.
-            // We stash a sentinel FileEntry with empty bytes to mark
-            // the slot; load_from_disk replaces it when needed.
-            // But to avoid serving zero-byte files, we skip
-            // registration and let get_file lazy-load instead.  Just
-            // track max id.
-            if let Some(rest) = id.strip_prefix('f')
-                && let Ok(n) = rest.parse::<u64>()
-            {
-                max_n = max_n.max(n);
-            }
-        }
-        max_n
-    }
+}
+
+/// Highest `f<N>` id ever persisted under `{data_dir}/files/` so the
+/// controller's monotonic counter resumes above any pre-existing
+/// entry.  Files load lazily on `GET /api/files/<id>`, so this is a
+/// max-id scan, not a hydrate — the previous shape pretended to fill
+/// `FileStore.items` but never did.
+fn max_file_id(data_dir: &std::path::Path) -> u64 {
+    let entries = match std::fs::read_dir(data_dir.join("files")) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|n| n.strip_suffix(".meta.json").map(str::to_string))
+        .filter_map(|id| id.strip_prefix('f').and_then(|r| r.parse::<u64>().ok()))
+        .max()
+        .unwrap_or(0)
 }
 
 /// In-memory store for agent-produced artefacts (security-review
-/// reports, etc.).  Mirrors `FileStore` but stores the markdown
-/// body as a `String` and keeps the per-chat index, kind, title and
-/// metadata alongside each entry so the Artefacts view can list
-/// everything without downloading bodies.  FIFO eviction keeps memory
-/// bounded.
-#[derive(Default)]
+/// reports, etc.).  Same FIFO ring as `FileStore` but the entry
+/// carries chat scope + markdown body so the Artefacts view can list
+/// everything without downloading bodies.
 struct ArtefactStore {
-    items: HashMap<String, ArtefactEntry>,
-    order: std::collections::VecDeque<String>,
+    inner: EvictingStore<ArtefactEntry>,
+}
+
+impl Default for ArtefactStore {
+    fn default() -> Self {
+        Self { inner: EvictingStore::with_cap(Self::MAX_ARTEFACTS) }
+    }
+}
+
+impl std::ops::Deref for ArtefactStore {
+    type Target = EvictingStore<ArtefactEntry>;
+    fn deref(&self) -> &Self::Target { &self.inner }
+}
+impl std::ops::DerefMut for ArtefactStore {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.inner }
 }
 
 struct ArtefactEntry {
@@ -498,19 +525,10 @@ struct ArtefactEntry {
 }
 
 impl ArtefactStore {
-    /// In-memory cap — beyond this, oldest are evicted from the hot
-    /// cache.  When disk persistence is enabled, the markdown stays
-    /// addressable on disk so FIFO eviction is purely a memory cap.
     const MAX_ARTEFACTS: usize = 32;
 
     fn put(&mut self, id: String, entry: ArtefactEntry) {
-        while self.order.len() >= Self::MAX_ARTEFACTS {
-            if let Some(old) = self.order.pop_front() {
-                self.items.remove(&old);
-            }
-        }
-        self.order.push_back(id.clone());
-        self.items.insert(id, entry);
+        self.inner.put(id, entry);
     }
 
     /// Per-chat artefact dir: `{data_dir}/{chat_id}/artefacts/`.
@@ -853,13 +871,13 @@ impl HttpState {
             None
         };
 
-        let mut files = FileStore::default();
+        let files = FileStore::default();
         let mut artefacts = ArtefactStore::default();
         let mut file_next: u64 = 1;
         let mut artefact_next: u64 = 1;
         let mut chat_next: u64 = 1;
         if let Some(dir) = data_dir.as_ref() {
-            file_next = files.hydrate_from_disk(dir).saturating_add(1);
+            file_next = max_file_id(dir).saturating_add(1);
             artefact_next = artefacts.hydrate_from_disk(dir).saturating_add(1);
             chat_next = max_chat_id_n(dir, &artefacts).saturating_add(1);
         }
@@ -980,17 +998,15 @@ impl HttpState {
         *guard = settings;
     }
 
-    #[doc(hidden)]
-    pub fn settings_snapshot_for_test(&self) -> Settings {
-        self.settings_snapshot()
-    }
-
     /// Clone the live settings under a short read lock.  Callers that
     /// need more than one field should call this once — repeatedly
     /// re-acquiring the read guard is cheap but noisier.  Poisoned
     /// locks are recovered via `into_inner` because a writer that
     /// panicked mid-swap still leaves a valid `Settings` behind.
-    fn settings_snapshot(&self) -> Settings {
+    /// `pub` for the test that asserts hot-reload propagates fresh
+    /// settings into the snapshot path.
+    #[doc(hidden)]
+    pub fn settings_snapshot(&self) -> Settings {
         match self.settings.read() {
             Ok(g) => g.clone(),
             Err(p) => p.into_inner().clone(),
@@ -1665,23 +1681,23 @@ async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) ->
 async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) -> Resp {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+    // Borrowed view of the path segments — `["api", "conversations", id, …]`
+    // — keyed on once and reused by the route match.
+    let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
 
     // `/api/auth/config` is intentionally unauthenticated: the SPA
     // calls it before it has a token to discover whether one is
     // required, and (for OIDC) where to start the auth code flow.
-    // Without this exemption the frontend has no way to bootstrap.
-    if path == "/api/auth/config" && method == Method::GET {
+    if matches!((&method, segs.as_slice()), (&Method::GET, ["api", "auth", "config"])) {
         return get_auth_config(&state);
     }
 
-    // Enforce inbound auth on every API route.  Static-shell assets
-    // (`/`, `/assets/*`) are exempt so the UI can load before the
-    // browser has presented its credential.  SSE endpoints can't set
-    // custom headers from the browser (`EventSource` doesn't forward
-    // them), so for `/events` we also accept `?access_token=<jwt>` —
-    // `auth_headers_for` synthesises the missing `Authorization`
-    // header from the query param (and only allocates when it has
-    // to).
+    // Inbound auth on every `/api/*`.  Static-shell paths (`/`,
+    // `/assets/*`) are exempt so the UI can load before presenting a
+    // credential.  SSE endpoints can't send headers from the browser,
+    // so `auth_headers_for` folds `?access_token=` into a synthetic
+    // Authorization header — only when necessary, the rest borrow
+    // `req.headers()` and pay no allocation.
     if path.starts_with("/api/") {
         let synthesised = auth_headers_for(&path, &req);
         let headers = synthesised.as_ref().unwrap_or_else(|| req.headers());
@@ -1690,101 +1706,53 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         }
     }
 
-    // API routes first.
-    if path == "/api/conversations" && method == Method::GET {
-        return list_conversations(&state).await;
-    }
-    if path == "/api/conversations" && method == Method::POST {
-        return create_conversation(req, &state).await;
-    }
-    if path == "/api/providers" && method == Method::GET {
-        return list_providers(&state);
-    }
-    if path == "/api/mind" && method == Method::GET {
-        return get_mind(&state).await;
-    }
-    if path == "/api/mind/file" && method == Method::GET {
-        return get_mind_file(&state, req.uri().query().unwrap_or("")).await;
-    }
-    if path == "/api/mind/file" && method == Method::POST {
-        return post_mind_file(req, &state).await;
-    }
-    if path == "/api/activity" && method == Method::GET {
-        return get_activity(&state, req.uri().query().unwrap_or(""));
-    }
-    if path == "/api/model" && method == Method::POST {
-        return post_model(req, Arc::clone(&state)).await;
-    }
-    if let Some(id) = path.strip_prefix("/api/files/") {
-        if method == Method::GET {
+    match (&method, segs.as_slice()) {
+        // ─── conversations ─────────────────────────────────────────────
+        (&Method::GET,    ["api", "conversations"])                 => list_conversations(&state).await,
+        (&Method::POST,   ["api", "conversations"])                 => create_conversation(req, &state).await,
+        (&Method::GET,    ["api", "conversations", id])             => get_conversation(&state, id).await,
+        (&Method::DELETE, ["api", "conversations", id])             => delete_conversation(&state, id).await,
+        (&Method::POST,   ["api", "conversations", id, "turn"])     => post_turn(req, Arc::clone(&state), id).await,
+        (&Method::POST,   ["api", "conversations", id, "cancel"])   => post_cancel(&state, id).await,
+        (&Method::GET,    ["api", "conversations", id, "events"])   => sse_events(&state, id).await,
+        (&Method::GET,    ["api", "conversations", id, "feedback"]) => get_feedback(&state, id).await,
+        (&Method::POST,   ["api", "conversations", id, "feedback"]) => post_feedback(req, &state, id).await,
+        (&Method::GET,    ["api", "conversations", id, "artefacts"]) => list_artefacts(&state, id).await,
+        (&Method::GET,    ["api", "conversations", id, "export"])   => export_conversation(&state, id).await,
+
+        // ─── providers / model / mind / activity ───────────────────────
+        (&Method::GET,    ["api", "providers"])    => list_providers(&state),
+        (&Method::POST,   ["api", "model"])        => post_model(req, Arc::clone(&state)).await,
+        (&Method::GET,    ["api", "mind"])         => get_mind(&state).await,
+        (&Method::GET,    ["api", "mind", "file"]) => get_mind_file(&state, req.uri().query().unwrap_or("")).await,
+        (&Method::POST,   ["api", "mind", "file"]) => post_mind_file(req, &state).await,
+        (&Method::GET,    ["api", "activity"])     => get_activity(&state, req.uri().query().unwrap_or("")),
+
+        // ─── files & artefacts ─────────────────────────────────────────
+        (&Method::GET, ["api", "files", id])     => get_file(&state, &url_decode(id)).await,
+        (&Method::GET, ["api", "artefacts", id]) => get_artefact(&state, &url_decode(id)).await,
+        // Naked `/artefacts/<id>` is a shareable permalink: bounce it
+        // to `#/artefacts/<id>` so the SPA reader opens with it
+        // selected.  Keeps the URL short and doesn't leak the API
+        // path that serves the bytes.
+        (&Method::GET, ["artefacts", id]) => {
             let id = url_decode(id);
             if !safe_store_id(&id) {
                 return not_found();
             }
-            return get_file(&state, &id).await;
+            Response::builder()
+                .status(StatusCode::FOUND)
+                .header("Location", format!("/#/artefacts/{id}"))
+                .header("Cache-Control", "no-cache")
+                .body(boxed(Bytes::new()))
+                .unwrap()
         }
-        return method_not_allowed();
-    }
-    if let Some(id) = path.strip_prefix("/api/artefacts/") {
-        if method == Method::GET {
-            let id = url_decode(id);
-            if !safe_store_id(&id) {
-                return not_found();
-            }
-            return get_artefact(&state, &id).await;
-        }
-        return method_not_allowed();
-    }
-    // Naked `/artefacts/<id>` (no `/api/` prefix) is a shareable
-    // permalink — bounce it to the SPA deep-link so the reader mounts
-    // with that artefact selected.  Keeps the URL short enough to paste
-    // into chat / docs without leaking the internal API path.
-    if let Some(id) = path.strip_prefix("/artefacts/") {
-        if method == Method::GET {
-            let id = url_decode(id);
-            if safe_store_id(&id) {
-                let loc = format!("/#/artefacts/{id}");
-                return Response::builder()
-                    .status(StatusCode::FOUND)
-                    .header("Location", loc)
-                    .header("Cache-Control", "no-cache")
-                    .body(boxed(Bytes::new()))
-                    .unwrap();
-            }
-            return not_found();
-        }
-    }
-    if let Some(id) = path.strip_prefix("/api/conversations/") {
-        if let Some((id, rest)) = split_once(id, '/') {
-            match (method.clone(), rest) {
-                (Method::POST, "turn") => return post_turn(req, Arc::clone(&state), id).await,
-                (Method::POST, "cancel") => return post_cancel(&state, id).await,
-                (Method::GET, "events") => return sse_events(&state, id).await,
-                (Method::GET, "feedback") => return get_feedback(&state, id).await,
-                (Method::POST, "feedback") => return post_feedback(req, &state, id).await,
-                (Method::GET, "artefacts") => return list_artefacts(&state, id).await,
-                (Method::GET, "export") => return export_conversation(&state, id).await,
-                _ => return not_found(),
-            }
-        } else if method == Method::GET {
-            return get_conversation(&state, id).await;
-        } else if method == Method::DELETE {
-            return delete_conversation(&state, id).await;
-        } else {
-            return method_not_allowed();
-        }
-    }
 
-    // Embedded React bundle (index.html + hashed JS/CSS chunks).
-    if method == Method::GET {
-        return serve_static(&state, &path).await;
+        // ─── static shell + fallback ───────────────────────────────────
+        (&Method::GET, _) => serve_static(&state, &path).await,
+        _ if path.starts_with("/api/") => method_not_allowed(),
+        _ => method_not_allowed(),
     }
-
-    method_not_allowed()
-}
-
-fn split_once(s: &str, c: char) -> Option<(&str, &str)> {
-    s.find(c).map(|i| (&s[..i], &s[i + 1..]))
 }
 
 // ---------------------------------------------------------------------------
@@ -2975,6 +2943,12 @@ async fn get_mind_file(state: &HttpState, query: &str) -> Resp {
 /// Inline content-disposition for images so they preview in `<img>`;
 /// attachment for everything else so the browser downloads.
 async fn get_file(state: &HttpState, id: &str) -> Resp {
+    // Reject anything outside the minted alphabet (dispatch hands us
+    // the URL-decoded value; an attacker submitting `%2F../etc/passwd`
+    // would otherwise traverse).  Mint-only ids are `f<u64>`.
+    if !safe_store_id(id) {
+        return not_found();
+    }
     // Check the in-memory cache first, then fall back to disk.  Files
     // evicted from the FIFO cache stay reachable as long as the
     // controller has a data_dir configured — which is always true when
@@ -3032,6 +3006,9 @@ async fn get_file(state: &HttpState, id: &str) -> Resp {
 /// entry (expected after ~32 reports on a long session) — the UI shows
 /// a "no longer in memory — rerun to regenerate" fallback.
 async fn get_artefact(state: &HttpState, id: &str) -> Resp {
+    if !safe_store_id(id) {
+        return not_found();
+    }
     let cached = {
         let store = match state.artefacts.lock() {
             Ok(s) => s,
