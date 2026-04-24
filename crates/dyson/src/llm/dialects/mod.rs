@@ -17,6 +17,7 @@
 //   3. Register it in `text_tool_handler_for_model()`
 // ===========================================================================
 
+pub mod deepseek;
 pub mod gemma;
 
 use std::collections::VecDeque;

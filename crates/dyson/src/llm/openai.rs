@@ -121,27 +121,38 @@ impl LlmClient for OpenAiClient {
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<crate::llm::StreamResponse> {
-        // -- Build messages array --
-        //
         // OpenAI puts the system prompt as the first message with role "system".
         // Then user/assistant messages follow.  Tool results use role "tool"
         // with a tool_call_id field (different from Anthropic's approach of
         // putting them in user messages).
-        let mut messages_json: Vec<serde_json::Value> = Vec::new();
-
-        // System message first.  Concatenate stable prefix and ephemeral suffix
-        // (OpenAI doesn't support prompt caching breakpoints, so one block is fine).
         let full_system = concat_system_prompt(system, system_suffix);
+        let mut messages_json: Vec<serde_json::Value> = Vec::with_capacity(1 + messages.len());
         messages_json.push(serde_json::json!({
             "role": "system",
             "content": full_system,
         }));
-
-        // Convert our internal messages to OpenAI format.
         for msg in messages {
             messages_json.push(message_to_openai(msg));
         }
 
+        self.stream_with_messages_json(messages_json, tools, config)
+            .await
+    }
+}
+
+impl OpenAiClient {
+    /// Send a pre-serialized messages array.
+    ///
+    /// The system prompt must already be embedded as the first message (role
+    /// "system").  Exposed for `OpenAiCompatClient` so dialects can rewrite
+    /// individual message objects — adding `reasoning_content` for DeepSeek,
+    /// for example — without this file having to know about them.
+    pub(crate) async fn stream_with_messages_json(
+        &self,
+        messages_json: Vec<serde_json::Value>,
+        tools: &[ToolDefinition],
+        config: &CompletionConfig,
+    ) -> Result<crate::llm::StreamResponse> {
         // -- Build tools array --
         //
         // OpenAI wraps tool definitions in a {"type":"function","function":{...}} envelope.
@@ -159,7 +170,7 @@ impl LlmClient for OpenAiClient {
             })
             .collect();
 
-        // -- Build request body --
+        let message_count = messages_json.len();
         let mut body = serde_json::json!({
             "model": config.model,
             "max_tokens": config.max_tokens,
@@ -175,12 +186,11 @@ impl LlmClient for OpenAiClient {
             body["temperature"] = serde_json::json!(temp);
         }
 
-        // -- Send request --
         let url = format!("{}/v1/chat/completions", self.base_url);
 
         tracing::debug!(
             model = config.model,
-            message_count = messages.len(),
+            message_count,
             "sending OpenAI streaming request"
         );
 
@@ -228,7 +238,7 @@ fn extract_text(content: &[ContentBlock]) -> String {
 /// - Tool calls in assistant messages go in a "tool_calls" array (not content blocks).
 /// - Text content is a simple string field (not a content array), unless there
 ///   are also tool calls (in which case content can be null).
-fn message_to_openai(msg: &Message) -> serde_json::Value {
+pub(crate) fn message_to_openai(msg: &Message) -> serde_json::Value {
     let role_str = match msg.role {
         Role::User => "user",
         Role::Assistant => "assistant",

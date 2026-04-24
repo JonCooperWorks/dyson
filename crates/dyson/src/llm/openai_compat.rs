@@ -17,9 +17,9 @@ use async_trait::async_trait;
 
 use crate::auth::Auth;
 use crate::error::Result;
-use crate::llm::dialects::{text_tool_handler_for_model, TextToolExtractorStream};
-use crate::llm::openai::OpenAiClient;
-use crate::llm::{CompletionConfig, LlmClient, StreamResponse, ToolDefinition};
+use crate::llm::dialects::{deepseek, text_tool_handler_for_model, TextToolExtractorStream};
+use crate::llm::openai::{message_to_openai, OpenAiClient};
+use crate::llm::{concat_system_prompt, CompletionConfig, LlmClient, StreamResponse, ToolDefinition};
 use crate::message::Message;
 
 // ---------------------------------------------------------------------------
@@ -88,9 +88,48 @@ impl LlmClient for OpenAiCompatClient {
             return Ok(response);
         }
 
+        // DeepSeek's thinking mode requires prior `reasoning_content` echoed
+        // back on the next turn. The OpenAI-proper serializer has no such
+        // field, so we dialect-rewrite the serialized messages here.
+        if deepseek::is_deepseek_model(&config.model) {
+            let messages_json = build_messages_json(messages, system, system_suffix, |json| {
+                deepseek::inject_reasoning_content(messages, json);
+            });
+            return self
+                .inner
+                .stream_with_messages_json(messages_json, tools, config)
+                .await;
+        }
+
         // No dialect needed — pass through unchanged.
         self.inner
             .stream(messages, system, system_suffix, tools, config)
             .await
     }
+}
+
+/// Serialize messages to OpenAI's Chat Completions format, with the system
+/// prompt as the first entry, then give the `rewrite` closure a chance to
+/// mutate the resulting JSON (used by dialects to inject fields like
+/// `reasoning_content` that aren't modeled by `message_to_openai`).
+fn build_messages_json<F>(
+    messages: &[Message],
+    system: &str,
+    system_suffix: &str,
+    rewrite: F,
+) -> Vec<serde_json::Value>
+where
+    F: FnOnce(&mut [serde_json::Value]),
+{
+    let full_system = concat_system_prompt(system, system_suffix);
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(1 + messages.len());
+    out.push(serde_json::json!({
+        "role": "system",
+        "content": full_system,
+    }));
+    for msg in messages {
+        out.push(message_to_openai(msg));
+    }
+    rewrite(&mut out);
+    out
 }
