@@ -215,6 +215,21 @@ describe('views.jsx — artefacts mobile drawer regressions', () => {
       .toMatch(/\.mind\.show-side\s+\.mind-scrim\s*\{[^}]*display:\s*block/);
   });
 
+  it('mobile drawer is full-width so no dead pane strip shows through', () => {
+    // Regression for the "dim broken sidebar" bug visible on iOS.  The
+    // drawer used to be `width: 80vw; max-width: 320px`, which left a
+    // 20vw strip of empty .mind-pane painting var(--bg-1) next to it —
+    // reading as a black void alongside the list.  Clamp removed on
+    // mobile; the drawer now covers the full viewport when open.
+    const mobileBlock = layoutCss.split('@media (max-width: 760px)')[1] || '';
+    const sideRule = mobileBlock.match(/\.mind-side\s*\{([^}]*)\}/);
+    expect(sideRule, 'mobile .mind-side rule must exist').toBeTruthy();
+    expect(sideRule[1], 'drawer must be full-width on mobile')
+      .toMatch(/width:\s*100%/);
+    expect(sideRule[1], 'drawer must not re-clamp to 80vw / 320px')
+      .not.toMatch(/80vw|320px/);
+  });
+
   it('Artefacts hamburger is not killed by the Mind-view LeftRail-hide rule', () => {
     // Regression for "tapping ☰ on the artefacts tab does nothing".
     // The Mind view body class is `.body no-left no-right` so its
