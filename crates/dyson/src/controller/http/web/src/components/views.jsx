@@ -1,6 +1,6 @@
 /* Dyson — TopBar / LeftRail / MindView / ActivityView. */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { ToolPanel } from './panels.jsx';
 import { ArtefactBlock, markdown, prettySize } from './turns.jsx';
@@ -459,69 +459,53 @@ function ActivityView() {
 // once per chat, then kept live by the `onArtefact` SSE callback in App.
 // ---------------------------------------------------------------------------
 
-function ArtefactsView({ conv, session, bump }) {
-  // Seed the selection from the global stash written by App.onOpenArtefact
-  // so deep-linked clicks from chat chips land on the right artefact
-  // even though our own event listener isn't attached until after the
-  // view switch.  Clear the stash after consuming so it doesn't
-  // re-select an old id on the next mount.
+// Lazy-load a chat's artefact list into window.__dysonSessions.  The
+// map is owned by App; we reuse it so findArtefactMeta can surface
+// metadata for any chat the tree has visited, not just the active one.
+function ensureArtefacts(chatId, bump) {
+  if (!chatId || !window.DysonLive) return;
+  const sessions = window.__dysonSessions;
+  if (!sessions) return;
+  let s = sessions.get(chatId);
+  if (!s) { s = { artefacts: [], artefactsLoaded: false }; sessions.set(chatId, s); }
+  if (s.artefactsLoaded) return;
+  s.artefactsLoaded = true;
+  window.DysonLive.listArtefacts(chatId)
+    .then(list => { s.artefacts = list || []; bump && bump(); })
+    .catch(() => { s.artefactsLoaded = false; });
+}
+
+function ArtefactsView({ conv, setConv, bump }) {
+  // Seed the selection from the global stash written by
+  // App.onOpenArtefact so deep-linked clicks from chat chips land on
+  // the right artefact even though our own event listener isn't
+  // attached until after the view switch.  Clear the stash after
+  // consuming so it doesn't re-select an old id on the next mount.
   const initialPending = (typeof window !== 'undefined' && window.__dysonOpenArtefactId) || null;
   const [selected, setSelected] = useState(() => {
     if (initialPending) delete window.__dysonOpenArtefactId;
     return initialPending || null;
   });
-  // Mobile drawer toggle.  On desktop the sidebar is always visible
-  // (grid column), so this state is a no-op there.  On mobile the
-  // sidebar is an absolutely-positioned overlay that slides in when
-  // `.show-side` is set — defaults to visible (the list) and auto-
-  // collapses when the user picks an artefact, so the reader isn't
-  // permanently buried under the drawer (the "tap-then-black-screen"
-  // bug).  Deep-links boot straight to the reader.
+  // Mobile drawer toggle.  On desktop the sidebar is a permanent grid
+  // column, so this state is a no-op there.  On mobile the sidebar is
+  // an absolutely-positioned overlay that slides in when `.show-side`
+  // is set — defaults to the tree view and collapses to the reader
+  // when the user picks an artefact.  Deep-links boot straight to the
+  // reader.
   const [showSide, setShowSide] = useState(!initialPending);
+  // Tree expansion state per chat.  The active conv is pre-expanded
+  // so the common "tap Artefacts tab from a chat" flow lands with
+  // that chat's artefacts already visible.
+  const [expanded, setExpanded] = useState(() => (conv ? { [conv]: true } : {}));
 
-  // Lazy hydrate the per-chat artefact list from the API.  Subsequent
-  // switches do nothing — live SSE keeps it current.  We re-run the
-  // auto-select below once the fetch resolves so a freshly-loaded
-  // chat lands on its newest artefact immediately.
+  // Keep the active chat expanded — conv can change underneath us
+  // (deep-link restore, chip click, sibling-chat selection) and the
+  // tree should always reveal its artefacts without a second tap.
   useEffect(() => {
-    if (!conv || !session || !window.DysonLive) return;
-    if (session.artefactsLoaded) return;
-    session.artefactsLoaded = true;
-    window.DysonLive.listArtefacts(conv)
-      .then(list => {
-        session.artefacts = list || [];
-        bump();
-      })
-      .catch(() => {});
-  }, [conv]);
-
-  // When the chat changes from one non-null value to another
-  // (= the user clicked a different chat in the sidebar), drop the
-  // previous chat's selection so the auto-select effect below picks
-  // the newest artefact of the new chat.  A pending id from a chip
-  // click or deep-link wins over the auto-pick.  We skip clearing
-  // the first time `conv` transitions from null → something (the
-  // cold-deep-link case, where the reader has just told App which
-  // chat owns the artefact being read — clobbering would throw away
-  // the user's actual target).
-  const prevConvRef = useRef(conv);
-  useEffect(() => {
-    const prev = prevConvRef.current;
-    prevConvRef.current = conv;
-    if (!prev) return;
-    const pending = window.__dysonOpenArtefactId;
-    if (pending) {
-      delete window.__dysonOpenArtefactId;
-      setSelected(pending);
-      setShowSide(false);
-    } else {
-      setSelected(null);
-      // Switching chats from the LeftRail should land the user back
-      // on the artefact list of the new chat, not on whatever reader
-      // pane was last open on mobile.
-      setShowSide(true);
-    }
-  }, [conv]);
+    if (!conv) return;
+    setExpanded(e => (e[conv] ? e : { ...e, [conv]: true }));
+    ensureArtefacts(conv, bump);
+  }, [conv, bump]);
 
   // Auto-select the newest artefact for the current chat whenever
   // selection is empty and the list is ready.  Keeps the "click a
@@ -532,21 +516,22 @@ function ArtefactsView({ conv, session, bump }) {
   // later useEffect — on first mount it isn't attached yet when this
   // effect fires, so dispatching alone would leave the drawer pinned
   // over the reader.
-  const listForAutoselect = (session && session.artefacts) || [];
+  const activeList = artefactListFor(conv);
   useEffect(() => {
     if (selected) return;
-    if (!listForAutoselect.length) return;
-    const first = listForAutoselect[0].id;
+    if (!conv) return;
+    if (!activeList.length) return;
+    const first = activeList[0].id;
     setSelected(first);
     setShowSide(false);
     window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: first } }));
-  }, [conv, listForAutoselect.length, selected]);
+  }, [conv, activeList.length, selected]);
 
   // Allow in-chat chips to jump straight to a specific artefact.  The
   // event is fired by ArtefactBlock.onClick — if we're already on the
-  // Artefacts tab we pick it up; otherwise App's view state change will
-  // mount this component and the last-selected id wins.  Closes the
-  // mobile drawer so the reader is the visible surface.
+  // Artefacts tab we pick it up; otherwise App's view state change
+  // will mount this component and the last-selected id wins.  Closes
+  // the mobile drawer so the reader is the visible surface.
   useEffect(() => {
     const h = (e) => {
       const id = e.detail && e.detail.id;
@@ -556,102 +541,122 @@ function ArtefactsView({ conv, session, bump }) {
     return () => window.removeEventListener('dyson:open-artefact', h);
   }, []);
 
-  // Deep-link case: `/#/artefacts/<id>` opened cold (no chat selected
-  // yet).  Render the reader anyway so the URL genuinely lands the
-  // user on the artefact — the reader will learn the owning chat from
-  // the fetch response header and restore the sidebar once loaded.
-  if (!conv) {
-    if (selected) {
-      return (
-        <div className={`mind${showSide ? ' show-side' : ''}`}>
-          {showSide && <div className="mind-scrim" onClick={() => setShowSide(false)}/>}
-          <aside className="mind-side">
-            <div style={{padding:'10px 14px', borderBottom:'1px solid var(--line)'}}>
-              <div className="eyebrow">artefact</div>
-              <div style={{fontSize:12, color:'var(--fg-dim)', marginTop:4}}>
-                Loading conversation context…
-              </div>
-            </div>
-          </aside>
-          <ArtefactReader id={selected} onShowSide={() => setShowSide(true)}/>
-        </div>
-      );
-    }
-    return (
-      <section className="mind-pane" style={{alignItems:'center', justifyContent:'center'}}>
-        <div style={{color:'var(--fg-dim)', fontSize:13}}>Select a conversation to see its artefacts.</div>
-      </section>
-    );
-  }
+  // The topbar hamburger used to drive a LeftRail that this view no
+  // longer renders.  Repurpose it as the drawer toggle so users have
+  // a familiar way to reopen the tree after picking an artefact —
+  // otherwise the mobile reader is a one-way door until they find the
+  // `.artefact-back` button inside the title bar.
+  useEffect(() => {
+    const h = () => setShowSide(s => !s);
+    window.addEventListener('dyson:toggle-artefacts-drawer', h);
+    return () => window.removeEventListener('dyson:toggle-artefacts-drawer', h);
+  }, []);
 
-  const list = (session && session.artefacts) || [];
+  const chats = ((window.DYSON_DATA && window.DYSON_DATA.conversations && window.DYSON_DATA.conversations.http) || [])
+    .filter(c => c.hasArtefacts);
+
+  const toggleChat = (chatId) => {
+    const willOpen = !expanded[chatId];
+    setExpanded(e => ({ ...e, [chatId]: willOpen }));
+    if (willOpen) ensureArtefacts(chatId, bump);
+  };
+
+  const pickArtefact = (chatId, artefactId) => {
+    if (chatId && chatId !== conv && setConv) setConv(chatId);
+    setSelected(artefactId);
+    setShowSide(false);
+    window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: artefactId } }));
+  };
+
+  // Deep-link: `#/artefacts/<id>` opened cold (no chat known yet).
+  // Render the reader anyway — the fetch response header will tell
+  // App which chat owns the artefact and setConv will populate the
+  // tree on the round-trip.  Using the tree skeleton in the drawer
+  // keeps the sidebar looking like the rest of the app rather than a
+  // blank "Loading…" box.
+  const hasChats = chats.length > 0;
+  const showDeepLinkPlaceholder = !conv && selected && !hasChats;
 
   return (
     <div className={`mind${showSide ? ' show-side' : ''}`}>
-      {/* Tap-to-close target for the mobile drawer.  Mirrors the
-          .body.show-left .scrim pattern so the right-strip of visible
-          .mind-pane finally has a way to dismiss the 80vw sidebar —
-          without this the only escape from an empty drawer was to pick
-          an artefact (impossible when the list is empty).  No-op on
-          desktop, where the scrim is display:none. */}
       {showSide && <div className="mind-scrim" onClick={() => setShowSide(false)}/>}
       <aside className="mind-side">
-        <div style={{padding:'10px 14px', borderBottom:'1px solid var(--line)'}}>
-          <div className="eyebrow">artefacts · {list.length}</div>
-          <div style={{fontSize:12, color:'var(--fg-dim)', marginTop:4}}>Full-page reports emitted by agents.</div>
+        <div className="artefact-tree-head">
+          <div className="eyebrow">artefacts</div>
+          <div style={{fontSize:12, color:'var(--fg-dim)', marginTop:4}}>
+            {hasChats
+              ? `${chats.length} chat${chats.length === 1 ? '' : 's'} with reports`
+              : 'Full-page reports emitted by agents.'}
+          </div>
         </div>
-        {list.length === 0 ? (
-          // Centered empty-state so the drawer doesn't read as a broken
-          // black page on mobile.  Previously the message was a tiny
-          // top-anchored block inside a `flex:1` scroller — below it the
-          // rest of the viewport was bare var(--bg), which is what the
-          // "still a black screen" report kept pointing at even after
-          // the drawer started covering the full viewport.
+        {showDeepLinkPlaceholder ? (
           <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center', padding:'24px'}}>
             <div style={{color:'var(--fg-dim)', fontSize:13, lineHeight:1.6, textAlign:'center', maxWidth:'320px'}}>
-              No artefacts yet in this chat.<br/><br/>
-              The security_engineer subagent emits its final report here.<br/><br/>
-              Tap <span className="mono" style={{color:'var(--fg)'}}>☰</span> to switch to a chat that already has one.
+              Loading conversation context…
             </div>
           </div>
+        ) : hasChats ? (
+          <div style={{overflowY:'auto', flex:1, padding:'4px 0'}}>
+            {chats.map(c => {
+              const isActive = c.id === conv;
+              const open = !!expanded[c.id];
+              const items = artefactListFor(c.id);
+              return (
+                <div key={c.id}>
+                  <div className="artefact-chat-row"
+                       data-active={isActive ? 'true' : 'false'}
+                       onClick={() => toggleChat(c.id)}>
+                    <span className="caret" style={{transform: open ? 'rotate(90deg)' : 'none'}}>
+                      <Icon name="chev" size={10}/>
+                    </span>
+                    <span className="title">{c.title || '(untitled)'}</span>
+                    {items.length > 0 && <span className="count mono">{items.length}</span>}
+                  </div>
+                  {open && (
+                    items.length === 0 ? (
+                      <div style={{padding:'6px 14px 10px 32px', color:'var(--fg-dim)', fontSize:11.5}}>
+                        No artefacts loaded.
+                      </div>
+                    ) : (
+                      items.map(a => (
+                        <div key={a.id}
+                             className="artefact-row"
+                             data-selected={selected === a.id ? 'true' : 'false'}
+                             onClick={() => pickArtefact(c.id, a.id)}>
+                          <Icon name="file" size={11} style={{color:'var(--mute)'}}/>
+                          <span className="title">{a.title}</span>
+                          <span className="mono size">{prettySize(a.bytes || 0)}</span>
+                        </div>
+                      ))
+                    )
+                  )}
+                </div>
+              );
+            })}
+          </div>
         ) : (
-          <div style={{overflowY:'auto', flex:1, padding:'6px 0'}}>
-            {list.map(a => (
-            <div key={a.id}
-                 onClick={() => {
-                   setSelected(a.id);
-                   // Auto-collapse the mobile drawer so the reader
-                   // becomes the visible surface — without this the
-                   // 80vw sidebar stayed pinned over the reader and
-                   // the user just saw a near-black screen.  No-op
-                   // on desktop (the sidebar is a grid column there).
-                   setShowSide(false);
-                   // Surface the id to App so the URL becomes
-                   // `#/artefacts/<id>` — clicking through the list
-                   // is navigation, not just a local selection.
-                   window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: a.id } }));
-                 }}
-                 style={{display:'flex', flexDirection:'column', gap:3, padding:'8px 14px',
-                         cursor:'pointer',
-                         background: selected === a.id ? 'var(--panel)' : 'transparent',
-                         borderLeft: selected === a.id ? '2px solid var(--accent)' : '2px solid transparent'}}>
-              <div style={{display:'flex', alignItems:'center', gap:8}}>
-                <Icon name="file" size={11} style={{color:'var(--mute)'}}/>
-                <span style={{fontSize:12.5, color:'var(--fg)', flex:1, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{a.title}</span>
-                <span className="mono" style={{fontSize:10, color:'var(--mute)'}}>{prettySize(a.bytes || 0)}</span>
-              </div>
-              <div style={{fontSize:10.5, color:'var(--fg-dim)', paddingLeft:19}}>
-                <span className="mono">{(a.kind || 'other').replace(/_/g, ' ')}</span>
-                {a.created_at && <span style={{marginLeft:8}}>· {formatAgo(a.created_at)}</span>}
-              </div>
+          <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center', padding:'24px'}}>
+            <div style={{color:'var(--fg-dim)', fontSize:13, lineHeight:1.6, textAlign:'center', maxWidth:'320px'}}>
+              No artefacts yet.<br/><br/>
+              The security_engineer subagent emits its final report here.
             </div>
-          ))}
           </div>
         )}
       </aside>
       <ArtefactReader id={selected} onShowSide={() => setShowSide(true)}/>
     </div>
   );
+}
+
+// Reads cached artefacts for a chat from App's session map.  Returns
+// an empty array when the chat hasn't been fetched yet — callers
+// trigger ensureArtefacts before expecting data.
+function artefactListFor(chatId) {
+  if (!chatId) return [];
+  const sessions = (typeof window !== 'undefined') ? window.__dysonSessions : null;
+  if (!sessions) return [];
+  const s = sessions.get(chatId);
+  return (s && s.artefacts) || [];
 }
 
 // Full-page markdown reader.  Fetches the body from /api/artefacts/:id,

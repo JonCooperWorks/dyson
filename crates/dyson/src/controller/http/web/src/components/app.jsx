@@ -318,7 +318,18 @@ function App() {
     <div className="app">
       <TopBar view={view} setView={selectView}
               rightHidden={rightHidden}
-              onToggleLeft={() => { setShowLeft(s => !s); setShowRight(false); }}
+              onToggleLeft={() => {
+                // On the Artefacts tab the LeftRail is gone, so the
+                // hamburger drives the single-sidebar tree drawer
+                // instead — without this the mobile reader is a
+                // one-way door until the user finds the back button
+                // inside the title bar.
+                if (view === 'artefacts') {
+                  window.dispatchEvent(new CustomEvent('dyson:toggle-artefacts-drawer'));
+                  return;
+                }
+                setShowLeft(s => !s); setShowRight(false);
+              }}
               onToggleRight={onToggleRight}/>
       {view === 'conv' && (
         <div className={bodyClass}>
@@ -335,23 +346,12 @@ function App() {
         </div>
       )}
       {view === 'artefacts' && (
-        <div className="body no-right">
-          {showLeft && <div className="scrim" onClick={closeRails}/>}
-          <LeftRail active={conv}
-                    setActive={(id) => {
-                      // Switching a chat in the Artefacts sidebar should
-                      // land on something readable — clear the current
-                      // selection so ArtefactsView's hydrate effect
-                      // picks the first artefact of the new chat and
-                      // updates the URL to match.
-                      setConv(id);
-                      setArtefactId(null);
-                      window.__dysonOpenArtefactId = null;
-                      setShowLeft(false);
-                    }}
-                    filter={(c) => c.hasArtefacts}
-                    emptyLabel="No chats with artefacts yet. Run a /security-review in any conversation to create one."/>
-          <ArtefactsView conv={conv} session={session} bump={bump}/>
+        <div className="body no-left no-right">
+          {/* Artefacts tab is a single-sidebar layout now: the drawer shows
+              every chat with artefacts as a collapsible tree, so the
+              redundant LeftRail (which was an unreachable duplicate on
+              mobile and a two-step navigation on desktop) is gone. */}
+          <ArtefactsView conv={conv} setConv={setConv} bump={bump}/>
         </div>
       )}
       {view === 'activity' && <div style={{display:'flex', flex:1, minHeight:0}}><ActivityView/></div>}
