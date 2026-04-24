@@ -146,6 +146,7 @@ impl Tool for CoderTool {
             parent_depth: ctx.depth,
             working_dir: Some(scoped_dir),
             user_message,
+            activity: ctx.activity.clone(),
         })
         .await
     }

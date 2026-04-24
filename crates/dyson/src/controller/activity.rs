@@ -70,6 +70,13 @@ pub struct ActivityEntry {
     /// Seconds since UNIX epoch.
     pub started_at: u64,
     pub finished_at: Option<u64>,
+    /// Last time this Running entry showed liveness (a tool call fired).
+    /// Stale-cleanup measures idleness from here, not from `started_at`,
+    /// so a legitimately long run keeps pulsing as long as it's doing
+    /// work.  In-memory only — not persisted — so the field resets on
+    /// restart and hydrate_from_disk falls back to `started_at`.
+    #[serde(skip)]
+    pub last_progress_at: Option<u64>,
     /// Monotonic within a chat — used to fold the two-line-per-run
     /// JSONL into a single entry.  Never re-used within a chat's log
     /// (file stays append-only, so "re-use" isn't a concern anyway).
@@ -155,7 +162,11 @@ impl ActivityRegistry {
                 // Reconcile stale Running entries — a crash during a
                 // long run leaves a Running line with no terminal
                 // follow-up.  Better to surface it as Err than let the
-                // UI pulse forever.
+                // UI pulse forever.  `last_progress_at` isn't persisted
+                // (see field comment) so on first hydrate we can only
+                // measure from `started_at`; the runtime reconciler
+                // uses the in-memory liveness signal for long-uptime
+                // cleanup.
                 if entry.status == ActivityStatus::Running
                     && now.saturating_sub(entry.started_at) > STALE_RUNNING_SECS
                 {
@@ -214,12 +225,13 @@ impl ActivityRegistry {
         entries
     }
 
-    /// Flip any in-memory Running entry older than `STALE_RUNNING_SECS`
-    /// to `Err` with a "never finished" note.  Mirrors the load-time
-    /// reconciliation in `hydrate_from_disk` so orphans still get
-    /// cleaned up when the controller stays up for longer than a run.
-    /// Appends the terminal state to disk so the fix persists across
-    /// future restarts.
+    /// Flip any in-memory Running entry that's been idle for more than
+    /// `STALE_RUNNING_SECS` to `Err` with a "never finished" note.
+    /// "Idle" means no `touch_running` since the last progress bump
+    /// (falling back to `started_at` for entries loaded from disk,
+    /// which don't persist the liveness stamp).  A legitimately long
+    /// run that keeps calling tools resets the idle counter each call,
+    /// so only genuinely stuck / orphaned entries get reaped.
     fn reconcile_stale_running(&self) {
         let now = unix_seconds_now();
         let mut to_persist: Vec<ActivityEntry> = Vec::new();
@@ -230,11 +242,12 @@ impl ActivityRegistry {
                     if entry.status != ActivityStatus::Running {
                         continue;
                     }
-                    if now.saturating_sub(entry.started_at) <= STALE_RUNNING_SECS {
+                    let last_seen = entry.last_progress_at.unwrap_or(entry.started_at);
+                    if now.saturating_sub(last_seen) <= STALE_RUNNING_SECS {
                         continue;
                     }
                     entry.status = ActivityStatus::Err;
-                    entry.finished_at = Some(entry.started_at + STALE_RUNNING_SECS);
+                    entry.finished_at = Some(last_seen + STALE_RUNNING_SECS);
                     entry.note = if entry.note.is_empty() {
                         "never finished".to_string()
                     } else {
@@ -246,6 +259,23 @@ impl ActivityRegistry {
         }
         for entry in &to_persist {
             self.append_disk(entry);
+        }
+    }
+
+    /// Bump `last_progress_at` on every in-memory Running entry for
+    /// `chat_id`.  Called from the agent loop's tool dispatch so that
+    /// an active subagent never looks idle — the stale reaper only
+    /// flips entries where nothing has happened in an hour.
+    fn touch_running(&self, chat_id: &str) {
+        let now = unix_seconds_now();
+        let mut guard = self.by_chat.lock().expect("activity by_chat poisoned");
+        let Some(entries) = guard.get_mut(chat_id) else {
+            return;
+        };
+        for entry in entries.iter_mut() {
+            if entry.status == ActivityStatus::Running {
+                entry.last_progress_at = Some(now);
+            }
         }
     }
 
@@ -263,14 +293,16 @@ impl ActivityRegistry {
     /// Append a `Running` entry, both in memory and on disk.
     fn start(&self, chat_id: &str, lane: &str, name: &str, note: &str) -> u64 {
         let id = self.next_id(chat_id);
+        let now = unix_seconds_now();
         let entry = ActivityEntry {
             chat_id: chat_id.to_string(),
             lane: lane.to_string(),
             name: name.to_string(),
             note: note.to_string(),
             status: ActivityStatus::Running,
-            started_at: unix_seconds_now(),
+            started_at: now,
             finished_at: None,
+            last_progress_at: Some(now),
             id,
         };
         self.insert_memory(&entry);
@@ -375,6 +407,13 @@ impl ActivityHandle {
             chat_id: self.chat_id.clone(),
             id,
         }
+    }
+
+    /// Signal liveness for every Running entry on this chat.  Cheap —
+    /// just bumps an in-memory timestamp — so the agent loop can call
+    /// it per tool dispatch without disk churn.
+    pub fn touch(&self) {
+        self.inner.touch_running(&self.chat_id);
     }
 }
 
@@ -495,6 +534,7 @@ mod tests {
             status: ActivityStatus::Running,
             started_at: old_ts,
             finished_at: None,
+            last_progress_at: None,
             id: 1,
         };
         std::fs::write(
@@ -515,17 +555,19 @@ mod tests {
     }
 
     #[test]
-    fn stale_running_reconciled_on_snapshot_without_restart() {
-        // Forge an in-memory Running entry with a started_at that's
-        // already past the stale threshold.  snapshot_chat must promote
-        // it to Err without requiring a restart.
+    fn idle_running_reconciled_on_snapshot_without_restart() {
+        // Forge an in-memory Running entry whose last_progress_at is
+        // past the stale threshold.  snapshot_chat must promote it to
+        // Err without a restart.
         let dir = tempdir();
         let reg = Arc::new(ActivityRegistry::new(Some(dir.path().to_path_buf())));
         reg.handle_for("c-0007").start(LANE_SUBAGENT, "se", "stuck");
         {
             let mut guard = reg.by_chat.lock().unwrap();
             let entries = guard.get_mut("c-0007").unwrap();
-            entries[0].started_at = unix_seconds_now().saturating_sub(STALE_RUNNING_SECS + 60);
+            let old = unix_seconds_now().saturating_sub(STALE_RUNNING_SECS + 60);
+            entries[0].started_at = old;
+            entries[0].last_progress_at = Some(old);
             entries[0].status = ActivityStatus::Running;
             entries[0].finished_at = None;
         }
@@ -536,6 +578,30 @@ mod tests {
         let reloaded = ActivityRegistry::new(Some(dir.path().to_path_buf()));
         let reloaded_snap = reloaded.snapshot_chat("c-0007");
         assert_eq!(reloaded_snap[0].status, ActivityStatus::Err);
+    }
+
+    #[test]
+    fn touch_resets_idle_counter_and_keeps_entry_running() {
+        // Long-running but alive: started hours ago, but a recent touch
+        // bumps last_progress_at so reconcile_stale_running leaves it
+        // alone.
+        let reg = Arc::new(ActivityRegistry::new(None));
+        let handle = reg.handle_for("c-0008");
+        let _tok = handle.start(LANE_SUBAGENT, "se", "long-run");
+        {
+            let mut guard = reg.by_chat.lock().unwrap();
+            let entries = guard.get_mut("c-0008").unwrap();
+            entries[0].started_at =
+                unix_seconds_now().saturating_sub(STALE_RUNNING_SECS + 300);
+        }
+        // Tool call fires → touch() → last_progress_at = now.
+        handle.touch();
+        let snap = reg.snapshot_chat("c-0008");
+        assert_eq!(
+            snap[0].status,
+            ActivityStatus::Running,
+            "recent touch should keep a long-running entry alive"
+        );
     }
 
     #[test]

@@ -319,6 +319,7 @@ impl Tool for OrchestratorTool {
             parent_depth: ctx.depth,
             working_dir: child_working_dir,
             user_message,
+            activity: ctx.activity.clone(),
         })
         .await;
         let mut out = match spawn_result {

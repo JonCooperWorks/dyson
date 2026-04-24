@@ -198,6 +198,10 @@ pub(crate) struct ChildSpawn<'a> {
     /// Override the child's working directory (used by `CoderTool`).
     pub working_dir: Option<PathBuf>,
     pub user_message: String,
+    /// Parent's activity handle, forwarded so the child's tool calls
+    /// bump the parent's Activity tab liveness.  `None` on non-HTTP
+    /// controllers.
+    pub activity: Option<crate::controller::ActivityHandle>,
 }
 
 /// Build a child `Agent` from `spec`, run it to completion under a
@@ -235,6 +239,9 @@ pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
     child_agent.set_depth(spec.parent_depth + 1);
     if let Some(dir) = spec.working_dir {
         child_agent.set_working_dir(dir);
+    }
+    if let Some(handle) = spec.activity {
+        child_agent.set_activity_handle(handle);
     }
 
     let mut capture = CaptureOutput::new();
@@ -412,6 +419,7 @@ impl Tool for SubagentTool {
             // checkouts from prior smoke runs.
             working_dir: Some(ctx.working_dir.clone()),
             user_message,
+            activity: ctx.activity.clone(),
         })
         .await;
 

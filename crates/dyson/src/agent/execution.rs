@@ -208,6 +208,12 @@ impl Agent {
                 "executing tool call"
             );
         }
+        // Liveness signal for the Activity tab's stale-cleanup.  A
+        // tool call means this chat's Running entries are still doing
+        // work; reset their idle counters so they don't get reaped.
+        if let Some(activity) = &self.tool_context.activity {
+            activity.touch();
+        }
         // -- Pre-tool hooks --
         let effective_call;
         let call = if !self.tool_hooks.is_empty() {
