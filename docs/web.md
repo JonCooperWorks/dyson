@@ -21,9 +21,9 @@ vice versa.
 ```
 ┌──── browser ─────────┐               ┌──── dyson process ────────┐
 │                      │               │                           │
-│  React UMD + Babel   │ ◀──── SSE ───┤  HttpController           │
-│  prototype.html      │ ──── HTTP ──▶ │  (hyper http1)            │
-│  bridge.js           │               │                           │
+│  React (Vite-built)  │ ◀──── SSE ───┤  HttpController           │
+│  index.html          │ ──── HTTP ──▶ │  (hyper http1)            │
+│  /assets/*.{js,css}  │               │                           │
 │                      │               │   ┌────────────────────┐ │
 └──────────────────────┘               │   │ shared with        │ │
                                        │   │ terminal/telegram: │ │
@@ -47,7 +47,7 @@ Add to your `dyson.json` `controllers` array:
 | field | type | default | description |
 |---|---|---|---|
 | `bind` | `string` | `"127.0.0.1:7878"` | Address to bind.  Loopback-only is the only supported deployment.  Listening on `0.0.0.0` exposes the agent. |
-| `webroot` | `string?` | `null` | Optional path to a directory of UI files (`prototype.html`, `styles/`, `js/`, `components/`) for live-edit dev.  Unset means use the prototype embedded in the dyson binary. |
+| `webroot` | `string?` | `null` | Optional path to a Vite build output (`crates/dyson/src/controller/http/web/dist/`) to serve from disk instead of the embedded bundle.  Re-running `npm run build` in `web/` refreshes the files without recompiling dyson.  Most UI development should use `npm run dev` against a running binary instead — see [Developing the frontend](#developing-the-frontend) below. |
 | `auth` | `object` | `dangerous_no_auth` on loopback, **required** otherwise | Inbound authentication.  See below. |
 
 ### Authentication
@@ -80,11 +80,10 @@ startup.
 
 Requires `Authorization: Bearer <token>` on every `/api/*` request;
 mismatches return `401 {"error":"unauthorized"}`.  Static-shell paths
-(`/`, `/styles/*`, `/js/*`, `/components/*`) are exempt so the UI can
-load before the browser has presented the credential.  The `token`
-field flows through the same secret-resolver pipeline that Telegram's
-`bot_token` uses, so it can be a literal string or a
-`{ "resolver": …, "name": … }` reference.
+(`/`, `/assets/*`) are exempt so the UI can load before the browser
+has presented the credential.  The `token` field flows through the
+same secret-resolver pipeline that Telegram's `bot_token` uses, so it
+can be a literal string or a `{ "resolver": …, "name": … }` reference.
 
 Both variants are implementations of the shared `Auth` trait at
 `crates/dyson/src/auth/mod.rs`, which is also used by the MCP server.
@@ -93,9 +92,11 @@ without touching `dispatch()`.
 
 The web assets live in
 [crates/dyson/src/controller/http/web/](../crates/dyson/src/controller/http/web/)
-and are bundled via `include_bytes!` so a deployed binary needs nothing
-but itself.  Set `webroot` to that path during UI development to skip
-the recompile step.
+as a Vite + React project.  `crates/dyson/build.rs` runs `npm run
+build` on every cargo build (gated by source-file mtimes, so nothing
+fires when the frontend is untouched), walks the resulting `dist/`,
+and generates an asset table that `include_bytes!`s every file into
+the binary — so a deployed binary still needs nothing but itself.
 
 ## Surfaces
 
@@ -254,34 +255,56 @@ ChatHistory directory on startup, sorted newest-first by file mtime.
 
 ## Static assets
 
-Default: served from the embedded byte table in
-[assets.rs](../crates/dyson/src/controller/http/assets.rs).  Twelve
-files, ~30 KB compressed:
+Shipped as a bundled React app — sources under `web/src/`, built by
+Vite into `web/dist/`, embedded in the binary by
+[`crates/dyson/build.rs`](../crates/dyson/build.rs) which writes the
+asset table to
+[`assets.rs`](../crates/dyson/src/controller/http/assets.rs) via
+`include!` at compile time.  Production bundle is one hashed JS chunk +
+one hashed CSS chunk + `index.html`, served from `/` and `/assets/*`.
 
-```
-prototype.html
-styles/{tokens,layout,turns,panels}.css
-js/{data,bridge}.js
-components/{icons,panels,turns,views,app}.jsx
+Override with `webroot:` pointing at `web/dist/` to load from disk
+without recompiling dyson — handy after running `npm run build`.
+Prefer `npm run dev` (below) for active UI work; HMR avoids both the
+Rust rebuild and the Vite production build.
+
+## Developing the frontend
+
+The frontend has its own Node toolchain so it can be iterated on
+independently.  From `crates/dyson/src/controller/http/web/`:
+
+```bash
+npm install           # once, or whenever package-lock.json changes
+npm run dev           # Vite dev server on :5173, HMR, proxies /api to :7878
+npm test              # vitest suite (regression checks for past bugs)
+npm run build         # production bundle → dist/  (runs vitest first)
 ```
 
-The assets are served verbatim — no minification, no transpile (the
-browser's `@babel/standalone` does that).  Override with `webroot:` to
-load from disk for live-edit dev.
+`npm run dev` assumes a dyson binary is running on `:7878` — the dev
+server proxies `/api` and `/artefacts` to it, so the live API is a
+TCP hop away while the UI reloads instantly on save.
+
+`build.rs` invokes `npm run build` during `cargo build`, gated by
+mtime on sources in `web/src/`, `index.html`, `package.json`, etc.
+If Node is missing the Cargo build fails with a pointed message;
+there's no feature flag to skip the frontend — it's a required part
+of the binary.
 
 ## Tests
 
-- **Unit** — pure helpers in `crates/dyson/src/controller/http/mod.rs`'s
-  `#[cfg(test)] mod tests` block (emoji→rating mapping, asset lookup,
-  query parsing).
-- **Integration** — `crates/dyson/tests/http_controller.rs` binds the
-  controller to `127.0.0.1:0` and exercises every endpoint with a real
-  TCP client.  Includes regressions for known classes of bug
-  (greyscreen on `⌘4`/`⌘5` when nav indices outran view ids;
-  conversations opening at the top instead of the bottom).
-- **JSX** — exercised through the Rust integration tests via the API
-  contract that the JSX consumes.  No browser-based JS unit harness
-  yet.
+- **Rust unit** — `crates/dyson/src/controller/http/mod.rs`'s
+  `#[cfg(test)] mod tests` block covers content-type dispatch, emoji →
+  rating mapping, URL decoding, and shape checks on the embedded
+  bundle.
+- **Rust integration** — `crates/dyson/tests/http_controller.rs` binds
+  the controller to `127.0.0.1:0` and exercises every endpoint with a
+  real TCP client.
+- **Frontend** — `web/src/__tests__/regression.test.js` runs under
+  vitest (`npm test`).  Each case pins a past bug — greyscreen on ⌘4/⌘5
+  when nav indices outran view ids, conversations opening at the top,
+  control-char placeholders leaking into rendered markdown, etc.
+  `npm run build` runs the suite before bundling, so a regression
+  fails `cargo build` too.
 
 ## Known limits
 

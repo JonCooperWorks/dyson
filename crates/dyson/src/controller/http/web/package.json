@@ -1,0 +1,26 @@
+{
+  "name": "dyson-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web UI for the dyson HTTP controller. Bundled into the Rust binary by crates/dyson/build.rs.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vitest run && vite build",
+    "build:nocheck": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "4.3.4",
+    "vite": "5.4.11",
+    "vitest": "2.1.8"
+  }
+}

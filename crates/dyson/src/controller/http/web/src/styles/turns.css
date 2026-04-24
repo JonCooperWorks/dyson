@@ -254,6 +254,22 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* Artefact chips and attachment cards have desktop-friendly fixed
+     max-widths (460px / 400px) that overflow a narrow viewport.  Let
+     them take the full turn width on mobile and cap image height so a
+     tall screenshot doesn't push the composer offscreen. */
+  .fileblock.image {
+    max-width: 100%;
+    width: 100%;
+  }
+  .fileblock.image img {
+    max-height: 60vh;
+    width: 100%;
+    object-fit: contain;
+  }
+  .att-card {
+    max-width: 100%;
+  }
 }
 
 /* ---------- thinking block ---------- */

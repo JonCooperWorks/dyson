@@ -9,7 +9,15 @@
  * mod tests` for the regression checks that lock this behaviour in.
  */
 
-const { useState, useEffect, useRef, useCallback, useLayoutEffect } = React;
+import React, { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react';
+import { Icon } from './icons.jsx';
+import { ImagePanel, ToolPanel } from './panels.jsx';
+import {
+  Turn, Composer, TypingIndicator, EmptyState, FileBlock, ArtefactBlock,
+} from './turns.jsx';
+import {
+  TopBar, LeftRail, RightRail, MindView, ActivityView, ArtefactsView,
+} from './views.jsx';
 
 // Single source of truth for the views that exist.  TopBar's nav array
 // must list these in the same order; the keyboard handler in App keys
@@ -887,5 +895,4 @@ function applyToolView(t, content, isError, view) {
   if (view.kind === 'read' && view.path) t.sig = view.path;
 }
 
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App/>);
+export { App };

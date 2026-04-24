@@ -1,6 +1,7 @@
 /* Dyson — turns, subagents, composer */
 
-const { useState: uS2, useRef: uR2, useEffect: uE2 } = React;
+import React, { useState, useRef, useEffect } from 'react';
+import { Icon, Kbd } from './icons.jsx';
 
 function ThinkingBlock({ text }) {
   return (
@@ -88,7 +89,7 @@ function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
   const isUser = turn.role === 'user';
   const avatarL = isUser ? 'JC' : 'DY';
   const ratable = !isUser && turnIndex != null && typeof onRate === 'function';
-  const [copied, setCopied] = uS2(false);
+  const [copied, setCopied] = useState(false);
 
   // Tap-to-reveal the reactions bar on touch.  Desktop hover path is
   // preserved by CSS gated on @media (hover: hover) and (pointer: fine).
@@ -353,8 +354,8 @@ function ArtefactBlock({ block }) {
     // swap to <img>.  Until the fetch lands, cmd-click opens the
     // reader (via `reader`); once resolved, cmd-click opens the image
     // itself in a new tab — which is what users reach for on an image.
-    const [src, setSrc] = React.useState('');
-    React.useEffect(() => {
+    const [src, setSrc] = useState('');
+    useEffect(() => {
       if (!block.id) return;
       fetch(`/api/artefacts/${encodeURIComponent(block.id)}`)
         .then(r => r.ok ? r.text() : Promise.reject(r.status))
@@ -400,18 +401,18 @@ function TypingIndicator({ phase, tname, onJump }) {
 }
 
 function Composer({ onSend, onCancel, running }) {
-  const [val, setVal] = uS2('');
-  const [slash, setSlash] = uS2(false);
+  const [val, setVal] = useState('');
+  const [slash, setSlash] = useState(false);
   // Real File objects from <input type="file"> or drag-drop.  Sent as
   // base64 attachments through DysonLive.send → /api/.../turn → agent
   // run_with_attachments (same path Telegram takes for media).
-  const [atts, setAtts] = uS2([]);
-  const taRef = uR2();
-  const fileRef = uR2();
+  const [atts, setAtts] = useState([]);
+  const taRef = useRef();
+  const fileRef = useRef();
   const cmds = window.DYSON_DATA.slashCmds;
   const filtered = slash ? cmds.filter(c => c.cmd.startsWith(val.split(/\s/)[0] || '/')) : [];
 
-  uE2(() => {
+  useEffect(() => {
     if (!taRef.current) return;
     taRef.current.style.height = 'auto';
     taRef.current.style.height = Math.min(240, taRef.current.scrollHeight) + 'px';
@@ -545,4 +546,4 @@ function fileToBase64(file) {
   });
 }
 
-Object.assign(window, { Turn, ThinkingBlock, ToolChip, FileBlock, ArtefactBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64 });
+export { Turn, ThinkingBlock, ToolChip, FileBlock, ArtefactBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64 };

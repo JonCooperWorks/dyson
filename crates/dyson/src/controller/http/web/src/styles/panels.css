@@ -59,7 +59,11 @@
 .panel .p-body {
   padding: 10px;
   min-height: 0;
-  max-height: 380px;
+  /* 380px is comfortable on desktop but clips tool output on phones
+     where viewport height is already constrained by the URL bar and
+     keyboard.  Clamp to 50vh on small screens so long outputs don't
+     get cut off and still fit above the composer. */
+  max-height: min(380px, 50vh);
   overflow: auto;
 }
 .panel .p-body.flush { padding: 0; }

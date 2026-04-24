@@ -1,11 +1,11 @@
 // ===========================================================================
 // HTTP controller — web UI + JSON API + SSE event stream.
 //
-// Hosts the prototype at `/` (static files from a webroot directory) and
+// Hosts the React UI at `/` (embedded or from a webroot directory) and
 // exposes a small JSON API plus per-conversation Server-Sent Events:
 //
-//   GET  /                          → prototype.html
-//   GET  /styles/*, /js/*, /components/*  → static assets
+//   GET  /                          → index.html (Vite-built bundle)
+//   GET  /assets/*                  → hashed JS/CSS/font chunks
 //   GET  /api/conversations         → list this controller's chats
 //   POST /api/conversations         → create new chat → { id, title }
 //   GET  /api/conversations/:id     → load Vec<MessageDto>
@@ -1373,8 +1373,8 @@ async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) ->
     let path = req.uri().path().to_string();
 
     // Enforce inbound auth on every API route.  Static-shell assets
-    // (`/`, `/styles/*`, `/js/*`, `/components/*`) are exempt so the UI
-    // can load before the browser has presented its credential.
+    // (`/`, `/assets/*`) are exempt so the UI can load before the
+    // browser has presented its credential.
     if path.starts_with("/api/") && state.auth.validate_request(req.headers()).await.is_err() {
         return unauthorized();
     }
@@ -2337,11 +2337,13 @@ async fn serve_static(state: &HttpState, path: &str) -> Resp {
     if decoded.contains("..") || decoded.contains('\\') || decoded.contains('\0') {
         return not_found();
     }
-    // Disk webroot wins when configured (dev mode — edit + reload without
-    // recompile).  Otherwise serve from the embedded prototype.
+    // Disk webroot wins when configured (dev mode — point it at
+    // `crates/dyson/src/controller/http/web/dist` to iterate on the
+    // frontend without recompiling the binary).  Otherwise serve from
+    // the embedded bundle.
     if let Some(webroot) = state.webroot.as_ref() {
         let rel = if decoded == "/" {
-            "prototype.html"
+            "index.html"
         } else {
             decoded.trim_start_matches('/')
         };
@@ -2415,14 +2417,19 @@ fn content_type_for(path: &str) -> &'static str {
     match ext {
         "html" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
-        "js" => "application/javascript; charset=utf-8",
-        "jsx" => "text/babel; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
         "json" => "application/json",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
         "ico" => "image/x-icon",
+        "woff" => "font/woff",
         "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "map" => "application/json",
         _ => "application/octet-stream",
     }
 }
@@ -3348,246 +3355,43 @@ mod tests {
 
     #[test]
     fn content_type_for_known_extensions() {
-        assert!(content_type_for("prototype.html").starts_with("text/html"));
-        assert!(content_type_for("styles/x.css").starts_with("text/css"));
-        assert!(content_type_for("js/x.js").starts_with("application/javascript"));
-        assert_eq!(content_type_for("x.jsx"), "text/babel; charset=utf-8");
+        assert!(content_type_for("index.html").starts_with("text/html"));
+        assert!(content_type_for("assets/index-abc.css").starts_with("text/css"));
+        assert!(content_type_for("assets/index-abc.js").starts_with("application/javascript"));
         assert_eq!(content_type_for("x.unknown"), "application/octet-stream");
     }
 
-    // The embedded prototype is part of the binary's contract — these
-    // tests guarantee the include_bytes! table is intact and that the
-    // JS/JSX surface the web UI depends on is actually shipped.
+    // The embedded bundle is part of the binary's contract.  Filenames
+    // are hashed by Vite, so these tests verify shape — index.html at
+    // the root, at least one JS chunk, at least one CSS chunk — rather
+    // than specific paths.  Frontend-facing regressions live in
+    // crates/dyson/src/controller/http/web/src/__tests__/ and run
+    // under `npm test` (invoked by build.rs as part of `npm run build`).
 
     #[test]
-    fn embedded_assets_serve_root() {
-        let (bytes, ct) = assets::lookup("/").expect("/ must serve prototype.html");
+    fn embedded_bundle_serves_root() {
+        let (bytes, ct) = assets::lookup("/").expect("/ must serve index.html");
         assert!(ct.starts_with("text/html"));
         assert!(!bytes.is_empty());
-        assert!(
-            std::str::from_utf8(bytes).unwrap().contains("<div id=\"root\">"),
-            "prototype.html must mount React at #root",
-        );
+        let body = std::str::from_utf8(bytes).unwrap();
+        assert!(body.contains("id=\"root\""), "index.html must mount React at #root");
     }
 
     #[test]
-    fn embedded_assets_serve_every_required_file() {
-        // Files the prototype's <script>/<link> tags load.  If any
-        // disappears, the UI breaks silently in the browser.
-        const REQUIRED: &[&str] = &[
-            "/styles/tokens.css",
-            "/styles/layout.css",
-            "/styles/turns.css",
-            "/styles/panels.css",
-            "/js/data.js",
-            "/js/bridge.js",
-            "/components/icons.jsx",
-            "/components/panels.jsx",
-            "/components/turns.jsx",
-            "/components/views.jsx",
-            "/components/app.jsx",
-        ];
-        for path in REQUIRED {
-            let (bytes, _) = assets::lookup(path)
-                .unwrap_or_else(|| panic!("missing embedded asset {path}"));
-            assert!(!bytes.is_empty(), "{path} is empty");
-        }
+    fn embedded_bundle_has_js_and_css_chunks() {
+        let has_js = assets::ASSETS.iter().any(|(p, _, ct)| {
+            p.ends_with(".js") && ct.starts_with("application/javascript")
+        });
+        let has_css = assets::ASSETS.iter().any(|(p, _, ct)| {
+            p.ends_with(".css") && ct.starts_with("text/css")
+        });
+        assert!(has_js, "bundle must ship at least one JS chunk");
+        assert!(has_css, "bundle must ship at least one CSS chunk");
     }
 
-    // ----- JS-side regression checks -----
-    //
-    // The web UI is JSX wrapped per-script-tag by Babel-in-browser.
-    // Each file is its own IIFE, so cross-file references must be
-    // hung off `window` via Object.assign.  Components from views.jsx
-    // are referenced from app.jsx — a missing export there produces a
-    // grey screen with `<X> is not defined` in the console.
-    //
-    // These tests grep the embedded JS for the load-bearing patterns
-    // so a deleted export or a regression of the bugs we hit while
-    // building this controller surfaces in `cargo test`.
-
-    fn jsx(path: &str) -> &'static str {
-        let (bytes, _) = assets::lookup(path).expect("asset must exist");
-        std::str::from_utf8(bytes).expect("asset is utf-8")
-    }
-
-    #[test]
-    fn views_exports_components_app_uses() {
-        // app.jsx renders <TopBar>, <LeftRail>, <RightRail>, <MindView>,
-        // <ActivityView> — all defined in views.jsx.  Each must be
-        // attached to window so the IIFE-wrapped app.jsx can see them.
-        let v = jsx("/components/views.jsx");
-        for name in ["TopBar", "LeftRail", "RightRail", "MindView", "ActivityView"] {
-            assert!(
-                v.contains(&format!("Object.assign(window, {{")) && v.contains(name),
-                "views.jsx must export {name} on window",
-            );
-        }
-    }
-
-    #[test]
-    fn turns_exports_only_live_components() {
-        // SubagentCard and ErrorCard were deleted; they must not be in
-        // the export list (referencing a deleted name throws on load).
-        let t = jsx("/components/turns.jsx");
-        assert!(t.contains("Object.assign(window, {"));
-        for dead in ["SubagentCard", "ErrorCard"] {
-            assert!(
-                !t.contains(&format!(", {dead}")) && !t.contains(&format!("{{ {dead}")),
-                "turns.jsx still exports deleted name {dead}",
-            );
-        }
-        for live in ["Turn", "ToolChip", "Composer", "EmptyState", "markdown"] {
-            assert!(t.contains(live), "turns.jsx must export {live}");
-        }
-    }
-
-    #[test]
-    fn keyboard_handler_does_not_outrun_view_ids() {
-        // Regression for the "⌘4/⌘5 grey-screen" bug: the keyboard
-        // handler used to map [1-5] to a hardcoded array longer than
-        // the rendered <Route>s, so pressing ⌘4 set view='providers'
-        // and nothing rendered.  app.jsx now uses VIEW_IDS as the
-        // single source of truth, with a bounds check.
-        let app = jsx("/components/app.jsx");
-        assert!(
-            app.contains("const VIEW_IDS"),
-            "app.jsx must define VIEW_IDS as the source of truth",
-        );
-        assert!(
-            app.contains("idx < VIEW_IDS.length"),
-            "app.jsx keyboard handler must bounds-check against VIEW_IDS",
-        );
-        assert!(
-            !app.contains("['conv','mind','activity','providers','sandbox']"),
-            "app.jsx still references the deleted Providers/Sandbox views",
-        );
-    }
-
-    #[test]
-    fn transcript_force_scrolls_to_bottom_on_load() {
-        // Regression for "chats open at the top": a long-loaded
-        // transcript would render scrolled to the top because the
-        // auto-scroll only fired when the user was already near the
-        // bottom (and a fresh element has scrollTop=0).  app.jsx now
-        // marks `session.justScrollOnNextRender` on conv switch and
-        // force-scrolls the next render that has turns.
-        let app = jsx("/components/app.jsx");
-        assert!(
-            app.contains("justScrollOnNextRender"),
-            "app.jsx must mark just-loaded conversations to force-scroll",
-        );
-    }
-
-    #[test]
-    fn per_chat_session_state_survives_conv_switch() {
-        // Regression for "moving from a chat seems to kill it" and
-        // "the tool stack is not per conversation".  Per-chat state
-        // (transcript, panels, ratings, in-flight EventSource) lives
-        // in `sessionsRef: Map<chat_id, Session>` so switching `conv`
-        // never clears prior chat state and inactive chats keep
-        // streaming.  The forbidden patterns below were the bug.
-        let app = jsx("/components/app.jsx");
-        assert!(
-            app.contains("sessionsRef") && app.contains("makeSession"),
-            "app.jsx must keep a per-chat session map",
-        );
-        assert!(
-            !app.contains("setLiveTurns([])"),
-            "conv-change must NOT wipe liveTurns — that killed the chat the user just left",
-        );
-        // RightRail must read from the active session's panels rather
-        // than a global `panels` state shared across chats.
-        assert!(
-            app.contains("session.panels") || app.contains("session ? session.panels"),
-            "RightRail must take its panels from the active session",
-        );
-        // SSE must be stored on the session so it keeps streaming for
-        // chats the user navigated away from.
-        assert!(
-            app.contains("session.es ="),
-            "EventSource must be parked on the per-chat session",
-        );
-    }
-
-    #[test]
-    fn markdown_inline_code_does_not_leak_placeholders() {
-        // Regression for the "CODE0 / CODEBLOCK_0 leaked into chat
-        // output" bug.  Inline-code and fenced-code placeholders used
-        // \u0000/\u0001 — control chars the DOM strips on innerHTML
-        // assignment, so the literal placeholder text leaked through.
-        // The fix: don't use control chars at all (inline-code is
-        // tokenised by split-on-backticks, fenced uses §§ printable).
-        let t = jsx("/components/turns.jsx");
-        assert!(
-            !t.contains("\\u0000CODEBLOCK_") && !t.contains("\\u0001CODE_"),
-            "turns.jsx still uses control-char placeholders the DOM strips",
-        );
-        assert!(
-            t.contains("split(/(`[^`]+`)/g)"),
-            "inline() must tokenise on backticks rather than placeholder-substitute",
-        );
-    }
-
-    #[test]
-    fn markdown_header_splits_from_following_paragraph() {
-        // Regression for "## CRITICAL\nNo findings. rendered as literal
-        // ## text" in the artefact reader.  The block-level header
-        // match only accepts a standalone line, so a header without a
-        // blank line before its paragraph fell through to the
-        // paragraph branch.  The fix injects a newline after every
-        // header line so block splitting on `\n{2,}` peels headers
-        // into their own block.
-        let t = jsx("/components/turns.jsx");
-        assert!(
-            t.contains("replace(/^(#{1,6}\\s+.+)$/gm, '$1\\n')"),
-            "turns.jsx must inject a blank line after header lines",
-        );
-    }
-
-    #[test]
-    fn file_block_renders_inline_image_or_download_link() {
-        // Regression for "agent can't deliver files to the UI".  The
-        // SSE `file` event must be dispatched into the transcript as
-        // a `file` block; FileBlock renders inline <img> for images
-        // and a download link for other MIME types.
-        let t = jsx("/components/turns.jsx");
-        let app = jsx("/components/app.jsx");
-        let bridge = jsx("/js/bridge.js");
-        assert!(t.contains("function FileBlock"), "turns.jsx must export FileBlock");
-        assert!(t.contains("b.type === 'file'"), "Turn must dispatch 'file' blocks to FileBlock");
-        assert!(bridge.contains("case 'file':"), "bridge.js must dispatch SSE 'file' events");
-        assert!(app.contains("onFile:"), "ConversationView must wire onFile to push 'file' blocks");
-    }
-
-    #[test]
-    fn composer_uses_real_file_input_not_a_fake_chip() {
-        // Regression for "paperclip pretends to attach a file".  The
-        // composer must mount an <input type="file"> and actually pass
-        // real File objects through to bridge → backend.
-        let t = jsx("/components/turns.jsx");
-        assert!(
-            t.contains("type=\"file\""),
-            "Composer must use a real <input type=\"file\"> not a fake chip",
-        );
-        assert!(
-            !t.contains("'screenshot.png'") || !t.contains("name: 'screenshot.png'"),
-            "the hardcoded fake screenshot.png attachment must be gone",
-        );
-        assert!(
-            t.contains("function fileToBase64"),
-            "the FileReader → base64 helper must exist for upload serialisation",
-        );
-    }
-
-    #[test]
-    fn live_tool_ids_are_namespaced_per_chat() {
-        // Two chats minting `live-1` would collide in window.DYSON_DATA.tools.
-        // The fix is to prefix newly-minted tool ids with the chat id.
-        let app = jsx("/components/app.jsx");
-        assert!(
-            app.contains("`${conv}-live-${"),
-            "live tool ids must be namespaced by conv to avoid cross-chat collisions",
-        );
-    }
+    // JS-side regression checks live in
+    // crates/dyson/src/controller/http/web/src/__tests__/regression.test.js
+    // and run under vitest via `npm test`.  build.rs chains `npm run
+    // build` into the cargo build, so a failing frontend test fails
+    // `cargo build` too.
 }

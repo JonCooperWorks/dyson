@@ -21,7 +21,10 @@ Four layers, covered in detail in [docs/testing.md](docs/testing.md):
 | Unit tests | `cargo test` | Free |
 | Smoke tests (tools vs. real repos) | `cargo run -p dyson --example smoke_*` | Free |
 | Integration / regression | `cargo test` (root `tests/`) | Free |
+| Frontend (vitest) | `npm test` in `crates/dyson/src/controller/http/web/` | Free |
 | Live subagent review (real LLM) | `cargo run -p dyson --example expensive_live_security_review` | Billable |
+
+The web frontend is a Vite + React project under `crates/dyson/src/controller/http/web/`.  `crates/dyson/build.rs` runs `npm run build` as part of `cargo build` (mtime-gated — nothing fires when the frontend is untouched) and `include_bytes!`s the resulting `dist/` into the binary.  Frontend regressions live next to the code in `web/src/__tests__/`; `npm run build` runs vitest first, so a failing JS test fails `cargo build` too.  For active UI work, `npm run dev` from `web/` gives HMR with `/api` proxied to a running dyson on :7878.  Node 20+ is required to build — there is no feature flag to skip the frontend.
 
 Two loops connect them:
 - Smoke failures get **minimised to a fixture and promoted** into `tests/ast_taint_patterns.rs` or similar.  Don't patch silently.

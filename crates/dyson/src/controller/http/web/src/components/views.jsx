@@ -1,6 +1,9 @@
 /* Dyson — TopBar / LeftRail / MindView / ActivityView. */
 
-const { useState: vUS, useEffect: vUE, useRef: vUR } = React;
+import React, { useState, useEffect, useRef } from 'react';
+import { Icon, Kbd } from './icons.jsx';
+import { ToolPanel } from './panels.jsx';
+import { ArtefactBlock, markdown, prettySize } from './turns.jsx';
 
 function TopBar({ view, setView, onToggleLeft, onToggleRight, rightHidden }) {
   const navs = [
@@ -14,13 +17,13 @@ function TopBar({ view, setView, onToggleLeft, onToggleRight, rightHidden }) {
   const providers = D.providers || [];
   const totalModels = providers.reduce((n, p) => n + ((p.models && p.models.length) || 0), 0);
 
-  const [menuOpen, setMenuOpen] = vUS(false);
-  const [busy, setBusy] = vUS(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
   // expanded[providerId] === true → group is open.  Active provider
   // starts open, others collapsed.  Resets each time the menu opens so
   // the initial render matches the current active provider.
-  const [expanded, setExpanded] = vUS({});
-  vUE(() => {
+  const [expanded, setExpanded] = useState({});
+  useEffect(() => {
     if (!menuOpen) return;
     const init = {};
     for (const p of providers) init[p.id] = !!p.active;
@@ -208,13 +211,13 @@ function LeftRail({ active, setActive, filter, emptyLabel }) {
 function MindView({ showSide, onHideSide }) {
   const m = window.DYSON_DATA.mind;
   const initial = (m.files[0] && m.files[0].path) || '';
-  const [selected, setSelected] = vUS(initial);
-  const [loaded, setLoaded] = vUS('');
-  const [draft, setDraft] = vUS('');
-  const [saving, setSaving] = vUS(false);
-  const [err, setErr] = vUS('');
+  const [selected, setSelected] = useState(initial);
+  const [loaded, setLoaded] = useState('');
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
 
-  vUE(() => {
+  useEffect(() => {
     if (!selected) { setLoaded(''); setDraft(''); return; }
     if (window.DysonLive) {
       window.DysonLive.mindFile(selected)
@@ -239,7 +242,7 @@ function MindView({ showSide, onHideSide }) {
     setSaving(false);
   };
 
-  vUE(() => {
+  useEffect(() => {
     const h = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
@@ -299,8 +302,8 @@ function RightRail({ panels, onClose, activeChatId }) {
   // for this chat even when the user hasn't clicked the chip to open
   // its panel.  Scoped to the active chat — stack-wide lists live in
   // the Activity tab.  Refresh cadence matches ActivityView (3s).
-  const [runningSubagents, setRunningSubagents] = vUS([]);
-  vUE(() => {
+  const [runningSubagents, setRunningSubagents] = useState([]);
+  useEffect(() => {
     if (!activeChatId) { setRunningSubagents([]); return; }
     let cancelled = false;
     const refresh = () => {
@@ -364,8 +367,8 @@ function ActivityView() {
   // security_engineer run streams.  The registry is authoritative
   // (disk-backed, per chat) — re-fetching is cheap and keeps the
   // tab honest even across tab switches.
-  const [tick, setTick] = vUS(0);
-  vUE(() => {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
     const refresh = () => {
       fetch('/api/activity').then(r => r.ok ? r.json() : null).then(act => {
         if (act && Array.isArray(act.lanes)) {
@@ -462,7 +465,7 @@ function ArtefactsView({ conv, session, bump }) {
   // even though our own event listener isn't attached until after the
   // view switch.  Clear the stash after consuming so it doesn't
   // re-select an old id on the next mount.
-  const [selected, setSelected] = vUS(() => {
+  const [selected, setSelected] = useState(() => {
     const pending = window.__dysonOpenArtefactId;
     if (pending) delete window.__dysonOpenArtefactId;
     return pending || null;
@@ -472,7 +475,7 @@ function ArtefactsView({ conv, session, bump }) {
   // switches do nothing — live SSE keeps it current.  We re-run the
   // auto-select below once the fetch resolves so a freshly-loaded
   // chat lands on its newest artefact immediately.
-  vUE(() => {
+  useEffect(() => {
     if (!conv || !session || !window.DysonLive) return;
     if (session.artefactsLoaded) return;
     session.artefactsLoaded = true;
@@ -493,8 +496,8 @@ function ArtefactsView({ conv, session, bump }) {
   // cold-deep-link case, where the reader has just told App which
   // chat owns the artefact being read — clobbering would throw away
   // the user's actual target).
-  const prevConvRef = vUR(conv);
-  vUE(() => {
+  const prevConvRef = useRef(conv);
+  useEffect(() => {
     const prev = prevConvRef.current;
     prevConvRef.current = conv;
     if (!prev) return;
@@ -513,7 +516,7 @@ function ArtefactsView({ conv, session, bump }) {
   // the reader position so a back-button or share-link round-trips
   // cleanly.
   const listForAutoselect = (session && session.artefacts) || [];
-  vUE(() => {
+  useEffect(() => {
     if (selected) return;
     if (!listForAutoselect.length) return;
     const first = listForAutoselect[0].id;
@@ -525,7 +528,7 @@ function ArtefactsView({ conv, session, bump }) {
   // event is fired by ArtefactBlock.onClick — if we're already on the
   // Artefacts tab we pick it up; otherwise App's view state change will
   // mount this component and the last-selected id wins.
-  vUE(() => {
+  useEffect(() => {
     const h = (e) => {
       const id = e.detail && e.detail.id;
       if (id) setSelected(id);
@@ -612,12 +615,12 @@ function ArtefactsView({ conv, session, bump }) {
 // renders it through the shared `markdown()` helper, and surfaces the
 // metadata header (model, target, tokens, cost) in a sticky top bar.
 function ArtefactReader({ id }) {
-  const [body, setBody] = vUS('');
-  const [meta, setMeta] = vUS(null);
-  const [err, setErr]  = vUS('');
-  const [copied, setCopied] = vUS(false);
+  const [body, setBody] = useState('');
+  const [meta, setMeta] = useState(null);
+  const [err, setErr]  = useState('');
+  const [copied, setCopied] = useState(false);
 
-  vUE(() => {
+  useEffect(() => {
     if (!id || !window.DysonLive) { setBody(''); setMeta(null); setErr(''); return; }
     setErr('');
     const hit = findArtefactMeta(id);
@@ -782,6 +785,4 @@ function formatAgo(epochSeconds) {
   return `${Math.floor(d / 86400)}d ago`;
 }
 
-// Each component file is wrapped in its own IIFE by Babel-in-browser,
-// so cross-file references must be hung off `window`.
-Object.assign(window, { TopBar, LeftRail, RightRail, MindView, ActivityView, ArtefactsView, ArtefactReader });
+export { TopBar, LeftRail, RightRail, MindView, ActivityView, ArtefactsView, ArtefactReader };

@@ -1,9 +1,10 @@
 /* Dyson — right-rail tool panels */
 
-const { useState: uS1 } = React;
+import React, { useState, useEffect, useRef } from 'react';
+import { Icon } from './icons.jsx';
 
 function PanelChrome({ icon, name, arg, live, copyText, onClose, children }) {
-  const [copied, setCopied] = uS1(false);
+  const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
     const text = typeof copyText === 'function' ? copyText() : (copyText || '');
     try {
@@ -224,8 +225,8 @@ function ReadPanel({ path, lines, highlight }) {
 // reason before the text starts.  Auto-scrolls to the bottom on each
 // update, matching BashPanel's UX.
 function ThinkingPanel({ text, running }) {
-  const bodyRef = React.useRef(null);
-  React.useEffect(() => {
+  const bodyRef = useRef(null);
+  useEffect(() => {
     if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
   }, [text]);
   if (!text && !running) {
@@ -297,4 +298,4 @@ function ToolPanel({ tool, onClose }) {
   );
 }
 
-Object.assign(window, { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, ToolPanel, copyTextForTool });
+export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, ToolPanel, copyTextForTool };
