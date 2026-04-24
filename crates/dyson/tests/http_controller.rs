@@ -1451,6 +1451,121 @@ async fn send_file_inlines_images_and_attaches_everything_else() {
 }
 
 // ---------------------------------------------------------------------------
+// Browser artefact sink — the bridge that makes Telegram's `send_file`
+// land in the web UI's Artefacts tab for the same chat id.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn browser_artefact_sink_publishes_telegram_file_as_artefact() {
+    // Simulates the telegram → browser path: a file delivered through
+    // the Telegram controller should show up in the HTTP controller's
+    // Artefacts tab for the matching chat id, with both the served
+    // bytes and the per-chat listing reachable from the browser.
+    let r = rig().await;
+
+    // Telegram chat ids are bare numeric strings (see
+    // `controller::http::source_for_chat_id`).  Use one here so the
+    // chat is indistinguishable from a real Telegram chat to the rest
+    // of the controller.
+    let chat_id = "2102424765".to_string();
+
+    // Hydrate a ChatHandle for this chat id — the sink only
+    // broadcasts live SSE when one exists.  Listing conversations is
+    // the cheap, idempotent way to trigger hydration.
+    let _ = get(&format!("{}/api/conversations", r.base)).await;
+    // Nothing on disk yet, so prime the map directly by listing from
+    // an explicit POST wouldn't work (it would mint `c-NNNN`).  The
+    // sink still persists to disk regardless — force a handle to
+    // exist by writing a transcript file the controller can discover.
+    let chat_sub = r.chat_dir.path().join(&chat_id);
+    std::fs::create_dir_all(&chat_sub).expect("mkdir chat");
+    std::fs::write(
+        chat_sub.join("transcript.json"),
+        r#"{"version":1,"messages":[]}"#,
+    )
+    .expect("write transcript");
+    let _ = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
+
+    let mut sse = request(
+        &format!("{}/api/conversations/{}/events", r.base, chat_id),
+        Method::GET,
+        None,
+    ).await;
+    assert_eq!(sse.status(), StatusCode::OK);
+    test_helpers::wait_for_sse_subscriber(r.state.clone(), &chat_id).await;
+
+    // Publish a PDF through the sink — the same path Telegram's
+    // `send_file` takes when an HTTP controller is also running.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pdf_path = dir.path().join("invoice.pdf");
+    let pdf_bytes = b"%PDF-1.4\n% telegram upload\n";
+    std::fs::write(&pdf_path, pdf_bytes).expect("write pdf");
+    let (_file_id, art_id) =
+        test_helpers::publish_file_as_artefact_for_test(r.state.clone(), &chat_id, &pdf_path)
+            .expect("sink must succeed on a readable file");
+
+    // SSE broadcast: file event then artefact event, in that order.
+    let file_evt = read_sse_event(&mut sse).await;
+    assert_eq!(file_evt["type"], "file", "first event: {file_evt}");
+    assert_eq!(file_evt["name"], "invoice.pdf");
+    assert_eq!(file_evt["mime_type"], "application/pdf");
+    assert_eq!(file_evt["inline_image"], false);
+    let file_url = file_evt["url"].as_str().expect("file url").to_string();
+
+    let art_evt = read_sse_event(&mut sse).await;
+    assert_eq!(art_evt["type"], "artefact", "second event: {art_evt}");
+    assert_eq!(art_evt["title"], "invoice.pdf");
+    assert_eq!(art_evt["kind"], "other", "non-images surface as kind=other");
+    assert_eq!(art_evt["bytes"], pdf_bytes.len());
+    let art_url = art_evt["url"].as_str().expect("artefact url").to_string();
+    assert!(
+        art_url.starts_with("/#/artefacts/"),
+        "artefact url is an SPA deep-link: {art_url}",
+    );
+
+    // The served file endpoint returns the bytes verbatim.
+    let resp = get(&format!("{}{}", r.base, file_url)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.expect("collect").to_bytes();
+    assert_eq!(&body[..], pdf_bytes);
+
+    // Per-chat artefact listing must include the new entry.
+    let list = body_json(get(&format!(
+        "{}/api/conversations/{}/artefacts",
+        r.base, chat_id,
+    )).await).await;
+    let arr = list.as_array().expect("artefact list is array");
+    assert!(
+        arr.iter().any(|a| a["id"] == art_id.as_str()),
+        "sink artefact must appear in per-chat list: {list}",
+    );
+}
+
+#[tokio::test]
+async fn browser_artefact_sink_missing_file_is_noop() {
+    // Telegram hands us a path for a file that's already been cleaned
+    // up — the sink must decline silently rather than poison the
+    // store with a broken artefact entry.
+    let r = rig().await;
+    let chat_id = "999".to_string();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let gone = dir.path().join("ghost.pdf");
+    assert!(!gone.exists());
+
+    let result =
+        test_helpers::publish_file_as_artefact_for_test(r.state.clone(), &chat_id, &gone);
+    assert!(result.is_none(), "sink must return None when the file is gone");
+
+    let list = body_json(get(&format!(
+        "{}/api/conversations/{}/artefacts",
+        r.base, chat_id,
+    )).await).await;
+    let arr = list.as_array().expect("artefact list is array");
+    assert!(arr.is_empty(), "failed publish must not surface anything: {list}");
+}
+
+// ---------------------------------------------------------------------------
 // Artefact delivery round-trip (Output::send_artefact → SSE → GET)
 // ---------------------------------------------------------------------------
 

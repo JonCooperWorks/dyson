@@ -954,6 +954,149 @@ impl HttpState {
             Err(p) => p.into_inner().clone(),
         }
     }
+
+    /// Core of `BrowserArtefactSink::publish_file_as_artefact` — extracted
+    /// so tests can exercise the put-in-store side without touching the
+    /// trait-object bus.  Returns the minted `(file_id, artefact_id)` on
+    /// success, `None` when the file couldn't be read.
+    fn publish_file_as_artefact_impl(
+        &self,
+        chat_id: &str,
+        path: &std::path::Path,
+    ) -> Option<(String, String)> {
+        // Match the 25 MB cap used by `SseOutput::send_file` — keeps a
+        // runaway tool from blowing memory regardless of which controller
+        // is the source of the file.
+        const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
+        match std::fs::metadata(path) {
+            Ok(m) if m.len() > MAX_FILE_BYTES => {
+                tracing::warn!(
+                    path = %path.display(),
+                    bytes = m.len(),
+                    "file too large to publish as browser artefact",
+                );
+                return None;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "stat failed — cannot publish browser artefact",
+                );
+                return None;
+            }
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "read failed — cannot publish browser artefact",
+                );
+                return None;
+            }
+        };
+
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let mime = mime_for_extension(path);
+        let inline_image = mime.starts_with("image/");
+        let bytes_len = bytes.len();
+
+        let file_id = format!(
+            "f{}",
+            self.file_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let file_url = format!("/api/files/{file_id}");
+        let file_entry = FileEntry {
+            bytes,
+            mime: mime.clone(),
+            name: name.clone(),
+        };
+        if let Some(dir) = self.data_dir.as_ref() {
+            FileStore::persist_static(dir, &file_id, &file_entry);
+        }
+        if let Ok(mut s) = self.files.lock() {
+            s.put(file_id.clone(), file_entry);
+        }
+
+        let kind = if inline_image {
+            crate::message::ArtefactKind::Image
+        } else {
+            crate::message::ArtefactKind::Other
+        };
+        let artefact_id = format!(
+            "a{}",
+            self.artefact_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let artefact_url = format!("/#/artefacts/{artefact_id}");
+        let metadata = serde_json::json!({
+            "file_url": file_url,
+            "file_name": name,
+            "bytes": bytes_len,
+        });
+        let entry = ArtefactEntry {
+            chat_id: chat_id.to_string(),
+            kind,
+            title: name.clone(),
+            // `content` holds the served URL rather than raw bytes —
+            // matches `SseOutput::send_file`'s inline-image artefact
+            // branch so the reader's image fallback kicks in for
+            // anything with an `image/*` mime.
+            content: file_url.clone(),
+            mime_type: mime.clone(),
+            metadata: Some(metadata.clone()),
+            tool_use_id: None,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        };
+        if let Some(dir) = self.data_dir.as_ref() {
+            ArtefactStore::persist_static(dir, &artefact_id, &entry);
+        }
+        if let Ok(mut s) = self.artefacts.lock() {
+            s.put(artefact_id.clone(), entry);
+        }
+
+        // Best-effort live SSE broadcast: if a browser is currently
+        // subscribed to this chat, it sees the new file + artefact
+        // without needing to re-list.  `try_lock` keeps us sync-safe
+        // — a busy chats map just means the browser picks it up on
+        // the next poll / reload.
+        if let Ok(guard) = self.chats.try_lock()
+            && let Some(handle) = guard.get(chat_id).cloned()
+        {
+            let _ = handle.events.send(SseEvent::File {
+                name: name.clone(),
+                mime_type: mime.clone(),
+                url: file_url,
+                inline_image,
+            });
+            let _ = handle.events.send(SseEvent::Artefact {
+                id: artefact_id.clone(),
+                kind,
+                title: name,
+                url: artefact_url,
+                bytes: bytes_len,
+                metadata: Some(metadata),
+            });
+        }
+
+        Some((file_id, artefact_id))
+    }
+}
+
+impl super::BrowserArtefactSink for HttpState {
+    fn publish_file_as_artefact(&self, chat_id: &str, path: &std::path::Path) {
+        let _ = self.publish_file_as_artefact_impl(chat_id, path);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,6 +1222,15 @@ impl Controller for HttpController {
             Arc::clone(&self.auth),
             config_path,
         ));
+
+        // Expose the artefact store across controllers so a file sent
+        // through Telegram's `send_file` lands in the web UI's
+        // Artefacts tab for the same chat id.  First installer wins —
+        // running multiple HTTP controllers in one process is
+        // unsupported.
+        super::install_browser_artefact_sink(
+            Arc::clone(&state) as Arc<dyn super::BrowserArtefactSink>,
+        );
 
         // Hydrate the chat list from disk so existing conversations show
         // up immediately in the left rail.
@@ -1262,6 +1414,20 @@ pub mod test_helpers {
             current_tool_use_id: tool_use_id.map(|s| s.to_string()),
         };
         out.send_file(path)
+    }
+
+    /// Drive the cross-controller `BrowserArtefactSink` path from a
+    /// test — lets the integration tests verify that a file sent
+    /// through Telegram's `send_file` would land in the web UI's
+    /// Artefacts tab.  Returns the minted `(file_id, artefact_id)` so
+    /// the caller can assert on `/api/files/...` and
+    /// `/api/artefacts/...` reachability.
+    pub fn publish_file_as_artefact_for_test(
+        state: Arc<HttpState>,
+        chat_id: &str,
+        path: &std::path::Path,
+    ) -> Option<(String, String)> {
+        state.publish_file_as_artefact_impl(chat_id, path)
     }
 
     /// Mirror of `emit_agent_file` for artefacts: stash the given

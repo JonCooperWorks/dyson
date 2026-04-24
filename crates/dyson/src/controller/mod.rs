@@ -644,6 +644,42 @@ pub fn subscribe_settings_updates()
 }
 
 // ---------------------------------------------------------------------------
+// Cross-controller artefact publishing — so a file sent by one controller
+// (e.g. Telegram) shows up as an artefact in another controller's view
+// (e.g. the HTTP web UI).
+// ---------------------------------------------------------------------------
+
+/// Publishes a file sent through one controller as a first-class artefact
+/// in a browser-facing controller.  Implemented by `HttpState`; installed
+/// on startup so the Telegram controller can call it when its `send_file`
+/// fires and the same chat is visible in the web UI.
+pub trait BrowserArtefactSink: Send + Sync {
+    /// Stash `path` as an artefact for `chat_id`.  Best-effort: errors
+    /// (file gone, too big, etc.) are logged by the implementation, not
+    /// propagated — the caller has already delivered the file through
+    /// its primary channel and just wants the browser copy as a bonus.
+    fn publish_file_as_artefact(&self, chat_id: &str, path: &std::path::Path);
+}
+
+pub(crate) static BROWSER_ARTEFACT_SINK: std::sync::OnceLock<
+    std::sync::Arc<dyn BrowserArtefactSink>,
+> = std::sync::OnceLock::new();
+
+/// Install the browser artefact sink.  Called by the HTTP controller on
+/// startup.  Subsequent calls are ignored (first writer wins, matching
+/// `SETTINGS_BUS`).
+pub fn install_browser_artefact_sink(sink: std::sync::Arc<dyn BrowserArtefactSink>) {
+    let _ = BROWSER_ARTEFACT_SINK.set(sink);
+}
+
+/// Look up the installed browser artefact sink.  `None` when no HTTP
+/// controller is running — the caller should treat this as a no-op
+/// (nothing to bridge to).
+pub fn browser_artefact_sink() -> Option<std::sync::Arc<dyn BrowserArtefactSink>> {
+    BROWSER_ARTEFACT_SINK.get().cloned()
+}
+
+// ---------------------------------------------------------------------------
 // Single-agent reload — used by terminal controller.
 // ---------------------------------------------------------------------------
 

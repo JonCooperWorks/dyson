@@ -214,6 +214,17 @@ impl Output for TelegramOutput {
 
     fn send_file(&mut self, path: &Path) -> Result<(), DysonError> {
         let result = self.block_on(self.bot.send_document(self.chat_id, path));
+
+        // Mirror the file into the HTTP controller's artefact store so
+        // the web UI's Artefacts tab shows it for the same chat id.
+        // No-op when no HTTP controller is running in this process.
+        // Done after the Telegram send returns so a slow browser can't
+        // delay document delivery to the user.
+        if let Some(sink) = crate::controller::browser_artefact_sink() {
+            let chat_key = self.chat_id.0.to_string();
+            sink.publish_file_as_artefact(&chat_key, path);
+        }
+
         match result {
             Ok(_) => Ok(()),
             Err(e) => {
