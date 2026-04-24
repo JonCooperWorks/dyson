@@ -5,9 +5,16 @@
  * lazy-loaded — on cold load the user only pays for the conversation
  * shell, not the full UI. */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { Icon, Kbd } from './icons.jsx';
-import { ToolPanel } from './panels.jsx';
+
+// ToolPanel dispatches to ~8 tool-view renderers (bash/diff/sbom/taint
+// /read/image/thinking/fallback).  None of them are invoked on the
+// cold-paint route because session.panels starts empty — defer the
+// whole module to its own chunk so the initial bundle shrinks by the
+// weight of every view renderer that hasn't been asked for yet.
+const ToolPanel = lazy(() =>
+  import('./panels.jsx').then(m => ({ default: m.ToolPanel })));
 
 function TopBar({ view, setView, onToggleLeft, onToggleRight, rightHidden }) {
   const navs = [
@@ -269,11 +276,15 @@ function RightRail({ panels, onClose, activeChatId }) {
             Click <span className="mono">[open]</span> on a tool chip in the transcript.
           </div>
         )}
-        {panels.map(ref => {
-          const t = tools[ref];
-          if (!t) return null;
-          return <ToolPanel key={ref} tool={t} onClose={() => onClose(ref)}/>;
-        })}
+        {panels.length > 0 && (
+          <Suspense fallback={<div/>}>
+            {panels.map(ref => {
+              const t = tools[ref];
+              if (!t) return null;
+              return <ToolPanel key={ref} tool={t} onClose={() => onClose(ref)}/>;
+            })}
+          </Suspense>
+        )}
       </div>
     </aside>
   );

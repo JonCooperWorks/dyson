@@ -11,7 +11,6 @@
 
 import React, { useState, useEffect, useRef, useCallback, useLayoutEffect, Suspense, lazy } from 'react';
 import { Icon } from './icons.jsx';
-import { ImagePanel, ToolPanel } from './panels.jsx';
 import {
   Turn, Composer, TypingIndicator, EmptyState, FileBlock, ArtefactBlock,
 } from './turns.jsx';
