@@ -320,3 +320,146 @@ fn load_artefact_from_subdir(sub: &std::path::Path, id: &str) -> Option<Artefact
         created_at: meta.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str) -> FileEntry {
+        FileEntry {
+            bytes: format!("body-{name}").into_bytes(),
+            mime: "text/plain".to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn art_entry(chat: &str, n: u64) -> ArtefactEntry {
+        ArtefactEntry {
+            chat_id: chat.to_string(),
+            kind: crate::message::ArtefactKind::Other,
+            title: format!("title-{n}"),
+            content: format!("content-{n}"),
+            mime_type: "text/markdown".to_string(),
+            metadata: None,
+            tool_use_id: None,
+            created_at: n,
+        }
+    }
+
+    #[test]
+    fn evicting_store_drops_oldest_when_at_cap() {
+        let mut s: EvictingStore<FileEntry> = EvictingStore::with_cap(3);
+        for i in 0..5 {
+            s.put(format!("f{i}"), entry(&format!("f{i}")));
+        }
+        assert_eq!(s.items.len(), 3, "FIFO must hold the cap");
+        assert!(!s.items.contains_key("f0"), "oldest evicted");
+        assert!(!s.items.contains_key("f1"), "second-oldest evicted");
+        assert!(s.items.contains_key("f2"));
+        assert!(s.items.contains_key("f3"));
+        assert!(s.items.contains_key("f4"));
+        // `order` is the source of truth for FIFO; assert insertion order.
+        let order: Vec<&str> = s.order.iter().map(String::as_str).collect();
+        assert_eq!(order, vec!["f2", "f3", "f4"]);
+    }
+
+    #[test]
+    fn file_store_round_trips_through_disk() {
+        // Round-trip via persist_static / load_from_disk so a controller
+        // restart can rehydrate bytes that the in-memory FIFO has dropped.
+        let dir = tempfile::tempdir().unwrap();
+        let id = "f42";
+        let original = entry("hello.txt");
+        FileStore::persist_static(dir.path(), id, &original);
+        let loaded = FileStore::load_from_disk(dir.path(), id).expect("loaded");
+        assert_eq!(loaded.bytes, original.bytes);
+        assert_eq!(loaded.mime, original.mime);
+        assert_eq!(loaded.name, original.name);
+    }
+
+    #[test]
+    fn file_store_load_returns_none_for_missing_id() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(FileStore::load_from_disk(dir.path(), "f1").is_none());
+        // Even after creating the files dir, missing meta returns None
+        // (not a panic) so the cache-miss path can decide what to do.
+        std::fs::create_dir_all(dir.path().join("files")).unwrap();
+        assert!(FileStore::load_from_disk(dir.path(), "f1").is_none());
+    }
+
+    #[test]
+    fn max_file_id_skips_non_matching_filenames() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = dir.path().join("files");
+        std::fs::create_dir_all(&files).unwrap();
+        // Plant a couple of legitimate ids and some files that should
+        // be ignored — we don't want a stray `.tmp` to bump the
+        // counter.
+        for id in &["f1", "f7", "f23"] {
+            std::fs::write(files.join(format!("{id}.meta.json")), b"{}").unwrap();
+        }
+        std::fs::write(files.join("README.txt"), b"").unwrap();
+        std::fs::write(files.join("garbage.meta.json"), b"{}").unwrap();
+        std::fs::write(files.join("f99.tmp"), b"").unwrap();
+        assert_eq!(max_file_id(dir.path()), 23);
+    }
+
+    #[test]
+    fn max_file_id_returns_zero_when_dir_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(max_file_id(dir.path()), 0);
+    }
+
+    #[test]
+    fn artefact_store_persists_and_loads_with_metadata_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut original = art_entry("c-0001", 7);
+        original.metadata = Some(serde_json::json!({"file_url": "/api/files/f1", "bytes": 1024}));
+        original.tool_use_id = Some("tool_42".to_string());
+        ArtefactStore::persist_static(dir.path(), "a7", &original);
+        let loaded = ArtefactStore::load_from_disk(dir.path(), "a7").expect("loaded");
+        assert_eq!(loaded.chat_id, "c-0001");
+        assert_eq!(loaded.title, "title-7");
+        assert_eq!(loaded.content, "content-7");
+        assert_eq!(loaded.tool_use_id.as_deref(), Some("tool_42"));
+        assert_eq!(
+            loaded.metadata.as_ref().and_then(|m| m.get("bytes")).and_then(|v| v.as_u64()),
+            Some(1024),
+        );
+    }
+
+    #[test]
+    fn artefact_load_from_disk_finds_id_under_any_chat_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        // Plant the same id under one chat — the loader walks all
+        // chat subdirs since callers don't know the owner up front.
+        ArtefactStore::persist_static(dir.path(), "a1", &art_entry("c-0042", 1));
+        let loaded = ArtefactStore::load_from_disk(dir.path(), "a1").unwrap();
+        assert_eq!(loaded.chat_id, "c-0042");
+        assert!(ArtefactStore::load_from_disk(dir.path(), "a-missing").is_none());
+    }
+
+    #[test]
+    fn artefact_hydrate_returns_max_id_and_indexes_recent_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        // Mix two chats; max id is 9.  Hydrate should find at least
+        // the newest entries and report 9 so next_id starts at 10.
+        for &(chat, n) in &[("c-0001", 1u64), ("c-0001", 3), ("c-0002", 9), ("c-0002", 5)] {
+            ArtefactStore::persist_static(
+                dir.path(),
+                &format!("a{n}"),
+                &art_entry(chat, n),
+            );
+        }
+        let mut store = ArtefactStore::default();
+        let max_n = store.hydrate_from_disk(dir.path());
+        assert_eq!(max_n, 9, "hydrate must return the largest id ever persisted");
+        // Newest must be present in the in-memory index — older ids
+        // may be evicted when the disk count exceeds MAX_ARTEFACTS,
+        // but we have only four here so all four should be cached.
+        assert!(store.items.contains_key("a9"));
+        assert!(store.items.contains_key("a5"));
+        assert!(store.items.contains_key("a3"));
+        assert!(store.items.contains_key("a1"));
+    }
+}

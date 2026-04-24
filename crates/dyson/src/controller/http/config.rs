@@ -82,3 +82,79 @@ pub(crate) fn is_loopback_bind(bind: &str) -> bool {
         .map(|addr| addr.ip().is_loopback())
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_bind_recognises_v4_v6_and_rejects_others() {
+        // The whole point of this gate is to refuse to default to
+        // dangerous_no_auth on a non-loopback bind.  Keep all the
+        // shapes operators actually paste into dyson.json under one
+        // test so a future change is forced to think about each case.
+        assert!(is_loopback_bind("127.0.0.1:7878"));
+        assert!(is_loopback_bind("127.0.0.99:7878"), "every 127/8 host is loopback");
+        assert!(is_loopback_bind("[::1]:7878"));
+        assert!(!is_loopback_bind("0.0.0.0:7878"), "0.0.0.0 is the trap we exist to catch");
+        assert!(!is_loopback_bind("[::]:7878"));
+        assert!(!is_loopback_bind("192.168.1.10:7878"));
+        assert!(!is_loopback_bind("10.0.0.1:7878"));
+        // `localhost` is intentionally not parsed — refusing it forces the
+        // operator to write `127.0.0.1` rather than trust /etc/hosts.
+        assert!(!is_loopback_bind("localhost:7878"));
+        // Garbage at the end of the world.
+        assert!(!is_loopback_bind(""));
+        assert!(!is_loopback_bind("not a bind"));
+    }
+
+    #[test]
+    fn config_default_bind_is_loopback() {
+        // Round-trip an empty config through the deserialiser to
+        // guarantee the operator who pastes `{ "type": "http" }` lands
+        // on a loopback bind.
+        let raw: HttpControllerConfigRaw = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(raw.bind, "127.0.0.1:7878");
+        assert!(is_loopback_bind(&raw.bind));
+        assert!(raw.auth.is_none(), "default auth is unset → loopback gets DangerousNoAuth");
+    }
+
+    #[test]
+    fn config_parses_bearer_and_oidc_and_dangerous_variants() {
+        let bearer: HttpAuthConfig = serde_json::from_value(serde_json::json!({
+            "type": "bearer",
+            "hash": "$argon2id$v=19$m=19456,t=2,p=1$abc$def",
+        }))
+        .unwrap();
+        assert!(matches!(bearer, HttpAuthConfig::Bearer { .. }));
+
+        let oidc: HttpAuthConfig = serde_json::from_value(serde_json::json!({
+            "type": "oidc",
+            "issuer": "https://idp.example.com",
+            "audience": "dyson-web",
+            "required_scopes": ["dyson:api", "openid"],
+        }))
+        .unwrap();
+        match oidc {
+            HttpAuthConfig::Oidc { issuer, audience, required_scopes } => {
+                assert_eq!(issuer, "https://idp.example.com");
+                assert_eq!(audience, "dyson-web");
+                assert_eq!(required_scopes, vec!["dyson:api".to_string(), "openid".to_string()]);
+            }
+            _ => panic!("expected Oidc"),
+        }
+
+        let none: HttpAuthConfig = serde_json::from_value(serde_json::json!({
+            "type": "dangerous_no_auth",
+        }))
+        .unwrap();
+        assert!(matches!(none, HttpAuthConfig::DangerousNoAuth));
+
+        // Unknown type tag — must fail loudly rather than silently
+        // fall back to no-auth.
+        let bad = serde_json::from_value::<HttpAuthConfig>(serde_json::json!({
+            "type": "magic",
+        }));
+        assert!(bad.is_err());
+    }
+}
