@@ -1,8 +1,9 @@
 // ===========================================================================
 // HTTP controller — web UI + JSON API + SSE event stream.
 //
-// Hosts the React UI at `/` (embedded or from a webroot directory) and
-// exposes a small JSON API plus per-conversation Server-Sent Events:
+// Hosts the React UI at `/` (always served from the embedded build —
+// `build.rs` picks up frontend changes via mtime-gated `npm run build`)
+// and exposes a small JSON API plus per-conversation Server-Sent Events:
 //
 //   GET  /                          → index.html (Vite-built bundle)
 //   GET  /assets/*                  → hashed JS/CSS/font chunks
@@ -45,7 +46,7 @@ use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::Agent;
-use crate::auth::{Auth, BearerTokenAuth, DangerousNoAuth};
+use crate::auth::{Auth, DangerousNoAuth, HashedBearerAuth, OidcAuth};
 use crate::chat_history::{ChatHistory, create_chat_history};
 use crate::config::{ControllerConfig, Settings};
 use crate::error::DysonError;
@@ -70,14 +71,6 @@ struct HttpControllerConfigRaw {
     #[serde(default = "default_bind")]
     bind: String,
 
-    /// Optional override: serve static assets from this directory instead
-    /// of the bundled-in prototype.  Useful when iterating on the UI
-    /// without a recompile — point at
-    /// `crates/dyson/src/controller/http/web`.  When unset (the default)
-    /// the controller serves the prototype embedded in the dyson binary.
-    #[serde(default)]
-    webroot: Option<String>,
-
     /// Inbound authentication mechanism.  Optional on a loopback bind
     /// (127.0.0.1 / ::1) — the loopback assumption is a single trusted
     /// operator, so a missing field defaults to `DangerousNoAuth` there.
@@ -97,11 +90,36 @@ struct HttpControllerConfigRaw {
 enum HttpAuthConfig {
     /// No authentication.  Every request is accepted as `anonymous`.
     DangerousNoAuth,
-    /// `Authorization: Bearer <token>` validated against a shared secret.
-    /// `token` flows through the secret-resolver pipeline, so the config
-    /// value may be either a literal string or a `{ resolver, name }`
-    /// reference resolved before this struct is parsed.
-    Bearer { token: String },
+    /// `Authorization: Bearer <token>` validated against a stored
+    /// Argon2id PHC hash.  We never persist the plaintext token —
+    /// operators paste a hash (`$argon2id$...`) into dyson.json and
+    /// share the matching plaintext with their browser.  Generate the
+    /// hash with `dyson hash-bearer`.  `hash` flows through the
+    /// secret-resolver pipeline so it may be a literal string or a
+    /// `{ resolver, name }` reference (e.g. environment-variable
+    /// indirection for hashes that shouldn't sit in source control).
+    Bearer { hash: String },
+    /// Verify `Authorization: Bearer <jwt>` against an external OpenID
+    /// Connect provider.  The controller fetches
+    /// `<issuer>/.well-known/openid-configuration` at startup for the
+    /// JWKS URI, then validates signature + `iss` + `aud` + `exp` +
+    /// `nbf` + (optional) `scope` on every `/api/*` request.  The SPA
+    /// / CLI / reverse proxy handles the auth code flow itself — on
+    /// 401 we emit a `WWW-Authenticate` header pointing at the
+    /// authorization endpoint so clients can discover it.
+    Oidc {
+        /// Base URL of the OIDC provider, e.g. `https://accounts.example.com`.
+        /// `.well-known/openid-configuration` is appended automatically.
+        issuer: String,
+        /// Required `aud` claim.  Typically the OAuth `client_id`
+        /// registered for this dyson instance.
+        audience: String,
+        /// Optional space-separated scopes that must all appear in the
+        /// token's `scope` claim.  Use when one IdP client covers
+        /// many relying parties (e.g. `dyson:api`).
+        #[serde(default)]
+        required_scopes: Vec<String>,
+    },
 }
 
 fn default_bind() -> String {
@@ -691,10 +709,6 @@ pub struct HttpState {
     /// Inbound auth guard.  Every `/api/*` request is validated against
     /// this before `dispatch` routes it.  See `HttpAuthConfig`.
     auth: Arc<dyn Auth>,
-    /// `Some` when the controller was configured with `webroot: "..."` —
-    /// serve from disk for live-edit dev.  `None` means use the bundled
-    /// embedded prototype.
-    webroot: Option<PathBuf>,
     /// Persistent ChatHistory if configured in `dyson.json`.  `None`
     /// means in-memory only.
     history: Option<Arc<dyn ChatHistory>>,
@@ -753,6 +767,34 @@ pub struct HttpState {
     /// startup model.  Cleared on process restart — the persisted
     /// `dyson.json` write is what carries the choice across restarts.
     runtime_model: std::sync::Mutex<Option<(String, String)>>,
+    /// Public auth-mode summary the frontend needs to bootstrap an
+    /// auth code flow.  Surfaced via `/api/auth/config` (unauth-
+    /// enticated) and embedded in `WWW-Authenticate` on 401s when the
+    /// mode is OIDC.  The real auth guard is `auth: Arc<dyn Auth>`;
+    /// this is just the metadata required to drive a browser
+    /// redirect, never used in the validation path.
+    auth_mode: AuthMode,
+}
+
+/// Public auth metadata that the SPA needs to bootstrap.  Lives next to
+/// `auth: Arc<dyn Auth>` because the actual `Auth` trait deliberately
+/// hides everything except `validate_request` / `apply_to_request` —
+/// the discovery URL etc. don't belong in there.
+#[derive(Clone, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum AuthMode {
+    None,
+    Bearer,
+    Oidc {
+        issuer: String,
+        authorization_endpoint: String,
+        /// The OAuth `client_id` the SPA should send on `/authorize`.
+        /// Same value the controller validates as the JWT `aud` claim.
+        client_id: String,
+        /// Scopes the operator told us are required.  The SPA appends
+        /// `openid` automatically — that one is mandatory for OIDC.
+        required_scopes: Vec<String>,
+    },
 }
 
 /// Scan the chat directory (files + archives + artefact metadata) for
@@ -794,10 +836,10 @@ impl HttpState {
     fn new(
         settings: Settings,
         registry: Arc<ClientRegistry>,
-        webroot: Option<PathBuf>,
         history: Option<Arc<dyn ChatHistory>>,
         feedback: Option<Arc<FeedbackStore>>,
         auth: Arc<dyn Auth>,
+        auth_mode: AuthMode,
         config_path: Option<PathBuf>,
     ) -> Self {
         // Piggy-back on the ChatHistory directory so artefacts / files /
@@ -830,7 +872,6 @@ impl HttpState {
             settings: std::sync::RwLock::new(settings),
             registry,
             auth,
-            webroot,
             history,
             feedback,
             files: Arc::new(std::sync::Mutex::new(files)),
@@ -844,6 +885,7 @@ impl HttpState {
             next_id: std::sync::atomic::AtomicU64::new(chat_next),
             config_path,
             runtime_model: std::sync::Mutex::new(None),
+            auth_mode,
         }
     }
 
@@ -1105,11 +1147,25 @@ impl super::BrowserArtefactSink for HttpState {
 
 pub struct HttpController {
     bind: String,
-    /// Disk webroot override, or `None` to use the embedded prototype.
-    webroot: Option<PathBuf>,
-    /// Inbound auth.  Built once from `HttpAuthConfig` and shared with
-    /// every request handler via `HttpState`.
-    auth: Arc<dyn Auth>,
+    init: AuthInit,
+}
+
+/// What `from_config` parsed out of the operator's `auth` block.
+/// `Ready` covers everything we can build synchronously: it holds both
+/// the live `Auth` impl and the public-discovery shape the SPA needs.
+/// `PendingOidc` parks an OIDC config until `run()` can `.await` the
+/// `.well-known` fetch — discovery there fails the controller fast
+/// rather than silently returning 401s.
+enum AuthInit {
+    Ready {
+        auth: Arc<dyn Auth>,
+        mode: AuthMode,
+    },
+    PendingOidc {
+        issuer: String,
+        audience: String,
+        required_scopes: Vec<String>,
+    },
 }
 
 impl HttpController {
@@ -1149,21 +1205,50 @@ impl HttpController {
                 }
             }
         };
-        let auth: Arc<dyn Auth> = match auth_config {
-            HttpAuthConfig::DangerousNoAuth => Arc::new(DangerousNoAuth),
-            HttpAuthConfig::Bearer { token } => {
-                if token.is_empty() {
-                    tracing::error!("http controller: bearer auth configured with empty token");
+        let init = match auth_config {
+            HttpAuthConfig::DangerousNoAuth => AuthInit::Ready {
+                auth: Arc::new(DangerousNoAuth),
+                mode: AuthMode::None,
+            },
+            HttpAuthConfig::Bearer { hash } => {
+                if hash.is_empty() {
+                    tracing::error!("http controller: bearer auth configured with empty hash");
                     return None;
                 }
-                Arc::new(BearerTokenAuth::new(token))
+                match HashedBearerAuth::from_phc(hash) {
+                    Ok(a) => AuthInit::Ready {
+                        auth: Arc::new(a),
+                        mode: AuthMode::Bearer,
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "http controller: bearer hash is not a valid argon2 PHC string \
+                             (generate one with `dyson hash-bearer <plaintext>`)"
+                        );
+                        return None;
+                    }
+                }
+            }
+            HttpAuthConfig::Oidc {
+                issuer,
+                audience,
+                required_scopes,
+            } => {
+                if issuer.is_empty() || audience.is_empty() {
+                    tracing::error!(
+                        "http controller: oidc auth requires non-empty issuer and audience"
+                    );
+                    return None;
+                }
+                AuthInit::PendingOidc {
+                    issuer,
+                    audience,
+                    required_scopes,
+                }
             }
         };
-        Some(Self {
-            bind: raw.bind,
-            webroot: raw.webroot.map(PathBuf::from),
-            auth,
-        })
+        Some(Self { bind: raw.bind, init })
     }
 }
 
@@ -1178,6 +1263,40 @@ impl Controller for HttpController {
         settings: &Settings,
         registry: &Arc<ClientRegistry>,
     ) -> crate::Result<()> {
+        // Build the live auth + its public-discovery shape.  For OIDC
+        // we run `.well-known/openid-configuration` here, in async
+        // land, so a misconfigured issuer fails the controller start
+        // rather than leaving the endpoint silently rejecting every
+        // request — same posture as the bearer hash check at
+        // config-parse time.
+        let (auth, auth_mode): (Arc<dyn Auth>, AuthMode) = match &self.init {
+            AuthInit::Ready { auth, mode } => (Arc::clone(auth), mode.clone()),
+            AuthInit::PendingOidc {
+                issuer,
+                audience,
+                required_scopes,
+            } => {
+                let built = OidcAuth::discover(
+                    issuer,
+                    audience.clone(),
+                    required_scopes.clone(),
+                    None,
+                )
+                .await?;
+                let mode = AuthMode::Oidc {
+                    issuer: built.issuer().to_string(),
+                    authorization_endpoint: built.authorization_endpoint().to_string(),
+                    client_id: audience.clone(),
+                    required_scopes: required_scopes.clone(),
+                };
+                tracing::info!(
+                    issuer = %built.issuer(),
+                    "http controller: oidc auth discovered"
+                );
+                (Arc::new(built) as Arc<dyn Auth>, mode)
+            }
+        };
+
         // Build the persistent ChatHistory; tolerate failure (controller
         // still works in memory-only mode).
         let history: Option<Arc<dyn ChatHistory>> =
@@ -1216,10 +1335,10 @@ impl Controller for HttpController {
         let state = Arc::new(HttpState::new(
             settings.clone(),
             Arc::clone(registry),
-            self.webroot.clone(),
             history.clone(),
             feedback.clone(),
-            Arc::clone(&self.auth),
+            Arc::clone(&auth),
+            auth_mode,
             config_path,
         ));
 
@@ -1265,13 +1384,8 @@ impl Controller for HttpController {
             DysonError::Config(format!("failed to bind {} for http controller: {e}", self.bind))
         })?;
 
-        let webroot_display = match self.webroot.as_ref() {
-            Some(p) => p.display().to_string(),
-            None => "<embedded>".into(),
-        };
         tracing::info!(
             bind = %self.bind,
-            webroot = %webroot_display,
             "HTTP controller listening — open http://{} in a browser",
             self.bind,
         );
@@ -1279,10 +1393,9 @@ impl Controller for HttpController {
         // Probe the configured auth to log which mechanism is active.
         // DangerousNoAuth is the only variant that validates an empty
         // HeaderMap successfully; treat that success as the loud warning
-        // signal.  Bearer and anything else falls through to the info
-        // branch.
+        // signal.  Everything else falls through to the info branch.
         let empty_headers = hyper::HeaderMap::new();
-        match self.auth.validate_request(&empty_headers).await {
+        match auth.validate_request(&empty_headers).await {
             Ok(info) if info.identity == "anonymous" => {
                 tracing::warn!(
                     bind = %self.bind,
@@ -1358,13 +1471,18 @@ pub mod test_helpers {
     pub fn build_state(
         settings: Settings,
         registry: Arc<ClientRegistry>,
-        webroot: Option<PathBuf>,
         history: Option<Arc<dyn ChatHistory>>,
         feedback: Option<Arc<FeedbackStore>>,
         auth: Arc<dyn Auth>,
     ) -> Arc<HttpState> {
         Arc::new(HttpState::new(
-            settings, registry, webroot, history, feedback, auth, None,
+            settings,
+            registry,
+            history,
+            feedback,
+            auth,
+            AuthMode::None,
+            None,
         ))
     }
 
@@ -1548,11 +1666,28 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
+    // `/api/auth/config` is intentionally unauthenticated: the SPA
+    // calls it before it has a token to discover whether one is
+    // required, and (for OIDC) where to start the auth code flow.
+    // Without this exemption the frontend has no way to bootstrap.
+    if path == "/api/auth/config" && method == Method::GET {
+        return get_auth_config(&state);
+    }
+
     // Enforce inbound auth on every API route.  Static-shell assets
     // (`/`, `/assets/*`) are exempt so the UI can load before the
-    // browser has presented its credential.
-    if path.starts_with("/api/") && state.auth.validate_request(req.headers()).await.is_err() {
-        return unauthorized();
+    // browser has presented its credential.  SSE endpoints can't set
+    // custom headers from the browser (`EventSource` doesn't forward
+    // them), so for `/events` we also accept `?access_token=<jwt>` —
+    // `auth_headers_for` synthesises the missing `Authorization`
+    // header from the query param (and only allocates when it has
+    // to).
+    if path.starts_with("/api/") {
+        let synthesised = auth_headers_for(&path, &req);
+        let headers = synthesised.as_ref().unwrap_or_else(|| req.headers());
+        if state.auth.validate_request(headers).await.is_err() {
+            return unauthorized(&state);
+        }
     }
 
     // API routes first.
@@ -1640,7 +1775,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         }
     }
 
-    // Static files from webroot.
+    // Embedded React bundle (index.html + hashed JS/CSS chunks).
     if method == Method::GET {
         return serve_static(&state, &path).await;
     }
@@ -2503,7 +2638,7 @@ async fn post_feedback(
 // Static files
 // ---------------------------------------------------------------------------
 
-async fn serve_static(state: &HttpState, path: &str) -> Resp {
+async fn serve_static(_state: &HttpState, path: &str) -> Resp {
     // Decode before the traversal check — raw `%2e%2e%2f` would otherwise
     // slip past `contains("..")` and resolve to `..` when the OS opens
     // the file.  Reject backslashes too; we don't serve on Windows but
@@ -2513,43 +2648,10 @@ async fn serve_static(state: &HttpState, path: &str) -> Resp {
     if decoded.contains("..") || decoded.contains('\\') || decoded.contains('\0') {
         return not_found();
     }
-    // Disk webroot wins when configured (dev mode — point it at
-    // `crates/dyson/src/controller/http/web/dist` to iterate on the
-    // frontend without recompiling the binary).  Otherwise serve from
-    // the embedded bundle.
-    if let Some(webroot) = state.webroot.as_ref() {
-        let rel = if decoded == "/" {
-            "index.html"
-        } else {
-            decoded.trim_start_matches('/')
-        };
-        let full = webroot.join(rel);
-        // Canonicalize and confirm the result is still under webroot.
-        // Defence in depth — symlinks inside webroot could otherwise
-        // aim at `/etc/passwd` and the `..` check wouldn't catch it.
-        let canon_root = match tokio::fs::canonicalize(webroot).await {
-            Ok(p) => p,
-            Err(_) => return not_found(),
-        };
-        let canon_full = match tokio::fs::canonicalize(&full).await {
-            Ok(p) => p,
-            Err(_) => return not_found(),
-        };
-        if !canon_full.starts_with(&canon_root) {
-            return not_found();
-        }
-        match tokio::fs::read(&canon_full).await {
-            Ok(bytes) => {
-                return Response::builder()
-                    .status(StatusCode::OK)
-                    .header("Content-Type", content_type_for(rel))
-                    .header("Cache-Control", "no-cache")
-                    .body(boxed(Bytes::from(bytes)))
-                    .unwrap();
-            }
-            Err(_) => return not_found(),
-        }
-    }
+    // The frontend is always served from the embedded bundle generated
+    // by `build.rs`.  Frontend changes ride into the binary on the next
+    // `cargo build` (mtime-gated, so a clean tree is a no-op); there is
+    // no on-disk webroot override.
     match assets::lookup(&decoded) {
         Some((bytes, ct)) => Response::builder()
             .status(StatusCode::OK)
@@ -2586,28 +2688,6 @@ fn mime_for_extension(path: &std::path::Path) -> String {
         _ => "application/octet-stream",
     }
     .to_string()
-}
-
-fn content_type_for(path: &str) -> &'static str {
-    let ext = path.rsplit('.').next().unwrap_or("");
-    match ext {
-        "html" => "text/html; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "js" | "mjs" => "application/javascript; charset=utf-8",
-        "json" => "application/json",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "ico" => "image/x-icon",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "ttf" => "font/ttf",
-        "otf" => "font/otf",
-        "map" => "application/json",
-        _ => "application/octet-stream",
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3512,12 +3592,66 @@ fn method_not_allowed() -> Resp {
         .unwrap()
 }
 
-fn unauthorized() -> Resp {
-    Response::builder()
+fn unauthorized(state: &HttpState) -> Resp {
+    let mut builder = Response::builder()
         .status(StatusCode::UNAUTHORIZED)
-        .header("Content-Type", "application/json")
+        .header("Content-Type", "application/json");
+
+    // RFC 6750 challenge.  In OIDC mode include the issuer + the
+    // authorization endpoint so a client that doesn't already know
+    // about /api/auth/config can still find its way to the IdP — the
+    // header is the well-trodden path for non-browser clients
+    // (curl wrappers, terraform providers, k6 load tests).
+    let challenge = match &state.auth_mode {
+        AuthMode::Bearer => Some(r#"Bearer realm="dyson", error="invalid_token""#.to_string()),
+        AuthMode::Oidc {
+            issuer,
+            authorization_endpoint,
+            ..
+        } => Some(format!(
+            r#"Bearer realm="dyson", error="invalid_token", as_uri="{authorization_endpoint}", iss="{issuer}""#
+        )),
+        AuthMode::None => None,
+    };
+    if let Some(c) = challenge {
+        builder = builder.header("WWW-Authenticate", c);
+    }
+    builder
         .body(boxed(Bytes::from_static(br#"{"error":"unauthorized"}"#)))
         .unwrap()
+}
+
+/// `GET /api/auth/config` — unauthenticated discovery endpoint the SPA
+/// calls before it has any credential.  Returns the auth mode plus the
+/// minimum the frontend needs to bootstrap (OIDC: issuer +
+/// authorization_endpoint + client_id + required_scopes; bearer: just
+/// the mode tag; none: just the mode tag).
+fn get_auth_config(state: &HttpState) -> Resp {
+    json_ok(&state.auth_mode)
+}
+
+/// Produce a `HeaderMap` to feed into `auth.validate_request`,
+/// folding `?access_token=` into an `Authorization: Bearer …` header
+/// when the path is an SSE endpoint and no header is already present.
+/// Returns `None` when the original headers are usable as-is — the
+/// caller borrows `req.headers()` and pays no allocation in that
+/// (overwhelmingly common) case.
+fn auth_headers_for(
+    path: &str,
+    req: &Request<hyper::body::Incoming>,
+) -> Option<hyper::HeaderMap> {
+    if !path.ends_with("/events") || req.headers().contains_key("authorization") {
+        return None;
+    }
+    let token = parse_query(req.uri().query()?)
+        .into_iter()
+        .find(|(k, _)| k == "access_token")
+        .map(|(_, v)| v)
+        .filter(|v| !v.is_empty())?;
+    let value = format!("Bearer {token}").parse().ok()?;
+    let mut headers = req.headers().clone();
+    headers.insert("authorization", value);
+    Some(headers)
 }
 
 async fn read_json<T: for<'de> Deserialize<'de>>(
@@ -3683,14 +3817,6 @@ mod tests {
     fn parse_query_extracts_path() {
         let pairs = parse_query("path=memory%2FSOUL.md&x=1");
         assert!(pairs.iter().any(|(k, v)| k == "path" && v == "memory/SOUL.md"));
-    }
-
-    #[test]
-    fn content_type_for_known_extensions() {
-        assert!(content_type_for("index.html").starts_with("text/html"));
-        assert!(content_type_for("assets/index-abc.css").starts_with("text/css"));
-        assert!(content_type_for("assets/index-abc.js").starts_with("application/javascript"));
-        assert_eq!(content_type_for("x.unknown"), "application/octet-stream");
     }
 
     // The embedded bundle is part of the binary's contract.  Filenames

@@ -84,8 +84,16 @@ Add to your `dyson.json` `controllers` array:
 | field | type | default | description |
 |---|---|---|---|
 | `bind` | `string` | `"127.0.0.1:7878"` | Loopback-only is the only supported deployment.  Listening on `0.0.0.0` exposes the agent. |
-| `webroot` | `string?` | `null` | Path to a Vite build output (`crates/dyson/src/controller/http/web/dist/`) to serve from disk instead of the embedded bundle.  Re-running `npm run build` refreshes the files without recompiling dyson.  For active UI work prefer `npm run dev` — see [Developing the frontend](#developing-the-frontend). |
 | `auth` | `object` | `dangerous_no_auth` on loopback, **required** otherwise | Inbound authentication.  See below. |
+
+There is no on-disk `webroot` override.  The frontend is always served
+from the bundle `build.rs` embeds at compile time (mtime-gated, so
+clean trees are no-ops); to iterate on the UI, run the Vite dev server
+on `:5173` against a live dyson on `:7878` — see
+[Developing the frontend](#developing-the-frontend).  Splitting the
+"how is this binary running?" question into "release binary serves
+itself" vs "dev server proxies to it" eliminated a configuration knob
+that was useful for one workflow and confusing for everyone else.
 
 ### Authentication
 
@@ -104,21 +112,48 @@ posture `--dangerous-no-sandbox` takes for the sandbox boundary.
 {
   "auth": {
     "type": "bearer",
-    "token": { "resolver": "insecure_env", "name": "DYSON_WEB_TOKEN" }
+    "hash": { "resolver": "insecure_env", "name": "DYSON_WEB_BEARER_HASH" }
   }
 }
 ```
 
-`bearer` requires `Authorization: Bearer <token>` on every `/api/*`
-request; mismatches return `401 {"error":"unauthorized"}`.  Static
-shell paths (`/`, `/assets/*`) are exempt so the UI can load before
-the browser presents the credential.  The `token` field flows through
-the same secret-resolver pipeline that Telegram's `bot_token` uses.
+`bearer` requires `Authorization: Bearer <plaintext>` on every
+`/api/*` request; the controller verifies the plaintext against a
+stored Argon2id PHC hash.  Mismatches return `401
+{"error":"unauthorized"}`.  Static shell paths (`/`, `/assets/*`) are
+exempt so the UI can load before the browser presents the credential.
+The `hash` field flows through the same secret-resolver pipeline that
+Telegram's `bot_token` uses, so it can be a literal `$argon2id$...`
+string or an env-var reference.
+
+#### Generating the hash
+
+```bash
+$ dyson hash-bearer 'super-secret-token'
+$argon2id$v=19$m=19456,t=2,p=1$NkM4...$bjA0...
+```
+
+Paste the output into `auth.hash`.  Keep the plaintext for the
+browser; never put plaintext in `dyson.json`.
+
+#### Why hash a static token?
+
+A bearer token in plaintext is a one-step credential: any leak of the
+config (cloud snapshot, an accidentally-committed dotfile, a terminal
+recording with `cat dyson.json` in the scrollback, a backup tarball)
+hands an attacker a working token immediately.  Argon2id breaks that
+chain — a disclosed hash still requires brute-forcing a memory-hard
+KDF before it grants entry, and the hash params (`m=19456,t=2,p=1`)
+travel inside the PHC string itself, so a future hardening upgrade
+just changes what `dyson hash-bearer` emits without migrating stored
+hashes.  The plaintext only ever exists in the operator's head and
+the browser's `Authorization` header.
 
 Both variants implement the shared `Auth` trait at
 [`crates/dyson/src/auth/mod.rs`](../crates/dyson/src/auth/mod.rs)
-(also used by the MCP server).  A future variant plugs in without
-touching `dispatch()`.
+(also used by the MCP server).  `bearer` resolves to
+[`HashedBearerAuth`](../crates/dyson/src/auth/hashed_bearer.rs) — a
+verify-only impl that holds no plaintext.
 
 ---
 
@@ -178,7 +213,7 @@ Every request goes through `dispatch_inner`:
 2. Match the route table.  Conversation, provider, mind, activity,
    model, file, and artefact endpoints route to small async handlers
    on `&HttpState`.
-3. Static fall-through serves the embedded bundle (or `webroot/`).
+3. Static fall-through serves the embedded bundle.
 4. `dispatch` wraps the inner response with `maybe_gzip` when the
    client accepts it and the content-type is in
    `compressible_content_type`.  SSE responses skip compression — their
@@ -534,6 +569,13 @@ archives.
 
 ## Developing the frontend
 
+The frontend is embedded in the binary in both debug and release
+builds — there is no on-disk webroot, no `dev` vs `prod` branching in
+the controller's serving path.  Iteration uses the Vite dev server,
+which proxies `/api` + `/artefacts` back to a dyson running on
+`:7878`, so what the browser fetches is a live dyson, not a
+file-server simulation of one.
+
 From `crates/dyson/src/controller/http/web/`:
 
 ```bash
@@ -543,14 +585,15 @@ npm test             # vitest suite
 npm run build        # production bundle → dist/  (runs vitest first)
 ```
 
-`npm run dev` assumes a dyson binary is running on `:7878` — the dev
-server proxies `/api` and `/artefacts`, so the live API is a TCP hop
-away while the UI hot-reloads on save.
+`build.rs` invokes `npm run build` during `cargo build`, walks `dist/`,
+and generates [`assets.rs`](../crates/dyson/src/controller/http/assets.rs)
+via `include!` at compile time so every file ends up in the binary.
+mtime-gated — a clean tree is a no-op.  Node 20+ is required; there
+is no feature flag to skip the frontend.
 
-`build.rs` invokes `npm run build` during `cargo build`, gated by
-mtime on sources in `web/src/`, `index.html`, `package.json`, etc.
-Node 20+ is required; there is no feature flag to skip the frontend —
-it's a required part of the binary.
+To ship a frontend change: save, `cargo build`, restart dyson.  For
+tight inner-loop work: `npm run dev` in one terminal, dyson on `:7878`
+in another.
 
 ---
 

@@ -96,6 +96,18 @@ tree-sitter-json = "0.24.8"
 rand = "0.10"
 subtle = "2"
 zeroize = "1"
+# Argon2id password hashing for the HTTP controller's bearer-auth config.
+# We never store a plaintext bearer token at rest — operators put a PHC
+# hash (`$argon2id$...`) in dyson.json and the controller verifies the
+# incoming token against it.  Stays small (~70 KiB compiled) and pure-Rust.
+# `std + password-hash + rand` enables the OsRng salt source the `hash-bearer`
+# subcommand uses to mint per-token salts; verification only would need fewer.
+argon2 = "0.5"
+# JWT verification for the HTTP controller's OIDC auth mode.  Pure-Rust
+# (ring-backed, already in the dep tree via rustls).  We only ever
+# verify tokens — the dyson process is the relying party, never the
+# issuer — so the surface stays narrow.
+jsonwebtoken = "9"
 libc = "0.2"
 undoc = "0.2.0"
 unpdf = { version = "0.4.5", default-features = false, features = ["fast-parse"] }

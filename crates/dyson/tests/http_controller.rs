@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dyson::auth::{Auth, BearerTokenAuth, Credential, DangerousNoAuth};
+use dyson::auth::{Auth, Credential, DangerousNoAuth, HashedBearerAuth};
 use dyson::chat_history::{ChatHistory, DiskChatHistory};
 use dyson::config::{ChatHistoryConfig, LlmProvider, ProviderConfig, Settings};
 use dyson::controller::ClientRegistry;
@@ -79,7 +79,6 @@ async fn rig_with_auth(auth: Arc<dyn Auth>) -> Rig {
     let state = test_helpers::build_state(
         settings,
         registry,
-        None,
         Some(history),
         Some(feedback),
         auth,
@@ -396,15 +395,22 @@ async fn embedded_static_assets_serve_with_correct_content_types() {
     let html = body_string(resp).await;
 
     let js = find_asset_href(&html, ".js").expect("index.html must link a JS chunk");
-    let css = find_asset_href(&html, ".css").expect("index.html must link a CSS chunk");
+    let resp = get(&format!("{}{}", r.base, js)).await;
+    assert_eq!(resp.status(), StatusCode::OK, "GET {js}");
+    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(ct.starts_with("application/javascript"), "js content-type = {ct}");
+    assert!(!body_string(resp).await.is_empty(), "empty JS chunk");
 
-    for (path, want_ct) in [(&js, "application/javascript"), (&css, "text/css")] {
-        let resp = get(&format!("{}{}", r.base, path)).await;
-        assert_eq!(resp.status(), StatusCode::OK, "GET {path}");
+    // Vite inlines small CSS into a <style> tag in index.html and only
+    // emits a separate `.css` chunk past a size threshold.  Either is
+    // fine — accept whichever shape the bundle produced.
+    if let Some(css) = find_asset_href(&html, ".css") {
+        let resp = get(&format!("{}{}", r.base, css)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "GET {css}");
         let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
-        assert!(ct.starts_with(want_ct), "content-type for {path} = {ct}");
-        let body = body_string(resp).await;
-        assert!(!body.is_empty(), "empty body for {path}");
+        assert!(ct.starts_with("text/css"), "css content-type = {ct}");
+    } else {
+        assert!(html.contains("<style"), "no .css chunk and no inline <style> in index.html");
     }
 }
 
@@ -693,9 +699,8 @@ async fn sse_endpoint_serves_event_stream() {
 #[tokio::test]
 async fn static_path_traversal_is_blocked() {
     // The controller refuses any path containing "..", so a client
-    // can't escape the embedded asset table when an on-disk webroot
-    // is configured.  Returns 404, not 403, on purpose — same shape
-    // as a missing asset.
+    // can't probe outside the embedded asset table.  Returns 404, not
+    // 403, on purpose — same shape as a missing asset.
     let r = rig().await;
     for evil in [
         "/../../../../etc/passwd",
@@ -959,7 +964,7 @@ async fn mint_id_skips_ids_used_by_rotated_archives_or_orphan_artefacts() {
     );
     let feedback = Arc::new(FeedbackStore::new(chat_dir.path().to_path_buf()));
     let state = test_helpers::build_state(
-        settings, registry, None, Some(history), Some(feedback),
+        settings, registry, Some(history), Some(feedback),
         Arc::new(DangerousNoAuth),
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1162,9 +1167,14 @@ async fn root_path_serves_index_html() {
 // we lock in the Bearer-protected path and the static-shell exemption.
 // ---------------------------------------------------------------------------
 
+fn hashed_bearer_for_test(plaintext: &str) -> Arc<HashedBearerAuth> {
+    let phc = HashedBearerAuth::hash(plaintext).expect("argon2 hash");
+    Arc::new(HashedBearerAuth::from_phc(phc).expect("phc parse"))
+}
+
 #[tokio::test]
 async fn bearer_auth_rejects_unauthenticated_api_request() {
-    let auth = Arc::new(BearerTokenAuth::new("s3cret".into()));
+    let auth = hashed_bearer_for_test("s3cret");
     let r = rig_with_auth(auth).await;
     let resp = get(&format!("{}/api/conversations", r.base)).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -1174,7 +1184,7 @@ async fn bearer_auth_rejects_unauthenticated_api_request() {
 
 #[tokio::test]
 async fn bearer_auth_rejects_wrong_token() {
-    let auth = Arc::new(BearerTokenAuth::new("correct".into()));
+    let auth = hashed_bearer_for_test("correct");
     let r = rig_with_auth(auth).await;
     let resp = get_with_header(
         &format!("{}/api/conversations", r.base),
@@ -1187,7 +1197,7 @@ async fn bearer_auth_rejects_wrong_token() {
 
 #[tokio::test]
 async fn bearer_auth_accepts_matching_token() {
-    let auth = Arc::new(BearerTokenAuth::new("right-token".into()));
+    let auth = hashed_bearer_for_test("right-token");
     let r = rig_with_auth(auth).await;
     let resp = get_with_header(
         &format!("{}/api/conversations", r.base),
@@ -1203,16 +1213,17 @@ async fn bearer_auth_still_serves_static_shell_without_token() {
     // The UI has to load before the browser can present any credential,
     // so `/` and `/assets/*` are exempt.  Without this the UI would
     // 401 on the very first GET /.
-    let auth = Arc::new(BearerTokenAuth::new("s3cret".into()));
+    let auth = hashed_bearer_for_test("s3cret");
     let r = rig_with_auth(auth).await;
     let html_resp = get(&format!("{}/", r.base)).await;
     assert_eq!(html_resp.status(), StatusCode::OK, "GET / must be exempt");
     let html = body_string(html_resp).await;
     let js = find_asset_href(&html, ".js").expect("index.html must link a JS chunk");
-    let css = find_asset_href(&html, ".css").expect("index.html must link a CSS chunk");
-    for path in [&js, &css] {
-        let resp = get(&format!("{}{}", r.base, path)).await;
-        assert_eq!(resp.status(), StatusCode::OK, "GET {path} must be exempt");
+    let resp = get(&format!("{}{}", r.base, js)).await;
+    assert_eq!(resp.status(), StatusCode::OK, "GET {js} must be exempt");
+    if let Some(css) = find_asset_href(&html, ".css") {
+        let resp = get(&format!("{}{}", r.base, css)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "GET {css} must be exempt");
     }
 }
 
@@ -1270,22 +1281,23 @@ async fn http_controller_accepts_dangerous_no_auth_config() {
 }
 
 #[tokio::test]
-async fn http_controller_accepts_bearer_config() {
+async fn http_controller_accepts_bearer_config_with_argon2_hash() {
     use dyson::config::ControllerConfig;
     use dyson::controller::http::HttpController;
 
+    let phc = HashedBearerAuth::hash("abc123").expect("hash");
     let cfg = ControllerConfig {
         controller_type: "http".into(),
         config: serde_json::json!({
             "bind": "127.0.0.1:0",
-            "auth": { "type": "bearer", "token": "abc123" },
+            "auth": { "type": "bearer", "hash": phc },
         }),
     };
     assert!(HttpController::from_config(&cfg).is_some());
 }
 
 #[tokio::test]
-async fn http_controller_rejects_bearer_with_empty_token() {
+async fn http_controller_rejects_bearer_with_empty_hash() {
     use dyson::config::ControllerConfig;
     use dyson::controller::http::HttpController;
 
@@ -1293,7 +1305,24 @@ async fn http_controller_rejects_bearer_with_empty_token() {
         controller_type: "http".into(),
         config: serde_json::json!({
             "bind": "127.0.0.1:0",
-            "auth": { "type": "bearer", "token": "" },
+            "auth": { "type": "bearer", "hash": "" },
+        }),
+    };
+    assert!(HttpController::from_config(&cfg).is_none());
+}
+
+#[tokio::test]
+async fn http_controller_rejects_bearer_with_non_phc_hash() {
+    // A plaintext token slipped into the `hash` field must be rejected:
+    // we promised operators we'd argon2-verify, not byte-compare.
+    use dyson::config::ControllerConfig;
+    use dyson::controller::http::HttpController;
+
+    let cfg = ControllerConfig {
+        controller_type: "http".into(),
+        config: serde_json::json!({
+            "bind": "127.0.0.1:0",
+            "auth": { "type": "bearer", "hash": "plaintext-token" },
         }),
     };
     assert!(HttpController::from_config(&cfg).is_none());
@@ -1680,7 +1709,6 @@ async fn agent_artefact_round_trips_through_sse_and_disk() {
     let state2 = test_helpers::build_state(
         rebuilt_settings,
         registry2,
-        None,
         Some(history2),
         Some(feedback2),
         Arc::new(DangerousNoAuth),
@@ -2040,7 +2068,6 @@ async fn emitted_images_survive_refresh_via_artefacts() {
     let state2 = test_helpers::build_state(
         rebuilt_settings,
         registry2,
-        None,
         Some(history2),
         Some(feedback2),
         Arc::new(DangerousNoAuth),
@@ -2370,7 +2397,6 @@ async fn rig_pointing_at(
     let state = test_helpers::build_state(
         settings,
         registry,
-        None,
         Some(history),
         Some(feedback),
         Arc::new(DangerousNoAuth),

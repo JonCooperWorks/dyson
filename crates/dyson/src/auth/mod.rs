@@ -44,8 +44,10 @@ pub mod bearer;
 pub mod composite;
 pub mod credential;
 pub mod deferred_bearer;
+pub mod hashed_bearer;
 pub mod no_auth;
 pub mod oauth;
+pub mod oidc;
 pub mod static_headers;
 
 
@@ -54,8 +56,10 @@ pub use bearer::BearerTokenAuth;
 pub use composite::CompositeAuth;
 pub use credential::Credential;
 pub use deferred_bearer::DeferredBearerAuth;
+pub use hashed_bearer::HashedBearerAuth;
 pub use no_auth::DangerousNoAuth;
 pub use oauth::OAuth;
+pub use oidc::OidcAuth;
 pub use static_headers::StaticHeadersAuth;
 
 

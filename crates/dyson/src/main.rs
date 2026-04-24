@@ -115,6 +115,15 @@ enum Commands {
         dangerous_no_sandbox: bool,
     },
 
+    /// Argon2id-hash a plaintext bearer token for the HTTP controller's
+    /// `auth.hash` config field.  The plaintext never touches disk —
+    /// only the PHC hash output goes into dyson.json; the operator
+    /// keeps the plaintext to type into their browser.
+    HashBearer {
+        /// Plaintext bearer token to hash.
+        plaintext: String,
+    },
+
     /// Run a single prompt and exit.
     Run {
         /// The prompt to run.
@@ -212,6 +221,7 @@ async fn main() -> dyson::error::Result<()> {
         } => {
             command::listen::run(config, dangerous_no_sandbox, provider, base_url, workspace).await
         }
+        Commands::HashBearer { plaintext } => command::hash_bearer::run(plaintext),
         Commands::Run {
             prompt,
             config,
