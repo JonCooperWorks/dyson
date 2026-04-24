@@ -395,11 +395,18 @@
 }
 
 /* ---------- mind view ---------- */
+/* position: relative anchors the mobile `.mind-side` drawer (which is
+   position: absolute) to this grid cell instead of the viewport.  Without
+   it the drawer escapes up to the initial containing block, covers the
+   44px topbar with an opaque dark panel, and renders the whole page as
+   a black screen with the nav tabs and hamburger unreachable.  On desktop
+   the drawer is a static grid column, so the rule is a no-op there. */
 .mind {
   display: grid;
   grid-template-columns: 280px 1fr;
   flex: 1;
   min-height: 0;
+  position: relative;
 }
 .mind-side {
   border-right: 1px solid var(--line);
