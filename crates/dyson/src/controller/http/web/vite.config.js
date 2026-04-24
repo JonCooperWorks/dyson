@@ -70,18 +70,6 @@ export default defineConfig({
         entryFileNames: 'assets/[name]-[hash].js',
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: 'assets/[name]-[hash][extname]',
-        // Split React into its own chunk so (a) the app chunk shrinks
-        // below the "single-big-file" Lighthouse perf cliff and (b) the
-        // browser can download react and the app chunk in parallel.
-        // React hardly changes between deploys either, so this chunk
-        // keeps its hash across most releases and stays in cache.
-        manualChunks(id) {
-          if (id.includes('node_modules/react-dom') ||
-              id.includes('node_modules/react/') ||
-              id.includes('node_modules/scheduler')) {
-            return 'react';
-          }
-        },
       },
     },
   },
