@@ -10,6 +10,7 @@
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { ArtefactBlock, markdown, prettySize } from './turns.jsx';
+import { copyToClipboard } from '../lib/clipboard.js';
 
 export function MindView({ showSide, onHideSide }) {
   const m = window.DYSON_DATA.mind;
@@ -479,27 +480,12 @@ export function ArtefactReader({ id, onShowSide }) {
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(u);
   };
-  // Clipboard API requires a secure context — on HTTP (Tailscale IP,
-  // local LAN) `navigator.clipboard` is undefined, so fall back to the
-  // hidden-textarea + execCommand dance before giving up.
   const copy = async () => {
     const text = isImage ? imageUrl : body;
-    if (!text) return;
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed'; ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-      }
+    if (await copyToClipboard(text)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
-    } catch (_) { /* clipboard denied — swallow */ }
+    }
   };
 
   return (

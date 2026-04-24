@@ -2,6 +2,10 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
+// The clipboard dance (modern API → legacy textarea + execCommand
+// fallback → swallow) used to live inline here and was copy-pasted
+// across panels.jsx / views-secondary.jsx.  One implementation now.
+import { copyToClipboard } from '../lib/clipboard.js';
 
 function ThinkingBlock({ text }) {
   return (
@@ -66,23 +70,6 @@ function turnToText(turn) {
   return parts.join('\n\n');
 }
 
-async function copyText(text) {
-  if (!text) return false;
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed'; ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-    }
-    return true;
-  } catch (_) { return false; }
-}
 
 function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
                 reactionsOpen, onToggleReactions }) {
@@ -104,7 +91,7 @@ function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
 
   const onCopy = async (e) => {
     e.stopPropagation();
-    const ok = await copyText(turnToText(turn));
+    const ok = await copyToClipboard(turnToText(turn));
     if (!ok) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1200);

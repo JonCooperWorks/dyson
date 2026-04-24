@@ -48,6 +48,11 @@ async-stream = "0.3"
 tokio-stream = { version = "0.1", features = ["io-util"] }
 tokio-util = "0.7"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+# Gzip the static frontend bundle + API JSON responses when the client's
+# Accept-Encoding asks for it.  Pure-Rust miniz_oxide backend — no C dep,
+# ~60 KiB of source, fast enough that we encode per-request without a
+# measurable cost on the 50–250 KiB blobs the web UI ships.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 # Content + storage
 rusqlite = { version = "0.32", features = ["bundled"] }

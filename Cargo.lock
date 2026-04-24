@@ -935,6 +935,7 @@ dependencies = [
  "base64",
  "clap",
  "dyson-swarm-protocol",
+ "flate2",
  "futures-util",
  "glob",
  "http-body-util",

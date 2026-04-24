@@ -1535,6 +1535,16 @@ pub mod test_helpers {
 type Resp = Response<BoxBody<Bytes, Infallible>>;
 
 async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) -> Resp {
+    // Gzip the response if the client asked for it and the content-type
+    // matches `compressible_content_type`.  Extracted into a wrapper so
+    // the (large) routing match below stays focused on what it's for.
+    // SSE responses skip compression because their Content-Type isn't in
+    // the compressible set — buffering their body would be a disaster.
+    let accepts_gzip = client_accepts_gzip(req.headers());
+    maybe_gzip(dispatch_inner(req, state).await, accepts_gzip).await
+}
+
+async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) -> Resp {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
@@ -3364,6 +3374,108 @@ fn boxed(bytes: Bytes) -> BoxBody<Bytes, Infallible> {
     Full::new(bytes).boxed()
 }
 
+/// True when the request's `Accept-Encoding` header advertises gzip.
+/// Conservative parse — we only look for the literal token `gzip`, not
+/// q-values or `*`.  That's fine: every real browser lists `gzip` plainly
+/// alongside brotli/deflate.
+fn client_accepts_gzip(headers: &hyper::header::HeaderMap) -> bool {
+    headers
+        .get(hyper::header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(',')
+                .map(|p| p.trim().split(';').next().unwrap_or("").trim())
+                .any(|tok| tok.eq_ignore_ascii_case("gzip"))
+        })
+        .unwrap_or(false)
+}
+
+/// Content-Type prefixes worth gzipping.  woff2/png/jpeg are already
+/// compressed; SSE (`text/event-stream`) is infinite-streaming so we
+/// must never buffer it.  Anything not in this set passes through.
+fn compressible_content_type(ct: &str) -> bool {
+    ct.starts_with("text/html")
+        || ct.starts_with("text/css")
+        || ct.starts_with("text/plain")
+        || ct.starts_with("text/csv")
+        || ct.starts_with("application/javascript")
+        || ct.starts_with("application/json")
+        || ct.starts_with("image/svg+xml")
+}
+
+/// Gzip at miniz_oxide's default level.  Called on the hot path for
+/// every cold-load asset fetch; the cost is bounded by what the
+/// frontend bundle ships (~220 KiB worst case today) and amortised
+/// against the bandwidth saved — on slow-4G a 60 % compression win
+/// beats the CPU cost by an order of magnitude.
+fn gzip_bytes(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+    let mut enc = GzEncoder::new(
+        Vec::with_capacity(bytes.len() / 2),
+        Compression::default(),
+    );
+    enc.write_all(bytes)?;
+    enc.finish()
+}
+
+/// Post-dispatch wrapper: collect the response body, compress it if the
+/// client asked for gzip and the content-type is text-ish and the body
+/// is big enough to be worth it.  SSE responses sail through untouched
+/// because `text/event-stream` isn't in the compressible set — their
+/// streaming body would otherwise be buffered forever.
+async fn maybe_gzip(resp: Resp, accepts_gzip: bool) -> Resp {
+    if !accepts_gzip {
+        return resp;
+    }
+    let is_compressible = resp
+        .headers()
+        .get("Content-Type")
+        .and_then(|v| v.to_str().ok())
+        .map(compressible_content_type)
+        .unwrap_or(false);
+    if !is_compressible {
+        return resp;
+    }
+    if resp.headers().contains_key("Content-Encoding") {
+        return resp;
+    }
+    let (parts, body) = resp.into_parts();
+    // Body is `BoxBody<Bytes, Infallible>` — collect can't fail, but we
+    // match defensively anyway so a future body type can't silently
+    // panic in production.
+    let bytes = match body.collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(_) => return Response::from_parts(parts, boxed(Bytes::new())),
+    };
+    // ~1 KiB floor: below that the gzip header overhead can make the
+    // output bigger than the input, and the transfer is one TCP packet
+    // either way.
+    if bytes.len() < 1024 {
+        return Response::from_parts(parts, boxed(bytes));
+    }
+    let compressed = match gzip_bytes(&bytes) {
+        Ok(v) => v,
+        Err(_) => return Response::from_parts(parts, boxed(bytes)),
+    };
+    let mut resp = Response::from_parts(parts, boxed(Bytes::from(compressed)));
+    let headers = resp.headers_mut();
+    headers.insert(
+        hyper::header::CONTENT_ENCODING,
+        hyper::header::HeaderValue::from_static("gzip"),
+    );
+    headers.insert(
+        hyper::header::VARY,
+        hyper::header::HeaderValue::from_static("Accept-Encoding"),
+    );
+    // Hyper computes Content-Length from the Full body, but the old
+    // header (if any) lingered from the uncompressed build — drop it
+    // so the new, smaller length is authoritative.
+    headers.remove(hyper::header::CONTENT_LENGTH);
+    resp
+}
+
 fn json_ok<T: Serialize>(v: &T) -> Resp {
     let bytes = serde_json::to_vec(v).unwrap_or_else(|_| b"null".to_vec());
     Response::builder()
@@ -3446,6 +3558,60 @@ async fn read_json_capped<T: for<'de> Deserialize<'de>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_accepts_gzip_parses_common_headers() {
+        use hyper::header::{ACCEPT_ENCODING, HeaderMap, HeaderValue};
+        fn h(v: &str) -> HeaderMap {
+            let mut m = HeaderMap::new();
+            m.insert(ACCEPT_ENCODING, HeaderValue::from_str(v).unwrap());
+            m
+        }
+        // What real browsers send — gzip listed alongside other encodings.
+        assert!(client_accepts_gzip(&h("gzip, deflate, br")));
+        assert!(client_accepts_gzip(&h("br, gzip")));
+        assert!(client_accepts_gzip(&h("gzip")));
+        // Q-values and whitespace shouldn't trip us up.
+        assert!(client_accepts_gzip(&h("deflate, gzip;q=0.8")));
+        assert!(client_accepts_gzip(&h("GZIP")));
+        // Only non-gzip encodings.
+        assert!(!client_accepts_gzip(&h("br, deflate")));
+        assert!(!client_accepts_gzip(&h("identity")));
+        // No header at all (old clients, curl without -H).
+        assert!(!client_accepts_gzip(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn compressible_content_type_allowlist() {
+        // Text-ish: compress.  Image/svg is worth it, font/woff2 isn't
+        // (already compressed).  text/event-stream MUST stay out —
+        // it's the SSE channel and buffering it would deadlock.
+        assert!(compressible_content_type("text/html; charset=utf-8"));
+        assert!(compressible_content_type("application/javascript; charset=utf-8"));
+        assert!(compressible_content_type("application/json"));
+        assert!(compressible_content_type("image/svg+xml"));
+        assert!(!compressible_content_type("text/event-stream"));
+        assert!(!compressible_content_type("font/woff2"));
+        assert!(!compressible_content_type("image/png"));
+        assert!(!compressible_content_type("application/octet-stream"));
+    }
+
+    #[test]
+    fn gzip_bytes_round_trips() {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+        // The 223 KiB app bundle is the real workload — use a large
+        // repetitive buffer so the compressor has room to show it
+        // actually compresses (not just a no-op wrap).
+        let payload = b"dyson ".repeat(10_000);
+        let compressed = gzip_bytes(&payload).expect("gzip should succeed");
+        assert!(compressed.len() < payload.len() / 4, "should compress repetitive text");
+        let mut decoded = Vec::new();
+        GzDecoder::new(&compressed[..])
+            .read_to_end(&mut decoded)
+            .expect("round-trip decode");
+        assert_eq!(decoded, payload);
+    }
 
     #[test]
     fn emoji_to_rating_matches_telegram() {
@@ -3544,15 +3710,27 @@ mod tests {
     }
 
     #[test]
-    fn embedded_bundle_has_js_and_css_chunks() {
+    fn embedded_bundle_has_js_chunk_and_inlined_css() {
+        // CSS is inlined into index.html by the dyson-inline-css Vite
+        // plugin — that's what lets us skip the render-blocking CSS
+        // round-trip on cold paint.  So the contract here is (a) a JS
+        // chunk exists and (b) the HTML carries the stylesheet rules
+        // directly, NOT as a separate .css asset.
         let has_js = assets::ASSETS.iter().any(|(p, _, ct)| {
             p.ends_with(".js") && ct.starts_with("application/javascript")
         });
-        let has_css = assets::ASSETS.iter().any(|(p, _, ct)| {
-            p.ends_with(".css") && ct.starts_with("text/css")
-        });
+        let has_standalone_css = assets::ASSETS.iter().any(|(p, _, _)| p.ends_with(".css"));
+        let (html_bytes, _) = assets::lookup("/").expect("/ must serve index.html");
+        let html = std::str::from_utf8(html_bytes).unwrap();
         assert!(has_js, "bundle must ship at least one JS chunk");
-        assert!(has_css, "bundle must ship at least one CSS chunk");
+        assert!(
+            !has_standalone_css,
+            "CSS should be inlined into index.html, not shipped as a separate chunk"
+        );
+        assert!(
+            html.contains("<style>") && html.contains(":root"),
+            "index.html must carry the inlined stylesheet"
+        );
     }
 
     // JS-side regression checks live in

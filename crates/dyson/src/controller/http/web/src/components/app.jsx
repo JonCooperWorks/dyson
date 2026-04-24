@@ -7,6 +7,32 @@
  * fix for "moving from a chat seems to kill it" and "the tool stack is
  * not per conversation".  See controller/http/mod.rs `#[cfg(test)]
  * mod tests` for the regression checks that lock this behaviour in.
+ *
+ * -------------------------------------------------------------------
+ * Why `window.DYSON_DATA` / `window.DysonLive` / `CustomEvent` instead
+ * of React context?  Two reasons:
+ *
+ *   1. bridge.js mutates `window.DYSON_DATA` in place on SSE frames
+ *      and then fires `dyson:live-update`.  Components listen and
+ *      re-render via a bump counter.  Routing the same updates
+ *      through React context would require async setState on every
+ *      frame — dozens per streaming token — and the batched re-renders
+ *      would either miss deltas or stampede the tree.
+ *
+ *   2. Live SSE fires outside the component tree, so there's no single
+ *      provider that naturally owns the state.  A context would have
+ *      to be threaded at the root, fed by a reducer that listens to
+ *      the same events, at which point context adds a layer without
+ *      changing the ownership story.
+ *
+ * The cost: two sources of truth (React refs + window) and a test
+ * harness that has to provide both.  The win is that streaming is
+ * allocation-free per delta and a component that wants to read the
+ * latest conversation list just reads `window.DYSON_DATA.conversations`
+ * at render time — no prop-drilling, no staleness from setState
+ * batching.  If we ever switch to RSC / Suspense-driven streaming
+ * this gets re-examined; for a single-page admin UI over SSE, it's
+ * the right shape.
  */
 
 import React, { useState, useEffect, useRef, useCallback, useLayoutEffect, Suspense, lazy } from 'react';

@@ -2,26 +2,16 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Icon } from './icons.jsx';
+import { copyToClipboard } from '../lib/clipboard.js';
 
 function PanelChrome({ icon, name, arg, live, copyText, onClose, children }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
     const text = typeof copyText === 'function' ? copyText() : (copyText || '');
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed'; ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand('copy');
-        document.body.removeChild(ta);
-      }
+    if (await copyToClipboard(text)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
-    } catch (_) { /* clipboard denied — swallow */ }
+    }
   };
   return (
     <div className={`panel ${live ? 'live' : ''}`}>
