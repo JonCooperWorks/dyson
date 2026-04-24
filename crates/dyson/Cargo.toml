@@ -3,6 +3,7 @@ name = "dyson"
 version = "0.1.0"
 edition = "2024"
 description = "Streaming, composable AI agent loop in Rust"
+build = "build.rs"
 
 [features]
 # No features enabled by default — keeps the baseline binary lean.

@@ -385,14 +385,20 @@ async fn unknown_emoji_is_rejected_400() {
 
 #[tokio::test]
 async fn embedded_static_assets_serve_with_correct_content_types() {
+    // The Vite bundle hashes asset filenames, so the test fetches `/`
+    // and discovers the real paths from the injected <script>/<link>
+    // tags rather than hardcoding names that would drift on rebuild.
     let r = rig().await;
-    let cases: &[(&str, &str)] = &[
-        ("/", "text/html"),
-        ("/styles/tokens.css", "text/css"),
-        ("/js/bridge.js", "application/javascript"),
-        ("/components/app.jsx", "text/babel"),
-    ];
-    for (path, want_ct) in cases {
+    let resp = get(&format!("{}/", r.base)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(ct.starts_with("text/html"));
+    let html = body_string(resp).await;
+
+    let js = find_asset_href(&html, ".js").expect("index.html must link a JS chunk");
+    let css = find_asset_href(&html, ".css").expect("index.html must link a CSS chunk");
+
+    for (path, want_ct) in [(&js, "application/javascript"), (&css, "text/css")] {
         let resp = get(&format!("{}{}", r.base, path)).await;
         assert_eq!(resp.status(), StatusCode::OK, "GET {path}");
         let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
@@ -400,6 +406,27 @@ async fn embedded_static_assets_serve_with_correct_content_types() {
         let body = body_string(resp).await;
         assert!(!body.is_empty(), "empty body for {path}");
     }
+}
+
+fn find_asset_href(html: &str, suffix: &str) -> Option<String> {
+    // Simple scanner — the injected tags always use double quotes and
+    // root-relative paths (`/assets/...`).  Good enough for the test.
+    for needle in ["src=\"", "href=\""] {
+        let mut rest = html;
+        while let Some(pos) = rest.find(needle) {
+            let after = &rest[pos + needle.len()..];
+            if let Some(end) = after.find('"') {
+                let candidate = &after[..end];
+                if candidate.starts_with('/') && candidate.ends_with(suffix) {
+                    return Some(candidate.to_string());
+                }
+                rest = &after[end..];
+            } else {
+                break;
+            }
+        }
+    }
+    None
 }
 
 #[tokio::test]
@@ -672,12 +699,12 @@ async fn static_path_traversal_is_blocked() {
     let r = rig().await;
     for evil in [
         "/../../../../etc/passwd",
-        "/styles/../../etc/hosts",
-        "/components/..%2Fapp.jsx",
+        "/assets/../../etc/hosts",
+        "/assets/..%2Findex.html",
         // Fully-encoded variants — the check must run after url_decode,
         // otherwise %2e%2e%2f sails past a literal `..` string-contains.
         "/%2e%2e%2f%2e%2e%2fetc/passwd",
-        "/styles/%2e%2e/%2e%2e/etc/hosts",
+        "/assets/%2e%2e/%2e%2e/etc/hosts",
         "/%2E%2E%2Fetc/hosts",
     ] {
         let resp = get(&format!("{}{}", r.base, evil)).await;
@@ -1115,16 +1142,19 @@ async fn files_endpoint_404s_for_unknown_id() {
 }
 
 #[tokio::test]
-async fn root_path_serves_prototype_html() {
-    // GET / must serve the prototype, not redirect or 404.
+async fn root_path_serves_index_html() {
+    // GET / must serve the Vite-built index.html, not redirect or 404.
     let r = rig().await;
     let resp = get(&format!("{}/", r.base)).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
     assert!(ct.starts_with("text/html"));
     let html = body_string(resp).await;
-    assert!(html.contains("<div id=\"root\">"));
-    assert!(html.contains("js/bridge.js"), "must load bridge.js");
+    assert!(html.contains("id=\"root\""));
+    assert!(
+        find_asset_href(&html, ".js").is_some(),
+        "index.html must link a JS chunk under /assets/",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1171,11 +1201,16 @@ async fn bearer_auth_accepts_matching_token() {
 #[tokio::test]
 async fn bearer_auth_still_serves_static_shell_without_token() {
     // The UI has to load before the browser can present any credential,
-    // so `/`, `/styles/*`, `/js/*`, `/components/*` are exempt.  Without
-    // this the prototype would 401 on the very first GET /.
+    // so `/` and `/assets/*` are exempt.  Without this the UI would
+    // 401 on the very first GET /.
     let auth = Arc::new(BearerTokenAuth::new("s3cret".into()));
     let r = rig_with_auth(auth).await;
-    for path in ["/", "/styles/tokens.css", "/js/bridge.js", "/components/app.jsx"] {
+    let html_resp = get(&format!("{}/", r.base)).await;
+    assert_eq!(html_resp.status(), StatusCode::OK, "GET / must be exempt");
+    let html = body_string(html_resp).await;
+    let js = find_asset_href(&html, ".js").expect("index.html must link a JS chunk");
+    let css = find_asset_href(&html, ".css").expect("index.html must link a CSS chunk");
+    for path in [&js, &css] {
         let resp = get(&format!("{}{}", r.base, path)).await;
         assert_eq!(resp.status(), StatusCode::OK, "GET {path} must be exempt");
     }

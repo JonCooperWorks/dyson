@@ -1,6 +1,6 @@
 /* Dyson — shared JSX bits: icons, small components */
 
-const { useState, useEffect, useRef, useMemo, useLayoutEffect } = React;
+import React from 'react';
 
 // tiny inline SVG icons, monoline, 14px
 function Icon({ name, size = 14, style, className }) {
@@ -45,5 +45,4 @@ function Chip({ tone = '', children }) {
 
 function Kbd({ children }) { return <span className="kbd">{children}</span>; }
 
-// expose globally
-Object.assign(window, { Icon, Chip, Kbd });
+export { Icon, Chip, Kbd };
