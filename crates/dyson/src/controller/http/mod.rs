@@ -52,306 +52,20 @@ use crate::config::{ControllerConfig, Settings};
 use crate::error::DysonError;
 use crate::feedback::{FeedbackEntry, FeedbackRating, FeedbackStore};
 use crate::message::{ContentBlock, Message, Role};
-use crate::tool::view::ToolView;
 use crate::tool::{CheckpointEvent, ToolOutput};
 use crate::util::resolve_tilde;
 
 use super::{AgentMode, ClientRegistry, Controller, Output, build_agent};
 
 mod assets;
+mod config;
+mod wire;
 
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Deserialize)]
-struct HttpControllerConfigRaw {
-    /// Address to bind, e.g. "127.0.0.1:7878".  Loopback-only by default
-    /// because there is no inbound auth.
-    #[serde(default = "default_bind")]
-    bind: String,
-
-    /// Inbound authentication mechanism.  Optional on a loopback bind
-    /// (127.0.0.1 / ::1) — the loopback assumption is a single trusted
-    /// operator, so a missing field defaults to `DangerousNoAuth` there.
-    /// On any other bind the field is required: omitting it refuses to
-    /// start the controller so you can't silently expose an
-    /// unauthenticated endpoint.
-    #[serde(default)]
-    auth: Option<HttpAuthConfig>,
-}
-
-/// Which inbound auth mechanism guards the HTTP API.
-///
-/// `DangerousNoAuth` is the explicit opt-in to an unauthenticated
-/// endpoint — the controller still starts, but logs a loud warning.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum HttpAuthConfig {
-    /// No authentication.  Every request is accepted as `anonymous`.
-    DangerousNoAuth,
-    /// `Authorization: Bearer <token>` validated against a stored
-    /// Argon2id PHC hash.  We never persist the plaintext token —
-    /// operators paste a hash (`$argon2id$...`) into dyson.json and
-    /// share the matching plaintext with their browser.  Generate the
-    /// hash with `dyson hash-bearer`.  `hash` flows through the
-    /// secret-resolver pipeline so it may be a literal string or a
-    /// `{ resolver, name }` reference (e.g. environment-variable
-    /// indirection for hashes that shouldn't sit in source control).
-    Bearer { hash: String },
-    /// Verify `Authorization: Bearer <jwt>` against an external OpenID
-    /// Connect provider.  The controller fetches
-    /// `<issuer>/.well-known/openid-configuration` at startup for the
-    /// JWKS URI, then validates signature + `iss` + `aud` + `exp` +
-    /// `nbf` + (optional) `scope` on every `/api/*` request.  The SPA
-    /// / CLI / reverse proxy handles the auth code flow itself — on
-    /// 401 we emit a `WWW-Authenticate` header pointing at the
-    /// authorization endpoint so clients can discover it.
-    Oidc {
-        /// Base URL of the OIDC provider, e.g. `https://accounts.example.com`.
-        /// `.well-known/openid-configuration` is appended automatically.
-        issuer: String,
-        /// Required `aud` claim.  Typically the OAuth `client_id`
-        /// registered for this dyson instance.
-        audience: String,
-        /// Optional space-separated scopes that must all appear in the
-        /// token's `scope` claim.  Use when one IdP client covers
-        /// many relying parties (e.g. `dyson:api`).
-        #[serde(default)]
-        required_scopes: Vec<String>,
-    },
-}
-
-fn default_bind() -> String {
-    "127.0.0.1:7878".to_string()
-}
-
-/// True when `bind` resolves to a loopback address (`127.0.0.0/8` or
-/// `::1`).  Used to gate the `auth`-field default: the loopback threat
-/// model is a single trusted operator, so `DangerousNoAuth` is fine
-/// there; any other bind must name a mechanism explicitly.
-///
-/// `localhost` is intentionally NOT treated as loopback without a DNS
-/// lookup — if an operator writes `localhost:7878` they're trusting
-/// `/etc/hosts`, which is a different story; safer to force them to be
-/// explicit.  `0.0.0.0` / `::` are NOT loopback, which is the whole
-/// point.
-fn is_loopback_bind(bind: &str) -> bool {
-    bind.parse::<std::net::SocketAddr>()
-        .map(|addr| addr.ip().is_loopback())
-        .unwrap_or(false)
-}
-
-// ---------------------------------------------------------------------------
-// Wire types
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-struct ConversationDto {
-    id: String,
-    title: String,
-    /// `true` while a turn is currently executing for this chat.
-    live: bool,
-    /// `true` when at least one artefact has ever been emitted for
-    /// this chat (in-memory or still on disk).  The Artefacts view
-    /// filters the sidebar on this so chats with nothing to read
-    /// don't clutter the list.
-    has_artefacts: bool,
-    /// Origin of the chat.  HTTP-minted chats have ids of the form
-    /// `c-NNNN` (see `mint_id`); Telegram chats are the numeric
-    /// Telegram chat id as a string.  The UI badges Telegram rows so
-    /// the operator can tell at a glance where a conversation came
-    /// from when both transports share the same on-disk chat dir.
-    source: &'static str,
-}
-
-#[derive(Serialize)]
-struct MessageDto {
-    role: String,
-    blocks: Vec<BlockDto>,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum BlockDto {
-    Text {
-        text: String,
-    },
-    Thinking {
-        thinking: String,
-    },
-    ToolUse {
-        id: String,
-        name: String,
-        input: serde_json::Value,
-    },
-    ToolResult {
-        tool_use_id: String,
-        content: String,
-        is_error: bool,
-    },
-    /// User-uploaded image or document reconstituted from chat history
-    /// on reload.  The web UI's `FileBlock` component expects this
-    /// shape and renders images inline (`<img>` when `inline_image`)
-    /// and other files as download chips.  `url` is a data URL so the
-    /// transcript is self-contained — chat history already externalises
-    /// the bytes to `{chat_dir}/media/<hash>.b64` and restores them to
-    /// inline base64 on load; we just repackage the base64 as a
-    /// `data:<mime>;base64,…` URL instead of surfacing the raw bytes.
-    File {
-        name: String,
-        mime: String,
-        bytes: usize,
-        url: String,
-        inline_image: bool,
-    },
-    /// Reference to an artefact rendered in the Artefacts tab.  The body
-    /// lives in `HttpState.artefacts` and is fetched via
-    /// `/api/artefacts/<id>` — not inlined here to keep history payloads
-    /// small when a chat has produced multiple long reports.
-    Artefact {
-        id: String,
-        kind: crate::message::ArtefactKind,
-        title: String,
-        /// `/#/artefacts/<id>` — an SPA deep-link that opens the reader
-        /// directly.  We intentionally do NOT hand out the raw
-        /// `/api/artefacts/<id>` bytes URL here: cmd-click / copy-paste
-        /// of the chip should land in a viewer, not on raw markdown.
-        /// The reader still fetches the body through the API endpoint;
-        /// the client constructs that URL itself from the id.
-        url: String,
-        bytes: usize,
-        /// The originating tool call, when known.  The client uses
-        /// this to hydrate an image-kind artefact into the matching
-        /// `image_generate` tool panel on chat reload.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        tool_use_id: Option<String>,
-        /// Optional structured metadata — for image artefacts this
-        /// carries `file_url` so the reader and the tool panel can
-        /// render the image without a second round-trip.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
-    },
-}
-
-#[derive(Deserialize)]
-struct CreateChatBody {
-    title: Option<String>,
-    /// Chat id whose on-disk transcript should be rotated (archived)
-    /// before the new conversation is minted.  The web sidebar's
-    /// "+ New Conversation" button passes the currently-active chat id
-    /// so starting a fresh chat also preserves the prior one as a
-    /// dated archive — same shape Telegram gets on `/clear`.
-    #[serde(default)]
-    rotate_previous: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TurnBody {
-    prompt: String,
-    /// Optional file attachments — base64-encoded bytes plus MIME type
-    /// and original filename.  Resolved to multimodal `ContentBlock`s
-    /// by `media::resolve_attachment` in `Agent::run_with_attachments`,
-    /// the same path Telegram uses for photos / voice notes / docs.
-    #[serde(default)]
-    attachments: Vec<AttachmentDto>,
-}
-
-#[derive(Deserialize)]
-struct AttachmentDto {
-    /// MIME type — drives the resolver (image/* → resize, audio/* →
-    /// transcribe, application/pdf → extract, text-like → wrap).
-    mime_type: String,
-    /// Original filename, if available.  Surfaces in the prompt so the
-    /// model knows which file it is looking at.
-    #[serde(default)]
-    name: Option<String>,
-    /// Base64-encoded bytes, NO data-URL prefix (`data:image/png;base64,`
-    /// must be stripped client-side).
-    data_base64: String,
-}
-
-/// Maximum total request body for `POST /turn`.  Big enough for a
-/// photo or a small PDF; refuses anything that would require streaming
-/// uploads (which the controller doesn't do — body is buffered into
-/// memory before deserialize).
-const MAX_TURN_BODY: usize = 25 * 1024 * 1024;
-
-/// Events streamed over SSE for one conversation.
-///
-/// Keep these stable — the prototype's bridge.js parses them.  `view` on
-/// `tool_result` is the typed payload that the right-rail panel renders
-/// natively (terminal / diff / sbom / taint / read).  Tools without a
-/// view leave it `None` and the panel falls back to plain text.
-#[derive(Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum SseEvent {
-    Text {
-        delta: String,
-    },
-    /// A fragment of the model's extended-thinking / reasoning stream.
-    /// Rendered in a dedicated right-rail panel — see `ThinkingPanel`
-    /// in the web UI.  Arrives before any `text` event on turns where
-    /// the model reasons before answering.
-    Thinking {
-        delta: String,
-    },
-    ToolStart {
-        id: String,
-        name: String,
-    },
-    ToolResult {
-        content: String,
-        is_error: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        view: Option<ToolView>,
-    },
-    Checkpoint {
-        text: String,
-    },
-    /// An agent-produced file the UI can preview/download — points at
-    /// `/api/files/<id>` served from the controller's in-memory file
-    /// store.  `inline_image` is `true` for images so the UI can render
-    /// `<img>` directly instead of a download link.
-    File {
-        name: String,
-        mime_type: String,
-        url: String,
-        inline_image: bool,
-    },
-    /// An agent-produced artefact (e.g. a security-review report) ready
-    /// for full-page markdown rendering.  The body is served at
-    /// `/api/artefacts/<id>` and the metadata list at
-    /// `/api/conversations/<chat>/artefacts`.
-    Artefact {
-        id: String,
-        kind: crate::message::ArtefactKind,
-        title: String,
-        url: String,
-        bytes: usize,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
-    },
-    LlmError {
-        message: String,
-    },
-    Done,
-}
-
-#[derive(Serialize)]
-struct ProviderDto {
-    id: String,
-    name: String,
-    /// All models configured for this provider in dyson.json, plus any
-    /// added via POST /api/providers/:id/models during this session.
-    models: Vec<String>,
-    /// Currently-active model name for this provider (the agent-level
-    /// `model` setting when this provider is the default; otherwise the
-    /// first configured model).
-    active_model: String,
-    /// `true` if this is the default provider configured in dyson.json.
-    active: bool,
-}
+use config::{HttpAuthConfig, HttpControllerConfigRaw, is_loopback_bind};
+use wire::{
+    ArtefactDto, AuthMode, BlockDto, ConversationDto, CreateChatBody, FeedbackBody, MAX_TURN_BODY,
+    MessageDto, MindWriteBody, ModelSwitchBody, ProviderDto, SseEvent, TurnBody,
+};
 
 // ---------------------------------------------------------------------------
 // State
@@ -792,31 +506,6 @@ pub struct HttpState {
     /// this is just the metadata required to drive a browser
     /// redirect, never used in the validation path.
     auth_mode: AuthMode,
-}
-
-/// Public auth metadata the SPA needs to bootstrap.  Lives next to
-/// `auth: Arc<dyn Auth>` because the actual `Auth` trait hides
-/// everything except `validate_request` / `apply_to_request` — the
-/// discovery URL etc. don't belong in there.
-#[derive(Clone, Serialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-enum AuthMode {
-    None,
-    Bearer,
-    Oidc {
-        issuer: String,
-        authorization_endpoint: String,
-        /// Where the SPA POSTs the `code` it gets back from the IdP.
-        /// `None` if the provider's `.well-known` document didn't list
-        /// one — pure-implicit-flow IdPs are rare but possible.
-        token_endpoint: Option<String>,
-        /// The OAuth `client_id` the SPA should send on `/authorize`.
-        /// Same value the controller validates as the JWT `aud` claim.
-        client_id: String,
-        /// Scopes the operator told us are required.  The SPA appends
-        /// `openid` automatically — that one is mandatory for OIDC.
-        required_scopes: Vec<String>,
-    },
 }
 
 /// Scan the chat directory (files + archives + artefact metadata) for
@@ -2532,15 +2221,6 @@ fn list_providers(state: &HttpState) -> Resp {
 // Feedback — same emoji set as the Telegram controller.
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct FeedbackBody {
-    turn_index: usize,
-    /// Emoji to map to a rating (matches the Telegram controller's set).
-    /// When omitted or empty, removes any existing feedback for this turn.
-    #[serde(default)]
-    emoji: Option<String>,
-}
-
 fn emoji_to_rating(emoji: &str) -> Option<FeedbackRating> {
     // Mirror crate::controller::telegram::feedback so behaviour matches
     // Telegram exactly.  Kept inline (not re-exported from the telegram
@@ -3083,17 +2763,8 @@ fn sanitize_filename(s: &str) -> String {
 /// per artefact emitted for this chat, ordered newest first.  The
 /// reader fetches the body separately from `/api/artefacts/<id>` so the
 /// list is cheap to render even when reports are multi-KB.
-#[derive(Serialize)]
-struct ArtefactDto {
-    id: String,
-    kind: crate::message::ArtefactKind,
-    title: String,
-    bytes: usize,
-    created_at: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<serde_json::Value>,
-}
-
+/// (`ArtefactDto` lives in `wire.rs`.)
+///
 /// List artefacts for a given chat.  Empty list if none exist yet.
 /// Stream a ShareGPT-format dump of a conversation for the web UI's
 /// download button.  Reads the transcript from `ChatHistory` (or the
@@ -3261,12 +2932,6 @@ fn get_activity(state: &HttpState, query: &str) -> Resp {
     json_ok(&serde_json::json!({ "lanes": lanes }))
 }
 
-#[derive(Deserialize)]
-struct MindWriteBody {
-    path: String,
-    content: String,
-}
-
 /// Persist a workspace file edit.  Loads the workspace, calls
 /// `Workspace::set` (in-memory) then `save()` (flush).  The agent will
 /// see the new content the next time it reads the file — this is the
@@ -3287,16 +2952,6 @@ async fn post_mind_file(req: Request<hyper::body::Incoming>, state: &HttpState) 
         return bad_request(&format!("workspace save failed: {e}"));
     }
     json_ok(&serde_json::json!({ "ok": true, "path": body.path }))
-}
-
-#[derive(Deserialize)]
-struct ModelSwitchBody {
-    /// Provider name from `dyson.json` providers table.
-    provider: String,
-    /// Optional model — defaults to the provider's first configured model.
-    model: Option<String>,
-    /// Optional chat to swap on.  When omitted, swaps every loaded chat.
-    chat_id: Option<String>,
 }
 
 /// Switch the LLM provider/model for one chat (or every loaded chat).
