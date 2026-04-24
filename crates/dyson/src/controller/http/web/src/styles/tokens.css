@@ -1,4 +1,25 @@
 /* Dyson — tokens */
+
+/* Self-host the Latin subsets so we don't pay Google Fonts'
+ * render-blocking CSS round-trip on first load.  One file per family
+ * covers 400–700 via font-synthesis; total ~60 KiB bundled into the
+ * binary.  swap lets text paint in the fallback before the webfont
+ * arrives — the aesthetic is preserved, FCP isn't held hostage. */
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('./fonts/geist-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('./fonts/jetbrainsmono-400.woff2') format('woff2');
+}
+
 :root {
   /* Neutrals */
   --bg:       oklch(0.155 0.012 260);
@@ -7,7 +28,7 @@
   --panel-2:  oklch(0.245 0.015 260);
   --line:     oklch(0.30 0.018 260);
   --line-2:   oklch(0.38 0.022 260);
-  --mute:     oklch(0.55 0.015 260);
+  --mute:     oklch(0.68 0.015 260);
   --mute-2:   oklch(0.72 0.012 260);
   --fg-dim:   oklch(0.82 0.008 260);
   --fg:       oklch(0.96 0.003 260);

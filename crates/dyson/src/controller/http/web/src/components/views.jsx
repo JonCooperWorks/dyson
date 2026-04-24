@@ -61,7 +61,8 @@ function TopBar({ view, setView, onToggleLeft, onToggleRight, rightHidden }) {
       <div className="brand"><div className="mark">D</div><div className="name">Dyson</div></div>
       <nav>
         {navs.map(n => (
-          <button key={n.id} className={view === n.id ? 'active' : ''} onClick={() => setView(n.id)}>
+          <button key={n.id} className={view === n.id ? 'active' : ''} onClick={() => setView(n.id)}
+                  aria-label={n.name} aria-current={view === n.id ? 'page' : undefined}>
             <Icon name={n.icon} size={13}/> <span>{n.name}</span> <span className="k">⌘{n.k}</span>
           </button>
         ))}

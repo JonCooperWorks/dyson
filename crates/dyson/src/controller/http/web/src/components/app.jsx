@@ -332,29 +332,29 @@ function App() {
               }}
               onToggleRight={onToggleRight}/>
       {view === 'conv' && (
-        <div className={bodyClass}>
+        <main className={bodyClass}>
           {(showLeft || showRight) && <div className="scrim" onClick={closeRails}/>}
           <LeftRail active={conv} setActive={(id) => { setConv(id); setShowLeft(false); }}/>
           <ConversationView conv={conv} session={session} bump={bump}/>
           {!rightHidden && <RightRail panels={session ? session.panels : []} onClose={removePanel} activeChatId={conv}/>}
-        </div>
+        </main>
       )}
       {view === 'mind' && (
-        <div className="body no-left no-right">
+        <main className="body no-left no-right">
           {showLeft && <div className="scrim" onClick={closeRails}/>}
           <MindView showSide={showLeft} onHideSide={() => setShowLeft(false)}/>
-        </div>
+        </main>
       )}
       {view === 'artefacts' && (
-        <div className="body no-left no-right">
+        <main className="body no-left no-right">
           {/* Artefacts tab is a single-sidebar layout now: the drawer shows
               every chat with artefacts as a collapsible tree, so the
               redundant LeftRail (which was an unreachable duplicate on
               mobile and a two-step navigation on desktop) is gone. */}
           <ArtefactsView conv={conv} setConv={setConv} bump={bump}/>
-        </div>
+        </main>
       )}
-      {view === 'activity' && <div style={{display:'flex', flex:1, minHeight:0}}><ActivityView/></div>}
+      {view === 'activity' && <main style={{display:'flex', flex:1, minHeight:0}}><ActivityView/></main>}
     </div>
   );
 }
