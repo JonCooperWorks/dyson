@@ -559,6 +559,7 @@ function ArtefactsView({ conv, session, bump }) {
     if (selected) {
       return (
         <div className={`mind${showSide ? ' show-side' : ''}`}>
+          {showSide && <div className="mind-scrim" onClick={() => setShowSide(false)}/>}
           <aside className="mind-side">
             <div style={{padding:'10px 14px', borderBottom:'1px solid var(--line)'}}>
               <div className="eyebrow">artefact</div>
@@ -573,7 +574,7 @@ function ArtefactsView({ conv, session, bump }) {
     }
     return (
       <section className="mind-pane" style={{alignItems:'center', justifyContent:'center'}}>
-        <div style={{color:'var(--mute)', fontSize:13}}>Select a conversation to see its artefacts.</div>
+        <div style={{color:'var(--fg-dim)', fontSize:13}}>Select a conversation to see its artefacts.</div>
       </section>
     );
   }
@@ -582,6 +583,13 @@ function ArtefactsView({ conv, session, bump }) {
 
   return (
     <div className={`mind${showSide ? ' show-side' : ''}`}>
+      {/* Tap-to-close target for the mobile drawer.  Mirrors the
+          .body.show-left .scrim pattern so the right-strip of visible
+          .mind-pane finally has a way to dismiss the 80vw sidebar —
+          without this the only escape from an empty drawer was to pick
+          an artefact (impossible when the list is empty).  No-op on
+          desktop, where the scrim is display:none. */}
+      {showSide && <div className="mind-scrim" onClick={() => setShowSide(false)}/>}
       <aside className="mind-side">
         <div style={{padding:'10px 14px', borderBottom:'1px solid var(--line)'}}>
           <div className="eyebrow">artefacts · {list.length}</div>
@@ -589,9 +597,9 @@ function ArtefactsView({ conv, session, bump }) {
         </div>
         <div style={{overflowY:'auto', flex:1, padding:'6px 0'}}>
           {list.length === 0 && (
-            <div style={{padding:'14px', color:'var(--mute)', fontSize:12, lineHeight:1.5}}>
+            <div style={{padding:'14px', color:'var(--fg-dim)', fontSize:12, lineHeight:1.5}}>
               No artefacts yet in this chat.  The security_engineer subagent
-              emits its final report here.  Tap <span className="mono" style={{color:'var(--fg-dim)'}}>☰</span> to switch to a chat that already has one.
+              emits its final report here.  Tap <span className="mono" style={{color:'var(--fg)'}}>☰</span> to switch to a chat that already has one.
             </div>
           )}
           {list.map(a => (
@@ -665,19 +673,33 @@ function ArtefactReader({ id, onShowSide }) {
       .catch(e => setErr(String(e.message || e)));
   }, [id]);
 
-  if (!id) {
-    return (
-      <section className="mind-pane" style={{alignItems:'center', justifyContent:'center'}}>
-        <div style={{color:'var(--mute)', fontSize:13}}>Select an artefact to read.</div>
-      </section>
-    );
-  }
-
   const back = onShowSide
     ? <button className="artefact-back" title="Back to artefact list" onClick={onShowSide}>
         <Icon name="menu" size={14}/>
       </button>
     : null;
+
+  if (!id) {
+    // Render the title bar even in the empty state so the mobile back
+    // button is reachable — without it the reader is a one-way door
+    // when `showSide` is false and `selected` is null (e.g. a chip
+    // pointing at a now-deleted artefact, or any state race).  On
+    // desktop `.artefact-back` is display:none, leaving just a thin
+    // "Artefacts" label bar — harmless.
+    return (
+      <section className="mind-pane">
+        <div style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
+                     borderBottom:'1px solid var(--line)', background:'var(--bg)'}}>
+          {back}
+          <span style={{fontSize:13, color:'var(--fg-dim)'}}>Artefacts</span>
+        </div>
+        <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center',
+                     color:'var(--fg-dim)', fontSize:13}}>
+          Select an artefact to read.
+        </div>
+      </section>
+    );
+  }
 
   const isImage = meta && typeof meta.kind === 'string' && meta.kind === 'image';
   const imageUrl = isImage
