@@ -7,6 +7,13 @@ import react from '@vitejs/plugin-react';
 // binary via include_bytes!.
 export default defineConfig({
   plugins: [react()],
+  // Vitest runs under jsdom so regression tests can mount components and
+  // walk the resulting DOM — source-text greps missed the artefacts-tab
+  // black-screen bug five times because they couldn't see what React
+  // actually rendered.
+  test: {
+    environment: 'jsdom',
+  },
   server: {
     port: 5173,
     proxy: {

@@ -527,13 +527,18 @@ function ArtefactsView({ conv, session, bump }) {
   // selection is empty and the list is ready.  Keeps the "click a
   // chat → see a report" flow zero-click and makes the URL reflect
   // the reader position so a back-button or share-link round-trips
-  // cleanly.
+  // cleanly.  setShowSide(false) is direct (not via the event round-
+  // trip) because the chip-click listener below is registered in a
+  // later useEffect — on first mount it isn't attached yet when this
+  // effect fires, so dispatching alone would leave the drawer pinned
+  // over the reader.
   const listForAutoselect = (session && session.artefacts) || [];
   useEffect(() => {
     if (selected) return;
     if (!listForAutoselect.length) return;
     const first = listForAutoselect[0].id;
     setSelected(first);
+    setShowSide(false);
     window.dispatchEvent(new CustomEvent('dyson:open-artefact', { detail: { id: first } }));
   }, [conv, listForAutoselect.length, selected]);
 
@@ -795,7 +800,7 @@ function ArtefactReader({ id, onShowSide }) {
       ) : (
         <div className="prose"
              style={{overflowY:'auto', flex:1, padding:'18px 28px', lineHeight:1.6}}
-             dangerouslySetInnerHTML={{__html: window.markdown(body || '')}}/>
+             dangerouslySetInnerHTML={{__html: markdown(body || '')}}/>
       )}
     </section>
   );
