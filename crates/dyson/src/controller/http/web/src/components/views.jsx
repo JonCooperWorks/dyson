@@ -595,14 +595,23 @@ function ArtefactsView({ conv, session, bump }) {
           <div className="eyebrow">artefacts · {list.length}</div>
           <div style={{fontSize:12, color:'var(--fg-dim)', marginTop:4}}>Full-page reports emitted by agents.</div>
         </div>
-        <div style={{overflowY:'auto', flex:1, padding:'6px 0'}}>
-          {list.length === 0 && (
-            <div style={{padding:'14px', color:'var(--fg-dim)', fontSize:12, lineHeight:1.5}}>
-              No artefacts yet in this chat.  The security_engineer subagent
-              emits its final report here.  Tap <span className="mono" style={{color:'var(--fg)'}}>☰</span> to switch to a chat that already has one.
+        {list.length === 0 ? (
+          // Centered empty-state so the drawer doesn't read as a broken
+          // black page on mobile.  Previously the message was a tiny
+          // top-anchored block inside a `flex:1` scroller — below it the
+          // rest of the viewport was bare var(--bg), which is what the
+          // "still a black screen" report kept pointing at even after
+          // the drawer started covering the full viewport.
+          <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center', padding:'24px'}}>
+            <div style={{color:'var(--fg-dim)', fontSize:13, lineHeight:1.6, textAlign:'center', maxWidth:'320px'}}>
+              No artefacts yet in this chat.<br/><br/>
+              The security_engineer subagent emits its final report here.<br/><br/>
+              Tap <span className="mono" style={{color:'var(--fg)'}}>☰</span> to switch to a chat that already has one.
             </div>
-          )}
-          {list.map(a => (
+          </div>
+        ) : (
+          <div style={{overflowY:'auto', flex:1, padding:'6px 0'}}>
+            {list.map(a => (
             <div key={a.id}
                  onClick={() => {
                    setSelected(a.id);
@@ -632,7 +641,8 @@ function ArtefactsView({ conv, session, bump }) {
               </div>
             </div>
           ))}
-        </div>
+          </div>
+        )}
       </aside>
       <ArtefactReader id={selected} onShowSide={() => setShowSide(true)}/>
     </div>
