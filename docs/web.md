@@ -25,23 +25,23 @@ through `BrowserArtefactSink`.
 ```mermaid
 flowchart LR
   subgraph Browser
-    UI[React app<br/>Vite-built bundle]
+    UI["React app<br>Vite-built bundle"]
   end
 
   subgraph Dyson["dyson process"]
-    HC[HttpController<br/>hyper http1]
+    HC["HttpController<br>hyper http1"]
     TG[TelegramController]
     TM[TerminalController]
     AG((Agent loop))
-    CH[(ChatHistory<br/>disk)]
-    FB[(FeedbackStore<br/>disk)]
-    WS[(Workspace)]
-    REG[ClientRegistry<br/>per-provider LLM clients]
+    CH[("ChatHistory<br>disk")]
+    FB[("FeedbackStore<br>disk")]
+    WS[Workspace]
+    REG["ClientRegistry<br>per-provider LLM clients"]
   end
 
   UI -- "GET /, /assets/*" --> HC
   UI -- "JSON /api/*" --> HC
-  UI <-. "SSE /events" .- HC
+  HC -. "SSE /events" .-> UI
 
   HC --> AG
   TG --> AG
@@ -120,42 +120,44 @@ touching `dispatch()`.
 
 ```mermaid
 flowchart TB
-  subgraph HC["HttpController"]
-    cfg["from_config<br/>parses HttpControllerConfigRaw,<br/>builds Auth"]
-    run["run() — binds TcpListener,<br/>spawns serve_loop"]
+  subgraph HC[HttpController]
+    cfg["from_config<br>parses config, builds Auth"]
+    run["run — binds TcpListener,<br>spawns serve_loop"]
   end
 
-  subgraph State["HttpState (Arc)"]
-    settings["RwLock&lt;Settings&gt;"]
-    auth["Arc&lt;dyn Auth&gt;"]
-    chats["Mutex&lt;HashMap&lt;id, Arc&lt;ChatHandle&gt;&gt;&gt;"]
-    order["Mutex&lt;Vec&lt;id&gt;&gt;"]
-    history["Option&lt;Arc&lt;dyn ChatHistory&gt;&gt;"]
-    feedback["Option&lt;Arc&lt;FeedbackStore&gt;&gt;"]
-    files["Mutex&lt;FileStore&gt;<br/>FIFO + write-through"]
-    artefacts["Mutex&lt;ArtefactStore&gt;<br/>FIFO + write-through"]
-    activity["Arc&lt;ActivityRegistry&gt;"]
-    runtime["Mutex&lt;Option&lt;(provider,model)&gt;&gt;<br/>last /api/model selection"]
+  subgraph State[HttpState]
+    settings["settings: RwLock"]
+    auth["auth: dyn Auth"]
+    chats["chats: HashMap id to ChatHandle"]
+    order["order: Vec id"]
+    history["history: dyn ChatHistory"]
+    feedback["feedback: FeedbackStore"]
+    files["files: FileStore<br>FIFO plus write-through"]
+    artefacts["artefacts: ArtefactStore<br>FIFO plus write-through"]
+    activity["activity: ActivityRegistry"]
+    runtime["runtime_model<br>last api/model selection"]
   end
 
-  subgraph Handle["ChatHandle (per chat)"]
-    agent["Mutex&lt;Option&lt;Agent&gt;&gt;<br/>lazily built on first turn"]
-    busy["AtomicBool"]
-    cancel["Mutex&lt;Option&lt;CancellationToken&gt;&gt;"]
-    events["broadcast::Sender&lt;SseEvent&gt;"]
+  subgraph Handle[ChatHandle per chat]
+    agent["agent: Option Agent<br>lazily built on first turn"]
+    busy[busy: AtomicBool]
+    cancel["cancel: CancellationToken"]
+    events["events: broadcast Sender SseEvent"]
   end
 
-  subgraph Out["SseOutput (impl Output)"]
+  subgraph Out[SseOutput as impl Output]
     direction LR
-    so_send["text_delta / thinking_delta / tool_use_start /<br/>tool_result / send_file / send_artefact / checkpoint"]
+    so_send["text_delta / thinking_delta / tool_use_start /<br>tool_result / send_file / send_artefact / checkpoint"]
   end
+
+  dispatch["dispatch req<br>auth, route, maybe_gzip"]
 
   cfg --> State
-  run --> dispatch[("dispatch(req)<br/>auth + route + maybe_gzip")]
+  run --> dispatch
   dispatch --> State
   State -- "per chat" --> Handle
-  Handle -- "agent.run(prompt, &mut SseOutput)" --> Out
-  Out -. "broadcast" .- events
+  Handle -- "agent.run prompt and SseOutput" --> Out
+  Out -- "broadcast" --> events
 ```
 
 [`HttpController`](../crates/dyson/src/controller/http/mod.rs) parses
@@ -351,37 +353,37 @@ oriented around stopping that.
 
 ```mermaid
 flowchart TB
-  subgraph entry["main.jsx"]
-    cli["new DysonClient()"]
-    bt["boot(client)<br/>cold-load + 10s poll"]
-    prov["&lt;ApiProvider client&gt;"]
+  subgraph entry[main.jsx]
+    cli["new DysonClient"]
+    bt["boot client<br>cold-load plus 10s poll"]
+    prov[ApiProvider]
   end
 
-  subgraph api["api/"]
-    client[client.js<br/>fetch + EventSource]
-    stream[stream.js<br/>parse + dispatch]
+  subgraph api[api]
+    client["client.js<br>fetch plus EventSource"]
+    stream["stream.js<br>parse plus dispatch"]
     boot[boot.js]
   end
 
-  subgraph store["store/"]
-    cs[createStore.js<br/>deep-freeze, reducer-returns-same → no-op]
-    app[app.js<br/>conversations, providers, mind, tools, ui]
-    sess[sessions.js<br/>per-chatId frozen sessions<br/>+ resources Map]
-    const[constants.js<br/>SLASH_COMMANDS]
+  subgraph store[store]
+    cs["createStore.js<br>deep-freeze<br>same-ref reducer is no-op"]
+    app["app.js<br>conversations, providers,<br>mind, tools, ui"]
+    sess["sessions.js<br>per-chat frozen sessions<br>plus resources Map"]
+    cnst["constants.js<br>SLASH_COMMANDS"]
   end
 
-  subgraph hooks["hooks/"]
+  subgraph hooks[hooks]
     uApi[useApi]
-    uApp[useAppState<br/>cached selector]
-    uSess[useSession<br/>useSessionMutator]
+    uApp["useAppState<br>cached selector"]
+    uSess["useSession<br>useSessionMutator"]
   end
 
-  subgraph comp["components/"]
-    App[app.jsx<br/>App, ConversationView,<br/>streamCallbacks, hydrateTranscript]
-    Views[views.jsx<br/>TopBar, LeftRail, RightRail]
-    Vsec[views-secondary.jsx<br/>Mind, Activity, Artefacts<br/>(lazy)]
-    Turns[turns.jsx<br/>Turn, Composer,<br/>TypingIndicator]
-    Panels[panels.jsx<br/>ToolPanel<br/>(lazy)]
+  subgraph comp[components]
+    App["app.jsx<br>App, ConversationView,<br>streamCallbacks, hydrateTranscript"]
+    Views["views.jsx<br>TopBar, LeftRail, RightRail"]
+    Vsec["views-secondary.jsx<br>Mind, Activity, Artefacts (lazy)"]
+    Turns["turns.jsx<br>Turn, Composer, TypingIndicator"]
+    Panels["panels.jsx<br>ToolPanel (lazy)"]
   end
 
   cli --> client
@@ -398,10 +400,16 @@ flowchart TB
   uApp --> app
   uSess --> sess
 
-  App --> uApi & uApp & uSess
+  App --> uApi
+  App --> uApp
+  App --> uSess
   App --> client
-  Views --> uApi & uApp & uSess
-  Vsec --> uApi & uApp & uSess
+  Views --> uApi
+  Views --> uApp
+  Views --> uSess
+  Vsec --> uApi
+  Vsec --> uApp
+  Vsec --> uSess
   Turns --> uApp
 ```
 
@@ -429,17 +437,22 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-  caller["caller<br/>(SSE callback,<br/>UI handler)"]
-  action["action helper<br/>setTool, updateSession, …"]
-  reducer["reducer(prev) → next"]
-  freeze["deepFreeze"]
-  notify["notify listeners"]
-  hook["useSyncExternalStore<br/>+ cached selector"]
-  comp["component re-renders"]
+  caller["caller<br>SSE callback or UI handler"]
+  action["action helper<br>setTool, updateSession"]
+  reducer["reducer prev to next"]
+  freeze[deepFreeze]
+  notify[notify listeners]
+  hook["useSyncExternalStore<br>plus cached selector"]
+  comp[component re-renders]
+  noop["no-op<br>no allocation, no notification"]
 
-  caller --> action --> reducer
-  reducer -- "next === prev" --> noop["no-op<br/>(no allocation, no notification)"]
-  reducer -- "new ref" --> freeze --> notify --> hook --> comp
+  caller --> action
+  action --> reducer
+  reducer -- "next is prev" --> noop
+  reducer -- "new ref" --> freeze
+  freeze --> notify
+  notify --> hook
+  hook --> comp
 ```
 
 Returning `prev` from the reducer is the supported way to signal
@@ -461,24 +474,24 @@ sequenceDiagram
   participant A as Agent
   participant SO as SseOutput
 
-  U->>C: types prompt + Enter
-  C->>C: optimistic mutate(session)<br/>append user + empty agent turn
-  C->>CL: send(id, prompt, callbacks, files?)
-  CL->>H: GET /api/conversations/:id/events (SSE open)
-  CL->>H: POST /api/conversations/:id/turn
-  H->>CH: lock, build agent if absent,<br/>install persist hook + cancel token
-  H->>A: agent.run(prompt, &mut SseOutput)
+  U->>C: types prompt and presses Enter
+  C->>C: optimistic mutate session, append user plus empty agent turn
+  C->>CL: send id, prompt, callbacks, files
+  CL->>H: GET events SSE open
+  CL->>H: POST turn
+  H->>CH: lock, build agent if absent, install persist hook and cancel token
+  H->>A: agent.run prompt with SseOutput
   loop streaming
-    A->>SO: text_delta / thinking_delta /<br/>tool_use_start / tool_result / send_file / send_artefact
+    A->>SO: text_delta, thinking_delta, tool_use_start, tool_result, send_file, send_artefact
     SO-->>H: broadcast SseEvent
-    H-->>CL: data: {...}\n\n
-    CL->>C: callbacks (updateSession / setTool / updateTool)
+    H-->>CL: data frame
+    CL->>C: callbacks updateSession, setTool, updateTool
     C-->>U: re-render frozen snapshot
   end
   A-->>H: persist hook saves transcript
-  SO-->>CL: data: {"type":"done"}
-  CL->>CL: EventSource.close()
-  C->>C: mutate(session.running = false)
+  SO-->>CL: done event
+  CL->>CL: EventSource close
+  C->>C: mutate session running false
 ```
 
 **Cancel.**  `POST /api/conversations/:id/cancel` calls the chat's
