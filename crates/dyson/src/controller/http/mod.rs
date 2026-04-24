@@ -33,13 +33,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::Engine;
-use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
+use http_body_util::{BodyExt, StreamBody};
 use hyper::body::{Bytes, Frame};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -50,21 +49,28 @@ use crate::config::{ControllerConfig, Settings};
 use crate::error::DysonError;
 use crate::feedback::{FeedbackEntry, FeedbackRating, FeedbackStore};
 use crate::message::{ContentBlock, Message, Role};
-use crate::tool::{CheckpointEvent, ToolOutput};
 use crate::util::resolve_tilde;
 
 use super::{AgentMode, ClientRegistry, Controller, Output, build_agent};
 
 mod assets;
 mod config;
+mod output;
+mod responses;
 mod state;
 mod stores;
 mod wire;
 
 use config::{HttpAuthConfig, HttpControllerConfigRaw, is_loopback_bind};
+use output::SseOutput;
+use responses::{
+    Resp, auth_headers_for, bad_request, boxed, client_accepts_gzip, get_auth_config, json_ok,
+    maybe_gzip, method_not_allowed, mime_for_extension, not_found, parse_query, read_json,
+    read_json_capped, safe_store_id, sanitize_filename, unauthorized, url_decode,
+};
 pub use state::HttpState;
 use state::ChatHandle;
-use stores::{ArtefactEntry, ArtefactStore, FileEntry, FileStore};
+use stores::{ArtefactStore, FileStore};
 use wire::{
     ArtefactDto, AuthMode, BlockDto, ConversationDto, CreateChatBody, FeedbackBody, MAX_TURN_BODY,
     MessageDto, MindWriteBody, ModelSwitchBody, ProviderDto, SseEvent, TurnBody,
@@ -584,8 +590,6 @@ pub mod test_helpers {
 // ---------------------------------------------------------------------------
 // Routing
 // ---------------------------------------------------------------------------
-
-type Resp = Response<BoxBody<Bytes, Infallible>>;
 
 async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) -> Resp {
     // Gzip the response if the client asked for it and the content-type
@@ -1541,270 +1545,6 @@ async fn serve_static(_state: &HttpState, path: &str) -> Resp {
     }
 }
 
-/// MIME type for an agent-produced file based on extension.  Used by
-/// `send_file` to label inline images vs. download attachments.
-fn mime_for_extension(path: &std::path::Path) -> String {
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "pdf" => "application/pdf",
-        "txt" | "md" | "log" => "text/plain; charset=utf-8",
-        "json" => "application/json",
-        "html" | "htm" => "text/html; charset=utf-8",
-        "csv" => "text/csv; charset=utf-8",
-        "zip" => "application/zip",
-        "tar" => "application/x-tar",
-        "gz" => "application/gzip",
-        _ => "application/octet-stream",
-    }
-    .to_string()
-}
-
-// ---------------------------------------------------------------------------
-// SseOutput — implements `Output` by fanning events into a broadcast channel.
-// ---------------------------------------------------------------------------
-
-struct SseOutput {
-    /// Which chat this output is scoped to — stamped onto every
-    /// artefact so `/api/conversations/<id>/artefacts` can filter.
-    chat_id: String,
-    tx: broadcast::Sender<SseEvent>,
-    /// Shared file store so `send_file` can stash agent-produced bytes
-    /// for the UI to fetch via `/api/files/<id>`.
-    files: Arc<std::sync::Mutex<FileStore>>,
-    /// Counter for synthesising file ids when the agent attaches an
-    /// unnamed file.  Wraps; collisions are vanishingly unlikely
-    /// inside the FileStore::MAX_FILES window.
-    next_file_id: Arc<std::sync::atomic::AtomicU64>,
-    /// Shared artefact store for `send_artefact`.
-    artefacts: Arc<std::sync::Mutex<ArtefactStore>>,
-    next_artefact_id: Arc<std::sync::atomic::AtomicU64>,
-    /// Optional write-through disk directory for persistence.
-    data_dir: Option<PathBuf>,
-    /// Currently-executing tool's id.  Set in `tool_use_start` and
-    /// carried across subsequent `send_file` / `send_artefact` calls
-    /// that the agent loop triggers from the same `ToolOutput`.  The
-    /// id is stamped on every file and artefact entry so the UI can
-    /// wire image artefacts back to the originating tool panel on
-    /// chat reload.
-    current_tool_use_id: Option<String>,
-}
-
-impl SseOutput {
-    fn send(&self, evt: SseEvent) {
-        // Ignore receiver-count errors — there may be no subscribers right
-        // now; events are still useful when one connects mid-turn (only the
-        // most recent N stay buffered, that's fine for SSE semantics).
-        let _ = self.tx.send(evt);
-    }
-}
-
-impl Output for SseOutput {
-    fn text_delta(&mut self, text: &str) -> std::result::Result<(), DysonError> {
-        self.send(SseEvent::Text {
-            delta: text.to_string(),
-        });
-        Ok(())
-    }
-
-    fn thinking_delta(&mut self, text: &str) -> std::result::Result<(), DysonError> {
-        self.send(SseEvent::Thinking {
-            delta: text.to_string(),
-        });
-        Ok(())
-    }
-
-    fn tool_use_start(&mut self, id: &str, name: &str) -> std::result::Result<(), DysonError> {
-        // Remember which tool is running so any `send_file` /
-        // `send_artefact` calls that follow this turn's `tool_result`
-        // can stamp the same id on their FileEntry / ArtefactEntry.
-        // Reset in `flush` at turn end; NOT reset in `tool_result` —
-        // files are emitted AFTER the tool result per execution.rs.
-        self.current_tool_use_id = Some(id.to_string());
-        self.send(SseEvent::ToolStart {
-            id: id.to_string(),
-            name: name.to_string(),
-        });
-        Ok(())
-    }
-
-    fn tool_use_complete(&mut self) -> std::result::Result<(), DysonError> {
-        Ok(())
-    }
-
-    fn tool_result(&mut self, output: &ToolOutput) -> std::result::Result<(), DysonError> {
-        self.send(SseEvent::ToolResult {
-            content: output.content.clone(),
-            is_error: output.is_error,
-            view: output.view.clone(),
-        });
-        Ok(())
-    }
-
-    fn send_file(&mut self, path: &std::path::Path) -> std::result::Result<(), DysonError> {
-        // Slurp the file (size-capped to keep a runaway tool from
-        // blowing memory), park it in the shared FileStore, emit an
-        // SSE `file` event with the URL the UI fetches.
-        const MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
-        match std::fs::metadata(path) {
-            Ok(m) if m.len() > MAX_FILE_BYTES => {
-                self.send(SseEvent::Text {
-                    delta: format!(
-                        "\n[file: {} too large ({} MB) — not delivered]\n",
-                        path.display(), m.len() / (1024 * 1024),
-                    ),
-                });
-                return Ok(());
-            }
-            Ok(_) => {}
-            Err(e) => {
-                self.send(SseEvent::Text {
-                    delta: format!("\n[file: {} — stat failed: {e}]\n", path.display()),
-                });
-                return Ok(());
-            }
-        }
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.send(SseEvent::Text {
-                    delta: format!("\n[file: {} — read failed: {e}]\n", path.display()),
-                });
-                return Ok(());
-            }
-        };
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("file")
-            .to_string();
-        let mime = mime_for_extension(path);
-        let id = format!(
-            "f{}",
-            self.next_file_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
-        let inline_image = mime.starts_with("image/");
-        let url = format!("/api/files/{id}");
-        let bytes_len = bytes.len();
-        let entry = FileEntry { bytes, mime: mime.clone(), name: name.clone() };
-        // Write-through to disk first so a controller crash between
-        // the memory put and the disk write doesn't leak a dangling
-        // in-memory reference that can't be rehydrated.
-        if let Some(dir) = self.data_dir.as_ref() {
-            FileStore::persist_static(dir, &id, &entry);
-        }
-        // std::sync::Mutex — blocking but the critical section is a
-        // HashMap insert + a Vec push.  Negligible contention.
-        if let Ok(mut s) = self.files.lock() {
-            s.put(id.clone(), entry);
-        }
-        self.send(SseEvent::File {
-            name: name.clone(),
-            mime_type: mime.clone(),
-            url: url.clone(),
-            inline_image,
-        });
-
-        // Images are also artefacts — listing them in the Artefacts
-        // tab makes a chat's generated images discoverable after the
-        // original chat scroll has paged them away.  The body here is
-        // the served URL (not the raw bytes); the reader notices the
-        // `image/*` mime and renders with `<img>` instead of markdown.
-        if inline_image {
-            let artefact = crate::message::Artefact {
-                id: String::new(),
-                kind: crate::message::ArtefactKind::Image,
-                title: name.clone(),
-                content: url.clone(),
-                mime_type: mime.clone(),
-                metadata: Some(serde_json::json!({
-                    "file_url": url,
-                    "file_name": name,
-                    "bytes": bytes_len,
-                })),
-            };
-            let _ = self.send_artefact(&artefact);
-        }
-
-        Ok(())
-    }
-
-    fn checkpoint(&mut self, event: &CheckpointEvent) -> std::result::Result<(), DysonError> {
-        // CheckpointEvent has no Display impl — Debug suffices for the
-        // UI's progress feed in v1.  Replace with a typed event later.
-        self.send(SseEvent::Checkpoint {
-            text: format!("{event:?}"),
-        });
-        Ok(())
-    }
-
-    fn send_artefact(
-        &mut self,
-        artefact: &crate::message::Artefact,
-    ) -> std::result::Result<(), DysonError> {
-        let id = format!(
-            "a{}",
-            self.next_artefact_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
-        // The `url` surfaces to the client as the chip's href — use the
-        // SPA deep-link so cmd-click / copy-paste lands on the reader.
-        // The raw bytes still live at `/api/artefacts/<id>` and the
-        // reader fetches them itself once mounted.
-        let url = format!("/#/artefacts/{id}");
-        let bytes = artefact.content.len();
-        let entry = ArtefactEntry {
-            chat_id: self.chat_id.clone(),
-            kind: artefact.kind,
-            title: artefact.title.clone(),
-            content: artefact.content.clone(),
-            mime_type: artefact.mime_type.clone(),
-            metadata: artefact.metadata.clone(),
-            tool_use_id: self.current_tool_use_id.clone(),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        };
-        if let Some(dir) = self.data_dir.as_ref() {
-            ArtefactStore::persist_static(dir, &id, &entry);
-        }
-        if let Ok(mut s) = self.artefacts.lock() {
-            s.put(id.clone(), entry);
-        }
-        self.send(SseEvent::Artefact {
-            id,
-            kind: artefact.kind,
-            title: artefact.title.clone(),
-            url,
-            bytes,
-            metadata: artefact.metadata.clone(),
-        });
-        Ok(())
-    }
-
-    fn error(&mut self, error: &DysonError) -> std::result::Result<(), DysonError> {
-        self.send(SseEvent::LlmError {
-            message: error.to_string(),
-        });
-        Ok(())
-    }
-
-    fn flush(&mut self) -> std::result::Result<(), DysonError> {
-        // End of turn — the next turn's `tool_use_start` will set a
-        // new id; until then there's no "current" tool.
-        self.current_tool_use_id = None;
-        Ok(())
-    }
-}
 
 // ---------------------------------------------------------------------------
 // API: mind / activity
@@ -1973,23 +1713,6 @@ async fn get_artefact(state: &HttpState, id: &str) -> Resp {
         .unwrap()
 }
 
-/// Sanitise a title for use inside a `filename="..."` Content-Disposition
-/// parameter.  Strips characters that would either break the header
-/// (`\r`, `\n`, `"`) or confuse downstream shells / archivers (`/`,
-/// `\\`).  Non-ASCII passes through — browsers tolerate it in quoted
-/// filenames and the UI already uses it as the display title.
-fn sanitize_filename(s: &str) -> String {
-    s.chars()
-        .filter(|c| !matches!(c, '"' | '\r' | '\n' | '/' | '\\'))
-        .collect()
-}
-
-/// Wire shape for `GET /api/conversations/<chat>/artefacts`.  One entry
-/// per artefact emitted for this chat, ordered newest first.  The
-/// reader fetches the body separately from `/api/artefacts/<id>` so the
-/// list is cheap to render even when reports are multi-KB.
-/// (`ArtefactDto` lives in `wire.rs`.)
-///
 /// List artefacts for a given chat.  Empty list if none exist yet.
 /// Stream a ShareGPT-format dump of a conversation for the web UI's
 /// download button.  Reads the transcript from `ChatHistory` (or the
@@ -2253,299 +1976,6 @@ async fn post_model(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) 
     }))
 }
 
-/// Tiny URL-query parser, sufficient for `?path=foo&bar=baz`.
-fn parse_query(q: &str) -> Vec<(String, String)> {
-    q.split('&')
-        .filter_map(|kv| {
-            let (k, v) = kv.split_once('=')?;
-            Some((url_decode(k), url_decode(v)))
-        })
-        .collect()
-}
-
-/// Gate for path components that become filesystem names in on-disk
-/// stores (`<id>.meta.json`, `<id>.body`, `<id>.bin`).  Minted IDs are
-/// `a<u64>` / `f<u64>`, but the value reaches us through a URL, so an
-/// attacker can submit `../etc/passwd` after `url_decode` turns `%2F`
-/// into `/`.  We're strict rather than blacklist-y — anything outside
-/// the minted alphabet is suspicious.
-fn safe_store_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
-fn url_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => {
-                let hi = (bytes[i + 1] as char).to_digit(16);
-                let lo = (bytes[i + 2] as char).to_digit(16);
-                match (hi, lo) {
-                    (Some(h), Some(l)) => {
-                        out.push((h * 16 + l) as u8);
-                        i += 3;
-                    }
-                    _ => {
-                        out.push(bytes[i]);
-                        i += 1;
-                    }
-                }
-            }
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn boxed(bytes: Bytes) -> BoxBody<Bytes, Infallible> {
-    Full::new(bytes).boxed()
-}
-
-/// True when the request's `Accept-Encoding` header advertises gzip.
-/// Conservative parse — we only look for the literal token `gzip`, not
-/// q-values or `*`.  That's fine: every real browser lists `gzip` plainly
-/// alongside brotli/deflate.
-fn client_accepts_gzip(headers: &hyper::header::HeaderMap) -> bool {
-    headers
-        .get(hyper::header::ACCEPT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| {
-            v.split(',')
-                .map(|p| p.trim().split(';').next().unwrap_or("").trim())
-                .any(|tok| tok.eq_ignore_ascii_case("gzip"))
-        })
-        .unwrap_or(false)
-}
-
-/// Content-Type prefixes worth gzipping.  woff2/png/jpeg are already
-/// compressed; SSE (`text/event-stream`) is infinite-streaming so we
-/// must never buffer it.  Anything not in this set passes through.
-fn compressible_content_type(ct: &str) -> bool {
-    ct.starts_with("text/html")
-        || ct.starts_with("text/css")
-        || ct.starts_with("text/plain")
-        || ct.starts_with("text/csv")
-        || ct.starts_with("application/javascript")
-        || ct.starts_with("application/json")
-        || ct.starts_with("image/svg+xml")
-}
-
-/// Gzip at miniz_oxide's default level.  Called on the hot path for
-/// every cold-load asset fetch; the cost is bounded by what the
-/// frontend bundle ships (~220 KiB worst case today) and amortised
-/// against the bandwidth saved — on slow-4G a 60 % compression win
-/// beats the CPU cost by an order of magnitude.
-fn gzip_bytes(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
-    use flate2::Compression;
-    use flate2::write::GzEncoder;
-    use std::io::Write;
-    let mut enc = GzEncoder::new(
-        Vec::with_capacity(bytes.len() / 2),
-        Compression::default(),
-    );
-    enc.write_all(bytes)?;
-    enc.finish()
-}
-
-/// Post-dispatch wrapper: collect the response body, compress it if the
-/// client asked for gzip and the content-type is text-ish and the body
-/// is big enough to be worth it.  SSE responses sail through untouched
-/// because `text/event-stream` isn't in the compressible set — their
-/// streaming body would otherwise be buffered forever.
-async fn maybe_gzip(resp: Resp, accepts_gzip: bool) -> Resp {
-    if !accepts_gzip {
-        return resp;
-    }
-    let is_compressible = resp
-        .headers()
-        .get("Content-Type")
-        .and_then(|v| v.to_str().ok())
-        .map(compressible_content_type)
-        .unwrap_or(false);
-    if !is_compressible {
-        return resp;
-    }
-    if resp.headers().contains_key("Content-Encoding") {
-        return resp;
-    }
-    let (parts, body) = resp.into_parts();
-    // Body is `BoxBody<Bytes, Infallible>` — collect can't fail, but we
-    // match defensively anyway so a future body type can't silently
-    // panic in production.
-    let bytes = match body.collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(_) => return Response::from_parts(parts, boxed(Bytes::new())),
-    };
-    // ~1 KiB floor: below that the gzip header overhead can make the
-    // output bigger than the input, and the transfer is one TCP packet
-    // either way.
-    if bytes.len() < 1024 {
-        return Response::from_parts(parts, boxed(bytes));
-    }
-    let compressed = match gzip_bytes(&bytes) {
-        Ok(v) => v,
-        Err(_) => return Response::from_parts(parts, boxed(bytes)),
-    };
-    let mut resp = Response::from_parts(parts, boxed(Bytes::from(compressed)));
-    let headers = resp.headers_mut();
-    headers.insert(
-        hyper::header::CONTENT_ENCODING,
-        hyper::header::HeaderValue::from_static("gzip"),
-    );
-    headers.insert(
-        hyper::header::VARY,
-        hyper::header::HeaderValue::from_static("Accept-Encoding"),
-    );
-    // Hyper computes Content-Length from the Full body, but the old
-    // header (if any) lingered from the uncompressed build — drop it
-    // so the new, smaller length is authoritative.
-    headers.remove(hyper::header::CONTENT_LENGTH);
-    resp
-}
-
-fn json_ok<T: Serialize>(v: &T) -> Resp {
-    let bytes = serde_json::to_vec(v).unwrap_or_else(|_| b"null".to_vec());
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(boxed(Bytes::from(bytes)))
-        .unwrap()
-}
-
-fn bad_request(msg: &str) -> Resp {
-    let body = serde_json::json!({ "error": msg }).to_string();
-    Response::builder()
-        .status(StatusCode::BAD_REQUEST)
-        .header("Content-Type", "application/json")
-        .body(boxed(Bytes::from(body)))
-        .unwrap()
-}
-
-fn not_found() -> Resp {
-    Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .header("Content-Type", "application/json")
-        .body(boxed(Bytes::from_static(br#"{"error":"not found"}"#)))
-        .unwrap()
-}
-
-fn method_not_allowed() -> Resp {
-    Response::builder()
-        .status(StatusCode::METHOD_NOT_ALLOWED)
-        .header("Content-Type", "application/json")
-        .body(boxed(Bytes::from_static(
-            br#"{"error":"method not allowed"}"#,
-        )))
-        .unwrap()
-}
-
-fn unauthorized(state: &HttpState) -> Resp {
-    let mut builder = Response::builder()
-        .status(StatusCode::UNAUTHORIZED)
-        .header("Content-Type", "application/json");
-
-    // RFC 6750 challenge.  In OIDC mode include the issuer + the
-    // authorization endpoint so a client that doesn't already know
-    // about /api/auth/config can still find its way to the IdP — the
-    // header is the well-trodden path for non-browser clients
-    // (curl wrappers, terraform providers, k6 load tests).
-    let challenge = match &state.auth_mode {
-        AuthMode::Bearer => Some(r#"Bearer realm="dyson", error="invalid_token""#.to_string()),
-        AuthMode::Oidc {
-            issuer,
-            authorization_endpoint,
-            ..
-        } => Some(format!(
-            r#"Bearer realm="dyson", error="invalid_token", as_uri="{authorization_endpoint}", iss="{issuer}""#
-        )),
-        AuthMode::None => None,
-    };
-    if let Some(c) = challenge {
-        builder = builder.header("WWW-Authenticate", c);
-    }
-    builder
-        .body(boxed(Bytes::from_static(br#"{"error":"unauthorized"}"#)))
-        .unwrap()
-}
-
-/// `GET /api/auth/config` — unauthenticated discovery endpoint the SPA
-/// calls before it has any credential.  Returns the auth mode plus the
-/// minimum the frontend needs to bootstrap (OIDC: issuer +
-/// authorization_endpoint + client_id + required_scopes; bearer: just
-/// the mode tag; none: just the mode tag).
-fn get_auth_config(state: &HttpState) -> Resp {
-    json_ok(&state.auth_mode)
-}
-
-/// Produce a `HeaderMap` to feed into `auth.validate_request`,
-/// folding `?access_token=` into an `Authorization: Bearer …` header
-/// when the path is an SSE endpoint and no header is already present.
-/// Returns `None` when the original headers are usable as-is — the
-/// caller borrows `req.headers()` and pays no allocation in that
-/// (overwhelmingly common) case.
-fn auth_headers_for(
-    path: &str,
-    req: &Request<hyper::body::Incoming>,
-) -> Option<hyper::HeaderMap> {
-    if !path.ends_with("/events") || req.headers().contains_key("authorization") {
-        return None;
-    }
-    let token = parse_query(req.uri().query()?)
-        .into_iter()
-        .find(|(k, _)| k == "access_token")
-        .map(|(_, v)| v)
-        .filter(|v| !v.is_empty())?;
-    let value = format!("Bearer {token}").parse().ok()?;
-    let mut headers = req.headers().clone();
-    headers.insert("authorization", value);
-    Some(headers)
-}
-
-async fn read_json<T: for<'de> Deserialize<'de>>(
-    req: Request<hyper::body::Incoming>,
-) -> std::result::Result<T, String> {
-    let collected = req
-        .collect()
-        .await
-        .map_err(|e| format!("body read: {e}"))?;
-    let bytes = collected.to_bytes();
-    serde_json::from_slice(&bytes).map_err(|e| format!("json parse: {e}"))
-}
-
-/// Like `read_json` but with a hard byte cap.  Used by upload-bearing
-/// endpoints to refuse oversized requests after the body is read
-/// (the Content-Length pre-check covers honest clients; this catches
-/// chunked bodies that lie about length).
-async fn read_json_capped<T: for<'de> Deserialize<'de>>(
-    req: Request<hyper::body::Incoming>,
-    max: usize,
-) -> std::result::Result<T, String> {
-    let collected = req
-        .collect()
-        .await
-        .map_err(|e| format!("body read: {e}"))?;
-    let bytes = collected.to_bytes();
-    if bytes.len() > max {
-        return Err(format!("body too large ({} bytes; max {max})", bytes.len()));
-    }
-    serde_json::from_slice(&bytes).map_err(|e| format!("json parse: {e}"))
-}
-
 // ---------------------------------------------------------------------------
 // Unit tests — pure helpers.  End-to-end HTTP round-trips live in
 // `crates/dyson/tests/http_controller.rs` so they can bind a port.
@@ -2554,60 +1984,6 @@ async fn read_json_capped<T: for<'de> Deserialize<'de>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn client_accepts_gzip_parses_common_headers() {
-        use hyper::header::{ACCEPT_ENCODING, HeaderMap, HeaderValue};
-        fn h(v: &str) -> HeaderMap {
-            let mut m = HeaderMap::new();
-            m.insert(ACCEPT_ENCODING, HeaderValue::from_str(v).unwrap());
-            m
-        }
-        // What real browsers send — gzip listed alongside other encodings.
-        assert!(client_accepts_gzip(&h("gzip, deflate, br")));
-        assert!(client_accepts_gzip(&h("br, gzip")));
-        assert!(client_accepts_gzip(&h("gzip")));
-        // Q-values and whitespace shouldn't trip us up.
-        assert!(client_accepts_gzip(&h("deflate, gzip;q=0.8")));
-        assert!(client_accepts_gzip(&h("GZIP")));
-        // Only non-gzip encodings.
-        assert!(!client_accepts_gzip(&h("br, deflate")));
-        assert!(!client_accepts_gzip(&h("identity")));
-        // No header at all (old clients, curl without -H).
-        assert!(!client_accepts_gzip(&HeaderMap::new()));
-    }
-
-    #[test]
-    fn compressible_content_type_allowlist() {
-        // Text-ish: compress.  Image/svg is worth it, font/woff2 isn't
-        // (already compressed).  text/event-stream MUST stay out —
-        // it's the SSE channel and buffering it would deadlock.
-        assert!(compressible_content_type("text/html; charset=utf-8"));
-        assert!(compressible_content_type("application/javascript; charset=utf-8"));
-        assert!(compressible_content_type("application/json"));
-        assert!(compressible_content_type("image/svg+xml"));
-        assert!(!compressible_content_type("text/event-stream"));
-        assert!(!compressible_content_type("font/woff2"));
-        assert!(!compressible_content_type("image/png"));
-        assert!(!compressible_content_type("application/octet-stream"));
-    }
-
-    #[test]
-    fn gzip_bytes_round_trips() {
-        use flate2::read::GzDecoder;
-        use std::io::Read;
-        // The 223 KiB app bundle is the real workload — use a large
-        // repetitive buffer so the compressor has room to show it
-        // actually compresses (not just a no-op wrap).
-        let payload = b"dyson ".repeat(10_000);
-        let compressed = gzip_bytes(&payload).expect("gzip should succeed");
-        assert!(compressed.len() < payload.len() / 4, "should compress repetitive text");
-        let mut decoded = Vec::new();
-        GzDecoder::new(&compressed[..])
-            .read_to_end(&mut decoded)
-            .expect("round-trip decode");
-        assert_eq!(decoded, payload);
-    }
 
     #[test]
     fn emoji_to_rating_matches_telegram() {
@@ -2664,21 +2040,6 @@ mod tests {
             text: "no user here".into(),
         }])];
         assert_eq!(first_user_text(&msgs), None);
-    }
-
-    #[test]
-    fn url_decode_handles_percent_and_plus() {
-        assert_eq!(url_decode("foo%20bar"), "foo bar");
-        assert_eq!(url_decode("a+b"), "a b");
-        assert_eq!(url_decode("memory%2F2026.md"), "memory/2026.md");
-        // Bad escape — pass through the literal % rather than panic.
-        assert_eq!(url_decode("100%"), "100%");
-    }
-
-    #[test]
-    fn parse_query_extracts_path() {
-        let pairs = parse_query("path=memory%2FSOUL.md&x=1");
-        assert!(pairs.iter().any(|(k, v)| k == "path" && v == "memory/SOUL.md"));
     }
 
     // The embedded bundle is part of the binary's contract.  Filenames
