@@ -7,7 +7,7 @@ import { Icon, Kbd } from './icons.jsx';
 // across panels.jsx / views-secondary.jsx.  One implementation now.
 import { copyToClipboard } from '../lib/clipboard.js';
 import { useAppState } from '../hooks/useAppState.js';
-import { selectActiveModel, selectMind, requestOpenArtefact } from '../store/app.js';
+import { requestOpenArtefact } from '../store/app.js';
 import { SLASH_COMMANDS } from '../store/constants.js';
 
 function ThinkingBlock({ text }) {
@@ -399,7 +399,7 @@ function Composer({ onSend, onCancel, running }) {
   const [atts, setAtts] = useState([]);
   const taRef = useRef();
   const fileRef = useRef();
-  const activeModel = useAppState(selectActiveModel);
+  const activeModel = useAppState(s => s.activeModel);
   const filtered = slash ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(val.split(/\s/)[0] || '/')) : [];
 
   useEffect(() => {
@@ -496,8 +496,8 @@ function EmptyState() {
   // /api/mind — both live in the app store.  Skills isn't populated by
   // the current controller; left as-is so the count stays 0 until the
   // endpoint exists.
-  const model = useAppState(selectActiveModel);
-  const mind = useAppState(selectMind);
+  const model = useAppState(s => s.activeModel);
+  const mind = useAppState(s => s.mind);
   const wsBackend = (mind && mind.backend) || '';
   const builtinCount = 0;
   const mcpCount = 0;

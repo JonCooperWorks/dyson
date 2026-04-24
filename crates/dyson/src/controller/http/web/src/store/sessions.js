@@ -96,7 +96,7 @@ export function mintToolRef(chatId, kind) {
   return `${chatId}-${kind}-${r.counter}`;
 }
 
-export function disposeResources(chatId) {
+function disposeResources(chatId) {
   const r = resources.get(chatId);
   if (!r) return;
   if (r.es) { try { r.es.close(); } catch { /* closed already */ } }
@@ -109,3 +109,30 @@ export function __resetSessionsForTests() {
   sessions.dispatch(() => ({}));
   for (const chatId of [...resources.keys()]) disposeResources(chatId);
 }
+
+// -- Pure session reducers ---------------------------------------------
+// Reused across streamCallbacks, /clear, and hydration.  Each returns a
+// new session snapshot, or the same reference to signal no-op.  Kept
+// out of the React tree so they can be unit-tested and so streamCallbacks
+// can compose them without prop-drilling.
+
+export const mapLastTurn = (s, fn) => {
+  if (!s.liveTurns.length) return s;
+  const i = s.liveTurns.length - 1;
+  const next = fn(s.liveTurns[i]);
+  if (next === s.liveTurns[i]) return s;
+  return { ...s, liveTurns: [...s.liveTurns.slice(0, i), next] };
+};
+
+export const appendBlock = (s, block) =>
+  mapLastTurn(s, t => ({ ...t, blocks: [...t.blocks, block] }));
+
+export const openPanel = (s, ref) => ({
+  ...s,
+  panels: s.panels.includes(ref) ? s.panels : [...s.panels, ref],
+  openTool: ref,
+});
+
+export const closePanel = (s, ref) => s.panels.includes(ref)
+  ? { ...s, panels: s.panels.filter(x => x !== ref), openTool: s.openTool === ref ? null : s.openTool }
+  : s;

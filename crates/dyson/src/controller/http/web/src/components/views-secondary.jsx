@@ -9,14 +9,13 @@
 
 import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
-import { ArtefactBlock, markdown, prettySize } from './turns.jsx';
+import { markdown, prettySize } from './turns.jsx';
 import { copyToClipboard } from '../lib/clipboard.js';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession } from '../hooks/useSession.js';
 import {
-  selectMind, selectActivity, selectConversations,
-  setActivity, setMind,
+  setActivity,
   requestOpenArtefact, clearPendingArtefact,
 } from '../store/app.js';
 import {
@@ -25,7 +24,7 @@ import {
 
 export function MindView({ showSide, onHideSide }) {
   const client = useApi();
-  const m = useAppState(selectMind);
+  const m = useAppState(s => s.mind);
   const initial = (m.files[0] && m.files[0].path) || '';
   const [selected, setSelected] = useState(initial);
   const [loaded, setLoaded] = useState('');
@@ -111,7 +110,7 @@ export function ActivityView() {
   // (disk-backed, per chat) — re-fetching is cheap and keeps the
   // tab honest even across tab switches.
   const client = useApi();
-  const lanes = useAppState(selectActivity);
+  const lanes = useAppState(s => s.activity);
   useEffect(() => {
     const refresh = () => {
       client.getActivity().then(act => {
@@ -218,7 +217,7 @@ function ensureArtefacts(chatId, client) {
 
 export function ArtefactsView({ conv, setConv }) {
   const client = useApi();
-  const chats = useAppState(selectConversations).filter(c => c.hasArtefacts);
+  const chats = useAppState(s => s.conversations).filter(c => c.hasArtefacts);
   const toggleNonce = useAppState(s => s.ui.toggleArtefactsDrawerNonce);
   const pendingArtefactId = useAppState(s => s.ui.pendingArtefactId);
 

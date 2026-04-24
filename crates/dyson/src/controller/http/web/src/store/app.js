@@ -41,20 +41,11 @@ const INITIAL = {
 
 export const app = createStore(INITIAL);
 
-// Selectors — keep the shape of dependent components decoupled from the
-// store layout.  Callers that only care about one slice stay cheap when
-// the rest of the state churns.
-export const selectActiveModel   = (s) => s.activeModel;
-export const selectConversations = (s) => s.conversations;
-export const selectProviders     = (s) => s.providers;
-export const selectActivity      = (s) => s.activity;
-export const selectMind          = (s) => s.mind;
-export const selectTools         = (s) => s.tools;
-export const selectUi            = (s) => s.ui;
-export const selectLive          = (s) => s.live;
-
 // Actions — the only supported way to mutate the store.  Each returns
-// void and dispatches the minimum-viable reducer.
+// void and dispatches the minimum-viable reducer.  Selectors are inline
+// lambdas at the call site (`useAppState(s => s.foo)`) — the hook caches
+// the selected slice by identity so recreating the selector per render
+// doesn't cost anything.
 
 export function setLive(v) {
   app.dispatch(s => s.live === v ? s : { ...s, live: v });
@@ -123,6 +114,12 @@ export function setActivity(lanes) {
 // createStore ensures any accidental `tools[id].foo = bar` throws.
 export function setTool(ref, tool) {
   app.dispatch(s => ({ ...s, tools: { ...s.tools, [ref]: tool } }));
+}
+
+// Merge many tools at once — cheaper than one dispatch per entry when
+// hydrating a transcript on chat reload.
+export function mergeTools(patch) {
+  app.dispatch(s => ({ ...s, tools: { ...s.tools, ...patch } }));
 }
 
 // `patchOrReducer` can be a shallow patch object or a reducer function —

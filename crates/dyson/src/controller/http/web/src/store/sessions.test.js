@@ -8,6 +8,10 @@ import {
   makeSession,
   mintToolRef,
   getResources,
+  mapLastTurn,
+  appendBlock,
+  openPanel,
+  closePanel,
   __resetSessionsForTests,
 } from './sessions.js';
 
@@ -103,5 +107,68 @@ describe('makeSession shape', () => {
     expect(s.running).toBe(false);
     expect(s.loaded).toBe(false);
     expect(s.artefacts).toEqual([]);
+  });
+});
+
+describe('pure session reducers', () => {
+  const turn = (blocks = []) => ({ role: 'agent', ts: '', blocks });
+
+  it('mapLastTurn returns the same state when there are no turns', () => {
+    const s = makeSession();
+    expect(mapLastTurn(s, t => ({ ...t, blocks: ['x'] }))).toBe(s);
+  });
+
+  it('mapLastTurn returns the same state when the reducer is a no-op', () => {
+    const s = { ...makeSession(), liveTurns: [turn()] };
+    expect(mapLastTurn(s, t => t)).toBe(s);
+  });
+
+  it('mapLastTurn only replaces the last turn', () => {
+    const first = turn([{ type: 'text', text: 'a' }]);
+    const last = turn([{ type: 'text', text: 'b' }]);
+    const s = { ...makeSession(), liveTurns: [first, last] };
+    const next = mapLastTurn(s, t => ({ ...t, blocks: [] }));
+    expect(next.liveTurns[0]).toBe(first);
+    expect(next.liveTurns[1]).not.toBe(last);
+    expect(next.liveTurns[1].blocks).toEqual([]);
+  });
+
+  it('appendBlock pushes onto the last turn', () => {
+    const s = { ...makeSession(), liveTurns: [turn([{ type: 'text', text: 'hi' }])] };
+    const next = appendBlock(s, { type: 'text', text: ' there' });
+    expect(next.liveTurns[0].blocks).toHaveLength(2);
+    expect(next.liveTurns[0].blocks[1]).toEqual({ type: 'text', text: ' there' });
+  });
+
+  it('openPanel adds to panels and sets openTool', () => {
+    const s = makeSession();
+    const next = openPanel(s, 'r1');
+    expect(next.panels).toEqual(['r1']);
+    expect(next.openTool).toBe('r1');
+  });
+
+  it('openPanel does not duplicate panels', () => {
+    const s = { ...makeSession(), panels: ['r1'] };
+    const next = openPanel(s, 'r1');
+    expect(next.panels).toEqual(['r1']);
+    expect(next.openTool).toBe('r1');
+  });
+
+  it('closePanel removes the ref and clears openTool when it was the active one', () => {
+    const s = { ...makeSession(), panels: ['r1', 'r2'], openTool: 'r1' };
+    const next = closePanel(s, 'r1');
+    expect(next.panels).toEqual(['r2']);
+    expect(next.openTool).toBeNull();
+  });
+
+  it('closePanel leaves openTool untouched when closing a sibling ref', () => {
+    const s = { ...makeSession(), panels: ['r1', 'r2'], openTool: 'r2' };
+    const next = closePanel(s, 'r1');
+    expect(next.openTool).toBe('r2');
+  });
+
+  it('closePanel is a no-op when the ref isn\'t open', () => {
+    const s = { ...makeSession(), panels: ['r1'] };
+    expect(closePanel(s, 'r2')).toBe(s);
   });
 });
