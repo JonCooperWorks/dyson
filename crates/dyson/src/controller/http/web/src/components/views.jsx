@@ -465,11 +465,19 @@ function ArtefactsView({ conv, session, bump }) {
   // even though our own event listener isn't attached until after the
   // view switch.  Clear the stash after consuming so it doesn't
   // re-select an old id on the next mount.
+  const initialPending = (typeof window !== 'undefined' && window.__dysonOpenArtefactId) || null;
   const [selected, setSelected] = useState(() => {
-    const pending = window.__dysonOpenArtefactId;
-    if (pending) delete window.__dysonOpenArtefactId;
-    return pending || null;
+    if (initialPending) delete window.__dysonOpenArtefactId;
+    return initialPending || null;
   });
+  // Mobile drawer toggle.  On desktop the sidebar is always visible
+  // (grid column), so this state is a no-op there.  On mobile the
+  // sidebar is an absolutely-positioned overlay that slides in when
+  // `.show-side` is set — defaults to visible (the list) and auto-
+  // collapses when the user picks an artefact, so the reader isn't
+  // permanently buried under the drawer (the "tap-then-black-screen"
+  // bug).  Deep-links boot straight to the reader.
+  const [showSide, setShowSide] = useState(!initialPending);
 
   // Lazy hydrate the per-chat artefact list from the API.  Subsequent
   // switches do nothing — live SSE keeps it current.  We re-run the
@@ -505,8 +513,13 @@ function ArtefactsView({ conv, session, bump }) {
     if (pending) {
       delete window.__dysonOpenArtefactId;
       setSelected(pending);
+      setShowSide(false);
     } else {
       setSelected(null);
+      // Switching chats from the LeftRail should land the user back
+      // on the artefact list of the new chat, not on whatever reader
+      // pane was last open on mobile.
+      setShowSide(true);
     }
   }, [conv]);
 
@@ -527,11 +540,12 @@ function ArtefactsView({ conv, session, bump }) {
   // Allow in-chat chips to jump straight to a specific artefact.  The
   // event is fired by ArtefactBlock.onClick — if we're already on the
   // Artefacts tab we pick it up; otherwise App's view state change will
-  // mount this component and the last-selected id wins.
+  // mount this component and the last-selected id wins.  Closes the
+  // mobile drawer so the reader is the visible surface.
   useEffect(() => {
     const h = (e) => {
       const id = e.detail && e.detail.id;
-      if (id) setSelected(id);
+      if (id) { setSelected(id); setShowSide(false); }
     };
     window.addEventListener('dyson:open-artefact', h);
     return () => window.removeEventListener('dyson:open-artefact', h);
@@ -544,7 +558,7 @@ function ArtefactsView({ conv, session, bump }) {
   if (!conv) {
     if (selected) {
       return (
-        <div className="mind show-side">
+        <div className={`mind${showSide ? ' show-side' : ''}`}>
           <aside className="mind-side">
             <div style={{padding:'10px 14px', borderBottom:'1px solid var(--line)'}}>
               <div className="eyebrow">artefact</div>
@@ -553,7 +567,7 @@ function ArtefactsView({ conv, session, bump }) {
               </div>
             </div>
           </aside>
-          <ArtefactReader id={selected}/>
+          <ArtefactReader id={selected} onShowSide={() => setShowSide(true)}/>
         </div>
       );
     }
@@ -567,7 +581,7 @@ function ArtefactsView({ conv, session, bump }) {
   const list = (session && session.artefacts) || [];
 
   return (
-    <div className="mind show-side">
+    <div className={`mind${showSide ? ' show-side' : ''}`}>
       <aside className="mind-side">
         <div style={{padding:'10px 14px', borderBottom:'1px solid var(--line)'}}>
           <div className="eyebrow">artefacts · {list.length}</div>
@@ -575,15 +589,21 @@ function ArtefactsView({ conv, session, bump }) {
         </div>
         <div style={{overflowY:'auto', flex:1, padding:'6px 0'}}>
           {list.length === 0 && (
-            <div style={{padding:'14px', color:'var(--mute)', fontSize:12}}>
+            <div style={{padding:'14px', color:'var(--mute)', fontSize:12, lineHeight:1.5}}>
               No artefacts yet in this chat.  The security_engineer subagent
-              emits its final report here.
+              emits its final report here.  Tap <span className="mono" style={{color:'var(--fg-dim)'}}>☰</span> to switch to a chat that already has one.
             </div>
           )}
           {list.map(a => (
             <div key={a.id}
                  onClick={() => {
                    setSelected(a.id);
+                   // Auto-collapse the mobile drawer so the reader
+                   // becomes the visible surface — without this the
+                   // 80vw sidebar stayed pinned over the reader and
+                   // the user just saw a near-black screen.  No-op
+                   // on desktop (the sidebar is a grid column there).
+                   setShowSide(false);
                    // Surface the id to App so the URL becomes
                    // `#/artefacts/<id>` — clicking through the list
                    // is navigation, not just a local selection.
@@ -606,7 +626,7 @@ function ArtefactsView({ conv, session, bump }) {
           ))}
         </div>
       </aside>
-      <ArtefactReader id={selected}/>
+      <ArtefactReader id={selected} onShowSide={() => setShowSide(true)}/>
     </div>
   );
 }
@@ -614,7 +634,10 @@ function ArtefactsView({ conv, session, bump }) {
 // Full-page markdown reader.  Fetches the body from /api/artefacts/:id,
 // renders it through the shared `markdown()` helper, and surfaces the
 // metadata header (model, target, tokens, cost) in a sticky top bar.
-function ArtefactReader({ id }) {
+// `onShowSide` (optional) wires up the mobile-only back button so the
+// user can re-open the artefact list after picking a report — without
+// it the reader would be a one-way door on phones.
+function ArtefactReader({ id, onShowSide }) {
   const [body, setBody] = useState('');
   const [meta, setMeta] = useState(null);
   const [err, setErr]  = useState('');
@@ -649,6 +672,12 @@ function ArtefactReader({ id }) {
       </section>
     );
   }
+
+  const back = onShowSide
+    ? <button className="artefact-back" title="Back to artefact list" onClick={onShowSide}>
+        <Icon name="menu" size={14}/>
+      </button>
+    : null;
 
   const isImage = meta && typeof meta.kind === 'string' && meta.kind === 'image';
   const imageUrl = isImage
@@ -698,6 +727,7 @@ function ArtefactReader({ id }) {
     <section className="mind-pane">
       <div style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
                    borderBottom:'1px solid var(--line)', background:'var(--bg)', flexWrap:'wrap'}}>
+        {back}
         <span style={{fontSize:13, color:'var(--fg)', fontWeight:500}}>{(meta && meta.title) || 'Artefact'}</span>
         {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
         {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}

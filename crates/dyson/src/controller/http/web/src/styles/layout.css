@@ -428,6 +428,22 @@
 .mind-editor:focus { background: var(--bg-1); }
 .mind-editor:disabled { color: var(--mute); }
 
+/* Mobile-only back button in the artefact reader's title bar.  On
+   desktop the artefact list is a permanent grid column, so the
+   button is hidden — there's nothing to go "back" to.  On mobile the
+   list collapses when an artefact is picked and this is how the user
+   re-opens it. */
+.artefact-back {
+  display: none;
+  background: transparent; border: 0;
+  color: var(--fg-dim);
+  width: 28px; height: 28px;
+  align-items: center; justify-content: center;
+  cursor: pointer; border-radius: 4px;
+  flex: 0 0 auto;
+}
+.artefact-back:hover { background: var(--panel); color: var(--fg); }
+
 /* ---------- model menu (top bar) ---------- */
 .modelmenu-scrim { position: fixed; inset: 0; z-index: 19; }
 .modelmenu {
@@ -572,6 +588,7 @@
   }
   .mind.show-side .mind-side { transform: translateX(0); }
   .mind-editor { padding: 14px 18px; }
+  .artefact-back { display: inline-flex; }
   /* In Mind view the hamburger drives .mind.show-side (file list), so
      the stats-only LeftRailMind drawer would be redundant. Hide it. */
   .body.no-right .left,
