@@ -451,6 +451,12 @@
 }
 .artefact-back:hover { background: var(--panel); color: var(--fg); }
 
+/* Tap-to-close target for the mobile artefact drawer.  Sits inside
+   .mind under .mind-side so the visible 20vw strip of .mind-pane to
+   the right of the drawer actually does something when tapped.
+   Hidden on desktop, where the sidebar is a permanent grid column. */
+.mind-scrim { display: none; }
+
 /* ---------- model menu (top bar) ---------- */
 .modelmenu-scrim { position: fixed; inset: 0; z-index: 19; }
 .modelmenu {
@@ -594,12 +600,22 @@
     transition: transform 0.18s ease;
   }
   .mind.show-side .mind-side { transform: translateX(0); }
+  .mind.show-side .mind-scrim {
+    display: block;
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: oklch(0 0 0 / 0.45);
+    z-index: 4; /* below .mind-side (z-index 5) */
+  }
   .mind-editor { padding: 14px 18px; }
   .artefact-back { display: inline-flex; }
   /* In Mind view the hamburger drives .mind.show-side (file list), so
-     the stats-only LeftRailMind drawer would be redundant. Hide it. */
-  .body.no-right .left,
-  .body.no-right.show-left .left { display: none; }
+     the stats-only LeftRailMind drawer would be redundant.  Scope this
+     to Mind view only (.body.no-left.no-right) — the previous
+     `.body.no-right .left` selector also matched Artefacts view (which
+     ships .body.no-right without .no-left), killing its hamburger so
+     the empty-state's "Tap ☰ to switch" hint did nothing. */
+  .body.no-left.no-right .left { display: none; }
   /* Hide visual keyboard shortcut chips on mobile — no physical keys. */
   .kbd { display: none; }
 }

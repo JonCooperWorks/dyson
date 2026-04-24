@@ -166,6 +166,73 @@ describe('views.jsx — artefacts mobile drawer regressions', () => {
     expect(rule[1], '.mind must be a positioning context for .mind-side')
       .toMatch(/position:\s*relative/);
   });
+
+  it('artefact-flow empty states use --fg-dim, not --mute', () => {
+    // Regression for "the page looks black on mobile even though it
+    // isn't" — the three empty-state messages used `var(--mute)`
+    // (oklch lightness 0.55) on `var(--bg)`/`var(--bg-1)` (0.155/
+    // 0.185).  Contrast ~2.5:1, well below WCAG AA.  On a phone the
+    // text vanished and the viewport read as a uniform black void.
+    // Each assertion anchors on the surrounding copy so unrelated
+    // var(--mute) usages elsewhere in views.jsx don't trip it.
+    expect(viewsSrc, 'no-conv landing copy must use --fg-dim')
+      .toMatch(/var\(--fg-dim\)[^>]*>\s*Select a conversation to see its artefacts/);
+    expect(viewsSrc, 'empty-list drawer copy must use --fg-dim')
+      .toMatch(/var\(--fg-dim\)[^>]*>\s*\n?\s*No artefacts yet in this chat/);
+    expect(viewsSrc, 'empty-reader copy must use --fg-dim')
+      .toMatch(/var\(--fg-dim\)[^>]*>\s*\n?\s*Select an artefact to read/);
+  });
+
+  it('empty ArtefactReader still exposes the mobile back button', () => {
+    // Regression for "the empty reader is a one-way door".  The
+    // `if (!id)` branch used to early-return a centered <section>
+    // with no title bar at all — so when showSide was false and
+    // selected was null (chip pointing at a deleted artefact, race
+    // on first paint, etc.), there was no back button to re-open
+    // the drawer.  The empty branch must now render the title bar
+    // including the back button.
+    const emptyBranch = viewsSrc.match(/if\s*\(\s*!id\s*\)\s*\{[\s\S]*?return\s*\([\s\S]*?\);\s*\}/);
+    expect(emptyBranch, 'ArtefactReader must have an if (!id) branch').toBeTruthy();
+    expect(emptyBranch[0], 'empty reader branch must render artefact-back')
+      .toContain('artefact-back');
+  });
+
+  it('mobile drawer has a tap-to-close scrim', () => {
+    // Regression for "I can\'t close the drawer when the list is empty".
+    // The only previous way to dismiss the 80vw drawer was to pick an
+    // artefact (impossible when the list is empty) — there was no scrim
+    // under it.  Now ArtefactsView renders a .mind-scrim when showSide
+    // is true, and layout.css makes it a tap target on mobile only.
+    expect(viewsSrc, 'ArtefactsView must render .mind-scrim while showSide is true')
+      .toMatch(/showSide\s*&&\s*<div\s+className="mind-scrim"/);
+    expect(viewsSrc, 'scrim must dismiss the drawer on click')
+      .toMatch(/className="mind-scrim"\s+onClick=\{\(\)\s*=>\s*setShowSide\(false\)\}/);
+    // Scrim must be hidden on desktop (display:none in the base rule).
+    expect(layoutCss).toMatch(/\.mind-scrim\s*\{[^}]*display:\s*none/);
+    // ...and shown only on mobile when .mind.show-side is set.
+    const mobileBlock = layoutCss.split('@media (max-width: 760px)')[1] || '';
+    expect(mobileBlock, 'mobile media query must show .mind.show-side .mind-scrim')
+      .toMatch(/\.mind\.show-side\s+\.mind-scrim\s*\{[^}]*display:\s*block/);
+  });
+
+  it('Artefacts hamburger is not killed by the Mind-view LeftRail-hide rule', () => {
+    // Regression for "tapping ☰ on the artefacts tab does nothing".
+    // The Mind view body class is `.body no-left no-right` so its
+    // redundant LeftRail can be hidden with `.body.no-left.no-right
+    // .left { display:none }`.  The previous selector
+    // `.body.no-right .left { display:none }` was too loose — it also
+    // matched the Artefacts body (`.body no-right` without no-left),
+    // overriding the `.body.show-left .left { display:flex }` mobile
+    // drawer rule and making the empty-state's "Tap ☰ to switch" hint
+    // a lie.
+    const mobileBlock = layoutCss.split('@media (max-width: 760px)')[1] || '';
+    expect(mobileBlock, 'mobile block must hide LeftRail in Mind view only')
+      .toMatch(/\.body\.no-left\.no-right\s+\.left\s*\{[^}]*display:\s*none/);
+    expect(mobileBlock, 'old over-broad .body.no-right .left rule must be gone')
+      .not.toMatch(/^\s*\.body\.no-right\s+\.left\s*,/m);
+    expect(mobileBlock, 'old over-broad .body.no-right .left rule must be gone')
+      .not.toMatch(/^\s*\.body\.no-right\s+\.left\s*\{/m);
+  });
 });
 
 describe('turns.jsx — markdown + composer regressions', () => {
