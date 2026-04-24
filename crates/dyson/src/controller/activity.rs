@@ -196,6 +196,7 @@ impl ActivityRegistry {
     /// Return a snapshot of entries for every chat.  Newest-first.
     /// Used by `/api/activity`.
     pub fn snapshot_all(&self) -> Vec<ActivityEntry> {
+        self.reconcile_stale_running();
         let guard = self.by_chat.lock().expect("activity by_chat poisoned");
         let mut all: Vec<ActivityEntry> =
             guard.values().flat_map(|v| v.iter().cloned()).collect();
@@ -205,11 +206,47 @@ impl ActivityRegistry {
 
     /// Return a snapshot of entries for one chat, newest-first.
     pub fn snapshot_chat(&self, chat_id: &str) -> Vec<ActivityEntry> {
+        self.reconcile_stale_running();
         let guard = self.by_chat.lock().expect("activity by_chat poisoned");
         let mut entries: Vec<ActivityEntry> =
             guard.get(chat_id).cloned().unwrap_or_default();
         entries.sort_by_key(|e| std::cmp::Reverse(e.started_at));
         entries
+    }
+
+    /// Flip any in-memory Running entry older than `STALE_RUNNING_SECS`
+    /// to `Err` with a "never finished" note.  Mirrors the load-time
+    /// reconciliation in `hydrate_from_disk` so orphans still get
+    /// cleaned up when the controller stays up for longer than a run.
+    /// Appends the terminal state to disk so the fix persists across
+    /// future restarts.
+    fn reconcile_stale_running(&self) {
+        let now = unix_seconds_now();
+        let mut to_persist: Vec<ActivityEntry> = Vec::new();
+        {
+            let mut guard = self.by_chat.lock().expect("activity by_chat poisoned");
+            for entries in guard.values_mut() {
+                for entry in entries.iter_mut() {
+                    if entry.status != ActivityStatus::Running {
+                        continue;
+                    }
+                    if now.saturating_sub(entry.started_at) <= STALE_RUNNING_SECS {
+                        continue;
+                    }
+                    entry.status = ActivityStatus::Err;
+                    entry.finished_at = Some(entry.started_at + STALE_RUNNING_SECS);
+                    entry.note = if entry.note.is_empty() {
+                        "never finished".to_string()
+                    } else {
+                        format!("{} · never finished", entry.note)
+                    };
+                    to_persist.push(entry.clone());
+                }
+            }
+        }
+        for entry in &to_persist {
+            self.append_disk(entry);
+        }
     }
 
     fn next_id(&self, chat_id: &str) -> u64 {
@@ -475,6 +512,30 @@ mod tests {
             "stale Running should have been promoted to Err"
         );
         assert!(snap[0].note.contains("never finished"));
+    }
+
+    #[test]
+    fn stale_running_reconciled_on_snapshot_without_restart() {
+        // Forge an in-memory Running entry with a started_at that's
+        // already past the stale threshold.  snapshot_chat must promote
+        // it to Err without requiring a restart.
+        let dir = tempdir();
+        let reg = Arc::new(ActivityRegistry::new(Some(dir.path().to_path_buf())));
+        reg.handle_for("c-0007").start(LANE_SUBAGENT, "se", "stuck");
+        {
+            let mut guard = reg.by_chat.lock().unwrap();
+            let entries = guard.get_mut("c-0007").unwrap();
+            entries[0].started_at = unix_seconds_now().saturating_sub(STALE_RUNNING_SECS + 60);
+            entries[0].status = ActivityStatus::Running;
+            entries[0].finished_at = None;
+        }
+        let snap = reg.snapshot_chat("c-0007");
+        assert_eq!(snap[0].status, ActivityStatus::Err);
+        assert!(snap[0].note.contains("never finished"));
+        // And the fix persisted: reload sees Err too.
+        let reloaded = ActivityRegistry::new(Some(dir.path().to_path_buf()));
+        let reloaded_snap = reloaded.snapshot_chat("c-0007");
+        assert_eq!(reloaded_snap[0].status, ActivityStatus::Err);
     }
 
     #[test]

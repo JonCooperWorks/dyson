@@ -410,22 +410,37 @@ function ActivityView() {
                      : lane === 'loop' ? 'Loops · recurring'
                      : lane === 'dream' ? 'Dreams · background compaction'
                      : 'Swarm · parallel tasks';
+          const runningItems = items.filter(a => a.status === 'running');
+          const finishedItems = items.filter(a => a.status !== 'running');
+          const row = (a, i, dim) => (
+            <div key={i} style={{display:'flex', alignItems:'center', gap:14, padding:'10px 14px', background:'var(--bg)', border:'1px solid var(--line)', borderRadius:6, opacity: dim ? 0.72 : 1}}>
+              <span style={{width:6, height:6, borderRadius:'50%',
+                            background: a.status === 'running' ? 'var(--accent)' : a.status === 'ok' ? 'var(--ok)' : 'var(--err)',
+                            animation: a.status === 'running' ? 'pulse 1.4s infinite' : ''}}/>
+              <span className="mono" style={{fontSize:12.5, color:'var(--fg)', minWidth:200}}>{a.name}</span>
+              <span style={{fontSize:12.5, color:'var(--fg-dim)', flex:1}}>{a.note}</span>
+              {a.chat_id && <span className="mono" style={{fontSize:10.5, color:'var(--mute-2)', opacity:0.75}}>{a.chat_id}</span>}
+              <span className="mono" style={{fontSize:11, color:'var(--mute-2)'}}>{fmtDuration(a)}</span>
+            </div>
+          );
           return (
             <div key={lane} style={{marginBottom:22}}>
               <h4 className="eyebrow" style={{margin:'0 0 8px'}}>{label}</h4>
-              <div style={{display:'flex', flexDirection:'column', gap:6}}>
-                {items.map((a, i) => (
-                  <div key={i} style={{display:'flex', alignItems:'center', gap:14, padding:'10px 14px', background:'var(--bg)', border:'1px solid var(--line)', borderRadius:6}}>
-                    <span style={{width:6, height:6, borderRadius:'50%',
-                                  background: a.status === 'running' ? 'var(--accent)' : a.status === 'ok' ? 'var(--ok)' : 'var(--err)',
-                                  animation: a.status === 'running' ? 'pulse 1.4s infinite' : ''}}/>
-                    <span className="mono" style={{fontSize:12.5, color:'var(--fg)', minWidth:200}}>{a.name}</span>
-                    <span style={{fontSize:12.5, color:'var(--fg-dim)', flex:1}}>{a.note}</span>
-                    {a.chat_id && <span className="mono" style={{fontSize:10.5, color:'var(--mute-2)', opacity:0.75}}>{a.chat_id}</span>}
-                    <span className="mono" style={{fontSize:11, color:'var(--mute-2)'}}>{fmtDuration(a)}</span>
+              {runningItems.length > 0 && (
+                <div style={{display:'flex', flexDirection:'column', gap:6}}>
+                  {runningItems.map((a, i) => row(a, i, false))}
+                </div>
+              )}
+              {finishedItems.length > 0 && (
+                <div style={{marginTop: runningItems.length > 0 ? 14 : 0}}>
+                  <div className="eyebrow" style={{margin:'0 0 6px', fontSize:10.5, color:'var(--mute-2)'}}>
+                    Finished · {finishedItems.length}
                   </div>
-                ))}
-              </div>
+                  <div style={{display:'flex', flexDirection:'column', gap:6}}>
+                    {finishedItems.map((a, i) => row(a, i, true))}
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
