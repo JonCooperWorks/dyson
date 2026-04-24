@@ -11,7 +11,7 @@
 import React from 'react';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent, cleanup } from '@testing-library/react';
-import { ArtefactsView, ArtefactReader } from '../components/views.jsx';
+import { ArtefactsView, ArtefactReader } from '../components/views-secondary.jsx';
 
 // App owns the sessions map in the real app; we mirror that here so
 // ArtefactsView's tree can read cached artefacts and findArtefactMeta

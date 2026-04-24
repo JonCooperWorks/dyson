@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import * as views from '../components/views.jsx';
+import * as viewsSecondary from '../components/views-secondary.jsx';
 import * as turns from '../components/turns.jsx';
 import * as panels from '../components/panels.jsx';
 import * as icons from '../components/icons.jsx';
@@ -24,9 +25,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const src = (rel) => readFileSync(join(__dirname, '..', rel), 'utf8');
 
 describe('module exports', () => {
-  it('views.jsx exports the components app.jsx renders', () => {
-    for (const name of ['TopBar', 'LeftRail', 'RightRail', 'MindView', 'ActivityView', 'ArtefactsView', 'ArtefactReader']) {
+  it('views.jsx exports the primary shell components', () => {
+    for (const name of ['TopBar', 'LeftRail', 'RightRail']) {
       expect(views[name], `views.jsx must export ${name}`).toBeTypeOf('function');
+    }
+  });
+
+  it('views-secondary.jsx exports the lazy-loaded views', () => {
+    // These were split out of views.jsx so the cold-load bundle only
+    // carries the conversation shell; app.jsx React.lazy()s them.
+    for (const name of ['MindView', 'ActivityView', 'ArtefactsView', 'ArtefactReader']) {
+      expect(viewsSecondary[name], `views-secondary.jsx must export ${name}`).toBeTypeOf('function');
     }
   });
 
@@ -91,8 +100,11 @@ describe('app.jsx — keyboard + session regressions', () => {
   });
 });
 
-describe('views.jsx — artefacts mobile drawer regressions', () => {
-  const viewsSrc = src('components/views.jsx');
+describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
+  // ArtefactsView / ArtefactReader moved out of views.jsx into
+  // views-secondary.jsx when we code-split the non-initial tabs.  The
+  // grep-based regressions below follow them.
+  const viewsSrc = src('components/views-secondary.jsx');
   const layoutCss = src('styles/layout.css');
 
   it('ArtefactsView drives .show-side from state, not hardcoded', () => {

@@ -9,15 +9,24 @@
  * mod tests` for the regression checks that lock this behaviour in.
  */
 
-import React, { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useLayoutEffect, Suspense, lazy } from 'react';
 import { Icon } from './icons.jsx';
 import { ImagePanel, ToolPanel } from './panels.jsx';
 import {
   Turn, Composer, TypingIndicator, EmptyState, FileBlock, ArtefactBlock,
 } from './turns.jsx';
-import {
-  TopBar, LeftRail, RightRail, MindView, ActivityView, ArtefactsView,
-} from './views.jsx';
+import { TopBar, LeftRail, RightRail } from './views.jsx';
+
+// Mind / Activity / Artefacts aren't on the cold-load route — split
+// them into their own chunk so the initial bundle only carries the
+// conversation shell.  The `then`-unwrap is the standard React.lazy
+// trampoline for named exports.
+const MindView = lazy(() =>
+  import('./views-secondary.jsx').then(m => ({ default: m.MindView })));
+const ActivityView = lazy(() =>
+  import('./views-secondary.jsx').then(m => ({ default: m.ActivityView })));
+const ArtefactsView = lazy(() =>
+  import('./views-secondary.jsx').then(m => ({ default: m.ArtefactsView })));
 
 // Single source of truth for the views that exist.  TopBar's nav array
 // must list these in the same order; the keyboard handler in App keys
@@ -342,7 +351,9 @@ function App() {
       {view === 'mind' && (
         <main className="body no-left no-right">
           {showLeft && <div className="scrim" onClick={closeRails}/>}
-          <MindView showSide={showLeft} onHideSide={() => setShowLeft(false)}/>
+          <Suspense fallback={<div/>}>
+            <MindView showSide={showLeft} onHideSide={() => setShowLeft(false)}/>
+          </Suspense>
         </main>
       )}
       {view === 'artefacts' && (
@@ -351,10 +362,18 @@ function App() {
               every chat with artefacts as a collapsible tree, so the
               redundant LeftRail (which was an unreachable duplicate on
               mobile and a two-step navigation on desktop) is gone. */}
-          <ArtefactsView conv={conv} setConv={setConv} bump={bump}/>
+          <Suspense fallback={<div/>}>
+            <ArtefactsView conv={conv} setConv={setConv} bump={bump}/>
+          </Suspense>
         </main>
       )}
-      {view === 'activity' && <main style={{display:'flex', flex:1, minHeight:0}}><ActivityView/></main>}
+      {view === 'activity' && (
+        <main style={{display:'flex', flex:1, minHeight:0}}>
+          <Suspense fallback={<div/>}>
+            <ActivityView/>
+          </Suspense>
+        </main>
+      )}
     </div>
   );
 }
