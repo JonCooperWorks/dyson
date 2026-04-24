@@ -591,21 +591,30 @@
     bottom: var(--kb-inset, 0px);
   }
   .mind { grid-template-columns: 1fr; }
+  /* Full-width drawer on mobile — the previous 80vw clamp left a 20vw
+     strip of the empty .mind-pane showing on the right, reading as a
+     black void next to the list (the "dimmed broken sidebar" bug).
+     At 100% the drawer is the entire viewport when open; the back
+     button in the reader's title bar is the way back to the list. */
   .mind-side {
     position: absolute;
     top: 0; left: 0; bottom: 0;
-    width: 80vw; max-width: 320px;
+    width: 100%; max-width: none;
     z-index: 5;
     transform: translateX(-100%);
     transition: transform 0.18s ease;
   }
   .mind.show-side .mind-side { transform: translateX(0); }
+  /* Scrim is redundant now that the drawer fully covers the pane, but
+     keep the rule as a safety net in case the transform ever fails to
+     land (iOS layout glitch on orientation change, etc).  Sits below
+     the drawer (z-index 4 vs 5) so it never paints on top. */
   .mind.show-side .mind-scrim {
     display: block;
     position: absolute;
     top: 0; left: 0; right: 0; bottom: 0;
     background: oklch(0 0 0 / 0.45);
-    z-index: 4; /* below .mind-side (z-index 5) */
+    z-index: 4;
   }
   .mind-editor { padding: 14px 18px; }
   .artefact-back { display: inline-flex; }
