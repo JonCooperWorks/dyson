@@ -191,6 +191,108 @@ describe('DysonClient — POST endpoints', () => {
   });
 });
 
+describe('DysonClient._authedFetch — bearer token plumbing', () => {
+  it('attaches Authorization on every method that hits /api/*', async () => {
+    // Constructor takes a getToken zero-arg fn.  Each request type
+    // must pull a fresh value (so a silent refresh propagates) and
+    // stamp it as `Authorization: Bearer <token>` exactly once.
+    const fetch = mockFetch(() => ({ body: {} }));
+    const getToken = vi.fn(() => 'TOK');
+    const client = new DysonClient({ fetch, getToken, EventSource: class {
+      close() {}
+      set onmessage(_v) {}
+    } });
+
+    await client.listConversations();
+    await client.listProviders();
+    await client.getMind();
+    await client.load('c1');
+    await client.deleteChat('c1');
+    await client.feedback('c1', 0, '👍');
+    await client.postModel('p', 'm');
+    await client.cancel('c1');
+    await client.loadFeedback('c1');
+    await client.listArtefacts('c1');
+
+    // Every recorded fetch call carries Authorization: Bearer TOK.
+    for (const [, init] of fetch.mock.calls) {
+      const auth = (init?.headers && (init.headers.get
+        ? init.headers.get('authorization')
+        : init.headers.authorization || init.headers.Authorization)) || null;
+      expect(auth, `call to ${fetch.mock.calls[0][0]} missing auth`).toBe('Bearer TOK');
+    }
+    // getToken was invoked at least once per request (no caching of a
+    // stale value across the silent-refresh window).
+    expect(getToken.mock.calls.length).toBeGreaterThanOrEqual(fetch.mock.calls.length);
+  });
+
+  it('does not add Authorization when getToken returns null', async () => {
+    const fetch = mockFetch(() => ({ body: [] }));
+    const client = new DysonClient({ fetch, getToken: () => null });
+    await client.listConversations();
+    const init = fetch.mock.calls[0][1] || {};
+    const headers = new Headers(init.headers || {});
+    expect(headers.get('authorization')).toBeNull();
+  });
+
+  it('preserves an existing Authorization header from the caller', async () => {
+    // _authedFetch only sets the header when none is present.  An
+    // explicit Authorization passed through the init object must
+    // survive — protects callers that override per-request (e.g. a
+    // future MCP-bridge adapter).
+    const fetch = mockFetch(() => ({ body: [] }));
+    const client = new DysonClient({ fetch, getToken: () => 'OVERRIDE_ME' });
+    await client._authedFetch('/api/anything', {
+      headers: { Authorization: 'Bearer caller-supplied' },
+    });
+    const headers = new Headers(fetch.mock.calls[0][1].headers);
+    expect(headers.get('authorization')).toBe('Bearer caller-supplied');
+  });
+
+  it('SSE URL carries access_token only when getToken returns a value', async () => {
+    // EventSource can't send headers — auth folds through ?access_token.
+    // Two assertions: WITH a token the URL has the param; WITHOUT, it doesn't.
+    const fetch = vi.fn(async () => ({ ok: true, status: 200 }));
+    class FakeES {
+      constructor(url) { FakeES.lastUrl = url; this.onmessage = null; }
+      close() {}
+    }
+
+    const withTokClient = new DysonClient({
+      fetch,
+      EventSource: FakeES,
+      getToken: () => 'TOK-XYZ',
+    });
+    withTokClient.send('c1', 'hi', {});
+    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events?access_token=TOK-XYZ');
+
+    const noTokClient = new DysonClient({
+      fetch,
+      EventSource: FakeES,
+      getToken: () => null,
+    });
+    noTokClient.send('c1', 'hi', {});
+    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events');
+  });
+
+  it('SSE URL access_token is URL-encoded', async () => {
+    // A token can carry `=`, `&`, `+` (base64 padding etc.).  Without
+    // encoding the query parser would mis-split.
+    const fetch = vi.fn(async () => ({ ok: true, status: 200 }));
+    class FakeES {
+      constructor(url) { FakeES.lastUrl = url; this.onmessage = null; }
+      close() {}
+    }
+    const client = new DysonClient({
+      fetch,
+      EventSource: FakeES,
+      getToken: () => 'a=b&c+d',
+    });
+    client.send('c1', 'hi', {});
+    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events?access_token=a%3Db%26c%2Bd');
+  });
+});
+
 describe('DysonClient — send (SSE + POST turn)', () => {
   it('opens an EventSource, POSTs the turn body, returns the ES', async () => {
     const fetch = vi.fn(async () => ({ ok: true, status: 200 }));
