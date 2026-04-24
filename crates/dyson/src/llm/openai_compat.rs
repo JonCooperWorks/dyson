@@ -19,6 +19,7 @@ use crate::auth::Auth;
 use crate::error::Result;
 use crate::llm::dialects::{deepseek, text_tool_handler_for_model, TextToolExtractorStream};
 use crate::llm::openai::{message_to_openai, OpenAiClient};
+use crate::llm::sse_parser::BaseSseParser;
 use crate::llm::{concat_system_prompt, CompletionConfig, LlmClient, StreamResponse, ToolDefinition};
 use crate::message::Message;
 
@@ -88,16 +89,19 @@ impl LlmClient for OpenAiCompatClient {
             return Ok(response);
         }
 
-        // DeepSeek's thinking mode requires prior `reasoning_content` echoed
-        // back on the next turn. The OpenAI-proper serializer has no such
-        // field, so we dialect-rewrite the serialized messages here.
+        // DeepSeek's thinking mode:
+        //   - inbound: captures `delta.reasoning` (OpenRouter's field) as
+        //     Thinking via a wrapping SSE parser
+        //   - outbound: echoes `reasoning_content` back on assistant turns,
+        //     required by DeepSeek after a tool call
         if deepseek::is_deepseek_model(&config.model) {
             let messages_json = build_messages_json(messages, system, system_suffix, |json| {
                 deepseek::inject_reasoning_content(messages, json);
             });
+            let parser = BaseSseParser::new(deepseek::DeepSeekJsonParser::new());
             return self
                 .inner
-                .stream_with_messages_json(messages_json, tools, config)
+                .stream_with_messages_json(messages_json, tools, config, parser)
                 .await;
         }
 

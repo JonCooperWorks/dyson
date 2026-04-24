@@ -135,24 +135,35 @@ impl LlmClient for OpenAiClient {
             messages_json.push(message_to_openai(msg));
         }
 
-        self.stream_with_messages_json(messages_json, tools, config)
-            .await
+        self.stream_with_messages_json(
+            messages_json,
+            tools,
+            config,
+            BaseSseParser::new(OpenAiJsonParser::new()),
+        )
+        .await
     }
 }
 
 impl OpenAiClient {
-    /// Send a pre-serialized messages array.
+    /// Send a pre-serialized messages array with a caller-supplied parser.
     ///
     /// The system prompt must already be embedded as the first message (role
-    /// "system").  Exposed for `OpenAiCompatClient` so dialects can rewrite
-    /// individual message objects — adding `reasoning_content` for DeepSeek,
-    /// for example — without this file having to know about them.
-    pub(crate) async fn stream_with_messages_json(
+    /// "system").  Exposed for `OpenAiCompatClient` so dialects can:
+    ///   - rewrite individual message objects (e.g. inject `reasoning_content`)
+    ///   - swap in a provider-specific SSE parser (e.g. parse OpenRouter's
+    ///     `delta.reasoning` alongside the standard fields)
+    /// without this file having to know about any of them.
+    pub(crate) async fn stream_with_messages_json<P>(
         &self,
         messages_json: Vec<serde_json::Value>,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
-    ) -> Result<crate::llm::StreamResponse> {
+        parser: P,
+    ) -> Result<crate::llm::StreamResponse>
+    where
+        P: crate::llm::SseStreamParser + Send + 'static,
+    {
         // -- Build tools array --
         //
         // OpenAI wraps tool definitions in a {"type":"function","function":{...}} envelope.
@@ -206,10 +217,7 @@ impl OpenAiClient {
             return Err(crate::llm::map_http_error(response, "OpenAI").await);
         }
 
-        Ok(crate::llm::build_stream_response(
-            response,
-            BaseSseParser::new(OpenAiJsonParser::new()),
-        ))
+        Ok(crate::llm::build_stream_response(response, parser))
     }
 }
 
@@ -354,7 +362,11 @@ pub(crate) fn message_to_openai(msg: &Message) -> serde_json::Value {
 ///
 /// Handles OpenAI's choices[0].delta event model.
 /// Used with `BaseSseParser<OpenAiJsonParser>`.
-struct OpenAiJsonParser {
+///
+/// Exposed at crate visibility so dialects (e.g. the DeepSeek reasoning
+/// dialect) can wrap it to add provider-specific field handling without
+/// reimplementing the whole parser.
+pub(crate) struct OpenAiJsonParser {
     /// Whether we've already emitted a MessageComplete event.
     /// Guards against duplicate finish_reason chunks from providers
     /// like OpenRouter that may send usage data in a separate chunk.
@@ -362,7 +374,7 @@ struct OpenAiJsonParser {
 }
 
 impl OpenAiJsonParser {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self { completed: false }
     }
 }
@@ -383,20 +395,9 @@ impl SseJsonParser for OpenAiJsonParser {
             let delta = &choice["delta"];
 
             // -- Thinking / reasoning content --
-            //
-            // Three conventions in the wild:
-            //   - `reasoning_content` (OpenAI o-series, DeepSeek direct)
-            //   - `reasoning` (OpenRouter normalized)
-            //   - `reasoning_details[].text` (OpenRouter structured)
-            // Prefer reasoning_content, fall back to reasoning.  Skip
-            // reasoning_details to avoid double-counting when OpenRouter
-            // emits both `reasoning` and `reasoning_details` for the same
-            // chunk (observed for deepseek via OpenRouter).
-            let thinking = delta["reasoning_content"]
-                .as_str()
-                .or_else(|| delta["reasoning"].as_str())
-                .filter(|s| !s.is_empty());
-            if let Some(thinking) = thinking {
+            if let Some(thinking) = delta["reasoning_content"].as_str()
+                && !thinking.is_empty()
+            {
                 events.push(Ok(StreamEvent::ThinkingDelta(thinking.to_string())));
             }
 
@@ -554,29 +555,6 @@ mod tests {
                 assert_eq!(*stop_reason, StopReason::EndTurn);
             }
             other => panic!("expected MessageComplete, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_openrouter_reasoning_field_as_thinking() {
-        // OpenRouter normalizes reasoning to `delta.reasoning` (and also
-        // emits `reasoning_details`).  Confirmed via live curl against
-        // deepseek-v4-pro through OpenRouter.  We fall back to `reasoning`
-        // when `reasoning_content` is absent so the Thinking block is
-        // captured for echoing back.
-        let events = parse_sse(
-            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\"step one\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"step one\"}]},\"finish_reason\":null}]}\n\n\
-             data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-        );
-
-        let thinking: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e.as_ref().unwrap(), StreamEvent::ThinkingDelta(_)))
-            .collect();
-        assert_eq!(thinking.len(), 1, "reasoning field should emit one ThinkingDelta (not doubled by reasoning_details)");
-        match thinking[0].as_ref().unwrap() {
-            StreamEvent::ThinkingDelta(t) => assert_eq!(t, "step one"),
-            other => panic!("expected ThinkingDelta, got: {other:?}"),
         }
     }
 

@@ -1,21 +1,35 @@
 // ===========================================================================
-// DeepSeek dialect — echoes `reasoning_content` back to the API.
+// DeepSeek dialect — thinking-mode parsing and `reasoning_content` echo.
 //
-// DeepSeek's "thinking mode" (via OpenRouter or direct) streams a
-// `reasoning_content` field alongside regular `content`.  Our parser turns
-// those deltas into `ContentBlock::Thinking` blocks on the assistant message.
+// DeepSeek's "thinking mode" (direct API or via OpenRouter) streams reasoning
+// chunks alongside regular `content`.  This dialect handles two ends of
+// that round trip:
 //
-// On the NEXT turn, DeepSeek requires the prior `reasoning_content` to be
-// echoed back in the same field on the assistant message — omitting it
-// raises:
+//   1. INBOUND.  OpenRouter normalizes DeepSeek's `reasoning_content` to
+//      `delta.reasoning` (string, plus a `reasoning_details` array).  The
+//      base OpenAI parser only knows about `reasoning_content`, so we wrap
+//      it with `DeepSeekJsonParser` to also capture `delta.reasoning`.
+//      Without this the Thinking block never gets built and step 2 has
+//      nothing to echo.
 //
-//   "The reasoning_content in the thinking mode must be passed back to the API."
+//   2. OUTBOUND.  On the NEXT turn DeepSeek requires the prior
+//      `reasoning_content` echoed back on the assistant message or it
+//      returns:
 //
-// The default OpenAI Chat Completions serializer (`message_to_openai`) drops
-// `Thinking` blocks because standard OpenAI has no matching field.  This
-// dialect is applied only for DeepSeek models, via `OpenAiCompatClient`.
+//        "The reasoning_content in the thinking mode must be passed back to the API."
+//
+//      The default OpenAI Chat Completions serializer drops `Thinking`
+//      blocks because standard OpenAI has no matching field, so we inject
+//      `reasoning_content` after serialization via `inject_reasoning_content`.
+//
+// Applied only for DeepSeek models, gated by `is_deepseek_model()` in
+// `OpenAiCompatClient`.
 // ===========================================================================
 
+use crate::error::Result;
+use crate::llm::openai::OpenAiJsonParser;
+use crate::llm::sse_parser::{SseJsonParser, ToolBufferContext};
+use crate::llm::stream::StreamEvent;
 use crate::message::{ContentBlock, Message, Role};
 
 /// Returns `true` if the model name looks like a DeepSeek variant.
@@ -24,6 +38,58 @@ use crate::message::{ContentBlock, Message, Role};
 /// and OpenRouter slugs (`deepseek/deepseek-chat`, `deepseek/deepseek-r1`, etc.).
 pub fn is_deepseek_model(model: &str) -> bool {
     model.to_lowercase().contains("deepseek")
+}
+
+/// Wraps [`OpenAiJsonParser`] and additionally scans `choices[].delta.reasoning`
+/// (OpenRouter's normalized reasoning field) for Thinking deltas.
+///
+/// Delegates all other delta handling (content, tool_calls, finish_reason) to
+/// the base parser.  We prefer `reasoning_content` when present (DeepSeek
+/// direct) and only fall through to `reasoning` otherwise, to avoid
+/// double-emitting when a provider sends both.
+pub struct DeepSeekJsonParser {
+    inner: OpenAiJsonParser,
+}
+
+impl DeepSeekJsonParser {
+    pub const fn new() -> Self {
+        Self {
+            inner: OpenAiJsonParser::new(),
+        }
+    }
+}
+
+impl Default for DeepSeekJsonParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SseJsonParser for DeepSeekJsonParser {
+    fn parse_json(
+        &mut self,
+        json: &serde_json::Value,
+        ctx: &mut ToolBufferContext,
+    ) -> Vec<Result<StreamEvent>> {
+        let mut extra: Vec<Result<StreamEvent>> = Vec::new();
+
+        if let Some(choices) = json["choices"].as_array() {
+            for choice in choices {
+                let delta = &choice["delta"];
+                // Only fill in when the base parser wouldn't already have
+                // handled this chunk via `reasoning_content`.
+                if delta.get("reasoning_content").is_none()
+                    && let Some(text) = delta["reasoning"].as_str()
+                    && !text.is_empty()
+                {
+                    extra.push(Ok(StreamEvent::ThinkingDelta(text.to_string())));
+                }
+            }
+        }
+
+        extra.extend(self.inner.parse_json(json, ctx));
+        extra
+    }
 }
 
 /// Walk the serialized messages array and inject `reasoning_content` into
@@ -62,6 +128,59 @@ pub fn inject_reasoning_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::sse_parser::BaseSseParser;
+    use crate::llm::SseStreamParser;
+
+    #[test]
+    fn parser_emits_thinking_from_openrouter_reasoning_field() {
+        // Verified against live OpenRouter SSE for deepseek-v4-pro — chunks
+        // carry `delta.reasoning` (string) and `delta.reasoning_details`
+        // (array) but no `delta.reasoning_content`.  The base parser misses
+        // both; the dialect parser must catch the string form.
+        let mut parser = BaseSseParser::new(DeepSeekJsonParser::new());
+        let events = parser.feed(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\"step one\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"step one\"}]},\"finish_reason\":null}]}\n\n\
+              data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\n\
+              data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        );
+
+        let thinking: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Ok(StreamEvent::ThinkingDelta(t)) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, vec!["step one".to_string()]);
+
+        let text: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Ok(StreamEvent::TextDelta(t)) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, vec!["answer".to_string()]);
+    }
+
+    #[test]
+    fn parser_prefers_reasoning_content_when_both_present() {
+        // A provider that sends both `reasoning_content` and `reasoning`
+        // (unlikely but defensive) must not emit two ThinkingDeltas.
+        let mut parser = BaseSseParser::new(DeepSeekJsonParser::new());
+        let events = parser.feed(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"primary\",\"reasoning\":\"duplicate\"},\"finish_reason\":null}]}\n\n"
+        );
+
+        let thinking: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Ok(StreamEvent::ThinkingDelta(t)) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, vec!["primary".to_string()]);
+    }
 
     #[test]
     fn detects_deepseek_models() {
