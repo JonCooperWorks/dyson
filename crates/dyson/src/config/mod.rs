@@ -252,7 +252,10 @@ pub struct AgentSettings {
     /// Maximum retries on transient LLM failures: HTTP 429/529, network
     /// errors, and empty responses (no text and no tool calls).  Each
     /// retry uses exponential backoff with jitter and does not advance
-    /// the per-turn iteration counter.  Defaults to 3.
+    /// the per-turn iteration counter.  Defaults to 6 — upstream rate
+    /// limits on budget providers (OpenRouter → DeepSeek) often take
+    /// ~30-60s to clear, so a longer total backoff window (~63s at
+    /// defaults) prevents premature give-ups.
     pub max_retries: usize,
 
     /// Maximum tokens the LLM can generate per turn.
@@ -950,7 +953,7 @@ impl Default for AgentSettings {
             // a model they didn't choose.
             model: String::new(),
             max_iterations: 20,
-            max_retries: 3,
+            max_retries: 6,
             max_tokens: 8192,
             system_prompt: "You are Dyson, a capable AI assistant.  You can use \
                             tools to help answer questions and complete tasks.\n\n\
