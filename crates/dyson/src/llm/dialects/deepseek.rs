@@ -93,7 +93,15 @@ impl SseJsonParser for DeepSeekJsonParser {
 }
 
 /// Walk the serialized messages array and inject `reasoning_content` into
-/// assistant messages whose original `Message` carried `Thinking` blocks.
+/// every assistant message.  Messages with `Thinking` blocks get the
+/// concatenated reasoning text; messages without get an empty string.
+///
+/// DeepSeek's thinking mode requires `reasoning_content` on EVERY prior
+/// assistant message in the history, not just ones with reasoning — even
+/// assistant messages that came from a different (non-thinking) model
+/// before the user switched to DeepSeek mid-conversation.  Without this
+/// DeepSeek 400s with "The reasoning_content in the thinking mode must
+/// be passed back to the API" for model-switch scenarios.
 ///
 /// `originals` and `messages_json` are aligned by index *after* the system
 /// message (i.e. `messages_json[0]` is the system message, subsequent
@@ -116,9 +124,6 @@ pub fn inject_reasoning_content(
             })
             .collect::<Vec<_>>()
             .join("");
-        if reasoning.is_empty() {
-            continue;
-        }
         if let Some(out) = messages_json.get_mut(system_offset + i) {
             out["reasoning_content"] = serde_json::json!(reasoning);
         }
@@ -219,7 +224,11 @@ mod tests {
     }
 
     #[test]
-    fn skips_assistants_without_thinking() {
+    fn injects_empty_reasoning_content_for_assistants_without_thinking() {
+        // Covers the model-switch case: history from a non-thinking model
+        // (e.g. qwen) flows into a DeepSeek turn.  DeepSeek requires the
+        // field present on every assistant message when thinking is active,
+        // even if empty.
         let originals = vec![Message::assistant(vec![ContentBlock::Text {
             text: "hi".into(),
         }])];
@@ -230,7 +239,7 @@ mod tests {
 
         inject_reasoning_content(&originals, &mut json);
 
-        assert!(json[1].get("reasoning_content").is_none());
+        assert_eq!(json[1]["reasoning_content"], "");
     }
 
     #[test]
