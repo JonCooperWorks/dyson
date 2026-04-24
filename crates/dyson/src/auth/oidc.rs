@@ -203,6 +203,14 @@ impl OidcAuth {
         &self.expected_issuer
     }
 
+    /// The `token_endpoint` from discovery — `None` if the provider
+    /// doesn't advertise one (rare; some test/dummy IdPs omit it).
+    /// The SPA needs this to exchange a code for an access token, but
+    /// it's not load-bearing for the verification path.
+    pub fn token_endpoint(&self) -> Option<&str> {
+        self.config.token_endpoint.as_deref()
+    }
+
     async fn ensure_jwks(&self, need_refresh: bool) -> Result<()> {
         if !need_refresh {
             let guard = self.jwks.read().await;

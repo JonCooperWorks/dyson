@@ -794,10 +794,10 @@ pub struct HttpState {
     auth_mode: AuthMode,
 }
 
-/// Public auth metadata that the SPA needs to bootstrap.  Lives next to
-/// `auth: Arc<dyn Auth>` because the actual `Auth` trait deliberately
-/// hides everything except `validate_request` / `apply_to_request` —
-/// the discovery URL etc. don't belong in there.
+/// Public auth metadata the SPA needs to bootstrap.  Lives next to
+/// `auth: Arc<dyn Auth>` because the actual `Auth` trait hides
+/// everything except `validate_request` / `apply_to_request` — the
+/// discovery URL etc. don't belong in there.
 #[derive(Clone, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 enum AuthMode {
@@ -806,6 +806,10 @@ enum AuthMode {
     Oidc {
         issuer: String,
         authorization_endpoint: String,
+        /// Where the SPA POSTs the `code` it gets back from the IdP.
+        /// `None` if the provider's `.well-known` document didn't list
+        /// one — pure-implicit-flow IdPs are rare but possible.
+        token_endpoint: Option<String>,
         /// The OAuth `client_id` the SPA should send on `/authorize`.
         /// Same value the controller validates as the JWT `aud` claim.
         client_id: String,
@@ -1302,6 +1306,7 @@ impl Controller for HttpController {
                 let mode = AuthMode::Oidc {
                     issuer: built.issuer().to_string(),
                     authorization_endpoint: built.authorization_endpoint().to_string(),
+                    token_endpoint: built.token_endpoint().map(str::to_string),
                     client_id: audience.clone(),
                     required_scopes: required_scopes.clone(),
                 };

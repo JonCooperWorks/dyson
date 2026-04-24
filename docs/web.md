@@ -155,6 +155,128 @@ Both variants implement the shared `Auth` trait at
 [`HashedBearerAuth`](../crates/dyson/src/auth/hashed_bearer.rs) — a
 verify-only impl that holds no plaintext.
 
+### OIDC
+
+```json
+{
+  "auth": {
+    "type": "oidc",
+    "issuer": "https://accounts.example.com",
+    "audience": "dyson-web",
+    "required_scopes": ["dyson:api"]
+  }
+}
+```
+
+At startup the controller fetches
+`<issuer>/.well-known/openid-configuration` to discover the JWKS URI
+and the authorization / token endpoints.  Then on every `/api/*`
+request it verifies `Authorization: Bearer <jwt>`:
+
+- Signature against the JWK matching the token's `kid` (RS256 by
+  default; the JWKS cache refreshes lazily on `kid` miss).
+- `iss` matches the discovered issuer.
+- `aud` matches the configured `audience` (the OAuth `client_id`).
+- `exp` / `nbf` are within tolerance.
+- `scope` contains every entry in `required_scopes`.
+
+Tokens dyson never minted are rejected; tokens dyson minted go
+through the verification path on every request — there's no session
+cookie, no per-user state on the server, nothing to invalidate at
+logout.  401s carry a [RFC 6750](https://datatracker.ietf.org/doc/html/rfc6750)
+challenge:
+
+```
+WWW-Authenticate: Bearer realm="dyson", error="invalid_token",
+                  as_uri="https://accounts.example.com/authorize",
+                  iss="https://accounts.example.com"
+```
+
+so a CLI / curl wrapper / k6 load test can find its way to the IdP
+without needing dyson-specific config.
+
+#### Frontend flow
+
+The SPA runs the auth code + PKCE flow itself — dyson is never the
+OAuth client, just the relying party verifying tokens the IdP signed.
+[`api/auth.js`](../crates/dyson/src/controller/http/web/src/api/auth.js)
+owns the dance; [`main.jsx`](../crates/dyson/src/controller/http/web/src/main.jsx)
+gates React mount on it returning a session.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant U as User browser
+  participant SPA as Dyson SPA
+  participant DC as DysonController
+  participant IdP as OIDC provider
+
+  U->>SPA: open /
+  SPA->>DC: GET /api/auth/config
+  DC-->>SPA: { mode: oidc, issuer, authorization_endpoint, token_endpoint, client_id }
+
+  alt no token in sessionStorage
+    SPA->>SPA: generate PKCE verifier, S256 challenge, state
+    SPA->>SPA: sessionStorage[pending] = verifier, state, returnTo
+    SPA->>U: redirect to authorization_endpoint
+    U->>IdP: login plus consent
+    IdP->>U: redirect to / with code and state
+    U->>SPA: load / with query params
+    SPA->>SPA: state matches pending state
+    SPA->>IdP: POST token_endpoint with code, verifier
+    IdP-->>SPA: access_token, id_token, refresh_token, expires_in
+    SPA->>SPA: sessionStorage[tokens] = parsed
+    SPA->>U: history.replaceState back to returnTo
+  end
+
+  SPA->>SPA: schedule silent refresh 60 s before expiry
+  SPA->>DC: GET /api/conversations<br>Authorization: Bearer access_token
+  DC->>DC: verify signature plus iss plus aud plus exp plus scope
+  DC-->>SPA: 200 OK
+
+  Note over SPA,DC: SSE: EventSource cannot send headers,<br>so /events takes ?access_token=jwt instead
+
+  SPA->>DC: GET /api/conversations/c-1/events?access_token=jwt
+  DC->>DC: dispatch_inner folds query token<br>into synthetic Authorization header
+  DC-->>SPA: text/event-stream
+
+  loop on near-expiry
+    SPA->>IdP: POST token_endpoint refresh_token
+    IdP-->>SPA: fresh access_token
+    SPA->>SPA: sessionStorage[tokens] = next
+  end
+```
+
+Storage notes:
+- `sessionStorage` (per-tab) holds tokens.  Surviving the redirect is
+  required; surviving a tab close is not — closing the tab is the
+  logout.  XSS would still expose tokens; the deployment model
+  (single trusted operator behind loopback or Tailscale) accepts that.
+- The PKCE verifier never leaves the browser.  The IdP only sees the
+  S256 challenge, and the code-for-token exchange happens after the
+  redirect — without the verifier no attacker who stole the `code`
+  can complete the exchange.
+- Refresh runs silently 60 s before expiry.  If refresh fails the
+  SPA falls back to a full redirect; the user re-authenticates in
+  one click and continues.
+
+#### Why OIDC instead of a static token?
+
+| Concern | Static Bearer (Argon2id) | OIDC |
+|---|---|---|
+| **Identity** | One shared secret.  The controller logs every request as `bearer`. | Each user has a `sub`; the controller knows who acted. |
+| **Revocation** | Edit dyson.json + restart the controller. | Disable the user at the IdP — next refresh fails, the SPA redirects back to login. |
+| **Rotation** | Coordinate password changes with every operator. | Native: short-lived access tokens, refresh-token rotation, no human round-trips. |
+| **MFA** | Bring your own VPN. | The IdP enforces MFA, conditional access, device posture, geo-fencing — for free. |
+| **Audit** | The web logs say "someone with the token did X". | The IdP's logs say "alice@corp signed in from device D at time T", and dyson stamps `sub` on every request. |
+| **Setup cost** | One CLI invocation, one config field. | Register a public OAuth client, paste two URLs, set `audience`. |
+| **Best for** | A solo operator, a homelab, a Tailscale tailnet of one, a CTF box. | Teams.  Enterprises.  Any deployment where "who did this?" is a question that has to have an answer. |
+
+The two modes intentionally cover different deployment shapes — pick
+the one that matches who's actually using the controller.  Both
+verify the same way (`Authorization: Bearer …` on `/api/*`); only
+who-signs-the-token differs.
+
 ---
 
 ## Backend (Rust)

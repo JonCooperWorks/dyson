@@ -24,7 +24,7 @@ function fileToBase64(file) {
 }
 
 export class DysonClient {
-  constructor({ fetch: fetchImpl, EventSource: EventSourceImpl } = {}) {
+  constructor({ fetch: fetchImpl, EventSource: EventSourceImpl, getToken } = {}) {
     // Respect explicit null — tests pass `{ fetch: null }` to assert the
     // guard fires.  Only fall back to the global when the field is
     // missing entirely.
@@ -32,11 +32,27 @@ export class DysonClient {
     const globalES = typeof globalThis.EventSource === 'function' ? globalThis.EventSource : null;
     this._fetch = fetchImpl === undefined ? globalFetch : fetchImpl;
     this._EventSource = EventSourceImpl === undefined ? globalES : EventSourceImpl;
+    // `getToken` is a zero-arg fn returning the current OIDC access
+    // token (or null in dangerous_no_auth mode).  Called fresh per
+    // request so silent refreshes propagate without rebuilding the
+    // client.
+    this._getToken = typeof getToken === 'function' ? getToken : () => null;
     if (!this._fetch) throw new Error('DysonClient: no fetch implementation available');
   }
 
+  // Inject Authorization header when a token is available.  Stamping
+  // it via a wrapper instead of the call sites keeps every method a
+  // single line and makes auth a single point of change.
+  _authedFetch(url, init) {
+    const token = this._getToken();
+    if (!token) return this._fetch(url, init);
+    const headers = new Headers((init && init.headers) || {});
+    if (!headers.has('authorization')) headers.set('authorization', `Bearer ${token}`);
+    return this._fetch(url, { ...(init || {}), headers });
+  }
+
   async _json(url, init) {
-    const r = await this._fetch(url, init);
+    const r = await this._authedFetch(url, init);
     if (!r.ok) throw new Error(`${(init && init.method) || 'GET'} ${url}: ${r.status}`);
     return r.json();
   }
@@ -81,7 +97,7 @@ export class DysonClient {
   }
 
   async postMindFile(path, content) {
-    const r = await this._fetch('/api/mind/file', {
+    const r = await this._authedFetch('/api/mind/file', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path, content }),
@@ -91,7 +107,7 @@ export class DysonClient {
   }
 
   async feedback(chatId, turnIndex, emoji) {
-    const r = await this._fetch(`/api/conversations/${encodeURIComponent(chatId)}/feedback`, {
+    const r = await this._authedFetch(`/api/conversations/${encodeURIComponent(chatId)}/feedback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ turn_index: turnIndex, emoji: emoji || '' }),
@@ -101,13 +117,13 @@ export class DysonClient {
   }
 
   async loadFeedback(chatId) {
-    const r = await this._fetch(`/api/conversations/${encodeURIComponent(chatId)}/feedback`);
+    const r = await this._authedFetch(`/api/conversations/${encodeURIComponent(chatId)}/feedback`);
     if (!r.ok) return [];
     return r.json();
   }
 
   async listArtefacts(chatId) {
-    const r = await this._fetch(`/api/conversations/${encodeURIComponent(chatId)}/artefacts`);
+    const r = await this._authedFetch(`/api/conversations/${encodeURIComponent(chatId)}/artefacts`);
     if (!r.ok) return [];
     return r.json();
   }
@@ -117,7 +133,7 @@ export class DysonClient {
   // lets a cold deep-link (/#/artefacts/<id> pasted into a fresh tab)
   // restore the sidebar context without a second round-trip.
   async loadArtefact(id) {
-    const r = await this._fetch(`/api/artefacts/${encodeURIComponent(id)}`);
+    const r = await this._authedFetch(`/api/artefacts/${encodeURIComponent(id)}`);
     if (!r.ok) throw new Error(`artefact load failed: ${r.status}`);
     const body = await r.text();
     const chatId = r.headers.get('X-Dyson-Chat-Id') || null;
@@ -129,7 +145,7 @@ export class DysonClient {
   // an anchor-click download (browser) or a file-write (future desktop
   // shell).
   async exportConversation(chatId) {
-    const r = await this._fetch(`/api/conversations/${encodeURIComponent(chatId)}/export`);
+    const r = await this._authedFetch(`/api/conversations/${encodeURIComponent(chatId)}/export`);
     if (!r.ok) {
       const txt = await r.text().catch(() => '');
       throw new Error(`export failed: ${r.status}${txt ? ` — ${txt}` : ''}`);
@@ -138,7 +154,7 @@ export class DysonClient {
   }
 
   async postModel(provider, model) {
-    const r = await this._fetch('/api/model', {
+    const r = await this._authedFetch('/api/model', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ provider, model }),
@@ -158,7 +174,16 @@ export class DysonClient {
   send(id, prompt, callbacks, files) {
     if (!this._EventSource) throw new Error('DysonClient.send: no EventSource implementation');
     const cb = callbacks || {};
-    const es = new this._EventSource(`/api/conversations/${encodeURIComponent(id)}/events`);
+    // EventSource can't send headers, so OIDC mode folds the bearer
+    // through `?access_token=<jwt>`.  Backend's dispatch_inner
+    // synthesises the Authorization header from that param when no
+    // header is present — only on `/events` paths.  No-token case
+    // (dangerous_no_auth) hits the bare URL.
+    const tok = this._getToken();
+    const eventsUrl = tok
+      ? `/api/conversations/${encodeURIComponent(id)}/events?access_token=${encodeURIComponent(tok)}`
+      : `/api/conversations/${encodeURIComponent(id)}/events`;
+    const es = new this._EventSource(eventsUrl);
     es.onmessage = (ev) => {
       const msg = parseStreamEvent(ev.data);
       if (!msg) return;
@@ -179,7 +204,7 @@ export class DysonClient {
     };
 
     buildBody()
-      .then(body => this._fetch(`/api/conversations/${encodeURIComponent(id)}/turn`, {
+      .then(body => this._authedFetch(`/api/conversations/${encodeURIComponent(id)}/turn`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body,
@@ -194,6 +219,6 @@ export class DysonClient {
   }
 
   async cancel(id) {
-    await this._fetch(`/api/conversations/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+    await this._authedFetch(`/api/conversations/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
   }
 }
