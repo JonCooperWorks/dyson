@@ -124,8 +124,6 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// Drive `dispatch_inner` with a synthetic request without binding
     /// a port — we can't directly because `dispatch_inner` takes a
     /// `Request<hyper::body::Incoming>` and `Incoming` only comes from

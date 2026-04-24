@@ -413,4 +413,495 @@ mod tests {
         let headers = hyper::HeaderMap::new();
         assert!(auth.validate_request(&headers).await.is_err());
     }
+
+    // -----------------------------------------------------------------
+    // Coverage for the verification path.  We use HS256 with a known
+    // shared secret because RSA key generation in tests would either
+    // pull in a heavy generator dep or hardcode a key, neither
+    // worthwhile when the verifier is algorithm-agnostic past the
+    // alg-allowlist check.  The discover path is exercised separately
+    // via wiremock.
+    // -----------------------------------------------------------------
+
+    use base64::Engine;
+    use jsonwebtoken::{EncodingKey, Header};
+    use std::collections::HashMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn now_secs() -> u64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    /// Build an `OidcAuth` whose JWKS is preloaded with one HMAC key.
+    /// Lets verification tests run entirely offline.
+    fn hs256_auth(
+        kid: &str,
+        secret: &[u8],
+        audience: &str,
+        issuer: &str,
+        required_scopes: Vec<String>,
+        algorithms: Vec<Algorithm>,
+    ) -> OidcAuth {
+        let k_b64 = base64::engine::general_purpose::STANDARD.encode(secret);
+        let jwks = JwkSet {
+            keys: vec![Jwk {
+                kid: kid.to_string(),
+                alg: Some("HS256".to_string()),
+                kty: Some("oct".to_string()),
+                n: None,
+                e: None,
+                x: None,
+                y: None,
+                k: Some(k_b64),
+            }],
+        };
+        OidcAuth {
+            config: OidcConfig {
+                issuer: issuer.to_string(),
+                authorization_endpoint: format!("{issuer}/authorize"),
+                jwks_uri: format!("{issuer}/jwks"),
+                token_endpoint: Some(format!("{issuer}/token")),
+                userinfo_endpoint: None,
+            },
+            audience: audience.to_string(),
+            expected_issuer: issuer.to_string(),
+            required_scopes,
+            algorithms,
+            jwks: Arc::new(RwLock::new(Some(JwksCache {
+                jwks,
+                fetched_at: Instant::now(),
+            }))),
+            http: crate::http::client().clone(),
+        }
+    }
+
+    fn mint_hs256_token(
+        kid: &str,
+        secret: &[u8],
+        claims: serde_json::Value,
+    ) -> String {
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(kid.to_string());
+        jsonwebtoken::encode(&header, &claims, &EncodingKey::from_secret(secret)).unwrap()
+    }
+
+    fn header_with(token: &str) -> hyper::HeaderMap {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(
+            "authorization",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        h
+    }
+
+    #[tokio::test]
+    async fn validates_hs256_token_when_algorithm_is_allowed() {
+        let secret = b"shared-secret-for-tests";
+        let auth = hs256_auth(
+            "kid-1",
+            secret,
+            "dyson-web",
+            "https://idp",
+            vec![],
+            vec![Algorithm::HS256],
+        );
+        let claims = serde_json::json!({
+            "iss": "https://idp",
+            "aud": "dyson-web",
+            "sub": "alice",
+            "exp": now_secs() + 60,
+            "nbf": now_secs() - 60,
+        });
+        let token = mint_hs256_token("kid-1", secret, claims);
+        let info = auth.validate_request(&header_with(&token)).await.unwrap();
+        assert_eq!(info.identity, "oidc");
+        assert_eq!(info.metadata.get("sub").map(String::as_str), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn rejects_hs256_when_only_rs256_allowed() {
+        // The algorithm-allowlist check must reject HS256 even when a
+        // matching JWK is in the cache — without this, a public RSA
+        // key in JWKS plus an attacker-minted HS256 token would
+        // verify with the public key as the shared secret.
+        let secret = b"trap";
+        let auth = hs256_auth(
+            "kid-1",
+            secret,
+            "dyson-web",
+            "https://idp",
+            vec![],
+            vec![Algorithm::RS256],
+        );
+        let token = mint_hs256_token(
+            "kid-1",
+            secret,
+            serde_json::json!({
+                "iss": "https://idp",
+                "aud": "dyson-web",
+                "sub": "alice",
+                "exp": now_secs() + 60,
+            }),
+        );
+        assert!(auth.validate_request(&header_with(&token)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_alg_none() {
+        // Build a valid `alg: none` token by hand.  jsonwebtoken's
+        // public encoder refuses to mint one (good!), so we craft the
+        // bytes directly: header + payload + empty signature.
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_string(&serde_json::json!({
+                "alg": "none",
+                "kid": "kid-1",
+                "typ": "JWT",
+            })).unwrap());
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_string(&serde_json::json!({
+                "iss": "https://idp",
+                "aud": "dyson-web",
+                "sub": "alice",
+                "exp": now_secs() + 60,
+            })).unwrap());
+        let token = format!("{header}.{payload}.");
+
+        let auth = hs256_auth(
+            "kid-1",
+            b"any",
+            "dyson-web",
+            "https://idp",
+            vec![],
+            vec![Algorithm::HS256],
+        );
+        // jsonwebtoken's `decode_header` may itself refuse `alg: none`.
+        // Either path lands on Err — the *result* is what we care about.
+        assert!(auth.validate_request(&header_with(&token)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_expired_token() {
+        let secret = b"s";
+        let auth = hs256_auth(
+            "k",
+            secret,
+            "aud",
+            "https://idp",
+            vec![],
+            vec![Algorithm::HS256],
+        );
+        // jsonwebtoken's default leeway is 60s, so we expire well past
+        // that threshold to land outside any tolerance window.
+        let token = mint_hs256_token(
+            "k",
+            secret,
+            serde_json::json!({
+                "iss": "https://idp",
+                "aud": "aud",
+                "sub": "x",
+                "exp": now_secs() - 600, // expired 10 minutes ago
+            }),
+        );
+        assert!(auth.validate_request(&header_with(&token)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_token_not_yet_valid() {
+        let secret = b"s";
+        let auth = hs256_auth(
+            "k",
+            secret,
+            "aud",
+            "https://idp",
+            vec![],
+            vec![Algorithm::HS256],
+        );
+        // jsonwebtoken's default leeway is 60s; pick an nbf comfortably
+        // outside that window.
+        let token = mint_hs256_token(
+            "k",
+            secret,
+            serde_json::json!({
+                "iss": "https://idp",
+                "aud": "aud",
+                "sub": "x",
+                "exp": now_secs() + 1200,
+                "nbf": now_secs() + 600, // valid 10 minutes from now
+            }),
+        );
+        assert!(auth.validate_request(&header_with(&token)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_wrong_audience() {
+        let secret = b"s";
+        let auth = hs256_auth(
+            "k",
+            secret,
+            "dyson-web",
+            "https://idp",
+            vec![],
+            vec![Algorithm::HS256],
+        );
+        let token = mint_hs256_token(
+            "k",
+            secret,
+            serde_json::json!({
+                "iss": "https://idp",
+                "aud": "other-app",
+                "sub": "x",
+                "exp": now_secs() + 60,
+            }),
+        );
+        assert!(auth.validate_request(&header_with(&token)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_wrong_issuer() {
+        let secret = b"s";
+        let auth = hs256_auth(
+            "k",
+            secret,
+            "aud",
+            "https://idp",
+            vec![],
+            vec![Algorithm::HS256],
+        );
+        let token = mint_hs256_token(
+            "k",
+            secret,
+            serde_json::json!({
+                "iss": "https://attacker",
+                "aud": "aud",
+                "sub": "x",
+                "exp": now_secs() + 60,
+            }),
+        );
+        assert!(auth.validate_request(&header_with(&token)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn required_scopes_must_all_appear_order_does_not_matter() {
+        let secret = b"s";
+        let auth = hs256_auth(
+            "k",
+            secret,
+            "aud",
+            "https://idp",
+            vec!["dyson:api".to_string(), "openid".to_string()],
+            vec![Algorithm::HS256],
+        );
+        // Reverse order from required: still passes.
+        let ok = mint_hs256_token(
+            "k",
+            secret,
+            serde_json::json!({
+                "iss": "https://idp",
+                "aud": "aud",
+                "sub": "x",
+                "exp": now_secs() + 60,
+                "scope": "openid email dyson:api profile",
+            }),
+        );
+        assert!(auth.validate_request(&header_with(&ok)).await.is_ok());
+
+        // Missing one of the required scopes.
+        let bad = mint_hs256_token(
+            "k",
+            secret,
+            serde_json::json!({
+                "iss": "https://idp",
+                "aud": "aud",
+                "sub": "x",
+                "exp": now_secs() + 60,
+                "scope": "openid email",
+            }),
+        );
+        assert!(auth.validate_request(&header_with(&bad)).await.is_err());
+
+        // Empty scope claim with required_scopes set: rejected.
+        let no_scope = mint_hs256_token(
+            "k",
+            secret,
+            serde_json::json!({
+                "iss": "https://idp",
+                "aud": "aud",
+                "sub": "x",
+                "exp": now_secs() + 60,
+            }),
+        );
+        assert!(auth.validate_request(&header_with(&no_scope)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn jwks_refresh_on_kid_miss_picks_up_rotated_key() {
+        // Start with a JWKS that contains kid "old".  Rotate the IdP to
+        // kid "new" and verify the auth refetches and accepts a "new"-
+        // signed token.  Drives the cold-cache → first-fetch (kid miss
+        // refresh) path of `validate_request`.
+        let server = MockServer::start().await;
+
+        // First request to /jwks returns the rotated set (no "old").
+        let new_secret = b"rotated-secret";
+        let new_k = base64::engine::general_purpose::STANDARD.encode(new_secret);
+        let rotated = serde_json::json!({
+            "keys": [{
+                "kid": "new",
+                "kty": "oct",
+                "alg": "HS256",
+                "k": new_k,
+            }]
+        });
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&rotated))
+            .mount(&server)
+            .await;
+
+        // Pre-populate the cache with an obsolete "old" key so the
+        // first decode_key_for(kid="new") call misses → forces a
+        // refresh against the wiremock server.
+        let old_secret = b"old-secret";
+        let old_k = base64::engine::general_purpose::STANDARD.encode(old_secret);
+        let cached = JwkSet {
+            keys: vec![Jwk {
+                kid: "old".into(),
+                alg: Some("HS256".into()),
+                kty: Some("oct".into()),
+                n: None,
+                e: None,
+                x: None,
+                y: None,
+                k: Some(old_k),
+            }],
+        };
+        let auth = OidcAuth {
+            config: OidcConfig {
+                issuer: "https://idp".into(),
+                authorization_endpoint: "https://idp/authorize".into(),
+                jwks_uri: format!("{}/jwks", server.uri()),
+                token_endpoint: None,
+                userinfo_endpoint: None,
+            },
+            audience: "dyson-web".into(),
+            expected_issuer: "https://idp".into(),
+            required_scopes: vec![],
+            algorithms: vec![Algorithm::HS256],
+            jwks: Arc::new(RwLock::new(Some(JwksCache {
+                jwks: cached,
+                // Fetched far in the past so MIN_JWKS_REFRESH doesn't
+                // gate the kid-miss-driven refresh.
+                fetched_at: Instant::now() - std::time::Duration::from_secs(3600),
+            }))),
+            http: crate::http::client().clone(),
+        };
+
+        let token = mint_hs256_token(
+            "new",
+            new_secret,
+            serde_json::json!({
+                "iss": "https://idp",
+                "aud": "dyson-web",
+                "sub": "alice",
+                "exp": now_secs() + 60,
+            }),
+        );
+        let info = auth.validate_request(&header_with(&token)).await.unwrap();
+        assert_eq!(info.identity, "oidc");
+    }
+
+    #[tokio::test]
+    async fn discover_succeeds_against_http_issuer() {
+        // wiremock binds on http; round-trip through .well-known and
+        // assert the discovered fields land where we expect.
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+
+        let body = serde_json::json!({
+            "issuer": issuer,
+            "authorization_endpoint": format!("{issuer}/authorize"),
+            "jwks_uri": format!("{issuer}/jwks"),
+            "token_endpoint": format!("{issuer}/token"),
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let auth = OidcAuth::discover(
+            &issuer,
+            "dyson-web".to_string(),
+            vec![],
+            None,
+        )
+        .await
+        .expect("discover should succeed");
+        assert_eq!(auth.issuer(), issuer);
+        assert_eq!(auth.token_endpoint(), Some(format!("{issuer}/token").as_str()));
+    }
+
+    #[tokio::test]
+    async fn discover_normalises_trailing_slash_on_issuer() {
+        // Operator puts a trailing slash on the issuer in dyson.json
+        // but the IdP advertises the same URL without the slash.  Must
+        // accept rather than fail with a mysterious mismatch error.
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let body = serde_json::json!({
+            "issuer": issuer, // no trailing slash
+            "authorization_endpoint": format!("{issuer}/authorize"),
+            "jwks_uri": format!("{issuer}/jwks"),
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let with_trailing = format!("{issuer}/");
+        let auth = OidcAuth::discover(&with_trailing, "aud".into(), vec![], None).await;
+        assert!(auth.is_ok(), "trailing-slash mismatch must be tolerated");
+    }
+
+    #[tokio::test]
+    async fn discover_rejects_when_advertised_issuer_does_not_match() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "issuer": "https://different-issuer.example.com",
+            "authorization_endpoint": "https://idp/authorize",
+            "jwks_uri": "https://idp/jwks",
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .mount(&server)
+            .await;
+        let auth = OidcAuth::discover(&server.uri(), "aud".into(), vec![], None).await;
+        assert!(auth.is_err(), "issuer mismatch must fail discovery");
+    }
+
+    #[tokio::test]
+    async fn discover_propagates_http_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let auth = OidcAuth::discover(&server.uri(), "aud".into(), vec![], None).await;
+        assert!(auth.is_err(), "5xx during discovery must fail fast");
+    }
+
+    #[test]
+    fn auth_info_metadata_records_sub() {
+        // Sanity-check the AuthInfo carrier so the metadata field used
+        // by callers (e.g. structured access logs) keeps working.
+        let mut info = AuthInfo::new("oidc");
+        info.metadata.insert("sub".into(), "alice".into());
+        let map: &HashMap<String, String> = &info.metadata;
+        assert_eq!(map.get("sub").map(String::as_str), Some("alice"));
+    }
 }

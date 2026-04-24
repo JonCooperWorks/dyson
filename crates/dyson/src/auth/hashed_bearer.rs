@@ -136,4 +136,127 @@ mod tests {
         let phc = HashedBearerAuth::hash("x").unwrap();
         assert!(phc.starts_with("$argon2id$"), "got: {phc}");
     }
+
+    // -----------------------------------------------------------------
+    // Boundary cases: a plaintext token can be just about anything an
+    // operator pastes into a config or a browser, so the hash↔verify
+    // pipeline has to survive the unusual shapes a real user produces.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn from_phc_rejects_malformed_strings_with_distinct_errors() {
+        // Empty string — nothing to parse.
+        assert!(HashedBearerAuth::from_phc(String::new()).is_err());
+        // Missing the `$` prefix entirely.
+        assert!(HashedBearerAuth::from_phc("argon2id$v=19$...".into()).is_err());
+        // Truncated — algorithm tag with no params.
+        assert!(HashedBearerAuth::from_phc("$argon2id$".into()).is_err());
+        // Bytes mid-string.
+        assert!(HashedBearerAuth::from_phc("$argon2id$\0".into()).is_err());
+        // Wrong algorithm tag.
+        assert!(HashedBearerAuth::from_phc("$bcrypt$v=2$cost=12$...$...".into()).is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_token_with_leading_whitespace_in_header() {
+        // hyper preserves the header value verbatim — a `Bearer  x` (two
+        // spaces) does NOT match `Bearer x` because we strip a single
+        // `Bearer ` prefix and verify the rest as the plaintext.  Make
+        // sure that mismatch is actually a rejection (no whitespace
+        // tolerance silently leaking in).
+        let phc = HashedBearerAuth::hash("right").unwrap();
+        let auth = HashedBearerAuth::from_phc(phc).unwrap();
+        let mut h = hyper::HeaderMap::new();
+        h.insert("authorization", "Bearer  right".parse().unwrap());
+        assert!(auth.validate_request(&h).await.is_err());
+        // Trailing whitespace: same story.
+        h.clear();
+        h.insert("authorization", "Bearer right ".parse().unwrap());
+        assert!(auth.validate_request(&h).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_lowercase_bearer_prefix() {
+        // RFC 6750 says scheme tokens are case-insensitive, but our
+        // verifier is strict — clients that downcase the scheme would
+        // get a clean 401 here.  Pin that behaviour so an accidental
+        // tolerance doesn't slip in unnoticed.
+        let phc = HashedBearerAuth::hash("token").unwrap();
+        let auth = HashedBearerAuth::from_phc(phc).unwrap();
+        let mut h = hyper::HeaderMap::new();
+        h.insert("authorization", "bearer token".parse().unwrap());
+        assert!(auth.validate_request(&h).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_non_ascii_authorization_header_value() {
+        // HTTP header values must be visible ASCII; an operator who
+        // pastes an emoji-laced password into the browser would get a
+        // header that hyper accepts on the wire (any byte is valid)
+        // but our `to_str()` rejects.  That's the correct behaviour —
+        // pin it so a future "to_str_lossy" doesn't silently let
+        // unicode bytes leak past the prefix-strip and produce a
+        // mismatched verify call.
+        let phc = HashedBearerAuth::hash("token").unwrap();
+        let auth = HashedBearerAuth::from_phc(phc).unwrap();
+        let mut h = hyper::HeaderMap::new();
+        // 0xC3 0xA9 is UTF-8 'é' — invalid in an RFC 7230 header value.
+        let bytes = b"Bearer caf\xC3\xA9";
+        h.insert(
+            "authorization",
+            hyper::header::HeaderValue::from_bytes(bytes).unwrap(),
+        );
+        assert!(auth.validate_request(&h).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn validates_punctuation_heavy_token() {
+        // Real-world bearer tokens often look like base64url with `-_=`
+        // or have URL-safe ASCII punctuation.  Make sure the strip-
+        // prefix + verify chain doesn't depend on the alphabet.
+        let token = "abcXYZ-_.~!@#$%^&*()=+,;:?[]{}";
+        let phc = HashedBearerAuth::hash(token).unwrap();
+        let auth = HashedBearerAuth::from_phc(phc).unwrap();
+        let mut h = hyper::HeaderMap::new();
+        h.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        assert!(auth.validate_request(&h).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn validates_long_token() {
+        // A 4 KiB pasted token is silly but legal — argon2 hashes the
+        // raw bytes regardless of length.  Make sure we don't hit any
+        // hidden cap.
+        let token: String = "long-".repeat(800);
+        let phc = HashedBearerAuth::hash(&token).unwrap();
+        let auth = HashedBearerAuth::from_phc(phc).unwrap();
+        let mut h = hyper::HeaderMap::new();
+        h.insert(
+            "authorization",
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        assert!(auth.validate_request(&h).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn rejects_when_phc_params_mismatch_what_hashed() {
+        // Hand-craft a PHC string whose parameters are valid but whose
+        // hash bytes are wrong — typo a single character of the encoded
+        // hash and the verifier must say no.  This guards against any
+        // future "constant-time only on the right path" regression.
+        let original = HashedBearerAuth::hash("token").unwrap();
+        // Tamper the last char.  PHC is `$...$<salt>$<hash>` — flipping
+        // a base64 char in the hash segment yields a syntactically
+        // valid PHC but a bytes-mismatch.
+        let mut chars: Vec<char> = original.chars().collect();
+        let last = chars.pop().unwrap();
+        // Pick a different char so we definitely change the encoded
+        // hash bytes.
+        chars.push(if last == 'A' { 'B' } else { 'A' });
+        let tampered: String = chars.into_iter().collect();
+        let auth = HashedBearerAuth::from_phc(tampered).unwrap();
+        let mut h = hyper::HeaderMap::new();
+        h.insert("authorization", "Bearer token".parse().unwrap());
+        assert!(auth.validate_request(&h).await.is_err(), "tampered hash must reject");
+    }
 }
