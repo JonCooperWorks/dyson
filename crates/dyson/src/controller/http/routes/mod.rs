@@ -139,8 +139,11 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
             .unwrap_or(host_value)
             .trim_start_matches('[')
             .trim_end_matches(']');
-        let host_ok =
-            matches!(host_part, "127.0.0.1" | "::1" | "localhost") || host_part.is_empty();
+        // Empty Host is HTTP/1.0 / raw-socket only (browsers always set
+        // it).  Allowing it punched a hole in the gate for any client
+        // willing to drop down to a raw socket, with no legitimate use
+        // case in a loopback-only deployment.  Reject explicitly.
+        let host_ok = matches!(host_part, "127.0.0.1" | "::1" | "localhost");
         if !host_ok {
             return misdirected_request();
         }

@@ -181,8 +181,9 @@ pub(super) async fn post(
                     *guard = Some(a);
                 }
                 Err(e) => {
+                    tracing::warn!(error = %e, chat_id = %chat_id, "agent build failed");
                     chat_handle.emit(SseEvent::LlmError {
-                        message: format!("agent build failed: {e}"),
+                        message: format!("agent build failed: {}", e.sanitized_message()),
                     });
                     chat_handle.emit(SseEvent::Done);
                     chat_handle
@@ -264,8 +265,12 @@ pub(super) async fn post(
         match result {
             Ok(_) => {}
             Err(e) => {
+                // Full Display goes to the operator log; the SSE wire
+                // gets the sanitised form so cross-tenant deployments
+                // don't leak filesystem paths or upstream URLs.
+                tracing::warn!(error = %e, chat_id = %chat_id, "turn failed");
                 chat_handle.emit(SseEvent::LlmError {
-                    message: e.to_string(),
+                    message: e.sanitized_message(),
                 });
             }
         }

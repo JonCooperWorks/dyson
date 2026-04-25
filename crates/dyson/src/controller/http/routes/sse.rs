@@ -106,8 +106,28 @@ pub(super) async fn events(
 }
 
 fn format_sse(id: u64, evt: &SseEvent) -> String {
-    let json = serde_json::to_string(evt).unwrap_or_else(|_| "{}".to_string());
-    format!("id: {id}\ndata: {json}\n\n")
+    // Serialisation of SseEvent shouldn't fail in practice — every
+    // variant carries owned, JSON-safe data — but if it ever did, the
+    // old `{}` fallback would silently swallow the event with no log,
+    // leaving the client to wonder why something never arrived.  Log
+    // and surface a synthetic LlmError frame so the wire stays useful
+    // and the operator sees the failure.
+    match serde_json::to_string(evt) {
+        Ok(json) => format!("id: {id}\ndata: {json}\n\n"),
+        Err(e) => {
+            tracing::error!(error = %e, event_id = id,
+                "format_sse failed to serialise event — emitting synthetic LlmError");
+            let synthetic = SseEvent::LlmError {
+                message: "internal SSE serialisation error".to_string(),
+            };
+            // The synthetic event is built from `&str` and should always
+            // serialise; if it doesn't, fall back to a hand-rolled frame
+            // so the client still sees an error rather than `{}`.
+            let json = serde_json::to_string(&synthetic).unwrap_or_else(|_|
+                r#"{"type":"llm_error","message":"internal SSE serialisation error"}"#.to_string());
+            format!("id: {id}\ndata: {json}\n\n")
+        }
+    }
 }
 
 /// Maximum quiet period before the SSE handler closes the connection

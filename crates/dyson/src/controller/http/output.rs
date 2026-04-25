@@ -276,8 +276,13 @@ impl Output for SseOutput {
     }
 
     fn error(&mut self, error: &DysonError) -> std::result::Result<(), DysonError> {
+        // Sanitised message goes over the wire; full Display is written
+        // to logs so operators still see the underlying IO/HTTP detail.
+        // The wire path can be cross-tenant in OIDC deployments — paths
+        // and upstream URLs leak across users without this guard.
+        tracing::warn!(error = %error, "agent surfaced LLM error");
         self.send(SseEvent::LlmError {
-            message: error.to_string(),
+            message: error.sanitized_message(),
         });
         Ok(())
     }

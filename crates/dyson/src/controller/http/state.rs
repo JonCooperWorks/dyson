@@ -457,14 +457,23 @@ impl HttpState {
     /// the lock.  Always removes the entry — even on expiry or
     /// identity-mismatch — so a single-use token can't be retried.
     pub(crate) fn consume_sse_ticket(&self, token: &str) -> Option<String> {
-        let mut guard = match self.sse_tickets.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
+        // Drop the sse_tickets guard before acquiring allowed_identity:
+        // any code path that takes both must walk the locks in the same
+        // order, and this is the only site that touches both.  Holding
+        // the ticket lock across an unrelated lock acquisition is the
+        // classic recipe for a future deadlock when someone adds a
+        // helper that takes them in the other order.
+        let entry = {
+            let mut guard = match self.sse_tickets.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let entry = guard.remove(token)?;
+            if entry.expires_at <= std::time::Instant::now() {
+                return None;
+            }
+            entry
         };
-        let entry = guard.remove(token)?;
-        if entry.expires_at <= std::time::Instant::now() {
-            return None;
-        }
         let allowed = match self.allowed_identity.lock() {
             Ok(g) => g.clone(),
             Err(p) => p.into_inner().clone(),

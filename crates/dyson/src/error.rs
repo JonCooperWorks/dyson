@@ -196,6 +196,40 @@ impl DysonError {
             message: message.into(),
         }
     }
+
+    /// Returns a redacted error message safe to send to a remote client.
+    ///
+    /// `Display` (used by `to_string()`) leaks infrastructure detail that
+    /// callers don't need and attackers can mine: `Io` exposes filesystem
+    /// paths, `Http` exposes upstream URLs and status text from the
+    /// provider, `Json` exposes input bytes around the parse error.  In a
+    /// single-user deployment that's self-info, but a multi-tenant OIDC
+    /// deployment streams these errors over SSE to whoever made the
+    /// request — including across tenants if the chat is shared.
+    ///
+    /// LLM/Tool/MCP/OAuth/Rate-limit errors carry application-level
+    /// messages the model and the user actually need to see, so they
+    /// pass through unchanged.  Infrastructure variants collapse to a
+    /// generic category.  Full `Display` output remains available for
+    /// server-side logs.
+    pub fn sanitized_message(&self) -> String {
+        match self {
+            Self::Llm(_)
+            | Self::LlmRateLimit(_)
+            | Self::LlmOverloaded(_)
+            | Self::Tool { .. }
+            | Self::Mcp { .. }
+            | Self::OAuth { .. }
+            | Self::Config(_)
+            | Self::RateLimit { .. }
+            | Self::Cancelled => self.to_string(),
+            Self::Io(_) => "internal IO error".to_string(),
+            Self::Http(_) => "upstream HTTP error".to_string(),
+            Self::Json(_) => "internal JSON error".to_string(),
+            #[cfg(feature = "dangerous_swarm")]
+            Self::Swarm(_) => "swarm error".to_string(),
+        }
+    }
 }
 
 // ===========================================================================
@@ -261,6 +295,41 @@ mod tests {
             classify_llm_error("No endpoints found for this model"),
             LlmErrorKind::Other,
         );
+    }
+
+    #[test]
+    fn sanitized_message_redacts_infrastructure_errors() {
+        // IO/HTTP/JSON variants leak filesystem paths, upstream URLs, and
+        // input bytes through their Display impls.  Sanitised form must
+        // collapse to a generic category — full detail still goes to logs
+        // via to_string().
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "/home/user/.secret/private.key: permission denied",
+        );
+        let dyson_err: DysonError = io_err.into();
+        assert!(dyson_err.to_string().contains("/home/user/.secret"));
+        assert_eq!(dyson_err.sanitized_message(), "internal IO error");
+        assert!(!dyson_err.sanitized_message().contains("/"));
+    }
+
+    #[test]
+    fn sanitized_message_passes_through_application_errors() {
+        // LLM/Tool/MCP/OAuth/Config/RateLimit messages are application
+        // text the user and model actually need to see — pass through.
+        let cases: Vec<DysonError> = vec![
+            DysonError::Llm("rate limited".into()),
+            DysonError::tool("bash", "command not found"),
+            DysonError::mcp("github", "connection refused"),
+            DysonError::oauth("google", "token expired"),
+            DysonError::Config("missing API key".into()),
+            DysonError::RateLimit { limit: 10, window_secs: 60 },
+            DysonError::Cancelled,
+        ];
+        for e in cases {
+            assert_eq!(e.sanitized_message(), e.to_string(),
+                       "application error must pass through: {e:?}");
+        }
     }
 
     #[test]
