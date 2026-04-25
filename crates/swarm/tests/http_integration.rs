@@ -797,15 +797,25 @@ async fn dispatch_preserves_inline_payload() {
 
 /// Register a node and return `(node_id, token)`.
 async fn register_node(client: &reqwest::Client, base_url: &str, name: &str) -> (String, String) {
-    let reg: Value = client
+    register_node_with_auth(client, base_url, name, None).await
+}
+
+/// Like `register_node`, but presents an API-key bearer.  Required when
+/// the hub was started with `--mcp-api-key-hash`, since /swarm/register
+/// is gated behind the same key.
+async fn register_node_with_auth(
+    client: &reqwest::Client,
+    base_url: &str,
+    name: &str,
+    api_key: Option<&str>,
+) -> (String, String) {
+    let mut req = client
         .post(format!("{base_url}/swarm/register"))
-        .json(&sample_manifest(name))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+        .json(&sample_manifest(name));
+    if let Some(k) = api_key {
+        req = req.bearer_auth(k);
+    }
+    let reg: Value = req.send().await.unwrap().json().await.unwrap();
     (
         reg["node_id"].as_str().unwrap().to_string(),
         reg["token"].as_str().unwrap().to_string(),
@@ -1605,7 +1615,9 @@ async fn mcp_api_key_tasks_scoped_to_owner() {
     let client = reqwest::Client::new();
 
     // Register a node so there's a worker to accept tasks.
-    let (_node_id, node_token) = register_node(&client, &h.base_url, "worker").await;
+    // The hub has --mcp-api-key-hash set, which gates /swarm/register too.
+    let (_node_id, node_token) =
+        register_node_with_auth(&client, &h.base_url, "worker", Some(api_key)).await;
 
     // Open SSE stream so the node is considered alive and idle.
     let sse_resp = client

@@ -265,7 +265,7 @@ fn validate_auth(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     Err(format!(
         "No authentication configured for non-localhost address ({}).\n\n\
          The hub's MCP and registration endpoints are open. Either:\n  \
-           --mcp-api-key-hash <PHC_STRING>\n  \
+           --mcp-api-key-hash <PHC_STRING>   (gates both /mcp and /swarm/register)\n  \
            --dangerous-no-auth",
         args.bind
     ).into())
