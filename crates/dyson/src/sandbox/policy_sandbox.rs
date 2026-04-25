@@ -568,6 +568,8 @@ mod tests {
             dangerous_no_sandbox: false,
             taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             activity: None,
+            tool_use_id: None,
+            subagent_events: None,
         }
     }
 

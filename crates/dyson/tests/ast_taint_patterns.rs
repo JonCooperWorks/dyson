@@ -21,6 +21,8 @@ fn test_ctx(dir: &Path) -> ToolContext {
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         activity: None,
+    tool_use_id: None,
+    subagent_events: None,
     }
 }
 

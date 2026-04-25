@@ -246,6 +246,26 @@ pub struct ToolContext {
     /// `crates/dyson/src/skill/subagent/mod.rs` on `CaptureOutput`
     /// for the LLM-boundary invariant this respects.
     pub activity: Option<crate::controller::ActivityHandle>,
+
+    /// The id of the tool call currently executing.  Set by the agent's
+    /// per-call dispatch (`agent::execution::execute_tool_call`) just
+    /// before calling `tool.run`, on a per-call clone of the context so
+    /// parallel calls each see their own id.  `None` outside a tool
+    /// dispatch (e.g. tools called from tests, dream callbacks).
+    ///
+    /// Subagent tools propagate this into `ChildSpawn.parent_tool_id`
+    /// so the inner agent's `CaptureOutput` can tag every nested SSE
+    /// event with its owning subagent box — see
+    /// `controller::http::SubagentEventBus`.
+    pub tool_use_id: Option<String>,
+
+    /// UI-only side channel for subagents to surface their nested tool
+    /// calls live, without those calls flowing into the parent's LLM
+    /// conversation.  Only the HTTP controller populates this; other
+    /// controllers leave it `None` and subagents run silently as before.
+    /// See `controller::http::SubagentEventBus` for the threading
+    /// rationale and LLM-boundary invariant.
+    pub subagent_events: Option<crate::controller::http::SubagentEventBus>,
 }
 
 impl Clone for ToolContext {
@@ -259,6 +279,8 @@ impl Clone for ToolContext {
             dangerous_no_sandbox: self.dangerous_no_sandbox,
             taint_indexes: Arc::clone(&self.taint_indexes),
             activity: self.activity.clone(),
+            tool_use_id: self.tool_use_id.clone(),
+            subagent_events: self.subagent_events.clone(),
         }
     }
 }
@@ -278,6 +300,8 @@ impl ToolContext {
             dangerous_no_sandbox: false,
             taint_indexes: Arc::new(RwLock::new(HashMap::new())),
             activity: None,
+            tool_use_id: None,
+            subagent_events: None,
         })
     }
 
@@ -296,6 +320,8 @@ impl ToolContext {
             dangerous_no_sandbox: false,
             taint_indexes: Arc::new(RwLock::new(HashMap::new())),
             activity: None,
+            tool_use_id: None,
+            subagent_events: None,
         }
     }
 
@@ -315,6 +341,8 @@ impl ToolContext {
             dangerous_no_sandbox: false,
             taint_indexes: Arc::new(RwLock::new(HashMap::new())),
             activity: None,
+            tool_use_id: None,
+            subagent_events: None,
         }
     }
 

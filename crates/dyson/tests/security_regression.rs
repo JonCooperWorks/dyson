@@ -787,6 +787,8 @@ async fn list_files_rejects_path_traversal() {
         dangerous_no_sandbox: false,
         taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
+    tool_use_id: None,
+    subagent_events: None,
     };
 
     let tool = dyson::tool::list_files::ListFilesTool;
@@ -812,6 +814,8 @@ async fn search_files_rejects_path_traversal() {
         dangerous_no_sandbox: false,
         taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
+    tool_use_id: None,
+    subagent_events: None,
     };
 
     let tool = dyson::tool::search_files::SearchFilesTool;

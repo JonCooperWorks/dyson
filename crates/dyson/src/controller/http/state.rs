@@ -758,6 +758,7 @@ impl HttpState {
                 mime_type: mime.clone(),
                 url: file_url,
                 inline_image,
+                parent_tool_id: None,
             });
             handle.emit(SseEvent::Artefact {
                 id: artefact_id.clone(),
@@ -766,6 +767,7 @@ impl HttpState {
                 url: artefact_url,
                 bytes: bytes_len,
                 metadata: Some(metadata),
+                parent_tool_id: None,
             });
         }
 

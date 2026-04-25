@@ -53,10 +53,18 @@ mod responses;
 mod routes;
 mod state;
 mod stores;
+mod subagent_events;
 mod wire;
 
 use config::{HttpAuthConfig, HttpControllerConfigRaw, HttpTlsConfig, is_loopback_bind};
 pub use state::HttpState;
+pub use subagent_events::SubagentEventBus;
+// Re-exported so subagent tee tests in `crate::skill::subagent::tests`
+// can assert on the wire frames without reaching into the private
+// `wire` module.  `SseEvent` is documented as the SSE wire format and
+// already serialises into the public `/events` stream — promoting it
+// here doesn't expand the surface beyond what's already on the wire.
+pub use wire::SseEvent;
 use state::ChatHandle;
 use wire::AuthMode;
 

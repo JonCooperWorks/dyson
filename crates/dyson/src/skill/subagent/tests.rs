@@ -55,6 +55,131 @@ fn capture_output_ignores_file_sends() {
 }
 
 // -----------------------------------------------------------------------
+// CaptureOutput UI tee — backstop for the "empty box until done" bug.
+// Without these, the LLM-boundary path could silently regress and the
+// UI would go back to looking dead while a subagent runs.
+// -----------------------------------------------------------------------
+
+/// Build a `CaptureOutput` with a real `SubagentEventBus` wired and
+/// return both halves so a test can assert on the broadcast frames.
+fn capture_with_bus(parent_tool_id: &str)
+    -> (CaptureOutput, tokio::sync::broadcast::Receiver<crate::controller::http::SseEvent>)
+{
+    let (tx, rx) = tokio::sync::broadcast::channel(64);
+    let bus = crate::controller::http::SubagentEventBus::new(tx);
+    let cap = CaptureOutput::new()
+        .with_ui_sink(Some(bus), Some(parent_tool_id.to_string()));
+    (cap, rx)
+}
+
+#[test]
+fn capture_output_tees_inner_tool_start_with_parent_id() {
+    use crate::controller::http::SseEvent;
+    let (mut cap, mut rx) = capture_with_bus("parent_subagent");
+    cap.tool_use_start("inner_1", "bash").unwrap();
+    match rx.try_recv().unwrap() {
+        SseEvent::ToolStart { id, name, parent_tool_id } => {
+            assert_eq!(id, "inner_1");
+            assert_eq!(name, "bash");
+            assert_eq!(parent_tool_id.as_deref(), Some("parent_subagent"));
+        }
+        other => panic!("unexpected: {}", serde_json::to_string(&other).unwrap()),
+    }
+}
+
+#[test]
+fn capture_output_tees_tool_result_with_parent_and_inner_id() {
+    use crate::controller::http::SseEvent;
+    let (mut cap, mut rx) = capture_with_bus("parent_subagent");
+    cap.tool_use_start("inner_1", "bash").unwrap();
+    let _ = rx.try_recv(); // discard the ToolStart frame
+    cap.tool_result(&ToolOutput::success("ok")).unwrap();
+    match rx.try_recv().unwrap() {
+        SseEvent::ToolResult { content, is_error, parent_tool_id, tool_use_id, .. } => {
+            assert_eq!(content, "ok");
+            assert!(!is_error);
+            assert_eq!(parent_tool_id.as_deref(), Some("parent_subagent"));
+            assert_eq!(tool_use_id.as_deref(), Some("inner_1"));
+        }
+        other => panic!("unexpected: {}", serde_json::to_string(&other).unwrap()),
+    }
+}
+
+#[test]
+fn capture_output_tee_is_silent_when_bus_is_unset() {
+    // Default `CaptureOutput::new()` — no bus, no parent — must not
+    // attempt to construct any SSE frames.  No assertion needed
+    // beyond "doesn't panic" because the broadcast channel doesn't
+    // exist; we just make sure the code path stays no-op.
+    let mut cap = CaptureOutput::new();
+    cap.tool_use_start("inner_1", "bash").unwrap();
+    cap.tool_result(&ToolOutput::success("ok")).unwrap();
+    cap.send_file(std::path::Path::new("/tmp/x")).unwrap();
+    let art = crate::message::Artefact {
+        id: String::new(),
+        kind: crate::message::ArtefactKind::Other,
+        title: "t".into(),
+        content: "c".into(),
+        mime_type: "text/plain".into(),
+        metadata: None,
+    };
+    cap.send_artefact(&art).unwrap();
+    // Artefacts are buffered for the parent regardless of the UI bus —
+    // this is the LLM-side capture path, not the UI tee.
+    assert_eq!(cap.take_artefacts().len(), 1);
+}
+
+#[test]
+fn capture_output_tee_requires_both_bus_and_parent_id() {
+    // Bus set but parent_tool_id absent → no tee.  Mirrors the case
+    // where a subagent ran from a code path without a parent dispatch
+    // (tests, dream callbacks).  Without this guard the frontend would
+    // get an event tagged with `parent_tool_id: ""` and either spam
+    // top-level chips or attach to the wrong panel.
+    let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::controller::http::SseEvent>(8);
+    let bus = crate::controller::http::SubagentEventBus::new(tx);
+    let mut cap = CaptureOutput::new().with_ui_sink(Some(bus), None);
+    cap.tool_use_start("inner_1", "bash").unwrap();
+    assert!(matches!(rx.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)),
+        "no frame should have been sent");
+}
+
+#[test]
+fn capture_output_text_path_does_not_tee_to_bus() {
+    // The LLM-boundary invariant: text deltas (the child's reply text)
+    // must NEVER reach the UI bus — they bubble up to the parent only
+    // as the subagent tool's `ToolOutput.content`, where the parent's
+    // own `SseOutput` decides what to render.  This test pins that
+    // invariant so a future "stream subagent text live" PR has to
+    // delete the assertion explicitly.
+    let (mut cap, mut rx) = capture_with_bus("parent_subagent");
+    cap.text_delta("hidden inner reasoning").unwrap();
+    assert!(matches!(rx.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+    assert_eq!(cap.text(), "hidden inner reasoning");
+}
+
+#[test]
+fn capture_output_inner_tool_id_resets_on_flush() {
+    // `flush` runs at end-of-turn for `SseOutput`.  Mirror the same
+    // contract here so a later turn doesn't accidentally tag results
+    // with a stale tool_use_id from the previous turn.
+    use crate::controller::http::SseEvent;
+    let (mut cap, mut rx) = capture_with_bus("parent_subagent");
+    cap.tool_use_start("inner_1", "bash").unwrap();
+    let _ = rx.try_recv();
+    cap.flush().unwrap();
+    cap.tool_result(&ToolOutput::success("ok")).unwrap();
+    match rx.try_recv().unwrap() {
+        SseEvent::ToolResult { tool_use_id, .. } => {
+            assert!(tool_use_id.is_none(), "stale inner id leaked through flush");
+        }
+        other => panic!("unexpected: {}", serde_json::to_string(&other).unwrap()),
+    }
+}
+
+// -----------------------------------------------------------------------
 // SubagentTool metadata tests
 // -----------------------------------------------------------------------
 
@@ -314,6 +439,8 @@ async fn subagent_depth_limit_prevents_recursion() {
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
+    tool_use_id: None,
+    subagent_events: None,
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -811,6 +938,8 @@ async fn coder_depth_limit_prevents_recursion() {
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
+    tool_use_id: None,
+    subagent_events: None,
     };
 
     let input = serde_json::json!({"path": ".", "task": "should fail"});
@@ -1063,6 +1192,8 @@ async fn orchestrator_depth_limit_prevents_recursion() {
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
+    tool_use_id: None,
+    subagent_events: None,
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -1501,6 +1632,8 @@ async fn subagent_inherits_parents_working_dir() {
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
+    tool_use_id: None,
+    subagent_events: None,
     };
 
     let input = serde_json::json!({ "task": "call the spy" });

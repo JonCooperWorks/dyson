@@ -303,6 +303,15 @@ impl Agent {
     /// 3. On Deny: return error ToolOutput
     /// 4. On Redirect: look up redirected tool → run it → `sandbox.after()`
     async fn execute_tool_call(&self, call: &ToolCall) -> Result<ToolOutput> {
+        // Per-call clone of the tool context so each tool sees its own
+        // `tool_use_id`.  Cloning is cheap (Arcs and small primitives)
+        // and is the only safe way to stamp per-call state when the
+        // dispatch path is `&self` and parallel-friendly.  Subagent
+        // tools propagate this id into `ChildSpawn.parent_tool_id` so
+        // the inner agent's `CaptureOutput` can tag every nested SSE
+        // event with its owning subagent box.
+        let mut ctx = self.tool_context.clone();
+        ctx.tool_use_id = Some(call.id.clone());
         // -- Ask the sandbox --
         //
         // Sandbox and tool-lookup errors are converted to error ToolOutputs
@@ -311,7 +320,7 @@ impl Agent {
         // the LLM should learn the tool was rejected and try something else.
         let decision = match self
             .sandbox
-            .check(&call.name, &call.input, &self.tool_context)
+            .check(&call.name, &call.input, &ctx)
             .await
         {
             Ok(d) => d,
@@ -333,7 +342,7 @@ impl Agent {
                 };
 
                 // Execute the tool.
-                let mut tool_output = match tool.run(&input, &self.tool_context).await {
+                let mut tool_output = match tool.run(&input, &ctx).await {
                     Ok(out) => out,
                     Err(e) => ToolOutput::error(e.to_string()),
                 };
@@ -378,8 +387,10 @@ impl Agent {
                     )));
                 };
 
-                // Execute the redirected tool.
-                let mut tool_output = match tool.run(&input, &self.tool_context).await {
+                // Execute the redirected tool.  The redirected call
+                // keeps the original `tool_use_id` — the sandbox didn't
+                // change which message id the LLM is waiting on.
+                let mut tool_output = match tool.run(&input, &ctx).await {
                     Ok(out) => out,
                     Err(e) => ToolOutput::error(e.to_string()),
                 };

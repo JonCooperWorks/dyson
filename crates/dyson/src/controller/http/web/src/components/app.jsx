@@ -557,7 +557,20 @@ function streamCallbacks(conv) {
       }));
     },
 
-    onToolStart: ({ id, name }) => {
+    onToolStart: ({ id, name, parent_tool_id }) => {
+      // Nested subagent tool call — attach to the parent panel as a
+      // child chip instead of minting a new top-level chip.  Drop on
+      // the floor if the parent panel isn't mounted (race on reload);
+      // the user will still see the subagent's outer chip, just not
+      // the nested progress.
+      if (parent_tool_id) {
+        updateTool(parent_tool_id, t => {
+          const existing = Array.isArray(t.body?.children) ? t.body.children : [];
+          const child = { id: id || `child-${existing.length + 1}`, name, status: 'running', dur: '…' };
+          return { ...t, kind: 'subagent', body: { ...(t.body || {}), children: [...existing, child] } };
+        });
+        return;
+      }
       const ref = id || mintToolRef(conv, 'live');
       setTool(ref, mkTool(name, { status: 'running', dur: '…' }));
       updateSession(conv, s => ({
@@ -566,7 +579,39 @@ function streamCallbacks(conv) {
       }));
     },
 
-    onToolResult: ({ content, is_error, view }) => {
+    onToolResult: ({ content, is_error, view, parent_tool_id, tool_use_id }) => {
+      // Nested subagent tool result — find the matching child by id
+      // (the backend always tags nested results with `tool_use_id`,
+      // including for parallel dispatches).  No fallback: a missing
+      // id or an unmatched id means we can't safely route the result,
+      // so we drop it rather than guess and corrupt the wrong child.
+      if (parent_tool_id) {
+        if (!tool_use_id) return;
+        updateTool(parent_tool_id, t => {
+          const children = Array.isArray(t.body?.children) ? t.body.children : [];
+          const idx = children.findIndex(c => c.id === tool_use_id);
+          if (idx < 0) return t;
+          // Strip the `kind` field out of `view` (it lives on the entry,
+          // not the body) without an IIFE allocation.
+          let body;
+          let kind = children[idx].kind;
+          if (view) {
+            const { kind: viewKind, ...rest } = view;
+            kind = viewKind;
+            body = rest;
+          } else {
+            body = { text: content };
+          }
+          const nextChildren = children.slice();
+          nextChildren[idx] = { ...children[idx],
+            status: 'done',
+            exit: is_error ? 'err' : 'ok',
+            kind, body,
+          };
+          return { ...t, body: { ...t.body, children: nextChildren } };
+        });
+        return;
+      }
       const ref = getSession(conv)?.liveToolRef;
       if (!ref) return;
       // image_generate's content is `Generated N image(s) for: "…"` —
@@ -728,8 +773,18 @@ function mkTool(name, over = {}) {
 
 // Apply a typed ToolView (SSE wire shape) to a tool entry, producing a
 // new frozen value.  Pure — called as an updateTool reducer argument.
+//
+// Subagent special case: when the panel was already flipped to
+// kind='subagent' by inner tool_use_start events streaming in during
+// the subagent's run, preserve `body.children` and stash the final
+// summary text as `body.summary`.  Without this guard, the typed view
+// (or the fallback `{ text: content }`) would clobber the live list of
+// child chips users have been watching populate for minutes.
 function applyToolView(t, content, isError, view) {
   const base = { ...t, status: 'done', exit: isError ? 'err' : 'ok' };
+  if (t.kind === 'subagent' && Array.isArray(t.body?.children)) {
+    return { ...base, body: { ...t.body, summary: content } };
+  }
   if (!view?.kind) return { ...base, kind: 'fallback', body: { text: content } };
   const { kind: _k, ...body } = view;
   const next = { ...base, kind: view.kind, body };
@@ -746,4 +801,4 @@ function applyToolView(t, content, isError, view) {
   return next;
 }
 
-export { App };
+export { App, streamCallbacks };

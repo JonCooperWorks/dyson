@@ -517,17 +517,61 @@ Discriminator is `type`:
 |---|---|
 | `text` | `{ delta }` |
 | `thinking` | `{ delta }` (extended-reasoning stream) |
-| `tool_start` | `{ id, name }` |
-| `tool_result` | `{ content, is_error, view? }` |
+| `tool_start` | `{ id, name, parent_tool_id? }` |
+| `tool_result` | `{ content, is_error, view?, parent_tool_id?, tool_use_id? }` |
 | `checkpoint` | `{ text }` |
-| `file` | `{ name, mime_type, url, inline_image }` |
-| `artefact` | `{ id, kind, title, url, bytes, metadata? }` |
+| `file` | `{ name, mime_type, url, inline_image, parent_tool_id? }` |
+| `artefact` | `{ id, kind, title, url, bytes, metadata?, parent_tool_id? }` |
 | `llm_error` | `{ message }` |
 | `done` | `{}` (always last; client should `close()` after this) |
+
+`parent_tool_id` is set on events that originated inside a subagent's
+inner agent loop and carry the parent agent's `tool_use_id` (the
+subagent tool box the inner call belongs to).  See
+[Subagent UI tee](#subagent-ui-tee) below.  On `tool_result`, the
+inner call's own `tool_use_id` is also included so the frontend can
+update the right child even when the subagent dispatched calls in
+parallel — relying on "most recent ToolStart" is unsafe there.
 
 **Subscribe before posting the turn.**  `broadcast` drops events with
 no receivers; `client.send()` opens the EventSource first, then POSTs
 to `/turn`.
+
+#### Subagent UI tee
+
+Subagent tools (`security_engineer`, `coder`, plain `SubagentTool`s)
+spawn an inner `Agent` under
+[`CaptureOutput`](../crates/dyson/src/skill/subagent/mod.rs).  The
+inner agent's `text_delta` / `tool_use_start` / `tool_result` etc. are
+**not** funnelled into the parent's LLM conversation — that would blow
+the context budget after a couple of subagent calls — but the HTTP
+controller does want them in the right rail so the user can watch
+work happen.
+
+The bridge is
+[`SubagentEventBus`](../crates/dyson/src/controller/http/subagent_events.rs):
+a thin `broadcast::Sender<SseEvent>` wrapper installed by
+`routes::turns` on `Agent::set_subagent_events` for each turn.
+`CaptureOutput` tees `tool_use_start` and `tool_result` (only — text,
+file bytes, and artefact previews stay parent-only) through the bus,
+tagging each frame with `parent_tool_id` (the subagent tool's
+`tool_use_id`) and, for results, `tool_use_id` (the inner call's
+own id).  The frontend's `onToolStart` / `onToolResult` route nested
+events to `tools[parent_tool_id].body.children` instead of as new
+top-level chips, and `panels.jsx`'s `SubagentPanel` renders the live
+list.
+
+The bus is fire-and-forget: events do **not** push into the per-chat
+replay ring, so a reconnect mid-subagent shows the panel empty until
+the next nested event lands.  Acceptable trade-off — the alternative
+(replaying every nested call from a multi-minute subagent run) would
+balloon the ring's memory bound for marginal UX value.
+
+**LLM-boundary invariant.**  The bus carries an `SseEvent` channel,
+not an `LlmEvent` one — events go to the browser, never to the next
+LLM prompt.  Any future change that reroutes nested tool calls into
+the parent's `Conversation` must happen through `Output::tool_result`
+on a non-`CaptureOutput` adapter, not through this bus.
 
 ### Tool views
 
@@ -694,7 +738,7 @@ flowchart TB
 | [`components/views.jsx`](../crates/dyson/src/controller/http/web/src/components/views.jsx) | TopBar (model picker, nav), LeftRail (chat list), RightRail (tool panels) |
 | [`components/views-secondary.jsx`](../crates/dyson/src/controller/http/web/src/components/views-secondary.jsx) | Mind / Activity / Artefacts.  Code-split via `React.lazy` so cold-paint bundle carries only the conversation shell |
 | [`components/turns.jsx`](../crates/dyson/src/controller/http/web/src/components/turns.jsx) | Turn rendering, markdown, composer, typing indicator, reactions bar |
-| [`components/panels.jsx`](../crates/dyson/src/controller/http/web/src/components/panels.jsx) | Tool view renderers (bash / diff / sbom / taint / read / image / thinking / fallback).  Lazy — no panel mounts on cold load |
+| [`components/panels.jsx`](../crates/dyson/src/controller/http/web/src/components/panels.jsx) | Tool view renderers (bash / diff / sbom / taint / read / image / thinking / subagent / fallback).  Lazy — no panel mounts on cold load.  `SubagentPanel` renders the live list of inner tool calls fed by [`SubagentEventBus`](#subagent-ui-tee) tees |
 
 ### Reactive store contract
 
@@ -837,9 +881,16 @@ in another.
   [`web/src/__tests__/regression.test.js`](../crates/dyson/src/controller/http/web/src/__tests__/regression.test.js)
   pins past bugs: greyscreen on ⌘4/⌘5 when nav indices outran view
   ids, conversations opening at the top, control-char placeholders
-  leaking into rendered markdown, etc.  `npm run build` runs the
-  whole vitest suite before bundling, so a regression fails
-  `cargo build` too.
+  leaking into rendered markdown, etc.
+- **Subagent stream regression** —
+  [`web/src/__tests__/subagent-stream.test.js`](../crates/dyson/src/controller/http/web/src/__tests__/subagent-stream.test.js)
+  pins the live-tee contract: nested `tool_start` / `tool_result`
+  events tagged with `parent_tool_id` attach to the parent panel's
+  child list, parallel calls route by `tool_use_id`, and the parent
+  result preserves children rather than clobbering them.
+
+`npm run build` runs the whole vitest suite before bundling, so a
+regression fails `cargo build` too.
 
 ---
 
@@ -849,10 +900,11 @@ in another.
 - **`/api/activity` aggregation is per-controller.**  Each controller
   keeps its own `ActivityRegistry`; cross-controller aggregation
   hasn't landed.
-- **Subagent zoom doesn't appear live.**  Orchestrator tools don't
-  emit structured spawn/complete events for the controller to
-  forward, so `security_engineer` shows as one orchestrator tool
-  card while it runs.
+- **Subagent live tool list is one level deep.**  Nested children
+  inside a subagent panel show as flat chips (name + status + exit)
+  rather than full typed views — a click-to-drill-in for child
+  panels is future work.  See
+  [Subagent UI tee](#subagent-ui-tee).
 - **Model switches persist via `dyson.json`.**  Survives a restart,
   but two operators editing the same config at the same time will
   race.

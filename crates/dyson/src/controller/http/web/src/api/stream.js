@@ -8,13 +8,22 @@
  * Event types:
  *   text        — streaming assistant prose (msg.delta)
  *   thinking    — streaming extended-thinking (msg.delta)
- *   tool_start  — { id, name }
- *   tool_result — { content, is_error, view? }
+ *   tool_start  — { id, name, parent_tool_id? }
+ *   tool_result — { content, is_error, view?, parent_tool_id?, tool_use_id? }
  *   checkpoint  — { text }
- *   file        — { name, mime_type, url, inline_image }
- *   artefact    — { id, kind, title, url, bytes, tool_use_id?, metadata? }
+ *   file        — { name, mime_type, url, inline_image, parent_tool_id? }
+ *   artefact    — { id, kind, title, url, bytes, tool_use_id?, metadata?, parent_tool_id? }
  *   llm_error   — { message }
  *   done        — terminator; caller should close the EventSource
+ *
+ * `parent_tool_id` is set by a subagent's `CaptureOutput` (backend) for
+ * events that originated inside the subagent's inner agent loop.  The
+ * frontend uses it to attach the event to the parent subagent's tool
+ * panel as a nested child instead of as a new top-level chip.  On
+ * tool_result, `tool_use_id` carries the inner call's id so the right
+ * child gets updated even when the subagent dispatched calls in
+ * parallel — without it, the legacy "most recent ToolStart" path is
+ * unsafe.
  */
 
 export function parseStreamEvent(raw) {

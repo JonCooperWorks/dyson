@@ -159,9 +159,20 @@ pub(crate) const MAX_MIND_BODY: usize = 4 * 1024 * 1024;
 /// `tool_result` is the typed payload that the right-rail panel renders
 /// natively (terminal / diff / sbom / taint / read).  Tools without a
 /// view leave it `None` and the panel falls back to plain text.
+///
+/// `parent_tool_id` on `tool_start` / `tool_result` / `file` / `artefact`
+/// is set when the event was emitted by a subagent's `CaptureOutput` —
+/// it carries the parent agent's `tool_use_id` (the subagent tool box
+/// the inner call belongs to) so the frontend can render nested tool
+/// chips inside the subagent panel instead of as new top-level chips.
+/// Top-level (parent-agent) emissions leave it `None`.  Nested
+/// `tool_result` also carries the inner call's own `tool_use_id` so the
+/// frontend can update the right child without relying on the
+/// most-recently-started liveToolRef heuristic — important when a
+/// subagent dispatches tool calls in parallel.
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum SseEvent {
+pub enum SseEvent {
     Text {
         delta: String,
     },
@@ -175,12 +186,23 @@ pub(crate) enum SseEvent {
     ToolStart {
         id: String,
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_tool_id: Option<String>,
     },
     ToolResult {
         content: String,
         is_error: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         view: Option<ToolView>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_tool_id: Option<String>,
+        /// The id of the tool call that produced this result.  Set on
+        /// nested (subagent-internal) emissions so the frontend can
+        /// pick the correct child by id; left `None` for parent-level
+        /// emissions where the legacy "most recent ToolStart" path
+        /// suffices.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
     },
     Checkpoint {
         text: String,
@@ -194,6 +216,8 @@ pub(crate) enum SseEvent {
         mime_type: String,
         url: String,
         inline_image: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_tool_id: Option<String>,
     },
     /// An agent-produced artefact (e.g. a security-review report) ready
     /// for full-page markdown rendering.  The body is served at
@@ -207,6 +231,8 @@ pub(crate) enum SseEvent {
         bytes: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_tool_id: Option<String>,
     },
     LlmError {
         message: String,

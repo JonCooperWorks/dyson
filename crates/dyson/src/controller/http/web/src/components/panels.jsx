@@ -60,6 +60,14 @@ function copyTextForTool(tool) {
       const lines = Array.isArray(body.lines) ? body.lines : [];
       return (body.path ? `// ${body.path}\n` : '') + lines.join('\n');
     }
+    case 'subagent': {
+      const children = Array.isArray(body.children) ? body.children : [];
+      const list = children.map(c => {
+        const status = c.status === 'running' ? 'running' : (c.exit === 'ok' ? 'exit 0' : 'exit 1');
+        return `${c.name}\t${c.dur || ''}\t${status}`;
+      }).join('\n');
+      return body.summary ? `${list}\n\n${body.summary}` : list;
+    }
     default:
       return typeof body.text === 'string' ? body.text : '';
   }
@@ -194,6 +202,55 @@ function FallbackPanel({ text }) {
   return <div className="fallback-body">{text}</div>;
 }
 
+// Subagent panel — renders the live list of inner tool calls a
+// subagent (security_engineer, coder, etc.) is dispatching, so users
+// can watch the inner agent work instead of staring at an empty
+// fallback panel for minutes.  The list is fed by `tool_start` /
+// `tool_result` events tagged with `parent_tool_id` (see
+// `controller::http::SubagentEventBus` on the backend) — no LLM-side
+// data flows through here.
+//
+// `children` shape (one entry per inner tool call):
+//   { id, name, status: 'running' | 'done', exit?: 'ok' | 'err',
+//     dur?: string, kind?: string, body?: object }
+// `summary` is the subagent's final text reply, populated when the
+// outer subagent ToolResult arrives.
+function SubagentPanel({ children, summary, running }) {
+  const list = Array.isArray(children) ? children : [];
+  return (
+    <div className="p-body flush" style={{overflow:'auto', flex:1}}>
+      {list.length === 0 && (
+        <div style={{padding:'16px', color:'var(--mute)', fontSize:12}}>
+          {running ? 'Subagent starting…' : 'Subagent ran without inner tool calls.'}
+        </div>
+      )}
+      {list.map((c, i) => (
+        <div key={c.id || i} className={`toolchip ${c.status === 'running' ? 'running' : ''}`}
+             style={{margin:'6px 10px', cursor:'default'}}>
+          <span className="icon">{(c.name && c.name[0] || '?').toUpperCase()}</span>
+          <span className="sig"><span className="tname">{c.name}</span></span>
+          <span className="meta">
+            <span className="dur">{c.dur || (c.status === 'running' ? '…' : '')}</span>
+            {c.status === 'done' && (
+              <span className={`exit ${c.exit === 'ok' ? 'ok' : 'err'}`}>
+                {c.exit === 'ok' ? 'exit 0' : 'exit 1'}
+              </span>
+            )}
+            {c.status === 'running' && <span className="exit">…</span>}
+          </span>
+        </div>
+      ))}
+      {summary && (
+        <div style={{padding:'12px 14px', borderTop:'1px solid var(--line)',
+                     fontSize:12, lineHeight:1.55, color:'var(--fg-dim)',
+                     whiteSpace:'pre-wrap'}}>
+          {summary}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReadPanel({ path, lines, highlight }) {
   return (
     <div className="p-body flush" style={{background:'var(--bg)'}}>
@@ -272,6 +329,7 @@ function ToolPanel({ tool, onClose }) {
     case 'read': body = <ReadPanel path={tool.body.path} lines={tool.body.lines || []} highlight={tool.body.highlight}/>; break;
     case 'thinking': body = <ThinkingPanel text={tool.body?.text || ''} running={running}/>; break;
     case 'image': body = <ImagePanel url={tool.body?.url} name={tool.body?.name} prompt={tool.body?.prompt || tool.prompt}/>; break;
+    case 'subagent': body = <SubagentPanel children={tool.body?.children} summary={tool.body?.summary} running={running}/>; break;
     default: body = <FallbackPanel text={tool.body?.text || ''}/>;
   }
   return (
@@ -288,4 +346,4 @@ function ToolPanel({ tool, onClose }) {
   );
 }
 
-export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, ToolPanel, copyTextForTool };
+export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, SubagentPanel, ToolPanel, copyTextForTool };

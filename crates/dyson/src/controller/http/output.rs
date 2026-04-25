@@ -103,6 +103,7 @@ impl Output for SseOutput {
         self.send(SseEvent::ToolStart {
             id: id.to_string(),
             name: name.to_string(),
+            parent_tool_id: None,
         });
         Ok(())
     }
@@ -116,6 +117,8 @@ impl Output for SseOutput {
             content: output.content.clone(),
             is_error: output.is_error,
             view: output.view.clone(),
+            parent_tool_id: None,
+            tool_use_id: None,
         });
         Ok(())
     }
@@ -187,6 +190,7 @@ impl Output for SseOutput {
             mime_type: mime.clone(),
             url: url.clone(),
             inline_image,
+            parent_tool_id: None,
         });
 
         // Images are also artefacts — listing them in the Artefacts
@@ -266,6 +270,7 @@ impl Output for SseOutput {
             url,
             bytes,
             metadata: artefact.metadata.clone(),
+            parent_tool_id: None,
         });
         Ok(())
     }

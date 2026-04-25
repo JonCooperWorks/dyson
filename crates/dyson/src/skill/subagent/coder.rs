@@ -147,6 +147,8 @@ impl Tool for CoderTool {
             working_dir: Some(scoped_dir),
             user_message,
             activity: ctx.activity.clone(),
+            events: ctx.subagent_events.clone(),
+            parent_tool_id: ctx.tool_use_id.clone(),
         })
         .await
     }

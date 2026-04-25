@@ -45,8 +45,12 @@ use crate::tool::{MAX_SUBAGENT_DEPTH, Tool, ToolContext, ToolOutput};
 use crate::workspace::WorkspaceHandle;
 
 /// An `Output` that accumulates a child agent's streamed text into a
-/// buffer.  Tool events are logged at `debug` but never captured —
-/// only the final text (and side-channel artefacts) reach the parent.
+/// buffer.  Tool events are logged at `debug` and (when the parent
+/// controller wired in a `SubagentEventBus`) tee'd to the parent's SSE
+/// stream tagged with `parent_tool_id`, so the browser can render
+/// nested tool chips inside the subagent panel as they happen.  Only
+/// the final text (and side-channel artefacts) reach the parent's LLM
+/// conversation.
 ///
 /// ## LLM boundary vs. UI sink — design note
 ///
@@ -63,27 +67,45 @@ use crate::workspace::WorkspaceHandle;
 ///   conversation would blow past the context window after two or
 ///   three subagent calls and leak implementation noise into the
 ///   parent's reasoning.  `tool_use_start` / `tool_result` / `error`
-///   here are debug-log only.  Do not ever make them append to
-///   `self.text` — that text is what the parent LLM reads back.
+///   here never append to `self.text` — that text is what the parent
+///   LLM reads back.
 ///
-/// - **UI sink** (TODO, not wired yet): rendering a subagent's nested
-///   tool calls inside a collapsible card under the subagent chip,
-///   plus listing running subagents in the Activity tab, requires a
-///   second event path that bypasses `CaptureOutput` entirely and
-///   reaches the HTTP controller's per-chat broadcast channel.  That
-///   channel drives SSE and never flows into any LLM prompt, so
-///   forwarding intermediate events through it does not violate the
-///   boundary above.  Implementation plan: thread an optional
-///   `Arc<tokio::sync::broadcast::Sender<UiEvent>>` into `ChildSpawn`,
-///   have `CaptureOutput` tee `tool_use_start` / `tool_result` /
-///   `send_file` / `send_artefact` to it tagged with the spawning
-///   tool's `tool_use_id` (the "parent_tool_id" on the frontend), and
-///   grow a new `SseEvent::SubagentStart` / `SubagentEnd` pair for the
-///   card's lifecycle.  The LLM-facing code path stays untouched.
-#[derive(Default)]
+/// - **UI sink**: when the optional `events` bus is wired (HTTP
+///   controller only), the same `tool_use_start` / `tool_result` /
+///   `send_file` / `send_artefact` calls also tee a tagged `SseEvent`
+///   to the parent's per-chat broadcast channel via the bus.  Those
+///   events carry `parent_tool_id` (the spawning tool's id, supplied
+///   by `ChildSpawn.parent_tool_id`) so the frontend can attach them
+///   to the right subagent panel.  The bus is fire-and-forget — slow
+///   subscribers, missing receivers, and reconnects degrade
+///   gracefully (no replay-ring entry; the panel just looks empty
+///   until the next nested event arrives).  This path never flows
+///   into any LLM prompt — it's pure UI.
 pub struct CaptureOutput {
     text: String,
     artefacts: Vec<crate::message::Artefact>,
+    /// Optional UI side-channel.  `None` for non-HTTP controllers and
+    /// for tests; `Some` when the HTTP controller wired
+    /// `Agent::set_subagent_events` for this turn.
+    events: Option<crate::controller::http::SubagentEventBus>,
+    /// The parent agent's `tool_use_id` for the subagent tool call
+    /// that produced this child.  Used as the frontend's
+    /// `parent_tool_id` tag.  `None` disables tee'ing even when
+    /// `events` is set — there's no panel to attach inner events to
+    /// without a parent id.
+    parent_tool_id: Option<String>,
+    /// Tracks the current inner tool call's id so `tool_result` can
+    /// emit it as `tool_use_id` on the SSE frame.  Set in
+    /// `tool_use_start`, cleared in `flush`.  Mirrors the same field
+    /// on `SseOutput` — same reason: file / artefact emissions that
+    /// follow a tool result need the originating call's id.
+    current_inner_tool_id: Option<String>,
+}
+
+impl Default for CaptureOutput {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CaptureOutput {
@@ -91,7 +113,24 @@ impl CaptureOutput {
         Self {
             text: String::new(),
             artefacts: Vec::new(),
+            events: None,
+            parent_tool_id: None,
+            current_inner_tool_id: None,
         }
+    }
+
+    /// Wire the optional UI bus + parent id.  Both must be set for any
+    /// tee'ing to happen — without `parent_tool_id` the frontend has
+    /// no panel to attach inner events to, and without `events` there's
+    /// no broadcast channel to send through.
+    pub fn with_ui_sink(
+        mut self,
+        events: Option<crate::controller::http::SubagentEventBus>,
+        parent_tool_id: Option<String>,
+    ) -> Self {
+        self.events = events;
+        self.parent_tool_id = parent_tool_id;
+        self
     }
 
     pub fn text(&self) -> &str {
@@ -104,6 +143,15 @@ impl CaptureOutput {
     pub fn take_artefacts(&mut self) -> Vec<crate::message::Artefact> {
         std::mem::take(&mut self.artefacts)
     }
+
+    /// Return `Some((bus, parent_id))` if both halves of the UI sink
+    /// are populated.  Inline so the hot path stays a single branch.
+    fn ui_sink(&self) -> Option<(&crate::controller::http::SubagentEventBus, &str)> {
+        match (self.events.as_ref(), self.parent_tool_id.as_deref()) {
+            (Some(bus), Some(parent)) => Some((bus, parent)),
+            _ => None,
+        }
+    }
 }
 
 impl Output for CaptureOutput {
@@ -112,8 +160,12 @@ impl Output for CaptureOutput {
         Ok(())
     }
 
-    fn tool_use_start(&mut self, _id: &str, name: &str) -> Result<()> {
-        tracing::debug!(tool = name, "subagent tool call started");
+    fn tool_use_start(&mut self, id: &str, name: &str) -> Result<()> {
+        tracing::debug!(tool = name, id = id, "subagent tool call started");
+        self.current_inner_tool_id = Some(id.to_string());
+        if let Some((bus, parent)) = self.ui_sink() {
+            bus.tool_start(parent, id, name);
+        }
         Ok(())
     }
 
@@ -127,11 +179,20 @@ impl Output for CaptureOutput {
             content_len = output.content.len(),
             "subagent tool result"
         );
+        if let Some((bus, parent)) = self.ui_sink() {
+            bus.tool_result(parent, self.current_inner_tool_id.as_deref(), output);
+        }
         Ok(())
     }
 
     fn send_file(&mut self, path: &std::path::Path) -> Result<()> {
         tracing::debug!(path = %path.display(), "subagent file send (ignored in capture)");
+        // We deliberately don't broadcast here: the file's bytes haven't
+        // been mirrored into the controller's `FileStore`, so a `file`
+        // event with a real `/api/files/<id>` URL only makes sense once
+        // the parent's `SseOutput::send_file` runs after the subagent
+        // returns.  The replay path (chat reload) reconstructs file
+        // blocks from disk anyway.
         Ok(())
     }
 
@@ -142,6 +203,16 @@ impl Output for CaptureOutput {
             bytes = artefact.content.len(),
             "subagent artefact buffered for parent",
         );
+        // We deliberately don't tee the artefact through the UI bus
+        // here.  The bus would emit an `Artefact` event with an empty
+        // id/url (no `ArtefactStore` entry exists yet — that's minted
+        // upstream by `SseOutput::send_artefact` when this artefact
+        // bubbles back through `ToolOutput.artefacts`).  Empty-id
+        // events confuse the frontend's chip click-through, and the
+        // user-visible delta is small (a few seconds earlier preview
+        // chip).  Inner tool_use_start/tool_result tees give plenty
+        // of progress signal already.  Keep the bus method around for
+        // a future "preview chip" UI iteration.
         self.artefacts.push(artefact.clone());
         Ok(())
     }
@@ -152,6 +223,7 @@ impl Output for CaptureOutput {
     }
 
     fn flush(&mut self) -> Result<()> {
+        self.current_inner_tool_id = None;
         Ok(())
     }
 }
@@ -202,6 +274,16 @@ pub(crate) struct ChildSpawn<'a> {
     /// bump the parent's Activity tab liveness.  `None` on non-HTTP
     /// controllers.
     pub activity: Option<crate::controller::ActivityHandle>,
+    /// Optional UI events bus, forwarded to the child's `CaptureOutput`
+    /// so its inner tool calls tee live SSE frames to the browser
+    /// tagged with `parent_tool_id`.  `None` on non-HTTP controllers
+    /// or when the parent's tool dispatch didn't carry an id (tests).
+    pub events: Option<crate::controller::http::SubagentEventBus>,
+    /// The parent agent's `tool_use_id` for the subagent tool call
+    /// that's spawning this child.  Tagged onto every tee'd UI event
+    /// so the frontend attaches inner chips to the correct subagent
+    /// panel.
+    pub parent_tool_id: Option<String>,
 }
 
 /// Build a child `Agent` from `spec`, run it to completion under a
@@ -244,7 +326,9 @@ pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
         child_agent.set_activity_handle(handle);
     }
 
-    let mut capture = CaptureOutput::new();
+    // Wire the optional UI sink before running.  Both `events` and
+    // `parent_tool_id` must be `Some` for any tee'ing to happen.
+    let mut capture = CaptureOutput::new().with_ui_sink(spec.events, spec.parent_tool_id);
     match child_agent.run(&spec.user_message, &mut capture).await {
         Ok(final_text) => {
             let buffered = capture.take_artefacts();
@@ -420,6 +504,8 @@ impl Tool for SubagentTool {
             working_dir: Some(ctx.working_dir.clone()),
             user_message,
             activity: ctx.activity.clone(),
+            events: ctx.subagent_events.clone(),
+            parent_tool_id: ctx.tool_use_id.clone(),
         })
         .await;
 

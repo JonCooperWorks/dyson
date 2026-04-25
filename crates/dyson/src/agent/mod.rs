@@ -695,6 +695,8 @@ impl Agent {
             dangerous_no_sandbox: sandbox.skip_path_validation(),
             taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             activity: None,
+        tool_use_id: None,
+        subagent_events: None,
         };
         tool_context.workspace = workspace;
         tool_context
@@ -777,6 +779,17 @@ impl Agent {
         handle: crate::controller::ActivityHandle,
     ) {
         self.tool_context.activity = Some(handle);
+    }
+
+    /// Install a per-turn subagent UI events bus.  Wired only by the
+    /// HTTP controller — lets nested tool calls inside a subagent surface
+    /// in the web UI without flowing into the parent's LLM conversation.
+    /// See `ToolContext::subagent_events` for the boundary invariant.
+    pub fn set_subagent_events(
+        &mut self,
+        bus: crate::controller::http::SubagentEventBus,
+    ) {
+        self.tool_context.subagent_events = Some(bus);
     }
 
     /// Send a dream event to the persistent dream thread.

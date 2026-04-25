@@ -320,6 +320,8 @@ impl Tool for OrchestratorTool {
             working_dir: child_working_dir,
             user_message,
             activity: ctx.activity.clone(),
+            events: ctx.subagent_events.clone(),
+            parent_tool_id: ctx.tool_use_id.clone(),
         })
         .await;
         let mut out = match spawn_result {
