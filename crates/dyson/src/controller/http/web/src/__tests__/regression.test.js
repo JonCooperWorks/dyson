@@ -312,21 +312,63 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
 describe('turns.jsx — markdown + composer regressions', () => {
   const turnsSrc = src('components/turns.jsx');
 
-  it('markdown inline-code does not leak control-char placeholders', () => {
+  const { markdown } = turns;
+
+  it('markdown inline-code renders cleanly with no placeholder leakage', () => {
     // Regression for the "CODE0 / CODEBLOCK_0 leaked into chat output"
-    // bug.  Inline-code placeholders used  / — control chars
-    // the DOM strips on innerHTML assignment, so literal placeholder
-    // text leaked through.  Fix: tokenise on backticks directly.
-    expect(turnsSrc).not.toContain(' CODEBLOCK_');
-    expect(turnsSrc).not.toContain('CODE_');
-    expect(turnsSrc).toContain('split(/(`[^`]+`)/g)');
+    // bug.  The hand-rolled parser used control-char placeholders the
+    // DOM stripped on innerHTML; the library-based parser avoids that
+    // class of bug entirely, but keep an output-level check so no
+    // similar artefact (e.g. the old §§ placeholder) re-appears.
+    const html = markdown('use `foo()` here');
+    expect(html).toContain('<code>foo()</code>');
+    expect(html).not.toMatch(/CODEBLOCK|CODE_|§§/);
   });
 
   it('markdown header splits from following paragraph', () => {
     // Regression for "## CRITICAL\nNo findings. rendered as literal ## text".
-    expect(turnsSrc).toContain("replace(/^(#{1,6}\\s+.+)$/gm, '$1\\n')");
+    const html = markdown('## CRITICAL\nNo findings.');
+    expect(html).toMatch(/<h2[^>]*>CRITICAL<\/h2>/);
+    expect(html).toContain('No findings.');
+    expect(html).not.toContain('## CRITICAL');
   });
 
+  it('markdown renders GFM tables, fenced code, lists', () => {
+    const table = markdown('| a | b |\n|---|---|\n| 1 | 2 |');
+    expect(table).toContain('<table>');
+    expect(table).toMatch(/<th[^>]*>a<\/th>/);
+    expect(table).toMatch(/<td[^>]*>1<\/td>/);
+
+    const fenced = markdown('```python\nprint("hi")\n```');
+    expect(fenced).toContain('<pre>');
+    expect(fenced).toMatch(/class="lang-python"/);
+    expect(fenced).toContain('print(&quot;hi&quot;)');
+
+    const list = markdown('- one\n- two');
+    expect(list).toContain('<ul>');
+    expect(list).toContain('<li>one</li>');
+  });
+
+  it('markdown strips hallucinated sandbox:// and attachment: images', () => {
+    // The model sometimes emits ![foo](sandbox://...) alongside a real
+    // image_generate tool call.  Image delivery is via the file event,
+    // not inline markdown — drop the broken syntax so it doesn't leak.
+    expect(markdown('before ![x](sandbox:///tmp/foo.png) after')).not.toContain('sandbox:');
+    expect(markdown('before ![x](attachment:foo) after')).not.toContain('attachment:');
+  });
+
+  it('markdown escapes raw HTML in input', () => {
+    // Agent output is untrusted — raw <script> must not render as a tag.
+    const html = markdown('<script>alert(1)</script>');
+    expect(html).not.toMatch(/<script>/i);
+    expect(html).toContain('&lt;script&gt;');
+  });
+
+  it('markdown allows only https links; drops javascript: and http:', () => {
+    expect(markdown('[ok](https://example.com)')).toMatch(/<a [^>]*href="https:\/\/example\.com"/);
+    expect(markdown('[bad](javascript:alert(1))')).not.toMatch(/href="javascript:/i);
+    expect(markdown('[plain](http://example.com)')).not.toMatch(/href="http:\/\/example\.com"/);
+  });
   it('FileBlock renders inline image or download link', () => {
     // Regression for "agent can't deliver files to the UI".  The SSE
     // dispatcher lives in api/stream.js now (a pure function) and the

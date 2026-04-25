@@ -9,6 +9,7 @@ import { copyToClipboard } from '../lib/clipboard.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { requestOpenArtefact } from '../store/app.js';
 import { SLASH_COMMANDS } from '../store/constants.js';
+import MarkdownIt from 'markdown-it';
 
 function ThinkingBlock({ text }) {
   return (
@@ -143,152 +144,42 @@ function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
   );
 }
 
-// Markdown renderer — handles headers, fenced code, inline code, bold,
-// italics, links, blockquotes, ordered + unordered lists, paragraphs.
-// No deps; built for chat turns where the input is short and the output
-// is HTML safely escaped on the way in.
+// Markdown renderer — CommonMark + GFM tables via markdown-it.
+// html:false escapes raw HTML in source so only parser-emitted tags
+// reach the DOM (matches the prior hand-rolled parser's security
+// model). breaks:true preserves single-newline <br/> behaviour for
+// chat turns. linkify:false — we only auto-link explicit
+// [text](url), bare URLs stay as text.
+const mdParser = new MarkdownIt({
+  html: false,
+  breaks: true,
+  linkify: false,
+  typographer: false,
+  langPrefix: 'lang-',
+});
+
+// https-only link allowlist — the prior parser enforced this so
+// the chat UI can't surface javascript:/data: URLs from agent output.
+// Fragment and root-relative links stay.
+const defaultValidateLink = mdParser.validateLink.bind(mdParser);
+mdParser.validateLink = (url) => {
+  const t = String(url).trim().toLowerCase();
+  if (t.startsWith('https://') || t.startsWith('#') || t.startsWith('/')) {
+    return defaultValidateLink(url);
+  }
+  return false;
+};
+
 function markdown(s) {
   if (!s) return '';
-  // Strip the broken `![alt](sandbox:///…)` / `![alt](attachment:…)`
-  // markdown the model hallucinates alongside a real image_generate
-  // tool call — the "URL" isn't fetchable and the raw syntax leaks
-  // into the chat.  Image delivery always comes through the tool's
-  // file event, not inline markdown.
-  s = s.replace(/!\[[^\]]*\]\((?:sandbox:|attachment:)[^)]*\)/gi, '');
-  const esc = (t) => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-
-  // Placeholder bytes for fenced code + inline code MUST be characters
-  // the browser doesn't strip and that don't trip any markdown regex
-  // below.  The original code used \u0000 / \u0001 — those are control
-  // chars that DOMs strip on innerHTML assignment, so the LITERAL
-  // `CODE0` / `CODEBLOCK0` text was leaking into chat output (see
-  // controller/http/mod.rs `markdown_inline_code_does_not_leak`
-  // regression).  `§§` is printable, very rare in normal text, and
-  // contains no markdown syntax characters (`*`, `_`, `[`, `(`, `` ` ``).
-  const FBEG = '\u00A7\u00A7F';
-  const FEND = '\u00A7\u00A7';
-  const CBEG = '\u00A7\u00A7C';
-  const CEND = '\u00A7\u00A7';
-
-  // Pull fenced code blocks out first so their contents are NOT touched
-  // by the inline rules below.  Restored at the end.
-  const codeBlocks = [];
-  s = s.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lang, body) => {
-    const i = codeBlocks.length;
-    codeBlocks.push({ lang, body });
-    return `${FBEG}${i}${FEND}`;
-  });
-
-  // Headers that aren't separated from the following content by a
-  // blank line (`## CRITICAL\nNo findings.`) fell through to the
-  // paragraph branch and rendered as literal `## CRITICAL` text.
-  // Inject an extra newline after every header line so block splitting
-  // on `\n{2,}` peels the header into its own block.
-  s = s.replace(/^(#{1,6}\s+.+)$/gm, '$1\n');
-
-  // Block-level pass: split on blank lines, classify each block.
-  const fenceRe = new RegExp(`^${FBEG}(\\d+)${FEND}$`);
-  const out = s.split(/\n{2,}/).map(block => {
-    const trimmed = block.trim();
-    if (!trimmed) return '';
-    // Code block placeholder?
-    const m = trimmed.match(fenceRe);
-    if (m) {
-      const cb = codeBlocks[Number(m[1])];
-      const langClass = cb.lang ? ` class="lang-${esc(cb.lang)}"` : '';
-      return `<pre><code${langClass}>${esc(cb.body.replace(/\n$/, ''))}</code></pre>`;
-    }
-    // Headers
-    const h = trimmed.match(/^(#{1,6})\s+(.+)$/);
-    if (h) {
-      const level = h[1].length;
-      return `<h${level}>${inline(h[2])}</h${level}>`;
-    }
-    // Blockquote
-    if (trimmed.split('\n').every(l => l.startsWith('>'))) {
-      const inner = trimmed.split('\n').map(l => l.replace(/^>\s?/, '')).join('<br/>');
-      return `<blockquote>${inline(inner)}</blockquote>`;
-    }
-    // GFM table: first row is header, second is separator |---|, rest are rows.
-    const tableLines = trimmed.split('\n');
-    if (tableLines.length >= 2 && isTableRow(tableLines[0]) && isTableSeparator(tableLines[1])) {
-      const aligns = parseTableAligns(tableLines[1]);
-      const head = parseTableRow(tableLines[0]);
-      const body = tableLines.slice(2).filter(isTableRow).map(parseTableRow);
-      const cell = (tag, txt, i) => {
-        const a = aligns[i] || '';
-        const style = a ? ` style="text-align:${a}"` : '';
-        return `<${tag}${style}>${inline(txt)}</${tag}>`;
-      };
-      const headHtml = `<thead><tr>${head.map((c, i) => cell('th', c, i)).join('')}</tr></thead>`;
-      const bodyHtml = body.length
-        ? `<tbody>${body.map(row => `<tr>${row.map((c, i) => cell('td', c, i)).join('')}</tr>`).join('')}</tbody>`
-        : '';
-      return `<table>${headHtml}${bodyHtml}</table>`;
-    }
-    // Unordered list
-    if (trimmed.split('\n').every(l => /^\s*[-*]\s+/.test(l))) {
-      const items = trimmed.split('\n').map(l => `<li>${inline(l.replace(/^\s*[-*]\s+/, ''))}</li>`);
-      return `<ul>${items.join('')}</ul>`;
-    }
-    // Ordered list
-    if (trimmed.split('\n').every(l => /^\s*\d+\.\s+/.test(l))) {
-      const items = trimmed.split('\n').map(l => `<li>${inline(l.replace(/^\s*\d+\.\s+/, ''))}</li>`);
-      return `<ol>${items.join('')}</ol>`;
-    }
-    // Paragraph — inline format, single newlines become <br/>.
-    return `<p>${inline(trimmed).replace(/\n/g, '<br/>')}</p>`;
-  }).join('');
-
-  return out;
-
-  function isTableRow(l) {
-    const t = l.trim();
-    return t.length > 0 && t.includes('|') && (t.startsWith('|') || /[^\\]\|/.test(t));
-  }
-  function isTableSeparator(l) {
-    return l.trim().split('|').filter(Boolean).every(seg => /^\s*:?-{2,}:?\s*$/.test(seg));
-  }
-  function parseTableRow(l) {
-    let s = l.trim();
-    if (s.startsWith('|')) s = s.slice(1);
-    if (s.endsWith('|')) s = s.slice(0, -1);
-    return s.split('|').map(c => c.trim());
-  }
-  function parseTableAligns(sep) {
-    return parseTableRow(sep).map(seg => {
-      const left = seg.startsWith(':');
-      const right = seg.endsWith(':');
-      if (left && right) return 'center';
-      if (right) return 'right';
-      if (left) return 'left';
-      return '';
-    });
-  }
-
-  function inline(t) {
-    // Split on backtick-bounded code spans first so their contents are
-    // never touched by bold/italic/link passes.  Even-indexed parts =
-    // outside code, odd-indexed = inside `…`.  Avoids the placeholder
-    // dance the original used (which got eaten by the DOM stripping
-    // control chars on innerHTML assignment).
-    const parts = t.split(/(`[^`]+`)/g);
-    return parts.map((p, i) => {
-      if (i % 2 === 1) {
-        return `<code>${esc(p.slice(1, -1))}</code>`;
-      }
-      let h = esc(p);
-      // Links: [text](url) — only http(s) URLs to keep it safe.
-      h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-      // Bold: **x** or __x__
-      h = h.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-      h = h.replace(/__([^_]+)__/g, '<strong>$1</strong>');
-      // Italic: *x* or _x_  (avoid eating bold contents)
-      h = h.replace(/(^|[^*])\*([^*\n]+)\*([^*]|$)/g, '$1<em>$2</em>$3');
-      h = h.replace(/(^|[^_])_([^_\n]+)_([^_]|$)/g, '$1<em>$2</em>$3');
-      return h;
-    }).join('');
-  }
+  // Strip hallucinated `![alt](sandbox:///…)` / `![alt](attachment:…)`
+  // markdown the model emits alongside a real image_generate tool
+  // call — the "URL" isn't fetchable and the raw syntax leaks
+  // into chat. Image delivery always comes through the tool's file
+  // event, not inline markdown. Must run pre-parse so the broken URL
+  // never reaches markdown-it.
+  const cleaned = s.replace(/!\[[^\]]*\]\((?:sandbox:|attachment:)[^)]*\)/gi, '');
+  return mdParser.render(cleaned);
 }
 
 // Renders an attachment, agent-produced file, or local upload preview.
