@@ -417,35 +417,59 @@
   position: relative;
   overflow: hidden;
 }
-/* Aurora — behind everything in the centre column.  Slowly drifts; sits
-   on top of the bg-1 fill but under the transcript via z-index.  Two
-   layered ::before/::after lets us run the soft radial glow and a
-   high-frequency noise-like dither separately so banding never appears. */
-.centre::before {
+/* Aurora — behind everything in the centre column when the chat is empty.
+   Active conversations get the plain --bg-1 fill so prose reads cleanly;
+   the empty state gets to be a moment.  Three layers stack: a wide
+   soft-radial aurora (::before), a slow conic sweep (.aurora-sweep), and
+   a vignette to anchor the type (::after). */
+.centre.empty::before {
   content: "";
-  position: absolute; inset: -15% -8% -15% -8%;
+  position: absolute; inset: -18% -10% -18% -10%;
   background: var(--aurora);
-  background-size: 140% 140%, 140% 140%, 140% 140%;
+  background-size: 150% 150%, 150% 150%, 150% 150%;
   background-repeat: no-repeat;
-  filter: blur(56px) saturate(125%);
-  opacity: 0.75;
-  animation: aurora-drift 26s ease-in-out infinite;
+  filter: blur(64px) saturate(150%);
+  opacity: 0.95;
+  animation: aurora-drift 22s ease-in-out infinite;
   pointer-events: none;
   z-index: 0;
 }
-.centre::after {
+.centre.empty::after {
   content: "";
   position: absolute; inset: 0;
   background:
-    radial-gradient(ellipse 80% 55% at 50% 115%, oklch(0.135 0.014 262 / 0.92), transparent 75%),
+    radial-gradient(ellipse 90% 60% at 50% 118%, oklch(0.135 0.014 262 / 0.92), transparent 78%),
+    radial-gradient(ellipse 60% 35% at 50% -10%, oklch(0.135 0.014 262 / 0.55), transparent 70%),
     linear-gradient(180deg,
-      oklch(0.135 0.014 262 / 0.30) 0%,
+      oklch(0.135 0.014 262 / 0.32) 0%,
       transparent 22%,
-      transparent 65%,
-      oklch(0.135 0.014 262 / 0.55) 100%);
+      transparent 62%,
+      oklch(0.135 0.014 262 / 0.60) 100%);
   pointer-events: none;
   z-index: 0;
 }
+/* Slow conic sweep — adds the "aurora storm" motion without competing
+   with reading.  Lives as a real DOM element so we can transform it
+   (pseudo-elements would re-layer awkwardly with ::before/::after). */
+.centre .aurora-sweep {
+  position: absolute; inset: -30%;
+  background: conic-gradient(from 140deg at 50% 60%,
+    transparent 0deg,
+    var(--accent-glow) 60deg,
+    transparent 130deg,
+    var(--cyan-glow) 200deg,
+    transparent 270deg,
+    var(--violet-glow) 320deg,
+    transparent 360deg);
+  filter: blur(80px) saturate(135%);
+  opacity: 0;
+  transition: opacity 600ms ease-out;
+  animation: aurora-spin 48s linear infinite;
+  pointer-events: none;
+  z-index: 0;
+  will-change: transform;
+}
+.centre.empty .aurora-sweep { opacity: 0.55; }
 .centre > * { position: relative; z-index: 1; }
 
 .centre .context {
@@ -988,18 +1012,30 @@
   animation: pulse 1.4s ease-in-out infinite;
 }
 .empty-state h1 {
-  font: 600 44px/1.05 var(--font-ui);
-  letter-spacing: -0.02em;
+  font: 600 52px/1.04 var(--font-ui);
+  letter-spacing: -0.022em;
   margin: 6px 0 0;
   color: var(--fg);
+  text-shadow: 0 1px 0 oklch(0 0 0 / 0.35);
 }
 .empty-state h1 em {
   font-style: normal;
-  background: linear-gradient(110deg, var(--accent) 0%, var(--cyan) 55%, var(--accent-2) 100%);
+  background: linear-gradient(110deg,
+    var(--accent-2) 0%,
+    var(--accent) 32%,
+    var(--cyan) 62%,
+    var(--violet) 100%);
+  background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  filter: drop-shadow(0 0 28px var(--accent-glow));
+  filter: drop-shadow(0 0 36px var(--accent-glow))
+          drop-shadow(0 0 12px var(--cyan-glow));
+  animation: gradient-shift 9s ease-in-out infinite;
+}
+@keyframes gradient-shift {
+  0%, 100% { background-position: 0% 50%; }
+  50%      { background-position: 100% 50%; }
 }
 .empty-state p {
   font: 400 15.5px/1.6 var(--font-ui);

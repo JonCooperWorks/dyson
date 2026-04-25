@@ -169,6 +169,14 @@ body { min-height: 100vh; overflow: hidden; }
   100% { background-position: 0% 0%, 100% 0%, 50% 100%; }
 }
 
+/* Slow conic-gradient rotation for the aurora-sweep layer.  Pure
+   transform — no layout, no paint of new pixels; the GPU just rotates
+   the existing texture. */
+@keyframes aurora-spin {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
 /* Halo pulse on running things (accent dot, live tool chip, brand mark).
    Two layered shadows expand-and-fade in opposite phases so the glow
    reads as breathing rather than blinking. */

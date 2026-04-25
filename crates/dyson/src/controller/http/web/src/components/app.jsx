@@ -451,7 +451,8 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     .catch(e => { console.warn('[dyson] export failed', e); alert(`Export failed: ${e.message || e}`); });
 
   return (
-    <div className="centre">
+    <div className={`centre${empty ? ' empty' : ''}`}>
+      <div className="aurora-sweep" aria-hidden="true"/>
       <div className="context">
         <div className="crumbs"><span className="c-leaf">{title}</span></div>
         <div className="right">
@@ -486,7 +487,8 @@ const noop = () => {};
 // of a blank white pane.
 function ConversationShell({ onSend, onCancel, children }) {
   return (
-    <div className="centre">
+    <div className="centre empty">
+      <div className="aurora-sweep" aria-hidden="true"/>
       <div className="context"><div className="crumbs"/></div>
       <div className="transcript"><div className="inner">{children || <EmptyState/>}</div></div>
       <ComposerDock running={false} onSend={onSend} onCancel={onCancel}/>
