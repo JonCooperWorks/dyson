@@ -253,29 +253,15 @@ export class DysonClient {
         headers: { 'Content-Type': 'application/json' },
         body,
       }))
-      .then(async r => {
+      .then(r => {
         if (!r.ok) {
           handle._markClosed();
           cb.onError && cb.onError(`turn rejected: ${r.status}`);
-          return;
         }
-        // The server returns `{queued: true, position: N}` when a chat
-        // is busy and the new POST landed in the per-chat queue.  Tell
-        // the caller so it can mark this message as queued in the UI;
-        // no SSE deltas will arrive for it until the in-flight turn
-        // ends and the server drains the queue.  Best-effort JSON
-        // parse — older servers (pre-queue) emit `{ok:true}` without
-        // the field, which falls through to a no-op.
-        try {
-          const body = await r.json();
-          if (body && body.queued === true) {
-            cb.onQueued && cb.onQueued({ position: body.position });
-          }
-        } catch {
-          // Malformed JSON on a 2xx is unexpected but not an error
-          // worth surfacing — the SSE stream is the authoritative
-          // signal that work started.
-        }
+        // 2xx covers both immediate-run and server-queued POSTs.  The
+        // SPA decides which case applies optimistically (from its own
+        // `running` state) so it can mirror the server's coalesce
+        // behaviour without round-tripping the response body.
       })
       .catch(e => {
         handle._markClosed();

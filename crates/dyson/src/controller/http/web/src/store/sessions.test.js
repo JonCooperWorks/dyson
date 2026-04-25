@@ -13,6 +13,7 @@ import {
   mapAgentTail,
   appendAgentBlock,
   lastAgentIndex,
+  pushUserMessage,
   openPanel,
   closePanel,
   __resetSessionsForTests,
@@ -248,5 +249,115 @@ describe('queue-aware agent-tail reducers', () => {
     expect(next.liveTurns[1].blocks).toHaveLength(2);
     expect(next.liveTurns[1].blocks[1]).toEqual({ type: 'tool', ref: 'r1' });
     expect(next.liveTurns[2].blocks).toHaveLength(1);
+  });
+});
+
+describe('pushUserMessage — idle / queue / coalesce', () => {
+  const blocks = (text) => [{ type: 'text', text }];
+
+  it('idle send pushes user + agent placeholder and flips running on', () => {
+    const s = makeSession();
+    expect(s.running).toBe(false);
+    const next = pushUserMessage(s, { ts: '12:00:00', blocks: blocks('hi') });
+    expect(next.running).toBe(true);
+    expect(next.phase).toBe('thinking');
+    expect(next.liveTurns).toHaveLength(2);
+    expect(next.liveTurns[0].role).toBe('user');
+    expect(next.liveTurns[0].queued).toBeUndefined();
+    expect(next.liveTurns[1].role).toBe('agent');
+    expect(next.liveTurns[1].blocks).toEqual([{ type: 'text', text: '' }]);
+  });
+
+  it('first send while running pushes a queued user turn with no agent placeholder', () => {
+    const s = {
+      ...makeSession(),
+      running: true,
+      liveTurns: [
+        { role: 'user', ts: '11:00:00', blocks: blocks('first') },
+        { role: 'agent', ts: '11:00:00', blocks: blocks('working...') },
+      ],
+    };
+    const next = pushUserMessage(s, { ts: '11:00:05', blocks: blocks('second') });
+    expect(next.liveTurns).toHaveLength(3);
+    const tail = next.liveTurns[2];
+    expect(tail.role).toBe('user');
+    expect(tail.queued).toBe(true);
+    expect(tail.queuedCount).toBe(1);
+    // The active agent turn must stay untouched.
+    expect(next.liveTurns[1]).toBe(s.liveTurns[1]);
+    expect(next.running).toBe(true);
+  });
+
+  it('subsequent queued sends merge into the trailing queued user turn (one bubble, count++)', () => {
+    const s = {
+      ...makeSession(),
+      running: true,
+      liveTurns: [
+        { role: 'user', ts: '11:00:00', blocks: blocks('first') },
+        { role: 'agent', ts: '11:00:00', blocks: blocks('working...') },
+        { role: 'user', ts: '11:00:05', blocks: blocks('second'),
+          queued: true, queuedCount: 1 },
+      ],
+    };
+    let next = pushUserMessage(s, { ts: '11:00:08', blocks: blocks('third') });
+    expect(next.liveTurns).toHaveLength(3);
+    const merged = next.liveTurns[2];
+    expect(merged.queuedCount).toBe(2);
+    expect(merged.blocks).toEqual([
+      { type: 'text', text: 'second' },
+      { type: 'text', text: 'third' },
+    ]);
+    expect(merged.ts).toBe('11:00:08');
+    // One more send → count goes to 3.
+    next = pushUserMessage(next, { ts: '11:00:10', blocks: blocks('fourth') });
+    expect(next.liveTurns[2].queuedCount).toBe(3);
+    expect(next.liveTurns[2].blocks).toHaveLength(3);
+  });
+
+  it('attachment blocks merge into the same queued bubble', () => {
+    const s = {
+      ...makeSession(),
+      running: true,
+      liveTurns: [
+        { role: 'agent', ts: '11:00:00', blocks: blocks('working') },
+        { role: 'user', ts: '11:00:05', blocks: blocks('look at this'),
+          queued: true, queuedCount: 1 },
+      ],
+    };
+    const fileBlock = { type: 'file', name: 'shot.png', mime: 'image/png', size: 9 };
+    const next = pushUserMessage(s, {
+      ts: '11:00:08',
+      blocks: [{ type: 'text', text: 'and this' }, fileBlock],
+    });
+    expect(next.liveTurns).toHaveLength(2);
+    expect(next.liveTurns[1].queuedCount).toBe(2);
+    // Original 1 text + (1 text + 1 file) merged = 3 blocks total.
+    expect(next.liveTurns[1].blocks).toHaveLength(3);
+    expect(next.liveTurns[1].blocks.find(b => b.type === 'file')).toEqual(fileBlock);
+  });
+
+  it('idle send AFTER a queued bubble has drained creates a fresh non-queued turn', () => {
+    // Simulate: after the in-flight turn ended and the queue drain
+    // ran, server is idle again.  Next send is a normal (non-queued)
+    // user message.  This exercises the !running branch even when
+    // earlier turns were queued.
+    const s = {
+      ...makeSession(),
+      running: false,
+      liveTurns: [
+        { role: 'user', ts: '11:00:00', blocks: blocks('first') },
+        { role: 'agent', ts: '11:00:00', blocks: blocks('reply 1') },
+        { role: 'user', ts: '11:00:05', blocks: blocks('q1'),
+          queued: true, queuedCount: 2 },
+        { role: 'agent', ts: '11:00:30', blocks: blocks('coalesced reply') },
+      ],
+    };
+    const next = pushUserMessage(s, { ts: '11:01:00', blocks: blocks('new ask') });
+    expect(next.liveTurns).toHaveLength(6);
+    expect(next.liveTurns[4].role).toBe('user');
+    expect(next.liveTurns[4].queued).toBeUndefined();
+    expect(next.liveTurns[5].role).toBe('agent');
+    expect(next.liveTurns[5].blocks).toEqual([{ type: 'text', text: '' }]);
+    expect(next.running).toBe(true);
   });
 });

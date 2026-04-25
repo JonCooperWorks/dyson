@@ -181,6 +181,59 @@ export const mapAgentTail = (s, fn) => {
 export const appendAgentBlock = (s, block) =>
   mapAgentTail(s, t => ({ ...t, blocks: [...t.blocks, block] }));
 
+// Push a new user message into the session.  Three cases:
+//
+//   1. Idle (no in-flight turn) — push user turn + empty agent
+//      placeholder + flip `running` on.  This is the classic flow.
+//   2. Running, no trailing queued user turn — push a new user turn
+//      flagged `queued: true, queuedCount: 1` so the renderer shows
+//      the pill.  No agent placeholder: the active agent turn earlier
+//      in the array is still receiving deltas, and a tail placeholder
+//      would intercept them.
+//   3. Running with a trailing queued user turn — MERGE: append the
+//      new blocks into that turn and bump its count.  The server
+//      coalesces every drained queued turn into one `agent.run()`,
+//      so the SPA shows them as one growing bubble.
+//
+// Returns the new session snapshot.  Pure — no side effects.
+export const pushUserMessage = (s, { ts, blocks }) => {
+  if (!s.running) {
+    return {
+      ...s,
+      running: true,
+      phase: 'thinking',
+      thinkingRef: null,
+      liveTurns: [
+        ...s.liveTurns,
+        { role: 'user', ts, blocks },
+        { role: 'agent', ts, blocks: [{ type: 'text', text: '' }] },
+      ],
+    };
+  }
+  const tail = s.liveTurns[s.liveTurns.length - 1];
+  if (tail && tail.role === 'user' && tail.queued) {
+    const merged = {
+      ...tail,
+      ts,
+      blocks: [...tail.blocks, ...blocks],
+      queuedCount: (tail.queuedCount || 1) + 1,
+    };
+    return {
+      ...s,
+      running: true,
+      liveTurns: [...s.liveTurns.slice(0, -1), merged],
+    };
+  }
+  return {
+    ...s,
+    running: true,
+    liveTurns: [
+      ...s.liveTurns,
+      { role: 'user', ts, blocks, queued: true, queuedCount: 1 },
+    ],
+  };
+};
+
 export const openPanel = (s, ref) => ({
   ...s,
   panels: s.panels.includes(ref) ? s.panels : [...s.panels, ref],

@@ -25,7 +25,7 @@ import {
 import {
   ensureSession, updateSession, getSession, getResources, mintToolRef,
   mapLastTurn, appendBlock, mapAgentTail, appendAgentBlock,
-  openPanel, closePanel,
+  pushUserMessage, openPanel, closePanel,
 } from '../store/sessions.js';
 
 const MindView = lazy(() =>
@@ -422,29 +422,11 @@ function ConversationView({ conv, toolRef, setToolRef }) {
       url: f.type?.startsWith('image/') ? URL.createObjectURL(f) : null,
       local: true,
     }))];
-    // When already running, the new POST will land in the server-side
-    // queue.  Don't push an optimistic agent placeholder for it — the
-    // active agent turn (earlier in the array) is still receiving
-    // deltas, and a tail placeholder would intercept them.  Once Done
-    // fires for the current turn, `nextAgentNew` lets `mapAgentTail`
-    // mint a fresh agent turn for the queue-drain reply.
-    mutate(s => {
-      const wasRunning = !!s.running;
-      const newTurns = wasRunning
-        ? [...s.liveTurns, { role: 'user', ts, blocks: userBlocks }]
-        : [
-            ...s.liveTurns,
-            { role: 'user', ts, blocks: userBlocks },
-            { role: 'agent', ts, blocks: [{ type: 'text', text: '' }] },
-          ];
-      return {
-        ...s,
-        running: true,
-        phase: wasRunning ? s.phase : 'thinking',
-        thinkingRef: wasRunning ? s.thinkingRef : null,
-        liveTurns: newTurns,
-      };
-    });
+    // The merge-or-push decision lives in `pushUserMessage` so it can
+    // be unit-tested as a pure reducer.  The server coalesces every
+    // drained queued turn into one `agent.run()`; the SPA mirrors
+    // that by merging consecutive queued sends into one bubble.
+    mutate(s => pushUserMessage(s, { ts, blocks: userBlocks }));
     getResources(conv).es = client.send(conv, val, streamCallbacks(conv), files);
   };
 
@@ -569,18 +551,6 @@ function streamCallbacks(conv) {
         ? { ...t, blocks: [...t.blocks.slice(0, -1), { ...tail, text: tail.text + delta }] }
         : { ...t, blocks: [...t.blocks, { type: 'text', text: delta }] };
     })),
-
-    // The server queues this POST behind the in-flight turn instead of
-    // 409-ing it.  Mark the just-pushed user turn so `Turn.jsx` shows
-    // a "queued" pill — no agent placeholder was pushed (sendMsg
-    // skipped that path when running:true), so there's nothing to
-    // remove.  Don't touch `running` — a turn is still active.
-    onQueued: ({ position }) => updateSession(conv, s => {
-      const i = s.liveTurns.length - 1;
-      if (i < 0 || s.liveTurns[i].role !== 'user') return s;
-      const turn = { ...s.liveTurns[i], queued: true, queuedPosition: position };
-      return { ...s, liveTurns: [...s.liveTurns.slice(0, i), turn] };
-    }),
 
     onThinking: (delta) => {
       const existing = getSession(conv)?.thinkingRef;

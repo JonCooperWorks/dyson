@@ -2,9 +2,10 @@
 // POST landed in the per-chat queue (the in-flight turn was still
 // running).  Backend semantics live in tests/http_controller.rs and
 // the sessions reducers; this test only pins the user-facing surface
-// — the server returns `{queued: true, position: N}`, the SPA marks
-// the user turn with `turn.queued = true, turn.queuedPosition = N`,
-// and Turn renders the badge.
+// — the SPA marks the user turn with `turn.queued = true` (and
+// `turn.queuedCount` when N>1 sends merged into one bubble), and
+// Turn renders the badge to mirror the server's coalesce behaviour
+// (one merged user message → one agent reply).
 
 import React from 'react';
 import { describe, it, expect, afterEach } from 'vitest';
@@ -35,20 +36,29 @@ describe('queued badge — user-facing surface for queued POSTs', () => {
     expect(container.querySelector('.queued-badge')).toBeNull();
   });
 
-  it('turn.queued renders the pill with the position number', () => {
+  it('a single queued send renders the pill without a count', () => {
     const { container } = render(
-      <Turn
-        turn={userTurn({ queued: true, queuedPosition: 3 })}
-        tools={{}} onOpenTool={() => {}} activeTool={null}/>
+      <Turn turn={userTurn({ queued: true, queuedCount: 1 })} tools={{}}
+            onOpenTool={() => {}} activeTool={null}/>
     );
     const badge = container.querySelector('.queued-badge');
     expect(badge, 'queued user turn must render .queued-badge').not.toBeNull();
-    expect(badge.textContent).toBe('queued #3');
-    // Tooltip helps a hovering user understand what queued means.
+    expect(badge.textContent).toBe('queued');
     expect(badge.getAttribute('title')).toMatch(/queued/i);
   });
 
-  it('turn.queued without a position renders the pill without the number', () => {
+  it('multi-send merge renders the count (queued ×N)', () => {
+    const { container } = render(
+      <Turn turn={userTurn({ queued: true, queuedCount: 3 })} tools={{}}
+            onOpenTool={() => {}} activeTool={null}/>
+    );
+    const badge = container.querySelector('.queued-badge');
+    expect(badge.textContent).toBe('queued ×3');
+    // Tooltip explains the coalesce: server answers all in one reply.
+    expect(badge.getAttribute('title')).toMatch(/3 messages.*one reply/i);
+  });
+
+  it('turn.queued without a queuedCount falls back to the singular pill', () => {
     const { container } = render(
       <Turn turn={userTurn({ queued: true })} tools={{}}
             onOpenTool={() => {}} activeTool={null}/>

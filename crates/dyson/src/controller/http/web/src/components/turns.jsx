@@ -123,10 +123,10 @@ function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
           {turn.queued && (
             <span
               className="queued-badge"
-              title={turn.queuedPosition
-                ? `Queued behind the in-flight turn (#${turn.queuedPosition})`
+              title={turn.queuedCount > 1
+                ? `${turn.queuedCount} messages queued — Dyson will answer them in one reply`
                 : 'Queued behind the in-flight turn'}>
-              queued{turn.queuedPosition ? ` #${turn.queuedPosition}` : ''}
+              queued{turn.queuedCount > 1 ? ` ×${turn.queuedCount}` : ''}
             </span>
           )}
           <span className="when">{turn.ts}</span>
