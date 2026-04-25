@@ -69,10 +69,12 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     // SSE bearer-in-URL was the older (sin) shape: a real OIDC token
     // would survive in browser history / proxy logs.  Tickets are
     // single-use, identity-bound, and 30-second-lived — the SPA
-    // exchanges its bearer at this endpoint and uses the result on
-    // the SSE open.  Mint requires the bearer in the Authorization
-    // header so the rest of the auth chain stays the source of
-    // identity truth.
+    // exchanges its bearer at this endpoint and the controller hands
+    // the ticket back as an HttpOnly cookie scoped to the SSE path.
+    // Same-origin EventSource sends the cookie automatically, so the
+    // ticket never appears in the URL or in any access log.  Mint
+    // still requires the bearer in the Authorization header so the
+    // rest of the auth chain stays the source of identity truth.
     if matches!((&method, segs.as_slice()), (&Method::POST, ["api", "auth", "sse-ticket"])) {
         match state.auth.validate_request(req.headers()).await {
             Ok(info) => {
@@ -88,33 +90,35 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
                     .cloned()
                     .unwrap_or(info.identity);
                 let ticket = state.mint_sse_ticket(&identity);
-                return super::responses::json_ok(&serde_json::json!({
-                    "ticket": ticket,
+                let mut resp = super::responses::json_ok(&serde_json::json!({
                     "expires_in": 30,
                 }));
+                let cookie = build_sse_ticket_cookie(&ticket, state.tls_enabled, 30);
+                if let Ok(value) = hyper::header::HeaderValue::from_str(&cookie) {
+                    resp.headers_mut().append(hyper::header::SET_COOKIE, value);
+                }
+                return resp;
             }
             Err(_) => return unauthorized(&state),
         }
     }
 
-    // SSE: a `?access_token=<ticket>` query that resolves to a live
-    // ticket consumes it (single-use) and bypasses the regular auth
-    // gate for this one request.  Falls through to the header path
-    // otherwise so k6 / curl-wrapper clients can still authenticate
-    // with a real Authorization header on the SSE open.
+    // SSE auth: same-origin EventSource sends `Cookie: dyson_sse=<ticket>`
+    // automatically — the cookie is HttpOnly, SameSite=Strict, and
+    // path-scoped to /api/conversations, so it never travels to other
+    // routes or to cross-site iframes.  We consume the ticket here
+    // (single-use) and bypass the regular auth gate for this one
+    // request.  Falls through to the header path otherwise so k6 /
+    // curl-wrapper clients can still authenticate with a real
+    // Authorization header on the SSE open.
     let is_events = segs.last() == Some(&"events") && segs.first() == Some(&"api");
     let mut ticket_authorized = false;
     if is_events && method == Method::GET && !req.headers().contains_key("authorization") {
-        if let Some(query) = req.uri().query() {
-            for (k, v) in super::responses::parse_query(query) {
-                if k == "access_token"
-                    && let Some(identity) = state.consume_sse_ticket(&v)
-                {
-                    tracing::debug!(identity, "SSE ticket consumed");
-                    ticket_authorized = true;
-                    break;
-                }
-            }
+        if let Some(ticket) = extract_sse_ticket_cookie(req.headers())
+            && let Some(identity) = state.consume_sse_ticket(&ticket)
+        {
+            tracing::debug!(identity, "SSE ticket consumed (cookie)");
+            ticket_authorized = true;
         }
     }
 
@@ -251,8 +255,109 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     }
 }
 
+/// Cookie name for the SSE ticket.  Hard-coded everywhere — the SPA
+/// doesn't see it (it's HttpOnly), so there's no need to surface it
+/// in `/api/auth/config`.
+const SSE_TICKET_COOKIE: &str = "dyson_sse";
+
+/// Build the `Set-Cookie` header value for a freshly-minted SSE ticket.
+///
+///   * `HttpOnly` — JS can't read it, defeating XSS exfil and matching
+///     "this is purely for the browser to send back" intent.
+///   * `SameSite=Strict` — never sent on cross-site navigations / sub-
+///     resource requests, so a malicious page on `evil.example` can't
+///     trick the browser into spending the ticket.
+///   * `Path=/api/conversations` — the cookie is only attached to the
+///     SSE endpoint family, not echoed on every API call.
+///   * `Secure` — only when the listener terminates TLS.  Loopback dev
+///     (`dangerous_no_tls`) leaves it off so the cookie is still sent
+///     over plain HTTP.
+///   * `Max-Age=<ttl>` — matches the server-side ticket TTL (30s) so
+///     the browser drops it shortly after consumption anyway.
+fn build_sse_ticket_cookie(token: &str, tls_enabled: bool, ttl_secs: u64) -> String {
+    let secure = if tls_enabled { "; Secure" } else { "" };
+    format!(
+        "{name}={token}; HttpOnly; SameSite=Strict; Path=/api/conversations; Max-Age={ttl}{secure}",
+        name = SSE_TICKET_COOKIE,
+        token = token,
+        ttl = ttl_secs,
+        secure = secure,
+    )
+}
+
+/// Pull the SSE ticket out of the request's `Cookie:` header.
+///
+/// Cookies are a single header with `; `-separated `name=value` pairs.
+/// We do a minimal split — no full RFC 6265 parser needed because the
+/// only cookie that matters here is the one we set ourselves.
+fn extract_sse_ticket_cookie(headers: &hyper::HeaderMap) -> Option<String> {
+    let raw = headers.get(hyper::header::COOKIE)?.to_str().ok()?;
+    for pair in raw.split(';') {
+        let pair = pair.trim();
+        if let Some((name, value)) = pair.split_once('=')
+            && name == SSE_TICKET_COOKIE
+            && !value.is_empty()
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_ticket_cookie_carries_security_attrs_when_tls_on() {
+        let c = build_sse_ticket_cookie("abc123", true, 30);
+        assert!(c.starts_with("dyson_sse=abc123"));
+        assert!(c.contains("HttpOnly"));
+        assert!(c.contains("SameSite=Strict"));
+        assert!(c.contains("Path=/api/conversations"));
+        assert!(c.contains("Max-Age=30"));
+        assert!(c.contains("Secure"), "TLS deployments must mark cookie Secure");
+    }
+
+    #[test]
+    fn sse_ticket_cookie_omits_secure_when_tls_off() {
+        let c = build_sse_ticket_cookie("abc123", false, 30);
+        assert!(!c.contains("Secure"),
+                "loopback/dev must not set Secure or browsers refuse to send the cookie");
+    }
+
+    #[test]
+    fn extract_sse_ticket_cookie_finds_ours_amongst_others() {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(
+            hyper::header::COOKIE,
+            "session=xyz; dyson_sse=mytoken; theme=dark".parse().unwrap(),
+        );
+        assert_eq!(extract_sse_ticket_cookie(&h).as_deref(), Some("mytoken"));
+    }
+
+    #[test]
+    fn extract_sse_ticket_cookie_handles_solo_cookie() {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::COOKIE, "dyson_sse=alone".parse().unwrap());
+        assert_eq!(extract_sse_ticket_cookie(&h).as_deref(), Some("alone"));
+    }
+
+    #[test]
+    fn extract_sse_ticket_cookie_absent_is_none() {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::COOKIE, "session=xyz".parse().unwrap());
+        assert!(extract_sse_ticket_cookie(&h).is_none());
+        assert!(extract_sse_ticket_cookie(&hyper::HeaderMap::new()).is_none());
+    }
+
+    #[test]
+    fn extract_sse_ticket_cookie_rejects_empty_value() {
+        let mut h = hyper::HeaderMap::new();
+        h.insert(hyper::header::COOKIE, "dyson_sse=; other=1".parse().unwrap());
+        assert!(extract_sse_ticket_cookie(&h).is_none());
+    }
+
     /// Drive `dispatch_inner` with a synthetic request without binding
     /// a port — we can't directly because `dispatch_inner` takes a
     /// `Request<hyper::body::Incoming>` and `Incoming` only comes from

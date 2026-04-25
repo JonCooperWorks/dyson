@@ -182,10 +182,11 @@ export class DysonClient {
   // Telegram uses for photos / voice notes / docs).
   //
   // Auth shape: EventSource can't send headers, so for any deployment
-  // with auth enabled the SPA exchanges its bearer for a one-shot
-  // SSE ticket (POST /api/auth/sse-ticket) and uses the *ticket* on
-  // the SSE open.  This keeps the real OIDC/bearer token out of URL
-  // history, proxy logs, and the referrer chain.
+  // with auth enabled the SPA exchanges its bearer for a one-shot SSE
+  // ticket (POST /api/auth/sse-ticket).  The controller hands the
+  // ticket back as an HttpOnly cookie scoped to /api/conversations,
+  // and the browser attaches it automatically when EventSource opens
+  // — no token in URL history, proxy logs, or the referrer chain.
   send(id, prompt, callbacks, files) {
     if (!this._EventSource) throw new Error('DysonClient.send: no EventSource implementation');
     const cb = callbacks || {};
@@ -194,7 +195,10 @@ export class DysonClient {
 
     const openStream = (eventsUrl) => {
       if (closed) return;
-      es = new this._EventSource(eventsUrl);
+      // `withCredentials` doesn't matter for same-origin EventSource —
+      // cookies are sent regardless — but we set it explicitly so a
+      // future cross-origin deployment behind a proxy stays correct.
+      es = new this._EventSource(eventsUrl, { withCredentials: true });
       es.onmessage = (ev) => {
         const msg = parseStreamEvent(ev.data);
         if (!msg) return;
@@ -207,10 +211,12 @@ export class DysonClient {
     const ticketed = async () => {
       const tok = this._getToken();
       if (!tok) return eventsBase;
+      // POST mints the ticket and Set-Cookies it; we don't read the
+      // body for the value (it's HttpOnly on purpose).  The same URL
+      // is then opened — the browser attaches the cookie itself.
       const r = await this._authedFetch('/api/auth/sse-ticket', { method: 'POST' });
       if (!r.ok) throw new Error(`ticket mint failed: ${r.status}`);
-      const j = await r.json();
-      return `${eventsBase}?access_token=${encodeURIComponent(j.ticket)}`;
+      return eventsBase;
     };
 
     ticketed()

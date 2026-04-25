@@ -70,6 +70,9 @@ pub fn build_state_with_auth_mode(
         None,
         loopback_only_host_check,
         None,
+        // Test rigs always run plain HTTP — TLS termination is out of
+        // scope here and would only affect the cookie's `Secure` flag.
+        false,
     ))
 }
 

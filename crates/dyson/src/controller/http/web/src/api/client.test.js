@@ -266,23 +266,25 @@ describe('DysonClient._authedFetch — bearer token plumbing', () => {
     expect(headers.get('authorization')).toBe('Bearer caller-supplied');
   });
 
-  it('SSE flow exchanges the bearer for a ticket before opening EventSource', async () => {
+  it('SSE flow mints a ticket cookie before opening EventSource — no token in URL', async () => {
     // The raw bearer must never reach the URL — leaks into history /
-    // proxy logs / Referer.  Send first POSTs /api/auth/sse-ticket
-    // (header-bearer) and uses the returned ticket as access_token.
+    // proxy logs / Referer.  The ticket itself is now an HttpOnly
+    // Set-Cookie response that the browser attaches automatically on
+    // the EventSource open, so the URL stays clean.
     const fetch = vi.fn(async (url) => {
       if (url === '/api/auth/sse-ticket') {
         return {
           ok: true,
           status: 200,
-          headers: new Headers(),
-          json: async () => ({ ticket: 'one-shot-abc' }),
+          headers: new Headers({ 'set-cookie':
+            'dyson_sse=one-shot-abc; HttpOnly; SameSite=Strict; Path=/api/conversations; Max-Age=30' }),
+          json: async () => ({ expires_in: 30 }),
         };
       }
       return { ok: true, status: 200 };
     });
     class FakeES {
-      constructor(url) { FakeES.lastUrl = url; this.onmessage = null; }
+      constructor(url, opts) { FakeES.lastUrl = url; FakeES.lastOpts = opts; this.onmessage = null; }
       close() {}
     }
     const client = new DysonClient({
@@ -291,17 +293,20 @@ describe('DysonClient._authedFetch — bearer token plumbing', () => {
       getToken: () => 'TOK-XYZ',
     });
     client.send('c1', 'hi', {});
-    // Wait for ticket fetch + EventSource open.
     await new Promise(r => setTimeout(r, 0));
     await new Promise(r => setTimeout(r, 0));
-    // The mint call goes out first with the bearer in a header.
     const mint = fetch.mock.calls.find(c => c[0] === '/api/auth/sse-ticket');
     expect(mint, 'must POST /api/auth/sse-ticket').toBeTruthy();
     const mintHeaders = new Headers(mint[1].headers || {});
     expect(mintHeaders.get('authorization')).toBe('Bearer TOK-XYZ');
-    // EventSource opens with the *ticket*, not the raw bearer.
-    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events?access_token=one-shot-abc');
+    // EventSource opens against the bare events URL — no ?access_token=,
+    // no bearer.  The ticket rides in the cookie the browser holds.
+    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events');
+    expect(FakeES.lastUrl).not.toContain('access_token');
     expect(FakeES.lastUrl).not.toContain('TOK-XYZ');
+    // withCredentials is set so a future cross-origin proxy deployment
+    // still attaches the ticket cookie.
+    expect(FakeES.lastOpts).toEqual({ withCredentials: true });
   });
 
   it('no-auth deployment opens EventSource without a ticket', async () => {

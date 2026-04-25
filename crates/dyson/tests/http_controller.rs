@@ -2671,8 +2671,16 @@ async fn unauthorized_omits_www_authenticate_for_dangerous_no_auth() {
 }
 
 // ---------------------------------------------------------------------------
-// SSE access_token query-param folding
+// SSE ticket cookie (replaces the older `?access_token=` query path)
 // ---------------------------------------------------------------------------
+
+/// Helper: GET with the SSE ticket cookie in the Cookie header — the
+/// browser-equivalent of "the Set-Cookie from POST /sse-ticket has been
+/// stored and is being attached automatically to the EventSource open".
+async fn get_with_sse_cookie(url: &str, ticket: &str) -> Response<Incoming> {
+    let cookie = format!("dyson_sse={ticket}");
+    request_with_headers(url, Method::GET, None, &[("cookie", &cookie)]).await
+}
 
 /// Same as `create_chat` but sends an Authorization header so it
 /// works against a Bearer-protected rig.
@@ -2696,9 +2704,9 @@ async fn sse_raw_bearer_in_query_no_longer_authorises() {
     // Regression: the old shape folded `?access_token=<bearer>` into
     // a synthetic Authorization header, which meant a real bearer /
     // OIDC token would land in browser history, proxy logs and the
-    // referrer chain.  After the migration the query param is
-    // exclusively a one-shot ticket — pasting the raw bearer there
-    // must NOT authenticate.
+    // referrer chain.  The ticket-in-cookie migration removed the
+    // query-param path entirely — pasting the bearer (or anything
+    // else) into the URL must NOT authenticate.
     let r = rig_with_auth_and_mode(
         hashed_bearer_for_test("right-token"),
         test_helpers::AuthMode::Bearer,
@@ -2718,38 +2726,51 @@ async fn sse_raw_bearer_in_query_no_longer_authorises() {
 }
 
 #[tokio::test]
-async fn sse_access_token_query_param_with_wrong_token_still_401s() {
+async fn sse_query_param_no_longer_consumes_a_real_ticket() {
+    // Doubles down on the cookie migration: even a *valid* ticket
+    // passed via `?access_token=` (the old transport) must not
+    // authorise the open.  Anyone still relying on the URL path needs
+    // to switch to the cookie path; silently accepting the query would
+    // hide the regression and reintroduce the URL-leak surface the
+    // migration was meant to close.
     let r = rig_with_auth_and_mode(
-        hashed_bearer_for_test("right"),
+        hashed_bearer_for_test("real-token"),
         test_helpers::AuthMode::Bearer,
     )
     .await;
-    let chat_id = create_chat_with_token(&r, "x", "right").await;
+    let chat_id = create_chat_with_token(&r, "x", "real-token").await;
+    let ticket = test_helpers::mint_sse_ticket_for_test(&r.state, "bearer");
     let url = format!(
-        "{}/api/conversations/{}/events?access_token=wrong",
-        r.base, chat_id,
+        "{}/api/conversations/{}/events?access_token={}",
+        r.base, chat_id, ticket,
     );
-    let resp = get(&url).await;
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn access_token_query_param_only_applies_to_events_path() {
-    // A bare `?access_token=` on a non-events path must NOT bypass the
-    // header check — the SSE-ticket consumer only fires for paths
-    // ending in `/events`.  Otherwise a leaked log line with
-    // `?access_token=…` in the query would be a credentials disclosure.
-    let r = rig_with_auth_and_mode(
-        hashed_bearer_for_test("right-token"),
-        test_helpers::AuthMode::Bearer,
-    )
-    .await;
-    let url = format!("{}/api/conversations?access_token=right-token", r.base);
     let resp = get(&url).await;
     assert_eq!(
         resp.status(),
         StatusCode::UNAUTHORIZED,
-        "query token must NOT authorise non-events paths",
+        "query-param transport must not consume a ticket — cookie path only",
+    );
+}
+
+#[tokio::test]
+async fn sse_ticket_cookie_only_applies_to_events_path() {
+    // A bare ticket cookie on a non-events path must NOT bypass the
+    // header check — the SSE-ticket consumer only fires for paths
+    // ending in `/events`.  The cookie's Path attribute already scopes
+    // it to /api/conversations, but a hand-crafted client could still
+    // send it elsewhere; the server-side gate is the second line.
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("real-token"),
+        test_helpers::AuthMode::Bearer,
+    )
+    .await;
+    let ticket = test_helpers::mint_sse_ticket_for_test(&r.state, "bearer");
+    let url = format!("{}/api/conversations", r.base);
+    let resp = get_with_sse_cookie(&url, &ticket).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "ticket cookie must NOT authorise non-events paths",
     );
 }
 
@@ -2782,11 +2803,8 @@ async fn sse_ticket_identity_must_match_allowed_sub_when_set() {
     // Ticket bound to a non-allowed sub — must NOT authorise the
     // SSE open.  Falls through to header auth (none present) → 401.
     let bob_ticket = test_helpers::mint_sse_ticket_for_test(&r.state, "bob@example.com");
-    let url = format!(
-        "{}/api/conversations/{}/events?access_token={}",
-        r.base, chat_id, bob_ticket,
-    );
-    let resp = get(&url).await;
+    let url = format!("{}/api/conversations/{}/events", r.base, chat_id);
+    let resp = get_with_sse_cookie(&url, &bob_ticket).await;
     assert_eq!(
         resp.status(),
         StatusCode::UNAUTHORIZED,
@@ -2795,22 +2813,17 @@ async fn sse_ticket_identity_must_match_allowed_sub_when_set() {
 
     // Ticket bound to the allowed identity — accepted.
     let alice_ticket = test_helpers::mint_sse_ticket_for_test(&r.state, "alice@example.com");
-    let url = format!(
-        "{}/api/conversations/{}/events?access_token={}",
-        r.base, chat_id, alice_ticket,
-    );
-    let resp = get(&url).await;
+    let resp = get_with_sse_cookie(&url, &alice_ticket).await;
     assert_eq!(resp.status(), StatusCode::OK, "matching-identity ticket must authorise");
 }
 
 #[tokio::test]
 async fn sse_ticket_round_trips_and_is_single_use() {
     // POST /api/auth/sse-ticket mints a one-shot, short-lived,
-    // identity-bound token.  EventSource can't send headers, so the
-    // SPA sends the ticket as `?access_token=<ticket>`.  The
-    // controller looks the ticket up, removes it (single-use), and
-    // attaches the bound identity to the request.  Re-using the
-    // ticket must 401.
+    // identity-bound token and Set-Cookies it as `dyson_sse=<token>`.
+    // The browser-equivalent path: read the cookie out of the response
+    // and replay it on the EventSource open.  Re-using the cookie
+    // value must 401.
     let r = rig_with_auth_and_mode(
         hashed_bearer_for_test("real-token"),
         test_helpers::AuthMode::Bearer,
@@ -2825,22 +2838,34 @@ async fn sse_ticket_round_trips_and_is_single_use() {
     )
     .await;
     assert_eq!(mint.status(), StatusCode::OK, "ticket mint must succeed");
-    let ticket = body_json(mint).await["ticket"]
-        .as_str()
-        .expect("ticket field")
-        .to_string();
+    // Cookie comes back via Set-Cookie (HttpOnly), not the JSON body —
+    // the body just carries `expires_in` for client observability.
+    let set_cookie = mint
+        .headers()
+        .get_all(hyper::header::SET_COOKIE)
+        .iter()
+        .find_map(|v| v.to_str().ok().map(str::to_string))
+        .expect("Set-Cookie must be present on ticket mint response");
+    assert!(set_cookie.contains("dyson_sse="), "cookie must be named dyson_sse");
+    assert!(set_cookie.contains("HttpOnly"), "cookie must be HttpOnly");
+    assert!(set_cookie.contains("SameSite=Strict"), "cookie must be SameSite=Strict");
+    assert!(set_cookie.contains("Path=/api/conversations"),
+            "cookie path must scope to the SSE family");
+    let ticket = set_cookie
+        .split(';')
+        .next()
+        .and_then(|kv| kv.split_once('='))
+        .map(|(_, v)| v.trim().to_string())
+        .expect("dyson_sse=<value> in Set-Cookie");
     assert!(!ticket.is_empty(), "ticket must be non-empty");
 
+    let url = format!("{}/api/conversations/{}/events", r.base, chat_id);
     // First use authorises the SSE open.
-    let url = format!(
-        "{}/api/conversations/{}/events?access_token={}",
-        r.base, chat_id, ticket,
-    );
-    let resp = get(&url).await;
+    let resp = get_with_sse_cookie(&url, &ticket).await;
     assert_eq!(resp.status(), StatusCode::OK, "first use authorises");
 
     // Second use fails — single-use semantics.
-    let resp = get(&url).await;
+    let resp = get_with_sse_cookie(&url, &ticket).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "ticket reuse must 401");
 }
 

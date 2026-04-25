@@ -95,10 +95,16 @@ pub(crate) struct EventRing {
 }
 
 impl EventRing {
-    /// Maximum entries kept.  256 covers a normal reconnect window
-    /// (browser refresh, brief network blip) without giving a
-    /// runaway producer an unbounded buffer.
-    const CAP: usize = 256;
+    /// Maximum entries kept.  Matched to the broadcast channel
+    /// capacity (`broadcast::channel(4096)` in `ChatHandle::new`) so
+    /// a subscriber that hits `RecvError::Lagged` can still resume
+    /// from the ring — with the previous 256-entry ring, events
+    /// 257..4096 behind the cursor were dropped from the channel
+    /// AND already evicted from the ring, leaving a permanent gap
+    /// for that one client.  `SseEvent` payloads are small (text
+    /// deltas, tool refs); 4096 of them is a few MB per active chat
+    /// at worst, fine for the deployment scale.
+    const CAP: usize = 4096;
 
     pub(crate) fn new() -> Self {
         Self {
@@ -306,13 +312,21 @@ pub struct HttpState {
     pub(crate) titles: std::sync::Mutex<HashMap<String, String>>,
     /// One-shot SSE tickets.  EventSource can't send headers, so the
     /// SPA exchanges its bearer for a single-use, short-lived ticket
-    /// (`POST /api/auth/sse-ticket`) and passes it as
-    /// `?access_token=<ticket>` on the SSE connect.  The dispatcher
-    /// looks the ticket up here, removes it (single-use), and trusts
-    /// the bound identity for that one request.  Replaces the older
-    /// raw-bearer-in-URL path so a leaked log line carrying
-    /// `?access_token=` discloses at most a 30s, used-once token.
+    /// (`POST /api/auth/sse-ticket`) which the controller sets as an
+    /// `HttpOnly; SameSite=Strict; Path=/api/conversations` cookie
+    /// (`dyson_sse=<ticket>`).  Same-origin EventSource sends the
+    /// cookie automatically; the dispatcher looks the ticket up here,
+    /// removes it (single-use), and trusts the bound identity for
+    /// that one request.  Cookie delivery replaces the older
+    /// `?access_token=` query path — same ticket lifecycle, no URL
+    /// surface to leak via proxy access logs / Referer.
     pub(crate) sse_tickets: std::sync::Mutex<HashMap<String, SseTicket>>,
+    /// `true` when the HTTP listener terminates TLS itself.  Drives
+    /// the `Secure` cookie attribute on the SSE ticket cookie so
+    /// browsers refuse to send it over plain HTTP.  Loopback dev
+    /// (`dangerous_no_tls`) sets this to `false` so the cookie is
+    /// still usable on `http://127.0.0.1:7878`.
+    pub(crate) tls_enabled: bool,
 }
 
 /// Stored per-ticket: the bound identity (so we can attach it on
@@ -371,6 +385,7 @@ impl HttpState {
         config_path: Option<PathBuf>,
         loopback_only_host_check: bool,
         allowed_identity: Option<String>,
+        tls_enabled: bool,
     ) -> Self {
         // Piggy-back on the ChatHistory directory so artefacts / files /
         // chats / ratings all live in one place on disk.  Memory-only
@@ -418,6 +433,7 @@ impl HttpState {
             auth_mode,
             loopback_only_host_check,
             sse_tickets: std::sync::Mutex::new(HashMap::new()),
+            tls_enabled,
             titles: std::sync::Mutex::new(HashMap::new()),
             allowed_identity: std::sync::Mutex::new(allowed_identity),
         }

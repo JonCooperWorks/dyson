@@ -1,0 +1,28 @@
+# cargo-audit configuration.
+#
+# Documents advisories we have explicitly evaluated and accepted, so
+# CI / supply-chain hygiene scans don't keep flagging them every run.
+# Each entry MUST carry a justification — silent ignores rot fast and
+# mask real risk on the next refactor.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin Attack: timing side-channel in `rsa`
+    # crate that recovers the private key during PKCS#1 v1.5 decryption.
+    #
+    # We pull `rsa@0.9.x` transitively via `jsonwebtoken`'s `rust_crypto`
+    # feature.  jsonwebtoken's only other backend is `aws_lc_rs`, which
+    # vendors BoringSSL — defeats the pure-Rust posture and adds
+    # cross-compile / binary-size cost.
+    #
+    # The vulnerability is in RSA *decryption*.  We only ever verify
+    # JWTs (public-key path) — the Dyson process is the OIDC relying
+    # party, never the issuer.  No decryption code path exists in the
+    # Dyson tree, so the advisory is non-applicable in practice.
+    #
+    # Re-evaluate when jsonwebtoken upgrades `rsa` past the fixed
+    # version (>= 0.10 with `RsaPrivateKey::new_with_blinder` or the
+    # post-Marvin constant-time path) — once available, drop this
+    # ignore and let the audit pass cleanly.
+    "RUSTSEC-2023-0071",
+]

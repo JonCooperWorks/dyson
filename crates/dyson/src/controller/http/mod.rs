@@ -302,6 +302,7 @@ impl Controller for HttpController {
             AuthInit::PendingOidc { allowed_sub, .. } => allowed_sub.clone(),
             AuthInit::Ready { .. } => None,
         };
+        let tls_enabled = self.tls.is_some();
         let state = Arc::new(HttpState::new(
             settings.clone(),
             Arc::clone(registry),
@@ -312,6 +313,7 @@ impl Controller for HttpController {
             config_path,
             loopback_only_host_check,
             allowed_identity,
+            tls_enabled,
         ));
 
         // Expose the artefact store across controllers so a file sent

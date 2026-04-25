@@ -118,6 +118,12 @@ argon2 = "0.5"
 # checks) and split the crypto backend out as an explicit feature, so
 # we pin >= 10.3 and select rust_crypto rather than aws_lc_rs (latter
 # would pull in BoringSSL, defeating the pure-Rust posture).
+#
+# `rust_crypto` pulls in `rsa@0.9.x`, which carries RUSTSEC-2023-0071
+# (Marvin Attack — timing side-channel in *decryption*).  We never
+# decrypt; verification is unaffected.  Documented and ignored in
+# `.cargo/audit.toml`; revisit when jsonwebtoken upgrades past the
+# fixed `rsa` version.
 jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "rust_crypto"] }
 libc = "0.2"
 undoc = "0.2.0"
