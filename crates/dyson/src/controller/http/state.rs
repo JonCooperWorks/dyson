@@ -57,10 +57,53 @@ use super::stores::{
 };
 use super::wire::{AuthMode, SseEvent};
 
+/// One pending POST /turn that arrived while a turn was already running.
+///
+/// Stored verbatim (the base64 attachment payload is what the wire
+/// already carries) so persistence is trivial and there's no decode/
+/// re-encode round-trip on the queue path.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct QueuedTurn {
+    pub(crate) prompt: String,
+    #[serde(default)]
+    pub(crate) attachments: Vec<QueuedAttachment>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct QueuedAttachment {
+    pub(crate) mime_type: String,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
+    pub(crate) data_base64: String,
+}
+
+/// Outcome of an enqueue attempt.
+pub(crate) enum EnqueueResult {
+    Queued { position: usize },
+    Full,
+}
+
+/// Maximum queued POSTs per chat before falling back to 409.  At
+/// MAX_TURN_BODY=25 MiB per turn this caps a single chat's queue at
+/// ~400 MiB resident worst case, which is fine for the deployment
+/// scale.  When full the controller still rejects with 409 so the
+/// SPA can surface backpressure to the user.
+pub(crate) const QUEUE_CAP: usize = 16;
+
 /// Per-chat handle.  Agent built lazily on first turn so that listing chats
 /// or creating an empty one is cheap.
 pub(crate) struct ChatHandle {
     pub(crate) title: String,
+    /// The chat's id.  Carried on the handle so persistence helpers
+    /// (queue, future state) don't need it threaded from the call site.
+    pub(crate) chat_id: String,
+    /// Resolved on-disk path for the persisted queue, or `None` when
+    /// `data_dir` is unset (memory-only deployment).
+    pub(crate) queue_path: Option<PathBuf>,
+    /// Pending turns accumulated while `busy=true`.  Drained at the end
+    /// of the in-flight turn and coalesced into one `agent.run()` call.
+    /// `std::Mutex` because the lock is only held for VecDeque ops.
+    pub(crate) queued: std::sync::Mutex<std::collections::VecDeque<QueuedTurn>>,
     /// Agent — `None` until first turn, then populated.  Behind tokio Mutex
     /// because `Agent::run` requires `&mut self` and turns are serialised
     /// per chat.
@@ -210,15 +253,124 @@ mod ring_tests {
 }
 
 impl ChatHandle {
-    pub(crate) fn new(title: String) -> Self {
+    /// Create an empty handle — does not touch disk.
+    ///
+    /// Call sites that have a `data_dir` should follow up with
+    /// `hydrate_queue_from_disk()` so any queued turns persisted by a
+    /// previous process are picked up.
+    pub(crate) fn new(chat_id: String, title: String, data_dir: Option<&std::path::Path>) -> Self {
         let (tx, _) = broadcast::channel(4096);
+        let queue_path = data_dir.map(|d| d.join(&chat_id).join("queue.json"));
         Self {
             title,
+            chat_id,
+            queue_path,
+            queued: std::sync::Mutex::new(std::collections::VecDeque::new()),
             agent: Mutex::new(None),
             events: tx,
             replay: Arc::new(std::sync::Mutex::new(EventRing::new())),
             cancel: Mutex::new(None),
             busy: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Read the persisted queue from disk and replace the in-memory
+    /// VecDeque.  Idempotent and safe to call before any push/pop —
+    /// gracefully handles a missing or malformed file by leaving the
+    /// queue empty.
+    pub(crate) async fn hydrate_queue_from_disk(&self) {
+        let Some(path) = &self.queue_path else { return };
+        let bytes = match tokio::fs::read(path).await {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                tracing::warn!(error = %e, chat_id = %self.chat_id, "failed to read queued turns from disk");
+                return;
+            }
+        };
+        match serde_json::from_slice::<Vec<QueuedTurn>>(&bytes) {
+            Ok(items) => {
+                let mut q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
+                *q = items.into();
+            }
+            Err(e) => tracing::warn!(error = %e, chat_id = %self.chat_id, "queued turns file malformed; ignoring"),
+        }
+    }
+
+    /// Push one turn into the queue and persist.  Returns the
+    /// 1-indexed position (`Queued{1}` is the next to drain) or
+    /// `Full` when the cap is hit.
+    pub(crate) async fn enqueue_turn(&self, turn: QueuedTurn) -> EnqueueResult {
+        let position = {
+            let mut q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
+            if q.len() >= QUEUE_CAP {
+                return EnqueueResult::Full;
+            }
+            q.push_back(turn);
+            q.len()
+        };
+        self.persist_queue().await;
+        EnqueueResult::Queued { position }
+    }
+
+    /// Drain every queued turn and persist (deletes the file when
+    /// empty).  Returns the drained turns in FIFO order.
+    pub(crate) async fn drain_queued_turns(&self) -> Vec<QueuedTurn> {
+        let drained: Vec<_> = {
+            let mut q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
+            q.drain(..).collect()
+        };
+        if !drained.is_empty() {
+            self.persist_queue().await;
+        }
+        drained
+    }
+
+    /// Drop every queued turn without acting on them.  Used by `/clear`
+    /// so a wiped chat doesn't resurrect prompts the user typed during
+    /// the previous run.
+    pub(crate) async fn clear_queued(&self) {
+        let had_any = {
+            let mut q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
+            let any = !q.is_empty();
+            q.clear();
+            any
+        };
+        if had_any {
+            self.persist_queue().await;
+        }
+    }
+
+    /// Snapshot the queue and write it to disk.  Deletes the file when
+    /// the queue is empty so an empty queue + restart is observably
+    /// the same as a fresh chat.
+    async fn persist_queue(&self) {
+        let Some(path) = &self.queue_path else { return };
+        let snapshot: Vec<QueuedTurn> = {
+            let q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
+            q.iter().cloned().collect()
+        };
+        if snapshot.is_empty() {
+            if let Err(e) = tokio::fs::remove_file(path).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(error = %e, chat_id = %self.chat_id, "failed to remove empty queue file");
+            }
+            return;
+        }
+        if let Some(parent) = path.parent()
+            && let Err(e) = tokio::fs::create_dir_all(parent).await
+        {
+            tracing::warn!(error = %e, chat_id = %self.chat_id, "failed to create queue dir");
+            return;
+        }
+        match serde_json::to_vec(&snapshot) {
+            Ok(json) => {
+                if let Err(e) = tokio::fs::write(path, json).await {
+                    tracing::warn!(error = %e, chat_id = %self.chat_id, "failed to persist queued turns");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, chat_id = %self.chat_id, "failed to serialize queued turns"),
         }
     }
 

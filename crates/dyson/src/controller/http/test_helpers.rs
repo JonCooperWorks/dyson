@@ -237,6 +237,30 @@ pub async fn set_chat_busy_for_test(
     Ok(())
 }
 
+/// Number of POSTs currently queued behind a busy chat — exposed so
+/// integration tests can assert that the enqueue / drain / clear paths
+/// updated the per-chat queue without needing access to internal types.
+pub async fn queued_count_for_test(state: Arc<HttpState>, chat_id: &str) -> Option<usize> {
+    let handle = state.chats.lock().await.get(chat_id).cloned()?;
+    let q = handle.queued.lock().unwrap_or_else(|p| p.into_inner());
+    Some(q.len())
+}
+
+/// Resolved on-disk path where this chat's queue file is persisted, if
+/// the rig was set up with a `data_dir`.  Lets tests assert that the
+/// file is created on enqueue and removed on drain/clear.
+pub async fn queue_path_for_test(
+    state: Arc<HttpState>,
+    chat_id: &str,
+) -> Option<std::path::PathBuf> {
+    state
+        .chats
+        .lock()
+        .await
+        .get(chat_id)
+        .and_then(|h| h.queue_path.clone())
+}
+
 /// Run the end-of-turn replay-ring cleanup that `turns.rs` invokes
 /// after emitting `Done`.  Exposed so the integration tests can
 /// simulate a finished turn (then assert a fresh subscriber sees

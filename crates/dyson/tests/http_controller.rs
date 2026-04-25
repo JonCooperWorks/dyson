@@ -590,6 +590,124 @@ async fn post_turn_404_for_unknown_chat() {
 }
 
 #[tokio::test]
+async fn post_turn_while_busy_enqueues_instead_of_409() {
+    // Pre-fix behavior: a POST landing while a turn was running got a
+    // 409 and the user's message was lost.  New behavior: queue it,
+    // return 200 with `queued: true` + 1-indexed position, and persist
+    // the queue file under data_dir so a restart picks it up.
+    let r = rig().await;
+    let id = create_chat(&r, "queue test").await;
+    test_helpers::set_chat_busy_for_test(r.state.clone(), &id, true)
+        .await
+        .expect("set busy");
+
+    let resp = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "while you're working" }),
+    ).await;
+    assert_eq!(resp.status(), StatusCode::OK, "queued POST returns 200, not 409");
+    let body = body_json(resp).await;
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["queued"], true);
+    assert_eq!(body["position"], 1);
+
+    // In-memory state reflects the queue depth.
+    let depth = test_helpers::queued_count_for_test(r.state.clone(), &id).await;
+    assert_eq!(depth, Some(1));
+
+    // Persisted file exists at the expected path.
+    let qpath = test_helpers::queue_path_for_test(r.state.clone(), &id)
+        .await
+        .expect("queue path resolved");
+    assert!(qpath.exists(), "queue file must be persisted to {qpath:?}");
+}
+
+#[tokio::test]
+async fn post_turn_409_only_when_queue_is_full() {
+    // Once 16 messages are queued (QUEUE_CAP), further POSTs fall back
+    // to 409 with `queue is full` so the SPA can surface backpressure.
+    let r = rig().await;
+    let id = create_chat(&r, "queue overflow").await;
+    test_helpers::set_chat_busy_for_test(r.state.clone(), &id, true)
+        .await
+        .expect("set busy");
+
+    // Fill up to QUEUE_CAP = 16.
+    for i in 0..16 {
+        let resp = post_json(
+            &format!("{}/api/conversations/{id}/turn", r.base),
+            &serde_json::json!({ "prompt": format!("msg {i}") }),
+        ).await;
+        assert_eq!(resp.status(), StatusCode::OK, "fill #{i}");
+    }
+
+    // 17th POST → 409.
+    let overflow = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "one too many" }),
+    ).await;
+    assert_eq!(overflow.status(), StatusCode::CONFLICT);
+    let body = body_json(overflow).await;
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("queue"),
+        "409 body should mention queue: {body:?}"
+    );
+}
+
+#[tokio::test]
+async fn clear_drains_queued_turns_and_removes_persisted_file() {
+    // /clear must wipe the queue too — otherwise messages the user
+    // typed during the previous run would resurrect into the fresh
+    // chat right after rotation.
+    let r = rig().await;
+    let id = create_chat(&r, "clear drains").await;
+    test_helpers::set_chat_busy_for_test(r.state.clone(), &id, true)
+        .await
+        .expect("set busy");
+
+    for i in 0..3 {
+        let resp = post_json(
+            &format!("{}/api/conversations/{id}/turn", r.base),
+            &serde_json::json!({ "prompt": format!("msg {i}") }),
+        ).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    assert_eq!(
+        test_helpers::queued_count_for_test(r.state.clone(), &id).await,
+        Some(3),
+        "preconditions: 3 queued"
+    );
+    let qpath = test_helpers::queue_path_for_test(r.state.clone(), &id)
+        .await
+        .expect("queue path");
+    assert!(qpath.exists(), "preconditions: queue file present");
+
+    // /clear normally requires busy=false to take the early branch
+    // (the in-flight turn would otherwise still hold it).  Drop the
+    // busy latch so /clear can run.
+    test_helpers::set_chat_busy_for_test(r.state.clone(), &id, false)
+        .await
+        .expect("clear busy");
+
+    let resp = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "/clear" }),
+    ).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["cleared"], true);
+
+    assert_eq!(
+        test_helpers::queued_count_for_test(r.state.clone(), &id).await,
+        Some(0),
+        "queue must be empty after /clear"
+    );
+    assert!(
+        !qpath.exists(),
+        "queue file must be removed after /clear (left at {qpath:?})"
+    );
+}
+
+#[tokio::test]
 async fn post_turn_400_for_invalid_body() {
     let r = rig().await;
     let id = body_json(post_json(

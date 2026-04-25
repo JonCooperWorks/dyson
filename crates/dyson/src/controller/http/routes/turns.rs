@@ -93,6 +93,11 @@ pub(super) async fn post(
                 tracing::warn!(error = %e, chat_id = %id, "failed to seed empty chat after rotate");
             }
         }
+        // /clear also drops anything queued — the user reset the chat
+        // and would not expect prompts they typed during a previous run
+        // to resurrect.  Cancel does NOT drain (queued messages there
+        // are independent intentions); only /clear wipes them.
+        handle.clear_queued().await;
         handle.emit(SseEvent::Done);
         // /clear ends any in-flight stream — wipe the replay ring so a
         // subsequent send doesn't see this turn's events.
@@ -104,13 +109,36 @@ pub(super) async fn post(
         .busy
         .swap(true, std::sync::atomic::Ordering::SeqCst)
     {
-        return Response::builder()
-            .status(StatusCode::CONFLICT)
-            .header("Content-Type", "application/json")
-            .body(boxed(Bytes::from_static(
-                br#"{"error":"chat is busy"}"#,
-            )))
-            .unwrap();
+        // Already running a turn for this chat — try to enqueue the
+        // new POST instead of rejecting it.  When the in-flight turn
+        // ends, the spawned task drains the queue and runs one more
+        // coalesced agent.run(); if more arrive during that run, they
+        // queue again and the loop repeats.  Persisted to disk so a
+        // restart mid-turn doesn't drop messages the user typed.
+        let queued = super::super::state::QueuedTurn {
+            prompt: body.prompt,
+            attachments: body
+                .attachments
+                .into_iter()
+                .map(|a| super::super::state::QueuedAttachment {
+                    mime_type: a.mime_type,
+                    name: a.name,
+                    data_base64: a.data_base64,
+                })
+                .collect(),
+        };
+        return match handle.enqueue_turn(queued).await {
+            super::super::state::EnqueueResult::Queued { position } => json_ok(
+                &serde_json::json!({"ok": true, "queued": true, "position": position}),
+            ),
+            super::super::state::EnqueueResult::Full => Response::builder()
+                .status(StatusCode::CONFLICT)
+                .header("Content-Type", "application/json")
+                .body(boxed(Bytes::from_static(
+                    br#"{"error":"chat queue is full"}"#,
+                )))
+                .unwrap(),
+        };
     }
 
     // Set up cancellation.
@@ -253,51 +281,79 @@ pub(super) async fn post(
         // agent committed to its conversation, so dropping the future
         // mid-run is safe: the state that survives is exactly what
         // the agent had decided on.
-        let result = tokio::select! {
-            biased;
-            _ = cancel_for_select.cancelled() => {
-                tracing::info!(chat_id = %chat_id, "turn aborted by cancel request");
-                chat_handle.emit(SseEvent::LlmError {
-                    message: "cancelled".to_string(),
-                });
-                Ok(String::new())
-            }
-            r = async {
-                if attachments.is_empty() {
-                    agent.run(&prompt, &mut output).await
-                } else {
-                    agent.run_with_attachments(&prompt, attachments, &mut output).await
+        //
+        // After the initial run we drain any POSTs that arrived while
+        // busy and run them as one coalesced sub-turn; if more arrive
+        // during that drain run they queue again and the loop repeats.
+        // Cancellation aborts the current sub-turn and exits the loop —
+        // the queue stays persisted so the next POST or restart picks
+        // it up.
+        let mut next_prompt = prompt;
+        let mut next_attachments = attachments;
+        loop {
+            let result = tokio::select! {
+                biased;
+                _ = cancel_for_select.cancelled() => {
+                    tracing::info!(chat_id = %chat_id, "turn aborted by cancel request");
+                    chat_handle.emit(SseEvent::LlmError {
+                        message: "cancelled".to_string(),
+                    });
+                    Ok(String::new())
                 }
-            } => r,
-        };
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                // Full Display goes to the operator log; the SSE wire
-                // gets the sanitised form so cross-tenant deployments
-                // don't leak filesystem paths or upstream URLs.
-                tracing::warn!(error = %e, chat_id = %chat_id, "turn failed");
-                chat_handle.emit(SseEvent::LlmError {
-                    message: e.sanitized_message(),
-                });
+                r = async {
+                    if next_attachments.is_empty() {
+                        agent.run(&next_prompt, &mut output).await
+                    } else {
+                        let atts = std::mem::take(&mut next_attachments);
+                        agent.run_with_attachments(&next_prompt, atts, &mut output).await
+                    }
+                } => r,
+            };
+            match result {
+                Ok(_) => {}
+                Err(e) => {
+                    // Full Display goes to the operator log; the SSE wire
+                    // gets the sanitised form so cross-tenant deployments
+                    // don't leak filesystem paths or upstream URLs.
+                    tracing::warn!(error = %e, chat_id = %chat_id, "turn failed");
+                    chat_handle.emit(SseEvent::LlmError {
+                        message: e.sanitized_message(),
+                    });
+                }
             }
+
+            // Persist the conversation to disk after every (sub-)turn.
+            // Canonical save point — controllers/telegram does the same.
+            if let Some(h) = history.as_ref()
+                && let Err(e) = h.save(&chat_id, agent.messages()) {
+                    tracing::warn!(error = %e, chat_id = %chat_id, "failed to save chat history");
+                }
+
+            chat_handle.emit(SseEvent::Done);
+            // Wipe the per-turn replay ring before either looping or
+            // releasing busy so a fresh EventSource opening for the
+            // *next* turn doesn't replay this turn's events into the
+            // new agent placeholder.  See
+            // sse_fresh_connect_after_turn_end_does_not_replay_stale_events.
+            chat_handle.reset_replay();
+
+            // Cancellation: stop draining; leave the queue alone for
+            // the next POST or restart to pick up.
+            if cancel_for_select.is_cancelled() {
+                break;
+            }
+
+            // Drain anything that queued up during the run we just
+            // finished; coalesce into one prompt and loop.
+            let drained = chat_handle.drain_queued_turns().await;
+            if drained.is_empty() {
+                break;
+            }
+            let (combined_prompt, combined_attachments) = coalesce_queued(drained);
+            next_prompt = combined_prompt;
+            next_attachments = combined_attachments;
         }
 
-        // Persist the conversation to disk after every turn.  This is the
-        // canonical save point — controllers/telegram does the same.
-        if let Some(h) = history.as_ref()
-            && let Err(e) = h.save(&chat_id, agent.messages()) {
-                tracing::warn!(error = %e, chat_id = %chat_id, "failed to save chat history");
-            }
-
-        chat_handle.emit(SseEvent::Done);
-        // Wipe the per-turn replay ring before releasing busy so a
-        // fresh EventSource opening for the *next* turn doesn't
-        // replay this turn's events into the new agent placeholder.
-        // Without this the user sees their second message "respond"
-        // with the previous turn's text — see
-        // sse_fresh_connect_after_turn_end_does_not_replay_stale_events.
-        chat_handle.reset_replay();
         chat_handle
             .busy
             .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -312,4 +368,115 @@ pub(super) async fn post(
         .header("Content-Type", "application/json")
         .body(boxed(Bytes::from_static(br#"{"ok":true}"#)))
         .unwrap()
+}
+
+/// Combine N queued turns into a single prompt + attachment set so the
+/// agent sees one coherent user message instead of having to deduce
+/// they came from separate POSTs.  Single-turn drains pass through
+/// unchanged; multi-turn drains get a numbered preamble so the agent
+/// answers them as discrete asks.
+pub(crate) fn coalesce_queued(
+    turns: Vec<super::super::state::QueuedTurn>,
+) -> (String, Vec<crate::media::Attachment>) {
+    let mut all_attachments = Vec::new();
+    for t in &turns {
+        for a in &t.attachments {
+            // Validated at enqueue, but defend against on-disk
+            // corruption — a single bad attachment must not abort the
+            // whole drain.
+            match base64::engine::general_purpose::STANDARD.decode(a.data_base64.as_bytes()) {
+                Ok(bytes) => all_attachments.push(crate::media::Attachment {
+                    data: bytes,
+                    mime_type: a.mime_type.clone(),
+                    file_name: a.name.clone(),
+                }),
+                Err(e) => tracing::warn!(error = %e, name = ?a.name, "queued attachment had malformed base64; skipping"),
+            }
+        }
+    }
+    let prompt = if turns.len() == 1 {
+        turns.into_iter().next().expect("len==1 checked").prompt
+    } else {
+        use std::fmt::Write as _;
+        let mut s = format!(
+            "I sent {} more messages while you were working:\n\n",
+            turns.len()
+        );
+        for (i, t) in turns.iter().enumerate() {
+            let _ = write!(s, "{}. {}\n\n", i + 1, t.prompt);
+        }
+        s.trim_end().to_string()
+    };
+    (prompt, all_attachments)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::super::state::{QueuedAttachment, QueuedTurn};
+
+    #[test]
+    fn coalesce_single_turn_passes_through() {
+        let (prompt, atts) = coalesce_queued(vec![QueuedTurn {
+            prompt: "hello".into(),
+            attachments: vec![],
+        }]);
+        assert_eq!(prompt, "hello");
+        assert!(atts.is_empty());
+    }
+
+    #[test]
+    fn coalesce_multi_turn_numbers_with_preamble() {
+        let (prompt, _) = coalesce_queued(vec![
+            QueuedTurn { prompt: "first".into(), attachments: vec![] },
+            QueuedTurn { prompt: "second".into(), attachments: vec![] },
+            QueuedTurn { prompt: "third".into(), attachments: vec![] },
+        ]);
+        assert!(prompt.starts_with("I sent 3 more messages while you were working:"));
+        assert!(prompt.contains("1. first"));
+        assert!(prompt.contains("2. second"));
+        assert!(prompt.contains("3. third"));
+    }
+
+    #[test]
+    fn coalesce_merges_attachments_in_order() {
+        use base64::Engine;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let (_, atts) = coalesce_queued(vec![
+            QueuedTurn {
+                prompt: "a".into(),
+                attachments: vec![QueuedAttachment {
+                    mime_type: "image/png".into(),
+                    name: Some("one.png".into()),
+                    data_base64: b64(b"\x89PNG one"),
+                }],
+            },
+            QueuedTurn {
+                prompt: "b".into(),
+                attachments: vec![QueuedAttachment {
+                    mime_type: "image/png".into(),
+                    name: Some("two.png".into()),
+                    data_base64: b64(b"\x89PNG two"),
+                }],
+            },
+        ]);
+        assert_eq!(atts.len(), 2);
+        assert_eq!(atts[0].file_name.as_deref(), Some("one.png"));
+        assert_eq!(atts[1].file_name.as_deref(), Some("two.png"));
+        assert_eq!(atts[0].data, b"\x89PNG one");
+        assert_eq!(atts[1].data, b"\x89PNG two");
+    }
+
+    #[test]
+    fn coalesce_skips_malformed_base64_attachment() {
+        let (_, atts) = coalesce_queued(vec![QueuedTurn {
+            prompt: "x".into(),
+            attachments: vec![QueuedAttachment {
+                mime_type: "image/png".into(),
+                name: Some("bad.png".into()),
+                data_base64: "not!!!base64".into(),
+            }],
+        }]);
+        assert!(atts.is_empty(), "malformed attachment must be skipped, not panic");
+    }
 }

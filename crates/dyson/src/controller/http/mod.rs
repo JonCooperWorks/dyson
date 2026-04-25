@@ -341,7 +341,15 @@ impl Controller for HttpController {
                                 .unwrap_or_else(|| id.clone()),
                             Err(_) => id.clone(),
                         };
-                        let handle = Arc::new(ChatHandle::new(title));
+                        let handle = Arc::new(ChatHandle::new(
+                            id.clone(),
+                            title,
+                            state.data_dir.as_deref(),
+                        ));
+                        // Pull persisted queued POSTs (if any) so a
+                        // restart doesn't drop messages the user typed
+                        // while the previous process was busy.
+                        handle.hydrate_queue_from_disk().await;
                         chats.insert(id.clone(), handle);
                         order.push(id);
                     }

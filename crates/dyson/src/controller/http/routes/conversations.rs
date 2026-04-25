@@ -81,7 +81,10 @@ pub(super) async fn list(state: &HttpState) -> Resp {
                 titles.insert(id.clone(), t.clone());
                 t
             };
-            chats.insert(id.clone(), Arc::new(ChatHandle::new(title)));
+            chats.insert(
+                id.clone(),
+                Arc::new(ChatHandle::new(id.clone(), title, state.data_dir.as_deref())),
+            );
         }
     }
 
@@ -183,7 +186,11 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
     }
     let id = state.mint_id().await;
     let title = body.title.unwrap_or_else(|| "New conversation".to_string());
-    let handle = Arc::new(ChatHandle::new(title.clone()));
+    let handle = Arc::new(ChatHandle::new(
+        id.clone(),
+        title.clone(),
+        state.data_dir.as_deref(),
+    ));
     state.chats.lock().await.insert(id.clone(), handle);
     // Newest first — push to front so the sidebar shows new chats on top.
     state.order.lock().await.insert(0, id.clone());
