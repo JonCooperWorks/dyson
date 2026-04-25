@@ -215,11 +215,52 @@ impl OpenAiClient {
         let response = self.auth.apply_to_request(req).await?.send().await?;
 
         if !response.status().is_success() {
-            return Err(crate::llm::map_http_error(response, "OpenAI").await);
+            let status = response.status();
+            let retry_after = crate::llm::parse_retry_hint(response.headers());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| format!("HTTP {status}"));
+            return Err(crate::llm::provider_http_error(
+                "OpenAI",
+                status,
+                retry_after,
+                &parse_error_body(&body),
+            ));
         }
 
         Ok(crate::llm::build_stream_response(response, parser))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Error body parser — strips OpenAI / OpenRouter envelope.
+// ---------------------------------------------------------------------------
+
+/// Pull the human-readable message out of an OpenAI-shaped error body.
+///
+/// OpenAI and every OpenAI-compatible provider (OpenRouter, Together,
+/// Groq, Ollama Cloud, …) return non-2xx bodies shaped like
+/// `{"error":{"message":"…","type":"…","code":"…"}}`.  OpenRouter adds
+/// sibling fields like `metadata` and `user_id` we don't want to leak
+/// at the user — drop the envelope and just return the message.
+///
+/// Falls back to the raw body when the shape doesn't match — better to
+/// show *something* than swallow the only diagnostic the user has.
+fn parse_error_body(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(err) = v.get("error")
+    {
+        let message = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(m) = message {
+            return m.to_string();
+        }
+    }
+    body.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -713,5 +754,46 @@ mod tests {
                 assert!(has_overflow, "expected tool buffer overflow on chunk {i}");
             }
         }
+    }
+
+    #[test]
+    fn parse_error_body_strips_openrouter_402_envelope() {
+        // The exact body shape OpenRouter returns when credits run out —
+        // sibling fields like `metadata` and `user_id` must not leak.
+        let body = r#"{"error":{"message":"Prompt tokens limit exceeded: 163586 > 132288. To increase, visit https://openrouter.ai/settings/credits and add more credits","code":402,"metadata":{"provider_name":null}},"user_id":"user_3BGgMlV4QdIpRqJBHJukfpbymrP"}"#;
+        let msg = parse_error_body(body);
+        assert_eq!(
+            msg,
+            "Prompt tokens limit exceeded: 163586 > 132288. To increase, visit https://openrouter.ai/settings/credits and add more credits"
+        );
+        assert!(!msg.contains("user_id"));
+        assert!(!msg.contains('{'));
+    }
+
+    #[test]
+    fn parse_error_body_strips_openai_insufficient_quota_envelope() {
+        // Real OpenAI 429 body for an exhausted quota.
+        let body = r#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","param":null,"code":"insufficient_quota"}}"#;
+        let msg = parse_error_body(body);
+        assert_eq!(
+            msg,
+            "You exceeded your current quota, please check your plan and billing details."
+        );
+    }
+
+    #[test]
+    fn parse_error_body_falls_back_to_raw_for_non_json() {
+        // A bare text body (some proxies return plain text 502s) should
+        // pass through unchanged rather than vanish.
+        let body = "upstream connect timeout";
+        assert_eq!(parse_error_body(body), "upstream connect timeout");
+    }
+
+    #[test]
+    fn parse_error_body_falls_back_when_message_missing() {
+        // JSON without `error.message` — fall back to the body so we
+        // don't silently drop the only diagnostic.
+        let body = r#"{"error":{"type":"unknown"}}"#;
+        assert_eq!(parse_error_body(body), body);
     }
 }

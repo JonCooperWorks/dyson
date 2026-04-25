@@ -139,7 +139,18 @@ impl LlmClient for GeminiClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(crate::llm::map_http_error(response, "Gemini").await);
+            let status = response.status();
+            let retry_after = crate::llm::parse_retry_hint(response.headers());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| format!("HTTP {status}"));
+            return Err(crate::llm::provider_http_error(
+                "Gemini",
+                status,
+                retry_after,
+                &parse_error_body(&body),
+            ));
         }
 
         Ok(crate::llm::build_stream_response(
@@ -147,6 +158,37 @@ impl LlmClient for GeminiClient {
             BaseSseParser::new(GeminiJsonParser::new()),
         ))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Error body parser — strips Google Cloud envelope.
+// ---------------------------------------------------------------------------
+
+/// Pull the human-readable message out of a Gemini error body.
+///
+/// Gemini follows the Google Cloud API error shape:
+/// `{"error":{"code":429,"message":"Resource has been exhausted …",
+///   "status":"RESOURCE_EXHAUSTED","details":[…]}}`.
+///
+/// The `details` array can be large (rich quota metadata) and isn't
+/// useful to the end user — drop the envelope and just return the
+/// human-readable message.
+///
+/// Falls back to the raw body when the shape doesn't match.
+fn parse_error_body(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(err) = v.get("error")
+    {
+        let message = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(m) = message {
+            return m.to_string();
+        }
+    }
+    body.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -589,5 +631,28 @@ mod tests {
         let schema = serde_json::json!("string");
         let cleaned = sanitize_schema_for_gemini(&schema);
         assert_eq!(cleaned, schema);
+    }
+
+    #[test]
+    fn parse_error_body_strips_resource_exhausted_envelope() {
+        // Real shape Gemini returns when the per-minute quota is hit.
+        let body = r#"{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaMetric":"generativelanguage.googleapis.com/generate_content_free_tier_requests"}]}]}}"#;
+        let msg = parse_error_body(body);
+        assert_eq!(msg, "Resource has been exhausted (e.g. check quota).");
+        assert!(!msg.contains("RESOURCE_EXHAUSTED"));
+        assert!(!msg.contains("QuotaFailure"));
+    }
+
+    #[test]
+    fn parse_error_body_strips_invalid_argument_envelope() {
+        let body = r#"{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}"#;
+        let msg = parse_error_body(body);
+        assert_eq!(msg, "API key not valid. Please pass a valid API key.");
+    }
+
+    #[test]
+    fn parse_error_body_falls_back_to_raw_for_non_json() {
+        let body = "<html>504 Gateway Timeout</html>";
+        assert_eq!(parse_error_body(body), body);
     }
 }

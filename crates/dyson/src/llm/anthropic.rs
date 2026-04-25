@@ -352,28 +352,28 @@ impl LlmClient for AnthropicClient {
             let body = response
                 .text()
                 .await
-                .unwrap_or_else(|_| "failed to read error body".into());
+                .unwrap_or_else(|_| format!("HTTP {status}"));
 
-            // Log the full body for debugging, but only surface a summary
-            // to the agent to avoid leaking internal API details.
+            // Log the full body for operators — the user-visible message
+            // is just the parsed `error.message`, so siblings like
+            // `request_id` stay in logs but out of the wire path.
             tracing::error!(status = %status, body = %body, "Anthropic API error");
 
-            return Err(match status.as_u16() {
-                401 => DysonError::Llm("Anthropic API error: authentication failed (check API key)".into()),
-                429 => DysonError::LlmRateLimit {
-                    message: "Anthropic API rate limited — try again shortly".into(),
-                    retry_after,
-                },
-                502 | 503 => DysonError::LlmOverloaded {
-                    message: format!("Anthropic API returned HTTP {status}"),
-                    retry_after,
-                },
-                529 => DysonError::LlmOverloaded {
-                    message: "Anthropic API overloaded — try again shortly".into(),
-                    retry_after,
-                },
-                _ => DysonError::Llm(format!("Anthropic API error: HTTP {status}")),
-            });
+            // 401 short-circuit: the body for a bad key is rarely useful
+            // and the actionable advice is "check your key".
+            if status.as_u16() == 401 {
+                return Err(DysonError::Llm(
+                    "Anthropic (401 Unauthorized): authentication failed (check API key)".into(),
+                ));
+            }
+
+            let message = parse_error_body(&body);
+            return Err(crate::llm::provider_http_error(
+                "Anthropic",
+                status,
+                retry_after,
+                &message,
+            ));
         }
 
         Ok(crate::llm::build_stream_response(
@@ -381,6 +381,35 @@ impl LlmClient for AnthropicClient {
             BaseSseParser::new(AnthropicJsonParser),
         ))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Error body parser — strips Anthropic envelope.
+// ---------------------------------------------------------------------------
+
+/// Pull the human-readable message out of an Anthropic error body.
+///
+/// Anthropic shape: `{"type":"error","error":{"type":"…","message":"…"}}`.
+/// Same `error.message` slot as OpenAI/Gemini once you peel the outer
+/// `type:"error"` discriminator.
+///
+/// Falls back to the raw body when the shape doesn't match — better
+/// than the old behavior of throwing the body away and substituting
+/// canned strings like "Anthropic API rate limited — try again shortly".
+fn parse_error_body(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(err) = v.get("error")
+    {
+        let message = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(m) = message {
+            return m.to_string();
+        }
+    }
+    body.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -864,5 +893,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn parse_error_body_strips_anthropic_overloaded_envelope() {
+        // Real shape Anthropic returns for a 529.
+        let body = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let msg = parse_error_body(body);
+        assert_eq!(msg, "Overloaded");
+        assert!(!msg.contains("overloaded_error"));
+        assert!(!msg.contains('{'));
+    }
+
+    #[test]
+    fn parse_error_body_strips_invalid_request_envelope() {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 200000 tokens > 199999 maximum"}}"#;
+        let msg = parse_error_body(body);
+        assert_eq!(msg, "prompt is too long: 200000 tokens > 199999 maximum");
+    }
+
+    #[test]
+    fn parse_error_body_falls_back_to_raw_for_non_json() {
+        let body = "Service Unavailable";
+        assert_eq!(parse_error_body(body), "Service Unavailable");
     }
 }

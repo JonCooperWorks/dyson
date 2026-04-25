@@ -510,35 +510,34 @@ pub(crate) fn parse_retry_hint(
     None
 }
 
-/// Map an HTTP error response to a `DysonError`.
+/// Build a `DysonError` from a provider's HTTP error response.
 ///
-/// Shared by all API-based LLM providers (Anthropic, OpenAI, Gemini).
-/// Reads the response body and maps status codes to error variants:
-/// - 429 → `LlmRateLimit` (with `retry_after` from response headers)
-/// - 502/503/529 → `LlmOverloaded` (with `retry_after` from response headers)
-/// - Everything else → `Llm`
-pub(crate) async fn map_http_error(
-    response: reqwest::Response,
+/// All HTTP-based LLM providers go through this after their own
+/// `parse_error_body` has stripped the JSON envelope, so the
+/// wire-facing string is uniform across providers and statuses:
+///
+///   `{provider} ({status}): {message}`
+///
+/// The status-code → variant routing (429 → `LlmRateLimit`, 5xx →
+/// `LlmOverloaded`, everything else → `Llm`) is identical across
+/// providers and lives here once.
+pub(crate) fn provider_http_error(
     provider: &str,
+    status: reqwest::StatusCode,
+    retry_after: Option<std::time::Duration>,
+    message: &str,
 ) -> DysonError {
-    let status = response.status();
-    // Pull headers off before consuming the response into text.
-    let retry_after = parse_retry_hint(response.headers());
-    let body = response
-        .text()
-        .await
-        .unwrap_or_else(|_| "failed to read error body".into());
-
+    let msg = format!("{provider} ({status}): {message}");
     match status.as_u16() {
         429 => DysonError::LlmRateLimit {
-            message: format!("{provider} API rate limited: {body}"),
+            message: msg,
             retry_after,
         },
         502 | 503 | 529 => DysonError::LlmOverloaded {
-            message: format!("{provider} API returned {status}: {body}"),
+            message: msg,
             retry_after,
         },
-        _ => DysonError::Llm(format!("{provider} API returned {status}: {body}")),
+        _ => DysonError::Llm(msg),
     }
 }
 
@@ -1321,6 +1320,54 @@ mod tests {
     fn parse_retry_hint_returns_none_when_absent() {
         let headers = reqwest::header::HeaderMap::new();
         assert!(parse_retry_hint(&headers).is_none());
+    }
+
+    #[test]
+    fn provider_http_error_routes_429_to_rate_limit() {
+        let err = provider_http_error(
+            "OpenAI",
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            Some(std::time::Duration::from_secs(7)),
+            "you are being rate limited",
+        );
+        match err {
+            DysonError::LlmRateLimit { message, retry_after } => {
+                assert_eq!(message, "OpenAI (429 Too Many Requests): you are being rate limited");
+                assert_eq!(retry_after, Some(std::time::Duration::from_secs(7)));
+            }
+            other => panic!("expected LlmRateLimit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_http_error_routes_5xx_to_overloaded() {
+        for code in [502u16, 503, 529] {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            let err = provider_http_error("Anthropic", status, None, "service unavailable");
+            assert!(
+                matches!(err, DysonError::LlmOverloaded { .. }),
+                "status {code} should be LlmOverloaded, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_http_error_routes_402_to_llm() {
+        let err = provider_http_error(
+            "OpenRouter",
+            reqwest::StatusCode::PAYMENT_REQUIRED,
+            None,
+            "Prompt tokens limit exceeded — add credits",
+        );
+        match err {
+            DysonError::Llm(message) => {
+                assert_eq!(
+                    message,
+                    "OpenRouter (402 Payment Required): Prompt tokens limit exceeded — add credits"
+                );
+            }
+            other => panic!("expected Llm, got {other:?}"),
+        }
     }
 
     #[test]
