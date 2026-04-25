@@ -4,7 +4,7 @@
  * views-secondary.jsx so they can be code-split and lazy-loaded — the
  * cold-paint bundle carries only the conversation shell. */
 
-import React, { useState, useEffect, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useRef, useLayoutEffect, Suspense, lazy } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
@@ -235,10 +235,33 @@ function RightRail({ chatId }) {
   const session = useSession(chatId);
   const tools = useAppState(s => s.tools);
   const panels = session?.panels || [];
+  const openTool = session?.openTool || null;
   const runningSubagents = useRunningSubagents(chatId);
   const pulseCount = runningSubagents.length;
+  const stackRef = useRef(null);
 
   const onClose = (ref) => updateSession(chatId, s => closePanel(s, ref));
+
+  // Clicking a tool chip (or restoring `#/c/<id>/t/<ref>` from the URL)
+  // updates `session.openTool` — the stack already renders the panel,
+  // but if it's offscreen below the rail's fold the user sees nothing
+  // happen. Scroll the matching panel into view whenever openTool flips
+  // so the click-to-open feels like an actual jump. `block: 'nearest'`
+  // avoids yanking the rail when the panel is already visible. The
+  // requestAnimationFrame round-trip is for the lazy ToolPanel module:
+  // first render after Suspense resolves may not have the DOM node yet.
+  useLayoutEffect(() => {
+    if (!openTool || !stackRef.current) return;
+    const find = () => stackRef.current?.querySelector(
+      `[data-tool-ref="${cssEscape(openTool)}"]`);
+    const node = find();
+    if (node) { node.scrollIntoView({ block: 'nearest' }); return; }
+    const raf = requestAnimationFrame(() => {
+      const late = find();
+      if (late) late.scrollIntoView({ block: 'nearest' });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [openTool, panels.length]);
 
   return (
     <aside className="right">
@@ -247,7 +270,7 @@ function RightRail({ chatId }) {
         <span className="count">{panels.length}</span>
         <div className="spacer"/>
       </div>
-      <div className="r-stack">
+      <div className="r-stack" ref={stackRef}>
         {pulseCount > 0 && <RunningSection agents={runningSubagents}/>}
         {panels.length === 0 && pulseCount === 0 && (
           <div style={{color:'var(--mute)', fontSize:12, padding:24, textAlign:'center', lineHeight:1.5}}>
@@ -258,13 +281,23 @@ function RightRail({ chatId }) {
         {panels.length > 0 && (
           <Suspense fallback={<div/>}>
             {panels.map(ref => tools[ref] && (
-              <ToolPanel key={ref} tool={tools[ref]} onClose={() => onClose(ref)}/>
+              <ToolPanel key={ref} toolRef={ref} tool={tools[ref]} onClose={() => onClose(ref)}/>
             ))}
           </Suspense>
         )}
       </div>
     </aside>
   );
+}
+
+// Tool refs are mint-generated (`${chatId}-${kind}-${counter}`) so they
+// can't contain quotes or backslashes today, but a tool id arriving over
+// SSE could theoretically. CSS.escape is the standards-compliant escape;
+// fall back to a hand-rolled minimal escape for older runtimes (jsdom in
+// some test setups).
+function cssEscape(s) {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(s);
+  return String(s).replace(/["\\]/g, '\\$&');
 }
 
 // Poll /api/activity for this chat so the Tool Stack surfaces any

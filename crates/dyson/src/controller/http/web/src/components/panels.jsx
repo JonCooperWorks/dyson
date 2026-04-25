@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Icon } from './icons.jsx';
 import { copyToClipboard } from '../lib/clipboard.js';
 
-function PanelChrome({ icon, name, arg, live, copyText, onClose, children }) {
+function PanelChrome({ icon, name, arg, live, copyText, onClose, toolRef, children }) {
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
     const text = typeof copyText === 'function' ? copyText() : (copyText || '');
@@ -14,7 +14,7 @@ function PanelChrome({ icon, name, arg, live, copyText, onClose, children }) {
     }
   };
   return (
-    <div className={`panel ${live ? 'live' : ''}`}>
+    <div className={`panel ${live ? 'live' : ''}`} data-tool-ref={toolRef || undefined}>
       <div className="p-head">
         <span className="ic">{icon}</span>
         <span className="t"><span>{name}</span> <span className="fade">· {arg}</span></span>
@@ -317,7 +317,7 @@ function ImagePanel({ url, name, prompt }) {
   );
 }
 
-function ToolPanel({ tool, onClose }) {
+function ToolPanel({ tool, onClose, toolRef }) {
   const running = tool.status === 'running';
   const icon = tool.icon || tool.name[0].toUpperCase();
   let body = null;
@@ -338,6 +338,7 @@ function ToolPanel({ tool, onClose }) {
       name={tool.name}
       arg={tool.sig}
       live={running}
+      toolRef={toolRef}
       copyText={() => copyTextForTool(tool)}
       onClose={onClose}
     >

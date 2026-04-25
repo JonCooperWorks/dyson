@@ -26,6 +26,16 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--mute);
+  /* Stays pinned at the top of the transcript while scrolling through a
+     long turn so the copy button is always reachable.  Background +
+     z-index keep it readable over the prose that scrolls underneath;
+     padding is the visual breathing room a non-sticky header didn't
+     need. */
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-1);
+  padding: 6px 0 4px;
 }
 .turn .who .name { color: var(--fg-dim); }
 .turn .who .when { margin-left: auto; }
