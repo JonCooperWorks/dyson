@@ -212,6 +212,16 @@ pub struct AgentSettings {
     /// defaults) prevents premature give-ups.
     pub max_retries: usize,
 
+    /// Maximum LLM requests in flight at once for this provider.
+    ///
+    /// Multiple controllers (telegram + http + swarm) and background agents
+    /// (dreams, reflection, learning synthesis) all share one provider
+    /// client.  Without a cap they fan out concurrently and trip per-minute
+    /// rate limits.  The semaphore wraps the retry decorator, so permits
+    /// are held across backoff sleeps — sticky 429s serialise instead of
+    /// thundering.  Defaults to 4; set to 0 to disable the cap.
+    pub max_concurrent_llm_calls: usize,
+
     /// Maximum tokens the LLM can generate per turn.
     pub max_tokens: u32,
 
@@ -887,6 +897,7 @@ impl Default for AgentSettings {
             model: String::new(),
             max_iterations: 20,
             max_retries: 6,
+            max_concurrent_llm_calls: 4,
             max_tokens: 8192,
             system_prompt: "You are Dyson, a capable AI assistant.  You can use \
                             tools to help answer questions and complete tasks.\n\n\

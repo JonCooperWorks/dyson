@@ -169,6 +169,7 @@ struct JsonAgent {
     model: Option<String>,
     max_iterations: Option<usize>,
     max_retries: Option<usize>,
+    max_concurrent_llm_calls: Option<usize>,
     max_tokens: Option<u32>,
     system_prompt: Option<String>,
     /// Name of the provider from the `"providers"` map.
@@ -731,6 +732,9 @@ fn parse_agent_settings(agent: Option<JsonAgent>, settings: &mut Settings) {
     }
     if let Some(max_retries) = agent.max_retries {
         settings.agent.max_retries = max_retries;
+    }
+    if let Some(cap) = agent.max_concurrent_llm_calls {
+        settings.agent.max_concurrent_llm_calls = cap;
     }
     if let Some(max_tok) = agent.max_tokens {
         settings.agent.max_tokens = max_tok;

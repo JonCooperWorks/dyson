@@ -50,12 +50,24 @@ pub enum DysonError {
     Llm(String),
 
     /// The LLM provider returned a rate limit error (HTTP 429 or equivalent).
-    #[error("LLM rate limited: {0}")]
-    LlmRateLimit(String),
+    ///
+    /// `retry_after` carries the server's wait hint when one was present
+    /// (`Retry-After` header or `X-RateLimit-Reset`).  `RetryingLlmClient`
+    /// uses it as a floor under the exponential backoff so we don't retry
+    /// inside a still-open rate-limit window and burn another quota slot.
+    #[error("LLM rate limited: {message}")]
+    LlmRateLimit {
+        message: String,
+        retry_after: Option<std::time::Duration>,
+    },
 
     /// The LLM provider is overloaded (HTTP 529, 502, 503, or equivalent).
-    #[error("LLM overloaded: {0}")]
-    LlmOverloaded(String),
+    /// `retry_after` carries the server's wait hint when present.
+    #[error("LLM overloaded: {message}")]
+    LlmOverloaded {
+        message: String,
+        retry_after: Option<std::time::Duration>,
+    },
 
     /// A tool failed during execution.
     ///
@@ -199,8 +211,8 @@ impl DysonError {
     pub fn sanitized_message(&self) -> String {
         match self {
             Self::Llm(_)
-            | Self::LlmRateLimit(_)
-            | Self::LlmOverloaded(_)
+            | Self::LlmRateLimit { .. }
+            | Self::LlmOverloaded { .. }
             | Self::Tool { .. }
             | Self::Mcp { .. }
             | Self::OAuth { .. }

@@ -346,6 +346,9 @@ impl LlmClient for AnthropicClient {
         // the error message rather than just returning the status code.
         if !response.status().is_success() {
             let status = response.status();
+            // Extract any wait hint from the response headers before
+            // consuming the body — text() takes ownership.
+            let retry_after = crate::llm::parse_retry_hint(response.headers());
             let body = response
                 .text()
                 .await
@@ -357,9 +360,18 @@ impl LlmClient for AnthropicClient {
 
             return Err(match status.as_u16() {
                 401 => DysonError::Llm("Anthropic API error: authentication failed (check API key)".into()),
-                429 => DysonError::LlmRateLimit("Anthropic API rate limited — try again shortly".into()),
-                502 | 503 => DysonError::LlmOverloaded(format!("Anthropic API returned HTTP {status}")),
-                529 => DysonError::LlmOverloaded("Anthropic API overloaded — try again shortly".into()),
+                429 => DysonError::LlmRateLimit {
+                    message: "Anthropic API rate limited — try again shortly".into(),
+                    retry_after,
+                },
+                502 | 503 => DysonError::LlmOverloaded {
+                    message: format!("Anthropic API returned HTTP {status}"),
+                    retry_after,
+                },
+                529 => DysonError::LlmOverloaded {
+                    message: "Anthropic API overloaded — try again shortly".into(),
+                    retry_after,
+                },
                 _ => DysonError::Llm(format!("Anthropic API error: HTTP {status}")),
             });
         }
@@ -496,8 +508,17 @@ impl SseJsonParser for AnthropicJsonParser {
                     .to_string();
                 let error_type = json["error"]["type"].as_str().unwrap_or("");
                 let err = match error_type {
-                    "overloaded_error" => DysonError::LlmOverloaded(message),
-                    "rate_limit_error" => DysonError::LlmRateLimit(message),
+                    // SSE error frames don't carry HTTP headers — no hint
+                    // available, so the retry decorator falls back to its
+                    // exponential schedule.
+                    "overloaded_error" => DysonError::LlmOverloaded {
+                        message,
+                        retry_after: None,
+                    },
+                    "rate_limit_error" => DysonError::LlmRateLimit {
+                        message,
+                        retry_after: None,
+                    },
                     _ => DysonError::Llm(message),
                 };
                 events.push(Ok(StreamEvent::Error(err)));
@@ -608,7 +629,9 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         match events[0].as_ref().unwrap() {
-            StreamEvent::Error(DysonError::LlmOverloaded(msg)) => assert_eq!(msg, "Overloaded"),
+            StreamEvent::Error(DysonError::LlmOverloaded { message, .. }) => {
+                assert_eq!(message, "Overloaded")
+            }
             other => panic!("expected Error, got: {other:?}"),
         }
     }

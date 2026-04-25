@@ -122,3 +122,7 @@ tikv-jemallocator = "0.6"
 tempfile = "3"
 proptest = "1"
 wiremock = "0.6"
+# `test-util` enables tokio::time::pause / start_paused so retry-backoff
+# tests assert on virtual time instead of sleeping for real seconds.
+# Dev-only — does not bloat the release binary.
+tokio = { version = "1", features = ["test-util"] }

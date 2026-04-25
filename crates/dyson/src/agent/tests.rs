@@ -458,8 +458,14 @@ fn token_budget_unlimited_never_fails() {
 #[test]
 fn retryable_error_detection() {
     // Structured retryable variants.
-    assert!(crate::llm::is_retryable(&DysonError::LlmRateLimit("rate limited".into())));
-    assert!(crate::llm::is_retryable(&DysonError::LlmOverloaded("overloaded".into())));
+    assert!(crate::llm::is_retryable(&DysonError::LlmRateLimit {
+        message: "rate limited".into(),
+        retry_after: None,
+    }));
+    assert!(crate::llm::is_retryable(&DysonError::LlmOverloaded {
+        message: "overloaded".into(),
+        retry_after: None,
+    }));
 
     // Generic LLM errors are NOT retryable — retryable errors should use
     // the structured variants.
@@ -2066,16 +2072,24 @@ fn build_compaction_prompt_without_previous() {
 
 #[test]
 fn is_retryable_rate_limit() {
-    assert!(crate::llm::is_retryable(&DysonError::LlmRateLimit("rate limit exceeded".into())));
-    assert!(crate::llm::is_retryable(&DysonError::LlmRateLimit("HTTP 429 Too Many Requests".into())));
+    let mk = |m: &str| DysonError::LlmRateLimit {
+        message: m.into(),
+        retry_after: None,
+    };
+    assert!(crate::llm::is_retryable(&mk("rate limit exceeded")));
+    assert!(crate::llm::is_retryable(&mk("HTTP 429 Too Many Requests")));
 }
 
 #[test]
 fn is_retryable_overloaded() {
-    assert!(crate::llm::is_retryable(&DysonError::LlmOverloaded("server overloaded".into())));
-    assert!(crate::llm::is_retryable(&DysonError::LlmOverloaded("HTTP 529".into())));
-    assert!(crate::llm::is_retryable(&DysonError::LlmOverloaded("HTTP 502 Bad Gateway".into())));
-    assert!(crate::llm::is_retryable(&DysonError::LlmOverloaded("HTTP 503 Service Unavailable".into())));
+    let mk = |m: &str| DysonError::LlmOverloaded {
+        message: m.into(),
+        retry_after: None,
+    };
+    assert!(crate::llm::is_retryable(&mk("server overloaded")));
+    assert!(crate::llm::is_retryable(&mk("HTTP 529")));
+    assert!(crate::llm::is_retryable(&mk("HTTP 502 Bad Gateway")));
+    assert!(crate::llm::is_retryable(&mk("HTTP 503 Service Unavailable")));
 }
 
 #[tokio::test]

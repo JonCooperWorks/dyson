@@ -270,7 +270,18 @@ pub(crate) fn create_client(
         dangerous_no_sandbox,
     };
     let inner = (entry.create_client)(&config);
-    Box::new(RetryingLlmClient::new(inner, settings.max_retries))
+    let retrying: Box<dyn LlmClient> =
+        Box::new(RetryingLlmClient::new(inner, settings.max_retries));
+    // Cap of 0 disables the wrapper (preserves pre-existing unbounded
+    // behaviour for anyone who explicitly opts out).
+    if settings.max_concurrent_llm_calls == 0 {
+        retrying
+    } else {
+        Box::new(ConcurrencyLimitedLlmClient::new(
+            retrying,
+            settings.max_concurrent_llm_calls,
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -460,28 +471,73 @@ pub(crate) fn sse_event_stream<P: SseStreamParser + Send + 'static>(
     })
 }
 
+/// Parse a wait hint out of rate-limit response headers.
+///
+/// Looks at `Retry-After` first (RFC 7231 — integer seconds; HTTP-date form
+/// is rare in API responses and intentionally not handled to avoid pulling
+/// in a date-parsing dep), then `X-RateLimit-Reset` (Unix timestamp in
+/// seconds, occasionally milliseconds — disambiguated by magnitude).
+///
+/// Returns the duration to wait from now, or `None` if no usable hint is
+/// present.
+pub(crate) fn parse_retry_hint(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<std::time::Duration> {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    if let Some(v) = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|h| h.to_str().ok())
+        && let Ok(secs) = v.trim().parse::<u64>()
+    {
+        return Some(Duration::from_secs(secs));
+    }
+
+    if let Some(v) = headers
+        .get("x-ratelimit-reset")
+        .and_then(|h| h.to_str().ok())
+        && let Ok(ts) = v.trim().parse::<u64>()
+    {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        // OpenRouter has used both seconds and ms over time.  Anything past
+        // year 2100 in seconds (4_102_444_800) must be ms.
+        let target_secs = if ts > 4_102_444_800 { ts / 1000 } else { ts };
+        if target_secs > now {
+            return Some(Duration::from_secs(target_secs - now));
+        }
+    }
+
+    None
+}
+
 /// Map an HTTP error response to a `DysonError`.
 ///
 /// Shared by all API-based LLM providers (Anthropic, OpenAI, Gemini).
 /// Reads the response body and maps status codes to error variants:
-/// - 429 → `LlmRateLimit`
-/// - 502/503/529 → `LlmOverloaded`
+/// - 429 → `LlmRateLimit` (with `retry_after` from response headers)
+/// - 502/503/529 → `LlmOverloaded` (with `retry_after` from response headers)
 /// - Everything else → `Llm`
 pub(crate) async fn map_http_error(
     response: reqwest::Response,
     provider: &str,
 ) -> DysonError {
     let status = response.status();
+    // Pull headers off before consuming the response into text.
+    let retry_after = parse_retry_hint(response.headers());
     let body = response
         .text()
         .await
         .unwrap_or_else(|_| "failed to read error body".into());
 
     match status.as_u16() {
-        429 => DysonError::LlmRateLimit(format!("{provider} API rate limited: {body}")),
-        502 | 503 | 529 => {
-            DysonError::LlmOverloaded(format!("{provider} API returned {status}: {body}"))
-        }
+        429 => DysonError::LlmRateLimit {
+            message: format!("{provider} API rate limited: {body}"),
+            retry_after,
+        },
+        502 | 503 | 529 => DysonError::LlmOverloaded {
+            message: format!("{provider} API returned {status}: {body}"),
+            retry_after,
+        },
         _ => DysonError::Llm(format!("{provider} API returned {status}: {body}")),
     }
 }
@@ -504,7 +560,7 @@ pub(crate) async fn map_http_error(
 pub fn is_retryable(err: &DysonError) -> bool {
     matches!(
         err,
-        DysonError::LlmRateLimit(_) | DysonError::LlmOverloaded(_) | DysonError::Http(_)
+        DysonError::LlmRateLimit { .. } | DysonError::LlmOverloaded { .. } | DysonError::Http(_)
     )
 }
 
@@ -563,15 +619,29 @@ impl LlmClient for RetryingLlmClient {
             {
                 Ok(r) => return Ok(r),
                 Err(e) if attempt < self.max_retries && is_retryable(&e) => {
-                    let base_ms = self
+                    // Server hint (Retry-After / X-RateLimit-Reset) wins over
+                    // exponential backoff when present, but stays bounded so
+                    // a misbehaving header can't hang the loop indefinitely.
+                    let hint = match &e {
+                        DysonError::LlmRateLimit { retry_after, .. }
+                        | DysonError::LlmOverloaded { retry_after, .. } => *retry_after,
+                        _ => None,
+                    };
+                    let exp_ms = self
                         .base_delay_ms
                         .saturating_mul(1u64 << attempt.min(6));
-                    let jitter_ms = rand::random::<u64>() % (base_ms / 2 + 1);
-                    let delay_ms = base_ms + jitter_ms;
+                    let jitter_ms = rand::random::<u64>() % (exp_ms / 2 + 1);
+                    let backoff_ms = exp_ms + jitter_ms;
+                    const MAX_HINT_MS: u64 = 90_000;
+                    let delay_ms = match hint {
+                        Some(d) => (d.as_millis() as u64).min(MAX_HINT_MS).max(backoff_ms),
+                        None => backoff_ms,
+                    };
                     tracing::warn!(
                         attempt = attempt + 1,
                         max = self.max_retries,
                         delay_ms,
+                        honoring_server_hint = hint.is_some(),
                         error = %e,
                         "LLM call failed — backing off before retry"
                     );
@@ -581,6 +651,61 @@ impl LlmClient for RetryingLlmClient {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    fn set_mcp_tools(&self, tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>) {
+        self.inner.set_mcp_tools(tools);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency-limited decorator — caps in-flight requests per provider.
+//
+// Multiple controllers (telegram, http, swarm) and background agents
+// (dreams, reflection, learning synthesis) all funnel through one provider
+// client.  Without a cap they race into the same per-minute window and
+// thunder-herd the rate limiter.  The semaphore sits OUTSIDE retry, so
+// permits stay held across backoff sleeps — that serialises the sticky
+// 429 case instead of letting every waiter retry independently and
+// re-trip the limit.
+// ---------------------------------------------------------------------------
+
+pub(crate) struct ConcurrencyLimitedLlmClient {
+    inner: Box<dyn LlmClient>,
+    sem: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+impl ConcurrencyLimitedLlmClient {
+    pub fn new(inner: Box<dyn LlmClient>, max_concurrent: usize) -> Self {
+        Self {
+            inner,
+            sem: std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClient for ConcurrencyLimitedLlmClient {
+    async fn stream(
+        &self,
+        messages: &[Message],
+        system: &str,
+        system_suffix: &str,
+        tools: &[ToolDefinition],
+        config: &CompletionConfig,
+    ) -> Result<StreamResponse> {
+        // Acquire a permit before issuing the request.  Permit drops when
+        // _permit goes out of scope — we hold it through the whole
+        // .stream() call (including any retries inside the inner client).
+        let _permit = self
+            .sem
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore is never closed");
+        self.inner
+            .stream(messages, system, system_suffix, tools, config)
+            .await
     }
 
     fn set_mcp_tools(&self, tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>) {
@@ -1081,11 +1206,25 @@ mod tests {
         }
     }
 
+    fn rate_limit_err(retry_after: Option<std::time::Duration>) -> DysonError {
+        DysonError::LlmRateLimit {
+            message: "429".into(),
+            retry_after,
+        }
+    }
+
+    fn overloaded_err(retry_after: Option<std::time::Duration>) -> DysonError {
+        DysonError::LlmOverloaded {
+            message: "529".into(),
+            retry_after,
+        }
+    }
+
     #[tokio::test]
     async fn retries_rate_limit_then_succeeds() {
         let (scripted, attempts) = ScriptedClient::new(vec![
-            Err(DysonError::LlmRateLimit("429".into())),
-            Err(DysonError::LlmRateLimit("429".into())),
+            Err(rate_limit_err(None)),
+            Err(rate_limit_err(None)),
             Ok(()),
         ]);
         let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 3, 1);
@@ -1098,9 +1237,9 @@ mod tests {
     #[tokio::test]
     async fn gives_up_after_max_retries() {
         let (scripted, attempts) = ScriptedClient::new(vec![
-            Err(DysonError::LlmRateLimit("429".into())),
-            Err(DysonError::LlmRateLimit("429".into())),
-            Err(DysonError::LlmRateLimit("429".into())),
+            Err(rate_limit_err(None)),
+            Err(rate_limit_err(None)),
+            Err(rate_limit_err(None)),
         ]);
         let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 2, 1);
 
@@ -1109,7 +1248,7 @@ mod tests {
                 .stream(&[], "", "", &[], &empty_config())
                 .await,
         );
-        assert!(matches!(err, DysonError::LlmRateLimit(_)));
+        assert!(matches!(err, DysonError::LlmRateLimit { .. }));
         // initial + 2 retries = 3 attempts.
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
@@ -1131,8 +1270,7 @@ mod tests {
 
     #[tokio::test]
     async fn zero_max_retries_disables_retry() {
-        let (scripted, attempts) =
-            ScriptedClient::new(vec![Err(DysonError::LlmOverloaded("529".into()))]);
+        let (scripted, attempts) = ScriptedClient::new(vec![Err(overloaded_err(None))]);
         let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 0, 1);
 
         let err = assert_err(
@@ -1140,7 +1278,228 @@ mod tests {
                 .stream(&[], "", "", &[], &empty_config())
                 .await,
         );
-        assert!(matches!(err, DysonError::LlmOverloaded(_)));
+        assert!(matches!(err, DysonError::LlmOverloaded { .. }));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn parse_retry_hint_reads_retry_after_seconds() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "30".parse().unwrap());
+        let hint = parse_retry_hint(&headers).expect("expected a hint");
+        assert_eq!(hint, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn parse_retry_hint_reads_x_ratelimit_reset_seconds() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let target = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 45;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-reset", target.to_string().parse().unwrap());
+        let hint = parse_retry_hint(&headers).expect("expected a hint");
+        // Allow 2s slack for clock drift between insertion and the reread.
+        assert!(
+            hint.as_secs() >= 43 && hint.as_secs() <= 45,
+            "hint was {hint:?}"
+        );
+    }
+
+    #[test]
+    fn parse_retry_hint_handles_x_ratelimit_reset_milliseconds() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let target_ms = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 60) * 1000;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-reset", target_ms.to_string().parse().unwrap());
+        let hint = parse_retry_hint(&headers).expect("expected a hint");
+        assert!(
+            hint.as_secs() >= 58 && hint.as_secs() <= 60,
+            "hint was {hint:?}"
+        );
+    }
+
+    #[test]
+    fn parse_retry_hint_returns_none_when_absent() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert!(parse_retry_hint(&headers).is_none());
+    }
+
+    #[test]
+    fn parse_retry_hint_prefers_retry_after_over_reset() {
+        // When both headers are present, Retry-After wins.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "5".parse().unwrap());
+        headers.insert("x-ratelimit-reset", "9999999999".parse().unwrap());
+        let hint = parse_retry_hint(&headers).expect("expected a hint");
+        assert_eq!(hint, std::time::Duration::from_secs(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_honors_server_hint_over_exponential() {
+        // base_delay_ms=1 → exponential floor on first retry is ~1-2ms.
+        // Hint of 5s must dominate.  Paused time auto-advances through
+        // sleeps, so the assertion is on virtual elapsed time.
+        let (scripted, _attempts) = ScriptedClient::new(vec![
+            Err(rate_limit_err(Some(std::time::Duration::from_secs(5)))),
+            Ok(()),
+        ]);
+        let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 3, 1);
+        let start = tokio::time::Instant::now();
+        client
+            .stream(&[], "", "", &[], &empty_config())
+            .await
+            .expect("retry should succeed");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_secs(5)
+                && elapsed < std::time::Duration::from_secs(6),
+            "expected ~5s wait honoring hint, got {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_caps_excessive_server_hint() {
+        // A 10-minute server hint must be capped to MAX_HINT_MS (90s) so a
+        // misbehaving header can't wedge the loop.  Tokio's paused-time mode
+        // lets us assert the actual elapsed virtual time without sleeping.
+        let (scripted, attempts) = ScriptedClient::new(vec![
+            Err(rate_limit_err(Some(std::time::Duration::from_secs(600)))),
+            Ok(()),
+        ]);
+        let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 1, 1);
+        let start = tokio::time::Instant::now();
+        client
+            .stream(&[], "", "", &[], &empty_config())
+            .await
+            .expect("retry should succeed");
+        let elapsed = start.elapsed();
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(
+            elapsed <= std::time::Duration::from_millis(90_001),
+            "expected wait capped at 90s, got {elapsed:?}"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(89_000),
+            "expected wait near the 90s cap, got {elapsed:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ConcurrencyLimitedLlmClient tests
+    // -----------------------------------------------------------------------
+
+    /// Test client that records how many `stream()` calls overlap.  Each
+    /// call increments an in-flight counter, awaits a notification gating
+    /// release, then decrements.  The peak counter shows whether the
+    /// semaphore actually serialised callers.
+    struct OverlapTrackingClient {
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    impl OverlapTrackingClient {
+        fn new() -> (Self, Arc<AtomicUsize>, Arc<tokio::sync::Notify>) {
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let gate = Arc::new(tokio::sync::Notify::new());
+            (
+                Self {
+                    in_flight: Arc::clone(&in_flight),
+                    peak: Arc::clone(&peak),
+                    gate: Arc::clone(&gate),
+                },
+                peak,
+                gate,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for OverlapTrackingClient {
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _system_suffix: &str,
+            _tools: &[ToolDefinition],
+            _config: &CompletionConfig,
+        ) -> Result<StreamResponse> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            self.gate.notified().await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(StreamResponse {
+                stream: Box::pin(tokio_stream::iter(std::iter::empty())),
+                tool_mode: ToolMode::Execute,
+                input_tokens: None,
+            })
+        }
+
+        fn set_mcp_tools(
+            &self,
+            _tools: std::collections::HashMap<String, std::sync::Arc<dyn Tool>>,
+        ) {
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrency_limit_caps_in_flight_calls() {
+        let (inner, peak, gate) = OverlapTrackingClient::new();
+        let client = Arc::new(ConcurrencyLimitedLlmClient::new(Box::new(inner), 2));
+
+        // Spawn 6 callers; only 2 may be in flight at once.
+        let mut handles = Vec::new();
+        for _ in 0..6 {
+            let c = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                c.stream(&[], "", "", &[], &empty_config()).await.unwrap();
+            }));
+        }
+
+        // Let calls progress in waves of 2 by releasing the gate repeatedly.
+        // notify_one wakes one waiter; loop until all 6 have completed.
+        for _ in 0..6 {
+            // Give spawned tasks a tick to enter the inner client.
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            gate.notify_one();
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let observed_peak = peak.load(Ordering::SeqCst);
+        assert!(
+            observed_peak <= 2,
+            "expected ≤2 concurrent calls, observed peak {observed_peak}"
+        );
+        assert!(observed_peak >= 1, "expected at least one call to land");
+    }
+
+    #[tokio::test]
+    async fn concurrency_limit_zero_is_disabled_path_in_create_client() {
+        // Direct test of the wrapper itself: with cap=1, 3 spawned callers
+        // serialise (peak == 1).  Validates the semaphore is actually
+        // applied — `create_client` skips wrapping when the cap is 0, so
+        // that path stays unchanged.
+        let (inner, peak, gate) = OverlapTrackingClient::new();
+        let client = Arc::new(ConcurrencyLimitedLlmClient::new(Box::new(inner), 1));
+
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let c = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                c.stream(&[], "", "", &[], &empty_config()).await.unwrap();
+            }));
+        }
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            gate.notify_one();
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
     }
 }
