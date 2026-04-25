@@ -193,15 +193,15 @@ pub(super) async fn post(
         // on disk for this chat_id, replay it into the agent so context
         // carries across sessions.
         let mut guard = chat_handle.agent.lock().await;
+        // Prefer the runtime-selected provider's client when one
+        // is set — falls back to the registry default otherwise
+        // (unknown provider name or no override set).
+        let client = match override_provider_name.as_deref() {
+            Some(p) => registry.get(p).unwrap_or_else(|_| registry.get_default()),
+            None => registry.get_default(),
+        };
         if guard.is_none() {
-            // Prefer the runtime-selected provider's client when one
-            // is set — falls back to the registry default otherwise
-            // (unknown provider name or no override set).
-            let client = match override_provider_name.as_deref() {
-                Some(p) => registry.get(p).unwrap_or_else(|_| registry.get_default()),
-                None => registry.get_default(),
-            };
-            match build_agent(&settings, None, AgentMode::Private, client, &registry, None).await {
+            match build_agent(&settings, None, AgentMode::Private, client.clone(), &registry, None).await {
                 Ok(mut a) => {
                     if let Some(h) = history.as_ref() {
                         match h.load(&chat_id) {
@@ -210,6 +210,22 @@ pub(super) async fn post(
                         }
                     }
                     *guard = Some(a);
+                    // Snapshot workspace mtimes alongside the agent so the
+                    // next turn can detect dream-driven writes (skills,
+                    // MEMORY.md curation) or external edits and trigger a
+                    // rebuild — same role `check_and_reload_agent` plays
+                    // for the terminal controller.  Config (`dyson.json`)
+                    // reloads are handled by `subscribe_settings_updates`
+                    // already, so this watcher is workspace-only.
+                    let workspace_path = crate::workspace::FilesystemWorkspace::resolve_path(
+                        Some(settings.workspace.connection_string.expose()),
+                    );
+                    *chat_handle.reloader.lock().await = Some(
+                        crate::config::hot_reload::HotReloader::new(
+                            None,
+                            workspace_path.as_deref(),
+                        ),
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, chat_id = %chat_id, "agent build failed");
@@ -228,8 +244,47 @@ pub(super) async fn post(
                     return;
                 }
             }
+        } else {
+            // Hot-reload: if workspace files changed since the last turn
+            // for this chat, rebuild the cached agent so a skill written
+            // by `SelfImprovementDream` or a manual edit to `MEMORY.md`
+            // / `SOUL.md` actually takes effect.  Without this, the
+            // agent's system prompt and skill list — both baked in at
+            // build time — drift from disk for the entire lifetime of
+            // the chat.  Mirrors what `check_and_reload_agent` does for
+            // the terminal controller.
+            let changed = match chat_handle.reloader.lock().await.as_mut() {
+                Some(r) => match r.check().await {
+                    Ok((c, _)) => c,
+                    Err(e) => {
+                        tracing::warn!(error = %e, chat_id = %chat_id, "workspace reload check failed");
+                        false
+                    }
+                },
+                None => false,
+            };
+            if changed {
+                let messages = guard
+                    .as_ref()
+                    .map(|a| a.messages().to_vec())
+                    .unwrap_or_default();
+                match build_agent(&settings, None, AgentMode::Private, client.clone(), &registry, None).await {
+                    Ok(mut a) => {
+                        a.set_messages(messages);
+                        *guard = Some(a);
+                        tracing::info!(chat_id = %chat_id, "agent rebuilt: workspace changed");
+                    }
+                    Err(e) => {
+                        // Keep the previous agent — a partial failure
+                        // shouldn't take the chat down.  The next turn
+                        // will retry the rebuild if the watcher still
+                        // sees a delta.
+                        tracing::warn!(error = %e, chat_id = %chat_id, "agent rebuild after workspace change failed; reusing previous agent");
+                    }
+                }
+            }
         }
-        let agent = guard.as_mut().expect("agent built above");
+        let agent = guard.as_mut().expect("agent built or kept above");
         // The agent polls `cancellation.is_cancelled()` at iteration
         // boundaries, which is fine for /stop between tool calls but
         // useless during a long LLM stream or a multi-second tool.

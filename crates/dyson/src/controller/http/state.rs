@@ -28,6 +28,7 @@
 // | `sse_tickets`                | `std::Mutex`       | mint + consume       | HashMap insert/remove                          |
 // | `titles`                     | `std::Mutex`       | conversations list   | HashMap insert/get                             |
 // | `ChatHandle.agent`           | `tokio::Mutex`     | one turn at a time   | the entire turn (`Agent::run` is `&mut self`)  |
+// | `ChatHandle.reloader`        | `tokio::Mutex`     | one turn at a time   | a `check()` + optional rebuild                 |
 // | `ChatHandle.cancel`          | `tokio::Mutex`     | turn start + cancel  | one `Option<CancellationToken>` swap           |
 // | `ChatHandle.replay`          | `std::Mutex`       | every emit + every reconnect | one `VecDeque` push or scan            |
 //
@@ -108,6 +109,18 @@ pub(crate) struct ChatHandle {
     /// because `Agent::run` requires `&mut self` and turns are serialised
     /// per chat.
     pub(crate) agent: Mutex<Option<Agent>>,
+    /// Workspace mtime watcher — built alongside the agent on first turn.
+    /// Before each turn we call `check()` and rebuild the cached agent
+    /// when the workspace changed on disk.  Without this, a skill written
+    /// by `SelfImprovementDream` or a manual edit to `MEMORY.md` /
+    /// `SOUL.md` is invisible until the chat is deleted or the process
+    /// restarts — the terminal controller has the same wiring via
+    /// `check_and_reload_agent`, but HTTP caches one agent per chat for
+    /// the lifetime of the chat so the rebuild has to fire here instead.
+    /// Config (`dyson.json`) reloads are already handled by
+    /// `subscribe_settings_updates` updating `state.settings`, so this
+    /// reloader only watches the workspace directory.
+    pub(crate) reloader: Mutex<Option<crate::config::hot_reload::HotReloader>>,
     /// Broadcast channel for SSE subscribers.  Capacity 4096 — a slow
     /// subscriber that lags by more than that will see "lag" gaps in
     /// the live stream, but the rolling replay buffer below is the
@@ -267,6 +280,7 @@ impl ChatHandle {
             queue_path,
             queued: std::sync::Mutex::new(std::collections::VecDeque::new()),
             agent: Mutex::new(None),
+            reloader: Mutex::new(None),
             events: tx,
             replay: Arc::new(std::sync::Mutex::new(EventRing::new())),
             cancel: Mutex::new(None),

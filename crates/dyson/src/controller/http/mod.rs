@@ -276,9 +276,13 @@ impl Controller for HttpController {
         // Resolve the dyson.json path the operator started with so
         // `post_model` can persist the web UI's choice the same way
         // Telegram's /model command does.  Matches the resolution
-        // used by `create_hot_reloader` (which HTTP doesn't itself
-        // use since it has no per-process agent cache to flush, but
-        // the path is still the right one to write back to).
+        // used by `create_hot_reloader`.  HTTP doesn't watch
+        // `dyson.json` here — `subscribe_settings_updates` does that
+        // process-wide and pushes fresh `Settings` into
+        // `state.settings` — but each `ChatHandle` runs its own
+        // workspace-only `HotReloader` so dream-written skills and
+        // edits to `MEMORY.md` / `SOUL.md` rebuild the cached agent
+        // on the next turn instead of waiting for a process restart.
         let config_path = std::env::args()
             .skip_while(|a| a != "--config" && a != "-c")
             .nth(1)
