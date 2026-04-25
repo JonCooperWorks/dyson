@@ -205,7 +205,8 @@ pub struct ControllerConfig {
 ///   "url": "https://hub.example.com",
 ///   "public_key": "v1:base64...",
 ///   "node_name": "gpu-workstation-01",
-///   "description": "GPU workstation specialised in model fine-tuning and inference"
+///   "description": "GPU workstation specialised in model fine-tuning and inference",
+///   "api_key": "..."
 /// }
 /// ```
 #[cfg(feature = "dangerous_swarm")]
@@ -223,6 +224,15 @@ pub struct SwarmControllerConfig {
 
     /// Optional plain-text description of this node's specialisations.
     pub description: Option<String>,
+
+    /// Pre-shared API key.  When set, the node sends it as a bearer
+    /// on `POST /swarm/register` so a hub started with
+    /// `--mcp-api-key-hash` will accept the registration.  After
+    /// register succeeds, subsequent requests use the per-node bearer
+    /// the hub returned, not this key.  Leave unset for hubs that bind
+    /// to localhost or run with `--dangerous-no-auth`.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 #[cfg(feature = "dangerous_swarm")]

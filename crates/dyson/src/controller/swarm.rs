@@ -407,8 +407,11 @@ impl SwarmController {
         output: &mut SwarmCaptureOutput,
         status: &Arc<Mutex<NodeStatus>>,
     ) -> SessionResult {
-        // Connect and register.
-        let mut conn = SwarmConnection::new(&self.config.url);
+        // Connect and register.  The API key (when configured) is only
+        // used on /swarm/register; subsequent calls use the per-node
+        // bearer returned in RegisterResponse.
+        let mut conn = SwarmConnection::new(&self.config.url)
+            .with_api_key(self.config.api_key.clone());
 
         let reg = match conn.register(manifest).await {
             Ok(r) => r,

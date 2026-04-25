@@ -60,6 +60,11 @@ pub struct SwarmConnection {
     /// Client for SSE stream (no request timeout — connection stays open).
     sse_client: reqwest::Client,
     auth_token: Option<String>,
+    /// Pre-shared API key sent as a bearer on the initial /swarm/register
+    /// call.  Required when the hub runs with `--mcp-api-key-hash`.
+    /// Subsequent requests authenticate with `auth_token` (the per-node
+    /// bearer the hub returns), not this key.
+    api_key: Option<String>,
 }
 
 impl SwarmConnection {
@@ -83,7 +88,15 @@ impl SwarmConnection {
                 .build()
                 .expect("failed to build SSE client"),
             auth_token: None,
+            api_key: None,
         }
+    }
+
+    /// Attach an API key to be sent on the initial register call.
+    #[must_use]
+    pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
+        self.api_key = api_key;
+        self
     }
 
     /// Apply bearer auth to a request builder if a token is set.
@@ -111,7 +124,11 @@ impl SwarmConnection {
     /// Register this node with the hub.
     pub async fn register(&mut self, manifest: &NodeManifest) -> Result<RegisterResponse> {
         let url = format!("{}/swarm/register", self.base_url);
-        let resp = self.client.post(&url).json(manifest).send().await?;
+        let mut req = self.client.post(&url).json(manifest);
+        if let Some(k) = &self.api_key {
+            req = req.bearer_auth(k);
+        }
+        let resp = req.send().await?;
         let resp = Self::check(resp, "registration failed").await?;
 
         let reg: RegisterResponse = resp.json().await.map_err(|e| {
