@@ -392,8 +392,8 @@ impl super::Controller for TelegramController {
             // the next check doesn't retrigger until the program
             // broadcaster sends again.  Registry + config-file
             // reload already happened centrally before this fires.
-            if let Some(rx) = settings_rx.as_mut() {
-                if rx.has_changed().unwrap_or(false) {
+            if let Some(rx) = settings_rx.as_mut()
+                && rx.has_changed().unwrap_or(false) {
                     let fresh = rx.borrow_and_update().clone();
                     current_settings = (*fresh).clone();
                     rebuild_agents_on_reload(
@@ -406,7 +406,6 @@ impl super::Controller for TelegramController {
                     )
                     .await;
                 }
-            }
 
             // Poll for updates with a timeout, racing against Ctrl-C.
             let updates = tokio::select! {

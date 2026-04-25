@@ -4,10 +4,6 @@ A streaming AI agent loop in Rust, built to understand how these things actually
 
 > **Educational project.** I'm an AppSec engineer building this to demystify AI agents — how they work, how to secure them, and how to deploy them responsibly. Trust the loop, read the loop. If you need a production agent, see [the projects that inspired this](#inspired-by).
 
-<p align="center">
-  <img src="docs/images/dyson-swarm.png" alt="Dyson Swarm" width="600">
-</p>
-
 ## What you learn by reading this codebase
 
 - **Streaming** — SSE parsing, partial JSON accumulation, token-by-token delivery
@@ -31,7 +27,6 @@ Dyson is a fully functional agent — not just a learning exercise.  It can hold
 - **Dependency analysis** — tool calls grouped by resource dependencies, executed in parallel when safe
 - **Image generation** — pluggable image generation via the `image_generate` tool; reuses existing providers
 - **MCP server mode** — expose Dyson as an MCP server over HTTP with bearer token auth
-- **Swarm** — distribute tasks across Dyson nodes; see [Swarm (trusted-network only)](#swarm-trusted-network-only)
 
 ## The sandbox is the point
 
@@ -105,16 +100,6 @@ as the Telegram controller — chats and ratings sync both ways.
 
 See [docs/web.md](docs/web.md) for the full API, SSE event schema,
 typed `ToolView` payloads, persistence story, and known limits.
-
-## Swarm (trusted-network only)
-
-The swarm distributes tasks across Dyson nodes. A central hub signs work with Ed25519; nodes verify before executing.
-
-**Security model:** Ed25519 signing ensures tasks came from the hub you trust. It does **not** authenticate or authorize callers. `/mcp` and `/swarm/register` are open endpoints — anyone who can reach the hub can register as a node or dispatch tasks.
-
-**Recommended transports:** run the hub on a Tailscale mesh or behind an SSH port-forward. TLS is mandatory for off-localhost binds but it encrypts traffic — it does not gate callers. If you deploy the hub on the public internet, firewall it to known peers.
-
-See [docs/swarm.md](docs/swarm.md) for the full architecture, configuration, and task lifecycle.
 
 
 ## Architecture
@@ -263,7 +248,6 @@ Secrets can be literal strings or resolver references (`{ "resolver": "insecure_
 | [Subagents](docs/subagents.md) | Child agents with different models, tool inheritance, delegation |
 | [Dreaming](docs/dreaming.md) | Background cognition — memory consolidation, self-improvement, skill creation |
 | [Advisor](docs/advisor.md) | Advisor pattern — consult a stronger model for complex decisions |
-| [Swarm](docs/swarm.md) | Distributed task routing over a trusted network — hub, workers, Ed25519-signed dispatch |
 | [Testing & Tuning](docs/testing.md) | Four test layers, smoke-to-regression promotion, live subagent review, case study tuning a prompt against Qwen |
 
 ## Tests

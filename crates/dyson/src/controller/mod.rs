@@ -55,8 +55,6 @@ pub mod activity;
 pub mod background;
 pub mod http;
 pub mod recording;
-#[cfg(feature = "dangerous_swarm")]
-pub mod swarm;
 pub mod telegram;
 pub mod terminal;
 
@@ -1274,7 +1272,7 @@ pub trait Output: Send {
     /// A fragment of extended-thinking / chain-of-thought reasoning.
     ///
     /// Default no-op so controllers that don't want to surface reasoning
-    /// (terminal, telegram, swarm) don't have to opt out.  The HTTP
+    /// (terminal, telegram) don't have to opt out.  The HTTP
     /// controller forwards these over SSE so the right-rail can stream
     /// a live reasoning panel.  Not sent to the LLM (the stream_handler
     /// still gathers thinking into `ContentBlock::Thinking` for history
@@ -1310,11 +1308,8 @@ pub trait Output: Send {
     /// side-channel — the event does not appear in the LLM's conversation
     /// history.
     ///
-    /// The default impl drops the event, which is the correct behaviour
-    /// for every controller except `SwarmController`.  The swarm
-    /// controller forwards checkpoints to the hub via
-    /// `POST /swarm/checkpoint` so callers observing a long-running
-    /// task see progress in real time.
+    /// The default impl drops the event; controllers that need to surface
+    /// progress can override it.
     fn checkpoint(
         &mut self,
         event: &CheckpointEvent,
@@ -1331,7 +1326,7 @@ pub trait Output: Send {
     /// stores the body in-memory and emits an SSE `artefact` event so
     /// the UI renders it in the Artefacts tab.  The default impl drops
     /// the artefact, which is correct for terminal / telegram /
-    /// recording / swarm / capture controllers.
+    /// recording / capture controllers.
     fn send_artefact(
         &mut self,
         artefact: &crate::message::Artefact,

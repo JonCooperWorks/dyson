@@ -492,8 +492,8 @@ All endpoints return JSON unless noted.  Errors are
 | `GET` | `/api/conversations/:id/export` | — | ShareGPT JSON blob |
 
 `ConversationDto` carries `{ id, title, live, has_artefacts, source }`
-where `source` is `"http"` / `"telegram"` / `"swarm"` so the sidebar
-can badge cross-controller chats.
+where `source` is `"http"` / `"telegram"` so the sidebar can badge
+cross-controller chats.
 
 `MessageDto.blocks[*]` discriminator is `type`:
 

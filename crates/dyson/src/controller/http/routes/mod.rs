@@ -113,14 +113,13 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     // Authorization header on the SSE open.
     let is_events = segs.last() == Some(&"events") && segs.first() == Some(&"api");
     let mut ticket_authorized = false;
-    if is_events && method == Method::GET && !req.headers().contains_key("authorization") {
-        if let Some(ticket) = extract_sse_ticket_cookie(req.headers())
+    if is_events && method == Method::GET && !req.headers().contains_key("authorization")
+        && let Some(ticket) = extract_sse_ticket_cookie(req.headers())
             && let Some(identity) = state.consume_sse_ticket(&ticket)
         {
             tracing::debug!(identity, "SSE ticket consumed (cookie)");
             ticket_authorized = true;
         }
-    }
 
     // DNS-rebinding gate.  Enabled only when the controller bound to
     // a loopback address with `DangerousNoAuth` — that pairing is the
@@ -158,11 +157,10 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     // credential.  SSE endpoints can't send headers from the browser,
     // so the SPA exchanges its bearer for a one-shot ticket above and
     // we skip the regular gate when it consumed.
-    if path.starts_with("/api/") && !ticket_authorized {
-        if state.auth.validate_request(req.headers()).await.is_err() {
+    if path.starts_with("/api/") && !ticket_authorized
+        && state.auth.validate_request(req.headers()).await.is_err() {
             return unauthorized(&state);
         }
-    }
 
     // CSRF gate: every state-changing `/api/*` request must carry the
     // `X-Dyson-CSRF` custom header.  Browsers can't set custom headers

@@ -25,7 +25,7 @@ use super::super::state::HttpState;
 /// - `?chat=<id>` — filter to one chat (single-chat view)
 /// - default     — all chats, newest-first
 ///
-/// Other lanes (`loop` / `dream` / `swarm`) don't feed this registry
+/// Other lanes (`loop` / `dream`) don't feed this registry
 /// yet; the frontend already renders them from separate data sources.
 /// Keeping the response schema uniform means extending the registry
 /// later is additive, not a rewrite.

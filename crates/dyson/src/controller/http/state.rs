@@ -375,6 +375,10 @@ pub(crate) fn max_chat_id_n(data_dir: &std::path::Path, artefacts: &ArtefactStor
 }
 
 impl HttpState {
+    // Constructor shape mirrors the controller's startup pipeline 1:1 —
+    // every arg is a distinct lifetime-bound dependency.  A builder would
+    // hide that, not simplify it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         settings: Settings,
         registry: Arc<ClientRegistry>,

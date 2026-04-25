@@ -88,69 +88,6 @@ pub async fn run(
                         tracing::warn!("http controller config invalid — skipping");
                     }
                 }
-                "swarm" => {
-                    #[cfg(feature = "dangerous_swarm")]
-                    {
-                        if let Some(mut ctrl) =
-                            dyson::controller::swarm::SwarmController::from_config(config)
-                        {
-                            // Auto-inject the hub as an MCP skill so ALL agents
-                            // (terminal, telegram, etc.) get swarm tools.
-                            let swarm_config: dyson::config::SwarmControllerConfig =
-                                match serde_json::from_value(config.config.clone()) {
-                                    Ok(c) => c,
-                                    Err(_) => {
-                                        tracing::warn!("swarm controller config already parsed — skipping MCP auto-wire");
-                                        controllers.push(Box::new(ctrl));
-                                        continue;
-                                    }
-                                };
-
-                            let node_name = swarm_config.node_name_or_default();
-                            let hub_base = swarm_config.url.trim_end_matches('/');
-
-                            // Wire a deferred bearer auth: the controller will
-                            // publish the registration token after connecting to
-                            // the hub, and the MCP skill will read it on each
-                            // request for cryptographic caller verification.
-                            let (token_tx, token_rx) = tokio::sync::watch::channel(None);
-                            ctrl.set_token_channel(token_tx);
-                            let deferred_auth: std::sync::Arc<dyn dyson::auth::Auth> =
-                                std::sync::Arc::new(dyson::auth::DeferredBearerAuth::new(token_rx));
-
-                            settings.skills.push(dyson::config::SkillConfig::Mcp(
-                                Box::new(dyson::config::McpConfig {
-                                    name: format!("swarm_{node_name}"),
-                                    transport: dyson::config::McpTransportConfig::Http {
-                                        // Caller identity is resolved from the
-                                        // bearer token set via `DeferredBearerAuth`
-                                        // below — no query params needed.
-                                        url: format!("{hub_base}/mcp"),
-                                        headers: std::collections::HashMap::new(),
-                                        auth: None,
-                                    },
-                                    exclude_tools: vec![],
-                                    custom_auth: Some(deferred_auth),
-                                }),
-                            ));
-
-                            controllers.push(Box::new(ctrl));
-                        } else {
-                            tracing::warn!("swarm controller config invalid — skipping");
-                        }
-                    }
-                    #[cfg(not(feature = "dangerous_swarm"))]
-                    {
-                        let _ = config;
-                        tracing::warn!(
-                            "swarm controller found in config, but this binary was \
-                             not compiled with the `dangerous_swarm` feature — the \
-                             swarm controller will not run and the swarm MCP tools \
-                             will not be available.  Rebuild with \
-                             `cargo build --features dangerous_swarm` to enable."
-                        );
-                    }
-                }
                 other => {
                     tracing::warn!(
                         controller_type = other,

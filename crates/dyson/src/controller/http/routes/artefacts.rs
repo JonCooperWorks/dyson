@@ -218,8 +218,8 @@ pub(super) async fn list(state: &HttpState, chat_id: &str) -> Resp {
             Err(p) => p.into_inner(),
         };
         for id in store.order.iter().rev() {
-            if let Some(entry) = store.items.get(id) {
-                if entry.chat_id == chat_id {
+            if let Some(entry) = store.items.get(id)
+                && entry.chat_id == chat_id {
                     items.push(ArtefactDto {
                         id: id.clone(),
                         kind: entry.kind,
@@ -229,7 +229,6 @@ pub(super) async fn list(state: &HttpState, chat_id: &str) -> Resp {
                         metadata: entry.metadata.clone(),
                     });
                 }
-            }
         }
     }
     // Newest first.  read_dir is unordered, so sort by (created_at,

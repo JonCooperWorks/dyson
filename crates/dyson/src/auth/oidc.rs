@@ -310,8 +310,8 @@ impl Auth for OidcAuth {
         let decoding = decoding.ok_or_else(|| DysonError::Config("unauthorized".into()))?;
 
         let mut validation = Validation::new(header.alg);
-        validation.set_issuer(&[self.expected_issuer.clone()]);
-        validation.set_audience(&[self.audience.clone()]);
+        validation.set_issuer(std::slice::from_ref(&self.expected_issuer));
+        validation.set_audience(std::slice::from_ref(&self.audience));
         validation.validate_exp = true;
         validation.validate_nbf = true;
 

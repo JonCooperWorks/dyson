@@ -1705,12 +1705,14 @@ async fn agent_artefact_round_trips_through_sse_and_disk() {
     // this is the "different browser profile" / "server restart"
     // scenario.  Build a second state over the same directory and
     // confirm the artefact rehydrates.
-    let mut rebuilt_settings = Settings::default();
-    rebuilt_settings.chat_history = ChatHistoryConfig {
-        backend: "disk".into(),
-        connection_string: Credential::new(
-            r.chat_dir.path().to_string_lossy().into_owned(),
-        ),
+    let mut rebuilt_settings = Settings {
+        chat_history: ChatHistoryConfig {
+            backend: "disk".into(),
+            connection_string: Credential::new(
+                r.chat_dir.path().to_string_lossy().into_owned(),
+            ),
+        },
+        ..Default::default()
     };
     rebuilt_settings.workspace.connection_string =
         Credential::new(r.workspace_dir.path().to_string_lossy().into_owned());
@@ -2064,12 +2066,14 @@ async fn emitted_images_survive_refresh_via_artefacts() {
 
     // Simulate a controller restart: build a fresh HttpState pointed
     // at the same chat dir.  The image body must rehydrate from disk.
-    let mut rebuilt_settings = Settings::default();
-    rebuilt_settings.chat_history = ChatHistoryConfig {
-        backend: "disk".into(),
-        connection_string: Credential::new(
-            r.chat_dir.path().to_string_lossy().into_owned(),
-        ),
+    let mut rebuilt_settings = Settings {
+        chat_history: ChatHistoryConfig {
+            backend: "disk".into(),
+            connection_string: Credential::new(
+                r.chat_dir.path().to_string_lossy().into_owned(),
+            ),
+        },
+        ..Default::default()
     };
     rebuilt_settings.workspace.connection_string =
         Credential::new(r.workspace_dir.path().to_string_lossy().into_owned());

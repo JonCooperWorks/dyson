@@ -46,8 +46,8 @@ const CAP_PER_CHAT: usize = 64;
 const STALE_RUNNING_SECS: u64 = 60 * 60;
 
 /// Lane classifier.  Today only "subagent" is populated by this
-/// registry; future wiring for "loop" / "dream" / "swarm" fits into
-/// the same file format without a migration.
+/// registry; future wiring for "loop" / "dream" fits into the same
+/// file format without a migration.
 pub const LANE_SUBAGENT: &str = "subagent";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

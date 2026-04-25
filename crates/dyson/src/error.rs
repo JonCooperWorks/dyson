@@ -98,11 +98,6 @@ pub enum DysonError {
     /// Rate limit exceeded — too many messages in the time window.
     #[error("Rate limited: {limit} messages per {window_secs}s exceeded")]
     RateLimit { limit: usize, window_secs: u64 },
-
-    /// A swarm operation failed (signature verification, connection, etc.).
-    #[cfg(feature = "dangerous_swarm")]
-    #[error("Swarm error: {0}")]
-    Swarm(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -147,17 +142,6 @@ pub fn classify_llm_error(err: &str) -> LlmErrorKind {
         LlmErrorKind::NoVision
     } else {
         LlmErrorKind::Other
-    }
-}
-
-// ---------------------------------------------------------------------------
-// From impls for types that don't use #[from]
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "dangerous_swarm")]
-impl From<dyson_swarm_protocol::ProtocolError> for DysonError {
-    fn from(e: dyson_swarm_protocol::ProtocolError) -> Self {
-        Self::Swarm(e.to_string())
     }
 }
 
@@ -226,8 +210,6 @@ impl DysonError {
             Self::Io(_) => "internal IO error".to_string(),
             Self::Http(_) => "upstream HTTP error".to_string(),
             Self::Json(_) => "internal JSON error".to_string(),
-            #[cfg(feature = "dangerous_swarm")]
-            Self::Swarm(_) => "swarm error".to_string(),
         }
     }
 }

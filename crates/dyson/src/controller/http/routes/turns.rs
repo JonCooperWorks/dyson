@@ -277,11 +277,10 @@ pub(super) async fn post(
 
         // Persist the conversation to disk after every turn.  This is the
         // canonical save point — controllers/telegram does the same.
-        if let Some(h) = history.as_ref() {
-            if let Err(e) = h.save(&chat_id, agent.messages()) {
+        if let Some(h) = history.as_ref()
+            && let Err(e) = h.save(&chat_id, agent.messages()) {
                 tracing::warn!(error = %e, chat_id = %chat_id, "failed to save chat history");
             }
-        }
 
         chat_handle.emit(SseEvent::Done);
         chat_handle

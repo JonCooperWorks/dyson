@@ -114,6 +114,7 @@ pub(crate) fn url_decode(s: &str) -> String {
 ///   * truncated escape (`%` at end-of-string, `%X`)
 ///   * invalid hex digits (`%ZZ`)
 ///   * decoded bytes that don't form valid UTF-8
+///
 /// `url_decode` is lossy by design — fine for human-readable contexts
 /// like the mind path query (gated separately by `safe_workspace_path`)
 /// — but ids should refuse anything ambiguous.

@@ -416,8 +416,13 @@ pub struct Agent {
     /// long turn (e.g. a subagent that streams for minutes) so a crash
     /// or kill doesn't lose the conversation — the end-of-turn save is
     /// unreachable if the tokio task gets aborted mid-run.
-    persist_hook: Option<std::sync::Arc<dyn Fn(&[crate::message::Message]) + Send + Sync>>,
+    persist_hook: Option<PersistHook>,
 }
+
+/// Callback fired whenever the agent's message history changes.
+/// See [`Agent::set_persist_hook`] for usage.
+pub type PersistHook =
+    std::sync::Arc<dyn Fn(&[crate::message::Message]) + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // AgentBuilder
@@ -632,10 +637,7 @@ impl Agent {
 
     /// Install a callback that runs after every message push.  Used by the
     /// HTTP controller to checkpoint the transcript to disk mid-turn.
-    pub fn set_persist_hook(
-        &mut self,
-        hook: std::sync::Arc<dyn Fn(&[crate::message::Message]) + Send + Sync>,
-    ) {
+    pub fn set_persist_hook(&mut self, hook: PersistHook) {
         self.persist_hook = Some(hook);
     }
 
@@ -761,11 +763,11 @@ impl Agent {
 
     /// Replace the agent's tool-context cancellation token.
     ///
-    /// Used by the swarm controller to install a fresh per-task
-    /// `CancellationToken` so a `swarm_task_cancel` MCP call can
-    /// cooperatively abort any tool calls that observe the token
-    /// (currently `web_fetch` and `web_search`; other tools will drop
-    /// naturally when the agent future is dropped).
+    /// Lets a controller install a fresh per-task `CancellationToken`
+    /// so an external cancel signal can cooperatively abort any tool
+    /// calls that observe the token (currently `web_fetch` and
+    /// `web_search`; other tools will drop naturally when the agent
+    /// future is dropped).
     pub fn set_cancellation_token(&mut self, token: CancellationToken) {
         self.tool_context.cancellation = token;
     }
@@ -1030,17 +1032,15 @@ impl Agent {
 
     /// Register an extra tool not owned by any skill.
     ///
-    /// Used by controllers that need to expose controller-local tools to
-    /// the agent — e.g., the swarm controller adds `swarm_checkpoint` so
-    /// only swarm nodes pay for its schema on every LLM turn.
+    /// Lets a controller expose a controller-local tool to its agent
+    /// without dragging the schema into deploys that don't need it.
     pub fn register_tool(&mut self, tool: Arc<dyn Tool>) {
         self.tool_registry.register_extra_tool(tool);
     }
 
     /// Get the names of all registered tools.
     ///
-    /// Used by the swarm controller to report capabilities in the node
-    /// manifest.  Returns tool names sorted for deterministic output.
+    /// Returns tool names sorted for deterministic output.
     pub fn tool_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.tool_registry.tools.keys().cloned().collect();
         names.sort();
@@ -1195,7 +1195,7 @@ impl Agent {
         let mut recovered_this_turn = false;
 
         'iter: for iteration in 0..self.max_iterations {
-            // Check for cooperative cancellation (used by /stop, swarm abort).
+            // Check for cooperative cancellation (used by /stop).
             if self.tool_context.cancellation.is_cancelled() {
                 tracing::info!("agent cancelled — breaking loop");
                 break;

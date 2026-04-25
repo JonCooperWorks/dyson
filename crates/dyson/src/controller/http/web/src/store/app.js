@@ -14,8 +14,8 @@ const INITIAL = {
   // shell with empty lists until then.
   live: false,
   activeModel: '',
-  // Flat list — a chat carries `source: 'http' | 'telegram' | 'swarm'`
-  // if we ever want to render a provenance badge.  The old DYSON_DATA
+  // Flat list — a chat carries `source: 'http' | 'telegram'` if we
+  // ever want to render a provenance badge.  The old DYSON_DATA
   // shape grouped by controller but every consumer flattened it back,
   // so the group object was pure ceremony.
   conversations: [],

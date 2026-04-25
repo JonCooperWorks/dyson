@@ -81,10 +81,6 @@ impl BuiltinSkill {
     /// When `web_search_config` is `Some`, the `web_search` tool is
     /// registered with the configured search provider.  When `None`,
     /// the tool is simply absent.
-    ///
-    /// Swarm-only tools (e.g., `swarm_checkpoint`) are NOT registered here.
-    /// The swarm controller adds them to the agent it builds, so non-swarm
-    /// deploys don't carry the schema on every LLM turn.
     pub fn new_filtered(
         web_search_config: Option<&crate::config::WebSearchConfig>,
         image_provider_config: Option<&crate::config::ProviderConfig>,
@@ -250,16 +246,6 @@ mod tests {
         assert_eq!(tools[12].name(), "kb_status");
         assert_eq!(tools[13].name(), "web_fetch");
         assert_eq!(tools[14].name(), "dependency_scan");
-    }
-
-    #[test]
-    fn swarm_checkpoint_is_not_a_builtin() {
-        let skill = BuiltinSkill::new(None, None, None);
-        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
-        assert!(
-            !names.contains(&"swarm_checkpoint"),
-            "swarm_checkpoint belongs to the swarm controller, not BuiltinSkill"
-        );
     }
 
     #[test]

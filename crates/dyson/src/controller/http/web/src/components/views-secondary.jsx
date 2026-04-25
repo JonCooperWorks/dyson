@@ -137,7 +137,7 @@ export function ActivityView() {
     return () => clearInterval(id);
   }, [client]);
   const running = lanes.filter(a => a.status === 'running').length;
-  const grouped = ['subagent','loop','dream','swarm']
+  const grouped = ['subagent','loop','dream']
     .map(lane => ({ lane, items: lanes.filter(a => a.lane === lane) }))
     .filter(g => g.items.length > 0);
   const fmtDuration = (a) => {
@@ -159,14 +159,13 @@ export function ActivityView() {
         </div>
         {grouped.length === 0 && (
           <div style={{color:'var(--mute)', fontSize:13, padding:'18px 0'}}>
-            No background agents, dreams, or swarm tasks running.
+            No background agents or dreams running.
           </div>
         )}
         {grouped.map(({ lane, items }) => {
           const label = lane === 'subagent' ? 'Subagents · orchestrators'
                      : lane === 'loop' ? 'Loops · recurring'
-                     : lane === 'dream' ? 'Dreams · background compaction'
-                     : 'Swarm · parallel tasks';
+                     : 'Dreams · background compaction';
           const runningItems = items.filter(a => a.status === 'running');
           const finishedItems = items.filter(a => a.status !== 'running');
           const row = (a, i, dim) => (

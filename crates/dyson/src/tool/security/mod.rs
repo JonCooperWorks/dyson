@@ -1,6 +1,6 @@
 // ===========================================================================
 // Security tools — AST-aware security analysis for the security_engineer
-// subagent swarm.
+// subagent.
 //
 // Philosophy: no hardcoded vulnerability checks.  Instead, expose
 // tree-sitter's Query API to the agent and let it write its own AST

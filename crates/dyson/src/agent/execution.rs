@@ -146,10 +146,8 @@ impl Agent {
                 }
 
                 // Forward any progress checkpoints emitted by the tool.
-                // This is the side-channel used by the `swarm_checkpoint`
-                // builtin to push progress updates to the swarm hub.
-                // Outside of the swarm controller the default
-                // `Output::checkpoint` impl drops them.
+                // Side-channel: the default `Output::checkpoint` impl drops
+                // them; controllers that want progress reporting override it.
                 for cp in &tool_output.checkpoints {
                     if let Err(e) = output.checkpoint(cp) {
                         tracing::warn!(error = %e, "failed to deliver checkpoint");

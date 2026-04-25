@@ -245,7 +245,7 @@ fn is_exact_version(v: &str) -> bool {
         return false;
     }
     // Any range operator or wildcard → not exact.
-    if v.contains(|c: char| matches!(c, '^' | '~' | '*' | '<' | '>' | '=' | '|' | ' ' | ','))
+    if v.contains(['^', '~', '*', '<', '>', '=', '|', ' ', ','])
     {
         return false;
     }
@@ -254,7 +254,7 @@ fn is_exact_version(v: &str) -> bool {
     // we only require three numeric leading components separated
     // by `.`.
     let core_end = v
-        .find(|c: char| c == '-' || c == '+')
+        .find(['-', '+'])
         .unwrap_or(v.len());
     let core = &v[..core_end];
     let parts: Vec<&str> = core.split('.').collect();

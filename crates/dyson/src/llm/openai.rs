@@ -153,6 +153,7 @@ impl OpenAiClient {
     ///   - rewrite individual message objects (e.g. inject `reasoning_content`)
     ///   - swap in a provider-specific SSE parser (e.g. parse OpenRouter's
     ///     `delta.reasoning` alongside the standard fields)
+    ///
     /// without this file having to know about any of them.
     pub(crate) async fn stream_with_messages_json<P>(
         &self,

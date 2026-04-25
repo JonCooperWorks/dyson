@@ -64,8 +64,6 @@ pub mod search_files;
 pub mod view;
 pub mod send_file;
 pub mod skill_create;
-#[cfg(feature = "dangerous_swarm")]
-pub mod swarm_checkpoint;
 pub mod web_fetch;
 pub mod web_search;
 pub mod workspace;
@@ -356,6 +354,12 @@ impl ToolContext {
     /// Resolve a user-supplied path against this context, honoring
     /// `dangerous_no_sandbox` and expanding `~`.  Returns a ready-to-send
     /// `ToolOutput::error` on failure so callers can `?`-propagate.
+    //
+    // The `Err` variant here *is* `ToolOutput`, which is intentional: the
+    // shape lets every tool's path-validation be a one-liner via `?`.
+    // Boxing it would force boilerplate at every callsite, so we accept
+    // the larger Err for ergonomic propagation.
+    #[allow(clippy::result_large_err)]
     pub fn resolve_path(&self, user_path: &str) -> std::result::Result<PathBuf, ToolOutput> {
         resolve_and_validate_path(&self.working_dir, user_path, self.dangerous_no_sandbox)
             .map_err(ToolOutput::error)
@@ -414,13 +418,8 @@ pub struct ToolOutput {
     ///
     /// Like `files`, this is a side-channel: checkpoints flow through
     /// the controller's `Output::checkpoint()` hook and do not appear
-    /// in the LLM's conversation history.  The `SwarmCaptureOutput`
-    /// impl forwards them to the swarm hub so long-running tasks can
-    /// report progress without waiting for the final result.
-    ///
-    /// Outside of the swarm controller the default `Output::checkpoint`
-    /// impl drops events on the floor, so the `swarm_checkpoint` tool
-    /// is a harmless no-op for terminal / telegram agents.
+    /// in the LLM's conversation history.  The default hook drops the
+    /// events; controllers that care can override it.
     pub checkpoints: Vec<CheckpointEvent>,
 
     /// Rendered artefacts produced by this tool call.
@@ -618,9 +617,8 @@ impl ToolOutput {
     ///
     /// Checkpoints are delivered to the controller's `Output::checkpoint`
     /// hook as a side-channel — they do not appear in the LLM
-    /// conversation history.  Outside of the swarm controller the
-    /// default hook drops them, making the builtin `swarm_checkpoint`
-    /// tool a safe no-op for other controllers.
+    /// conversation history.  The default hook drops events; controllers
+    /// that need progress reporting can override it.
     pub fn with_checkpoint(mut self, event: CheckpointEvent) -> Self {
         self.checkpoints.push(event);
         self

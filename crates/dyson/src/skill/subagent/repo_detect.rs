@@ -293,22 +293,22 @@ fn inspect_dir_nonrecursive(
 }
 
 fn is_skippable_dir(p: &Path) -> bool {
-    match p.file_name().and_then(|n| n.to_str()) {
+    matches!(
+        p.file_name().and_then(|n| n.to_str()),
         Some(
             "node_modules"
-            | "target"
-            | ".git"
-            | ".venv"
-            | "venv"
-            | "__pycache__"
-            | "dist"
-            | "build"
-            | "vendor"
-            | ".next"
-            | ".cache",
-        ) => true,
-        _ => false,
-    }
+                | "target"
+                | ".git"
+                | ".venv"
+                | "venv"
+                | "__pycache__"
+                | "dist"
+                | "build"
+                | "vendor"
+                | ".next"
+                | ".cache",
+        )
+    )
 }
 
 /// If `path` is a recognised manifest, bump its language count and scan
@@ -587,7 +587,7 @@ fn scan_requirements_txt(
 /// → `django`.
 fn requirement_name(req: &str) -> String {
     let cut = req
-        .find(|c: char| matches!(c, '[' | '=' | '<' | '>' | '!' | '~' | ';' | ' ' | '\t'))
+        .find(['[', '=', '<', '>', '!', '~', ';', ' ', '\t'])
         .unwrap_or(req.len());
     req[..cut].trim().to_ascii_lowercase()
 }
@@ -959,8 +959,8 @@ pub fn compose_cheatsheets(detection: &Detection) -> (String, Vec<&'static str>)
     }
 
     // Drop second language too.
-    let one_lang = build_prompt(&primary_langs[..1], &[]);
-    one_lang
+    
+    build_prompt(&primary_langs[..1], &[])
 }
 
 fn line_count(s: &str) -> usize {

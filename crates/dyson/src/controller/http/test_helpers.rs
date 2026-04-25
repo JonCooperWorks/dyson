@@ -254,11 +254,10 @@ pub fn activity_registry(state: &HttpState) -> Arc<crate::controller::ActivityRe
 /// channel (broadcast drops events that have no receivers).
 pub async fn wait_for_sse_subscriber(state: Arc<HttpState>, chat_id: &str) {
     for _ in 0..200 {
-        if let Some(h) = state.chats.lock().await.get(chat_id).cloned() {
-            if h.events.receiver_count() > 0 {
+        if let Some(h) = state.chats.lock().await.get(chat_id).cloned()
+            && h.events.receiver_count() > 0 {
                 return;
             }
-        }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("no SSE subscriber for chat {chat_id} after 2s");

@@ -222,10 +222,6 @@ impl McpSkill {
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut descs: Vec<String> = Vec::new();
         for def in defs {
-            if self.config.exclude_tools.contains(&def.name) {
-                tracing::debug!(server = server_name, tool = def.name, "excluding tool");
-                continue;
-            }
             let desc = def.description.clone().unwrap_or_default();
             // Sanitize description to prevent prompt injection from MCP servers.
             // Strip control characters and limit length to prevent abuse.
@@ -297,13 +293,7 @@ impl Skill for McpSkill {
             }
             crate::config::McpTransportConfig::Http { url, headers, auth: None } => {
                 let auth: Box<dyn crate::auth::Auth> =
-                    if let Some(ref custom) = self.config.custom_auth {
-                        // Programmatic auth (e.g. DeferredBearerAuth for swarm).
-                        // Wrap the Arc<dyn Auth> so it can be used as Box<dyn Auth>.
-                        Box::new(crate::auth::ArcAuth(custom.clone()))
-                    } else {
-                        Box::new(crate::auth::StaticHeadersAuth::new(headers))
-                    };
+                    Box::new(crate::auth::StaticHeadersAuth::new(headers));
                 Some(Arc::new(HttpTransport::new(&url, auth)))
             }
             crate::config::McpTransportConfig::Http { url, auth: Some(oauth_config), .. } => {

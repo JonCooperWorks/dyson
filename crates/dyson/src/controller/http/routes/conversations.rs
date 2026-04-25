@@ -160,11 +160,10 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
     // cleared so a future turn on that id doesn't resurrect stale
     // context from the agent cache.
     if let Some(prev) = body.rotate_previous.as_deref() {
-        if let Some(prev_handle) = state.chats.lock().await.get(prev).cloned() {
-            if let Some(agent) = prev_handle.agent.lock().await.as_mut() {
+        if let Some(prev_handle) = state.chats.lock().await.get(prev).cloned()
+            && let Some(agent) = prev_handle.agent.lock().await.as_mut() {
                 agent.clear();
             }
-        }
         // The previous chat's first-user-text is gone after rotate —
         // drop any cached title so the next list call rehydrates.
         if let Ok(mut t) = state.titles.lock() {
@@ -194,11 +193,10 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
     // and the chat would be gone because nothing was ever saved.  The
     // save is best-effort: an IO failure is logged but doesn't fail
     // creation (the in-memory chat still works for this session).
-    if let Some(h) = state.history.as_ref() {
-        if let Err(e) = h.save(&id, &[]) {
+    if let Some(h) = state.history.as_ref()
+        && let Err(e) = h.save(&id, &[]) {
             tracing::warn!(error = %e, chat_id = %id, "failed to persist new chat");
         }
-    }
     json_ok(&serde_json::json!({ "id": id, "title": title }))
 }
 
@@ -207,12 +205,11 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
 /// isn't in the list (shouldn't happen, but cheap to guard).
 pub(crate) async fn bump_to_front(state: &HttpState, id: &str) {
     let mut order = state.order.lock().await;
-    if let Some(pos) = order.iter().position(|x| x == id) {
-        if pos != 0 {
+    if let Some(pos) = order.iter().position(|x| x == id)
+        && pos != 0 {
             let entry = order.remove(pos);
             order.insert(0, entry);
         }
-    }
 }
 
 pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
