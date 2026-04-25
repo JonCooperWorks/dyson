@@ -106,17 +106,22 @@ function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
     <div className={cls} onPointerUp={onTurnPointerUp}>
       <div className={`avatar ${isUser ? 'user' : 'agent'}`}>{avatarL}</div>
       <div className="col">
+        {/* Copy button lives outside `.who` so it can be `position:
+            sticky` against the .col flex container — that keeps it
+            pinned in the top-right corner of the turn while you scroll
+            through long agent messages, without dragging the entire
+            header bar across the prose. */}
+        <button
+          className={`copy-turn ${copied ? 'on' : ''}`}
+          onClick={onCopy}
+          title={copied ? 'Copied' : 'Copy message'}>
+          <Icon name={copied ? 'rate' : 'copy'} size={11}/>
+        </button>
         <div className="who">
           <span className="name">{isUser ? 'jcooper' : 'dyson'}</span>
           {turn.model && <span className="model">{turn.model}</span>}
           <span className="when">{turn.ts}</span>
           {rating && <span className="rating-badge" title={`rated ${rating}`}>{rating}</span>}
-          <button
-            className={`copy-turn ${copied ? 'on' : ''}`}
-            onClick={onCopy}
-            title={copied ? 'Copied' : 'Copy message'}>
-            <Icon name={copied ? 'rate' : 'copy'} size={11}/>
-          </button>
         </div>
         {turn.blocks.map((b, i) => {
           if (b.type === 'text') {

@@ -26,16 +26,6 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--mute);
-  /* Stays pinned at the top of the transcript while scrolling through a
-     long turn so the copy button is always reachable.  Background +
-     z-index keep it readable over the prose that scrolls underneath;
-     padding is the visual breathing room a non-sticky header didn't
-     need. */
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: var(--bg-1);
-  padding: 6px 0 4px;
 }
 .turn .who .name { color: var(--fg-dim); }
 .turn .who .when { margin-left: auto; }
@@ -208,22 +198,29 @@
   border: 1px solid var(--accent-ln);
   cursor: default;
 }
-/* Copy-message button — subtle, revealed on hover (desktop) or always
-   on touch, so the affordance doesn't clutter the header by default. */
+/* Copy-message button — sits as a direct child of .col (the turn's
+   flex column) so `position: sticky` pins it to the top of the
+   transcript while you scroll through a long agent message.  The
+   negative margin keeps it from displacing the .who header that
+   follows; align-self pulls it to the right edge of the column. */
 .turn .copy-turn {
-  margin-left: 4px;
+  position: sticky;
+  top: 6px;
+  z-index: 3;
+  align-self: flex-end;
+  margin: 0 0 -22px;
   padding: 3px 5px;
-  background: transparent;
+  background: var(--bg-1);
   border: 1px solid transparent;
   border-radius: 4px;
   color: var(--mute);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  opacity: 0;
+  opacity: 0.5;
   transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
 }
-.turn:hover .copy-turn { opacity: 0.7; }
+.turn:hover .copy-turn { opacity: 0.85; }
 .turn .copy-turn:hover {
   opacity: 1;
   color: var(--fg);
@@ -237,7 +234,7 @@
   background: var(--accent-dim);
 }
 @media (hover: none), (pointer: coarse) {
-  .turn .copy-turn { opacity: 0.6; }
+  .turn .copy-turn { opacity: 0.7; }
 }
 @media (max-width: 760px) {
   /* Narrow viewports: drop the bar into flow so it doesn't overlap the
