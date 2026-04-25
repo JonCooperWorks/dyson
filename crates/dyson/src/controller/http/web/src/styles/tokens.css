@@ -21,45 +21,107 @@
 }
 
 :root {
-  /* Neutrals */
-  --bg:       oklch(0.155 0.012 260);
-  --bg-1:     oklch(0.185 0.013 260);
-  --panel:    oklch(0.215 0.014 260);
-  --panel-2:  oklch(0.245 0.015 260);
-  --line:     oklch(0.30 0.018 260);
-  --line-2:   oklch(0.38 0.022 260);
-  --mute:     oklch(0.68 0.015 260);
-  --mute-2:   oklch(0.72 0.012 260);
-  --fg-dim:   oklch(0.82 0.008 260);
-  --fg:       oklch(0.96 0.003 260);
+  /* Neutrals — slightly cooler, deeper bottom of the ramp lifts the
+     accent without losing the IDE-grade legibility we want. */
+  --bg:       oklch(0.135 0.014 262);
+  --bg-1:     oklch(0.170 0.014 262);
+  --panel:    oklch(0.205 0.015 262);
+  --panel-2:  oklch(0.240 0.016 262);
+  --line:     oklch(0.295 0.020 262);
+  --line-2:   oklch(0.380 0.024 262);
+  --mute:     oklch(0.680 0.015 262);
+  --mute-2:   oklch(0.730 0.012 262);
+  --fg-dim:   oklch(0.840 0.008 262);
+  --fg:       oklch(0.970 0.003 262);
 
-  /* Accent — electric lime, for agent/live */
-  --accent:     oklch(0.88 0.22 130);
-  --accent-ink: oklch(0.22 0.05 130);
-  --accent-dim: oklch(0.88 0.22 130 / 0.14);
-  --accent-ln:  oklch(0.88 0.22 130 / 0.35);
+  /* Accent — electric lime, for agent/live.  Halo channels (-glow,
+     -ring, -wash) are the same hue at varying alpha so a single design
+     change ripples through every glow surface. */
+  --accent:       oklch(0.890 0.220 130);
+  --accent-2:     oklch(0.940 0.180 138);
+  --accent-deep:  oklch(0.760 0.220 132);
+  --accent-ink:   oklch(0.190 0.060 130);
+  --accent-dim:   oklch(0.890 0.220 130 / 0.14);
+  --accent-ln:    oklch(0.890 0.220 130 / 0.40);
+  --accent-glow:  oklch(0.890 0.220 130 / 0.55);
+  --accent-wash:  oklch(0.890 0.220 130 / 0.06);
+
+  /* Secondary accent — cyan, used for the lime→cyan signature gradient
+     on the brand mark, send button, and agent avatar.  Reads as part of
+     the accent family rather than a competing colour. */
+  --cyan:         oklch(0.840 0.140 220);
+  --cyan-glow:    oklch(0.840 0.140 220 / 0.45);
+  --violet:       oklch(0.720 0.180 305);
+  --violet-glow:  oklch(0.720 0.180 305 / 0.40);
 
   /* Roles */
-  --user:    oklch(0.80 0.10 230);   /* cool blue — the human */
-  --agent:   var(--fg);               /* agent speaks in white */
-  --tool:    oklch(0.78 0.09 180);   /* teal — tool calls */
-  --sub:     oklch(0.82 0.14 45);    /* amber — subagents, privacy boundary */
-  --think:   oklch(0.62 0.04 280);   /* dim purple for reasoning */
+  --user:    oklch(0.800 0.110 230);   /* cool blue — the human */
+  --user-glow: oklch(0.800 0.110 230 / 0.35);
+  --agent:   var(--fg);                /* agent speaks in white */
+  --tool:    oklch(0.800 0.105 195);   /* teal — tool calls */
+  --tool-glow: oklch(0.800 0.105 195 / 0.35);
+  --sub:     oklch(0.830 0.150 50);    /* amber — subagents, privacy boundary */
+  --sub-glow: oklch(0.830 0.150 50 / 0.35);
+  --think:   oklch(0.660 0.060 285);   /* dim violet for reasoning */
 
   /* Status */
-  --ok:   oklch(0.85 0.18 160);
-  --warn: oklch(0.82 0.15 85);
-  --err:  oklch(0.70 0.21 25);
+  --ok:   oklch(0.860 0.180 160);
+  --warn: oklch(0.830 0.155 85);
+  --err:  oklch(0.700 0.215 25);
 
   --font-ui:   "Geist", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
 
-  --rad: 6px; --rad-lg: 10px; --rad-sm: 4px;
+  /* Radii — slightly rounder reads as more confident.  Kept hierarchical
+     so a 4px chip nests cleanly inside an 8px card inside a 12px panel. */
+  --rad: 8px; --rad-lg: 12px; --rad-sm: 5px; --rad-xs: 3px;
 
   --row-h: 34px;
   --fs-body: 14px;
   --fs-sm: 12.5px;
   --fs-xs: 11px;
+
+  /* Elevation — physically-motivated shadow ramp.  Cool-blue undertone
+     in the shadow keeps the ambient consistent with the bg ramp instead
+     of bleeding warm grey. */
+  --lift-1: 0 1px 0 oklch(1 0 0 / 0.02) inset,
+            0 2px 6px -2px oklch(0 0 0 / 0.45);
+  --lift-2: 0 1px 0 oklch(1 0 0 / 0.03) inset,
+            0 6px 18px -6px oklch(0 0 0 / 0.55),
+            0 2px 4px -2px oklch(0 0 0 / 0.40);
+  --lift-3: 0 1px 0 oklch(1 0 0 / 0.04) inset,
+            0 18px 38px -12px oklch(0 0 0 / 0.65),
+            0 6px 12px -6px oklch(0 0 0 / 0.45);
+
+  /* Signature gradients — one per role.  Used on avatars, brand mark,
+     send button, and the brand sweep on the topbar's bottom edge. */
+  --grad-accent: linear-gradient(135deg,
+      var(--accent-2) 0%,
+      var(--accent) 45%,
+      var(--accent-deep) 100%);
+  --grad-agent:  conic-gradient(from 210deg at 30% 30%,
+      var(--cyan) 0deg,
+      var(--accent) 90deg,
+      var(--accent-2) 180deg,
+      var(--cyan) 360deg);
+  --grad-user:   linear-gradient(135deg,
+      oklch(0.860 0.110 230) 0%,
+      oklch(0.700 0.150 250) 100%);
+  --grad-sub:    linear-gradient(135deg,
+      oklch(0.880 0.140 65) 0%,
+      oklch(0.760 0.160 35) 100%);
+  --grad-tool:   linear-gradient(135deg,
+      oklch(0.860 0.090 200) 0%,
+      oklch(0.720 0.110 195) 100%);
+
+  /* Aurora — the slow-drifting glow that lives behind the transcript.
+     Three soft radials in the accent + cyan + violet; placed off-axis
+     so the eye reads it as ambient light, not a logo.  Combined with
+     a low-amplitude background-position drift in the .aurora layer. */
+  --aurora:
+    radial-gradient(60% 45% at 18% 8%,  var(--accent-glow), transparent 60%),
+    radial-gradient(55% 50% at 88% 18%, var(--cyan-glow),   transparent 65%),
+    radial-gradient(70% 60% at 50% 110%, var(--violet-glow), transparent 65%);
 }
 
 * { box-sizing: border-box; }
@@ -76,7 +138,13 @@ body { min-height: 100vh; overflow: hidden; }
 .mono { font-family: var(--font-mono); }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(var(--line), var(--line-2));
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--line-2); background-clip: padding-box; border: 2px solid transparent; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::selection { background: var(--accent); color: var(--accent-ink); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -91,10 +159,36 @@ body { min-height: 100vh; overflow: hidden; }
 }
 .soft-hl { animation: soft-hl 2.4s ease-out forwards; }
 
+/* Slow aurora drift — used on the .aurora layer behind the transcript.
+   Tiny amplitude (8% / 12% travel) so the motion is felt more than seen
+   and never competes with reading.  GPU-only: only background-position
+   moves, no layout. */
+@keyframes aurora-drift {
+  0%   { background-position: 0% 0%, 100% 0%, 50% 100%; }
+  50%  { background-position: 8% 4%, 92% 8%, 58% 92%;  }
+  100% { background-position: 0% 0%, 100% 0%, 50% 100%; }
+}
+
+/* Halo pulse on running things (accent dot, live tool chip, brand mark).
+   Two layered shadows expand-and-fade in opposite phases so the glow
+   reads as breathing rather than blinking. */
+@keyframes halo {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow), 0 0 14px -2px var(--accent-glow); }
+  50%      { box-shadow: 0 0 0 4px transparent,      0 0 22px 2px var(--accent-glow); }
+}
+
+/* Conic sweep used on the send button and brand mark — the gradient
+   doesn't actually rotate (would shimmer too much in peripheral vision);
+   we move a translucent overlay across the surface instead. */
+@keyframes sweep {
+  0%   { transform: translateX(-120%); }
+  100% { transform: translateX(120%);  }
+}
+
 /* ---------- primitives ---------- */
 .eyebrow {
   font: 500 10.5px/1 var(--font-mono);
-  letter-spacing: 0.12em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--mute);
 }
@@ -102,7 +196,7 @@ body { min-height: 100vh; overflow: hidden; }
   font: 500 10.5px/1 var(--font-mono);
   padding: 3px 6px;
   border-radius: 4px;
-  background: var(--panel-2);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
   border: 1px solid var(--line);
   border-bottom-width: 2px;
   color: var(--fg-dim);
@@ -120,18 +214,23 @@ body { min-height: 100vh; overflow: hidden; }
   white-space: nowrap;
 }
 .chip .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
-.chip.ok { color: var(--ok); border-color: oklch(0.85 0.18 160 / 0.3); background: oklch(0.85 0.18 160 / 0.1); }
-.chip.warn { color: var(--warn); border-color: oklch(0.82 0.15 85 / 0.3); background: oklch(0.82 0.15 85 / 0.1); }
-.chip.err { color: var(--err); border-color: oklch(0.70 0.21 25 / 0.3); background: oklch(0.70 0.21 25 / 0.1); }
-.chip.sub { color: var(--sub); border-color: oklch(0.82 0.14 45 / 0.3); background: oklch(0.82 0.14 45 / 0.1); }
-.chip.accent { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+.chip.ok { color: var(--ok); border-color: oklch(0.86 0.18 160 / 0.32); background: oklch(0.86 0.18 160 / 0.10); }
+.chip.warn { color: var(--warn); border-color: oklch(0.83 0.155 85 / 0.32); background: oklch(0.83 0.155 85 / 0.10); }
+.chip.err { color: var(--err); border-color: oklch(0.70 0.215 25 / 0.32); background: oklch(0.70 0.215 25 / 0.10); }
+.chip.sub { color: var(--sub); border-color: oklch(0.83 0.15 50 / 0.32); background: oklch(0.83 0.15 50 / 0.10); }
+.chip.accent {
+  color: var(--accent-ink);
+  background: var(--grad-accent);
+  border-color: transparent;
+  box-shadow: 0 0 14px -4px var(--accent-glow);
+}
 
 .btn {
   height: var(--row-h);
   padding: 0 12px;
   border-radius: var(--rad-sm);
   border: 1px solid var(--line);
-  background: var(--panel);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
   color: var(--fg);
   font: 500 13px/1 var(--font-ui);
   display: inline-flex;
@@ -139,11 +238,32 @@ body { min-height: 100vh; overflow: hidden; }
   gap: 7px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background .12s ease, border-color .12s ease;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease, box-shadow 160ms ease;
+  position: relative;
 }
-.btn:hover { background: var(--panel-2); border-color: var(--line-2); }
-.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
-.btn.ghost { background: transparent; border-color: transparent; color: var(--fg-dim); }
+.btn:hover {
+  background: linear-gradient(180deg, var(--panel-2), var(--panel-2));
+  border-color: var(--line-2);
+}
+.btn:active { transform: translateY(1px); }
+.btn.primary {
+  background: var(--grad-accent);
+  color: var(--accent-ink);
+  border-color: transparent;
+  font-weight: 600;
+  box-shadow:
+    0 0 0 1px oklch(0.94 0.18 138 / 0.6) inset,
+    0 8px 22px -10px var(--accent-glow),
+    0 2px 4px -2px oklch(0 0 0 / 0.4);
+}
+.btn.primary:hover {
+  filter: brightness(1.06);
+  box-shadow:
+    0 0 0 1px oklch(0.94 0.18 138 / 0.7) inset,
+    0 12px 28px -10px var(--accent-glow),
+    0 0 22px -6px var(--accent-glow);
+}
+.btn.ghost { background: transparent; border-color: transparent; color: var(--fg-dim); box-shadow: none; }
 .btn.ghost:hover { color: var(--fg); background: var(--panel); }
 .btn.sm { height: 26px; font-size: 12px; padding: 0 9px; }
 .btn.xs { height: 22px; font-size: 11px; padding: 0 7px; border-radius: 3px; }
@@ -160,7 +280,12 @@ body { min-height: 100vh; overflow: hidden; }
   color: var(--fg);
   font: 400 13px/1 var(--font-mono);
   width: 100%;
+  transition: border-color 120ms ease, box-shadow 160ms ease;
 }
-.input:focus { border-color: var(--accent); outline: none; }
+.input:focus {
+  border-color: var(--accent-ln);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
 
-.hr { height: 1px; background: var(--line); border: 0; margin: 0; }
+.hr { height: 1px; background: linear-gradient(90deg, transparent, var(--line), transparent); border: 0; margin: 0; }

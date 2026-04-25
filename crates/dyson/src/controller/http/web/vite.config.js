@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { dysonMock } from './devmock.js';
 
 // Bundled CSS is ~38 KiB, and Vite emits it as a <link rel="stylesheet">
 // in <head> — that's render-blocking on mobile slow-4G for ~600 ms.
@@ -43,8 +44,13 @@ function inlineCss() {
 // frontend can be iterated on with HMR while talking to a real backend.
 // Production build emits to ./dist, which build.rs bakes into the Rust
 // binary via include_bytes!.
+// VITE_DYSON_MOCK=1 swaps the real /api proxy for an in-process mock so the
+// frontend can be designed without spinning the Rust backend.  Mock is
+// disabled by default; production builds never see it (apply: 'serve').
+const useMock = process.env.VITE_DYSON_MOCK === '1';
+
 export default defineConfig({
-  plugins: [react(), inlineCss()],
+  plugins: [react(), inlineCss(), ...(useMock ? [dysonMock()] : [])],
   // Vitest runs under jsdom so regression tests can mount components and
   // walk the resulting DOM — source-text greps missed the artefacts-tab
   // black-screen bug five times because they couldn't see what React

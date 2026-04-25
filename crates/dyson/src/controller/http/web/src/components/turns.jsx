@@ -398,16 +398,18 @@ function EmptyState() {
   const builtinCount = 0;
   const mcpCount = 0;
   return (
-    <div style={{maxWidth:540, margin:'80px auto 0', padding:'0 32px', color:'var(--fg-dim)'}}>
-      <div style={{fontSize:22, fontWeight:500, color:'var(--fg)', marginBottom:6, letterSpacing:'-0.01em'}}>
-        You're talking to <span style={{color:'var(--accent)'}}>Dyson</span>.
+    <div className="empty-state">
+      <div className="es-eyebrow">
+        <span className="es-dot"/>
+        <span>online · ready</span>
       </div>
-      <div style={{fontSize:13.5, lineHeight:1.55, color:'var(--mute-2)', marginBottom:28}}>
-        {model && <>Model <span className="mono" style={{color:'var(--fg-dim)'}}>{model}</span>. </>}
+      <h1>You're talking to <em>Dyson</em>.</h1>
+      <p>
+        {model && <>Model <span className="mono es-pill">{model}</span>. </>}
         {builtinCount > 0 && <>{builtinCount} builtin tools{mcpCount > 0 && ` + ${mcpCount} MCP`}. </>}
-        {wsBackend && <>Workspace backend <span className="mono" style={{color:'var(--fg-dim)'}}>{wsBackend}</span>.</>}
-      </div>
-      <div style={{fontSize:13, color:'var(--mute)'}}>Type a message to start.</div>
+        {wsBackend && <>Workspace backend <span className="mono es-pill">{wsBackend}</span>.</>}
+      </p>
+      <div className="es-hint">Type a message to start.</div>
     </div>
   );
 }

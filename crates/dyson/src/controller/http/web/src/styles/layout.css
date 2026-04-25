@@ -8,39 +8,120 @@
    without dvh (Safari <15.4, old Chrome). */
 .app {
   display: grid;
-  grid-template-rows: 44px 1fr;
+  grid-template-rows: 48px 1fr;
   height: 100vh;
   height: 100dvh;
+  position: relative;
+  background:
+    radial-gradient(120% 80% at 50% -20%, oklch(0.27 0.08 262 / 0.45), transparent 60%),
+    var(--bg);
 }
+
+/* Hairline grid wash on the bg — a 24px grid at 1.5% opacity, only
+   visible where the aurora isn't. Adds tactility without noise. The
+   pattern is data-URL-free: two repeating linear-gradients composited.
+   Anchored to .app so it scrolls with nothing (it's the floor). */
+.app::before {
+  content: "";
+  position: absolute; inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, oklch(1 0 0 / 0.018) 1px, transparent 1px),
+    linear-gradient(to bottom, oklch(1 0 0 / 0.018) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 30%, #000 30%, transparent 100%);
+  z-index: 0;
+}
+.app > * { position: relative; z-index: 1; }
 
 .topbar {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 0 14px;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg);
+  background: linear-gradient(180deg,
+      oklch(0.165 0.014 262 / 0.85) 0%,
+      oklch(0.155 0.014 262 / 0.78) 100%);
+  -webkit-backdrop-filter: saturate(140%) blur(12px);
+  backdrop-filter: saturate(140%) blur(12px);
   z-index: 10;
   min-width: 0;
+  position: relative;
+}
+/* Hairline accent on the bottom edge — fades from transparent through
+   the lime accent through cyan and back.  Reads as a brand signature
+   without yelling. */
+.topbar::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 1px;
+  background: linear-gradient(90deg,
+      transparent 0%,
+      var(--line) 12%,
+      var(--accent-ln) 35%,
+      var(--cyan-glow) 55%,
+      var(--line) 80%,
+      transparent 100%);
+  opacity: 0.7;
+  pointer-events: none;
 }
 .topbar .brand {
-  display: flex; align-items: center; gap: 9px;
-  padding-right: 10px;
-  border-right: 1px solid var(--line);
+  display: flex; align-items: center; gap: 10px;
+  padding-right: 12px;
   margin-right: 4px;
   height: 100%;
   flex: 0 0 auto;
+  position: relative;
+}
+.topbar .brand::after {
+  content: "";
+  position: absolute;
+  right: 0; top: 25%; bottom: 25%;
+  width: 1px;
+  background: linear-gradient(180deg, transparent, var(--line), transparent);
 }
 .topbar .brand .mark {
-  width: 20px; height: 20px; border-radius: 5px;
-  background: var(--accent);
+  width: 24px; height: 24px; border-radius: 6px;
+  background: var(--grad-agent);
   display: grid; place-items: center;
   color: var(--accent-ink);
-  font: 800 11px/1 var(--font-mono);
+  font: 800 12px/1 var(--font-mono);
+  position: relative;
+  box-shadow:
+    0 0 0 1px oklch(0.94 0.18 138 / 0.6) inset,
+    0 0 18px -2px var(--accent-glow),
+    0 4px 10px -4px oklch(0 0 0 / 0.6);
+  overflow: hidden;
+  isolation: isolate;
+}
+/* The brand mark uses an animated conic gradient — slowly rotates the
+   hue around the corner so it reads as a "live" badge.  Pure-CSS,
+   single repaint per second on most renderers. */
+@keyframes brand-rotate {
+  to { transform: rotate(360deg); }
+}
+.topbar .brand .mark::before {
+  content: "";
+  position: absolute; inset: -50%;
+  background: var(--grad-agent);
+  animation: brand-rotate 14s linear infinite;
+  z-index: -1;
+}
+.topbar .brand .mark::after {
+  content: "";
+  position: absolute; inset: 1px;
+  border-radius: 5px;
+  background: var(--grad-accent);
+  z-index: -1;
 }
 .topbar .brand .name {
-  font: 600 13.5px/1 var(--font-ui);
-  letter-spacing: 0.01em;
+  font: 600 14px/1 var(--font-ui);
+  letter-spacing: -0.01em;
+  background: linear-gradient(180deg, var(--fg), var(--fg-dim));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 .topbar nav {
   display: flex; gap: 1px;
@@ -49,20 +130,40 @@
 .topbar nav button {
   background: transparent; border: 0;
   color: var(--mute-2);
-  padding: 0 11px; height: 28px;
+  padding: 0 11px; height: 30px;
   font: 500 12.5px/1 var(--font-ui);
   border-radius: var(--rad-sm);
   cursor: pointer;
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; gap: 7px;
+  position: relative;
+  transition: color 120ms ease, background 120ms ease;
 }
 .topbar nav button:hover { color: var(--fg); background: var(--panel); }
-.topbar nav button.active { color: var(--fg); background: var(--panel); }
+.topbar nav button.active {
+  color: var(--fg);
+  background: linear-gradient(180deg,
+      oklch(0.27 0.02 262 / 0.7),
+      oklch(0.21 0.02 262 / 0.7));
+  box-shadow:
+    0 0 0 1px var(--line) inset,
+    0 1px 0 oklch(1 0 0 / 0.04) inset;
+}
+.topbar nav button.active::after {
+  content: "";
+  position: absolute;
+  left: 12px; right: 12px; bottom: -8px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--cyan));
+  box-shadow: 0 0 10px -1px var(--accent-glow);
+}
 .topbar nav button .k {
   font: 500 9.5px/1 var(--font-mono);
   color: var(--mute);
-  padding: 2px 4px;
+  padding: 2px 5px;
   border-radius: 3px;
-  background: var(--bg-1);
+  background: oklch(0.18 0.012 262 / 0.7);
+  border: 1px solid oklch(0.30 0.02 262 / 0.7);
   flex: 0 0 auto;
 }
 .topbar nav button { white-space: nowrap; }
@@ -98,27 +199,44 @@
   min-width: 0;
 }
 .topbar .meta .select {
-  display: inline-flex; align-items: center; gap: 6px;
-  height: 26px; padding: 0 8px;
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 28px; padding: 0 10px;
   border: 1px solid var(--line); border-radius: var(--rad-sm);
   font: 500 12px/1 var(--font-ui);
   color: var(--fg-dim);
-  background: var(--bg-1);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
   cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
 }
-.topbar .meta .select:hover { border-color: var(--line-2); color: var(--fg); }
-.topbar .meta .select .label { color: var(--mute); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; }
+.topbar .meta .select:hover {
+  border-color: var(--accent-ln);
+  color: var(--fg);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+.topbar .meta .select .label {
+  color: var(--mute);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+}
 .topbar .meta .budget {
   display: flex; align-items: center; gap: 7px;
   font: 500 10.5px/1 var(--font-mono);
   color: var(--mute-2);
 }
 .topbar .meta .budget .bar {
-  width: 80px; height: 4px; border-radius: 2px; background: var(--panel-2); overflow: hidden;
+  width: 80px; height: 4px; border-radius: 2px;
+  background: oklch(0.20 0.012 262 / 0.8);
+  overflow: hidden;
+  box-shadow: 0 1px 0 oklch(1 0 0 / 0.04) inset;
 }
-.topbar .meta .budget .bar > div { height: 100%; background: var(--accent); }
+.topbar .meta .budget .bar > div {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--cyan));
+  box-shadow: 0 0 10px -1px var(--accent-glow);
+}
 .topbar .meta .cmdk {
-  height: 26px; padding: 0 10px;
+  height: 28px; padding: 0 10px;
   display: inline-flex; align-items: center; gap: 10px;
   border: 1px solid var(--line);
   border-radius: var(--rad-sm);
@@ -126,58 +244,79 @@
   color: var(--mute-2);
   font: 500 12px/1 var(--font-ui);
   cursor: pointer;
-  min-width: 180px;
+  min-width: 200px;
+  transition: border-color 120ms ease, color 120ms ease;
 }
-.topbar .meta .cmdk:hover { border-color: var(--line-2); color: var(--fg); }
+.topbar .meta .cmdk:hover { border-color: var(--accent-ln); color: var(--fg); }
 .topbar .meta .cmdk .kbd { margin-left: auto; }
 
 /* ---------- main body ---------- */
 .body {
   display: grid;
-  grid-template-columns: 256px 1fr 380px;
+  grid-template-columns: 264px 1fr 388px;
   min-height: 0;
   overflow: hidden;
 }
-.body.no-right { grid-template-columns: 256px 1fr; }
-.body.no-left { grid-template-columns: 1fr 380px; }
+.body.no-right { grid-template-columns: 264px 1fr; }
+.body.no-left { grid-template-columns: 1fr 388px; }
 .body.no-left.no-right { grid-template-columns: 1fr; }
 
 /* ---------- left rail ---------- */
 .left {
   border-right: 1px solid var(--line);
-  background: var(--bg);
+  background: linear-gradient(180deg,
+      oklch(0.155 0.014 262 / 0.6) 0%,
+      oklch(0.135 0.014 262 / 0.6) 100%);
   display: flex; flex-direction: column;
   min-height: 0;
+  position: relative;
+}
+.left::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; right: 0;
+  width: 1px;
+  background: linear-gradient(180deg,
+      transparent 0%,
+      var(--line) 12%,
+      var(--line) 88%,
+      transparent 100%);
 }
 .left .newc {
-  padding: 10px;
+  padding: 12px;
   border-bottom: 1px solid var(--line);
 }
-.left .newc .btn { width: 100%; justify-content: space-between; }
+.left .newc .btn { width: 100%; justify-content: space-between; height: 36px; font-size: 13px; }
 .left .search {
-  padding: 8px 10px;
+  padding: 10px 12px;
 }
 .left .search input {
-  height: 28px; padding: 0 9px 0 28px;
+  height: 30px; padding: 0 10px 0 30px;
   background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: var(--rad-sm);
   color: var(--fg);
   font: 400 12px/1 var(--font-ui);
   width: 100%;
-  background-image: radial-gradient(circle at 10px 50%, var(--mute) 1.5px, transparent 2px), linear-gradient(var(--mute), var(--mute));
+  background-image: radial-gradient(circle at 11px 50%, var(--mute) 1.5px, transparent 2px), linear-gradient(var(--mute), var(--mute));
   background-repeat: no-repeat;
-  background-position: 10px 50%, 14px 50%;
+  background-position: 11px 50%, 15px 50%;
   background-size: 3px 3px, 5px 1px;
+  transition: border-color 120ms ease, box-shadow 160ms ease;
+}
+.left .search input:focus {
+  outline: none;
+  border-color: var(--accent-ln);
+  box-shadow: 0 0 0 3px var(--accent-wash);
 }
 .left .group {
   padding: 4px 0 10px;
 }
 .left .group h4 {
-  padding: 10px 12px 6px;
+  padding: 12px 14px 6px;
   margin: 0;
-  font: 500 10.5px/1 var(--font-mono);
-  letter-spacing: 0.12em;
+  font: 500 10px/1 var(--font-mono);
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--mute);
   display: flex;
@@ -194,23 +333,40 @@
 .left .scroll { overflow: auto; flex: 1 1 auto; min-height: 0; }
 
 .conv {
-  display: flex; flex-direction: column; gap: 3px;
-  padding: 6px 10px 9px;
-  margin: 0 6px 1px;
-  border-radius: var(--rad-sm);
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 9px 12px 11px;
+  margin: 0 8px 2px;
+  border-radius: var(--rad);
   cursor: pointer;
   position: relative;
+  border: 1px solid transparent;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
 }
-.conv:hover { background: var(--panel); }
-.conv.active { background: var(--panel); }
+.conv:hover {
+  background: linear-gradient(180deg,
+      oklch(0.22 0.014 262 / 0.7),
+      oklch(0.19 0.014 262 / 0.7));
+  border-color: var(--line);
+}
+.conv.active {
+  background: linear-gradient(180deg,
+      oklch(0.24 0.018 262),
+      oklch(0.20 0.016 262));
+  border-color: var(--line-2);
+  box-shadow:
+    0 1px 0 oklch(1 0 0 / 0.03) inset,
+    0 6px 16px -8px oklch(0 0 0 / 0.6);
+}
 .conv.active::before {
   content: ""; position: absolute;
-  left: -7px; top: 9px; bottom: 9px; width: 2px;
-  border-radius: 2px; background: var(--accent);
+  left: -2px; top: 12px; bottom: 12px; width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--accent), var(--cyan));
+  box-shadow: 0 0 14px -1px var(--accent-glow);
 }
 .conv .row1 {
   display: flex; align-items: center; gap: 6px;
-  font: 500 12.5px/1.2 var(--font-ui);
+  font: 500 13px/1.25 var(--font-ui);
   color: var(--fg);
 }
 .conv .row1 .title { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -223,12 +379,13 @@
   color: var(--mute); cursor: pointer;
   opacity: 0;
   border-radius: 3px;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
 }
 .conv:hover .row1 .conv-del { opacity: 0.7; }
 .conv .row1 .conv-del:hover { opacity: 1; background: var(--line); color: var(--fg); }
 .conv .row2 {
   display: flex; align-items: center; gap: 6px;
-  font: 400 11.5px/1.2 var(--font-ui);
+  font: 400 11.5px/1.25 var(--font-ui);
   color: var(--mute-2);
   min-height: 14px;
 }
@@ -237,11 +394,12 @@
 .conv.live .row1 .title::after {
   content: "";
   display: inline-block;
-  width: 5px; height: 5px;
-  margin-left: 6px;
+  width: 6px; height: 6px;
+  margin-left: 7px;
   border-radius: 50%;
   background: var(--accent);
   vertical-align: middle;
+  box-shadow: 0 0 10px var(--accent-glow), 0 0 0 2px oklch(0.89 0.22 130 / 0.18);
   animation: pulse 1.4s ease-in-out infinite;
 }
 
@@ -257,24 +415,69 @@
   min-width: 0;
   min-height: 0;
   position: relative;
+  overflow: hidden;
 }
+/* Aurora — behind everything in the centre column.  Slowly drifts; sits
+   on top of the bg-1 fill but under the transcript via z-index.  Two
+   layered ::before/::after lets us run the soft radial glow and a
+   high-frequency noise-like dither separately so banding never appears. */
+.centre::before {
+  content: "";
+  position: absolute; inset: -15% -8% -15% -8%;
+  background: var(--aurora);
+  background-size: 140% 140%, 140% 140%, 140% 140%;
+  background-repeat: no-repeat;
+  filter: blur(56px) saturate(125%);
+  opacity: 0.75;
+  animation: aurora-drift 26s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+.centre::after {
+  content: "";
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(ellipse 80% 55% at 50% 115%, oklch(0.135 0.014 262 / 0.92), transparent 75%),
+    linear-gradient(180deg,
+      oklch(0.135 0.014 262 / 0.30) 0%,
+      transparent 22%,
+      transparent 65%,
+      oklch(0.135 0.014 262 / 0.55) 100%);
+  pointer-events: none;
+  z-index: 0;
+}
+.centre > * { position: relative; z-index: 1; }
+
 .centre .context {
   display: flex; align-items: center; gap: 10px;
-  padding: 9px 18px;
+  padding: 10px 22px;
   border-bottom: 1px solid var(--line);
-  background: var(--bg);
-  min-height: 44px;
+  background: linear-gradient(180deg,
+      oklch(0.155 0.014 262 / 0.85) 0%,
+      oklch(0.150 0.014 262 / 0.55) 100%);
+  -webkit-backdrop-filter: blur(10px) saturate(130%);
+  backdrop-filter: blur(10px) saturate(130%);
+  min-height: 46px;
   flex: 0 0 auto;
+  position: relative;
+  z-index: 2;
+}
+.centre .context::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--line) 25%, var(--line) 75%, transparent);
 }
 .centre .context .crumbs {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; align-items: center; gap: 7px;
   font: 500 12px/1 var(--font-mono);
   color: var(--mute-2);
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
 }
-.centre .context .crumbs .c-sep { color: var(--mute); opacity: 0.6; }
+.centre .context .crumbs .c-sep { color: var(--mute); opacity: 0.5; }
 .centre .context .crumbs .c-root { color: var(--mute-2); }
 .centre .context .crumbs .c-leaf { color: var(--fg); }
 .centre .context .crumbs .c-sub { color: var(--sub); }
@@ -283,7 +486,7 @@
 .transcript {
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: 28px 0 220px;
+  padding: 36px 0 240px;
   min-height: 0;
   /* `scroll-behavior: smooth` made every programmatic scrollTop assign
      animate — including the "open at the bottom" pin when switching
@@ -291,48 +494,85 @@
      streaming near-bottom follow is also fine without animation. */
 }
 .transcript .inner {
-  max-width: 820px;
+  max-width: 840px;
   margin: 0 auto;
-  padding: 0 32px;
+  padding: 0 36px;
   display: flex;
   flex-direction: column;
-  gap: 22px;
+  gap: 28px;
 }
 
 /* ---------- composer dock ---------- */
 .composer-dock {
   position: absolute;
   left: 0; right: 0; bottom: 0;
-  padding: 80px 32px 22px;
+  padding: 100px 32px 26px;
   display: flex; justify-content: center;
   pointer-events: none;
-  background: linear-gradient(to bottom, transparent 0%, var(--bg-1) 60%, var(--bg-1) 100%);
+  background:
+    linear-gradient(to bottom,
+      transparent 0%,
+      oklch(0.135 0.014 262 / 0.55) 30%,
+      oklch(0.135 0.014 262 / 0.95) 75%,
+      var(--bg-1) 100%);
+  z-index: 5;
 }
 .composer-dock > * { pointer-events: auto; }
 
 /* ---------- right rail ---------- */
 .right {
   border-left: 1px solid var(--line);
-  background: var(--bg);
+  background: linear-gradient(180deg,
+      oklch(0.155 0.014 262 / 0.6) 0%,
+      oklch(0.135 0.014 262 / 0.6) 100%);
   display: flex; flex-direction: column;
   min-height: 0;
   min-width: 0;
+  position: relative;
+}
+.right::before {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 1px;
+  background: linear-gradient(180deg,
+      transparent 0%,
+      var(--line) 12%,
+      var(--line) 88%,
+      transparent 100%);
 }
 .right .r-head {
-  display: flex; align-items: center; gap: 8px;
-  padding: 9px 12px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 14px;
   border-bottom: 1px solid var(--line);
-  min-height: 44px;
+  min-height: 46px;
   flex: 0 0 auto;
+  background: linear-gradient(180deg,
+      oklch(0.165 0.014 262 / 0.5),
+      transparent);
 }
-.right .r-head .title { font: 500 12px/1 var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--mute); }
-.right .r-head .count { color: var(--mute); font-family: var(--font-mono); font-size: 11px; }
+.right .r-head .title {
+  font: 500 11px/1 var(--font-mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--mute);
+}
+.right .r-head .count {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-wash);
+  border: 1px solid var(--accent-ln);
+  font-weight: 600;
+}
 .right .r-head .spacer { flex: 1; }
 .right .r-stack {
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: 10px;
-  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px;
+  display: flex; flex-direction: column; gap: 12px;
   min-height: 0;
 }
 
@@ -342,16 +582,31 @@
    click the chip in the transcript or jump to the Activity tab. */
 .right .r-section {
   border: 1px solid var(--line);
-  border-left: 2px solid var(--sub);
   border-radius: var(--rad);
-  background: var(--bg);
+  background:
+    linear-gradient(180deg,
+      oklch(0.83 0.15 50 / 0.06),
+      transparent 60%),
+    var(--bg);
   overflow: hidden;
+  position: relative;
+  box-shadow:
+    0 1px 0 oklch(1 0 0 / 0.03) inset,
+    0 8px 22px -10px oklch(0 0 0 / 0.5),
+    0 0 22px -8px var(--sub-glow);
+}
+.right .r-section::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0; width: 2px;
+  background: linear-gradient(180deg, var(--sub), oklch(0.76 0.16 35));
+  box-shadow: 0 0 12px -1px var(--sub-glow);
 }
 .right .r-section-head {
   display: flex; align-items: center; gap: 8px;
-  padding: 7px 10px;
+  padding: 9px 12px;
   font: 500 10.5px/1 var(--font-mono);
-  letter-spacing: 0.08em;
+  letter-spacing: 0.10em;
   text-transform: uppercase;
   color: var(--sub);
   border-bottom: 1px solid var(--line);
@@ -365,8 +620,8 @@
   display: flex; flex-direction: column;
 }
 .right .r-running-row {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 10px;
+  display: flex; align-items: center; gap: 9px;
+  padding: 10px 12px;
   font-size: 12.5px;
   border-top: 1px solid var(--line);
 }
@@ -377,6 +632,7 @@
 }
 .right .r-running-row .dot.running {
   background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow), 0 0 0 3px oklch(0.89 0.22 130 / 0.15);
   animation: pulse 1.4s infinite;
 }
 .right .r-running-row .name {
@@ -403,14 +659,14 @@
    the drawer is a static grid column, so the rule is a no-op there. */
 .mind {
   display: grid;
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: 288px 1fr;
   flex: 1;
   min-height: 0;
   position: relative;
 }
 .mind-side {
   border-right: 1px solid var(--line);
-  background: var(--bg);
+  background: linear-gradient(180deg, oklch(0.155 0.014 262 / 0.6), oklch(0.135 0.014 262 / 0.6));
   display: flex; flex-direction: column;
   min-height: 0;
 }
@@ -419,20 +675,34 @@
   min-height: 0;
   min-width: 0;
   background: var(--bg-1);
+  position: relative;
 }
+.mind-pane::before {
+  content: "";
+  position: absolute; inset: -10% -5% -10% -5%;
+  background: var(--aurora);
+  background-size: 140% 140%, 140% 140%, 140% 140%;
+  background-repeat: no-repeat;
+  filter: blur(50px) saturate(110%);
+  opacity: 0.35;
+  animation: aurora-drift 28s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+.mind-pane > * { position: relative; z-index: 1; }
 .mind-editor {
   flex: 1 1 auto;
   width: 100%;
-  padding: 24px 36px;
-  background: var(--bg-1);
+  padding: 28px 40px;
+  background: transparent;
   color: var(--fg);
   border: 0;
   resize: none;
   outline: none;
-  font: 400 13px/1.65 var(--font-mono);
+  font: 400 13.5px/1.7 var(--font-mono);
   caret-color: var(--accent);
 }
-.mind-editor:focus { background: var(--bg-1); }
+.mind-editor:focus { background: oklch(0.15 0.014 262 / 0.3); }
 .mind-editor:disabled { color: var(--mute); }
 
 /* Mobile-only back button in the artefact reader's title bar.  On
@@ -458,23 +728,23 @@
 .mind-scrim { display: none; }
 
 /* ---------- artefact tree (mind-side) ---------- */
-/* The Artefacts tab collapsed its two-rail design into a single tree:
-   chats as expandable rows, artefacts nested under each.  Styles kept
-   next to .mind-side so the tree reads as part of the same drawer. */
 .artefact-tree-head {
-  padding: 10px 14px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
 }
 .artefact-chat-row {
   display: flex; align-items: center; gap: 6px;
-  padding: 8px 12px;
+  padding: 9px 14px;
   cursor: pointer;
   user-select: none;
   color: var(--fg);
+  transition: background 120ms ease;
 }
-.artefact-chat-row:hover { background: var(--bg-1); }
-.artefact-chat-row[data-active="true"] { background: var(--panel); }
+.artefact-chat-row:hover { background: oklch(0.18 0.014 262 / 0.7); }
+.artefact-chat-row[data-active="true"] {
+  background: linear-gradient(180deg, oklch(0.23 0.018 262), oklch(0.20 0.016 262));
+}
 .artefact-chat-row .caret {
   color: var(--mute);
   display: inline-flex;
@@ -495,17 +765,19 @@
 }
 .artefact-row {
   display: flex; align-items: center; gap: 8px;
-  padding: 6px 14px 6px 32px;
+  padding: 7px 16px 7px 36px;
   cursor: pointer;
   border-left: 2px solid transparent;
   font-size: 12.5px;
   color: var(--fg-dim);
+  transition: background 120ms ease, color 120ms ease;
 }
-.artefact-row:hover { background: var(--bg-1); color: var(--fg); }
+.artefact-row:hover { background: oklch(0.18 0.014 262 / 0.7); color: var(--fg); }
 .artefact-row[data-selected="true"] {
-  background: var(--panel);
+  background: linear-gradient(90deg, oklch(0.23 0.018 262), oklch(0.20 0.016 262));
   color: var(--fg);
   border-left-color: var(--accent);
+  box-shadow: -1px 0 12px -2px var(--accent-glow);
 }
 .artefact-row .title {
   flex: 1 1 auto;
@@ -523,28 +795,29 @@
 .modelmenu-scrim { position: fixed; inset: 0; z-index: 19; }
 .modelmenu {
   position: absolute;
-  top: 40px;
+  top: 44px;
   right: 0;
-  background: var(--panel);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
   border: 1px solid var(--line-2);
-  border-radius: 8px;
-  box-shadow: 0 12px 32px oklch(0 0 0 / 0.45);
-  width: min(440px, 92vw);
+  border-radius: var(--rad-lg);
+  box-shadow: var(--lift-3);
+  width: min(460px, 92vw);
   max-height: 70vh;
   overflow-y: auto;
-  padding: 6px;
+  padding: 8px;
   z-index: 20;
 }
-.modelmenu .group { border-radius: 6px; margin-bottom: 2px; }
+.modelmenu .group { border-radius: 8px; margin-bottom: 2px; }
 .modelmenu .group:last-child { margin-bottom: 0; }
 .modelmenu .g-head {
   display: flex; align-items: center; gap: 8px;
-  padding: 10px 10px;
-  border-radius: 6px;
+  padding: 11px 11px;
+  border-radius: 7px;
   cursor: pointer;
   font: 500 13.5px/1 var(--font-ui);
   color: var(--fg);
   user-select: none;
+  transition: background 120ms ease;
 }
 .modelmenu .g-head:hover { background: var(--bg-1); }
 .modelmenu .g-head .caret {
@@ -554,14 +827,15 @@
 }
 .modelmenu .g-head .name { flex: 0 0 auto; }
 .modelmenu .g-head .badge {
-  font: 500 9.5px/1 var(--font-mono);
-  letter-spacing: 0.08em;
+  font: 600 9.5px/1 var(--font-mono);
+  letter-spacing: 0.10em;
   text-transform: uppercase;
-  padding: 2px 6px;
+  padding: 3px 7px;
   border-radius: 999px;
-  background: var(--accent-dim);
-  border: 1px solid var(--accent-ln);
-  color: var(--accent);
+  background: var(--grad-accent);
+  color: var(--accent-ink);
+  border: none;
+  box-shadow: 0 0 12px -3px var(--accent-glow);
 }
 .modelmenu .g-head .count {
   margin-left: auto;
@@ -570,25 +844,26 @@
 }
 .modelmenu .group.active .g-head .name { color: var(--accent); }
 .modelmenu .g-body {
-  padding: 2px 0 6px 26px;
-  display: flex; flex-direction: column; gap: 1px;
+  padding: 2px 0 8px 28px;
+  display: flex; flex-direction: column; gap: 2px;
 }
 .modelmenu .item {
   display: flex; align-items: center; gap: 9px;
-  padding: 7px 10px;
-  border-radius: 4px;
+  padding: 8px 10px;
+  border-radius: 5px;
   cursor: pointer;
+  transition: background 120ms ease;
 }
 .modelmenu .item:hover { background: var(--bg-1); }
 .modelmenu .item .dot {
-  width: 6px; height: 6px;
+  width: 7px; height: 7px;
   border-radius: 50%;
   background: var(--line-2);
   flex: 0 0 auto;
 }
 .modelmenu .item.on .dot {
   background: var(--accent);
-  box-shadow: 0 0 6px var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow), 0 0 0 3px oklch(0.89 0.22 130 / 0.15);
 }
 .modelmenu .item .model {
   font: 500 12.5px/1.3 var(--font-mono);
@@ -601,12 +876,8 @@
 .body.no-right .right { display: none; }
 
 /* Plug button reflects whether the rail is currently visible. */
-.topbar .menu-toggle.active { color: var(--accent); }
+.topbar .menu-toggle.active { color: var(--accent); filter: drop-shadow(0 0 6px var(--accent-glow)); }
 @media (min-width: 761px) {
-  /* The plug button is the desktop tool-stack toggle; its mobile cousin
-     is the conversations menu-toggle on the left.  Show the plug
-     button on desktop too — its click handler chooses the right
-     behavior based on viewport. */
   .topbar .meta .menu-toggle { display: inline-flex; }
 }
 
@@ -617,22 +888,23 @@
   .body.show-left .left {
     display: flex;
     position: fixed;
-    top: 44px; left: 0; bottom: 0;
+    top: 48px; left: 0; bottom: 0;
     width: min(86vw, 320px);
     z-index: 30;
-    box-shadow: 0 0 24px oklch(0 0 0 / 0.5);
+    box-shadow: 0 0 32px oklch(0 0 0 / 0.55);
   }
   .body.show-right .right {
     display: flex;
     position: fixed;
-    top: 44px; right: 0; bottom: 0;
+    top: 48px; right: 0; bottom: 0;
     width: min(94vw, 380px);
     z-index: 30;
-    box-shadow: 0 0 24px oklch(0 0 0 / 0.5);
+    box-shadow: 0 0 32px oklch(0 0 0 / 0.55);
   }
   .scrim {
-    position: fixed; inset: 44px 0 0 0;
+    position: fixed; inset: 48px 0 0 0;
     background: oklch(0 0 0 / 0.55);
+    backdrop-filter: blur(2px);
     z-index: 25;
   }
   .topbar { padding: 0 8px; gap: 6px; }
@@ -640,24 +912,13 @@
   .topbar nav button .k { display: none; }
   .topbar nav button span:not(.k) { display: none; }
   .topbar nav button { padding: 0 8px; }
-  /* overflow-x: hidden is the safety net for any descendant that
-     escapes the flex/grid min-width: 0 chain — stops the whole page
-     from scrolling horizontally and clipping the tail of messages. */
-  .transcript { padding: 16px 0 180px; overflow-x: hidden; }
-  .transcript .inner { padding: 0 14px; max-width: 100%; min-width: 0; }
-  /* --kb-inset is set from App's visualViewport listener only while
-     a text input is focused — it is roughly the iOS on-screen keyboard
-     height, so the dock rides above it instead of being hidden. */
+  .transcript { padding: 18px 0 200px; overflow-x: hidden; }
+  .transcript .inner { padding: 0 16px; max-width: 100%; min-width: 0; }
   .composer-dock {
-    padding: 60px 14px 14px;
+    padding: 70px 14px 16px;
     bottom: var(--kb-inset, 0px);
   }
   .mind { grid-template-columns: 1fr; }
-  /* Full-width drawer on mobile — the previous 80vw clamp left a 20vw
-     strip of the empty .mind-pane showing on the right, reading as a
-     black void next to the list (the "dimmed broken sidebar" bug).
-     At 100% the drawer is the entire viewport when open; the back
-     button in the reader's title bar is the way back to the list. */
   .mind-side {
     position: absolute;
     top: 0; left: 0; bottom: 0;
@@ -667,10 +928,6 @@
     transition: transform 0.18s ease;
   }
   .mind.show-side .mind-side { transform: translateX(0); }
-  /* Scrim is redundant now that the drawer fully covers the pane, but
-     keep the rule as a safety net in case the transform ever fails to
-     land (iOS layout glitch on orientation change, etc).  Sits below
-     the drawer (z-index 4 vs 5) so it never paints on top. */
   .mind.show-side .mind-scrim {
     display: block;
     position: absolute;
@@ -678,16 +935,9 @@
     background: oklch(0 0 0 / 0.45);
     z-index: 4;
   }
-  .mind-editor { padding: 14px 18px; }
+  .mind-editor { padding: 16px 20px; }
   .artefact-back { display: inline-flex; }
-  /* In Mind view the hamburger drives .mind.show-side (file list), so
-     the stats-only LeftRailMind drawer would be redundant.  Scope this
-     to Mind view only (.body.no-left.no-right) — the previous
-     `.body.no-right .left` selector also matched Artefacts view (which
-     ships .body.no-right without .no-left), killing its hamburger so
-     the empty-state's "Tap ☰ to switch" hint did nothing. */
   .body.no-left.no-right .left { display: none; }
-  /* Hide visual keyboard shortcut chips on mobile — no physical keys. */
   .kbd { display: none; }
 }
 
@@ -698,9 +948,83 @@
   color: var(--fg-dim);
   width: 32px; height: 32px;
   align-items: center; justify-content: center;
-  cursor: pointer; border-radius: 4px;
+  cursor: pointer; border-radius: 5px;
+  transition: background 120ms ease, color 120ms ease;
 }
 .topbar .menu-toggle:hover { background: var(--panel); color: var(--fg); }
 @media (max-width: 760px) {
   .topbar .menu-toggle { display: inline-flex; }
+}
+
+/* ---------- empty state ---------- */
+/* The "You're talking to Dyson" cold-open in the centre column.  This is
+   the first thing users see on a blank chat — it gets to be a moment.
+   The aurora behind it does most of the visual lifting; the type just
+   needs to land confidently on top. */
+.empty-state {
+  display: flex; flex-direction: column;
+  gap: 18px;
+  padding: 80px 32px 0;
+  max-width: 620px;
+  margin: 0 auto;
+}
+.empty-state .es-eyebrow {
+  display: inline-flex; align-items: center; gap: 8px;
+  width: max-content;
+  padding: 5px 11px 5px 9px;
+  border-radius: 999px;
+  background: oklch(0.20 0.014 262 / 0.6);
+  border: 1px solid var(--accent-ln);
+  color: var(--accent);
+  font: 500 10.5px/1 var(--font-mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  box-shadow: 0 0 0 3px var(--accent-wash), 0 0 18px -6px var(--accent-glow);
+}
+.empty-state .es-eyebrow .es-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow), 0 0 0 3px oklch(0.89 0.22 130 / 0.18);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.empty-state h1 {
+  font: 600 44px/1.05 var(--font-ui);
+  letter-spacing: -0.02em;
+  margin: 6px 0 0;
+  color: var(--fg);
+}
+.empty-state h1 em {
+  font-style: normal;
+  background: linear-gradient(110deg, var(--accent) 0%, var(--cyan) 55%, var(--accent-2) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0 28px var(--accent-glow));
+}
+.empty-state p {
+  font: 400 15.5px/1.6 var(--font-ui);
+  color: var(--fg-dim);
+  margin: 0;
+  display: flex; flex-wrap: wrap; gap: 6px 4px;
+  align-items: center;
+}
+.empty-state .es-pill {
+  display: inline-flex; align-items: center;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: oklch(0.20 0.014 262 / 0.7);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  font-size: 12px;
+}
+.empty-state .es-hint {
+  margin-top: 8px;
+  font: 400 13px/1 var(--font-ui);
+  color: var(--mute);
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.empty-state .es-hint::before {
+  content: "";
+  width: 18px; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--mute));
 }
