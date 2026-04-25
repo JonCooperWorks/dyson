@@ -187,17 +187,19 @@ export class DysonClient {
   // ticket back as an HttpOnly cookie scoped to /api/conversations,
   // and the browser attaches it automatically when EventSource opens
   // — no token in URL history, proxy logs, or the referrer chain.
-  send(id, prompt, callbacks, files) {
-    if (!this._EventSource) throw new Error('DysonClient.send: no EventSource implementation');
+  // Open the SSE stream WITHOUT POSTing a turn.  Internal helper used
+  // by both send() (which adds a /turn POST) and attach() (which
+  // doesn't — it's purely observational, for re-attaching to an
+  // already-running turn after a page reload).  Returns the same
+  // `{ close, _es }` shape as send().
+  _openEvents(id, callbacks) {
+    if (!this._EventSource) throw new Error('DysonClient: no EventSource implementation');
     const cb = callbacks || {};
     let es = null;
     let closed = false;
 
     const openStream = (eventsUrl) => {
       if (closed) return;
-      // `withCredentials` doesn't matter for same-origin EventSource —
-      // cookies are sent regardless — but we set it explicitly so a
-      // future cross-origin deployment behind a proxy stays correct.
       es = new this._EventSource(eventsUrl, { withCredentials: true });
       es.onmessage = (ev) => {
         const msg = parseStreamEvent(ev.data);
@@ -211,9 +213,6 @@ export class DysonClient {
     const ticketed = async () => {
       const tok = this._getToken();
       if (!tok) return eventsBase;
-      // POST mints the ticket and Set-Cookies it; we don't read the
-      // body for the value (it's HttpOnly on purpose).  The same URL
-      // is then opened — the browser attaches the cookie itself.
       const r = await this._authedFetch('/api/auth/sse-ticket', { method: 'POST' });
       if (!r.ok) throw new Error(`ticket mint failed: ${r.status}`);
       return eventsBase;
@@ -222,6 +221,19 @@ export class DysonClient {
     ticketed()
       .then(openStream)
       .catch(e => { closed = true; cb.onError && cb.onError(`sse open failed: ${e.message}`); });
+
+    return {
+      close() { closed = true; if (es) es.close(); },
+      get _es() { return es; },
+      // Internal hooks so send() can tear down the stream from the
+      // POST-failure path.
+      _markClosed() { closed = true; if (es) es.close(); },
+    };
+  }
+
+  send(id, prompt, callbacks, files) {
+    const cb = callbacks || {};
+    const handle = this._openEvents(id, cb);
 
     const buildBody = async () => {
       const attachments = [];
@@ -243,24 +255,25 @@ export class DysonClient {
       }))
       .then(r => {
         if (!r.ok) {
-          closed = true;
-          if (es) es.close();
+          handle._markClosed();
           cb.onError && cb.onError(`turn rejected: ${r.status}`);
         }
       })
       .catch(e => {
-        closed = true;
-        if (es) es.close();
+        handle._markClosed();
         cb.onError && cb.onError(`turn failed: ${e.message}`);
       });
 
-    // Return a wrapper that defers close() to whatever ES actually
-    // opened, or marks the open as cancelled if the ticket exchange
-    // is still in flight.
-    return {
-      close() { closed = true; if (es) es.close(); },
-      get _es() { return es; },
-    };
+    return handle;
+  }
+
+  // Attach to an in-flight chat's SSE stream without POSTing a turn.
+  // Used after a mid-stream page reload: the original POST already
+  // hit the server (busy = true) and a second POST would 409.  The
+  // server's replay ring will yield any events buffered since the
+  // turn started, then the live broadcast keeps appending.
+  attach(id, callbacks) {
+    return this._openEvents(id, callbacks);
   }
 
   async cancel(id) {

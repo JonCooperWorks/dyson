@@ -370,6 +370,54 @@ describe('DysonClient — send (SSE + POST turn)', () => {
     expect(onText).toHaveBeenCalledWith('d');
   });
 
+  it('attach(id, cb) opens an EventSource at /events WITHOUT POSTing /turn', async () => {
+    // The fix for "mid-stream reload blanks the chat" needs a way to
+    // re-attach the SSE stream without re-POSTing the turn — a fresh
+    // POST would 409 against the busy latch.  attach() is the
+    // turn-free SSE open: ticket exchange (when authed) + EventSource,
+    // nothing else.
+    const fetch = vi.fn(async () => ({ ok: true, status: 200 }));
+    let instance;
+    class FakeES {
+      constructor(url, opts) { FakeES.lastUrl = url; FakeES.lastOpts = opts; instance = this; this.onmessage = null; }
+      close() { this.closed = true; }
+    }
+    const client = new DysonClient({ fetch, EventSource: FakeES, getToken: () => 'TOK' });
+    const onText = vi.fn();
+    const handle = client.attach('c1', { onText });
+    expect(typeof handle.close).toBe('function');
+    // Yield the ticket-exchange + open-stream microtasks.
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events');
+    expect(FakeES.lastOpts).toEqual({ withCredentials: true });
+    // Crucial: NO POST to /turn anywhere in the call list.  attach()
+    // is observation-only — it must never trigger a new turn or it
+    // would 409 against the in-flight one we're trying to watch.
+    const turnCall = fetch.mock.calls.find(c => c[0] === '/api/conversations/c1/turn');
+    expect(turnCall, 'attach() must not POST /turn').toBeUndefined();
+    // Stream events still dispatch through the callbacks (same path
+    // as send()).
+    instance.onmessage({ data: JSON.stringify({ type: 'text', delta: 'live' }) });
+    expect(onText).toHaveBeenCalledWith('live');
+    // close() tears down the underlying ES.
+    handle.close();
+    expect(instance.closed).toBe(true);
+  });
+
+  it('attach(id, cb) skips the ticket exchange when there is no token', async () => {
+    const fetch = vi.fn(async () => ({ ok: true, status: 200 }));
+    class FakeES {
+      constructor(url) { FakeES.lastUrl = url; this.onmessage = null; }
+      close() {}
+    }
+    const client = new DysonClient({ fetch, EventSource: FakeES, getToken: () => null });
+    client.attach('c1', {});
+    await new Promise(r => setTimeout(r, 0));
+    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events');
+    expect(fetch.mock.calls.find(c => c[0] === '/api/auth/sse-ticket')).toBeUndefined();
+  });
+
   it('turn POST non-ok closes the stream and fires onError', async () => {
     const fetch = vi.fn(async () => ({ ok: false, status: 400 }));
     let instance;

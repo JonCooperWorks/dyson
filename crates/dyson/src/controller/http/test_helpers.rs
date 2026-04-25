@@ -197,6 +197,65 @@ pub async fn emit_agent_artefact(
     out.send_artefact(&artefact)
 }
 
+/// Push an arbitrary `SseEvent` into a chat handle's broadcast +
+/// replay ring.  Lets the integration suite drive scenarios that
+/// exercise the SSE pipeline without standing up a real agent turn —
+/// notably the regression that asserts a fresh `EventSource` open
+/// for the *next* turn doesn't replay the previous turn's events.
+pub async fn emit_for_test(
+    state: Arc<HttpState>,
+    chat_id: &str,
+    evt: super::wire::SseEvent,
+) -> crate::Result<()> {
+    let handle = state
+        .chats
+        .lock()
+        .await
+        .get(chat_id)
+        .cloned()
+        .ok_or_else(|| crate::DysonError::Config(format!("no chat {chat_id}")))?;
+    handle.emit(evt);
+    Ok(())
+}
+
+/// Flip a chat handle's `busy` latch.  Lets integration tests assert
+/// the per-chat GET DTO reports `live: true|false` without driving a
+/// real turn (which needs an LLM).
+pub async fn set_chat_busy_for_test(
+    state: Arc<HttpState>,
+    chat_id: &str,
+    busy: bool,
+) -> crate::Result<()> {
+    let handle = state
+        .chats
+        .lock()
+        .await
+        .get(chat_id)
+        .cloned()
+        .ok_or_else(|| crate::DysonError::Config(format!("no chat {chat_id}")))?;
+    handle.busy.store(busy, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// Run the end-of-turn replay-ring cleanup that `turns.rs` invokes
+/// after emitting `Done`.  Exposed so the integration tests can
+/// simulate a finished turn (then assert a fresh subscriber sees
+/// nothing stale) without a real agent run.
+pub async fn reset_replay_for_test(
+    state: Arc<HttpState>,
+    chat_id: &str,
+) -> crate::Result<()> {
+    let handle = state
+        .chats
+        .lock()
+        .await
+        .get(chat_id)
+        .cloned()
+        .ok_or_else(|| crate::DysonError::Config(format!("no chat {chat_id}")))?;
+    handle.reset_replay();
+    Ok(())
+}
+
 /// Write a fixture transcript straight to the configured chat
 /// history backend.  Used by tests that need realistic messages
 /// without standing up an LLM — `role` is either `"user"` or

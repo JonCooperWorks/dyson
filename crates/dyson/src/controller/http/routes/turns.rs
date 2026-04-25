@@ -94,6 +94,9 @@ pub(super) async fn post(
             }
         }
         handle.emit(SseEvent::Done);
+        // /clear ends any in-flight stream — wipe the replay ring so a
+        // subsequent send doesn't see this turn's events.
+        handle.reset_replay();
         return json_ok(&serde_json::json!({ "ok": true, "cleared": true }));
     }
 
@@ -186,6 +189,11 @@ pub(super) async fn post(
                         message: format!("agent build failed: {}", e.sanitized_message()),
                     });
                     chat_handle.emit(SseEvent::Done);
+                    // Wipe the per-turn replay ring before releasing
+                    // busy so a fresh EventSource opening for the next
+                    // attempt doesn't replay this aborted turn's
+                    // events into the new agent placeholder.
+                    chat_handle.reset_replay();
                     chat_handle
                         .busy
                         .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -283,6 +291,13 @@ pub(super) async fn post(
             }
 
         chat_handle.emit(SseEvent::Done);
+        // Wipe the per-turn replay ring before releasing busy so a
+        // fresh EventSource opening for the *next* turn doesn't
+        // replay this turn's events into the new agent placeholder.
+        // Without this the user sees their second message "respond"
+        // with the previous turn's text — see
+        // sse_fresh_connect_after_turn_end_does_not_replay_stale_events.
+        chat_handle.reset_replay();
         chat_handle
             .busy
             .store(false, std::sync::atomic::Ordering::SeqCst);

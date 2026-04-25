@@ -270,6 +270,11 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
     json_ok(&serde_json::json!({
         "id": id,
         "title": handle.title,
+        // `live` mirrors the busy latch the list DTO already exposes,
+        // so a mid-stream reload can decide to re-attach the SSE
+        // stream instead of showing the chat blank.  Same Relaxed
+        // ordering — this is a UI hint, not a synchronisation point.
+        "live": handle.busy.load(std::sync::atomic::Ordering::Relaxed),
         "messages": messages,
     }))
 }

@@ -333,7 +333,17 @@ function ConversationView({ conv, toolRef, setToolRef }) {
       for (const e of (entries || [])) ratings[e.turn_index] = RATING_EMOJI[e.rating] || '';
       updateSession(conv, s => ({ ...s, ratings }));
     }).catch(() => {});
-    client.load(conv).then(data => hydrateTranscript(conv, data)).catch(() => {});
+    client.load(conv).then(data => {
+      hydrateTranscript(conv, data);
+      // If the chat is currently generating on the server, re-attach
+      // the SSE stream so deltas keep flowing into the UI.  Without
+      // this the page paints whatever's on disk and then sits there
+      // mute while the agent runs to completion in the background —
+      // the original "mid-stream reload blanks the chat" symptom.
+      if (data && data.live) {
+        getResources(conv).es = attachLiveStream(conv, client);
+      }
+    }).catch(() => {});
   }, [conv, client]);
 
   // Auto-scroll.  Pin to bottom on first entry so chats open at the
@@ -763,6 +773,27 @@ function hydrateTranscript(conv, data) {
   }
 }
 
+// Open the SSE stream for an in-flight chat without POSTing a turn,
+// and prepare the local session to receive the deltas.  Called by
+// the hydrate effect when `data.live` is true (mid-stream reload).
+//
+// Steps:
+//   1. Append an empty agent placeholder iff the last turn isn't
+//      already an agent turn — onText appends to the last block of
+//      the last turn, so it needs an agent target to write into.
+//   2. Flip running so the typing indicator paints.
+//   3. Open the SSE stream via client.attach (no /turn POST → no 409).
+function attachLiveStream(conv, client) {
+  updateSession(conv, s => {
+    const last = s.liveTurns[s.liveTurns.length - 1];
+    const liveTurns = last && last.role === 'agent'
+      ? s.liveTurns
+      : [...s.liveTurns, { role: 'agent', ts: '', blocks: [{ type: 'text', text: '' }] }];
+    return { ...s, liveTurns, running: true, phase: 'thinking' };
+  });
+  return client.attach(conv, streamCallbacks(conv));
+}
+
 function mkTool(name, over = {}) {
   return {
     name,
@@ -803,4 +834,4 @@ function applyToolView(t, content, isError, view) {
   return next;
 }
 
-export { App, streamCallbacks };
+export { App, streamCallbacks, attachLiveStream };

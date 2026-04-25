@@ -135,6 +135,18 @@ impl EventRing {
             .cloned()
             .collect()
     }
+
+    /// Drop every entry but keep the monotonic counter.  Called at
+    /// end-of-turn so a fresh `EventSource` opening for the *next*
+    /// turn (no `Last-Event-ID`, server treats `since=0`) doesn't
+    /// replay the previous turn's text deltas into the new agent
+    /// placeholder — the visible "subsequent message responds with
+    /// the last message" duplication bug.  Keeping `next_id`
+    /// monotonic protects any live subscriber from observing a
+    /// regressed id on the next emit.
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 #[cfg(test)]
@@ -168,6 +180,33 @@ mod ring_tests {
         assert_eq!(ids, vec![3, 4, 5]);
         assert!(r.since(99).is_empty(), "since past tip yields nothing");
     }
+
+    #[test]
+    fn event_ring_clear_drops_entries_but_keeps_id_monotonic() {
+        // The ring is per-turn state.  At end-of-turn we wipe the
+        // entries so a fresh EventSource opening for the *next* turn
+        // (which sends no Last-Event-ID) doesn't replay the previous
+        // turn's text deltas into the new agent placeholder — that's
+        // the visible "subsequent message responds with the last
+        // message" duplication bug.
+        let mut r = EventRing::new();
+        r.push(SseEvent::Text { delta: "stale-a".into() });
+        let last_done = r.push(SseEvent::Done);
+        assert_eq!(r.since(0).len(), 2, "preconditions");
+
+        r.clear();
+        assert!(r.entries.is_empty(), "clear must wipe entries");
+        assert!(r.since(0).is_empty(), "since(0) returns nothing after clear");
+
+        // next_id stays monotonic so any live subscriber that's still
+        // around (e.g. the previous turn's ES racing to receive Done)
+        // doesn't observe a regressed id from a future emit.
+        let next = r.push(SseEvent::Text { delta: "fresh".into() });
+        assert!(
+            next > last_done,
+            "next_id must remain monotonic across clear ({next} <= {last_done})"
+        );
+    }
 }
 
 impl ChatHandle {
@@ -198,6 +237,18 @@ impl ChatHandle {
         };
         let _ = self.events.send(evt);
         id
+    }
+
+    /// Drop every entry from the replay ring.  Called by the turn
+    /// dispatcher right after `Done` so a fresh `EventSource` opened
+    /// for the next turn doesn't see the previous turn's events.
+    /// See `EventRing::clear` for the bug this prevents.
+    pub(crate) fn reset_replay(&self) {
+        let mut ring = match self.replay.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        ring.clear();
     }
 }
 

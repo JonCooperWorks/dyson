@@ -525,6 +525,30 @@ async fn get_conversation_returns_empty_messages_for_new_chat() {
 }
 
 #[tokio::test]
+async fn get_conversation_reports_live_flag_so_spa_can_reattach_sse() {
+    // The chat list DTO already carries `live` (so the sidebar can
+    // badge running chats), but the per-chat GET didn't.  Without it
+    // the SPA can't tell, on a mid-stream reload, that an in-flight
+    // turn is still running on the server — so it can't decide to
+    // re-attach the SSE stream and ends up showing the chat blank
+    // until the next turn.  This test pins the field on the per-chat
+    // body and asserts the busy flag round-trips into it.
+    let r = rig().await;
+    let id = create_chat(&r, "live-flag").await;
+
+    // Idle chat: live should be false.
+    let body = body_json(get(&format!("{}/api/conversations/{id}", r.base)).await).await;
+    assert_eq!(body["live"], false, "fresh chat is not live");
+
+    // Flip the busy latch via test helper to simulate an in-flight turn.
+    test_helpers::set_chat_busy_for_test(r.state.clone(), &id, true)
+        .await
+        .expect("set busy");
+    let body = body_json(get(&format!("{}/api/conversations/{id}", r.base)).await).await;
+    assert_eq!(body["live"], true, "busy chat must report live: true");
+}
+
+#[tokio::test]
 async fn get_feedback_for_unknown_chat_returns_empty_list() {
     // FeedbackStore::load returns Ok(empty) when the file doesn't
     // exist; no need to check chat existence.  Match that.
@@ -3538,6 +3562,79 @@ async fn sse_replay_with_last_event_id_resumes_from_checkpoint() {
     assert!(body.contains("id: 2"), "must replay event id 2; body: {body}");
     assert!(body.contains("id: 3"), "must replay event id 3; body: {body}");
     assert!(!body.contains("id: 1\n"), "must not replay events the client already saw; body: {body}");
+}
+
+#[tokio::test]
+async fn sse_fresh_connect_after_turn_end_does_not_replay_stale_events() {
+    // Regression for the "subsequent message responds with the last
+    // message" bug: the per-chat replay ring used to keep accumulating
+    // events across turns.  When the user sent a second message, the
+    // client opened a new EventSource (no Last-Event-ID, so the server
+    // treats `since=0`) and the handler replayed the entire ring back —
+    // including the previous turn's text deltas, which the frontend
+    // then appended to the *new* agent placeholder.  Visible result:
+    // the new turn appears to "respond" with the previous reply,
+    // because the SSE stream closes on the stale Done before the real
+    // new-turn events ever land.
+    //
+    // Fix: end-of-turn clears the replay ring.  This test simulates a
+    // finished turn via direct ChatHandle emit calls (no LLM), then
+    // calls the new `reset_replay()` cleanup.  A fresh EventSource
+    // open afterwards must not replay anything from that turn.
+    use dyson::controller::http::SseEvent;
+
+    let r = rig().await;
+    let id = create_chat(&r, "ring-reset").await;
+
+    // Simulate a turn ending: emit some text + Done, then run the
+    // end-of-turn cleanup (the production code path inside turns.rs
+    // calls this same method right before flipping busy = false).
+    test_helpers::emit_for_test(
+        r.state.clone(), &id, SseEvent::Text { delta: "STALE-FROM-TURN-1".into() },
+    ).await.expect("emit text");
+    test_helpers::emit_for_test(
+        r.state.clone(), &id, SseEvent::Done,
+    ).await.expect("emit done");
+    test_helpers::reset_replay_for_test(r.state.clone(), &id)
+        .await
+        .expect("reset replay");
+
+    // Fresh EventSource open — no Last-Event-ID header — exactly what
+    // the SPA's `client.send()` does on a second send.  Read the body
+    // for a short window and assert nothing from the previous turn
+    // shows up.  We accept that the connection stays open (the chat
+    // is no longer busy but the SSE handler's idle timeout is long);
+    // we only care that the body holds no replayed frames.
+    let url = format!("{}/api/conversations/{id}/events", r.base);
+    let resp = get(&url).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = String::new();
+    let mut stream = resp.into_body();
+    for _ in 0..4 {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            stream.frame(),
+        )
+        .await
+        {
+            Ok(Some(Ok(frame))) => {
+                if let Ok(data) = frame.into_data() {
+                    body.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        !body.contains("STALE-FROM-TURN-1"),
+        "previous turn's text must not replay onto a fresh EventSource; body: {body}"
+    );
+    // Done from the previous turn must also not replay — otherwise
+    // the new ES would close immediately and miss the next turn.
+    assert!(
+        !body.contains(r#""type":"done""#),
+        "previous turn's Done must not replay; body: {body}"
+    );
 }
 
 #[tokio::test]
