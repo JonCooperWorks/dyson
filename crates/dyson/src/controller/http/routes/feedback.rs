@@ -6,9 +6,9 @@ use hyper::Request;
 
 use crate::feedback::{FeedbackEntry, FeedbackRating};
 
-use super::super::responses::{Resp, bad_request, json_ok, read_json};
+use super::super::responses::{Resp, bad_request, json_ok, read_json_capped};
 use super::super::state::HttpState;
-use super::super::wire::FeedbackBody;
+use super::super::wire::{FeedbackBody, MAX_SMALL_BODY};
 
 pub(crate) fn emoji_to_rating(emoji: &str) -> Option<FeedbackRating> {
     // Mirror crate::controller::telegram::feedback so behaviour matches
@@ -38,7 +38,7 @@ pub(super) async fn post(
     state: &HttpState,
     id: &str,
 ) -> Resp {
-    let body: FeedbackBody = match read_json(req).await {
+    let body: FeedbackBody = match read_json_capped(req, MAX_SMALL_BODY).await {
         Ok(b) => b,
         Err(e) => return bad_request(&e),
     };

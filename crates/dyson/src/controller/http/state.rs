@@ -14,6 +14,27 @@
 // `HttpState::publish_file_as_artefact` which mirrors the file into
 // the same store the agent's own `send_file` uses and (best-effort)
 // broadcasts a live SSE event if a browser is currently subscribed.
+//
+// ─── Lock topology ─────────────────────────────────────────────────────────
+//
+// | Field                        | Lock kind          | Acquired from        | Held while                                     |
+// |------------------------------|--------------------|----------------------|------------------------------------------------|
+// | `settings`                   | `std::RwLock`      | reads + hot-reload   | a short read or a swap                         |
+// | `chats`                      | `tokio::Mutex`     | every API request    | a single map insert/get/clone                  |
+// | `order`                      | `tokio::Mutex`     | list / mint / delete | one Vec mutation                               |
+// | `files`                      | `std::Mutex`       | sync `Output::send_file` | HashMap put/get + Vec push                  |
+// | `artefacts`                  | `std::Mutex`       | sync `Output::send_artefact` + list/get | HashMap put/get + Vec push        |
+// | `runtime_model`              | `std::Mutex`       | `post_model`, `turns`| one `Option<(String, String)>` swap or clone   |
+// | `sse_tickets`                | `std::Mutex`       | mint + consume       | HashMap insert/remove                          |
+// | `titles`                     | `std::Mutex`       | conversations list   | HashMap insert/get                             |
+// | `ChatHandle.agent`           | `tokio::Mutex`     | one turn at a time   | the entire turn (`Agent::run` is `&mut self`)  |
+// | `ChatHandle.cancel`          | `tokio::Mutex`     | turn start + cancel  | one `Option<CancellationToken>` swap           |
+// | `ChatHandle.replay`          | `std::Mutex`       | every emit + every reconnect | one `VecDeque` push or scan            |
+//
+// All `std::Mutex` callers recover from poisoning via `into_inner()`
+// — a previous panic-while-holding-lock leaves the wrapped value
+// well-formed; silently skipping on `Err` would permanently disable
+// the cache for the rest of the process.
 // ===========================================================================
 
 use std::collections::HashMap;
@@ -44,25 +65,133 @@ pub(crate) struct ChatHandle {
     /// because `Agent::run` requires `&mut self` and turns are serialised
     /// per chat.
     pub(crate) agent: Mutex<Option<Agent>>,
-    /// Broadcast channel for SSE subscribers.  Capacity is generous; a slow
-    /// subscriber that lags will see "lag" gaps but nothing else breaks.
+    /// Broadcast channel for SSE subscribers.  Capacity 4096 — a slow
+    /// subscriber that lags by more than that will see "lag" gaps in
+    /// the live stream, but the rolling replay buffer below is the
+    /// authoritative recovery path so nothing is permanently lost as
+    /// long as the buffer cap covers the disconnect window.
     pub(crate) events: broadcast::Sender<SseEvent>,
+    /// Rolling buffer of the most recent `RING_CAP` events tagged
+    /// with monotonic ids.  A reconnecting EventSource passes
+    /// `Last-Event-ID: <n>` and we replay everything with id > n
+    /// before attaching the live broadcast subscriber.  Behind a
+    /// `std::sync::Mutex` because every emit takes the lock and the
+    /// critical section is a single VecDeque push.  Wrapped in
+    /// `Arc` so per-turn `SseOutput` can clone a handle and push
+    /// without re-locking the chats map.
+    pub(crate) replay: Arc<std::sync::Mutex<EventRing>>,
     /// Cancellation token shared with the running turn (if any).
     pub(crate) cancel: Mutex<Option<CancellationToken>>,
     /// `true` while a turn is in flight.
     pub(crate) busy: std::sync::atomic::AtomicBool,
 }
 
+/// Per-chat replay ring buffer.  Capacity is small and fixed so the
+/// memory bound is obvious — covers a normal reconnect window.
+pub(crate) struct EventRing {
+    pub(crate) entries: std::collections::VecDeque<(u64, SseEvent)>,
+    /// Monotonic counter; the next event minted gets `next_id`.
+    pub(crate) next_id: u64,
+}
+
+impl EventRing {
+    /// Maximum entries kept.  256 covers a normal reconnect window
+    /// (browser refresh, brief network blip) without giving a
+    /// runaway producer an unbounded buffer.
+    const CAP: usize = 256;
+
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: std::collections::VecDeque::with_capacity(Self::CAP),
+            next_id: 1,
+        }
+    }
+
+    /// Push an event onto the ring and return the id it was tagged
+    /// with.  Wraps oldest-first when at capacity.
+    pub(crate) fn push(&mut self, evt: SseEvent) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        if self.entries.len() >= Self::CAP {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((id, evt));
+        id
+    }
+
+    /// Snapshot of every entry with id > `since`.  Used by SSE
+    /// reconnect to replay only what the client missed.  Cloned
+    /// because the caller holds the mutex briefly and then iterates.
+    pub(crate) fn since(&self, since: u64) -> Vec<(u64, SseEvent)> {
+        self.entries
+            .iter()
+            .filter(|(id, _)| *id > since)
+            .cloned()
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod ring_tests {
+    use super::*;
+    use super::SseEvent;
+    // Stand-alone tests for the rolling buffer — no async, no
+    // tokio.  Asserts the FIFO bound and the `since` cutoff that
+    // the SSE replay path depends on.
+    #[test]
+    fn event_ring_evicts_oldest_at_cap() {
+        let mut r = EventRing::new();
+        let cap = EventRing::CAP;
+        for n in 0..(cap + 5) {
+            r.push(SseEvent::Text { delta: format!("e{n}") });
+        }
+        assert_eq!(r.entries.len(), cap, "ring must hold the cap");
+        // Earliest entry id is 6 (5 evicted + 1-based).
+        assert_eq!(r.entries.front().map(|(i, _)| *i), Some(6));
+        assert_eq!(r.entries.back().map(|(i, _)| *i), Some((cap + 5) as u64));
+    }
+
+    #[test]
+    fn event_ring_since_skips_seen_events() {
+        let mut r = EventRing::new();
+        for n in 0..5 {
+            r.push(SseEvent::Text { delta: format!("e{n}") });
+        }
+        let after = r.since(2);
+        let ids: Vec<u64> = after.iter().map(|(i, _)| *i).collect();
+        assert_eq!(ids, vec![3, 4, 5]);
+        assert!(r.since(99).is_empty(), "since past tip yields nothing");
+    }
+}
+
 impl ChatHandle {
     pub(crate) fn new(title: String) -> Self {
-        let (tx, _) = broadcast::channel(256);
+        let (tx, _) = broadcast::channel(4096);
         Self {
             title,
             agent: Mutex::new(None),
             events: tx,
+            replay: Arc::new(std::sync::Mutex::new(EventRing::new())),
             cancel: Mutex::new(None),
             busy: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Emit an event: push into the rolling replay buffer (so a
+    /// reconnect can replay it) AND broadcast to live subscribers
+    /// (so any currently-connected EventSource sees it now).  The
+    /// returned id is the monotonic event id used by SSE clients
+    /// for `Last-Event-ID` resumption.
+    pub(crate) fn emit(&self, evt: SseEvent) -> u64 {
+        let id = {
+            let mut ring = match self.replay.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            ring.push(evt.clone())
+        };
+        let _ = self.events.send(evt);
+        id
     }
 }
 
@@ -149,6 +278,41 @@ pub struct HttpState {
     /// this is just the metadata required to drive a browser
     /// redirect, never used in the validation path.
     pub(crate) auth_mode: AuthMode,
+    /// Enforce a Host-header allowlist of `{127.0.0.1, ::1, localhost}`
+    /// for `/api/*` requests.  Set `true` only when the bind is
+    /// loopback AND auth is `DangerousNoAuth` — that combination is
+    /// vulnerable to DNS rebinding because a browser running on
+    /// `attacker.example.com` (resolved to 127.0.0.1) can otherwise
+    /// fire origin-bypassing requests at the API.  Reverse-proxy /
+    /// bearer / OIDC deployments stay off the gate so the public Host
+    /// the proxy presents (e.g. `dyson.example.com`) doesn't 421.
+    pub(crate) loopback_only_host_check: bool,
+    /// Cache of `(chat_id → first-user-text title)` so the
+    /// `/api/conversations` list endpoint isn't `O(n)` history loads
+    /// per call.  Populated on first hydration miss; invalidated on
+    /// turn save when the first user message of a chat would have
+    /// changed.  Not on disk: rebuilds on cold start with one load
+    /// per chat.
+    pub(crate) titles: std::sync::Mutex<HashMap<String, String>>,
+    /// One-shot SSE tickets.  EventSource can't send headers, so the
+    /// SPA exchanges its bearer for a single-use, short-lived ticket
+    /// (`POST /api/auth/sse-ticket`) and passes it as
+    /// `?access_token=<ticket>` on the SSE connect.  The dispatcher
+    /// looks the ticket up here, removes it (single-use), and trusts
+    /// the bound identity for that one request.  Replaces the older
+    /// raw-bearer-in-URL path so a leaked log line carrying
+    /// `?access_token=` discloses at most a 30s, used-once token.
+    pub(crate) sse_tickets: std::sync::Mutex<HashMap<String, SseTicket>>,
+}
+
+/// Stored per-ticket: the bound identity (so we can attach it on
+/// validation) and the wall-clock expiry.  TTL is 30s — long enough
+/// to round-trip a fetch + open an EventSource even on slow links,
+/// short enough that a leak is bounded.
+#[derive(Clone)]
+pub(crate) struct SseTicket {
+    pub(crate) identity: String,
+    pub(crate) expires_at: std::time::Instant,
 }
 
 /// Scan the chat directory (files + archives + artefact metadata) for
@@ -195,6 +359,7 @@ impl HttpState {
         auth: Arc<dyn Auth>,
         auth_mode: AuthMode,
         config_path: Option<PathBuf>,
+        loopback_only_host_check: bool,
     ) -> Self {
         // Piggy-back on the ChatHistory directory so artefacts / files /
         // chats / ratings all live in one place on disk.  Memory-only
@@ -240,7 +405,54 @@ impl HttpState {
             config_path,
             runtime_model: std::sync::Mutex::new(None),
             auth_mode,
+            loopback_only_host_check,
+            sse_tickets: std::sync::Mutex::new(HashMap::new()),
+            titles: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Mint a one-shot SSE ticket bound to `identity`.  Returns the
+    /// opaque token string the caller hands to the SPA.  The ticket
+    /// expires after 30 seconds; expired entries are pruned lazily
+    /// here so the map can't grow without bound when the SPA fetches
+    /// tickets it never uses.
+    pub(crate) fn mint_sse_ticket(&self, identity: &str) -> String {
+        // 24 random bytes → 32 base64 chars.  Plenty of entropy and
+        // shorter than a UUID for URL ergonomics.
+        use rand::RngExt;
+        let mut buf = [0u8; 24];
+        rand::rng().fill(&mut buf);
+        use base64::Engine;
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
+        let now = std::time::Instant::now();
+        let entry = SseTicket {
+            identity: identity.to_string(),
+            expires_at: now + std::time::Duration::from_secs(30),
+        };
+        let mut guard = match self.sse_tickets.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        // Lazy prune — drop everything that's already expired.
+        guard.retain(|_, e| e.expires_at > now);
+        guard.insert(token.clone(), entry);
+        token
+    }
+
+    /// Single-use ticket consume: returns the bound identity if the
+    /// token is present and unexpired, else `None`.  Always removes
+    /// the entry — even on expiry — so a single-use token can't be
+    /// retried after a clock tick.
+    pub(crate) fn consume_sse_ticket(&self, token: &str) -> Option<String> {
+        let mut guard = match self.sse_tickets.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let entry = guard.remove(token)?;
+        if entry.expires_at <= std::time::Instant::now() {
+            return None;
+        }
+        Some(entry.identity)
     }
 
     /// Mint a fresh chat id that doesn't collide with any existing chat
@@ -249,6 +461,7 @@ impl HttpState {
     /// on disk so freshly-minted ids never reuse a slot that still has
     /// artefact metadata tagged to it.
     pub(crate) async fn mint_id(&self) -> String {
+        let mut tries: u32 = 0;
         loop {
             let n = self
                 .next_id
@@ -256,6 +469,19 @@ impl HttpState {
             let id = format!("c-{n:04}");
             let chats = self.chats.lock().await;
             if chats.contains_key(&id) {
+                tries += 1;
+                // The startup scan should prime `next_id` past every
+                // known chat, so collisions here are rare.  A
+                // sustained streak suggests the scan missed a slot or
+                // the counter wrapped — surface it once so it shows
+                // up in logs without spamming on every iteration.
+                if tries == 16 {
+                    tracing::warn!(
+                        tries,
+                        next_id = n,
+                        "mint_id: 16+ consecutive collisions — startup id scan may be incomplete"
+                    );
+                }
                 continue;
             }
             return id;
@@ -482,17 +708,31 @@ impl HttpState {
         // subscribed to this chat, it sees the new file + artefact
         // without needing to re-list.  `try_lock` keeps us sync-safe
         // — a busy chats map just means the browser picks it up on
-        // the next poll / reload.
-        if let Ok(guard) = self.chats.try_lock()
+        // the next poll / reload.  Log when we miss the lock so a
+        // sustained pattern of misses (live contention with the
+        // /api/conversations list path) is observable.
+        let chats_guard = match self.chats.try_lock() {
+            Ok(g) => Some(g),
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    chat_id,
+                    "publish_file_as_artefact: chats try_lock missed; \
+                     event will arrive on next browser poll"
+                );
+                None
+            }
+        };
+        if let Some(guard) = chats_guard
             && let Some(handle) = guard.get(chat_id).cloned()
         {
-            let _ = handle.events.send(SseEvent::File {
+            handle.emit(SseEvent::File {
                 name: name.clone(),
                 mime_type: mime.clone(),
                 url: file_url,
                 inline_image,
             });
-            let _ = handle.events.send(SseEvent::Artefact {
+            handle.emit(SseEvent::Artefact {
                 id: artefact_id.clone(),
                 kind,
                 title: name,

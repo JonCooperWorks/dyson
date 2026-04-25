@@ -252,6 +252,13 @@ impl Controller for HttpController {
                 if p.exists() { Some(p) } else { None }
             });
 
+        // DNS-rebinding gate: only matters when the bind is loopback
+        // AND auth is `DangerousNoAuth`.  Any other shape (bearer /
+        // OIDC, or any non-loopback bind) trusts the operator's
+        // routing — turning the gate on there would 421 every reverse-
+        // proxy deployment whose public Host doesn't match `127.0.0.1`.
+        let loopback_only_host_check =
+            is_loopback_bind(&self.bind) && matches!(auth_mode, AuthMode::None);
         let state = Arc::new(HttpState::new(
             settings.clone(),
             Arc::clone(registry),
@@ -260,6 +267,7 @@ impl Controller for HttpController {
             Arc::clone(&auth),
             auth_mode,
             config_path,
+            loopback_only_host_check,
         ));
 
         // Expose the artefact store across controllers so a file sent
@@ -358,16 +366,31 @@ impl Controller for HttpController {
 /// returns `Ok(())` only if the accept loop is cancelled by dropping
 /// the task.
 async fn serve_loop(state: Arc<HttpState>, listener: TcpListener) -> crate::Result<()> {
+    // Cap simultaneous in-flight connections so a misbehaving client
+    // (or a runaway test) can't exhaust file descriptors / RAM.  1024
+    // is generous for a single-operator deployment but small enough
+    // that a panic-restart can recover quickly.  An owned permit rides
+    // into each spawned task and drops on connection close, freeing
+    // the slot — no manual release path to forget.
+    let conn_limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNS));
     loop {
+        // Acquire BEFORE accept so the OS keeps the SYN queue at the
+        // kernel layer rather than letting userspace queue grow.
+        let permit = match Arc::clone(&conn_limit).acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => return Ok(()), // Semaphore closed → controller shutting down.
+        };
         let (stream, _addr) = match listener.accept().await {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %e, "http accept error");
+                drop(permit);
                 continue;
             }
         };
         let state = Arc::clone(&state);
         tokio::spawn(async move {
+            let _permit = permit; // Held until connection close.
             let io = TokioIo::new(stream);
             let svc = service_fn(move |req| {
                 let state = Arc::clone(&state);
@@ -379,6 +402,10 @@ async fn serve_loop(state: Arc<HttpState>, listener: TcpListener) -> crate::Resu
         });
     }
 }
+
+/// Per-controller concurrent-connection ceiling.  Internal limit only —
+/// no external visibility / config surface.
+const MAX_CONCURRENT_CONNS: usize = 1024;
 
 // Test-only helpers that integration tests call into.  Always compiled
 // (cfg(test) is per-crate; integration tests can't see it) but

@@ -22,15 +22,30 @@ import {
   sessions, updateSession, ensureSession,
 } from '../store/sessions.js';
 
-export function MindView({ showSide, onHideSide }) {
+export function MindView({ showSide, onHideSide, path, setPath }) {
   const client = useApi();
   const m = useAppState(s => s.mind);
-  const initial = (m.files[0] && m.files[0].path) || '';
-  const [selected, setSelected] = useState(initial);
+  // Selection is owned by the URL hash so the back button moves
+  // between selected files and a deep-link / refresh restores the
+  // last-open file.  When no path is supplied (cold load with bare
+  // `#/mind`), fall through to the first workspace entry once the
+  // file list arrives — selecting it propagates back to the URL via
+  // `setPath`.
+  const selected = path || '';
+  const setSelected = (p) => { if (typeof setPath === 'function') setPath(p || null); };
   const [loaded, setLoaded] = useState('');
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+
+  useEffect(() => {
+    // Cold open with no `#/mind/<path>`: pick the first file the
+    // workspace knows about so the editor isn't blank.  Subsequent
+    // picks are user-driven via setSelected.
+    if (selected) return;
+    if (m.files.length === 0) return;
+    setSelected(m.files[0].path);
+  }, [selected, m.files]);
 
   useEffect(() => {
     if (!selected) { setLoaded(''); setDraft(''); return; }

@@ -211,8 +211,13 @@ impl ArtefactStore {
             tracing::warn!(error = %e, id, "failed to persist artefact body");
             return;
         }
-        let kind_str = serde_json::to_value(entry.kind)
-            .unwrap_or_else(|_| serde_json::Value::String("other".to_string()));
+        let kind_str = match serde_json::to_value(entry.kind) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, id, "failed to serialise artefact kind — skipping meta");
+                return;
+            }
+        };
         let meta = serde_json::json!({
             "chat_id": entry.chat_id,
             "kind": kind_str,
@@ -222,7 +227,17 @@ impl ArtefactStore {
             "metadata": entry.metadata,
             "tool_use_id": entry.tool_use_id,
         });
-        if let Err(e) = std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default()) {
+        // Bail rather than write an empty meta file: an empty
+        // `<id>.meta.json` makes the artefact unloadable and would
+        // mask the real failure on the next list call.
+        let serialised = match serde_json::to_string_pretty(&meta) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, id, "failed to serialise artefact metadata — skipping write");
+                return;
+            }
+        };
+        if let Err(e) = std::fs::write(&meta_path, serialised) {
             tracing::warn!(error = %e, id, "failed to persist artefact metadata");
         }
     }

@@ -44,6 +44,38 @@ pub(crate) fn safe_store_id(id: &str) -> bool {
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// Gate for workspace path components that flow into
+/// `Workspace::set` / `get`, which join the supplied name onto the
+/// workspace root with `Path::join`.  `Path::join` does NOT sanitise
+/// `..` or absolute paths, so without this gate a request body with
+/// `path = "../../etc/passwd"` would let the operator (or an
+/// attacker on a non-loopback bind) read or overwrite arbitrary
+/// files outside the workspace root.  The shared check keeps the
+/// GET and POST `/api/mind/file` handlers in sync.
+///
+/// Rejects: empty, NUL, `..` as any path component, leading `/`, any
+/// `\\` (Windows separator never legitimate here), Windows-style drive
+/// prefix (`C:`), and anything that round-trips through
+/// `Path::components` to an absolute path.
+pub(crate) fn safe_workspace_path(p: &str) -> bool {
+    if p.is_empty() || p.contains('\0') {
+        return false;
+    }
+    if p.starts_with('/') || p.contains('\\') {
+        return false;
+    }
+    let bytes = p.as_bytes();
+    // Windows drive prefix (e.g. "C:foo", "C:/foo") — never valid.
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return false;
+    }
+    // `..` as any component (after split on `/`).
+    if p.split('/').any(|seg| seg == "..") {
+        return false;
+    }
+    true
+}
+
 pub(crate) fn url_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -75,6 +107,42 @@ pub(crate) fn url_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Strict variant of `url_decode` for path parameters that flow into
+/// safety gates (file ids, artefact ids).  Returns `None` on any of:
+///   * truncated escape (`%` at end-of-string, `%X`)
+///   * invalid hex digits (`%ZZ`)
+///   * decoded bytes that don't form valid UTF-8
+/// `url_decode` is lossy by design — fine for human-readable contexts
+/// like the mind path query (gated separately by `safe_workspace_path`)
+/// — but ids should refuse anything ambiguous.
+pub(crate) fn url_decode_strict(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' => {
+                if i + 2 >= bytes.len() {
+                    return None;
+                }
+                let hi = (bytes[i + 1] as char).to_digit(16)?;
+                let lo = (bytes[i + 2] as char).to_digit(16)?;
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// True when the request's `Accept-Encoding` header advertises gzip.
@@ -180,12 +248,31 @@ pub(crate) async fn maybe_gzip(resp: Resp, accepts_gzip: bool) -> Resp {
 }
 
 pub(crate) fn json_ok<T: Serialize>(v: &T) -> Resp {
-    let bytes = serde_json::to_vec(v).unwrap_or_else(|_| b"null".to_vec());
+    // serde_json failures here are real — a serialize error means the
+    // route built an inconsistent DTO (a Map with non-string keys, a
+    // float NaN, etc.).  Returning `200 OK { "null" }` on that path
+    // hides the bug from the SPA, which then renders an empty list
+    // and the operator notices nothing.  Surface a 500 instead so
+    // the bridge / fetch chain reports the failure.
+    match serde_json::to_vec(v) {
+        Ok(bytes) => Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(boxed(Bytes::from(bytes)))
+            .expect("status + content-type are valid"),
+        Err(e) => internal_error(&format!("serialize: {e}")),
+    }
+}
+
+/// 500 helper.  Symmetric with `bad_request` / `not_found` — a single
+/// place to build the JSON body so callers stay one-liners.
+pub(crate) fn internal_error(msg: &str) -> Resp {
+    let body = serde_json::json!({ "error": msg }).to_string();
     Response::builder()
-        .status(StatusCode::OK)
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
         .header("Content-Type", "application/json")
-        .body(boxed(Bytes::from(bytes)))
-        .unwrap()
+        .body(boxed(Bytes::from(body)))
+        .expect("status + content-type are valid")
 }
 
 pub(crate) fn bad_request(msg: &str) -> Resp {
@@ -205,6 +292,52 @@ pub(crate) fn not_found() -> Resp {
         .unwrap()
 }
 
+/// Stamp baseline security headers on every response.  Called once
+/// after dispatch so every route (API, static, SSE) gets the same
+/// floor — nosniff, no Referer leak, never embeddable in a frame, and
+/// a tight Content-Security-Policy that locks `script-src` to the
+/// origin (no inline JS — Vite ships hashed chunks; the CSS gate is
+/// loose because Vite inlines CSS into a `<style>` tag, which would
+/// otherwise need a nonce per build).  Pre-existing values for any of
+/// these headers pass through, so per-route customisation can override
+/// later if needed.
+pub(crate) fn apply_security_headers(resp: &mut Resp) {
+    use hyper::header::HeaderValue;
+    let h = resp.headers_mut();
+    if !h.contains_key("X-Content-Type-Options") {
+        h.insert("X-Content-Type-Options", HeaderValue::from_static("nosniff"));
+    }
+    if !h.contains_key("Referrer-Policy") {
+        h.insert("Referrer-Policy", HeaderValue::from_static("no-referrer"));
+    }
+    if !h.contains_key("X-Frame-Options") {
+        h.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
+    }
+    if !h.contains_key("Content-Security-Policy") {
+        h.insert(
+            "Content-Security-Policy",
+            HeaderValue::from_static(
+                "default-src 'self'; script-src 'self'; \
+                 style-src 'self' 'unsafe-inline'; \
+                 img-src 'self' data: blob:; connect-src 'self'; \
+                 frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+            ),
+        );
+    }
+}
+
+/// 421 Misdirected Request — used by the loopback DNS-rebinding gate
+/// when the request's Host header doesn't match the loopback allowlist.
+pub(crate) fn misdirected_request() -> Resp {
+    Response::builder()
+        .status(StatusCode::MISDIRECTED_REQUEST)
+        .header("Content-Type", "application/json")
+        .body(boxed(Bytes::from_static(
+            br#"{"error":"misdirected request"}"#,
+        )))
+        .unwrap()
+}
+
 pub(crate) fn method_not_allowed() -> Resp {
     Response::builder()
         .status(StatusCode::METHOD_NOT_ALLOWED)
@@ -216,16 +349,22 @@ pub(crate) fn method_not_allowed() -> Resp {
 }
 
 pub(crate) fn unauthorized(state: &HttpState) -> Resp {
-    let mut builder = Response::builder()
-        .status(StatusCode::UNAUTHORIZED)
-        .header("Content-Type", "application/json");
+    use hyper::header::HeaderValue;
 
     // RFC 6750 challenge.  In OIDC mode include the issuer + the
     // authorization endpoint so a client that doesn't already know
     // about /api/auth/config can still find its way to the IdP — the
     // header is the well-trodden path for non-browser clients
     // (curl wrappers, terraform providers, k6 load tests).
-    let challenge = match &state.auth_mode {
+    //
+    // Build the value via `HeaderValue::try_from` rather than the
+    // panicking `from_str` / `.unwrap()` of yore: a corrupted /
+    // attacker-controlled issuer URL containing bytes outside RFC
+    // 7230's visible-ASCII set (NUL is the canonical example) used
+    // to take the whole connection down.  Now we drop the header,
+    // emit a structured warning, and ship the bare 401 so the rest
+    // of the auth surface keeps working.
+    let challenge: Option<String> = match &state.auth_mode {
         AuthMode::Bearer => Some(r#"Bearer realm="dyson", error="invalid_token""#.to_string()),
         AuthMode::Oidc {
             issuer,
@@ -245,12 +384,31 @@ pub(crate) fn unauthorized(state: &HttpState) -> Resp {
         }
         AuthMode::None => None,
     };
-    if let Some(c) = challenge {
-        builder = builder.header("WWW-Authenticate", c);
+
+    let mut builder = Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header("Content-Type", "application/json");
+    if let Some(c) = challenge.as_deref() {
+        match HeaderValue::try_from(c) {
+            Ok(hv) => {
+                builder = builder.header("WWW-Authenticate", hv);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "WWW-Authenticate value rejected by HeaderValue — emitting 401 without it",
+                );
+            }
+        }
     }
+    // The body is a fixed static byte slice; `from_static` cannot
+    // fail.  Build with `expect` so a future change to the body type
+    // is still loud, but avoid the pattern of `unwrap` on values
+    // that could realistically fail (the header chain above is the
+    // only thing that ever did).
     builder
         .body(boxed(Bytes::from_static(br#"{"error":"unauthorized"}"#)))
-        .unwrap()
+        .expect("static body is always valid")
 }
 
 /// `GET /api/auth/config` — unauthenticated discovery endpoint the SPA
@@ -262,45 +420,11 @@ pub(crate) fn get_auth_config(state: &HttpState) -> Resp {
     json_ok(&state.auth_mode)
 }
 
-/// Produce a `HeaderMap` to feed into `auth.validate_request`,
-/// folding `?access_token=` into an `Authorization: Bearer …` header
-/// when the path is an SSE endpoint and no header is already present.
-/// Returns `None` when the original headers are usable as-is — the
-/// caller borrows `req.headers()` and pays no allocation in that
-/// (overwhelmingly common) case.
-pub(crate) fn auth_headers_for(
-    path: &str,
-    req: &Request<hyper::body::Incoming>,
-) -> Option<hyper::HeaderMap> {
-    if !path.ends_with("/events") || req.headers().contains_key("authorization") {
-        return None;
-    }
-    let token = parse_query(req.uri().query()?)
-        .into_iter()
-        .find(|(k, _)| k == "access_token")
-        .map(|(_, v)| v)
-        .filter(|v| !v.is_empty())?;
-    let value = format!("Bearer {token}").parse().ok()?;
-    let mut headers = req.headers().clone();
-    headers.insert("authorization", value);
-    Some(headers)
-}
-
-pub(crate) async fn read_json<T: for<'de> Deserialize<'de>>(
-    req: Request<hyper::body::Incoming>,
-) -> std::result::Result<T, String> {
-    let collected = req
-        .collect()
-        .await
-        .map_err(|e| format!("body read: {e}"))?;
-    let bytes = collected.to_bytes();
-    serde_json::from_slice(&bytes).map_err(|e| format!("json parse: {e}"))
-}
-
-/// Like `read_json` but with a hard byte cap.  Used by upload-bearing
-/// endpoints to refuse oversized requests after the body is read
-/// (the Content-Length pre-check covers honest clients; this catches
-/// chunked bodies that lie about length).
+/// Read a JSON body with a hard byte cap.  Every upload-bearing
+/// endpoint passes its per-route cap here so an attacker can't pin a
+/// request worker on a multi-GB chunked body.  The Content-Length
+/// pre-check covers honest clients; the size check inside catches
+/// chunked bodies that lie about length.
 pub(crate) async fn read_json_capped<T: for<'de> Deserialize<'de>>(
     req: Request<hyper::body::Incoming>,
     max: usize,
@@ -399,6 +523,29 @@ mod tests {
         assert!(!safe_store_id(&big), "anything > 128 chars is rejected");
         let edge = "a".repeat(128);
         assert!(safe_store_id(&edge), "exactly 128 chars is fine");
+    }
+
+    #[test]
+    fn safe_workspace_path_accepts_relative_clean_paths() {
+        // Mirror the matrix called out by the audit: clean relative
+        // paths are accepted; anything that could escape the workspace
+        // root is rejected.  Read-side and write-side both pass through
+        // this so a pre-fix test that names `../etc/passwd` currently
+        // succeeds and a post-fix test rejects it.
+        assert!(safe_workspace_path("memory/foo.md"));
+        assert!(safe_workspace_path("foo.md"));
+        assert!(safe_workspace_path("a/b/c.md"));
+        // Rejected:
+        assert!(!safe_workspace_path(""));
+        assert!(!safe_workspace_path("../etc/passwd"));
+        assert!(!safe_workspace_path("a/../b"));
+        assert!(!safe_workspace_path("/etc/passwd"));
+        assert!(!safe_workspace_path("\\\\x"));
+        assert!(!safe_workspace_path("a\\b"));
+        assert!(!safe_workspace_path("a\0b"));
+        // Windows drive prefix.
+        assert!(!safe_workspace_path("C:foo"));
+        assert!(!safe_workspace_path("C:/foo"));
     }
 
     #[test]
@@ -556,6 +703,20 @@ mod tests {
             .read_to_end(&mut decoded)
             .expect("round-trip decode");
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn url_decode_strict_rejects_truncated_and_invalid_escapes() {
+        // Round-trip clean encodings.
+        assert_eq!(url_decode_strict("foo%20bar").as_deref(), Some("foo bar"));
+        assert_eq!(url_decode_strict("a-b_c").as_deref(), Some("a-b_c"));
+        // Truncated %.
+        assert!(url_decode_strict("100%").is_none());
+        assert!(url_decode_strict("%A").is_none());
+        // Invalid hex digits.
+        assert!(url_decode_strict("%ZZ").is_none());
+        // Decoded bytes that aren't valid UTF-8.
+        assert!(url_decode_strict("%C3%28").is_none(), "lone-continuation byte must reject");
     }
 
     #[test]

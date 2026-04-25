@@ -74,6 +74,12 @@ pub(super) async fn post(
         if let Some(agent) = handle.agent.lock().await.as_mut() {
             agent.clear();
         }
+        // Title cache is keyed by first-user-text — a /clear wipes that,
+        // so drop the cached entry to force the next list call to
+        // rehydrate from the (now empty) transcript.
+        if let Ok(mut t) = state.titles.lock() {
+            t.remove(id);
+        }
         if let Some(h) = state.history.as_ref() {
             if let Err(e) = h.rotate(id) {
                 tracing::warn!(error = %e, chat_id = %id, "failed to rotate chat history");
@@ -87,7 +93,7 @@ pub(super) async fn post(
                 tracing::warn!(error = %e, chat_id = %id, "failed to seed empty chat after rotate");
             }
         }
-        let _ = handle.events.send(SseEvent::Done);
+        handle.emit(SseEvent::Done);
         return json_ok(&serde_json::json!({ "ok": true, "cleared": true }));
     }
 
@@ -143,6 +149,7 @@ pub(super) async fn post(
         let mut output = SseOutput {
             chat_id: chat_id.clone(),
             tx: chat_handle.events.clone(),
+            replay: Arc::clone(&chat_handle.replay),
             files,
             next_file_id: file_id,
             artefacts,
@@ -174,10 +181,10 @@ pub(super) async fn post(
                     *guard = Some(a);
                 }
                 Err(e) => {
-                    let _ = chat_handle.events.send(SseEvent::LlmError {
+                    chat_handle.emit(SseEvent::LlmError {
                         message: format!("agent build failed: {e}"),
                     });
-                    let _ = chat_handle.events.send(SseEvent::Done);
+                    chat_handle.emit(SseEvent::Done);
                     chat_handle
                         .busy
                         .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -232,7 +239,7 @@ pub(super) async fn post(
             biased;
             _ = cancel_for_select.cancelled() => {
                 tracing::info!(chat_id = %chat_id, "turn aborted by cancel request");
-                let _ = chat_handle.events.send(SseEvent::LlmError {
+                chat_handle.emit(SseEvent::LlmError {
                     message: "cancelled".to_string(),
                 });
                 Ok(String::new())
@@ -248,7 +255,7 @@ pub(super) async fn post(
         match result {
             Ok(_) => {}
             Err(e) => {
-                let _ = chat_handle.events.send(SseEvent::LlmError {
+                chat_handle.emit(SseEvent::LlmError {
                     message: e.to_string(),
                 });
             }
@@ -262,7 +269,7 @@ pub(super) async fn post(
             }
         }
 
-        let _ = chat_handle.events.send(SseEvent::Done);
+        chat_handle.emit(SseEvent::Done);
         chat_handle
             .busy
             .store(false, std::sync::atomic::Ordering::SeqCst);

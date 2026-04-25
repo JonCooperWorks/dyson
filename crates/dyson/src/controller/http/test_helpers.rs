@@ -54,6 +54,12 @@ pub fn build_state_with_auth_mode(
     auth: Arc<dyn Auth>,
     auth_mode: AuthMode,
 ) -> Arc<HttpState> {
+    // Mirror the production derivation of the loopback Host-header
+    // gate: only on when the operator runs DangerousNoAuth on a
+    // loopback bind (every test rig binds 127.0.0.1).  Bearer / OIDC
+    // rigs leave the gate off so reverse-proxy-shaped tests don't
+    // 421.
+    let loopback_only_host_check = matches!(auth_mode, AuthMode::None);
     Arc::new(HttpState::new(
         settings,
         registry,
@@ -62,6 +68,7 @@ pub fn build_state_with_auth_mode(
         auth,
         auth_mode,
         None,
+        loopback_only_host_check,
     ))
 }
 
@@ -103,6 +110,7 @@ pub async fn emit_agent_file_for_tool(
     let mut out = SseOutput {
         chat_id: chat_id.to_string(),
         tx: handle.events.clone(),
+        replay: Arc::clone(&handle.replay),
         files: state.files.clone(),
         next_file_id: state.file_id.clone(),
         artefacts: state.artefacts.clone(),
@@ -147,6 +155,7 @@ pub async fn emit_agent_artefact(
     let mut out = SseOutput {
         chat_id: chat_id.to_string(),
         tx: handle.events.clone(),
+        replay: Arc::clone(&handle.replay),
         files: state.files.clone(),
         next_file_id: state.file_id.clone(),
         artefacts: state.artefacts.clone(),

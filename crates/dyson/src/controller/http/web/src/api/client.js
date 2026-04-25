@@ -164,32 +164,51 @@ export class DysonClient {
   }
 
   // Open the SSE stream, POST the turn, and dispatch each incoming
-  // event through the callback bag.  Returns the EventSource so the
-  // caller can close() on cancel.
+  // event through the callback bag.  Returns a wrapper that mimics
+  // EventSource (`close()`) so the caller can tear the stream down on
+  // cancel even when the EventSource itself is opened asynchronously
+  // after the ticket exchange.
   //
   // `files` is an optional list of File objects (from <input type=file>
   // or drag-drop).  Each is read into base64 and sent as an attachment —
   // controller dispatches through Agent::run_with_attachments (same path
   // Telegram uses for photos / voice notes / docs).
+  //
+  // Auth shape: EventSource can't send headers, so for any deployment
+  // with auth enabled the SPA exchanges its bearer for a one-shot
+  // SSE ticket (POST /api/auth/sse-ticket) and uses the *ticket* on
+  // the SSE open.  This keeps the real OIDC/bearer token out of URL
+  // history, proxy logs, and the referrer chain.
   send(id, prompt, callbacks, files) {
     if (!this._EventSource) throw new Error('DysonClient.send: no EventSource implementation');
     const cb = callbacks || {};
-    // EventSource can't send headers, so OIDC mode folds the bearer
-    // through `?access_token=<jwt>`.  Backend's dispatch_inner
-    // synthesises the Authorization header from that param when no
-    // header is present — only on `/events` paths.  No-token case
-    // (dangerous_no_auth) hits the bare URL.
-    const tok = this._getToken();
-    const eventsUrl = tok
-      ? `/api/conversations/${encodeURIComponent(id)}/events?access_token=${encodeURIComponent(tok)}`
-      : `/api/conversations/${encodeURIComponent(id)}/events`;
-    const es = new this._EventSource(eventsUrl);
-    es.onmessage = (ev) => {
-      const msg = parseStreamEvent(ev.data);
-      if (!msg) return;
-      if (msg.type === 'done') es.close();
-      dispatchStreamEvent(msg, cb);
+    let es = null;
+    let closed = false;
+
+    const openStream = (eventsUrl) => {
+      if (closed) return;
+      es = new this._EventSource(eventsUrl);
+      es.onmessage = (ev) => {
+        const msg = parseStreamEvent(ev.data);
+        if (!msg) return;
+        if (msg.type === 'done') es.close();
+        dispatchStreamEvent(msg, cb);
+      };
     };
+
+    const eventsBase = `/api/conversations/${encodeURIComponent(id)}/events`;
+    const ticketed = async () => {
+      const tok = this._getToken();
+      if (!tok) return eventsBase;
+      const r = await this._authedFetch('/api/auth/sse-ticket', { method: 'POST' });
+      if (!r.ok) throw new Error(`ticket mint failed: ${r.status}`);
+      const j = await r.json();
+      return `${eventsBase}?access_token=${encodeURIComponent(j.ticket)}`;
+    };
+
+    ticketed()
+      .then(openStream)
+      .catch(e => { closed = true; cb.onError && cb.onError(`sse open failed: ${e.message}`); });
 
     const buildBody = async () => {
       const attachments = [];
@@ -210,12 +229,25 @@ export class DysonClient {
         body,
       }))
       .then(r => {
-        if (!r.ok) { es.close(); cb.onError && cb.onError(`turn rejected: ${r.status}`); }
+        if (!r.ok) {
+          closed = true;
+          if (es) es.close();
+          cb.onError && cb.onError(`turn rejected: ${r.status}`);
+        }
       })
       .catch(e => {
-        es.close(); cb.onError && cb.onError(`turn failed: ${e.message}`);
+        closed = true;
+        if (es) es.close();
+        cb.onError && cb.onError(`turn failed: ${e.message}`);
       });
-    return es;
+
+    // Return a wrapper that defers close() to whatever ES actually
+    // opened, or marks the open as cancelled if the ticket exchange
+    // is still in flight.
+    return {
+      close() { closed = true; if (es) es.close(); },
+      get _es() { return es; },
+    };
   }
 
   async cancel(id) {

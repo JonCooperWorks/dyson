@@ -249,35 +249,47 @@ describe('DysonClient._authedFetch — bearer token plumbing', () => {
     expect(headers.get('authorization')).toBe('Bearer caller-supplied');
   });
 
-  it('SSE URL carries access_token only when getToken returns a value', async () => {
-    // EventSource can't send headers — auth folds through ?access_token.
-    // Two assertions: WITH a token the URL has the param; WITHOUT, it doesn't.
-    const fetch = vi.fn(async () => ({ ok: true, status: 200 }));
+  it('SSE flow exchanges the bearer for a ticket before opening EventSource', async () => {
+    // The raw bearer must never reach the URL — leaks into history /
+    // proxy logs / Referer.  Send first POSTs /api/auth/sse-ticket
+    // (header-bearer) and uses the returned ticket as access_token.
+    const fetch = vi.fn(async (url) => {
+      if (url === '/api/auth/sse-ticket') {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => ({ ticket: 'one-shot-abc' }),
+        };
+      }
+      return { ok: true, status: 200 };
+    });
     class FakeES {
       constructor(url) { FakeES.lastUrl = url; this.onmessage = null; }
       close() {}
     }
-
-    const withTokClient = new DysonClient({
+    const client = new DysonClient({
       fetch,
       EventSource: FakeES,
       getToken: () => 'TOK-XYZ',
     });
-    withTokClient.send('c1', 'hi', {});
-    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events?access_token=TOK-XYZ');
-
-    const noTokClient = new DysonClient({
-      fetch,
-      EventSource: FakeES,
-      getToken: () => null,
-    });
-    noTokClient.send('c1', 'hi', {});
-    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events');
+    client.send('c1', 'hi', {});
+    // Wait for ticket fetch + EventSource open.
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+    // The mint call goes out first with the bearer in a header.
+    const mint = fetch.mock.calls.find(c => c[0] === '/api/auth/sse-ticket');
+    expect(mint, 'must POST /api/auth/sse-ticket').toBeTruthy();
+    const mintHeaders = new Headers(mint[1].headers || {});
+    expect(mintHeaders.get('authorization')).toBe('Bearer TOK-XYZ');
+    // EventSource opens with the *ticket*, not the raw bearer.
+    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events?access_token=one-shot-abc');
+    expect(FakeES.lastUrl).not.toContain('TOK-XYZ');
   });
 
-  it('SSE URL access_token is URL-encoded', async () => {
-    // A token can carry `=`, `&`, `+` (base64 padding etc.).  Without
-    // encoding the query parser would mis-split.
+  it('no-auth deployment opens EventSource without a ticket', async () => {
+    // dangerous_no_auth: getToken returns null, no ticket exchange,
+    // EventSource hits the bare URL.
     const fetch = vi.fn(async () => ({ ok: true, status: 200 }));
     class FakeES {
       constructor(url) { FakeES.lastUrl = url; this.onmessage = null; }
@@ -286,26 +298,34 @@ describe('DysonClient._authedFetch — bearer token plumbing', () => {
     const client = new DysonClient({
       fetch,
       EventSource: FakeES,
-      getToken: () => 'a=b&c+d',
+      getToken: () => null,
     });
     client.send('c1', 'hi', {});
-    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events?access_token=a%3Db%26c%2Bd');
+    await new Promise(r => setTimeout(r, 0));
+    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events');
+    // No mint call when there's nothing to exchange.
+    expect(fetch.mock.calls.find(c => c[0] === '/api/auth/sse-ticket')).toBeUndefined();
   });
 });
 
 describe('DysonClient — send (SSE + POST turn)', () => {
-  it('opens an EventSource, POSTs the turn body, returns the ES', async () => {
+  it('opens an EventSource (post-ticket), POSTs the turn body, returns a closeable handle', async () => {
     const fetch = vi.fn(async () => ({ ok: true, status: 200 }));
     class FakeES {
       constructor(url) { FakeES.lastUrl = url; this.onmessage = null; }
       close() { this.closed = true; }
     }
     const client = new DysonClient({ fetch, EventSource: FakeES });
-    const es = client.send('c1', 'hello', {});
-    expect(es).toBeInstanceOf(FakeES);
-    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events');
-    // Let the buildBody microtask resolve before checking fetch.
+    const handle = client.send('c1', 'hello', {});
+    // Caller gets a `{ close }`-shaped object (ticket exchange may
+    // open the ES asynchronously; the handle wraps that).
+    expect(typeof handle.close).toBe('function');
+    // Yield twice — once for the ticket-exchange `then`, once for the
+    // open-stream resolution.
     await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+    // No-auth deployment skips the ticket call and opens the bare URL.
+    expect(FakeES.lastUrl).toBe('/api/conversations/c1/events');
     const turnCall = fetch.mock.calls.find(c => c[0] === '/api/conversations/c1/turn');
     expect(turnCall).toBeTruthy();
     expect(JSON.parse(turnCall[1].body)).toEqual({ prompt: 'hello', attachments: [] });
@@ -321,6 +341,9 @@ describe('DysonClient — send (SSE + POST turn)', () => {
     const client = new DysonClient({ fetch, EventSource: FakeES });
     const onText = vi.fn();
     client.send('c1', 'hi', { onText });
+    // Wait for the EventSource to open after the (no-op) ticket path.
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
     instance.onmessage({ data: JSON.stringify({ type: 'text', delta: 'd' }) });
     expect(onText).toHaveBeenCalledWith('d');
   });

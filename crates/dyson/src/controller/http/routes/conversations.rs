@@ -15,10 +15,10 @@ use hyper::Request;
 
 use crate::message::{ContentBlock, Message, Role};
 
-use super::super::responses::{Resp, bad_request, json_ok, not_found, read_json};
+use super::super::responses::{Resp, bad_request, json_ok, not_found, read_json_capped};
 use super::super::state::{ChatHandle, HttpState};
 use super::super::stores::ArtefactStore;
-use super::super::wire::{BlockDto, ConversationDto, CreateChatBody, MessageDto};
+use super::super::wire::{BlockDto, ConversationDto, CreateChatBody, MAX_SMALL_BODY, MessageDto};
 
 pub(super) async fn list(state: &HttpState) -> Resp {
     // Prefer the disk's mtime-sorted list when a ChatHistory is
@@ -56,18 +56,31 @@ pub(super) async fn list(state: &HttpState) -> Resp {
     // (typically Telegram chats created while this process was
     // running).  Title is a best-effort read of the first user-text
     // line; a missing/corrupt transcript falls back to the id.
+    // Titles cache cuts O(n) history loads per list call to one
+    // per chat ever — the cache is invalidated by `turns.rs` when
+    // a save changes the first user text.
     {
         let mut chats = state.chats.lock().await;
+        let mut titles = match state.titles.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         for id in order.iter() {
             if chats.contains_key(id) {
                 continue;
             }
-            let title = state
-                .history
-                .as_ref()
-                .and_then(|h| h.load(id).ok())
-                .and_then(|msgs| first_user_text(&msgs))
-                .unwrap_or_else(|| id.clone());
+            let title = if let Some(t) = titles.get(id) {
+                t.clone()
+            } else {
+                let t = state
+                    .history
+                    .as_ref()
+                    .and_then(|h| h.load(id).ok())
+                    .and_then(|msgs| first_user_text(&msgs))
+                    .unwrap_or_else(|| id.clone());
+                titles.insert(id.clone(), t.clone());
+                t
+            };
             chats.insert(id.clone(), Arc::new(ChatHandle::new(title)));
         }
     }
@@ -136,7 +149,7 @@ pub(crate) fn source_for_chat_id(id: &str) -> &'static str {
 }
 
 pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    let body: CreateChatBody = match read_json(req).await {
+    let body: CreateChatBody = match read_json_capped(req, MAX_SMALL_BODY).await {
         Ok(b) => b,
         Err(e) => return bad_request(&e),
     };
@@ -151,6 +164,11 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
             if let Some(agent) = prev_handle.agent.lock().await.as_mut() {
                 agent.clear();
             }
+        }
+        // The previous chat's first-user-text is gone after rotate —
+        // drop any cached title so the next list call rehydrates.
+        if let Ok(mut t) = state.titles.lock() {
+            t.remove(prev);
         }
         if let Some(h) = state.history.as_ref() {
             if let Err(e) = h.rotate(prev) {
@@ -398,6 +416,10 @@ pub(super) async fn delete(state: &HttpState, id: &str) -> Resp {
         None => return not_found(),
     };
     state.order.lock().await.retain(|x| x != id);
+    // Drop the title cache entry — the chat is gone or rotated.
+    if let Ok(mut t) = state.titles.lock() {
+        t.remove(id);
+    }
 
     // Cancel any in-flight turn before we drop the handle so the
     // agent doesn't keep streaming into a chat the sidebar forgot.

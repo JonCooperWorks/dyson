@@ -142,6 +142,17 @@ pub(crate) struct AttachmentDto {
 /// memory before deserialize).
 pub(crate) const MAX_TURN_BODY: usize = 25 * 1024 * 1024;
 
+/// Cap for control-plane JSON bodies (chat create, feedback, model
+/// switch).  These payloads are tiny in practice — a title string, a
+/// turn index, a provider/model name — so 16 KiB is plenty of slack
+/// without giving an attacker a free megabyte to keep a worker busy.
+pub(crate) const MAX_SMALL_BODY: usize = 16 * 1024;
+
+/// Cap for `POST /api/mind/file` — workspace files are bigger than
+/// the control-plane payloads (a SOUL.md or notes file can run to a
+/// few MB) but we still refuse anything that would require streaming.
+pub(crate) const MAX_MIND_BODY: usize = 4 * 1024 * 1024;
+
 /// Events streamed over SSE for one conversation.
 ///
 /// Keep these stable — the prototype's bridge.js parses them.  `view` on

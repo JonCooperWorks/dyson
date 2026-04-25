@@ -8,9 +8,11 @@
 
 use hyper::Request;
 
-use super::super::responses::{Resp, bad_request, json_ok, not_found, parse_query, read_json};
+use super::super::responses::{
+    Resp, bad_request, json_ok, not_found, parse_query, read_json_capped, safe_workspace_path,
+};
 use super::super::state::HttpState;
-use super::super::wire::MindWriteBody;
+use super::super::wire::{MAX_MIND_BODY, MindWriteBody};
 
 pub(super) async fn get(state: &HttpState) -> Resp {
     let snapshot = state.settings_snapshot();
@@ -37,6 +39,11 @@ pub(super) async fn get_file(state: &HttpState, query: &str) -> Resp {
         Some((_, v)) => v,
         None => return bad_request("missing 'path' query parameter"),
     };
+    // `Path::join` doesn't sanitise `..` or absolute paths — gate
+    // before handing the value to Workspace::get.
+    if !safe_workspace_path(&path) {
+        return bad_request("invalid workspace path");
+    }
     let snapshot = state.settings_snapshot();
     let ws = match crate::workspace::create_workspace(&snapshot.workspace) {
         Ok(w) => w,
@@ -49,10 +56,15 @@ pub(super) async fn get_file(state: &HttpState, query: &str) -> Resp {
 }
 
 pub(super) async fn post_file(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    let body: MindWriteBody = match read_json(req).await {
+    let body: MindWriteBody = match read_json_capped(req, MAX_MIND_BODY).await {
         Ok(b) => b,
         Err(e) => return bad_request(&e),
     };
+    // `Path::join` doesn't sanitise `..` or absolute paths — gate
+    // before handing the value to Workspace::set / save.
+    if !safe_workspace_path(&body.path) {
+        return bad_request("invalid workspace path");
+    }
     let snapshot = state.settings_snapshot();
     let mut ws = match crate::workspace::create_workspace(&snapshot.workspace) {
         Ok(w) => w,

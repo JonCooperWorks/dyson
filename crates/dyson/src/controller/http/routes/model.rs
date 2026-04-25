@@ -10,12 +10,12 @@ use std::sync::Arc;
 
 use hyper::Request;
 
-use super::super::responses::{Resp, bad_request, json_ok, not_found, read_json};
+use super::super::responses::{Resp, bad_request, json_ok, not_found, read_json_capped};
 use super::super::state::{ChatHandle, HttpState};
-use super::super::wire::ModelSwitchBody;
+use super::super::wire::{MAX_SMALL_BODY, ModelSwitchBody};
 
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) -> Resp {
-    let body: ModelSwitchBody = match read_json(req).await {
+    let body: ModelSwitchBody = match read_json_capped(req, MAX_SMALL_BODY).await {
         Ok(b) => b,
         Err(e) => return bad_request(&e),
     };

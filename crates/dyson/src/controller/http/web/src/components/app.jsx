@@ -41,27 +41,64 @@ const VIEW_IDS = ['conv', 'mind', 'artefacts', 'activity'];
 
 const MOBILE = '(max-width: 760px)';
 
-// Hash routing — URLs are shareable across Tailscale nodes.
-//   #/              conv view, first conversation
-//   #/c/<id>        conv view, specific chat
-//   #/mind | #/activity
-//   #/artefacts     list
-//   #/artefacts/<id> reader open on that id
-function parseHash() {
-  const raw = (typeof window !== 'undefined' && window.location.hash) || '';
+// Hash routing — URLs are shareable across Tailscale nodes and the
+// browser back button steps cleanly through them.  Two extras over
+// the original shape:
+//   * `#/c/<id>/t/<toolRef>` keeps a clicked tool chip in the URL so
+//     reload / share lands on the same panel and back-button pops
+//     the panel without leaving the chat.
+//   * `#/mind/<path>` tracks the selected workspace file.
+// `parseHash` accepts an explicit hash string so it's testable without
+// poking at `window.location` from a unit test; production callers
+// pass `window.location.hash`.
+//   #/                              conv view, first conversation
+//   #/c/<id>                        conv view, specific chat
+//   #/c/<id>/t/<toolRef>            conv view, chat + tool panel open
+//   #/mind                          mind view (no file selected)
+//   #/mind/<encoded path>           mind view, specific file open
+//   #/artefacts                     artefacts list
+//   #/artefacts/<id>                reader open on that id
+//   #/activity                      activity view
+export function parseHash(rawArg) {
+  const raw =
+    rawArg !== undefined
+      ? rawArg
+      : (typeof window !== 'undefined' && window.location.hash) || '';
   const parts = raw.replace(/^#\/?/, '').split('/').filter(Boolean);
-  if (!parts.length) return { view: 'conv', conv: null, artefactId: null };
-  if (parts[0] === 'c' && parts[1])
-    return { view: 'conv', conv: decodeURIComponent(parts[1]), artefactId: null };
+  const empty = { view: 'conv', conv: null, artefactId: null, toolRef: null, mindPath: null };
+  if (!parts.length) return empty;
+  if (parts[0] === 'c' && parts[1]) {
+    return {
+      ...empty,
+      view: 'conv',
+      conv: decodeURIComponent(parts[1]),
+      toolRef: parts[2] === 't' && parts[3] ? decodeURIComponent(parts[3]) : null,
+    };
+  }
   if (parts[0] === 'artefacts' && parts[1])
-    return { view: 'artefacts', conv: null, artefactId: decodeURIComponent(parts[1]) };
-  if (VIEW_IDS.includes(parts[0])) return { view: parts[0], conv: null, artefactId: null };
-  return { view: 'conv', conv: null, artefactId: null };
+    return { ...empty, view: 'artefacts', artefactId: decodeURIComponent(parts[1]) };
+  if (parts[0] === 'mind' && parts.length >= 2) {
+    // Workspace files can live in subdirs; rejoin with `/` so a
+    // multi-segment path round-trips even if the encoder didn't pre-
+    // encode the slash.  decodeURIComponent on each segment first.
+    const path = parts.slice(1).map(decodeURIComponent).join('/');
+    return { ...empty, view: 'mind', mindPath: path };
+  }
+  if (VIEW_IDS.includes(parts[0])) return { ...empty, view: parts[0] };
+  return empty;
 }
 
-function buildHash(view, conv, artefactId) {
-  if (view === 'conv') return conv ? `#/c/${encodeURIComponent(conv)}` : '#/';
-  if (view === 'artefacts' && artefactId) return `#/artefacts/${encodeURIComponent(artefactId)}`;
+export function buildHash(state) {
+  const { view, conv, artefactId, toolRef, mindPath } = state || {};
+  if (view === 'conv') {
+    if (!conv) return '#/';
+    const base = `#/c/${encodeURIComponent(conv)}`;
+    return toolRef ? `${base}/t/${encodeURIComponent(toolRef)}` : base;
+  }
+  if (view === 'artefacts')
+    return artefactId ? `#/artefacts/${encodeURIComponent(artefactId)}` : '#/artefacts';
+  if (view === 'mind')
+    return mindPath ? `#/mind/${encodeURIComponent(mindPath)}` : '#/mind';
   return `#/${view}`;
 }
 
@@ -77,9 +114,12 @@ function App() {
   // otherwise the state→URL effect would clobber `#/artefacts/<id>` back
   // down to `#/artefacts` the instant the sidebar restored.
   const [artefactId, setArtefactId] = useState(initialRoute.artefactId);
+  const [toolRef, setToolRef] = useState(initialRoute.toolRef);
+  const [mindPath, setMindPath] = useState(initialRoute.mindPath);
   const selectView = useCallback((v) => {
     setView(v);
     setArtefactId(null);
+    setToolRef(null);
     clearPendingArtefact();
   }, []);
   const [showLeft, setShowLeft] = useState(false);
@@ -99,9 +139,14 @@ function App() {
   // state → URL.  setState is a no-op when unchanged so no loop with the
   // popstate/hashchange listener below.
   useEffect(() => {
-    const target = buildHash(view, conv, view === 'artefacts' ? artefactId : null);
+    const target = buildHash({
+      view, conv,
+      artefactId: view === 'artefacts' ? artefactId : null,
+      toolRef:    view === 'conv'      ? toolRef    : null,
+      mindPath:   view === 'mind'      ? mindPath   : null,
+    });
     if (window.location.hash !== target) window.history.pushState(null, '', target);
-  }, [view, conv, artefactId]);
+  }, [view, conv, artefactId, toolRef, mindPath]);
 
   useEffect(() => {
     const h = () => {
@@ -109,6 +154,8 @@ function App() {
       setView(r.view);
       if (r.conv != null) setConv(r.conv);
       setArtefactId(r.artefactId || null);
+      setToolRef(r.toolRef || null);
+      setMindPath(r.mindPath || null);
       if (r.artefactId) requestOpenArtefact(r.artefactId);
     };
     window.addEventListener('popstate', h);
@@ -210,8 +257,8 @@ function App() {
       {view === 'conv' && (
         <main className={bodyClass}>
           {(showLeft || showRight) && <div className="scrim" onClick={closeRails}/>}
-          <LeftRail active={conv} setActive={(id) => { setConv(id); setShowLeft(false); }}/>
-          <ConversationView conv={conv}/>
+          <LeftRail active={conv} setActive={(id) => { setConv(id); setToolRef(null); setShowLeft(false); }}/>
+          <ConversationView conv={conv} toolRef={toolRef} setToolRef={setToolRef}/>
           {!rightHidden && <RightRail chatId={conv}/>}
         </main>
       )}
@@ -219,7 +266,11 @@ function App() {
         <main className="body no-left no-right">
           {showLeft && <div className="scrim" onClick={closeRails}/>}
           <Suspense fallback={<div/>}>
-            <MindView showSide={showLeft} onHideSide={() => setShowLeft(false)}/>
+            <MindView
+              showSide={showLeft}
+              onHideSide={() => setShowLeft(false)}
+              path={mindPath}
+              setPath={setMindPath}/>
           </Suspense>
         </main>
       )}
@@ -240,13 +291,31 @@ function App() {
 // Renders the session for `conv`.  Streaming SSE for inactive chats
 // keeps populating their sessions, so switching back picks up exactly
 // where the user left off.
-function ConversationView({ conv }) {
+function ConversationView({ conv, toolRef, setToolRef }) {
   const client = useApi();
   const session = useSession(conv);
   const mutate = useSessionMutator(conv);
   const tools = useAppState(s => s.tools);
   const conversations = useAppState(s => s.conversations);
   const scrollRef = useRef(null);
+
+  // URL → state: when the hash points at a specific tool ref (deep-
+  // link, back-button restore), open the matching panel as soon as
+  // the session is hydrated.  When the URL drops the suffix (back-
+  // button popping the panel out of history), close the panel so the
+  // back-button is symmetric with the click that opened it.
+  useEffect(() => {
+    if (!conv || !session?.loaded) return;
+    if (toolRef) {
+      if (session.openTool !== toolRef) {
+        mutate(s => openPanel(s, toolRef));
+        requestOpenRail();
+      }
+    } else if (session.openTool && session.panels.includes(session.openTool)) {
+      // URL no longer carries a tool ref — pop the panel.
+      mutate(s => closePanel(s, s.openTool));
+    }
+  }, [conv, toolRef, session?.loaded]);
 
   // First open of this conv in this tab: hydrate from the API.
   // Subsequent switches are no-ops because session.loaded flips on
@@ -285,13 +354,19 @@ function ConversationView({ conv }) {
 
   const handleOpenTool = (ref) => {
     if (!session) return;
-    // Tap an already-open chip to close its panel.
+    // Tap an already-open chip to close its panel — drop the URL
+    // suffix too so the back button doesn't reopen what the user just
+    // closed.
     if (session.openTool === ref && session.panels.includes(ref)) {
       mutate(s => closePanel(s, ref));
+      if (typeof setToolRef === 'function') setToolRef(null);
       return;
     }
     mutate(s => openPanel(s, ref));
     requestOpenRail();
+    // Push the tool into the URL so reload / share / back-button
+    // round-trips it.
+    if (typeof setToolRef === 'function') setToolRef(ref);
   };
 
   // Dismiss the reaction bar when the user taps outside any open turn.

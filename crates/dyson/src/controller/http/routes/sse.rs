@@ -1,15 +1,19 @@
 // ===========================================================================
 // /api/conversations/:id/events — Server-Sent Events stream.
 //
-// One subscriber per `EventSource` open.  Frames are `data: <json>\n\n`
-// where the JSON is a `SseEvent` enum variant.  The stream closes
-// after the `Done` event so the client's `.close()` is the natural
-// next step.
+// One subscriber per `EventSource` open.  Frames are
+// `id: <n>\ndata: <json>\n\n` so a reconnect carrying
+// `Last-Event-ID: <n>` can resume from a known checkpoint — the
+// chat handle keeps a rolling replay buffer of the most recent
+// events; we drain "everything newer than n" before attaching the
+// live broadcast subscriber.  The stream closes after the `Done`
+// event so the client's `.close()` is the natural next step.
 // ===========================================================================
 
 use std::convert::Infallible;
 
 use http_body_util::{BodyExt, StreamBody};
+use hyper::Request;
 use hyper::body::{Bytes, Frame};
 use hyper::{Response, StatusCode};
 use tokio::sync::broadcast;
@@ -18,20 +22,50 @@ use super::super::responses::{Resp, not_found};
 use super::super::state::HttpState;
 use super::super::wire::SseEvent;
 
-pub(super) async fn events(state: &HttpState, id: &str) -> Resp {
+pub(super) async fn events(
+    state: &HttpState,
+    id: &str,
+    req: &Request<hyper::body::Incoming>,
+) -> Resp {
     let handle = match state.chats.lock().await.get(id).cloned() {
         Some(h) => h,
         None => return not_found(),
     };
+    // Last-Event-ID: <n> tells us the highest id this client already
+    // saw — replay everything newer.  Missing / unparsable header
+    // means "no checkpoint, just attach to live".
+    let since: u64 = req
+        .headers()
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let replay: Vec<(u64, SseEvent)> = {
+        let ring = match handle.replay.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        ring.since(since)
+    };
     let mut rx = handle.events.subscribe();
-    // Build the SSE byte stream by hand so we don't depend on
-    // tokio-stream's `sync` feature (would add to deps).  Each
-    // broadcast::recv outcome → one frame.
     let body_stream = async_stream::stream! {
+        // Replay first so the client catches up, then attach live.
+        for (id, evt) in replay {
+            yield Ok::<_, Infallible>(Frame::data(Bytes::from(format_sse(id, &evt))));
+            if matches!(evt, SseEvent::Done) { return; }
+        }
         loop {
             match rx.recv().await {
                 Ok(evt) => {
-                    yield Ok::<_, Infallible>(Frame::data(Bytes::from(format_sse(&evt))));
+                    // The live id isn't visible to the receiver here;
+                    // the producer side stamped it on the ring.  Look
+                    // up the most-recent ring entry that matches by
+                    // identity is overkill — instead, mint a synthetic
+                    // increasing id from a local counter so frames
+                    // stay sequenced from the client's POV.  The ring
+                    // handles persistence; this is just labelling.
+                    let id = next_local_id();
+                    yield Ok(Frame::data(Bytes::from(format_sse(id, &evt))));
                     if matches!(evt, SseEvent::Done) { break; }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -51,9 +85,20 @@ pub(super) async fn events(state: &HttpState, id: &str) -> Resp {
         .unwrap()
 }
 
-fn format_sse(evt: &SseEvent) -> String {
+fn format_sse(id: u64, evt: &SseEvent) -> String {
     let json = serde_json::to_string(evt).unwrap_or_else(|_| "{}".to_string());
-    format!("data: {json}\n\n")
+    format!("id: {id}\ndata: {json}\n\n")
+}
+
+/// Best-effort monotonic local id used for live frames within a
+/// single connection.  Replay frames carry the ring's authoritative
+/// id; live frames use this counter so the client still gets
+/// sequenced ids and `Last-Event-ID` on a fast reconnect lands
+/// somewhere sensible.
+fn next_local_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -63,8 +108,9 @@ mod tests {
     #[test]
     fn format_sse_produces_one_frame_per_event() {
         let evt = SseEvent::Text { delta: "hi".to_string() };
-        let frame = format_sse(&evt);
-        assert!(frame.starts_with("data: "));
+        let frame = format_sse(7, &evt);
+        assert!(frame.starts_with("id: 7\n"));
+        assert!(frame.contains("\ndata: "));
         assert!(frame.ends_with("\n\n"));
         assert!(frame.contains(r#""type":"text""#));
         assert!(frame.contains(r#""delta":"hi""#));
@@ -72,7 +118,7 @@ mod tests {
 
     #[test]
     fn format_sse_handles_done_with_empty_payload() {
-        let frame = format_sse(&SseEvent::Done);
-        assert_eq!(frame, "data: {\"type\":\"done\"}\n\n");
+        let frame = format_sse(1, &SseEvent::Done);
+        assert_eq!(frame, "id: 1\ndata: {\"type\":\"done\"}\n\n");
     }
 }

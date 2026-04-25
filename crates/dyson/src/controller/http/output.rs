@@ -27,7 +27,14 @@ pub(crate) struct SseOutput {
     /// Which chat this output is scoped to — stamped onto every
     /// artefact so `/api/conversations/<id>/artefacts` can filter.
     pub(crate) chat_id: String,
+    /// Live broadcast channel for the chat.  Cloned from
+    /// `ChatHandle.events` at construction; held here so each emit
+    /// is a single send without re-locking the chats map.
     pub(crate) tx: broadcast::Sender<SseEvent>,
+    /// Replay ring (cloned from `ChatHandle.replay`) — every emit
+    /// pushes here so a reconnect can resume from a `Last-Event-ID`
+    /// checkpoint.
+    pub(crate) replay: Arc<std::sync::Mutex<super::state::EventRing>>,
     /// Shared file store so `send_file` can stash agent-produced bytes
     /// for the UI to fetch via `/api/files/<id>`.
     pub(crate) files: Arc<std::sync::Mutex<FileStore>>,
@@ -51,9 +58,22 @@ pub(crate) struct SseOutput {
 
 impl SseOutput {
     fn send(&self, evt: SseEvent) {
-        // Ignore receiver-count errors — there may be no subscribers right
-        // now; events are still useful when one connects mid-turn (only the
-        // most recent N stay buffered, that's fine for SSE semantics).
+        // Push into the rolling replay ring first so a reconnecting
+        // EventSource can resume from a `Last-Event-ID` checkpoint
+        // even if no subscriber was attached when the event fired.
+        // Recover from a poisoned mutex — a previous panic-while-
+        // holder shouldn't permanently disable replay; the ring's
+        // contents are still well-formed.
+        {
+            let mut ring = match self.replay.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            ring.push(evt.clone());
+        }
+        // Live broadcast — receiver-count errors are ignored: a turn
+        // emits whether or not anyone is listening, the ring covers
+        // late subscribers.
         let _ = self.tx.send(evt);
     }
 }
@@ -276,6 +296,7 @@ mod tests {
         let out = SseOutput {
             chat_id: "c-0001".to_string(),
             tx,
+            replay: Arc::new(std::sync::Mutex::new(super::super::state::EventRing::new())),
             files: Arc::new(std::sync::Mutex::new(FileStore::default())),
             next_file_id: Arc::new(AtomicU64::new(1)),
             artefacts: Arc::new(std::sync::Mutex::new(ArtefactStore::default())),

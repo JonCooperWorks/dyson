@@ -18,8 +18,9 @@ use hyper::body::Bytes;
 use hyper::{Method, Request, Response, StatusCode};
 
 use super::responses::{
-    Resp, auth_headers_for, boxed, client_accepts_gzip, get_auth_config, maybe_gzip,
-    method_not_allowed, not_found, safe_store_id, unauthorized, url_decode,
+    Resp, apply_security_headers, boxed, client_accepts_gzip, get_auth_config, maybe_gzip,
+    method_not_allowed, misdirected_request, not_found, safe_store_id, unauthorized,
+    url_decode_strict,
 };
 use super::state::HttpState;
 
@@ -42,7 +43,13 @@ pub(super) async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<Htt
     // SSE responses skip compression because their Content-Type isn't in
     // the compressible set — buffering their body would be a disaster.
     let accepts_gzip = client_accepts_gzip(req.headers());
-    maybe_gzip(dispatch_inner(req, state).await, accepts_gzip).await
+    let mut resp = maybe_gzip(dispatch_inner(req, state).await, accepts_gzip).await;
+    // Stamp baseline security headers last so they cover every code
+    // path (errors, static assets, SSE) without each branch repeating
+    // the four lines.  Per-route customisation is preserved — the
+    // helper only inserts when the header is missing.
+    apply_security_headers(&mut resp);
+    resp
 }
 
 async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) -> Resp {
@@ -59,16 +66,82 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         return get_auth_config(&state);
     }
 
+    // SSE bearer-in-URL was the older (sin) shape: a real OIDC token
+    // would survive in browser history / proxy logs.  Tickets are
+    // single-use, identity-bound, and 30-second-lived — the SPA
+    // exchanges its bearer at this endpoint and uses the result on
+    // the SSE open.  Mint requires the bearer in the Authorization
+    // header so the rest of the auth chain stays the source of
+    // identity truth.
+    if matches!((&method, segs.as_slice()), (&Method::POST, ["api", "auth", "sse-ticket"])) {
+        match state.auth.validate_request(req.headers()).await {
+            Ok(info) => {
+                let ticket = state.mint_sse_ticket(&info.identity);
+                return super::responses::json_ok(&serde_json::json!({
+                    "ticket": ticket,
+                    "expires_in": 30,
+                }));
+            }
+            Err(_) => return unauthorized(&state),
+        }
+    }
+
+    // SSE: a `?access_token=<ticket>` query that resolves to a live
+    // ticket consumes it (single-use) and bypasses the regular auth
+    // gate for this one request.  Falls through to the header path
+    // otherwise so k6 / curl-wrapper clients can still authenticate
+    // with a real Authorization header on the SSE open.
+    let is_events = segs.last() == Some(&"events") && segs.first() == Some(&"api");
+    let mut ticket_authorized = false;
+    if is_events && method == Method::GET && !req.headers().contains_key("authorization") {
+        if let Some(query) = req.uri().query() {
+            for (k, v) in super::responses::parse_query(query) {
+                if k == "access_token"
+                    && let Some(identity) = state.consume_sse_ticket(&v)
+                {
+                    tracing::debug!(identity, "SSE ticket consumed");
+                    ticket_authorized = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // DNS-rebinding gate.  Enabled only when the controller bound to
+    // a loopback address with `DangerousNoAuth` — that pairing is the
+    // attacker's leverage (a webpage on `evil.example` that resolves
+    // to 127.0.0.1 can otherwise hit the API with no credential).
+    // Reverse-proxy and bearer/OIDC deployments stay off the gate so
+    // the public Host the proxy presents doesn't trip a 421.
+    if state.loopback_only_host_check && path.starts_with("/api/") {
+        let host_value = req
+            .headers()
+            .get(hyper::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        // Strip port and bracket — `127.0.0.1:7878` and `[::1]:7878`
+        // both reduce to a bare host; we then match against the
+        // loopback allowlist.
+        let host_part = host_value
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_value)
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        let host_ok =
+            matches!(host_part, "127.0.0.1" | "::1" | "localhost") || host_part.is_empty();
+        if !host_ok {
+            return misdirected_request();
+        }
+    }
+
     // Inbound auth on every `/api/*`.  Static-shell paths (`/`,
     // `/assets/*`) are exempt so the UI can load before presenting a
     // credential.  SSE endpoints can't send headers from the browser,
-    // so `auth_headers_for` folds `?access_token=` into a synthetic
-    // Authorization header — only when necessary, the rest borrow
-    // `req.headers()` and pay no allocation.
-    if path.starts_with("/api/") {
-        let synthesised = auth_headers_for(&path, &req);
-        let headers = synthesised.as_ref().unwrap_or_else(|| req.headers());
-        if state.auth.validate_request(headers).await.is_err() {
+    // so the SPA exchanges its bearer for a one-shot ticket above and
+    // we skip the regular gate when it consumed.
+    if path.starts_with("/api/") && !ticket_authorized {
+        if state.auth.validate_request(req.headers()).await.is_err() {
             return unauthorized(&state);
         }
     }
@@ -81,7 +154,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&Method::DELETE, ["api", "conversations", id])             => conversations::delete(&state, id).await,
         (&Method::POST,   ["api", "conversations", id, "turn"])     => turns::post(req, Arc::clone(&state), id).await,
         (&Method::POST,   ["api", "conversations", id, "cancel"])   => conversations::cancel(&state, id).await,
-        (&Method::GET,    ["api", "conversations", id, "events"])   => sse::events(&state, id).await,
+        (&Method::GET,    ["api", "conversations", id, "events"])   => sse::events(&state, id, &req).await,
         (&Method::GET,    ["api", "conversations", id, "feedback"]) => feedback::get(&state, id).await,
         (&Method::POST,   ["api", "conversations", id, "feedback"]) => feedback::post(req, &state, id).await,
         (&Method::GET,    ["api", "conversations", id, "artefacts"]) => artefacts::list(&state, id).await,
@@ -96,14 +169,27 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&Method::GET,    ["api", "activity"])     => activity::get(&state, req.uri().query().unwrap_or("")),
 
         // ─── files & artefacts ─────────────────────────────────────────
-        (&Method::GET, ["api", "files", id])     => files::get(&state, &url_decode(id)).await,
-        (&Method::GET, ["api", "artefacts", id]) => artefacts::get(&state, &url_decode(id)).await,
+        // Strict decode here — these ids feed `safe_store_id` which
+        // refuses anything outside `[A-Za-z0-9_-]`.  A malformed
+        // percent-escape that the lossy `url_decode` would silently
+        // pass through as `%ZZ` should 404 instead.
+        (&Method::GET, ["api", "files", id]) => match url_decode_strict(id) {
+            Some(id) => files::get(&state, &id).await,
+            None => not_found(),
+        },
+        (&Method::GET, ["api", "artefacts", id]) => match url_decode_strict(id) {
+            Some(id) => artefacts::get(&state, &id).await,
+            None => not_found(),
+        },
         // Naked `/artefacts/<id>` is a shareable permalink: bounce it
         // to `#/artefacts/<id>` so the SPA reader opens with it
         // selected.  Keeps the URL short and doesn't leak the API
         // path that serves the bytes.
         (&Method::GET, ["artefacts", id]) => {
-            let id = url_decode(id);
+            let id = match url_decode_strict(id) {
+                Some(id) => id,
+                None => return not_found(),
+            };
             if !safe_store_id(&id) {
                 return not_found();
             }

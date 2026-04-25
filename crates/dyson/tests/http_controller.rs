@@ -147,10 +147,15 @@ async fn request_with_headers(
     tokio::spawn(async move {
         let _ = conn.await;
     });
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(path_q)
-        .header(hyper::header::HOST, authority);
+    // If the caller supplied an override Host header, drop the default
+    // so dispatch sees only one — DNS-rebinding tests need this.
+    let caller_set_host = extra_headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("host"));
+    let mut builder = Request::builder().method(method).uri(path_q);
+    if !caller_set_host {
+        builder = builder.header(hyper::header::HOST, authority);
+    }
     for (k, v) in extra_headers {
         builder = builder.header(*k, *v);
     }
@@ -1336,6 +1341,11 @@ async fn http_controller_rejects_bearer_with_non_phc_hash() {
 /// return the parsed JSON payload.  Accumulates across frame boundaries
 /// because hyper doesn't guarantee one SSE record per body frame.
 async fn read_sse_event(resp: &mut Response<Incoming>) -> serde_json::Value {
+    // SSE records are multiple `field: value\n` lines terminated by
+    // `\n\n`.  After the last-event-id work, every record carries
+    // `id: <n>\ndata: <json>\n\n`, so the reader scans the record's
+    // lines and pulls the `data:` payload regardless of whether
+    // `id:` came first.
     let mut buf = String::new();
     loop {
         let frame = resp
@@ -1352,11 +1362,13 @@ async fn read_sse_event(resp: &mut Response<Incoming>) -> serde_json::Value {
         while let Some(i) = buf.find("\n\n") {
             let record: String = buf.drain(..i + 2).collect();
             let record = record.trim_end_matches('\n');
-            if let Some(payload) = record.strip_prefix("data: ") {
-                return serde_json::from_str(payload).expect("sse json");
+            for line in record.lines() {
+                if let Some(payload) = line.strip_prefix("data: ") {
+                    return serde_json::from_str(payload).expect("sse json");
+                }
             }
-            // Comment-only frames (": lag\n\n") or empty records → keep
-            // reading for the real event.
+            // Comment-only frames (": lag\n\n") or id-only records →
+            // keep reading for the real event.
         }
     }
 }
@@ -2665,37 +2677,28 @@ async fn create_chat_with_token(r: &Rig, title: &str, token: &str) -> String {
 }
 
 #[tokio::test]
-async fn sse_access_token_query_param_authorizes_events_endpoint() {
-    // EventSource can't send headers, so dispatch_inner folds
-    // `?access_token=<jwt>` into a synthetic Authorization header
-    // before the auth gate.  We don't drive a real SSE stream here —
-    // we just need to know the gate accepts it.  The test sends a
-    // GET to /events; the response is a 200 (text/event-stream) with
-    // a body that we don't read so the open is enough to know auth
-    // passed.
+async fn sse_raw_bearer_in_query_no_longer_authorises() {
+    // Regression: the old shape folded `?access_token=<bearer>` into
+    // a synthetic Authorization header, which meant a real bearer /
+    // OIDC token would land in browser history, proxy logs and the
+    // referrer chain.  After the migration the query param is
+    // exclusively a one-shot ticket — pasting the raw bearer there
+    // must NOT authenticate.
     let r = rig_with_auth_and_mode(
         hashed_bearer_for_test("right-token"),
         test_helpers::AuthMode::Bearer,
     )
     .await;
-    let chat_id = create_chat_with_token(&r, "sse-auth-test", "right-token").await;
+    let chat_id = create_chat_with_token(&r, "x", "right-token").await;
     let url = format!(
         "{}/api/conversations/{}/events?access_token=right-token",
         r.base, chat_id,
     );
-    // We can't easily wait for the first frame here without standing
-    // up a longer SSE harness, so just check status code on connect.
     let resp = get(&url).await;
     assert_eq!(
         resp.status(),
-        StatusCode::OK,
-        "?access_token must authorise the SSE open",
-    );
-    assert_eq!(
-        resp.headers()
-            .get("Content-Type")
-            .and_then(|v| v.to_str().ok()),
-        Some("text/event-stream"),
+        StatusCode::UNAUTHORIZED,
+        "raw bearer in URL must no longer authorise the SSE open",
     );
 }
 
@@ -2718,8 +2721,8 @@ async fn sse_access_token_query_param_with_wrong_token_still_401s() {
 #[tokio::test]
 async fn access_token_query_param_only_applies_to_events_path() {
     // A bare `?access_token=` on a non-events path must NOT bypass the
-    // header check — `auth_headers_for` is supposed to only kick in
-    // for paths ending in `/events`.  Otherwise a leaked log line with
+    // header check — the SSE-ticket consumer only fires for paths
+    // ending in `/events`.  Otherwise a leaked log line with
     // `?access_token=…` in the query would be a credentials disclosure.
     let r = rig_with_auth_and_mode(
         hashed_bearer_for_test("right-token"),
@@ -2736,28 +2739,80 @@ async fn access_token_query_param_only_applies_to_events_path() {
 }
 
 #[tokio::test]
-async fn sse_authorization_header_takes_precedence_over_query_token() {
-    // When the client provides BOTH a header and a query token, the
-    // header wins (auth_headers_for returns None and the validation
-    // path borrows req.headers() unchanged).  A header with the right
-    // token must succeed even if the query carries a wrong one.
+async fn sse_ticket_round_trips_and_is_single_use() {
+    // POST /api/auth/sse-ticket mints a one-shot, short-lived,
+    // identity-bound token.  EventSource can't send headers, so the
+    // SPA sends the ticket as `?access_token=<ticket>`.  The
+    // controller looks the ticket up, removes it (single-use), and
+    // attaches the bound identity to the request.  Re-using the
+    // ticket must 401.
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("real-token"),
+        test_helpers::AuthMode::Bearer,
+    )
+    .await;
+    let chat_id = create_chat_with_token(&r, "ticketed", "real-token").await;
+    let mint = request_with_headers(
+        &format!("{}/api/auth/sse-ticket", r.base),
+        Method::POST,
+        None,
+        &[("authorization", "Bearer real-token")],
+    )
+    .await;
+    assert_eq!(mint.status(), StatusCode::OK, "ticket mint must succeed");
+    let ticket = body_json(mint).await["ticket"]
+        .as_str()
+        .expect("ticket field")
+        .to_string();
+    assert!(!ticket.is_empty(), "ticket must be non-empty");
+
+    // First use authorises the SSE open.
+    let url = format!(
+        "{}/api/conversations/{}/events?access_token={}",
+        r.base, chat_id, ticket,
+    );
+    let resp = get(&url).await;
+    assert_eq!(resp.status(), StatusCode::OK, "first use authorises");
+
+    // Second use fails — single-use semantics.
+    let resp = get(&url).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "ticket reuse must 401");
+}
+
+#[tokio::test]
+async fn sse_ticket_endpoint_requires_auth() {
+    // Minting a ticket is itself an authenticated operation.  Without
+    // a token, the endpoint must 401.
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("real-token"),
+        test_helpers::AuthMode::Bearer,
+    )
+    .await;
+    let resp = post_json(
+        &format!("{}/api/auth/sse-ticket", r.base),
+        &serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn sse_authorization_header_still_authorises_without_a_ticket() {
+    // Header-bearer clients (k6, curl wrappers) that don't bother
+    // with the ticket flow must still authenticate with a normal
+    // Authorization header on the SSE open — the ticket path is a
+    // browser-only concession to the EventSource API's lack of
+    // headers, not a replacement for the canonical bearer flow.
     let r = rig_with_auth_and_mode(
         hashed_bearer_for_test("real-token"),
         test_helpers::AuthMode::Bearer,
     )
     .await;
     let chat_id = create_chat_with_token(&r, "x", "real-token").await;
-    let url = format!(
-        "{}/api/conversations/{}/events?access_token=fake",
-        r.base, chat_id,
-    );
+    let url = format!("{}/api/conversations/{}/events", r.base, chat_id);
     let resp =
         get_with_header(&url, "authorization", "Bearer real-token").await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "Authorization header must take precedence over a fake query token",
-    );
+    assert_eq!(resp.status(), StatusCode::OK, "header bearer must still authorise");
 }
 
 // ---------------------------------------------------------------------------
@@ -3018,6 +3073,354 @@ async fn unauthorized_strips_crlf_from_oidc_issuer_in_www_authenticate() {
     // present (sanitiser removes only the dangerous bytes, not the
     // operator's actual host).
     assert!(www.contains("idp.example.com"), "issuer host preserved");
+}
+
+#[tokio::test]
+async fn baseline_security_headers_present_on_every_response() {
+    // Defense-in-depth headers attached after dispatch — every route
+    // (API, static, SSE) sees nosniff + Referrer-Policy + DENY on
+    // framing + a CSP that locks the renderer to its own origin.
+    let r = rig().await;
+
+    // Static shell — index.html.
+    let resp = get(&format!("{}/", r.base)).await;
+    let h = resp.headers().clone();
+    assert_eq!(h.get("X-Content-Type-Options").map(|v| v.to_str().unwrap()), Some("nosniff"));
+    assert_eq!(h.get("Referrer-Policy").map(|v| v.to_str().unwrap()), Some("no-referrer"));
+    assert_eq!(h.get("X-Frame-Options").map(|v| v.to_str().unwrap()), Some("DENY"));
+    let csp = h.get("Content-Security-Policy").expect("CSP header").to_str().unwrap();
+    assert!(csp.contains("default-src 'self'"), "CSP missing default-src: {csp}");
+    assert!(csp.contains("frame-ancestors 'none'"), "CSP missing frame-ancestors: {csp}");
+
+    // JSON API — /api/conversations.
+    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    let h = resp.headers().clone();
+    assert_eq!(h.get("X-Content-Type-Options").map(|v| v.to_str().unwrap()), Some("nosniff"));
+    assert_eq!(h.get("X-Frame-Options").map(|v| v.to_str().unwrap()), Some("DENY"));
+    assert!(h.get("Content-Security-Policy").is_some());
+    assert!(h.get("Referrer-Policy").is_some());
+
+    // SSE endpoint — must keep text/event-stream and still carry CSP.
+    let id = create_chat(&r, "sse-headers").await;
+    let url = format!("{}/api/conversations/{}/events", r.base, id);
+    // Issue request but only inspect headers; close the body promptly.
+    let resp = request(&url, Method::GET, None).await;
+    let h = resp.headers().clone();
+    assert_eq!(
+        h.get("Content-Type").map(|v| v.to_str().unwrap()).unwrap_or(""),
+        "text/event-stream",
+    );
+    assert!(h.get("Content-Security-Policy").is_some(), "SSE response must still carry CSP");
+    assert_eq!(h.get("X-Content-Type-Options").map(|v| v.to_str().unwrap()), Some("nosniff"));
+}
+
+#[tokio::test]
+async fn write_endpoints_reject_oversized_bodies_with_400() {
+    // Each upload-bearing endpoint has a per-route cap that backs the
+    // body reader.  Anything just over the cap must come back 400 with
+    // the size message; anything under the cap must succeed.  Caps:
+    //   /api/conversations create          16 KiB
+    //   /api/conversations/<id>/feedback   16 KiB
+    //   /api/model                         16 KiB
+    //   /api/mind/file                      4 MiB
+    let r = rig().await;
+    let id = create_chat(&r, "size").await;
+
+    // 1) POST /api/conversations — 16 KiB cap.  Build a body whose
+    // pad alone is larger than the cap so the encoded JSON is
+    // unambiguously over.
+    let just_over = serde_json::to_vec(&serde_json::json!({
+        "title": "ok",
+        "pad": "x".repeat(16 * 1024 + 256),
+    })).unwrap();
+    let resp = request(
+        &format!("{}/api/conversations", r.base),
+        Method::POST,
+        Some(just_over),
+    ).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "create over cap → 400");
+
+    // 2) POST /api/conversations/<id>/feedback — 16 KiB cap.
+    let just_over_fb = serde_json::to_vec(&serde_json::json!({
+        "turn_index": 0,
+        "emoji": "👍",
+        "pad": "y".repeat(16 * 1024),
+    })).unwrap();
+    let resp = request(
+        &format!("{}/api/conversations/{id}/feedback", r.base),
+        Method::POST,
+        Some(just_over_fb),
+    ).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "feedback over cap → 400");
+
+    // 3) POST /api/model — 16 KiB cap.
+    let just_over_model = serde_json::to_vec(&serde_json::json!({
+        "provider": "default",
+        "model": "qwen/qwen3.6-plus",
+        "pad": "z".repeat(16 * 1024),
+    })).unwrap();
+    let resp = request(
+        &format!("{}/api/model", r.base),
+        Method::POST,
+        Some(just_over_model),
+    ).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "model over cap → 400");
+
+    // 4) POST /api/mind/file — 4 MiB cap.  Build a body whose
+    // `content` is 4 MiB + 1, which puts the total over the cap.
+    let big_content = "a".repeat(4 * 1024 * 1024 + 1);
+    let just_over_mind = serde_json::to_vec(&serde_json::json!({
+        "path": "_size.md",
+        "content": big_content,
+    })).unwrap();
+    let resp = request(
+        &format!("{}/api/mind/file", r.base),
+        Method::POST,
+        Some(just_over_mind),
+    ).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "mind over cap → 400");
+
+    // Sanity: a body just under the conversations cap still succeeds.
+    let under_create = serde_json::to_vec(&serde_json::json!({
+        "title": "still-ok",
+        "pad": "p".repeat(8 * 1024),
+    })).unwrap();
+    let resp = request(
+        &format!("{}/api/conversations", r.base),
+        Method::POST,
+        Some(under_create),
+    ).await;
+    assert_eq!(resp.status(), StatusCode::OK, "under-cap create succeeds");
+}
+
+#[tokio::test]
+async fn loopback_dangerous_no_auth_rejects_foreign_host_header() {
+    // DNS-rebinding defence: with a loopback bind in DangerousNoAuth
+    // mode, the Host header must name a loopback host.  A browser
+    // page on `attacker.example.com` whose JS resolves the hostname
+    // to 127.0.0.1 (DNS rebinding) would otherwise fire requests at
+    // the loopback API with `Host: attacker.example.com` and have
+    // them accepted.  The controller refuses with 421.
+    let r = rig().await;
+    let resp = request_with_headers(
+        &format!("{}/api/conversations", r.base),
+        Method::GET,
+        None,
+        &[("host", "attacker.example.com")],
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::MISDIRECTED_REQUEST,
+        "foreign Host on loopback DangerousNoAuth must be 421",
+    );
+}
+
+#[tokio::test]
+async fn loopback_dangerous_no_auth_accepts_loopback_host_header() {
+    // Match: the rig binds 127.0.0.1, so a Host pointing to the same
+    // address (with the assigned port) is the legitimate request the
+    // browser makes when typing http://127.0.0.1:<port>/ in the
+    // address bar.  Must succeed.
+    let r = rig().await;
+    let port = r.base.rsplit(':').next().unwrap();
+    let resp = request_with_headers(
+        &format!("{}/api/conversations", r.base),
+        Method::GET,
+        None,
+        &[("host", &format!("127.0.0.1:{port}"))],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "loopback Host must be accepted");
+}
+
+#[tokio::test]
+async fn bearer_mode_accepts_foreign_host_header() {
+    // We don't break reverse-proxy deployments: a controller behind
+    // an authenticating reverse proxy sees an arbitrary Host (the
+    // public hostname).  Only loopback DangerousNoAuth tightens the
+    // gate, because that's where the rebinding threat exists.
+    let auth = hashed_bearer_for_test("sekrit");
+    let r = rig_with_auth_and_mode(auth, test_helpers::AuthMode::Bearer).await;
+    // Authenticate with the matching bearer token, but send a
+    // mismatched Host to verify the host gate doesn't fire here.
+    let resp = request_with_headers(
+        &format!("{}/api/conversations", r.base),
+        Method::GET,
+        None,
+        &[
+            ("host", "dyson.example.com"),
+            ("authorization", "Bearer sekrit"),
+        ],
+    )
+    .await;
+    // Either 200 (auth ok) or 401 (auth wrong); the *important* thing
+    // is that it isn't 421 — the host gate must stay off in this mode.
+    assert_ne!(
+        resp.status(),
+        StatusCode::MISDIRECTED_REQUEST,
+        "bearer mode must not gate on Host",
+    );
+}
+
+#[tokio::test]
+async fn post_mind_file_rejects_traversal_paths() {
+    // Path::join doesn't sanitise `..` or absolute paths, so a body
+    // with `path: "../etc/passwd"` would let the workspace writer
+    // clobber files outside its root.  The handler must reject these
+    // before calling Workspace::set / save.
+    let r = rig().await;
+    let attack_paths = [
+        "",
+        "../etc/passwd",
+        "a/../b",
+        "/etc/passwd",
+        "\\\\share\\evil",
+        "a\0b",
+        "a\\b",
+    ];
+    for p in attack_paths {
+        let resp = post_json(
+            &format!("{}/api/mind/file", r.base),
+            &serde_json::json!({ "path": p, "content": "x" }),
+        ).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "path {p:?} must be rejected",
+        );
+    }
+    // Sanity: workspace root is undisturbed — no file with the attack
+    // basename leaked into it.
+    let leaked = r.workspace_dir.path().join("passwd");
+    assert!(!leaked.exists(), "traversal must not write outside workspace");
+}
+
+#[tokio::test]
+async fn get_mind_file_rejects_traversal_paths() {
+    // Same gate on the read side: a `path` query like `../etc/passwd`
+    // would otherwise let the operator (or attacker on a non-loopback
+    // bind) read arbitrary files via Workspace::get.
+    let r = rig().await;
+    for p in ["../etc/passwd", "/etc/passwd", "a/../b", "a\\b"] {
+        let url = format!(
+            "{}/api/mind/file?path={}",
+            r.base,
+            urlencoding_minimal(p),
+        );
+        let resp = get(&url).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "path {p:?} must be rejected");
+    }
+}
+
+/// Tiny percent-encoder for the few bytes that confuse URL parsers in
+/// the test rig (`/`, `\\`, `..`, NUL).  Good enough for these tests —
+/// pulling in `urlencoding` for one call site would bloat the dev tree.
+fn urlencoding_minimal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(*b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn sse_replay_with_last_event_id_resumes_from_checkpoint() {
+    // The chat handle keeps a rolling buffer of the last N events
+    // tagged with monotonic ids.  A reconnecting EventSource sends
+    // `Last-Event-ID: <n>` and only sees events newer than that id.
+    // Without the buffer the client misses everything emitted while
+    // it was reconnecting — a 30-second-old `tool_result` would never
+    // re-arrive on the wire.
+    let r = rig().await;
+    let id = create_chat(&r, "replay").await;
+
+    // Drive a few events into the chat handle directly via the
+    // test_helpers artefact emit — same shape the agent uses for
+    // SseEvent::Artefact.  Three artefacts → three events with
+    // monotonic ids 1..3.
+    for n in 0..3 {
+        let art = dyson::message::Artefact::markdown(
+            dyson::message::ArtefactKind::Other,
+            format!("a-{n}"),
+            format!("body-{n}"),
+        );
+        test_helpers::emit_agent_artefact(r.state.clone(), &id, art)
+            .await
+            .expect("emit");
+    }
+
+    // Reconnect with Last-Event-ID: 1 — the controller should replay
+    // events 2 and 3 (and only those).  We read the response body
+    // with a 1s timeout to avoid hanging on the open SSE stream.
+    let url = format!("{}/api/conversations/{id}/events", r.base);
+    let resp = request_with_headers(
+        &url,
+        Method::GET,
+        None,
+        &[("Last-Event-ID", "1")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Drain a few frames — the replay yields each backlog event as a
+    // separate body frame.  Stop once we've seen the buffered set or
+    // the timeout hits.
+    let mut body = String::new();
+    let mut stream = resp.into_body();
+    for _ in 0..6 {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            stream.frame(),
+        )
+        .await
+        {
+            Ok(Some(Ok(frame))) => {
+                if let Ok(data) = frame.into_data() {
+                    body.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+            _ => break,
+        }
+        if body.contains("id: 2") && body.contains("id: 3") {
+            break;
+        }
+    }
+    assert!(body.contains("id: 2"), "must replay event id 2; body: {body}");
+    assert!(body.contains("id: 3"), "must replay event id 3; body: {body}");
+    assert!(!body.contains("id: 1\n"), "must not replay events the client already saw; body: {body}");
+}
+
+#[tokio::test]
+async fn unauthorized_drops_www_authenticate_when_value_is_invalid_for_header() {
+    // hyper's HeaderValue::from_str refuses bytes outside RFC 7230's
+    // visible-ASCII set.  An OIDC config carrying e.g. embedded NULs
+    // (an attacker-controlled / corrupted issuer JSON) used to make
+    // the unauthorized() builder panic via .unwrap().  The fixed
+    // shape skips the WWW-Authenticate header for that response and
+    // still emits a clean 401 — the rest of the auth surface is
+    // unaffected.
+    let r = rig_with_auth_and_mode(
+        hashed_bearer_for_test("placeholder"),
+        test_helpers::AuthMode::Oidc {
+            // NUL is illegal for HeaderValue but legal in a String —
+            // the production code path used to panic on this input.
+            issuer: "https://idp.example.com\u{0000}".into(),
+            authorization_endpoint: "https://idp.example.com/authorize".into(),
+            token_endpoint: None,
+            client_id: "dyson-web".into(),
+            required_scopes: vec![],
+        },
+    )
+    .await;
+    let resp = get(&format!("{}/api/conversations", r.base)).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "still 401, no panic");
+    assert!(
+        resp.headers().get("WWW-Authenticate").is_none(),
+        "must not emit a malformed WWW-Authenticate header",
+    );
 }
 
 #[tokio::test]
