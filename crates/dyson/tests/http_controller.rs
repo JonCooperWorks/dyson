@@ -152,9 +152,24 @@ async fn request_with_headers(
     let caller_set_host = extra_headers
         .iter()
         .any(|(k, _)| k.eq_ignore_ascii_case("host"));
-    let mut builder = Request::builder().method(method).uri(path_q);
+    let caller_set_csrf = extra_headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("x-dyson-csrf"));
+    let mut builder = Request::builder().method(&method).uri(path_q);
     if !caller_set_host {
         builder = builder.header(hyper::header::HOST, authority);
+    }
+    // Mirror the SPA's fetch wrapper: state-changing /api/* requests
+    // need the X-Dyson-CSRF header to clear the controller's CSRF
+    // gate.  Auto-stamp on every mutation method so tests stay
+    // one-line — a test that wants to assert the gate can pass an
+    // explicit header to override.
+    let needs_csrf = matches!(
+        method,
+        Method::POST | Method::DELETE | Method::PUT | Method::PATCH,
+    );
+    if needs_csrf && !caller_set_csrf {
+        builder = builder.header("x-dyson-csrf", "1");
     }
     for (k, v) in extra_headers {
         builder = builder.header(*k, *v);
@@ -2913,6 +2928,59 @@ async fn dispatch_returns_404_for_unknown_get_path_via_static_fallback() {
     let r = rig().await;
     let resp = get(&format!("{}/api/no-such-thing", r.base)).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// CSRF gate — state-changing /api/* requests must carry X-Dyson-CSRF.
+// Browsers can't add custom headers cross-origin without a CORS preflight,
+// and the controller refuses preflights, so a forged POST/DELETE from a
+// rogue origin can't reach a handler.  The SPA's fetch wrapper stamps the
+// header on every request; the test rig's request() helper does the same.
+// Here we explicitly send a request *without* the header to lock in the
+// gate — without this guard a regression that drops the gate would still
+// pass every other integration test in this file.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn csrf_gate_rejects_post_without_x_dyson_csrf() {
+    let r = rig().await;
+    // Override `x-dyson-csrf` to an empty string is not the same as
+    // omitting it (HeaderMap rejects empty), so use the lower-level
+    // hyper builder path that bypasses our auto-stamp.
+    use hyper::client::conn::http1;
+    let url = format!("{}/api/conversations", r.base);
+    let after = url.strip_prefix("http://").unwrap();
+    let (auth, path_q) = after.split_once('/').map(|(a, p)| (a, format!("/{p}"))).unwrap();
+    let stream = tokio::net::TcpStream::connect(auth).await.unwrap();
+    let io = TokioIo::new(stream);
+    let (mut sender, conn) = http1::handshake(io).await.unwrap();
+    tokio::spawn(async move { let _ = conn.await; });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(path_q)
+        .header(hyper::header::HOST, auth)
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(BodyEither::Full(Full::new(Bytes::from_static(b"{\"title\":\"x\"}"))))
+        .unwrap();
+    let resp = sender.send_request(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_string(resp).await;
+    assert!(body.contains("X-Dyson-CSRF"), "error must name the missing header: {body}");
+}
+
+#[tokio::test]
+async fn csrf_gate_allows_post_with_x_dyson_csrf() {
+    // The default request() helper auto-stamps the header — this test
+    // just confirms the rig's happy path still works alongside the
+    // negative case above.  If this regresses, the auto-stamp logic
+    // in the helper has been broken.
+    let r = rig().await;
+    let resp = post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({"title": "hi"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 // ---------------------------------------------------------------------------

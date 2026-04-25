@@ -111,10 +111,14 @@ zeroize = "1"
 # subcommand uses to mint per-token salts; verification only would need fewer.
 argon2 = "0.5"
 # JWT verification for the HTTP controller's OIDC auth mode.  Pure-Rust
-# (ring-backed, already in the dep tree via rustls).  We only ever
-# verify tokens — the dyson process is the relying party, never the
-# issuer — so the surface stays narrow.
-jsonwebtoken = "9"
+# (rust_crypto backend: rsa + p256/p384 + hmac + sha2 — no new C deps).
+# We only ever verify tokens — the dyson process is the relying party,
+# never the issuer — so the surface stays narrow.  v10 closed
+# GHSA-h395-gr6q-cpjc (claim type-confusion that bypassed exp/nbf
+# checks) and split the crypto backend out as an explicit feature, so
+# we pin >= 10.3 and select rust_crypto rather than aws_lc_rs (latter
+# would pull in BoringSSL, defeating the pure-Rust posture).
+jsonwebtoken = { version = "10.3", default-features = false, features = ["use_pem", "rust_crypto"] }
 libc = "0.2"
 undoc = "0.2.0"
 unpdf = { version = "0.4.5", default-features = false, features = ["fast-parse"] }

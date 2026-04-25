@@ -40,14 +40,21 @@ export class DysonClient {
     if (!this._fetch) throw new Error('DysonClient: no fetch implementation available');
   }
 
-  // Inject Authorization header when a token is available.  Stamping
-  // it via a wrapper instead of the call sites keeps every method a
-  // single line and makes auth a single point of change.
+  // Inject Authorization (when available) plus the X-Dyson-CSRF marker
+  // on every request.  The CSRF header is the controller's anti-CSRF
+  // gate: the server rejects any state-changing /api/* call that's
+  // missing it, and browsers won't let a cross-origin page set a custom
+  // header without a CORS preflight (which the controller refuses).
+  // Stamping it on every request — not just mutating ones — keeps the
+  // wrapper one-line and means a future GET that becomes mutating
+  // doesn't silently 400.
   _authedFetch(url, init) {
-    const token = this._getToken();
-    if (!token) return this._fetch(url, init);
     const headers = new Headers((init && init.headers) || {});
-    if (!headers.has('authorization')) headers.set('authorization', `Bearer ${token}`);
+    if (!headers.has('x-dyson-csrf')) headers.set('x-dyson-csrf', '1');
+    const token = this._getToken();
+    if (token && !headers.has('authorization')) {
+      headers.set('authorization', `Bearer ${token}`);
+    }
     return this._fetch(url, { ...(init || {}), headers });
   }
 

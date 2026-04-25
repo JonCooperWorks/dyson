@@ -157,6 +157,35 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         }
     }
 
+    // CSRF gate: every state-changing `/api/*` request must carry the
+    // `X-Dyson-CSRF` custom header.  Browsers can't set custom headers
+    // cross-origin without firing a CORS preflight, and the controller
+    // never returns permissive `Access-Control-Allow-*` headers — so a
+    // forged POST/DELETE/PUT/PATCH from `evil.example` is blocked at
+    // the preflight, and a same-origin call from the SPA passes
+    // because `client.js` stamps the header on `_authedFetch`.  This
+    // closes the gap where a stored bearer / OIDC cookie would
+    // otherwise be auto-attached to a cross-site form submit.
+    //
+    // Two carve-outs:
+    //   * `/api/auth/sse-ticket` is already gated by a bearer above
+    //     and is the bootstrap that the SPA's CSRF wrapper depends
+    //     on; a CSRF check here would chicken-and-egg the first call.
+    //   * SSE ticket consumption (handled above as `ticket_authorized`)
+    //     never lands here for state-changing methods.
+    let is_state_changing = matches!(
+        &method,
+        &Method::POST | &Method::DELETE | &Method::PUT | &Method::PATCH,
+    );
+    let is_csrf_exempt = matches!(segs.as_slice(), ["api", "auth", "sse-ticket"]);
+    if path.starts_with("/api/")
+        && is_state_changing
+        && !is_csrf_exempt
+        && !req.headers().contains_key("x-dyson-csrf")
+    {
+        return super::responses::bad_request("missing X-Dyson-CSRF header");
+    }
+
     match (&method, segs.as_slice()) {
         // ─── conversations ─────────────────────────────────────────────
         (&Method::GET,    ["api", "conversations"])                 => conversations::list(&state).await,

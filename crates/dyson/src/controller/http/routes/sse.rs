@@ -11,6 +11,7 @@
 // ===========================================================================
 
 use std::convert::Infallible;
+use std::time::Duration;
 
 use http_body_util::{BodyExt, StreamBody};
 use hyper::Request;
@@ -55,8 +56,20 @@ pub(super) async fn events(
             if matches!(evt, SseEvent::Done) { return; }
         }
         loop {
-            match rx.recv().await {
-                Ok(evt) => {
+            // Idle timeout — without this, an attacker that opens
+            // many SSE connections and never sends a request can
+            // pin the controller's connection-limit semaphore
+            // (see `MAX_CONCURRENT_CONNS`) until restart.  The
+            // broadcast::Receiver::recv() future blocks forever in
+            // a quiet chat, so we wrap it in a timeout that closes
+            // the connection after a long idle period.  Picked at
+            // the long end of "browser will reconnect cleanly":
+            // EventSource auto-reconnects on close, so the cost of
+            // a false trip is one extra round-trip on the next
+            // event.  An emitted SSE comment keeps proxies from
+            // closing for inactivity before we do.
+            match tokio::time::timeout(IDLE_TIMEOUT, rx.recv()).await {
+                Ok(Ok(evt)) => {
                     // The live id isn't visible to the receiver here;
                     // the producer side stamped it on the ring.  Look
                     // up the most-recent ring entry that matches by
@@ -68,10 +81,17 @@ pub(super) async fn events(
                     yield Ok(Frame::data(Bytes::from(format_sse(id, &evt))));
                     if matches!(evt, SseEvent::Done) { break; }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
                     yield Ok(Frame::data(Bytes::from_static(b": lag\n\n")));
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
+                Ok(Err(broadcast::error::RecvError::Closed)) => break,
+                Err(_elapsed) => {
+                    // Idle for too long — close the stream so the
+                    // connection slot frees up.  EventSource will
+                    // reconnect with Last-Event-ID and replay
+                    // anything emitted in the meantime.
+                    break;
+                }
             }
         }
     };
@@ -89,6 +109,16 @@ fn format_sse(id: u64, evt: &SseEvent) -> String {
     let json = serde_json::to_string(evt).unwrap_or_else(|_| "{}".to_string());
     format!("id: {id}\ndata: {json}\n\n")
 }
+
+/// Maximum quiet period before the SSE handler closes the connection
+/// to free its slot in the per-controller connection limit.  Five
+/// minutes covers a normal "agent is thinking" pause without forcing
+/// a reconnect; longer than that and a malicious client could pin
+/// every slot in `MAX_CONCURRENT_CONNS` by opening connections and
+/// never sending a turn.  EventSource reconnects automatically with
+/// `Last-Event-ID`, so the worst case from a false trip is one extra
+/// round-trip.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Best-effort monotonic local id used for live frames within a
 /// single connection.  Replay frames carry the ring's authoritative

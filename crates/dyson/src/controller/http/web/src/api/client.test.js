@@ -35,7 +35,7 @@ describe('DysonClient — GET endpoints', () => {
     const client = new DysonClient({ fetch });
     const out = await client.listConversations();
     expect(args(fetch)[0]).toBe('/api/conversations');
-    expect(args(fetch)[1].headers.Accept).toBe('application/json');
+    expect(new Headers(args(fetch)[1].headers).get('accept')).toBe('application/json');
     expect(out).toEqual([{ id: 'a', title: 't' }]);
   });
 
@@ -233,6 +233,23 @@ describe('DysonClient._authedFetch — bearer token plumbing', () => {
     const init = fetch.mock.calls[0][1] || {};
     const headers = new Headers(init.headers || {});
     expect(headers.get('authorization')).toBeNull();
+  });
+
+  it('stamps X-Dyson-CSRF on every request even without a bearer', async () => {
+    // Server rejects state-changing /api/* requests that don't carry
+    // the custom CSRF marker — browsers can't add it cross-origin
+    // without a CORS preflight, which the controller refuses.  The
+    // wrapper must add it on every request (mutating or not) so a
+    // future GET-turned-POST doesn't silently 400.
+    const fetch = mockFetch(() => ({ body: {} }));
+    const client = new DysonClient({ fetch, getToken: () => null });
+    await client.listConversations();
+    await client.deleteChat('c1');
+    await client.postModel('p', 'm');
+    for (const [, init] of fetch.mock.calls) {
+      const headers = new Headers(init.headers || {});
+      expect(headers.get('x-dyson-csrf')).toBe('1');
+    }
   });
 
   it('preserves an existing Authorization header from the caller', async () => {

@@ -429,6 +429,38 @@ pub(crate) async fn read_json_capped<T: for<'de> Deserialize<'de>>(
     req: Request<hyper::body::Incoming>,
     max: usize,
 ) -> std::result::Result<T, String> {
+    // Reject anything that isn't `application/json` up front.  serde_json
+    // would safely fail on text/html or form-urlencoded bodies anyway,
+    // but the failure mode is a confusing parse error rather than a
+    // clean "wrong Content-Type" rejection — and it forecloses any
+    // future read_*_capped variant accidentally accepting a body whose
+    // bytes look JSON-ish but came labelled as something else.  Empty
+    // bodies and missing headers are still handled below by the empty-
+    // body short-circuit so a content-less DELETE doesn't 400 here.
+    let has_body = req
+        .headers()
+        .get(hyper::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| n > 0)
+        .unwrap_or(true);
+    if has_body {
+        let ct_ok = req
+            .headers()
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| {
+                // Trim a media-type parameter like `; charset=utf-8`
+                // before comparing so callers that include one (most
+                // browsers do) still pass.
+                let primary = v.split(';').next().unwrap_or("").trim();
+                primary.eq_ignore_ascii_case("application/json")
+            })
+            .unwrap_or(false);
+        if !ct_ok {
+            return Err("expected Content-Type: application/json".to_string());
+        }
+    }
     let collected = req
         .collect()
         .await
