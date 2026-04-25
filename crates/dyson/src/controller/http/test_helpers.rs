@@ -98,7 +98,10 @@ pub fn mint_sse_ticket_for_test(state: &Arc<HttpState>, identity: &str) -> Strin
 }
 
 pub async fn serve(state: Arc<HttpState>, listener: TcpListener) -> crate::Result<()> {
-    super::serve_loop(state, listener).await
+    // Test rigs always run plain HTTP — no TLS termination.  The
+    // production code path adds an `Option<TlsAcceptor>` for the
+    // ACME / Let's Encrypt flow; tests pass `None`.
+    super::serve_loop(state, listener, None).await
 }
 
 /// Drive the `image_generate` / agent `send_file` path from a test

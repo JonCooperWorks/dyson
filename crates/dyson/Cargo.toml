@@ -32,6 +32,13 @@ thiserror = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "signal", "process", "sync", "time"] }
 reqwest = { version = "0.13.2", default-features = false, features = ["stream", "json", "multipart", "form", "query", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# TLS termination + automatic Let's Encrypt issuance for non-loopback
+# HTTP controller binds.  rustls-acme drives the ACME (RFC 8555) flow
+# end-to-end on top of rustls — same crypto stack the rest of the
+# binary already uses, so no new TLS runtime is added.  tokio-rustls
+# is the async TLS wrapper rustls-acme expects on the accept loop.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-acme = { version = "0.12", features = ["tokio", "ring"], default-features = false }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"

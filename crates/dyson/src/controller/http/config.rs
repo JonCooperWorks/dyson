@@ -23,6 +23,45 @@ pub(crate) struct HttpControllerConfigRaw {
     /// unauthenticated endpoint.
     #[serde(default)]
     pub(crate) auth: Option<HttpAuthConfig>,
+
+    /// TLS termination via Let's Encrypt (ACME).  Required on a
+    /// non-loopback bind unless `dangerous_no_tls` is set — running
+    /// plain HTTP on a public address would expose bearer / OIDC
+    /// tokens in flight, defeating the auth chain.  Loopback binds
+    /// don't need it because the OS already isolates the port to
+    /// the local user.
+    #[serde(default)]
+    pub(crate) tls: Option<HttpTlsConfig>,
+
+    /// Explicit opt-in for plain HTTP on a non-loopback bind.  Only
+    /// safe on a network you trust to be private (a VPN or an
+    /// air-gapped LAN); the controller emits a loud warning at
+    /// startup so the choice is auditable.  Modeled on
+    /// `--dangerous-no-sandbox` and `dangerous_no_auth`.
+    #[serde(default)]
+    pub(crate) dangerous_no_tls: bool,
+}
+
+/// TLS configuration.  Today the only supported source is automatic
+/// Let's Encrypt issuance via ACME — the reasoning, in [docs/web.md],
+/// is that operators who want a static cert path should run a
+/// reverse proxy in front and let dyson bind loopback.  Keeping the
+/// surface small means one less mode to reason about.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct HttpTlsConfig {
+    /// Domain name to request a certificate for.  Must resolve back
+    /// to the host this controller is binding on, port 443 (or
+    /// whatever non-loopback port is configured), so the Let's
+    /// Encrypt validators can reach the HTTP-01 challenge endpoint.
+    pub(crate) domain: String,
+    /// Contact email Let's Encrypt uses to notify the operator about
+    /// expiring certs / account issues.  Required by ACME accounts.
+    pub(crate) contact_email: String,
+    /// Use Let's Encrypt's staging environment instead of production.
+    /// Useful for testing the wiring without burning the production
+    /// rate limit.  Defaults to false.
+    #[serde(default)]
+    pub(crate) staging: bool,
 }
 
 /// Which inbound auth mechanism guards the HTTP API.
@@ -113,6 +152,36 @@ mod tests {
         // Garbage at the end of the world.
         assert!(!is_loopback_bind(""));
         assert!(!is_loopback_bind("not a bind"));
+    }
+
+    #[test]
+    fn tls_config_round_trips_with_acme_fields() {
+        // Operators declare a domain + contact email; staging is
+        // optional and defaults to false (production Let's Encrypt).
+        let raw: HttpControllerConfigRaw = serde_json::from_value(serde_json::json!({
+            "bind": "0.0.0.0:443",
+            "auth": { "type": "oidc", "issuer": "https://idp", "audience": "dyson", "allowed_sub": "alice@example.com" },
+            "tls": {
+                "domain": "dyson.example.com",
+                "contact_email": "alice@example.com"
+            }
+        }))
+        .expect("parse");
+        let tls = raw.tls.expect("tls present");
+        assert_eq!(tls.domain, "dyson.example.com");
+        assert_eq!(tls.contact_email, "alice@example.com");
+        assert!(!tls.staging);
+        assert!(!raw.dangerous_no_tls);
+    }
+
+    #[test]
+    fn dangerous_no_tls_is_off_by_default() {
+        // The flag must require an explicit opt-in.  Default loads
+        // (no field set) leave the gate strict.
+        let raw: HttpControllerConfigRaw = serde_json::from_value(serde_json::json!({}))
+            .expect("parse");
+        assert!(!raw.dangerous_no_tls);
+        assert!(raw.tls.is_none());
     }
 
     #[test]

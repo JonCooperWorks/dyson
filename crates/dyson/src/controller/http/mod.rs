@@ -55,7 +55,7 @@ mod state;
 mod stores;
 mod wire;
 
-use config::{HttpAuthConfig, HttpControllerConfigRaw, is_loopback_bind};
+use config::{HttpAuthConfig, HttpControllerConfigRaw, HttpTlsConfig, is_loopback_bind};
 pub use state::HttpState;
 use state::ChatHandle;
 use wire::AuthMode;
@@ -67,6 +67,7 @@ use wire::AuthMode;
 pub struct HttpController {
     bind: String,
     init: AuthInit,
+    tls: Option<HttpTlsConfig>,
 }
 
 /// What `from_config` parsed out of the operator's `auth` block.
@@ -125,6 +126,28 @@ impl HttpController {
                 }
             }
         };
+
+        // TLS / dangerous-no-tls gate.  A non-loopback bind without
+        // either an ACME `tls` block or an explicit `dangerous_no_tls`
+        // flag refuses to start: plain HTTP on a public address would
+        // expose bearer / OIDC tokens in flight, and we treat that as
+        // a config bug, not a runtime warning.  Loopback binds skip
+        // the gate — the OS already isolates the port.
+        if !is_loopback_bind(&raw.bind) && raw.tls.is_none() && !raw.dangerous_no_tls {
+            tracing::error!(
+                bind = %raw.bind,
+                "http controller: non-loopback bind requires either a `tls` block (Let's \
+                 Encrypt domain + contact_email) or `dangerous_no_tls: true`.  Plain HTTP on \
+                 a public address exposes auth tokens in flight."
+            );
+            return None;
+        }
+        if raw.tls.is_some() && raw.dangerous_no_tls {
+            tracing::error!(
+                "http controller: `tls` and `dangerous_no_tls` are mutually exclusive — pick one"
+            );
+            return None;
+        }
         let init = match auth_config {
             HttpAuthConfig::DangerousNoAuth => AuthInit::Ready {
                 auth: Arc::new(DangerousNoAuth),
@@ -170,7 +193,7 @@ impl HttpController {
                 }
             }
         };
-        Some(Self { bind: raw.bind, init })
+        Some(Self { bind: raw.bind, init, tls: raw.tls })
     }
 }
 
@@ -369,8 +392,79 @@ impl Controller for HttpController {
             });
         }
 
-        serve_loop(state, listener).await
+        // ACME / TLS startup.  When configured, build the rustls-acme
+        // state, hand the resolver into a rustls ServerConfig, and
+        // serve through a TlsAcceptor.  ACME state lives at
+        // `~/.dyson/acme/<domain>/` so accounts and certs survive
+        // restarts.  The flow is HTTP-01 over the same listener — a
+        // background task drives the renewal loop.
+        let tls_acceptor: Option<tokio_rustls::TlsAcceptor> = match &self.tls {
+            Some(cfg) => Some(build_acme_acceptor(cfg).await?),
+            None => None,
+        };
+
+        serve_loop(state, listener, tls_acceptor).await
     }
+}
+
+/// Build the ACME-driven rustls TLS acceptor.  Persists account +
+/// certificate to `~/.dyson/acme/<domain>/`; spawns the renewal /
+/// fetch task so the cert rotates well before expiry.  Returns an
+/// acceptor the accept loop wraps every TCP stream in.
+async fn build_acme_acceptor(cfg: &HttpTlsConfig) -> crate::Result<tokio_rustls::TlsAcceptor> {
+    use rustls_acme::AcmeConfig;
+    use rustls_acme::caches::DirCache;
+    use std::sync::Arc;
+
+    // Cert + account state live next to the rest of dyson's state so
+    // a `~/.dyson` snapshot captures everything needed to restart.
+    let cache_dir = crate::util::resolve_tilde("~/.dyson/acme");
+    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        return Err(crate::DysonError::Config(format!(
+            "cannot create acme cache dir {}: {e}",
+            cache_dir.display()
+        )));
+    }
+
+    let mut acme_cfg = AcmeConfig::new(vec![cfg.domain.clone()])
+        .contact_push(format!("mailto:{}", cfg.contact_email))
+        .cache(DirCache::new(cache_dir.clone()));
+    acme_cfg = if cfg.staging {
+        acme_cfg.directory_lets_encrypt(false)
+    } else {
+        acme_cfg.directory_lets_encrypt(true)
+    };
+
+    let mut state = acme_cfg.state();
+    let resolver = state.resolver();
+    let server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_cert_resolver(resolver);
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+
+    // rustls-acme ships a Stream<Item = Result<...>> the operator
+    // must drive forward to make progress.  Spawn a task to do
+    // exactly that — every event is logged so operators can see
+    // issuance / renewal in journalctl.
+    let domain = cfg.domain.clone();
+    tokio::spawn(async move {
+        use futures_util::StreamExt;
+        loop {
+            match state.next().await {
+                Some(Ok(ok)) => tracing::info!(domain = %domain, event = ?ok, "acme event"),
+                Some(Err(e)) => tracing::warn!(domain = %domain, error = ?e, "acme error"),
+                None => break,
+            }
+        }
+    });
+
+    tracing::info!(
+        domain = %cfg.domain,
+        cache = %cache_dir.display(),
+        staging = cfg.staging,
+        "TLS enabled — Let's Encrypt issuance via rustls-acme"
+    );
+    Ok(acceptor)
 }
 
 /// Accept loop, factored out of `Controller::run` so integration tests
@@ -378,7 +472,11 @@ impl Controller for HttpController {
 /// port via `local_addr`).  Never returns under normal operation;
 /// returns `Ok(())` only if the accept loop is cancelled by dropping
 /// the task.
-async fn serve_loop(state: Arc<HttpState>, listener: TcpListener) -> crate::Result<()> {
+async fn serve_loop(
+    state: Arc<HttpState>,
+    listener: TcpListener,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+) -> crate::Result<()> {
     // Cap simultaneous in-flight connections so a misbehaving client
     // (or a runaway test) can't exhaust file descriptors / RAM.  1024
     // is generous for a single-operator deployment but small enough
@@ -402,15 +500,37 @@ async fn serve_loop(state: Arc<HttpState>, listener: TcpListener) -> crate::Resu
             }
         };
         let state = Arc::clone(&state);
+        let tls_acceptor = tls_acceptor.clone();
         tokio::spawn(async move {
             let _permit = permit; // Held until connection close.
-            let io = TokioIo::new(stream);
+            // Branch on whether TLS is configured.  Both paths go
+            // through the same `service_fn` dispatcher; the only
+            // difference is the IO type fed to hyper.
+            let svc_state = Arc::clone(&state);
             let svc = service_fn(move |req| {
-                let state = Arc::clone(&state);
+                let state = Arc::clone(&svc_state);
                 async move { Ok::<_, Infallible>(routes::dispatch(req, state).await) }
             });
-            if let Err(e) = http1::Builder::new().serve_connection(io, svc).await {
-                tracing::debug!(error = %e, "http connection ended");
+            match tls_acceptor {
+                Some(acceptor) => {
+                    let tls_stream = match acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::debug!(error = %e, "TLS handshake failed");
+                            return;
+                        }
+                    };
+                    let io = TokioIo::new(tls_stream);
+                    if let Err(e) = http1::Builder::new().serve_connection(io, svc).await {
+                        tracing::debug!(error = %e, "http connection ended");
+                    }
+                }
+                None => {
+                    let io = TokioIo::new(stream);
+                    if let Err(e) = http1::Builder::new().serve_connection(io, svc).await {
+                        tracing::debug!(error = %e, "http connection ended");
+                    }
+                }
             }
         });
     }

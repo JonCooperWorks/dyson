@@ -163,7 +163,8 @@ verify-only impl that holds no plaintext.
     "type": "oidc",
     "issuer": "https://accounts.example.com",
     "audience": "dyson-web",
-    "required_scopes": ["dyson:api"]
+    "required_scopes": ["dyson:api"],
+    "allowed_sub": "alice@example.com"
   }
 }
 ```
@@ -179,6 +180,105 @@ request it verifies `Authorization: Bearer <jwt>`:
 - `aud` matches the configured `audience` (the OAuth `client_id`).
 - `exp` / `nbf` are within tolerance.
 - `scope` contains every entry in `required_scopes`.
+- `sub` matches `allowed_sub` exactly, when that field is set.  Unset
+  → any valid token authenticates (default; backwards-compatible).
+  Use this when the OIDC `client_id` is shared across an enterprise
+  but only one human should be able to drive this dyson instance.
+  The same gate applies to the SSE one-shot ticket flow: a ticket
+  bound to a non-allowed `sub` is rejected on `/events`.
+
+#### Deployment scenarios
+
+The auth + bind combination is the security perimeter.  Pick the row
+that matches where the controller will run:
+
+| Scenario | Bind | Auth | TLS | Notes |
+|---|---|---|---|---|
+| Single operator on the laptop | `127.0.0.1:7878` | `dangerous_no_auth` | n/a | Loopback threat model; the OS already isolates the port to the local user.  Default. |
+| Small team behind Tailscale / WireGuard | Tailscale IP `:7878` | `bearer` | optional | The VPN is the perimeter; the bearer hash adds a credential check on top.  TLS optional because the VPN already encrypts. |
+| Reverse-proxy in front (nginx, Caddy, Cloudflare) | `127.0.0.1:7878` | `bearer` or `oidc` | terminated by proxy | Proxy handles cert renewal + TLS termination.  Loopback bind so only the proxy can reach dyson. |
+| **Public internet, single user** | `0.0.0.0:7878` | `oidc` with `allowed_sub` | **required** | OIDC handles the auth; `allowed_sub` locks the box to one human regardless of who else has tokens for the same `client_id`.  See the TLS section below. |
+| Public internet, multi-user | not supported | n/a | n/a | Run a real reverse-proxy + multi-tenant identity layer.  Dyson is a single-operator agent. |
+
+**Why `allowed_sub` makes the public-internet shape safe.**  An OIDC
+deployment without `allowed_sub` accepts any token the IdP signs for
+the configured `audience`.  In a corporate IdP (Okta, Auth0, Entra,
+Authentik) that audience is typically a `client_id` registered for
+the dyson tenant — every employee with that scope group can mint a
+valid token.  Setting `allowed_sub` to your own `sub` claim narrows
+the population to one: the controller refuses every token whose
+subject doesn't match exactly, even if the signature, audience,
+issuer, expiry, and scopes all check out.  Combined with TLS, this
+is the shape that's safe to expose on `0.0.0.0:443` behind a real
+domain without a reverse proxy.
+
+The lock travels with the SSE ticket flow too: tickets are bound to
+the authenticated `sub` at mint time and rejected on consume if the
+identity doesn't match.  A leaked ticket can't impersonate the
+operator on `/events` even within the 30-second TTL window.
+
+### TLS
+
+The HTTP controller terminates TLS itself, with certificates issued
+and renewed automatically via Let's Encrypt (ACME, [RFC 8555]).  No
+static PEM file path, no openssl shells, no cron renewal jobs:
+declare a domain + contact email and the controller does the rest.
+
+[RFC 8555]: https://datatracker.ietf.org/doc/html/rfc8555
+
+```json
+{
+  "type": "http",
+  "config": {
+    "bind": "0.0.0.0:443",
+    "tls": {
+      "domain": "dyson.example.com",
+      "contact_email": "alice@example.com"
+    },
+    "auth": {
+      "type": "oidc",
+      "issuer": "...",
+      "audience": "...",
+      "allowed_sub": "alice@example.com"
+    }
+  }
+}
+```
+
+How it works:
+
+- On startup the controller registers an ACME account (or reuses one
+  from `~/.dyson/acme/`) and orders a certificate for `domain`.
+- The HTTP-01 challenge is served from the same listener — the ACME
+  client and the API share the bind, so no separate port-80 dance.
+  This requires the bind to be reachable on port 443 (or whatever
+  port you bound) from the public internet so Let's Encrypt's
+  validators can hit it.
+- Issued certs and the account key are persisted to
+  `~/.dyson/acme/`.  Renewal runs as a background task; certs
+  rotate ~30 days before expiry without restarting the controller.
+
+#### Non-loopback binds without TLS
+
+A non-loopback bind without a `tls` block refuses to start.  Plain
+HTTP on a public address would expose bearer tokens / OIDC tokens
+in flight, defeating the auth chain entirely.  If you genuinely
+want plain HTTP — for example, a private LAN segment where you
+trust the network or a VPN that already encrypts — set:
+
+```json
+{
+  "config": {
+    "bind": "192.168.1.10:7878",
+    "dangerous_no_tls": true,
+    "auth": { "...": "..." }
+  }
+}
+```
+
+The flag is the explicit opt-in, modeled on `--dangerous-no-sandbox`
+and `dangerous_no_auth`.  The controller logs a loud warning at
+startup so the choice is auditable.
 
 Tokens dyson never minted are rejected; tokens dyson minted go
 through the verification path on every request — there's no session

@@ -50,7 +50,7 @@ use serde_json::Value;
 use crate::error::{DysonError, Result};
 
 /// Current config version.  Bump this when adding a new migration.
-pub const CURRENT_VERSION: u64 = 2;
+pub const CURRENT_VERSION: u64 = 3;
 
 // ---------------------------------------------------------------------------
 // Step — a single atomic operation in a migration.
@@ -152,6 +152,23 @@ const fn migrations() -> &'static [Migration] {
                 Step::RenameWrapArray("providers", "model", "models"),
                 Step::Remove("agent.model"),
             ],
+        },
+        // v2 → v3: Marker migration documenting the new optional
+        // `allowed_sub` field on `controllers[].auth` for OIDC.  When
+        // set, the controller refuses any JWT whose `sub` claim
+        // doesn't match — locking the instance to a single user when
+        // the OIDC `client_id` is shared across an enterprise.  The
+        // same gate applies to SSE one-shot tickets.
+        //
+        // No structural changes: the field is `Option<String>` with a
+        // serde default, so existing v2 configs continue to load
+        // unchanged.  The version bump just stamps the schema so
+        // future tooling (and `journalctl`) can identify which
+        // capability set the operator's config is aware of.
+        Migration {
+            from_version: 2,
+            description: "OIDC controllers may now declare allowed_sub to lock the controller to a single user",
+            steps: &[],
         },
     ]
 }
@@ -867,6 +884,71 @@ mod tests {
         assert!(root["agent"].get("base_url").is_none());
         assert_eq!(root["agent"]["max_iterations"], 20);
         assert_eq!(root["agent"]["max_tokens"], 8192);
+    }
+
+    #[test]
+    fn v2_to_v3_marker_is_a_pure_version_bump() {
+        // v2 → v3 is a marker migration: the `allowed_sub` OIDC
+        // field is optional and serde-default, so no structural
+        // change is required.  The migration just bumps the
+        // stamped version so a journalctl reader can tell which
+        // capability set the operator's config is aware of.
+        let mut root = json!({
+            "config_version": 2,
+            "providers": {
+                "default": { "type": "anthropic", "models": ["claude-sonnet-4"] }
+            },
+            "agent": { "provider": "default" },
+            "controllers": [{
+                "type": "http",
+                "config": {
+                    "bind": "0.0.0.0:7878",
+                    "auth": {
+                        "type": "oidc",
+                        "issuer": "https://idp.example.com",
+                        "audience": "dyson-web"
+                    }
+                }
+            }]
+        });
+        let original = root.clone();
+        let applied = migrate(&mut root).unwrap();
+        assert!(applied, "version should bump 2 → 3");
+        assert_eq!(root["config_version"], CURRENT_VERSION);
+        assert_eq!(CURRENT_VERSION, 3);
+
+        // Everything else byte-for-byte identical (modulo the version stamp).
+        let mut without_version = root.clone();
+        without_version.as_object_mut().unwrap().remove("config_version");
+        let mut original_without_version = original.clone();
+        original_without_version.as_object_mut().unwrap().remove("config_version");
+        assert_eq!(without_version, original_without_version);
+    }
+
+    #[test]
+    fn v2_to_v3_preserves_allowed_sub_when_set() {
+        // An operator who has already added `allowed_sub` to a v2
+        // config (manual edit) must round-trip cleanly through the
+        // v3 marker without losing the field.
+        let mut root = json!({
+            "config_version": 2,
+            "controllers": [{
+                "type": "http",
+                "config": {
+                    "auth": {
+                        "type": "oidc",
+                        "issuer": "https://idp.example.com",
+                        "audience": "dyson-web",
+                        "allowed_sub": "alice@example.com"
+                    }
+                }
+            }]
+        });
+        migrate(&mut root).unwrap();
+        assert_eq!(
+            root["controllers"][0]["config"]["auth"]["allowed_sub"],
+            "alice@example.com"
+        );
     }
 
     #[test]
