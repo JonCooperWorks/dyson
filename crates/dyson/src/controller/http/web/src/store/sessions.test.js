@@ -10,6 +10,9 @@ import {
   getResources,
   mapLastTurn,
   appendBlock,
+  mapAgentTail,
+  appendAgentBlock,
+  lastAgentIndex,
   openPanel,
   closePanel,
   __resetSessionsForTests,
@@ -170,5 +173,80 @@ describe('pure session reducers', () => {
   it('closePanel is a no-op when the ref isn\'t open', () => {
     const s = { ...makeSession(), panels: ['r1'] };
     expect(closePanel(s, 'r2')).toBe(s);
+  });
+});
+
+describe('queue-aware agent-tail reducers', () => {
+  const userT = (text) => ({ role: 'user', ts: '', blocks: [{ type: 'text', text }] });
+  const agentT = (text = '') => ({ role: 'agent', ts: '', blocks: [{ type: 'text', text }] });
+
+  it('lastAgentIndex skips trailing user turns', () => {
+    const s = { ...makeSession(), liveTurns: [userT('a'), agentT('hi'), userT('b')] };
+    expect(lastAgentIndex(s)).toBe(1);
+  });
+
+  it('lastAgentIndex returns -1 when no agent turn exists', () => {
+    const s = { ...makeSession(), liveTurns: [userT('a'), userT('b')] };
+    expect(lastAgentIndex(s)).toBe(-1);
+  });
+
+  it('mapAgentTail routes deltas to the in-flight agent turn even with a queued user turn at the tail', () => {
+    // Reproduces the queue race: [user, agent-filling, user-queued].
+    // A delta arriving before the queue-drain Done belongs to the
+    // middle agent turn, NOT to the trailing user turn.
+    const s = {
+      ...makeSession(),
+      liveTurns: [userT('q1'), agentT('partial'), userT('q2')],
+    };
+    const next = mapAgentTail(s, t => ({
+      ...t, blocks: [{ type: 'text', text: t.blocks[0].text + ' more' }],
+    }));
+    expect(next.liveTurns).toHaveLength(3);
+    expect(next.liveTurns[1].blocks[0].text).toBe('partial more');
+    expect(next.liveTurns[2]).toBe(s.liveTurns[2]);
+  });
+
+  it('mapAgentTail mints a fresh agent turn after Done (nextAgentNew)', () => {
+    // Done sets nextAgentNew=true.  The next delta must NOT graft
+    // onto the just-finished turn — it belongs to the queue-drain
+    // reply that the server is about to start.
+    const s = {
+      ...makeSession(),
+      nextAgentNew: true,
+      running: false,
+      liveTurns: [userT('q1'), agentT('done'), userT('q2')],
+    };
+    const next = mapAgentTail(s, t => ({
+      ...t, blocks: [{ type: 'text', text: 'fresh delta' }],
+    }));
+    expect(next.liveTurns).toHaveLength(4);
+    expect(next.liveTurns[3].role).toBe('agent');
+    expect(next.liveTurns[3].blocks[0].text).toBe('fresh delta');
+    // The previous agent turn must be untouched.
+    expect(next.liveTurns[1]).toBe(s.liveTurns[1]);
+    expect(next.nextAgentNew).toBe(false);
+    // Typing indicator returns for the drained reply.
+    expect(next.running).toBe(true);
+  });
+
+  it('mapAgentTail creates an agent turn when none exists yet', () => {
+    const s = { ...makeSession(), liveTurns: [userT('only-user')] };
+    const next = mapAgentTail(s, t => ({
+      ...t, blocks: [{ type: 'text', text: 'first delta' }],
+    }));
+    expect(next.liveTurns).toHaveLength(2);
+    expect(next.liveTurns[1].role).toBe('agent');
+    expect(next.running).toBe(true);
+  });
+
+  it('appendAgentBlock pushes onto the in-flight agent turn, not a trailing user turn', () => {
+    const s = {
+      ...makeSession(),
+      liveTurns: [userT('q1'), agentT('hi'), userT('q2')],
+    };
+    const next = appendAgentBlock(s, { type: 'tool', ref: 'r1' });
+    expect(next.liveTurns[1].blocks).toHaveLength(2);
+    expect(next.liveTurns[1].blocks[1]).toEqual({ type: 'tool', ref: 'r1' });
+    expect(next.liveTurns[2].blocks).toHaveLength(1);
   });
 });

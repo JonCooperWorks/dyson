@@ -24,7 +24,8 @@ import {
 } from '../store/app.js';
 import {
   ensureSession, updateSession, getSession, getResources, mintToolRef,
-  mapLastTurn, appendBlock, openPanel, closePanel,
+  mapLastTurn, appendBlock, mapAgentTail, appendAgentBlock,
+  openPanel, closePanel,
 } from '../store/sessions.js';
 
 const MindView = lazy(() =>
@@ -421,15 +422,29 @@ function ConversationView({ conv, toolRef, setToolRef }) {
       url: f.type?.startsWith('image/') ? URL.createObjectURL(f) : null,
       local: true,
     }))];
-    mutate(s => ({
-      ...s,
-      running: true, phase: 'thinking', thinkingRef: null,
-      liveTurns: [
-        ...s.liveTurns,
-        { role: 'user', ts, blocks: userBlocks },
-        { role: 'agent', ts, blocks: [{ type: 'text', text: '' }] },
-      ],
-    }));
+    // When already running, the new POST will land in the server-side
+    // queue.  Don't push an optimistic agent placeholder for it — the
+    // active agent turn (earlier in the array) is still receiving
+    // deltas, and a tail placeholder would intercept them.  Once Done
+    // fires for the current turn, `nextAgentNew` lets `mapAgentTail`
+    // mint a fresh agent turn for the queue-drain reply.
+    mutate(s => {
+      const wasRunning = !!s.running;
+      const newTurns = wasRunning
+        ? [...s.liveTurns, { role: 'user', ts, blocks: userBlocks }]
+        : [
+            ...s.liveTurns,
+            { role: 'user', ts, blocks: userBlocks },
+            { role: 'agent', ts, blocks: [{ type: 'text', text: '' }] },
+          ];
+      return {
+        ...s,
+        running: true,
+        phase: wasRunning ? s.phase : 'thinking',
+        thinkingRef: wasRunning ? s.thinkingRef : null,
+        liveTurns: newTurns,
+      };
+    });
     getResources(conv).es = client.send(conv, val, streamCallbacks(conv), files);
   };
 
@@ -548,12 +563,24 @@ function streamCallbacks(conv) {
     t => ({ ...t, body: { ...t.body, text: (t.body.text || '') + extra } }));
 
   return {
-    onText: (delta) => updateSession(conv, s => mapLastTurn(s, t => {
+    onText: (delta) => updateSession(conv, s => mapAgentTail(s, t => {
       const tail = t.blocks[t.blocks.length - 1];
       return tail?.type === 'text'
         ? { ...t, blocks: [...t.blocks.slice(0, -1), { ...tail, text: tail.text + delta }] }
         : { ...t, blocks: [...t.blocks, { type: 'text', text: delta }] };
     })),
+
+    // The server queues this POST behind the in-flight turn instead of
+    // 409-ing it.  Mark the just-pushed user turn so `Turn.jsx` shows
+    // a "queued" pill — no agent placeholder was pushed (sendMsg
+    // skipped that path when running:true), so there's nothing to
+    // remove.  Don't touch `running` — a turn is still active.
+    onQueued: ({ position }) => updateSession(conv, s => {
+      const i = s.liveTurns.length - 1;
+      if (i < 0 || s.liveTurns[i].role !== 'user') return s;
+      const turn = { ...s.liveTurns[i], queued: true, queuedPosition: position };
+      return { ...s, liveTurns: [...s.liveTurns.slice(0, i), turn] };
+    }),
 
     onThinking: (delta) => {
       const existing = getSession(conv)?.thinkingRef;
@@ -564,7 +591,7 @@ function streamCallbacks(conv) {
         kind: 'thinking', status: 'running', dur: '…', body: { text: delta },
       }));
       updateSession(conv, s => ({
-        ...openPanel(appendBlock(s, { type: 'tool', ref }), ref),
+        ...openPanel(appendAgentBlock(s, { type: 'tool', ref }), ref),
         thinkingRef: ref,
       }));
     },
@@ -586,7 +613,7 @@ function streamCallbacks(conv) {
       const ref = id || mintToolRef(conv, 'live');
       setTool(ref, mkTool(name, { status: 'running', dur: '…' }));
       updateSession(conv, s => ({
-        ...openPanel(appendBlock(s, { type: 'tool', ref }), ref),
+        ...openPanel(appendAgentBlock(s, { type: 'tool', ref }), ref),
         phase: 'tool', tname: name, liveToolRef: ref,
       }));
     },
@@ -644,10 +671,10 @@ function streamCallbacks(conv) {
     },
 
     onError: (message) => updateSession(conv,
-      s => appendBlock(s, { type: 'text', text: `\n[error] ${message}\n` })),
+      s => appendAgentBlock(s, { type: 'text', text: `\n[error] ${message}\n` })),
 
     onFile: ({ name, mime_type, url, inline_image }) => {
-      updateSession(conv, s => appendBlock(s, {
+      updateSession(conv, s => appendAgentBlock(s, {
         type: 'file', name, mime: mime_type, url, inline: !!inline_image,
       }));
       // For images: also flip the active tool panel into image-kind so
@@ -669,7 +696,7 @@ function streamCallbacks(conv) {
         // so the Artefacts tab lists them.
         const withBlock = kind === 'image'
           ? s
-          : appendBlock(s, { type: 'artefact', id, kind, title, url, bytes });
+          : appendAgentBlock(s, { type: 'artefact', id, kind, title, url, bytes });
         return {
           ...withBlock,
           artefacts: [
@@ -684,7 +711,14 @@ function streamCallbacks(conv) {
     onDone: () => {
       const ref = getSession(conv)?.thinkingRef;
       if (ref) updateTool(ref, t => ({ ...t, status: 'done', dur: '' }));
-      updateSession(conv, s => s.running ? { ...s, running: false, thinkingRef: null } : s);
+      // Mark that any subsequent delta belongs to a new agent run --
+      // this is the queue-drain case where the server processes the
+      // next queued message right after this Done.  `mapAgentTail`
+      // mints a fresh agent turn when it sees `nextAgentNew`, so the
+      // drain reply doesn't graft onto the just-finished turn.
+      updateSession(conv, s => s.running
+        ? { ...s, running: false, thinkingRef: null, nextAgentNew: true }
+        : s);
       getResources(conv).es = null;
     },
   };

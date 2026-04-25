@@ -120,6 +120,15 @@ function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
         <div className="who">
           <span className="name">{isUser ? 'jcooper' : 'dyson'}</span>
           {turn.model && <span className="model">{turn.model}</span>}
+          {turn.queued && (
+            <span
+              className="queued-badge"
+              title={turn.queuedPosition
+                ? `Queued behind the in-flight turn (#${turn.queuedPosition})`
+                : 'Queued behind the in-flight turn'}>
+              queued{turn.queuedPosition ? ` #${turn.queuedPosition}` : ''}
+            </span>
+          )}
           <span className="when">{turn.ts}</span>
           {rating && <span className="rating-badge" title={`rated ${rating}`}>{rating}</span>}
         </div>

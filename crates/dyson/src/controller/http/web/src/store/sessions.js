@@ -127,6 +127,60 @@ export const mapLastTurn = (s, fn) => {
 export const appendBlock = (s, block) =>
   mapLastTurn(s, t => ({ ...t, blocks: [...t.blocks, block] }));
 
+// Walk from the end to find the most recent agent turn.  Returns -1
+// when no agent turn exists.  Used by the SSE delta handlers so a
+// queued user message sitting at the tail (no agent placeholder yet,
+// because we don't push one when sending while running) doesn't
+// receive deltas that belong to the in-flight agent turn earlier in
+// the array.
+export const lastAgentIndex = (s) => {
+  for (let i = s.liveTurns.length - 1; i >= 0; i--) {
+    if (s.liveTurns[i].role === 'agent') return i;
+  }
+  return -1;
+};
+
+// Apply `fn` to the agent turn that should absorb the next delta.
+// Forces a fresh agent turn when `s.nextAgentNew` is set (we just
+// emitted Done for the previous turn and the next delta belongs to
+// a new run — the queue-drain case) OR when no agent turn exists yet.
+// Otherwise mutates the most recent agent turn in place, skipping
+// past any user turns at the tail.
+export const mapAgentTail = (s, fn) => {
+  if (s.nextAgentNew) {
+    // Fresh turn after a Done — flip running back on so the typing
+    // indicator returns while the queue-drain reply streams in.
+    const fresh = fn({ role: 'agent', ts: '', blocks: [] });
+    return {
+      ...s,
+      nextAgentNew: false,
+      running: true,
+      phase: 'thinking',
+      thinkingRef: null,
+      liveTurns: [...s.liveTurns, fresh],
+    };
+  }
+  const i = lastAgentIndex(s);
+  if (i < 0) {
+    return {
+      ...s,
+      running: true,
+      phase: 'thinking',
+      thinkingRef: null,
+      liveTurns: [...s.liveTurns, fn({ role: 'agent', ts: '', blocks: [] })],
+    };
+  }
+  const next = fn(s.liveTurns[i]);
+  if (next === s.liveTurns[i]) return s;
+  return {
+    ...s,
+    liveTurns: [...s.liveTurns.slice(0, i), next, ...s.liveTurns.slice(i + 1)],
+  };
+};
+
+export const appendAgentBlock = (s, block) =>
+  mapAgentTail(s, t => ({ ...t, blocks: [...t.blocks, block] }));
+
 export const openPanel = (s, ref) => ({
   ...s,
   panels: s.panels.includes(ref) ? s.panels : [...s.panels, ref],

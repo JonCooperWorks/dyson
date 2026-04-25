@@ -274,6 +274,23 @@
   border: 1px solid var(--accent-ln);
   cursor: default;
 }
+/* Pill on user turns whose POST landed in the per-chat queue (the
+   in-flight turn was still running).  Muted styling so it reads as
+   metadata, not as an error.  Help cursor invites the title tooltip. */
+.turn .queued-badge {
+  margin-left: 8px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--bg-1);
+  border: 1px solid var(--ln);
+  color: var(--fg-2);
+  font-variant: small-caps;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  cursor: help;
+}
 .turn .copy-turn {
   position: sticky;
   top: 8px;
