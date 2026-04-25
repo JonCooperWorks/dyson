@@ -84,6 +84,7 @@ enum AuthInit {
         issuer: String,
         audience: String,
         required_scopes: Vec<String>,
+        allowed_sub: Option<String>,
     },
 }
 
@@ -153,6 +154,7 @@ impl HttpController {
                 issuer,
                 audience,
                 required_scopes,
+                allowed_sub,
             } => {
                 if issuer.is_empty() || audience.is_empty() {
                     tracing::error!(
@@ -164,6 +166,7 @@ impl HttpController {
                     issuer,
                     audience,
                     required_scopes,
+                    allowed_sub,
                 }
             }
         };
@@ -194,12 +197,14 @@ impl Controller for HttpController {
                 issuer,
                 audience,
                 required_scopes,
+                allowed_sub,
             } => {
                 let built = OidcAuth::discover(
                     issuer,
                     audience.clone(),
                     required_scopes.clone(),
                     None,
+                    allowed_sub.clone(),
                 )
                 .await?;
                 let mode = AuthMode::Oidc {
@@ -259,6 +264,13 @@ impl Controller for HttpController {
         // proxy deployment whose public Host doesn't match `127.0.0.1`.
         let loopback_only_host_check =
             is_loopback_bind(&self.bind) && matches!(auth_mode, AuthMode::None);
+        // Surface the OIDC `allowed_sub` (when set) on state so the
+        // SSE ticket consumer enforces the same single-user lock the
+        // header-bearer path enforces in `OidcAuth::validate_request`.
+        let allowed_identity = match &self.init {
+            AuthInit::PendingOidc { allowed_sub, .. } => allowed_sub.clone(),
+            AuthInit::Ready { .. } => None,
+        };
         let state = Arc::new(HttpState::new(
             settings.clone(),
             Arc::clone(registry),
@@ -268,6 +280,7 @@ impl Controller for HttpController {
             auth_mode,
             config_path,
             loopback_only_host_check,
+            allowed_identity,
         ));
 
         // Expose the artefact store across controllers so a file sent

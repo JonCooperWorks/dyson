@@ -2739,6 +2739,56 @@ async fn access_token_query_param_only_applies_to_events_path() {
 }
 
 #[tokio::test]
+async fn sse_ticket_identity_must_match_allowed_sub_when_set() {
+    // When the controller is locked to a single user via
+    // `allowed_sub` (OIDC), a ticket minted for that identity is
+    // accepted on the SSE open; a ticket bound to any other
+    // identity is rejected — the dispatcher consults the same
+    // identity gate the regular auth path uses.  This is the
+    // "lock the instance to one human" shape: a stolen ticket
+    // bound to a different sub doesn't authorise the SSE stream.
+    //
+    // Run against a bearer-auth rig so an SSE request without a
+    // valid ticket falls through to the header check (and 401s
+    // when no header is present).  DangerousNoAuth would always
+    // succeed and mask the gate.
+    use dyson::controller::http::test_helpers;
+    let auth = hashed_bearer_for_test("placeholder");
+    let r = rig_with_auth_and_mode(auth, test_helpers::AuthMode::Bearer).await;
+    // Force `allowed_sub` semantics on the HttpState by setting
+    // the configured identity.  The hook is test-only — production
+    // sets it from the OIDC `allowed_sub` config.
+    test_helpers::set_allowed_identity_for_test(&r.state, Some("alice@example.com".to_string()));
+
+    // Need a chat that exists.  Create one with the bearer header
+    // so the bearer gate accepts the request.
+    let chat_id = create_chat_with_token(&r, "lock", "placeholder").await;
+
+    // Ticket bound to a non-allowed sub — must NOT authorise the
+    // SSE open.  Falls through to header auth (none present) → 401.
+    let bob_ticket = test_helpers::mint_sse_ticket_for_test(&r.state, "bob@example.com");
+    let url = format!(
+        "{}/api/conversations/{}/events?access_token={}",
+        r.base, chat_id, bob_ticket,
+    );
+    let resp = get(&url).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "ticket bound to a non-allowed sub must not authorise the SSE open",
+    );
+
+    // Ticket bound to the allowed identity — accepted.
+    let alice_ticket = test_helpers::mint_sse_ticket_for_test(&r.state, "alice@example.com");
+    let url = format!(
+        "{}/api/conversations/{}/events?access_token={}",
+        r.base, chat_id, alice_ticket,
+    );
+    let resp = get(&url).await;
+    assert_eq!(resp.status(), StatusCode::OK, "matching-identity ticket must authorise");
+}
+
+#[tokio::test]
 async fn sse_ticket_round_trips_and_is_single_use() {
     // POST /api/auth/sse-ticket mints a one-shot, short-lived,
     // identity-bound token.  EventSource can't send headers, so the

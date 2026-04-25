@@ -69,7 +69,32 @@ pub fn build_state_with_auth_mode(
         auth_mode,
         None,
         loopback_only_host_check,
+        None,
     ))
+}
+
+/// Test hook: pin the controller's allowed-identity gate for the
+/// duration of a test rig.  Production sets this from the OIDC
+/// `allowed_sub` config at controller construction; the helper
+/// exists so the rebinding-defence and ticket-identity tests can
+/// assert the gate without standing up a real OIDC provider.
+/// Recovers from poisoning so the assignment can't be silently
+/// dropped.
+#[doc(hidden)]
+pub fn set_allowed_identity_for_test(state: &Arc<HttpState>, identity: Option<String>) {
+    let mut guard = match state.allowed_identity.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    *guard = identity;
+}
+
+/// Test hook: mint an SSE ticket bound to `identity` directly,
+/// bypassing the auth chain.  Lets the integration test exercise
+/// the consumer's identity-mismatch branch without a real OIDC IdP.
+#[doc(hidden)]
+pub fn mint_sse_ticket_for_test(state: &Arc<HttpState>, identity: &str) -> String {
+    state.mint_sse_ticket(identity)
 }
 
 pub async fn serve(state: Arc<HttpState>, listener: TcpListener) -> crate::Result<()> {

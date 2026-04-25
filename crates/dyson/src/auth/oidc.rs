@@ -128,6 +128,15 @@ pub struct OidcAuth {
     /// and trust the audience check; enterprises that issue one `aud`
     /// across many apps can require `dyson:api` here.
     required_scopes: Vec<String>,
+    /// Optional: lock the instance to a single user.  When set, only
+    /// tokens whose `sub` claim matches are accepted — every other
+    /// validation step still runs.  The audience check protects
+    /// against a token issued for a different relying party; this
+    /// extra gate covers the case where multiple humans share one
+    /// `aud` (an enterprise OIDC client_id) but only one should be
+    /// able to operate this dyson instance.  Unset → any valid token
+    /// authenticates.
+    pub(crate) allowed_sub: Option<String>,
     /// Accepted signing algorithms.  Defaults to `[RS256]` — the OIDC
     /// majority default.  We never default to `HS256` to avoid the
     /// classic "jwt alg: none / hs256 with public key as secret" trap.
@@ -147,6 +156,7 @@ impl OidcAuth {
         audience: String,
         required_scopes: Vec<String>,
         algorithms: Option<Vec<Algorithm>>,
+        allowed_sub: Option<String>,
     ) -> Result<Self> {
         let http = crate::http::client().clone();
         let url = format!(
@@ -183,10 +193,19 @@ impl OidcAuth {
             audience,
             expected_issuer,
             required_scopes,
+            allowed_sub,
             algorithms: algorithms.unwrap_or_else(|| vec![Algorithm::RS256]),
             jwks: Arc::new(RwLock::new(None)),
             http,
         })
+    }
+
+    /// The `sub` the controller is locked to, if any.  `None` →
+    /// any valid token authenticates.  Surfaced so other auth-aware
+    /// surfaces (e.g. the SSE ticket consumer) can perform the
+    /// same identity gate.
+    pub fn allowed_sub(&self) -> Option<&str> {
+        self.allowed_sub.as_deref()
     }
 
     /// URL clients follow to start their own auth code flow.  Surfaces
@@ -321,6 +340,15 @@ impl Auth for OidcAuth {
             }
         }
 
+        // Single-user lock: when `allowed_sub` is set, refuse any
+        // token whose `sub` doesn't match.  Audience and signature
+        // are already verified above; this is the additional gate.
+        if let Some(allowed) = &self.allowed_sub
+            && data.claims.sub != *allowed
+        {
+            return Err(DysonError::Config("unauthorized".into()));
+        }
+
         let mut info = AuthInfo::new("oidc");
         info.metadata.insert("sub".into(), data.claims.sub);
         Ok(info)
@@ -406,6 +434,7 @@ mod tests {
             audience: "dyson".into(),
             expected_issuer: "https://idp".into(),
             required_scopes: vec![],
+            allowed_sub: None,
             algorithms: vec![Algorithm::RS256],
             jwks: Arc::new(RwLock::new(None)),
             http: crate::http::client().clone(),
@@ -468,6 +497,7 @@ mod tests {
             audience: audience.to_string(),
             expected_issuer: issuer.to_string(),
             required_scopes,
+            allowed_sub: None,
             algorithms,
             jwks: Arc::new(RwLock::new(Some(JwksCache {
                 jwks,
@@ -683,6 +713,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn allowed_sub_locks_instance_to_a_single_user() {
+        // When `allowed_sub` is set, only tokens whose `sub` matches
+        // are accepted — the rest of the auth surface (signature,
+        // exp, aud, iss, scopes) remains unchanged.  This is the
+        // single-operator deployment shape: an OIDC client_id might
+        // be shared across an enterprise, but only one identity
+        // should be able to drive this dyson instance.
+        let secret = b"sub-secret";
+        let mut auth = hs256_auth(
+            "k",
+            secret,
+            "aud",
+            "https://idp",
+            vec![],
+            vec![Algorithm::HS256],
+        );
+        auth.allowed_sub = Some("alice@example.com".to_string());
+
+        // Matching sub passes.
+        let alice = mint_hs256_token(
+            "k",
+            secret,
+            serde_json::json!({
+                "iss": "https://idp",
+                "aud": "aud",
+                "sub": "alice@example.com",
+                "exp": now_secs() + 60,
+            }),
+        );
+        let info = auth.validate_request(&header_with(&alice)).await.unwrap();
+        assert_eq!(info.metadata.get("sub").map(String::as_str), Some("alice@example.com"));
+
+        // Different sub — even with valid signature / iss / aud — rejected.
+        let bob = mint_hs256_token(
+            "k",
+            secret,
+            serde_json::json!({
+                "iss": "https://idp",
+                "aud": "aud",
+                "sub": "bob@example.com",
+                "exp": now_secs() + 60,
+            }),
+        );
+        assert!(auth.validate_request(&header_with(&bob)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn unset_allowed_sub_accepts_any_sub() {
+        // Default behaviour — when allowed_sub is None every valid
+        // token authenticates regardless of `sub`.  Backwards-compatible
+        // with deployments that already trust the audience check alone.
+        let secret = b"any-secret";
+        let auth = hs256_auth(
+            "k",
+            secret,
+            "aud",
+            "https://idp",
+            vec![],
+            vec![Algorithm::HS256],
+        );
+        // hs256_auth leaves allowed_sub unset (None) — assert that.
+        assert!(auth.allowed_sub.is_none());
+        for sub in ["alice", "bob", "carol"] {
+            let token = mint_hs256_token(
+                "k",
+                secret,
+                serde_json::json!({
+                    "iss": "https://idp",
+                    "aud": "aud",
+                    "sub": sub,
+                    "exp": now_secs() + 60,
+                }),
+            );
+            assert!(auth.validate_request(&header_with(&token)).await.is_ok(), "sub={sub} must pass when unset");
+        }
+    }
+
+    #[tokio::test]
     async fn required_scopes_must_all_appear_order_does_not_matter() {
         let secret = b"s";
         let auth = hs256_auth(
@@ -788,6 +896,7 @@ mod tests {
             audience: "dyson-web".into(),
             expected_issuer: "https://idp".into(),
             required_scopes: vec![],
+            allowed_sub: None,
             algorithms: vec![Algorithm::HS256],
             jwks: Arc::new(RwLock::new(Some(JwksCache {
                 jwks: cached,
@@ -836,6 +945,7 @@ mod tests {
             "dyson-web".to_string(),
             vec![],
             None,
+            None,
         )
         .await
         .expect("discover should succeed");
@@ -862,7 +972,7 @@ mod tests {
             .await;
 
         let with_trailing = format!("{issuer}/");
-        let auth = OidcAuth::discover(&with_trailing, "aud".into(), vec![], None).await;
+        let auth = OidcAuth::discover(&with_trailing, "aud".into(), vec![], None, None).await;
         assert!(auth.is_ok(), "trailing-slash mismatch must be tolerated");
     }
 
@@ -879,7 +989,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(&body))
             .mount(&server)
             .await;
-        let auth = OidcAuth::discover(&server.uri(), "aud".into(), vec![], None).await;
+        let auth = OidcAuth::discover(&server.uri(), "aud".into(), vec![], None, None).await;
         assert!(auth.is_err(), "issuer mismatch must fail discovery");
     }
 
@@ -891,7 +1001,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
-        let auth = OidcAuth::discover(&server.uri(), "aud".into(), vec![], None).await;
+        let auth = OidcAuth::discover(&server.uri(), "aud".into(), vec![], None, None).await;
         assert!(auth.is_err(), "5xx during discovery must fail fast");
     }
 

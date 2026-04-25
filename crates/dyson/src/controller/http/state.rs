@@ -287,6 +287,16 @@ pub struct HttpState {
     /// bearer / OIDC deployments stay off the gate so the public Host
     /// the proxy presents (e.g. `dyson.example.com`) doesn't 421.
     pub(crate) loopback_only_host_check: bool,
+    /// Single-user lock: if set, only callers whose authenticated
+    /// identity matches are allowed to consume an SSE ticket (and,
+    /// going forward, any other identity-gated surface).  Sourced
+    /// from the OIDC `allowed_sub` config — the regular auth path
+    /// already enforces it on `validate_request`, this is the
+    /// counterpart for ticket-based requests that bypass that path.
+    /// Wrapped in a `Mutex` so test hooks can swap the value into
+    /// place after construction; production sets it once at start
+    /// and never mutates.
+    pub(crate) allowed_identity: std::sync::Mutex<Option<String>>,
     /// Cache of `(chat_id → first-user-text title)` so the
     /// `/api/conversations` list endpoint isn't `O(n)` history loads
     /// per call.  Populated on first hydration miss; invalidated on
@@ -360,6 +370,7 @@ impl HttpState {
         auth_mode: AuthMode,
         config_path: Option<PathBuf>,
         loopback_only_host_check: bool,
+        allowed_identity: Option<String>,
     ) -> Self {
         // Piggy-back on the ChatHistory directory so artefacts / files /
         // chats / ratings all live in one place on disk.  Memory-only
@@ -408,6 +419,7 @@ impl HttpState {
             loopback_only_host_check,
             sse_tickets: std::sync::Mutex::new(HashMap::new()),
             titles: std::sync::Mutex::new(HashMap::new()),
+            allowed_identity: std::sync::Mutex::new(allowed_identity),
         }
     }
 
@@ -440,9 +452,10 @@ impl HttpState {
     }
 
     /// Single-use ticket consume: returns the bound identity if the
-    /// token is present and unexpired, else `None`.  Always removes
-    /// the entry — even on expiry — so a single-use token can't be
-    /// retried after a clock tick.
+    /// token is present, unexpired, and (when the controller is
+    /// locked via `allowed_identity`) the bound identity matches
+    /// the lock.  Always removes the entry — even on expiry or
+    /// identity-mismatch — so a single-use token can't be retried.
     pub(crate) fn consume_sse_ticket(&self, token: &str) -> Option<String> {
         let mut guard = match self.sse_tickets.lock() {
             Ok(g) => g,
@@ -450,6 +463,20 @@ impl HttpState {
         };
         let entry = guard.remove(token)?;
         if entry.expires_at <= std::time::Instant::now() {
+            return None;
+        }
+        let allowed = match self.allowed_identity.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        if let Some(allowed) = allowed
+            && entry.identity != allowed
+        {
+            tracing::warn!(
+                ticket_identity = %entry.identity,
+                allowed,
+                "SSE ticket bound to non-allowed identity rejected",
+            );
             return None;
         }
         Some(entry.identity)

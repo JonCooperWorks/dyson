@@ -60,6 +60,13 @@ pub(crate) enum HttpAuthConfig {
         /// many relying parties (e.g. `dyson:api`).
         #[serde(default)]
         required_scopes: Vec<String>,
+        /// Optional `sub` claim allowlist with cardinality 1: lock
+        /// the controller to a single user.  Set when the OIDC
+        /// `client_id` is shared across multiple humans (typical
+        /// enterprise IdP shape) but only one should drive this
+        /// dyson instance.  Unset → any valid token authenticates.
+        #[serde(default)]
+        allowed_sub: Option<String>,
     },
 }
 
@@ -136,10 +143,28 @@ mod tests {
         }))
         .unwrap();
         match oidc {
-            HttpAuthConfig::Oidc { issuer, audience, required_scopes } => {
+            HttpAuthConfig::Oidc { issuer, audience, required_scopes, allowed_sub } => {
                 assert_eq!(issuer, "https://idp.example.com");
                 assert_eq!(audience, "dyson-web");
                 assert_eq!(required_scopes, vec!["dyson:api".to_string(), "openid".to_string()]);
+                assert!(allowed_sub.is_none(), "default allowed_sub is unset");
+            }
+            _ => panic!("expected Oidc"),
+        }
+
+        // Round-trip with `allowed_sub` set — the new field should
+        // deserialise from the operator's dyson.json into the
+        // single-user-lock identity.
+        let locked: HttpAuthConfig = serde_json::from_value(serde_json::json!({
+            "type": "oidc",
+            "issuer": "https://idp.example.com",
+            "audience": "dyson-web",
+            "allowed_sub": "alice@example.com",
+        }))
+        .unwrap();
+        match locked {
+            HttpAuthConfig::Oidc { allowed_sub, .. } => {
+                assert_eq!(allowed_sub.as_deref(), Some("alice@example.com"));
             }
             _ => panic!("expected Oidc"),
         }

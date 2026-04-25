@@ -76,7 +76,18 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     if matches!((&method, segs.as_slice()), (&Method::POST, ["api", "auth", "sse-ticket"])) {
         match state.auth.validate_request(req.headers()).await {
             Ok(info) => {
-                let ticket = state.mint_sse_ticket(&info.identity);
+                // Bind the ticket to the most specific identity the
+                // auth chain produced.  For OIDC that's the `sub`
+                // claim (in metadata); other schemes only carry the
+                // scheme tag in `identity` (e.g. `bearer`).  The
+                // ticket consumer reuses this when the controller
+                // is locked to a single user via `allowed_identity`.
+                let identity = info
+                    .metadata
+                    .get("sub")
+                    .cloned()
+                    .unwrap_or(info.identity);
+                let ticket = state.mint_sse_ticket(&identity);
                 return super::responses::json_ok(&serde_json::json!({
                     "ticket": ticket,
                     "expires_in": 30,
