@@ -699,21 +699,7 @@
   min-height: 0;
   min-width: 0;
   background: var(--bg-1);
-  position: relative;
 }
-.mind-pane::before {
-  content: "";
-  position: absolute; inset: -10% -5% -10% -5%;
-  background: var(--aurora);
-  background-size: 140% 140%, 140% 140%, 140% 140%;
-  background-repeat: no-repeat;
-  filter: blur(50px) saturate(110%);
-  opacity: 0.35;
-  animation: aurora-drift 28s ease-in-out infinite;
-  pointer-events: none;
-  z-index: 0;
-}
-.mind-pane > * { position: relative; z-index: 1; }
 .mind-editor {
   flex: 1 1 auto;
   width: 100%;
