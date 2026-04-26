@@ -68,6 +68,14 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // Pin the CSS target to Safari 14 so esbuild keeps the legacy
+    // `@media (max-width: 760px)` syntax instead of rewriting to
+    // `@media (width<=760px)`.  Range-form media queries didn't ship
+    // until Safari 16.4 — older iPads + iPhones (which is most of
+    // what hits this UI on Tailscale) drop the entire mobile block
+    // when they can't parse it, leaving the desktop 3-column grid
+    // squeezed onto a 375px viewport and the page renders black.
+    cssTarget: 'safari14',
     // Deterministic chunk layout — build.rs walks dist/ to generate
     // the Rust asset table, and hashed filenames invalidate the
     // Cargo cache cleanly when sources change.
