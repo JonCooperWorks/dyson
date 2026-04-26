@@ -907,6 +907,12 @@
 
 /* ---------- mobile ---------- */
 @media (max-width: 760px) {
+  /* iOS Safari auto-zooms <input>/<textarea> with font-size <16px on focus,
+     and the zoom can persist after blur — leaves the page rendering "a bit
+     zoomed in" with content overflowing the viewport.  Force 16px on mobile.
+     !important defeats the per-element font: shorthand declarations (e.g.
+     `.composer textarea` at 14.5px) without us having to chase every selector. */
+  input, textarea { font-size: 16px !important; }
   .body { grid-template-columns: 1fr !important; }
   .body .left, .body .right { display: none; }
   .body.show-left .left {
@@ -936,6 +942,12 @@
   .topbar nav button .k { display: none; }
   .topbar nav button span:not(.k) { display: none; }
   .topbar nav button { padding: 0 8px; }
+  /* The model id (e.g. "claude-opus-4-7") is ~115px in mono — combined with
+     the menu-toggle and nav, the topbar overshoots a 390px viewport.  Drop
+     to a chevron-only affordance on mobile; the title=" Switch model" still
+     identifies it, and tapping opens the full model menu. */
+  .topbar .meta .select .mono { display: none; }
+  .topbar .meta .select { padding: 0 6px; }
   .transcript { padding: 18px 0 200px; overflow-x: hidden; }
   .transcript .inner { padding: 0 16px; max-width: 100%; min-width: 0; }
   .composer-dock {
