@@ -641,7 +641,7 @@ function streamCallbacks(conv) {
     },
 
     onError: (message) => updateSession(conv,
-      s => appendAgentBlock(s, { type: 'text', text: `\n[error] ${message}\n` })),
+      s => appendAgentBlock(s, { type: 'error', message })),
 
     onFile: ({ name, mime_type, url, inline_image }) => {
       updateSession(conv, s => appendAgentBlock(s, {

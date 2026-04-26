@@ -939,6 +939,35 @@
   padding: 8px 4px 2px;
 }
 
+/* error block — turn-level failures (LLM provider, tool dispatch, …) */
+.errorblock {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  margin: 6px 0;
+  background: oklch(0.70 0.215 25 / 0.08);
+  border: 1px solid oklch(0.70 0.215 25 / 0.32);
+  border-left: 3px solid var(--err);
+  border-radius: 6px;
+  color: var(--fg);
+  font: 400 13.5px/1.55 var(--font-ui);
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+.errorblock-tag {
+  flex: 0 0 auto;
+  color: var(--err);
+  font: 500 11px/1.55 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding-top: 1px;
+}
+.errorblock-msg {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 /* attachments */
 .att-card {
   display: flex; gap: 12px;

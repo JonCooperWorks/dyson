@@ -150,6 +150,9 @@ function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
           if (b.type === 'artefact') {
             return <ArtefactBlock key={i} block={b}/>;
           }
+          if (b.type === 'error') {
+            return <ErrorBlock key={i} block={b}/>;
+          }
           return null;
         })}
         {ratable && <Reactions turnIndex={turnIndex} current={rating} onPick={(e) => onRate(turnIndex, e)}/>}
@@ -279,6 +282,19 @@ function ArtefactBlock({ block }) {
       )}
       <span className="dl mono">open →</span>
     </a>
+  );
+}
+
+// Renders a turn-level error (LLM provider failure, tool dispatch
+// error, etc.) as a distinct red-tinted card instead of inline text,
+// so the user doesn't have to mentally separate "[error] …" from the
+// surrounding agent prose.  Block shape: { type:'error', message }.
+function ErrorBlock({ block }) {
+  return (
+    <div className="errorblock" role="alert">
+      <span className="errorblock-tag mono">error</span>
+      <span className="errorblock-msg">{block.message}</span>
+    </div>
   );
 }
 
@@ -445,4 +461,4 @@ function fileToBase64(file) {
   });
 }
 
-export { Turn, ThinkingBlock, ToolChip, FileBlock, ArtefactBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64 };
+export { Turn, ThinkingBlock, ToolChip, FileBlock, ArtefactBlock, ErrorBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64 };
