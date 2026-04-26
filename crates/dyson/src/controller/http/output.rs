@@ -193,26 +193,59 @@ impl Output for SseOutput {
             parent_tool_id: None,
         });
 
-        // Images are also artefacts — listing them in the Artefacts
-        // tab makes a chat's generated images discoverable after the
-        // original chat scroll has paged them away.  The body here is
-        // the served URL (not the raw bytes); the reader notices the
-        // `image/*` mime and renders with `<img>` instead of markdown.
-        if inline_image {
-            let artefact = crate::message::Artefact {
-                id: String::new(),
-                kind: crate::message::ArtefactKind::Image,
-                title: name.clone(),
-                content: url.clone(),
-                mime_type: mime.clone(),
-                metadata: Some(serde_json::json!({
-                    "file_url": url,
-                    "file_name": name,
-                    "bytes": bytes_len,
-                })),
+        // Every sent file is also an artefact — listing them in the
+        // Artefacts tab makes a chat's generated outputs (images,
+        // markdown reports, scripts, JSON dumps, …) discoverable after
+        // the chat scroll has paged the original `file` block away.
+        //   * Images: kind=Image, body=URL — reader renders <img>.
+        //   * Markdown: kind=Other, body=UTF-8 text — reader feeds it
+        //     straight into the existing markdown() render path, same
+        //     as a SecurityReview artefact.  We re-read the FileEntry
+        //     from the cache so we don't have to clone `bytes` twice.
+        //   * Everything else: kind=Other, body=URL — reader shows a
+        //     download card with name / mime / size.
+        let is_markdown = mime == "text/markdown"
+            || std::path::Path::new(&name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+                .unwrap_or(false);
+        let kind = if inline_image {
+            crate::message::ArtefactKind::Image
+        } else {
+            crate::message::ArtefactKind::Other
+        };
+        let content = if is_markdown {
+            let s = match self.files.lock() {
+                Ok(s) => s,
+                Err(p) => p.into_inner(),
             };
-            let _ = self.send_artefact(&artefact);
-        }
+            s.items
+                .get(&id)
+                .and_then(|e| std::str::from_utf8(&e.bytes).ok().map(|s| s.to_string()))
+                .unwrap_or_else(|| url.clone())
+        } else {
+            url.clone()
+        };
+        // File-event mime stays as the OS's best guess (e.g. ".md" →
+        // "text/plain") — the chat-history File block is happy with
+        // that.  The *artefact* mime is the one that drives the
+        // reader's branch, so promote markdown explicitly.
+        let artefact_mime = if is_markdown { "text/markdown".to_string() } else { mime.clone() };
+        let artefact = crate::message::Artefact {
+            id: String::new(),
+            kind,
+            title: name.clone(),
+            content,
+            mime_type: artefact_mime.clone(),
+            metadata: Some(serde_json::json!({
+                "file_url": url,
+                "file_name": name,
+                "mime_type": artefact_mime,
+                "bytes": bytes_len,
+            })),
+        };
+        let _ = self.send_artefact(&artefact);
 
         Ok(())
     }
@@ -379,6 +412,97 @@ mod tests {
                 assert!(delta.contains("stat failed"));
             }
             _ => panic!("expected fallback text event"),
+        }
+    }
+
+    #[test]
+    fn send_file_emits_artefact_for_markdown_with_inlined_body() {
+        // A sent .md file becomes an Other-kind artefact whose body is
+        // the file's UTF-8 text — so the existing reader's markdown
+        // render path picks it up without a second fetch.
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("findings.md");
+        std::fs::write(&tmp, b"# Findings\n\n* a\n* b\n").unwrap();
+        let (mut out, mut rx) = fixture(Some(dir.path().to_path_buf()));
+        out.send_file(&tmp).unwrap();
+
+        // First the file event (OS mime — text/plain for .md), then
+        // the artefact event with the promoted markdown mime.
+        match rx.try_recv().unwrap() {
+            SseEvent::File { name, .. } => assert_eq!(name, "findings.md"),
+            other => panic!("expected file event, got {:?}", serde_json::to_string(&other).unwrap()),
+        }
+        match rx.try_recv().unwrap() {
+            SseEvent::Artefact { id, kind, title, metadata, .. } => {
+                assert_eq!(id, "a1");
+                assert_eq!(kind, ArtefactKind::Other);
+                assert_eq!(title, "findings.md");
+                let m = metadata.expect("metadata should be set");
+                assert_eq!(m["file_name"], "findings.md");
+                assert_eq!(m["mime_type"], "text/markdown",
+                    "metadata mime is the promoted markdown mime, not the OS guess");
+                assert_eq!(m["file_url"], "/api/files/f1");
+                assert_eq!(m["bytes"].as_u64(), Some(20));
+            }
+            other => panic!("expected artefact event, got {:?}", serde_json::to_string(&other).unwrap()),
+        }
+
+        // The artefact body is the markdown text itself (not the URL);
+        // that's what makes the existing reader Just Work.
+        let body = std::fs::read_to_string(
+            dir.path().join("c-0001").join("artefacts").join("a1.body"),
+        )
+        .unwrap();
+        assert_eq!(body, "# Findings\n\n* a\n* b\n");
+    }
+
+    #[test]
+    fn send_file_emits_artefact_with_url_body_for_binary() {
+        // Binary (non-image, non-markdown) files become Other-kind
+        // artefacts whose body is the served URL — the reader uses
+        // that to render a download card; we don't try to inline
+        // arbitrary bytes.
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("data.bin");
+        std::fs::write(&tmp, [0u8, 1, 2, 3, 0xFF]).unwrap();
+        let (mut out, mut rx) = fixture(Some(dir.path().to_path_buf()));
+        out.send_file(&tmp).unwrap();
+
+        // Drop the file event, inspect the artefact.
+        let _ = rx.try_recv().unwrap();
+        match rx.try_recv().unwrap() {
+            SseEvent::Artefact { kind, title, metadata, .. } => {
+                assert_eq!(kind, ArtefactKind::Other);
+                assert_eq!(title, "data.bin");
+                let m = metadata.expect("metadata");
+                assert_eq!(m["file_name"], "data.bin");
+                // mime fell through to the binary default — what matters
+                // is that the artefact metadata carries a usable file_url.
+                assert_eq!(m["file_url"], "/api/files/f1");
+            }
+            other => panic!("expected artefact event, got {:?}", serde_json::to_string(&other).unwrap()),
+        }
+        let body = std::fs::read_to_string(
+            dir.path().join("c-0001").join("artefacts").join("a1.body"),
+        )
+        .unwrap();
+        assert_eq!(body, "/api/files/f1", "binary artefact body is the URL");
+    }
+
+    #[test]
+    fn send_file_emits_artefact_for_image() {
+        // Pre-existing behaviour — images become Image-kind artefacts
+        // with the served URL as body so the reader / chip can `<img>`.
+        let dir = tempfile::tempdir().unwrap();
+        // Minimal valid PNG header is enough — mime is sniffed by extension.
+        let tmp = dir.path().join("pic.png");
+        std::fs::write(&tmp, [0x89, b'P', b'N', b'G']).unwrap();
+        let (mut out, mut rx) = fixture(Some(dir.path().to_path_buf()));
+        out.send_file(&tmp).unwrap();
+        let _ = rx.try_recv().unwrap();
+        match rx.try_recv().unwrap() {
+            SseEvent::Artefact { kind, .. } => assert_eq!(kind, ArtefactKind::Image),
+            other => panic!("expected artefact event, got {:?}", serde_json::to_string(&other).unwrap()),
         }
     }
 

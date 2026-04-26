@@ -457,14 +457,6 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
       .then(({ body, chatId }) => {
         setBody(body);
         if (chatId) requestOpenArtefact(id);
-        // Side-effect: upsert the owning chat row if the store doesn't
-        // know about it yet (cold deep-link).  The conversations list
-        // polling will flesh out the title on the next tick.
-        if (chatId) {
-          // We don't know the title; leave the existing row alone and
-          // only insert a skeleton if missing.  App's URL effect will
-          // take it from here.
-        }
       })
       .catch(e => setErr(String(e.message || e)));
   }, [id, client]);
@@ -495,15 +487,30 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
   }
 
   const isImage = meta && typeof meta.kind === 'string' && meta.kind === 'image';
-  const imageUrl = isImage
-    ? (body && body.startsWith('/') ? body : (meta && meta.metadata && meta.metadata.file_url) || '')
+  // A `kind:'other'` artefact paired with metadata.file_url is a sent
+  // file (anything send_file emitted that wasn't an image).  For
+  // markdown the body field IS the file text (set server-side), so the
+  // existing markdown render path below handles it without any extra
+  // fetch.  Non-markdown files fall through to a download card.
+  const fileUrl = !isImage && meta && meta.metadata && meta.metadata.file_url
+    ? meta.metadata.file_url
     : '';
+  const fileMime = (meta && meta.metadata && meta.metadata.mime_type) || '';
+  const fileName = (meta && meta.metadata && meta.metadata.file_name) || (meta && meta.title) || '';
+  const fileBytes = meta && meta.metadata && typeof meta.metadata.bytes === 'number'
+    ? meta.metadata.bytes : null;
+  const isFile = Boolean(fileUrl);
+  const isMarkdownFile = isFile && (fileMime === 'text/markdown' || /\.(md|markdown)$/i.test(fileName));
+  // Markdown files use the existing markdown(body) path — body is the
+  // file text already.  Other files (binary, JSON, scripts, …) get a
+  // download-only card; opening them in-browser is the user's call.
+  const isBinaryFile = isFile && !isMarkdownFile;
 
   const download = () => {
-    if (isImage && imageUrl) {
+    if ((isImage || isFile) && fileUrl) {
       const a = document.createElement('a');
-      a.href = imageUrl;
-      a.download = (meta && meta.metadata && meta.metadata.file_name) || 'image';
+      a.href = fileUrl;
+      a.download = fileName || (isImage ? 'image' : 'file');
       document.body.appendChild(a); a.click(); a.remove();
       return;
     }
@@ -516,12 +523,16 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
     URL.revokeObjectURL(u);
   };
   const copy = async () => {
-    const text = isImage ? imageUrl : body;
+    const text = isImage || isBinaryFile ? fileUrl : body;
     if (await copyToClipboard(text)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     }
   };
+
+  const downloadLabel = isImage ? 'download image'
+    : isFile ? 'download'
+    : 'download .md';
 
   return (
     <section className="mind-pane">
@@ -532,14 +543,14 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
         {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
         {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
         <span style={{flex:1}}/>
-        <button className="btn sm ghost" onClick={copy} disabled={isImage ? !imageUrl : !body}>
-          {copied ? 'copied' : (isImage ? 'copy url' : 'copy')}
+        <button className="btn sm ghost" onClick={copy} disabled={isImage || isBinaryFile ? !fileUrl : !body}>
+          {copied ? 'copied' : (isImage || isBinaryFile ? 'copy url' : 'copy')}
         </button>
-        <button className="btn sm primary" onClick={download} disabled={isImage ? !imageUrl : !body}>
-          {isImage ? 'download image' : 'download .md'}
+        <button className="btn sm primary" onClick={download} disabled={isImage || isFile ? !fileUrl : !body}>
+          {downloadLabel}
         </button>
       </div>
-      {meta && meta.metadata && !isImage && (
+      {meta && meta.metadata && !isImage && !isFile && (
         <div style={{display:'flex', flexWrap:'wrap', gap:14, padding:'8px 18px',
                      borderBottom:'1px solid var(--line)', background:'var(--panel)', fontSize:11.5}}>
           {metaRow('model',     meta.metadata.model)}
@@ -551,14 +562,36 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
           {metaRow('iterations', meta.metadata.iterations)}
         </div>
       )}
+      {isFile && (
+        <div style={{display:'flex', flexWrap:'wrap', gap:14, padding:'8px 18px',
+                     borderBottom:'1px solid var(--line)', background:'var(--panel)', fontSize:11.5}}>
+          {metaRow('name', fileName)}
+          {metaRow('mime', fileMime || 'application/octet-stream')}
+          {fileBytes !== null && metaRow('size', fileBytes, prettySize)}
+        </div>
+      )}
       {isImage ? (
         <div style={{overflow:'auto', flex:1, padding:'24px', display:'flex',
                      alignItems:'flex-start', justifyContent:'center', background:'var(--bg)'}}>
-          {imageUrl
-            ? <img src={imageUrl} alt={(meta && meta.title) || 'image'}
+          {fileUrl
+            ? <img src={fileUrl} alt={(meta && meta.title) || 'image'}
                    style={{maxWidth:'100%', maxHeight:'100%', objectFit:'contain',
                            borderRadius:4, boxShadow:'0 2px 10px rgba(0,0,0,0.1)'}}/>
             : <div style={{color:'var(--mute)', fontSize:13}}>Image no longer available.</div>}
+        </div>
+      ) : isBinaryFile ? (
+        <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center',
+                     padding:'40px 24px', textAlign:'center', color:'var(--fg-dim)', fontSize:13}}>
+          <div>
+            <div style={{fontSize:14, color:'var(--fg)', marginBottom:6}}>{fileName}</div>
+            <div style={{marginBottom:18, fontSize:12}}>
+              {fileMime || 'binary file'}
+              {fileBytes !== null ? ` · ${prettySize(fileBytes)}` : ''}
+            </div>
+            <button className="btn primary" onClick={download} disabled={!fileUrl}>
+              Download
+            </button>
+          </div>
         </div>
       ) : (
         <div className="prose"

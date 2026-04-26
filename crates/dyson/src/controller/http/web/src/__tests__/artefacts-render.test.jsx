@@ -213,3 +213,80 @@ describe('ArtefactReader — empty-id branch stays reachable', () => {
     expect(container.querySelector('.artefact-back')).toBeNull();
   });
 });
+
+// `send_file` now promotes every sent file to an Other-kind artefact —
+// markdown via inlined body (existing markdown render path), everything
+// else via a download card driven by metadata.file_url.  These tests
+// pin both branches so a future refactor can't silently regress to the
+// "files invisible in Artefacts tab" state.
+describe('ArtefactReader — sent files', () => {
+  // A reader needs both a populated session (so findArtefactMeta picks
+  // up the metadata header) and an awaited loadArtefact promise (so the
+  // body is set before assertions run).
+  async function mountReader(chatId, art, body) {
+    setConversations([
+      { id: chatId, title: 'Live chat', live: false, hasArtefacts: true, source: 'http' },
+    ]);
+    seedChatArtefacts(chatId, [art]);
+    const client = {
+      listArtefacts: async () => [art],
+      loadArtefact: async () => ({ body, chatId }),
+    };
+    const utils = renderWithApi(<ArtefactReader id={art.id}/>, client);
+    // Allow loadArtefact's microtask + setBody to flush.
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    return utils;
+  }
+
+  it('renders a markdown file artefact through the existing markdown helper', async () => {
+    const md = '# Findings\n\nA bullet.\n';
+    const { container } = await mountReader('c1', {
+      id: 'a1',
+      title: 'findings.md',
+      bytes: md.length,
+      kind: 'other',
+      created_at: 0,
+      metadata: {
+        file_url: '/api/files/f1',
+        file_name: 'findings.md',
+        mime_type: 'text/markdown',
+        bytes: md.length,
+      },
+    }, md);
+
+    // Existing render path: <div class="prose"> with markdown(body)
+    // turning '# Findings' into an <h1>.  Pinned so the binary-file
+    // branch can't ever swallow markdown.
+    const prose = container.querySelector('.prose');
+    expect(prose, 'markdown files must use the .prose render path').toBeTruthy();
+    expect(prose.querySelector('h1')?.textContent).toContain('Findings');
+    // No download card surface.
+    expect(container.textContent).not.toMatch(/^Download$/m);
+  });
+
+  it('renders a binary file artefact as a download card, not as markdown', async () => {
+    const { container, queryByText } = await mountReader('c1', {
+      id: 'a2',
+      title: 'data.bin',
+      bytes: 12,
+      kind: 'other',
+      created_at: 0,
+      metadata: {
+        file_url: '/api/files/f1',
+        file_name: 'data.bin',
+        mime_type: 'application/octet-stream',
+        bytes: 12,
+      },
+    }, '/api/files/f1');
+
+    // Download card — the visible Download button anchors the branch.
+    expect(queryByText('Download')).toBeTruthy();
+    // Metadata bar surfaces name + mime so the user knows what they're
+    // about to grab.
+    expect(container.textContent).toContain('data.bin');
+    expect(container.textContent).toContain('application/octet-stream');
+    // The download button's anchor target is the file URL — i.e. the
+    // reader does not try to feed binary bytes through markdown().
+    expect(container.querySelector('.prose')).toBeNull();
+  });
+});
