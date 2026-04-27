@@ -301,22 +301,14 @@ pub async fn create_skills(
     all_subagent_configs.extend(subagent_configs);
 
     {
-        // Subagent-only specialist tools: not registered on any skill so the
-        // main agent never sees them, but appended to parent_tools so the
-        // security_engineer orchestrator (and any future specialist
-        // orchestrator) can filter them in via direct_tool_names.
-        let subagent_only_tools: Vec<std::sync::Arc<dyn crate::tool::Tool>> = vec![
-            std::sync::Arc::new(crate::tool::security::AstDescribeTool),
-            std::sync::Arc::new(crate::tool::security::AstQueryTool),
-            std::sync::Arc::new(crate::tool::security::AttackSurfaceAnalyzerTool),
-            std::sync::Arc::new(crate::tool::security::ExploitBuilderTool),
-            std::sync::Arc::new(crate::tool::security::TaintTraceTool),
-        ];
-
+        // Specialist subagents (security_engineer, etc.) filter `parent_tools`
+        // via `direct_tool_names`.  AST/security tools used to be appended
+        // here as "subagent-only" extras; they now live on BuiltinSkill so
+        // the base agent can reach them too, and the orchestrator filter
+        // still picks them up from the regular skill tool list.
         let parent_tools: Vec<std::sync::Arc<dyn crate::tool::Tool>> = skills
             .iter()
             .flat_map(|s| s.tools().iter().cloned())
-            .chain(subagent_only_tools)
             .collect();
 
         tracing::info!(

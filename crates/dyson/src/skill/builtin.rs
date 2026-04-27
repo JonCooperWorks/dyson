@@ -37,6 +37,9 @@ use crate::tool::load_skill::LoadSkillTool;
 use crate::tool::memory_search::MemorySearchTool;
 use crate::tool::read_file::ReadFileTool;
 use crate::tool::search_files::SearchFilesTool;
+use crate::tool::security::{
+    AstDescribeTool, AstQueryTool, AttackSurfaceAnalyzerTool, ExploitBuilderTool, TaintTraceTool,
+};
 use crate::tool::send_file::SendFileTool;
 use crate::tool::image_generate;
 use crate::tool::web_fetch::WebFetchTool;
@@ -103,6 +106,17 @@ impl BuiltinSkill {
             Arc::new(KbStatusTool),
             Arc::new(WebFetchTool::default()),
             Arc::new(DependencyScanTool),
+            // AST-aware security tools.  Originally only injected into the
+            // security_engineer subagent, but the descriptions are short
+            // (~500 chars each) and the tools are too useful to gate behind
+            // a subagent dispatch — letting the main agent reach for
+            // taint_trace or ast_query directly skips a layer of orchestration
+            // when the user is already iterating on a security question.
+            Arc::new(AstDescribeTool),
+            Arc::new(AstQueryTool),
+            Arc::new(AttackSurfaceAnalyzerTool),
+            Arc::new(ExploitBuilderTool),
+            Arc::new(TaintTraceTool),
         ];
 
         if let Some(ws_cfg) = web_search_config {
@@ -230,7 +244,7 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new(None, None, None);
         let tools = skill.tools();
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 20);
         assert_eq!(tools[0].name(), "bash");
         assert_eq!(tools[1].name(), "read_file");
         assert_eq!(tools[2].name(), "write_file");
@@ -246,6 +260,32 @@ mod tests {
         assert_eq!(tools[12].name(), "kb_status");
         assert_eq!(tools[13].name(), "web_fetch");
         assert_eq!(tools[14].name(), "dependency_scan");
+        assert_eq!(tools[15].name(), "ast_describe");
+        assert_eq!(tools[16].name(), "ast_query");
+        assert_eq!(tools[17].name(), "attack_surface_analyzer");
+        assert_eq!(tools[18].name(), "exploit_builder");
+        assert_eq!(tools[19].name(), "taint_trace");
+    }
+
+    /// The five AST/security tools used to be subagent-only — now they live
+    /// on the base agent.  This test pins that contract so a future refactor
+    /// can't quietly hide them behind the security_engineer dispatch again.
+    #[test]
+    fn security_tools_available_on_base_agent() {
+        let skill = BuiltinSkill::new(None, None, None);
+        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
+        for required in [
+            "ast_describe",
+            "ast_query",
+            "attack_surface_analyzer",
+            "exploit_builder",
+            "taint_trace",
+        ] {
+            assert!(
+                names.contains(&required),
+                "base agent is missing security tool {required}",
+            );
+        }
     }
 
     #[test]
@@ -292,7 +332,7 @@ mod tests {
         let skill = BuiltinSkill::new(None, Some(&config), None);
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert!(names.contains(&"image_generate"));
-        assert_eq!(skill.tools().len(), 16);
+        assert_eq!(skill.tools().len(), 21);
     }
 
     #[test]
