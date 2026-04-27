@@ -74,18 +74,25 @@ pub async fn run() -> Result<()> {
     std::fs::create_dir_all(&workspace)
         .map_err(|e| DysonError::Config(format!("create workspace {workspace:?}: {e}")))?;
 
-    if !task.is_empty() {
-        let task_md = workspace.join("TASK.md");
-        if !task_md.exists() {
-            let _ = std::fs::write(&task_md, &task);
-        }
-    }
-    if !name.is_empty() || !instance_id.is_empty() {
+    // IDENTITY.md is what `Workspace::system_prompt` injects under the
+    // "## IDENTITY" section of the agent's system prompt — so this is
+    // the file the model actually reads on every turn.  Bake the task
+    // in here too so the agent has its mission alongside its name.
+    // (TASK.md isn't read by the workspace prompt builder, so writing
+    // it separately would be a dead drop.)
+    if !name.is_empty() || !instance_id.is_empty() || !task.is_empty() {
         let identity = workspace.join("IDENTITY.md");
         if !identity.exists() {
-            let body = format!(
-                "# Identity\n\nName: {name}\nWarden instance id: {instance_id}\n",
-            );
+            let mut body = String::from("# Identity\n\n");
+            if !name.is_empty() {
+                body.push_str(&format!("Name: {name}\n"));
+            }
+            if !instance_id.is_empty() {
+                body.push_str(&format!("Warden instance id: {instance_id}\n"));
+            }
+            if !task.is_empty() {
+                body.push_str(&format!("\n## Mission\n\n{task}\n"));
+            }
             let _ = std::fs::write(&identity, body);
         }
     }
@@ -134,11 +141,15 @@ pub async fn run() -> Result<()> {
         })
     };
 
+    // Provider key mirrors the upstream warden's /llm proxy fronts —
+    // OpenRouter today.  The Dyson UI surfaces this name in its
+    // provider dropdown, so naming it after the actual upstream
+    // (rather than "warden") makes the source obvious to operators.
     let workspace_str = workspace.to_string_lossy();
     let cfg = json!({
         "config_version": 2,
-        "providers": { "warden": provider_block },
-        "agent": { "provider": "warden" },
+        "providers": { "openrouter": provider_block },
+        "agent": { "provider": "openrouter" },
         "controllers": [
             {
                 "type": "http",
