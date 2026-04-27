@@ -7,10 +7,21 @@
 //     forwarded request
 //   - WARDEN_PROXY_URL    — base URL of warden's /llm provider proxy
 //   - WARDEN_PROXY_TOKEN  — bearer for that proxy
+//   - WARDEN_MODEL        — model id the agent talks to (e.g.
+//                            "anthropic/claude-sonnet-4-5",
+//                            "openai/gpt-4o"). No default — empty in
+//                            warmup mode, required at instance boot.
 //   - WARDEN_TASK         — free-text task description (seeded into
 //                            workspace/TASK.md)
 //   - WARDEN_NAME         — human-readable label
 //   - WARDEN_INSTANCE_ID  — warden-side instance id
+//
+// Provider shape: warden's /llm proxy fronts upstream LLM APIs. We
+// configure the dyson agent as an `openai`-compatible client pointed at
+// `<WARDEN_PROXY_URL>/openrouter` — OpenRouter speaks the OpenAI Chat
+// Completions protocol, so the same client transport works for any of
+// its 200+ models. Switching to a different provider later is a one-
+// path-segment change in this file.
 //
 // Synthesises a minimal dyson.json + a workspace skeleton, then hands off
 // to the standard `listen` runtime so the HTTP controller serves the
@@ -54,6 +65,7 @@ pub async fn run() -> Result<()> {
     let task = std::env::var("WARDEN_TASK").unwrap_or_default();
     let name = std::env::var("WARDEN_NAME").unwrap_or_default();
     let instance_id = std::env::var("WARDEN_INSTANCE_ID").unwrap_or_default();
+    let model = std::env::var("WARDEN_MODEL").unwrap_or_default();
 
     let home_path = PathBuf::from(&home);
     std::fs::create_dir_all(&home_path)
@@ -91,23 +103,34 @@ pub async fn run() -> Result<()> {
     // refuses base_url with an empty api_key (defends against env-var
     // fallback to a non-default endpoint) — supply a placeholder when
     // warden hasn't set the proxy token (warmup).
+    //
+    // Dyson's loader also refuses to boot with no model set (validate_agent_model).
+    // In warmup the agent never runs, so a placeholder model is fine; at
+    // instance boot the operator must supply WARDEN_MODEL via the create
+    // request's env (warden refuses the create otherwise — see the
+    // orchestrator's instance.rs).
     let api_key = if proxy_token.is_empty() {
         "warmup-placeholder".to_string()
     } else {
         proxy_token
     };
+    let model_id = if model.is_empty() {
+        "warmup-placeholder".to_string()
+    } else {
+        model
+    };
     let provider_block = if proxy_url.is_empty() {
         json!({
-            "type": "anthropic",
+            "type": "openai",
             "api_key": api_key,
-            "models": ["claude-sonnet-4-5"]
+            "models": [model_id]
         })
     } else {
         json!({
-            "type": "anthropic",
-            "base_url": format!("{}/anthropic", proxy_url.trim_end_matches('/')),
+            "type": "openai",
+            "base_url": format!("{}/openrouter/v1", proxy_url.trim_end_matches('/')),
             "api_key": api_key,
-            "models": ["claude-sonnet-4-5"]
+            "models": [model_id]
         })
     };
 
