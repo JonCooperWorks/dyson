@@ -25,6 +25,7 @@ use super::responses::{
 use super::state::HttpState;
 
 mod activity;
+mod admin;
 mod artefacts;
 pub(super) mod conversations;
 mod feedback;
@@ -220,6 +221,14 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&Method::GET,    ["api", "mind", "file"]) => mind::get_file(&state, req.uri().query().unwrap_or("")).await,
         (&Method::POST,   ["api", "mind", "file"]) => mind::post_file(req, &state).await,
         (&Method::GET,    ["api", "activity"])     => activity::get(&state, req.uri().query().unwrap_or("")),
+
+        // ─── admin (warden runtime reconfigure) ────────────────────────
+        // Lets dyson-orchestrator push the real WARDEN_MODEL/TASK
+        // envelope after a sandbox restore — Cube's snapshot/restore
+        // freezes the dyson process's env at warmup time, so without
+        // this every instance shows "warmup-placeholder" forever.
+        // See routes/admin.rs.
+        (&Method::POST,   ["api", "admin", "configure"]) => admin::post(req, &state).await,
 
         // ─── files & artefacts ─────────────────────────────────────────
         // Strict decode here — these ids feed `safe_store_id` which

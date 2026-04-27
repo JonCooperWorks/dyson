@@ -857,6 +857,15 @@ impl HttpState {
         }
     }
 
+    /// Path to dyson.json resolved at startup.  None when launched
+    /// without --config (in-memory only).  Used by the
+    /// `/api/admin/configure` route to patch the agent's model list
+    /// in-place; HotReloader watches this path and rebuilds the
+    /// agent on the next turn.
+    pub(crate) fn config_path(&self) -> Option<&std::path::Path> {
+        self.config_path.as_deref()
+    }
+
     /// Core of `BrowserArtefactSink::publish_file_as_artefact` — extracted
     /// so tests can exercise the put-in-store side without touching the
     /// trait-object bus.  Returns the minted `(file_id, artefact_id)` on
