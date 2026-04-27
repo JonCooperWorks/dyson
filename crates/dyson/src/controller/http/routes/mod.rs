@@ -59,6 +59,14 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     // — keyed on once and reused by the route match.
     let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
 
+    // `/healthz` is intentionally unauthenticated: external probes
+    // (Cube template builder, warden's health prober, load balancers)
+    // need a credential-free liveness endpoint. Returns 200 with a
+    // tiny JSON body — clients only check the status code.
+    if matches!((&method, segs.as_slice()), (&Method::GET, ["healthz"])) {
+        return super::responses::json_ok(&serde_json::json!({"status": "ok"}));
+    }
+
     // `/api/auth/config` is intentionally unauthenticated: the SPA
     // calls it before it has a token to discover whether one is
     // required, and (for OIDC) where to start the auth code flow.

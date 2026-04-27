@@ -24,6 +24,7 @@ pub mod hash_bearer;
 pub mod init;
 pub mod listen;
 pub mod run;
+pub mod warden;
 
 use std::path::PathBuf;
 

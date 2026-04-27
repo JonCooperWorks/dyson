@@ -124,6 +124,12 @@ enum Commands {
         plaintext: String,
     },
 
+    /// Boot inside a CubeSandbox under the dyson-orchestrator.
+    /// Reads WARDEN_BEARER_TOKEN, WARDEN_PROXY_URL, WARDEN_PROXY_TOKEN,
+    /// WARDEN_TASK, WARDEN_NAME, WARDEN_INSTANCE_ID from the env, then
+    /// synthesises a dyson.json + workspace and runs the HTTP controller.
+    Warden,
+
     /// Run a single prompt and exit.
     Run {
         /// The prompt to run.
@@ -222,6 +228,7 @@ async fn main() -> dyson::error::Result<()> {
             command::listen::run(config, dangerous_no_sandbox, provider, base_url, workspace).await
         }
         Commands::HashBearer { plaintext } => command::hash_bearer::run(plaintext),
+        Commands::Warden => command::warden::run().await,
         Commands::Run {
             prompt,
             config,
