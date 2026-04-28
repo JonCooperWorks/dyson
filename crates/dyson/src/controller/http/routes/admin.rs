@@ -87,6 +87,34 @@ pub(super) struct ConfigureBody {
     /// to fix it.
     #[serde(default)]
     proxy_base: Option<String>,
+    /// Name to register the image-generation provider under in
+    /// `providers.<image_provider_name>`.  Distinct from
+    /// `agent.provider` (chat) so the two can run with different
+    /// `LlmProvider` types — only `Gemini` and `OpenRouter` are wired
+    /// for image generation today.  When swarm pushes this it always
+    /// arrives alongside `image_provider_block`,
+    /// `image_generation_provider`, and `image_generation_model`;
+    /// individually-set fields are still patched so callers can do
+    /// partial updates if they want.
+    #[serde(default)]
+    image_provider_name: Option<String>,
+    /// Full provider entry to insert under `providers.<image_provider_name>`.
+    /// Shape mirrors what the dyson-side loader accepts:
+    /// `{ "type": "openrouter", "base_url": "...", "api_key": "...", "models": [...] }`.
+    /// Existing entries with the same name are replaced.
+    #[serde(default)]
+    image_provider_block: Option<serde_json::Value>,
+    /// Sets `agent.image_generation_provider`.  Usually equal to
+    /// `image_provider_name`, but kept independent so a future
+    /// caller could point the field at an already-registered
+    /// provider without re-uploading its block.
+    #[serde(default)]
+    image_generation_provider: Option<String>,
+    /// Sets `agent.image_generation_model` — the model id passed to
+    /// the image-gen factory's `model_override`.  Without this the
+    /// factory falls back to the provider's first `models` entry.
+    #[serde(default)]
+    image_generation_model: Option<String>,
 }
 
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
@@ -216,6 +244,41 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     };
     let models_changed = provider_changed && want_models;
 
+    // 3. Image generation: register / replace the dedicated image
+    //    provider block and point `agent.image_generation_*` at it.
+    //    Independent of the chat patch above — the chat path's
+    //    `agent.provider` is `openrouter` (LlmProvider::OpenAi under
+    //    the hood) but the image factory dispatches on real
+    //    LlmProvider variants, so the two need separate provider
+    //    entries.  Existing dysons (created before this field was
+    //    plumbed) get retroactively rewired by the swarm-side sweep
+    //    that pushes a configure with these set.
+    let want_image_block    = body.image_provider_name.as_deref().is_some_and(|s| !s.is_empty())
+        && body.image_provider_block.is_some();
+    let want_image_provider = body.image_generation_provider.as_deref().is_some_and(|s| !s.is_empty());
+    let want_image_model    = body.image_generation_model.as_deref().is_some_and(|s| !s.is_empty());
+    let image_changed = if want_image_block || want_image_provider || want_image_model {
+        match state.config_path() {
+            Some(path) => match patch_image_generation_in_config(
+                path,
+                if want_image_block {
+                    body.image_provider_name.as_deref().zip(body.image_provider_block.as_ref())
+                } else {
+                    None
+                },
+                if want_image_provider { body.image_generation_provider.as_deref() } else { None },
+                if want_image_model    { body.image_generation_model.as_deref()    } else { None },
+            ) {
+                Ok(()) => true,
+                Err(e) => return bad_request(&format!("image-gen patch failed: {e}")),
+            },
+            None => false,
+        }
+    } else {
+        false
+    };
+    let any_config_changed = provider_changed || image_changed;
+
     // Eagerly reload the settings + ClientRegistry instead of waiting
     // for the 2s polling HotReloader to notice the mtime change.  Two
     // reasons this matters:
@@ -230,7 +293,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //      client; the per-chat HotReloader's baseline is then
     //      post-patch, so subsequent turns see no change and never
     //      rebuild.  Eager reload closes the window entirely.
-    if provider_changed
+    if any_config_changed
         && let Some(path) = state.config_path()
     {
         match crate::config::loader::load_settings(Some(path)) {
@@ -256,6 +319,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "identity_updated": identity_changed,
         "models_updated": models_changed,
         "provider_updated": provider_changed,
+        "image_generation_updated": image_changed,
     }))
 }
 
@@ -383,6 +447,59 @@ fn patch_provider_in_config(
     Ok(())
 }
 
+/// Read dyson.json, register/replace the image-generation provider
+/// entry and/or update `agent.image_generation_provider` /
+/// `agent.image_generation_model`, write back atomically.  Each input
+/// is independent — a `None` means "leave alone" — so a swarm-side
+/// rewire can carry only the model change without re-uploading the
+/// full provider block, and vice versa.
+///
+/// Atomicity matters for the same reason as `patch_provider_in_config`:
+/// a half-written dyson.json is a chat-killer if the HotReloader picks
+/// it up before the second write lands.
+fn patch_image_generation_in_config(
+    path: &std::path::Path,
+    provider_block: Option<(&str, &Value)>,
+    image_provider: Option<&str>,
+    image_model: Option<&str>,
+) -> Result<(), String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+
+    if let Some((name, block)) = provider_block {
+        let providers = doc
+            .as_object_mut()
+            .ok_or_else(|| "config root is not an object".to_string())?
+            .entry("providers".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| "config providers is not an object".to_string())?;
+        providers.insert(name.to_owned(), block.clone());
+    }
+
+    if image_provider.is_some() || image_model.is_some() {
+        let agent = doc
+            .as_object_mut()
+            .ok_or_else(|| "config root is not an object".to_string())?
+            .entry("agent".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| "config agent is not an object".to_string())?;
+        if let Some(p) = image_provider {
+            agent.insert("image_generation_provider".into(), Value::String(p.to_owned()));
+        }
+        if let Some(m) = image_model {
+            agent.insert("image_generation_model".into(), Value::String(m.to_owned()));
+        }
+    }
+
+    let tmp = path.with_extension("json.tmp");
+    let pretty = serde_json::to_vec_pretty(&doc).map_err(|e| format!("serialise: {e}"))?;
+    std::fs::write(&tmp, &pretty).map_err(|e| format!("write tmp: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename: {e}"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,5 +576,85 @@ mod tests {
         let models = prov["models"].as_array().unwrap();
         assert_eq!(models[0], "anthropic/claude-sonnet-4-5");
         assert_eq!(models[1], "openai/gpt-5");
+    }
+
+    #[test]
+    fn patch_image_generation_inserts_provider_and_agent_fields() {
+        // Existing config has only the chat provider — the swarm-side
+        // rewire sweep arrives with a brand-new image provider block
+        // and the agent fields pointing at it.  Both must land in one
+        // atomic write so the HotReloader doesn't see a half-state.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dyson.json");
+        let initial = serde_json::json!({
+            "agent": { "provider": "openrouter" },
+            "providers": {
+                "openrouter": { "type": "openai", "api_key": "x", "models": ["m"] }
+            }
+        });
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        drop(f);
+
+        let block = serde_json::json!({
+            "type": "openrouter",
+            "base_url": "https://swarm/llm/openrouter",
+            "api_key": "tok",
+            "models": ["google/gemini-3-pro-image-preview"]
+        });
+        patch_image_generation_in_config(
+            &path,
+            Some(("openrouter-image", &block)),
+            Some("openrouter-image"),
+            Some("google/gemini-3-pro-image-preview"),
+        )
+        .unwrap();
+
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let img = &after["providers"]["openrouter-image"];
+        assert_eq!(img["type"], "openrouter");
+        assert_eq!(img["base_url"], "https://swarm/llm/openrouter");
+        assert_eq!(img["models"][0], "google/gemini-3-pro-image-preview");
+        assert_eq!(after["agent"]["image_generation_provider"], "openrouter-image");
+        assert_eq!(after["agent"]["image_generation_model"], "google/gemini-3-pro-image-preview");
+        // Chat side is untouched — a regression here would silently
+        // break the chat path on every running instance the sweep
+        // visits.
+        assert_eq!(after["agent"]["provider"], "openrouter");
+        assert_eq!(after["providers"]["openrouter"]["api_key"], "x");
+    }
+
+    #[test]
+    fn patch_image_generation_partial_update_only_touches_provided_fields() {
+        // Operator-side: somebody bumps the image model id (e.g. a
+        // newer preview) without changing the provider entry.  Only
+        // `agent.image_generation_model` should change; the provider
+        // block and provider-name field stay as they were.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dyson.json");
+        let initial = serde_json::json!({
+            "agent": {
+                "provider": "openrouter",
+                "image_generation_provider": "openrouter-image",
+                "image_generation_model": "google/old-model"
+            },
+            "providers": {
+                "openrouter": { "type": "openai", "api_key": "x", "models": ["m"] },
+                "openrouter-image": { "type": "openrouter", "models": ["google/old-model"] }
+            }
+        });
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        drop(f);
+
+        patch_image_generation_in_config(&path, None, None, Some("google/new-model")).unwrap();
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["agent"]["image_generation_model"], "google/new-model");
+        assert_eq!(after["agent"]["image_generation_provider"], "openrouter-image");
+        // Provider block models[] left alone — the model id only flows
+        // through the agent.image_generation_model override.
+        assert_eq!(after["providers"]["openrouter-image"]["models"][0], "google/old-model");
     }
 }
