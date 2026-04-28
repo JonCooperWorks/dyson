@@ -177,6 +177,7 @@ pub(super) async fn post(
     let data_dir = state.data_dir.clone();
 
     tokio::spawn(async move {
+        tracing::info!(chat_id = %chat_id, "TURN_WORKER: spawned");
         let mut output = SseOutput {
             chat_id: chat_id.clone(),
             tx: chat_handle.events.clone(),
@@ -192,7 +193,9 @@ pub(super) async fn post(
         // Lazily build the agent on first use.  If a transcript exists
         // on disk for this chat_id, replay it into the agent so context
         // carries across sessions.
+        tracing::info!(chat_id = %chat_id, "TURN_WORKER: acquiring agent lock");
         let mut guard = chat_handle.agent.lock().await;
+        tracing::info!(chat_id = %chat_id, "TURN_WORKER: agent lock acquired");
         // Prefer the runtime-selected provider's client when one
         // is set — falls back to the registry default otherwise
         // (unknown provider name or no override set).
@@ -201,8 +204,10 @@ pub(super) async fn post(
             None => registry.get_default(),
         };
         if guard.is_none() {
+            tracing::info!(chat_id = %chat_id, "TURN_WORKER: agent is None — calling build_agent");
             match build_agent(&settings, None, AgentMode::Private, client.clone(), &registry, None).await {
                 Ok(mut a) => {
+                    tracing::info!(chat_id = %chat_id, "TURN_WORKER: build_agent OK");
                     if let Some(h) = history.as_ref() {
                         match h.load(&chat_id) {
                             Ok(msgs) if !msgs.is_empty() => a.set_messages(msgs),
@@ -291,6 +296,7 @@ pub(super) async fn post(
                 }
             }
         }
+        tracing::info!(chat_id = %chat_id, "TURN_WORKER: agent ready, wiring run");
         let agent = guard.as_mut().expect("agent built or kept above");
         // The agent polls `cancellation.is_cancelled()` at iteration
         // boundaries, which is fine for /stop between tool calls but
@@ -363,12 +369,15 @@ pub(super) async fn post(
                     Ok(String::new())
                 }
                 r = async {
-                    if next_attachments.is_empty() {
+                    tracing::info!(chat_id = %chat_id, prompt_len = next_prompt.len(), atts = next_attachments.len(), "TURN_WORKER: calling agent.run");
+                    let r = if next_attachments.is_empty() {
                         agent.run(&next_prompt, &mut output).await
                     } else {
                         let atts = std::mem::take(&mut next_attachments);
                         agent.run_with_attachments(&next_prompt, atts, &mut output).await
-                    }
+                    };
+                    tracing::info!(chat_id = %chat_id, ok = r.is_ok(), "TURN_WORKER: agent.run returned");
+                    r
                 } => r,
             };
             match result {
