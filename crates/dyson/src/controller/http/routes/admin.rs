@@ -216,6 +216,41 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     };
     let models_changed = provider_changed && want_models;
 
+    // Eagerly reload the settings + ClientRegistry instead of waiting
+    // for the 2s polling HotReloader to notice the mtime change.  Two
+    // reasons this matters:
+    //   1. Cube snapshot/restore freezes the dyson process — there's
+    //      a real possibility the program-level hot-reload tokio task
+    //      doesn't survive the resume cleanly, leaving the registry
+    //      pinned to its warmup-time clients (api_key
+    //      "warmup-placeholder", base_url api.openai.com).  The chat
+    //      then 401s against api.openai.com on every turn.
+    //   2. Even when the polling loop IS alive, a chat that fires
+    //      between the patch and the next 2s tick caches the warmup
+    //      client; the per-chat HotReloader's baseline is then
+    //      post-patch, so subsequent turns see no change and never
+    //      rebuild.  Eager reload closes the window entirely.
+    if provider_changed
+        && let Some(path) = state.config_path()
+    {
+        match crate::config::loader::load_settings(Some(path)) {
+            Ok(new_settings) => {
+                state.registry.reload(&new_settings, None);
+                if let Ok(mut g) = state.settings.write() {
+                    *g = new_settings.clone();
+                }
+                crate::controller::publish_settings(std::sync::Arc::new(new_settings));
+                tracing::info!("dyson.json patched + registry reloaded by /api/admin/configure");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "post-patch settings reload failed; falling back to polling HotReloader"
+                );
+            }
+        }
+    }
+
     json_ok(&serde_json::json!({
         "ok": true,
         "identity_updated": identity_changed,

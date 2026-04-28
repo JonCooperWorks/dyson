@@ -1288,17 +1288,55 @@ fn reject_http_with_api_key(
     if !url.starts_with("http://") {
         return Ok(()); // HTTPS or other scheme — fine.
     }
-    // Allow localhost / 127.0.0.1 / [::1] — common for local model servers.
+    // Allow local-network destinations: loopback, RFC1918 private,
+    // link-local (covers cube-to-host gateway IPs), and Tailscale's
+    // 100.64/10 carrier-grade NAT range.  Plain HTTP on these
+    // addresses can't leave the host's local network, so the api_key
+    // never crosses an untrusted hop.  Public IPs still get rejected.
     let after_scheme = &url["http://".len()..];
     let host = after_scheme.split('/').next().unwrap_or("");
-    let host = host.split(':').next().unwrap_or(host); // strip port
-    if host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1" {
+    let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host); // strip port
+    if is_local_network_host(host) {
         return Ok(());
     }
     Err(DysonError::Config(format!(
         "provider '{label}' would send an API key over plain HTTP to '{url}' \
          (cleartext on the wire). Use HTTPS or remove the api_key."
     )))
+}
+
+/// True for hosts whose traffic stays on the local network: loopback,
+/// RFC1918 private (10/8, 172.16/12, 192.168/16), link-local
+/// (169.254/16), and Tailscale's 100.64/10 carrier-grade NAT range.
+/// Used by `reject_http_with_api_key` to decide whether plain HTTP +
+/// api_key is acceptable.
+fn is_local_network_host(host: &str) -> bool {
+    if host == "localhost" || host == "[::1]" || host == "::1" {
+        return true;
+    }
+    // IPv4 dotted-decimal: only treat as local-network when every
+    // octet parses cleanly.  Anything else (DNS name, IPv6 literal
+    // we don't recognise) defaults to "remote" — the safe direction.
+    let octets: Vec<&str> = host.split('.').collect();
+    if octets.len() != 4 {
+        return false;
+    }
+    let parsed: Option<[u8; 4]> = (|| {
+        let mut out = [0u8; 4];
+        for (i, o) in octets.iter().enumerate() {
+            out[i] = o.parse::<u8>().ok()?;
+        }
+        Some(out)
+    })();
+    match parsed {
+        Some([127, _, _, _]) => true,
+        Some([10, _, _, _]) => true,
+        Some([172, b, _, _]) if (16..=31).contains(&b) => true,
+        Some([192, 168, _, _]) => true,
+        Some([169, 254, _, _]) => true,
+        Some([100, b, _, _]) if (64..=127).contains(&b) => true,
+        _ => false,
+    }
 }
 
 // ===========================================================================
@@ -1317,6 +1355,62 @@ mod tests {
         let json = r#"{ "agent": { "model": "claude-opus-4-20250514" } }"#;
         let root: JsonRoot = serde_json::from_str(json).unwrap();
         assert_eq!(root.agent.unwrap().model.unwrap(), "claude-opus-4-20250514");
+    }
+
+    /// Regression for the dyson-in-cube `warmup-placeholder` bug:
+    /// swarm pushes `http://192.168.0.1:8080/llm/openrouter` as the
+    /// per-cube proxy_base (the cube-dev gateway IP — host-local, no
+    /// hairpin to the host's public IP).  Before the fix, the loader's
+    /// `reject_http_with_api_key` saw `http://` + non-localhost host +
+    /// non-empty api_key and threw.  The hot-reload path swallowed the
+    /// error, the registry never picked up the patched values, and
+    /// the agent kept calling api.openai.com with `warmup-placeholder`
+    /// for the chat's lifetime.
+    ///
+    /// All addresses below stay on the local network (loopback +
+    /// RFC1918 + link-local + Tailscale 100.64/10) — plain HTTP is
+    /// fine because the api_key never crosses an untrusted hop.
+    #[test]
+    fn http_with_api_key_allowed_for_local_network_hosts() {
+        for host in [
+            "localhost",
+            "127.0.0.1",
+            "[::1]",
+            "10.0.0.1",
+            "172.16.5.10",
+            "172.31.255.254",
+            "192.168.0.1",
+            "192.168.50.50",
+            "169.254.68.5",
+            "100.64.1.1",
+            "100.118.7.88", // tailnet
+        ] {
+            let url = format!("http://{host}:8080/llm/openrouter");
+            assert!(
+                reject_http_with_api_key(&Some(url.clone()), "key", "openrouter").is_ok(),
+                "expected {url} to be allowed (local-network host)"
+            );
+        }
+    }
+
+    /// Companion: public IPs and DNS names MUST still be rejected so
+    /// we don't silently leak api_keys over the internet.
+    #[test]
+    fn http_with_api_key_still_rejected_for_remote_hosts() {
+        for host in [
+            "8.8.8.8",
+            "172.32.0.1",       // just outside 172.16/12
+            "192.169.0.1",      // just outside 192.168/16
+            "100.128.0.1",      // just outside 100.64/10
+            "api.openai.com",
+            "openrouter.ai",
+        ] {
+            let url = format!("http://{host}/v1");
+            assert!(
+                reject_http_with_api_key(&Some(url.clone()), "key", "openrouter").is_err(),
+                "expected {url} to be rejected (remote host)"
+            );
+        }
     }
 
     #[test]
