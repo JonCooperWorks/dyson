@@ -135,7 +135,7 @@ pub async fn run() -> Result<()> {
     } else {
         json!({
             "type": "openai",
-            "base_url": format!("{}/openrouter/v1", proxy_url.trim_end_matches('/')),
+            "base_url": warden_provider_base_url(&proxy_url),
             "api_key": api_key,
             "models": [model_id]
         })
@@ -177,4 +177,41 @@ pub async fn run() -> Result<()> {
     );
 
     super::listen::run(Some(cfg_path), true, None, None, None).await
+}
+
+/// Build the `providers.openrouter.base_url` value that lands in dyson.json.
+///
+/// `OpenAiCompatClient` appends `/v1/chat/completions` to whatever
+/// `base_url` it sees, so this helper deliberately stops at `/openrouter`.
+/// A base ending in `/v1` doubles up to `/openrouter/v1/v1/...`, routes to
+/// OR's marketing site, and dyson surfaces the resulting non-200 as a
+/// generic "upstream HTTP error" — the bug pinned by the regression test
+/// `warden_provider_base_url_has_no_trailing_v1`.
+fn warden_provider_base_url(proxy_url: &str) -> String {
+    format!("{}/openrouter", proxy_url.trim_end_matches('/'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn warden_provider_base_url_has_no_trailing_v1() {
+        // The contract: warden's /llm proxy URL gets one provider segment
+        // appended.  `OpenAiCompatClient::stream` then appends
+        // `/v1/chat/completions` itself.  Adding `/v1` here would
+        // double it up.
+        assert_eq!(
+            warden_provider_base_url("https://dyson.example.com/llm"),
+            "https://dyson.example.com/llm/openrouter"
+        );
+    }
+
+    #[test]
+    fn warden_provider_base_url_strips_trailing_slash() {
+        assert_eq!(
+            warden_provider_base_url("https://dyson.example.com/llm/"),
+            "https://dyson.example.com/llm/openrouter"
+        );
+    }
 }

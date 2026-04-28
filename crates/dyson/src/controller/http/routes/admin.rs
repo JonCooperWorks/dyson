@@ -404,18 +404,23 @@ mod tests {
         f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
         drop(f);
 
+        // `base_url` must NOT carry `/v1` — `OpenAiCompatClient` appends
+        // `/v1/chat/completions` itself when building the request URL.  A
+        // base ending in `/v1` doubles up to `/openrouter/v1/v1/...`,
+        // which routes to OR's marketing site and surfaces as a generic
+        // "upstream HTTP error".
         patch_provider_in_config(
             &path,
             Some(&["anthropic/claude-sonnet-4-5".into(), "openai/gpt-5".into()]),
             Some("dy-real-token"),
-            Some("https://dyson.example/llm/openrouter/v1"),
+            Some("https://dyson.example/llm/openrouter"),
         )
         .unwrap();
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let prov = &after["providers"]["openrouter"];
         assert_eq!(prov["api_key"], "dy-real-token");
-        assert_eq!(prov["base_url"], "https://dyson.example/llm/openrouter/v1");
+        assert_eq!(prov["base_url"], "https://dyson.example/llm/openrouter");
         let models = prov["models"].as_array().unwrap();
         assert_eq!(models[0], "anthropic/claude-sonnet-4-5");
         assert_eq!(models[1], "openai/gpt-5");
