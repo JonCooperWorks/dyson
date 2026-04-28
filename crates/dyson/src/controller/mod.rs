@@ -572,30 +572,38 @@ pub fn list_providers(settings: &Settings) -> Vec<(&str, &crate::config::Provide
 // Hot-reload setup — shared across all controllers.
 // ---------------------------------------------------------------------------
 
-/// Resolve the config file path and create a hot reloader.
+/// Process-wide store for the resolved config-file path.  Set once by
+/// `command::listen` (or `command::warden` via `listen::run`) at
+/// startup, read by every site that needs to know which `dyson.json`
+/// the program is actually backed by — `create_hot_reloader`, the
+/// HTTP controller's `HttpState::config_path` field, etc.
 ///
-/// `explicit` is the config path the caller already resolved (e.g.
-/// `dyson warden` constructs `<DYSON_HOME>/dyson.json` itself, and
-/// `dyson listen` calls `resolve_config_path(--config)` upstream of
-/// this function).  When set, it wins outright; the argv/cwd
-/// fallback only fires for callers that don't have a path in hand.
-///
-/// Pre-fix this function ignored everything in `Settings` and re-derived
-/// from `std::env::args()` only.  In `dyson warden` mode that meant
-/// scanning argv for `--config` (never present), then falling back to
-/// `cwd/dyson.json`.  Systemd-launched warden containers run with
-/// `cwd = /`, so the fallback missed → `Option<PathBuf>` was `None`
-/// → program-level hot-reload silently disabled → warden's
-/// `/api/admin/configure` patches to `dyson.json` were never observed
-/// by the running agent.  The agent kept its bootstrap config with
-/// `models: ["warmup-placeholder"]` forever.  See `dyson_warden::dyson_reconfig`
-/// on the orchestrator side for the corresponding push path.
-pub fn create_hot_reloader(
-    settings: &Settings,
-    explicit: Option<&std::path::Path>,
-) -> (Option<PathBuf>, crate::config::hot_reload::HotReloader) {
-    let config_path = explicit
+/// Why this exists: the original layer of code re-derived the path
+/// from `std::env::args()` at every callsite.  In `dyson warden` mode
+/// the path is constructed internally (no `--config` flag, systemd cwd
+/// is `/`), so each callsite's argv parse returned `None` and silent
+/// path-resolution-fallout shipped twice — once breaking program-level
+/// hot-reload, once breaking `state.config_path()` for
+/// `/api/admin/configure`'s `patch_models_in_config` step.  Funnelling
+/// through a single OnceLock kills the failure mode at the source.
+pub(crate) static EXPLICIT_CONFIG_PATH: std::sync::OnceLock<PathBuf> =
+    std::sync::OnceLock::new();
+
+/// Install the program's resolved config path.  First writer wins
+/// (`OnceLock` semantics) so a stray double-install in tests is a
+/// no-op rather than a panic.
+pub fn install_explicit_config_path(p: PathBuf) {
+    let _ = EXPLICIT_CONFIG_PATH.set(p);
+}
+
+/// Resolve the config-file path for any caller that needs it.
+/// Order: caller-supplied `explicit` → installed OnceLock →
+/// `--config` / `-c` argv flag → `./dyson.json`.  Returns `None` when
+/// no source has a path (legitimate for in-memory dev / tests).
+pub fn resolve_config_path_for_runtime(explicit: Option<&std::path::Path>) -> Option<PathBuf> {
+    explicit
         .map(PathBuf::from)
+        .or_else(|| EXPLICIT_CONFIG_PATH.get().cloned())
         .or_else(|| {
             std::env::args()
                 .skip_while(|a| a != "--config" && a != "-c")
@@ -605,7 +613,21 @@ pub fn create_hot_reloader(
         .or_else(|| {
             let p = PathBuf::from("dyson.json");
             if p.exists() { Some(p) } else { None }
-        });
+        })
+}
+
+/// Resolve the config file path and create a hot reloader.
+///
+/// `explicit` is the config path the caller already resolved.  When
+/// set, it wins outright; otherwise we fall through to the
+/// process-wide `EXPLICIT_CONFIG_PATH`, then argv, then a `dyson.json`
+/// in cwd.  See `EXPLICIT_CONFIG_PATH`'s docstring for the full bug
+/// history this layered resolution is defending against.
+pub fn create_hot_reloader(
+    settings: &Settings,
+    explicit: Option<&std::path::Path>,
+) -> (Option<PathBuf>, crate::config::hot_reload::HotReloader) {
+    let config_path = resolve_config_path_for_runtime(explicit);
     let workspace_path = crate::workspace::FilesystemWorkspace::resolve_path(Some(
         settings.workspace.connection_string.expose(),
     ));
@@ -1415,6 +1437,54 @@ mod tests {
             Some(cfg.as_path()),
             "explicit path must win over argv/cwd fallback"
         );
+    }
+
+    /// Regression for the second-instance variant of the
+    /// warmup-placeholder bug: the HTTP controller's `HttpState::config_path`
+    /// resolver had its own argv-only copy, so even with `create_hot_reloader`
+    /// fixed, `routes::admin::post` saw `state.config_path() == None` and
+    /// silently returned `models_updated: false` on every reconfigure
+    /// push.  The fix consolidates the resolution into
+    /// `resolve_config_path_for_runtime`, which honours the OnceLock
+    /// installed by `command::listen`.
+    ///
+    /// This test goes through the OnceLock side door; we can't reset
+    /// it once set (that's the whole point), so we set first and then
+    /// assert the resolver picks it up.  Other tests in this module
+    /// run in parallel — they MUST NOT depend on the OnceLock being
+    /// empty (`create_hot_reloader_falls_back_when_no_explicit`'s
+    /// docstring explains this).
+    #[test]
+    fn resolve_config_path_for_runtime_honours_oncelock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("dyson.json");
+        std::fs::write(&path, b"{}").unwrap();
+        install_explicit_config_path(path.clone());
+
+        // No explicit override → must fall through to the OnceLock.
+        let resolved = resolve_config_path_for_runtime(None);
+        // The OnceLock is set-once across the test process.  Some other
+        // test may have set a different path first; we accept either
+        // (a) our path or (b) some other test's path.  What we won't
+        // accept is `None` — that would mean the OnceLock branch was
+        // skipped entirely.
+        assert!(
+            resolved.is_some(),
+            "resolver returned None despite an installed OnceLock path"
+        );
+    }
+
+    /// Caller-supplied `explicit` always beats the OnceLock.  This is
+    /// the contract `command::listen` relies on when it wants the
+    /// caller's intent to win even after a previous test polluted the
+    /// global lock.
+    #[test]
+    fn resolve_config_path_for_runtime_explicit_beats_oncelock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let explicit = tmp.path().join("explicit.json");
+        std::fs::write(&explicit, b"{}").unwrap();
+        let resolved = resolve_config_path_for_runtime(Some(&explicit));
+        assert_eq!(resolved.as_deref(), Some(explicit.as_path()));
     }
 
     #[test]

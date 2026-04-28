@@ -394,13 +394,29 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     return () => document.removeEventListener('pointerdown', h);
   }, [conv, openRating, mutate]);
 
-  const sendMsg = (val, files) => {
-    if (!conv) return;
+  const sendMsg = async (val, files) => {
+    // No conversation selected (fresh dyson, user typed straight into
+    // the input without clicking "+ New conversation" first).  Auto-
+    // create one and proceed.  Pre-fix this branch silently returned
+    // and the user's send-button click went nowhere — no fetch, no
+    // visible feedback, indistinguishable from a frontend hang.
+    let activeConv = conv;
+    if (!activeConv) {
+      try {
+        const c = await client.createChat('New conversation');
+        upsertConversation({ id: c.id, title: c.title, live: false, source: 'http' });
+        setConv(c.id);
+        activeConv = c.id;
+      } catch (e) {
+        console.warn('[dyson] auto-create chat failed', e);
+        return;
+      }
+    }
     // /clear is controller-side — the server rotates the chat file and
     // clears agent context.  Skip the optimistic turn pair (no LLM
     // reply is coming) and reset local state once the POST lands.
     if (val.trim() === '/clear' && !(files && files.length)) {
-      fetch(`/api/conversations/${encodeURIComponent(conv)}/turn`, {
+      fetch(`/api/conversations/${encodeURIComponent(activeConv)}/turn`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: '/clear' }),
@@ -427,7 +443,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     // drained queued turn into one `agent.run()`; the SPA mirrors
     // that by merging consecutive queued sends into one bubble.
     mutate(s => pushUserMessage(s, { ts, blocks: userBlocks }));
-    getResources(conv).es = client.send(conv, val, streamCallbacks(conv), files);
+    getResources(activeConv).es = client.send(activeConv, val, streamCallbacks(activeConv), files);
   };
 
   const onCancel = () => {

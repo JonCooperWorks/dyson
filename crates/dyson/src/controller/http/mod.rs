@@ -29,7 +29,6 @@
 // ===========================================================================
 
 use std::convert::Infallible;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use hyper::server::conn::http1;
@@ -275,22 +274,15 @@ impl Controller for HttpController {
 
         // Resolve the dyson.json path the operator started with so
         // `post_model` can persist the web UI's choice the same way
-        // Telegram's /model command does.  Matches the resolution
-        // used by `create_hot_reloader`.  HTTP doesn't watch
-        // `dyson.json` here — `subscribe_settings_updates` does that
-        // process-wide and pushes fresh `Settings` into
-        // `state.settings` — but each `ChatHandle` runs its own
-        // workspace-only `HotReloader` so dream-written skills and
-        // edits to `MEMORY.md` / `SOUL.md` rebuild the cached agent
-        // on the next turn instead of waiting for a process restart.
-        let config_path = std::env::args()
-            .skip_while(|a| a != "--config" && a != "-c")
-            .nth(1)
-            .map(PathBuf::from)
-            .or_else(|| {
-                let p = PathBuf::from("dyson.json");
-                if p.exists() { Some(p) } else { None }
-            });
+        // Telegram's /model command does, and `routes::admin::post`
+        // can patch `providers.<agent.provider>.models` on warden's
+        // `/api/admin/configure` calls.  Goes through the shared
+        // `resolve_config_path_for_runtime` so the path matches
+        // whatever `command::listen` installed at startup — argv
+        // alone misses the `dyson warden` path (no `--config` flag,
+        // systemd cwd is `/`), which is exactly how the
+        // warmup-placeholder bug shipped twice before this consolidation.
+        let config_path = super::resolve_config_path_for_runtime(None);
 
         // DNS-rebinding gate: only matters when the bind is loopback
         // AND auth is `DangerousNoAuth`.  Any other shape (bearer /

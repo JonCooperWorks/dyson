@@ -71,6 +71,22 @@ pub(super) struct ConfigureBody {
     /// in tool calls back to warden.
     #[serde(default)]
     instance_id: Option<String>,
+    /// Replacement value for `providers.<agent.provider>.api_key` —
+    /// the per-instance proxy_token warden minted at create time.
+    /// Without this, the dyson.json keeps the boot-time
+    /// `warmup-placeholder` literal as its api_key (Cube freezes
+    /// `/proc/self/environ` at warmup, so the `WARDEN_PROXY_TOKEN`
+    /// env warden injects on instance create never reaches the
+    /// running dyson process).
+    #[serde(default)]
+    proxy_token: Option<String>,
+    /// Replacement value for `providers.<agent.provider>.base_url` —
+    /// warden's `/llm` URL the agent should call.  Same root cause
+    /// as `proxy_token`: the boot-time value is empty / loopback
+    /// and Cube's snapshot freeze means warden can't ride env vars
+    /// to fix it.
+    #[serde(default)]
+    proxy_base: Option<String>,
 }
 
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
@@ -172,13 +188,24 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         false
     };
 
-    // 2. dyson.json: patch the agent provider's `models` array if
-    //    the body carries a non-empty list AND we have a config_path
-    //    on disk.  We don't validate the contents — OR will reject
-    //    bad ids at request time.
-    let models_changed = if !body.models.is_empty() {
+    // 2. dyson.json: patch the agent provider's `models`, `api_key`,
+    //    and/or `base_url` if the body supplies them.  All three
+    //    targets share the same patch helper because the surface is
+    //    a single `providers.<agent.provider>` object — one
+    //    read-modify-write keeps the file in a consistent state and
+    //    the HotReloader fires once per change cluster instead of
+    //    three times.  Empty / None on a field means "leave alone".
+    let want_models   = !body.models.is_empty();
+    let want_api_key  = body.proxy_token.as_deref().is_some_and(|s| !s.is_empty());
+    let want_base_url = body.proxy_base.as_deref().is_some_and(|s| !s.is_empty());
+    let provider_changed = if want_models || want_api_key || want_base_url {
         match state.config_path() {
-            Some(path) => match patch_models_in_config(path, &body.models) {
+            Some(path) => match patch_provider_in_config(
+                path,
+                if want_models { Some(body.models.as_slice()) } else { None },
+                if want_api_key { body.proxy_token.as_deref() } else { None },
+                if want_base_url { body.proxy_base.as_deref() } else { None },
+            ) {
                 Ok(()) => true,
                 Err(e) => return bad_request(&format!("config patch failed: {e}")),
             },
@@ -187,11 +214,13 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     } else {
         false
     };
+    let models_changed = provider_changed && want_models;
 
     json_ok(&serde_json::json!({
         "ok": true,
         "identity_updated": identity_changed,
         "models_updated": models_changed,
+        "provider_updated": provider_changed,
     }))
 }
 
@@ -264,18 +293,21 @@ fn extract_section(body: &str, name: &str) -> Option<String> {
     if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
-/// Read dyson.json, patch `providers.<agent.provider>.models` to the
-/// supplied list, write back atomically (tmp + rename).  We don't
-/// rewrite the rest of the file — the rest is operator-edited and
-/// shouldn't churn.
+/// Read dyson.json, patch any of `providers.<agent.provider>.models`,
+/// `.api_key`, `.base_url` that the caller supplies, write back
+/// atomically.  `None` for a field means "leave alone"; an empty
+/// `Some("")` would also be no-op but the caller is expected to filter
+/// those out before calling.
 ///
 /// Atomicity matters: `HotReloader` debounces 500ms on mtime so a
 /// half-written file isn't a real risk, but rename gives us the
 /// belt-and-braces guarantee that a crash mid-write leaves the
 /// previous version in place.
-fn patch_models_in_config(
+fn patch_provider_in_config(
     path: &std::path::Path,
-    models: &[String],
+    models: Option<&[String]>,
+    api_key: Option<&str>,
+    base_url: Option<&str>,
 ) -> Result<(), String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
@@ -284,7 +316,7 @@ fn patch_models_in_config(
         .get("agent")
         .and_then(|a| a.get("provider"))
         .and_then(|p| p.as_str())
-        .ok_or_else(|| "config has no agent.provider — can't tell which provider's models to patch".to_string())?
+        .ok_or_else(|| "config has no agent.provider — can't tell which provider's config to patch".to_string())?
         .to_owned();
 
     let providers = doc
@@ -295,10 +327,18 @@ fn patch_models_in_config(
         .get_mut(&provider_name)
         .and_then(|p| p.as_object_mut())
         .ok_or_else(|| format!("config has no providers.{provider_name}"))?;
-    prov_entry.insert(
-        "models".into(),
-        Value::Array(models.iter().map(|m| Value::String(m.clone())).collect()),
-    );
+    if let Some(ms) = models {
+        prov_entry.insert(
+            "models".into(),
+            Value::Array(ms.iter().map(|m| Value::String(m.clone())).collect()),
+        );
+    }
+    if let Some(k) = api_key {
+        prov_entry.insert("api_key".into(), Value::String(k.to_owned()));
+    }
+    if let Some(u) = base_url {
+        prov_entry.insert("base_url".into(), Value::String(u.to_owned()));
+    }
 
     // Atomic write: tmp file in same dir + rename.
     let tmp = path.with_extension("json.tmp");
@@ -353,21 +393,30 @@ mod tests {
         let initial = serde_json::json!({
             "agent": { "provider": "openrouter" },
             "providers": {
-                "openrouter": { "type": "openai", "models": ["warmup-placeholder"] }
+                "openrouter": {
+                    "type": "openai",
+                    "api_key": "warmup-placeholder",
+                    "models": ["warmup-placeholder"]
+                }
             }
         });
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
         drop(f);
 
-        patch_models_in_config(
+        patch_provider_in_config(
             &path,
-            &["anthropic/claude-sonnet-4-5".into(), "openai/gpt-5".into()],
+            Some(&["anthropic/claude-sonnet-4-5".into(), "openai/gpt-5".into()]),
+            Some("dy-real-token"),
+            Some("https://dyson.example/llm/openrouter/v1"),
         )
         .unwrap();
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let models = after["providers"]["openrouter"]["models"].as_array().unwrap();
+        let prov = &after["providers"]["openrouter"];
+        assert_eq!(prov["api_key"], "dy-real-token");
+        assert_eq!(prov["base_url"], "https://dyson.example/llm/openrouter/v1");
+        let models = prov["models"].as_array().unwrap();
         assert_eq!(models[0], "anthropic/claude-sonnet-4-5");
         assert_eq!(models[1], "openai/gpt-5");
     }

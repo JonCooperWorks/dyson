@@ -109,7 +109,15 @@ pub async fn run(
     // can subscribe for live settings updates instead of each spinning
     // up its own file watcher.  The companion task below does the
     // actual polling + registry reload + publish.
+    //
+    // Also publish the resolved config path via the controller-level
+    // OnceLock so callers like the HTTP controller (which can't get
+    // it through its run() signature) see the same path the listen
+    // command resolved.  See `controller::EXPLICIT_CONFIG_PATH`.
     dyson::controller::install_settings_bus(std::sync::Arc::new(settings.clone()));
+    if let Some(p) = config_path.as_ref() {
+        dyson::controller::install_explicit_config_path(p.clone());
+    }
     spawn_program_hot_reload_task(
         &settings,
         config_path.as_deref(),
