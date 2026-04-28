@@ -34,7 +34,6 @@ const INITIAL = {
   // nonce against the last value they processed.
   ui: {
     pendingArtefactId: null,   // deep-link / chip click → ArtefactsView picks it up
-    openRailNonce: 0,          // bumped to force the right rail open
     toggleArtefactsDrawerNonce: 0,
   },
 };
@@ -149,10 +148,6 @@ export function clearPendingArtefact() {
   app.dispatch(s => s.ui.pendingArtefactId == null
     ? s
     : { ...s, ui: { ...s.ui, pendingArtefactId: null } });
-}
-
-export function requestOpenRail() {
-  app.dispatch(s => ({ ...s, ui: { ...s.ui, openRailNonce: s.ui.openRailNonce + 1 } }));
 }
 
 export function requestToggleArtefactsDrawer() {

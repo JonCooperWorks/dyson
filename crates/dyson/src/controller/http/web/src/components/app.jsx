@@ -12,14 +12,14 @@
 import React, { useState, useEffect, useRef, useCallback, useLayoutEffect, Suspense, lazy } from 'react';
 import { Icon } from './icons.jsx';
 import { Turn, Composer, TypingIndicator, EmptyState } from './turns.jsx';
-import { TopBar, LeftRail, RightRail } from './views.jsx';
+import { TopBar, LeftRail } from './views.jsx';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession, useSessionMutator } from '../hooks/useSession.js';
 import {
   setTool, updateTool, mergeTools, upsertConversation,
   markConversationHasArtefacts,
-  requestOpenRail, requestOpenArtefact, clearPendingArtefact,
+  requestOpenArtefact, clearPendingArtefact,
   requestToggleArtefactsDrawer,
 } from '../store/app.js';
 import {
@@ -124,12 +124,9 @@ function App() {
     clearPendingArtefact();
   }, []);
   const [showLeft, setShowLeft] = useState(false);
-  const [showRight, setShowRight] = useState(false);
-  const [rightHidden, setRightHidden] = useState(false);
 
   const conversations = useAppState(s => s.conversations);
   const pendingArtefactId = useAppState(s => s.ui.pendingArtefactId);
-  const openRailNonce = useAppState(s => s.ui.openRailNonce);
 
   // First live arrival: snap to the first conversation.  Only fires when
   // conv is empty so a deep-link's conv wins.
@@ -225,42 +222,28 @@ function App() {
     };
   }, []);
 
-  const closeRails = useCallback(() => { setShowLeft(false); setShowRight(false); }, []);
-
-  // Plug button is dual-purpose: on mobile it toggles the drawer, on
-  // desktop it collapses the right column entirely.
-  const onToggleRight = () => {
-    if (window.matchMedia(MOBILE).matches) { setShowRight(s => !s); setShowLeft(false); }
-    else setRightHidden(h => !h);
-  };
-
-  // ConversationView signals "open the right rail" by bumping a nonce.
-  useEffect(() => {
-    if (openRailNonce === 0) return;
-    if (window.matchMedia(MOBILE).matches) { setShowRight(true); setShowLeft(false); }
-    else setRightHidden(false);
-  }, [openRailNonce]);
+  const closeRails = useCallback(() => { setShowLeft(false); }, []);
 
   const onToggleLeft = () => {
     // Artefacts tab has no LeftRail — hamburger drives the tree drawer
     // instead, otherwise mobile readers are a one-way door until users
     // find the back button inside the title bar.
     if (view === 'artefacts') { requestToggleArtefactsDrawer(); return; }
-    setShowLeft(s => !s); setShowRight(false);
+    setShowLeft(s => !s);
   };
 
-  const bodyClass = `body${showLeft ? ' show-left' : ''}${showRight ? ' show-right' : ''}${rightHidden ? ' no-right' : ''}`;
+  // Tool calls render inline in the transcript (expandable chips), so the
+  // body is two columns on desktop: conversations + transcript.
+  const bodyClass = `body no-right${showLeft ? ' show-left' : ''}`;
 
   return (
     <div className="app">
-      <TopBar view={view} setView={selectView} rightHidden={rightHidden}
-              onToggleLeft={onToggleLeft} onToggleRight={onToggleRight}/>
+      <TopBar view={view} setView={selectView} onToggleLeft={onToggleLeft}/>
       {view === 'conv' && (
         <main className={bodyClass}>
-          {(showLeft || showRight) && <div className="scrim" onClick={closeRails}/>}
+          {showLeft && <div className="scrim" onClick={closeRails}/>}
           <LeftRail active={conv} setActive={(id) => { setConv(id); setToolRef(null); setShowLeft(false); }}/>
           <ConversationView conv={conv} toolRef={toolRef} setToolRef={setToolRef}/>
-          {!rightHidden && <RightRail chatId={conv}/>}
         </main>
       )}
       {view === 'mind' && (
@@ -301,19 +284,17 @@ function ConversationView({ conv, toolRef, setToolRef }) {
   const scrollRef = useRef(null);
 
   // URL → state: when the hash points at a specific tool ref (deep-
-  // link, back-button restore), open the matching panel as soon as
-  // the session is hydrated.  When the URL drops the suffix (back-
-  // button popping the panel out of history), close the panel so the
-  // back-button is symmetric with the click that opened it.
+  // link, back-button restore), expand the matching inline tool block
+  // as soon as the session is hydrated.  When the URL drops the suffix
+  // (back-button popping the expansion out of history), collapse it so
+  // the back-button is symmetric with the click that opened it.
   useEffect(() => {
     if (!conv || !session?.loaded) return;
     if (toolRef) {
       if (session.openTool !== toolRef) {
         mutate(s => openPanel(s, toolRef));
-        requestOpenRail();
       }
     } else if (session.openTool && session.panels.includes(session.openTool)) {
-      // URL no longer carries a tool ref — pop the panel.
       mutate(s => closePanel(s, s.openTool));
     }
   }, [conv, toolRef, session?.loaded]);
@@ -365,16 +346,17 @@ function ConversationView({ conv, toolRef, setToolRef }) {
 
   const handleOpenTool = (ref) => {
     if (!session) return;
-    // Tap an already-open chip to close its panel — drop the URL
+    // Tap an already-expanded chip to collapse it — drop the URL
     // suffix too so the back button doesn't reopen what the user just
-    // closed.
-    if (session.openTool === ref && session.panels.includes(ref)) {
+    // collapsed.
+    if (session.panels.includes(ref)) {
       mutate(s => closePanel(s, ref));
-      if (typeof setToolRef === 'function') setToolRef(null);
+      if (session.openTool === ref && typeof setToolRef === 'function') {
+        setToolRef(null);
+      }
       return;
     }
     mutate(s => openPanel(s, ref));
-    requestOpenRail();
     // Push the tool into the URL so reload / share / back-button
     // round-trips it.
     if (typeof setToolRef === 'function') setToolRef(ref);
@@ -489,7 +471,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
         <div className="inner">
           {empty ? <EmptyState/> : session.liveTurns.map((t, i) => (
             <Turn key={i} turn={t} tools={tools}
-                  onOpenTool={handleOpenTool} activeTool={session.openTool}
+                  onOpenTool={handleOpenTool} expandedTools={session.panels}
                   turnIndex={i} rating={session.ratings[i]} onRate={onRate}
                   reactionsOpen={session.openRating === i}
                   onToggleReactions={() => toggleReactions(i)}/>

@@ -1,62 +1,29 @@
 // UX tweaks:
 //   1. Copy-from-anywhere: the per-turn copy button used to scroll out
-//      of view inside long agent messages — `.turn .who` is now `position:
-//      sticky` so the header (with its copy button) stays pinned to the
-//      transcript top while you scroll a turn.
-//   2. Tool-pane scroll: clicking a tool chip pushes `#/c/<id>/t/<ref>`
-//      and opens the panel, but if the panel was below the rail's fold
-//      the user saw nothing happen.  RightRail now scrolls the matching
-//      panel into view whenever `session.openTool` flips.
+//      of view inside long agent messages — `.turn .copy-turn` is now
+//      `position: sticky` so the header (with its copy button) stays
+//      pinned to the transcript top while you scroll a turn.
+//   2. Inline tool blocks: tool calls render expandable in the
+//      transcript (no right-rail tool stack).  Clicking the chip flips
+//      `aria-expanded` and reveals the kind-specific body underneath.
 //
 // jsdom has no CSS engine and no layout, so the sticky header is
 // asserted via a source-text grep on turns.css (matches the regression
-// test style next door).  The scroll wiring is exercised with a real
-// React mount — we seed the session store, render RightRail, and assert
-// `Element.prototype.scrollIntoView` is invoked on the panel that
-// matches `openTool`.
+// test style next door).  The expand wiring is exercised with a real
+// React mount.
 
 import React from 'react';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { render, cleanup, act, waitFor } from '@testing-library/react';
-import { RightRail } from '../components/views.jsx';
-import { ApiProvider } from '../hooks/useApi.js';
-import { setTool, __resetAppStoreForTests } from '../store/app.js';
-import {
-  ensureSession, updateSession, openPanel, closePanel,
-  __resetSessionsForTests,
-} from '../store/sessions.js';
-// Force the lazy ToolPanel module to load eagerly under vitest.  The
-// production lazy() boundary still works at runtime; this just removes
-// the Suspense delay from the test's render → assert window so we
-// don't have to thread waitFor() through every assertion.
-import '../components/panels.jsx';
+import { render, fireEvent, cleanup } from '@testing-library/react';
+import { ToolBlock } from '../components/turns.jsx';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const turnsCss = () => readFileSync(join(__dirname, '..', 'styles', 'turns.css'), 'utf8');
 
-function stubClient() {
-  // RightRail polls /api/activity for running subagents; the stub keeps
-  // the network silent so the test only watches the panel-scroll path.
-  return { getActivity: async () => ({ lanes: [] }) };
-}
-
-function renderRail(chatId, client = stubClient()) {
-  return render(
-    <ApiProvider client={client}><RightRail chatId={chatId}/></ApiProvider>
-  );
-}
-
-beforeEach(() => {
-  __resetAppStoreForTests();
-  __resetSessionsForTests();
-});
-
-afterEach(() => {
-  cleanup();
-});
+afterEach(() => { cleanup(); });
 
 describe('UX: copy-from-anywhere — sticky copy button', () => {
   it('.turn .copy-turn is position: sticky so it stays reachable mid-scroll', () => {
@@ -82,87 +49,75 @@ describe('UX: copy-from-anywhere — sticky copy button', () => {
   });
 });
 
-describe('UX: tool pane scroll — RightRail follows session.openTool', () => {
-  let originalScroll;
+// A bash-kind tool with a couple of seed lines.  Renders <BashPanel>
+// as the expanded body.
+const bashTool = () => ({
+  name: 'bash',
+  icon: 'B',
+  sig: 'echo hi',
+  dur: '12ms',
+  exit: 'ok',
+  status: 'done',
+  kind: 'bash',
+  body: {
+    lines: [
+      { c: 'p', t: '$ echo hi' },
+      { c: 'c', t: 'hi' },
+    ],
+    exit_code: 0,
+    duration_ms: 12,
+  },
+});
 
-  beforeEach(() => {
-    // jsdom doesn't implement scrollIntoView; spy on it so the layout
-    // effect doesn't crash and we can assert the call.
-    originalScroll = Element.prototype.scrollIntoView;
-    Element.prototype.scrollIntoView = vi.fn();
+describe('UX: inline tool block — chip expands the panel body in place', () => {
+  it('chip header always paints; body only when expanded', () => {
+    const { container, rerender } = render(
+      <ToolBlock tool={bashTool()} toolRef="c-1-bash-1" expanded={false} onToggle={() => {}}/>
+    );
+    expect(container.querySelector('.toolblock')).toBeTruthy();
+    expect(container.querySelector('.toolchip')).toBeTruthy();
+    expect(container.querySelector('.toolblock-body'), 'body must NOT render while collapsed').toBeNull();
+    // The disclosure label reads 'open' while collapsed.
+    expect(container.querySelector('.toolchip .open .lbl').textContent).toBe('open');
+    expect(container.querySelector('.toolchip').getAttribute('aria-expanded')).toBe('false');
+
+    rerender(<ToolBlock tool={bashTool()} toolRef="c-1-bash-1" expanded={true} onToggle={() => {}}/>);
+    expect(container.querySelector('.toolblock.expanded')).toBeTruthy();
+    expect(container.querySelector('.toolblock-body'), 'body must render once expanded').toBeTruthy();
+    expect(container.querySelector('.toolchip .open .lbl').textContent).toBe('hide');
+    expect(container.querySelector('.toolchip').getAttribute('aria-expanded')).toBe('true');
+    // The actual kind-specific body — bash output — renders inside.
+    expect(container.querySelector('.toolblock-body .term')).toBeTruthy();
+    expect(container.textContent).toContain('echo hi');
   });
 
-  afterEach(() => {
-    Element.prototype.scrollIntoView = originalScroll;
+  it('clicking the chip fires onToggle (single chip, not the body)', () => {
+    let calls = 0;
+    const { container } = render(
+      <ToolBlock tool={bashTool()} toolRef="c-1-bash-1" expanded={false} onToggle={() => { calls += 1; }}/>
+    );
+    fireEvent.click(container.querySelector('.toolchip'));
+    expect(calls).toBe(1);
   });
 
-  function seed(chatId, refs, openRef) {
-    // Seed app.tools and the session.panels stack as if the user had
-    // clicked these tool chips in order, with `openRef` being the most
-    // recent click. ensureSession + updateSession mirror what
-    // streamCallbacks does in app.jsx; openPanel is the same reducer
-    // handleOpenTool calls so this reproduces the exact runtime path.
-    ensureSession(chatId);
-    for (const ref of refs) {
-      setTool(ref, { name: ref, icon: 'X', sig: '', dur: '', exit: 'ok',
-                     status: 'done', kind: 'fallback', body: { text: ref } });
-      updateSession(chatId, s => openPanel(s, ref));
-    }
-    if (openRef && refs[refs.length - 1] !== openRef) {
-      updateSession(chatId, s => openPanel(s, openRef));
-    }
-  }
-
-  async function findPanel(container, ref) {
-    return waitFor(() => {
-      const node = container.querySelector(`[data-tool-ref="${ref}"]`);
-      if (!node) throw new Error(`panel ${ref} not yet mounted`);
-      return node;
-    });
-  }
-
-  it('renders each panel with a data-tool-ref attribute matching its ref', async () => {
-    seed('c-1', ['c-1-live-1', 'c-1-live-2'], 'c-1-live-2');
-    const { container } = renderRail('c-1');
-    await findPanel(container, 'c-1-live-2');
-    const panels = container.querySelectorAll('.r-stack [data-tool-ref]');
-    expect([...panels].map(p => p.getAttribute('data-tool-ref')))
-      .toEqual(['c-1-live-1', 'c-1-live-2']);
+  it('a tool with no kind falls back to FallbackPanel inside the inline body', () => {
+    const tool = { ...bashTool(), kind: 'fallback', body: { text: 'plain text payload' } };
+    const { container } = render(
+      <ToolBlock tool={tool} toolRef="c-1-fallback-1" expanded={true} onToggle={() => {}}/>
+    );
+    expect(container.querySelector('.toolblock-body .fallback-body')).toBeTruthy();
+    expect(container.textContent).toContain('plain text payload');
   });
 
-  it('scrolls the openTool panel into view after mount', async () => {
-    seed('c-1', ['c-1-live-1', 'c-1-live-2', 'c-1-live-3'], 'c-1-live-3');
-    const { container } = renderRail('c-1');
-    const target = await findPanel(container, 'c-1-live-3');
-    await waitFor(() => expect(target.scrollIntoView).toHaveBeenCalled());
-  });
-
-  it('scrolls the newly-opened panel into view when openTool changes', async () => {
-    seed('c-1', ['c-1-live-1', 'c-1-live-2'], 'c-1-live-2');
-    const { container } = renderRail('c-1');
-    await findPanel(container, 'c-1-live-2');
-    Element.prototype.scrollIntoView.mockClear();
-    // Simulate the user clicking the chip for the first panel — the
-    // session reducer flips openTool back to live-1.
-    await act(async () => {
-      updateSession('c-1', s => openPanel(s, 'c-1-live-1'));
-    });
-    const target = await findPanel(container, 'c-1-live-1');
-    await waitFor(() => expect(target.scrollIntoView).toHaveBeenCalled());
-  });
-
-  it('does not scroll when openTool is null (closed panel, no active tool)', async () => {
-    seed('c-1', ['c-1-live-1'], 'c-1-live-1');
-    const { container } = renderRail('c-1');
-    await findPanel(container, 'c-1-live-1');
-    Element.prototype.scrollIntoView.mockClear();
-    await act(async () => {
-      // closePanel clears openTool when the closed ref was the active one.
-      updateSession('c-1', s => closePanel(s, 'c-1-live-1'));
-    });
-    await waitFor(() => {
-      expect(container.querySelector('[data-tool-ref]')).toBeNull();
-    });
-    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+  it('expanded toolblock carries data-tool-ref for deep-link addressing', () => {
+    // The hash route `#/c/<id>/t/<ref>` flips this block to expanded; a
+    // future scroll-into-view feature can rely on the attribute as a
+    // stable selector.
+    const { container } = render(
+      <ToolBlock tool={bashTool()} toolRef="c-1-bash-7" expanded={true} onToggle={() => {}}/>
+    );
+    const node = container.querySelector('[data-tool-ref="c-1-bash-7"]');
+    expect(node).toBeTruthy();
+    expect(node.classList.contains('toolblock')).toBe(true);
   });
 });

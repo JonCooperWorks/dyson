@@ -14,7 +14,6 @@ import {
   updateTool,
   requestOpenArtefact,
   clearPendingArtefact,
-  requestOpenRail,
   requestToggleArtefactsDrawer,
   __resetAppStoreForTests,
 } from './app.js';
@@ -136,10 +135,7 @@ describe('app store — live / mind / activity / UI nonces', () => {
     expect(app.getSnapshot().ui.pendingArtefactId).toBeNull();
   });
 
-  it('open-rail / toggle-artefacts nonces monotonically increase', () => {
-    const a = app.getSnapshot().ui.openRailNonce;
-    requestOpenRail();
-    expect(app.getSnapshot().ui.openRailNonce).toBe(a + 1);
+  it('toggle-artefacts nonce monotonically increases', () => {
     const b = app.getSnapshot().ui.toggleArtefactsDrawerNonce;
     requestToggleArtefactsDrawer();
     expect(app.getSnapshot().ui.toggleArtefactsDrawerNonce).toBe(b + 1);

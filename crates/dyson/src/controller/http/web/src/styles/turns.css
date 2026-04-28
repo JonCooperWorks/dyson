@@ -504,6 +504,55 @@
   transition: color 120ms ease;
 }
 .toolchip:hover .open { color: var(--accent); }
+.toolchip .open svg { transition: transform 160ms ease; }
+.toolchip.active .open svg { transform: rotate(90deg); }
+.toolchip .tool-copy {
+  flex: 0 0 auto;
+  background: transparent; border: 0;
+  color: var(--mute);
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+.toolchip .tool-copy:hover { background: var(--bg-1); color: var(--fg); }
+
+/* Inline tool block: chip + (when expanded) the panel body underneath.
+   The chip serves as the panel header so we don't restack PanelChrome.
+   When expanded, the chip's bottom corners flatten into the body so the
+   two read as one card. */
+.toolblock { display: flex; flex-direction: column; min-width: 0; }
+.toolblock.expanded > .toolchip {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+}
+.toolblock-body {
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-bottom-left-radius: var(--rad);
+  border-bottom-right-radius: var(--rad);
+  background:
+    linear-gradient(180deg,
+      oklch(0.180 0.014 262),
+      oklch(0.150 0.014 262));
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  box-shadow:
+    0 1px 0 oklch(1 0 0 / 0.02) inset,
+    0 6px 18px -10px oklch(0 0 0 / 0.55);
+}
+.toolblock.live > .toolblock-body { border-color: var(--accent-ln); }
+/* The body content reuses the kind-specific renderers from panels.jsx
+   (BashPanel / DiffPanel / SbomPanel / …).  Their max-height was tuned
+   for the 388px right-rail; in the chat the transcript itself scrolls,
+   so let the body grow taller before introducing a second scroll bar. */
+.toolblock-body .term,
+.toolblock-body .diff,
+.toolblock-body .p-body,
+.toolblock-body .sbom,
+.toolblock-body .taint { max-height: min(560px, 70vh); }
 
 /* ---------- subagent card ---------- */
 .sacard {

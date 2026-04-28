@@ -317,21 +317,28 @@ function ImagePanel({ url, name, prompt }) {
   );
 }
 
+// Renders just the kind-specific body of a tool, without the panel chrome
+// header.  Used inline in the chat transcript where the tool chip itself
+// already serves as the header — stacking PanelChrome on top would
+// duplicate the icon, name, and arg row.
+function ToolBody({ tool }) {
+  const running = tool.status === 'running';
+  switch (tool.kind) {
+    case 'bash':     return <BashPanel running={running} body={tool.body}/>;
+    case 'diff':     return <DiffPanel files={tool.body?.files || []}/>;
+    case 'sbom':     return <SbomPanel rows={tool.body?.rows || []} counts={tool.body?.counts || {}}/>;
+    case 'taint':    return <TaintPanel flow={tool.body?.flow || []}/>;
+    case 'read':     return <ReadPanel path={tool.body?.path} lines={tool.body?.lines || []} highlight={tool.body?.highlight}/>;
+    case 'thinking': return <ThinkingPanel text={tool.body?.text || ''} running={running}/>;
+    case 'image':    return <ImagePanel url={tool.body?.url} name={tool.body?.name} prompt={tool.body?.prompt || tool.prompt}/>;
+    case 'subagent': return <SubagentPanel children={tool.body?.children} summary={tool.body?.summary} running={running}/>;
+    default:         return <FallbackPanel text={tool.body?.text || ''}/>;
+  }
+}
+
 function ToolPanel({ tool, onClose, toolRef }) {
   const running = tool.status === 'running';
   const icon = tool.icon || tool.name[0].toUpperCase();
-  let body = null;
-  switch (tool.kind) {
-    case 'bash': body = <BashPanel running={running} body={tool.body}/>; break;
-    case 'diff': body = <DiffPanel files={tool.body.files || []}/>; break;
-    case 'sbom': body = <SbomPanel rows={tool.body.rows || []} counts={tool.body.counts || {}}/>; break;
-    case 'taint': body = <TaintPanel flow={tool.body.flow || []}/>; break;
-    case 'read': body = <ReadPanel path={tool.body.path} lines={tool.body.lines || []} highlight={tool.body.highlight}/>; break;
-    case 'thinking': body = <ThinkingPanel text={tool.body?.text || ''} running={running}/>; break;
-    case 'image': body = <ImagePanel url={tool.body?.url} name={tool.body?.name} prompt={tool.body?.prompt || tool.prompt}/>; break;
-    case 'subagent': body = <SubagentPanel children={tool.body?.children} summary={tool.body?.summary} running={running}/>; break;
-    default: body = <FallbackPanel text={tool.body?.text || ''}/>;
-  }
   return (
     <PanelChrome
       icon={icon}
@@ -342,9 +349,9 @@ function ToolPanel({ tool, onClose, toolRef }) {
       copyText={() => copyTextForTool(tool)}
       onClose={onClose}
     >
-      {body}
+      <ToolBody tool={tool}/>
     </PanelChrome>
   );
 }
 
-export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, SubagentPanel, ToolPanel, copyTextForTool };
+export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, SubagentPanel, ToolBody, ToolPanel, copyTextForTool };

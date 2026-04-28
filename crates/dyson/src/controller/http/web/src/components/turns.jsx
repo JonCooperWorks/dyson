@@ -9,6 +9,7 @@ import { copyToClipboard } from '../lib/clipboard.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { requestOpenArtefact } from '../store/app.js';
 import { SLASH_COMMANDS } from '../store/constants.js';
+import { ToolBody, copyTextForTool } from './panels.jsx';
 import MarkdownIt from 'markdown-it';
 
 function ThinkingBlock({ text }) {
@@ -20,10 +21,21 @@ function ThinkingBlock({ text }) {
   );
 }
 
-function ToolChip({ tool, onOpen, active }) {
+// Header strip for an inline tool block.  Click toggles the expanded
+// body underneath (rendered by ToolBlock).  The chevron rotates 90° in
+// CSS when the wrapping .toolblock is .expanded so the caret reads as a
+// disclosure.
+function ToolChip({ tool, onToggle, expanded }) {
   const running = tool.status === 'running';
+  const onCopy = async (e) => {
+    e.stopPropagation();
+    await copyToClipboard(copyTextForTool(tool));
+  };
   return (
-    <div className={`toolchip ${active ? 'active' : ''} ${running ? 'running' : ''}`} onClick={onOpen}>
+    <div className={`toolchip ${expanded ? 'active' : ''} ${running ? 'running' : ''}`}
+         role="button"
+         aria-expanded={expanded ? 'true' : 'false'}
+         onClick={onToggle}>
       <span className="icon">{tool.icon}</span>
       <span className="sig"><span className="tname">{tool.name}</span>{tool.sig}</span>
       <span className="meta">
@@ -32,7 +44,34 @@ function ToolChip({ tool, onOpen, active }) {
           {running ? '…' : tool.exit === 'ok' ? 'exit 0' : 'exit 1'}
         </span>
       </span>
-      <span className="open">open <Icon name="chev" size={10}/></span>
+      {expanded && (
+        <button className="tool-copy" onClick={onCopy} title="Copy tool output">
+          <Icon name="copy" size={11}/>
+        </button>
+      )}
+      <span className="open">
+        <span className="lbl">{expanded ? 'hide' : 'open'}</span>
+        <Icon name="chev" size={10}/>
+      </span>
+    </div>
+  );
+}
+
+// Inline tool block: chip header + (optionally) the expanded body.
+// `expanded` flips when the user clicks the chip OR when the SSE stream
+// signals a new live tool via openPanel; both go through the same
+// session.panels reducer so the URL deep-link path is the same too.
+function ToolBlock({ tool, toolRef, expanded, onToggle }) {
+  const running = tool.status === 'running';
+  return (
+    <div className={`toolblock${expanded ? ' expanded' : ''}${running ? ' live' : ''}`}
+         data-tool-ref={toolRef || undefined}>
+      <ToolChip tool={tool} onToggle={onToggle} expanded={expanded}/>
+      {expanded && (
+        <div className="toolblock-body">
+          <ToolBody tool={tool}/>
+        </div>
+      )}
     </div>
   );
 }
@@ -75,8 +114,11 @@ function turnToText(turn) {
 }
 
 
-function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
+function Turn({ turn, tools, onOpenTool, expandedTools, turnIndex, rating, onRate,
                 reactionsOpen, onToggleReactions }) {
+  const expandedSet = expandedTools instanceof Set
+    ? expandedTools
+    : new Set(Array.isArray(expandedTools) ? expandedTools : []);
   const isUser = turn.role === 'user';
   const avatarL = isUser ? 'JC' : 'DY';
   const ratable = !isUser && turnIndex != null && typeof onRate === 'function';
@@ -142,7 +184,9 @@ function Turn({ turn, tools, onOpenTool, activeTool, turnIndex, rating, onRate,
           if (b.type === 'tool') {
             const t = tools[b.ref];
             if (!t) return null;
-            return <ToolChip key={i} tool={t} onOpen={() => onOpenTool(b.ref)} active={activeTool === b.ref}/>;
+            return <ToolBlock key={i} tool={t} toolRef={b.ref}
+                              expanded={expandedSet.has(b.ref)}
+                              onToggle={() => onOpenTool(b.ref)}/>;
           }
           if (b.type === 'file') {
             return <FileBlock key={i} block={b}/>;
@@ -461,4 +505,4 @@ function fileToBase64(file) {
   });
 }
 
-export { Turn, ThinkingBlock, ToolChip, FileBlock, ArtefactBlock, ErrorBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64 };
+export { Turn, ThinkingBlock, ToolChip, ToolBlock, FileBlock, ArtefactBlock, ErrorBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64 };

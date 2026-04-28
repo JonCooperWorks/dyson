@@ -251,14 +251,18 @@
 .topbar .meta .cmdk .kbd { margin-left: auto; }
 
 /* ---------- main body ---------- */
+/* Two columns: conversation list + transcript.  Tool calls render
+   inline as expandable blocks in the transcript, so there is no
+   right-rail tool stack.  `.body.no-right` on the conv view exists for
+   a CSS-only no-op (and to keep the no-left.no-right combo working in
+   the Mind / Activity / Artefacts views which set their own classes). */
 .body {
   display: grid;
-  grid-template-columns: 264px 1fr 388px;
+  grid-template-columns: 264px 1fr;
   min-height: 0;
   overflow: hidden;
 }
-.body.no-right { grid-template-columns: 264px 1fr; }
-.body.no-left { grid-template-columns: 1fr 388px; }
+.body.no-left { grid-template-columns: 1fr; }
 .body.no-left.no-right { grid-template-columns: 1fr; }
 
 /* ---------- left rail ---------- */
@@ -543,137 +547,6 @@
 }
 .composer-dock > * { pointer-events: auto; }
 
-/* ---------- right rail ---------- */
-.right {
-  border-left: 1px solid var(--line);
-  background: linear-gradient(180deg,
-      oklch(0.155 0.014 262 / 0.6) 0%,
-      oklch(0.135 0.014 262 / 0.6) 100%);
-  display: flex; flex-direction: column;
-  min-height: 0;
-  min-width: 0;
-  position: relative;
-}
-.right::before {
-  content: "";
-  position: absolute;
-  top: 0; bottom: 0; left: 0;
-  width: 1px;
-  background: linear-gradient(180deg,
-      transparent 0%,
-      var(--line) 12%,
-      var(--line) 88%,
-      transparent 100%);
-}
-.right .r-head {
-  display: flex; align-items: center; gap: 10px;
-  padding: 11px 14px;
-  border-bottom: 1px solid var(--line);
-  min-height: 46px;
-  flex: 0 0 auto;
-  background: linear-gradient(180deg,
-      oklch(0.165 0.014 262 / 0.5),
-      transparent);
-}
-.right .r-head .title {
-  font: 500 11px/1 var(--font-mono);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--mute);
-}
-.right .r-head .count {
-  color: var(--accent);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--accent-wash);
-  border: 1px solid var(--accent-ln);
-  font-weight: 600;
-}
-.right .r-head .spacer { flex: 1; }
-.right .r-stack {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  padding: 12px;
-  display: flex; flex-direction: column; gap: 12px;
-  min-height: 0;
-}
-
-/* Running-subagents block at the top of the Tool Stack.  Appears
-   whenever the ActivityRegistry has a `Running` entry for the active
-   chat — lets the operator see live subagents without having to
-   click the chip in the transcript or jump to the Activity tab. */
-.right .r-section {
-  border: 1px solid var(--line);
-  border-radius: var(--rad);
-  background:
-    linear-gradient(180deg,
-      oklch(0.83 0.15 50 / 0.06),
-      transparent 60%),
-    var(--bg);
-  overflow: hidden;
-  position: relative;
-  box-shadow:
-    0 1px 0 oklch(1 0 0 / 0.03) inset,
-    0 8px 22px -10px oklch(0 0 0 / 0.5),
-    0 0 22px -8px var(--sub-glow);
-}
-.right .r-section::before {
-  content: "";
-  position: absolute;
-  left: 0; top: 0; bottom: 0; width: 2px;
-  background: linear-gradient(180deg, var(--sub), oklch(0.76 0.16 35));
-  box-shadow: 0 0 12px -1px var(--sub-glow);
-}
-.right .r-section-head {
-  display: flex; align-items: center; gap: 8px;
-  padding: 9px 12px;
-  font: 500 10.5px/1 var(--font-mono);
-  letter-spacing: 0.10em;
-  text-transform: uppercase;
-  color: var(--sub);
-  border-bottom: 1px solid var(--line);
-}
-.right .r-section-head .count {
-  margin-left: auto;
-  color: var(--mute);
-  font-size: 10.5px;
-}
-.right .r-running {
-  display: flex; flex-direction: column;
-}
-.right .r-running-row {
-  display: flex; align-items: center; gap: 9px;
-  padding: 10px 12px;
-  font-size: 12.5px;
-  border-top: 1px solid var(--line);
-}
-.right .r-running-row:first-child { border-top: none; }
-.right .r-running-row .dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--mute); flex: 0 0 auto;
-}
-.right .r-running-row .dot.running {
-  background: var(--accent);
-  box-shadow: 0 0 8px var(--accent-glow), 0 0 0 3px oklch(0.89 0.22 130 / 0.15);
-  animation: pulse 1.4s infinite;
-}
-.right .r-running-row .name {
-  font-weight: 600;
-  color: var(--fg);
-  flex: 0 0 auto;
-}
-.right .r-running-row .note {
-  color: var(--fg-dim);
-  font-style: italic;
-  flex: 1 1 auto;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 /* ---------- mind view ---------- */
 /* position: relative anchors the mobile `.mind-side` drawer (which is
    position: absolute) to this grid cell instead of the viewport.  Without
@@ -882,14 +755,7 @@
 }
 .modelmenu .item.on .model { color: var(--fg); }
 
-/* Right-rail collapse — desktop hides the column entirely. */
-.body.no-right .right { display: none; }
-
-/* Plug button reflects whether the rail is currently visible. */
 .topbar .menu-toggle.active { color: var(--accent); filter: drop-shadow(0 0 6px var(--accent-glow)); }
-@media (min-width: 761px) {
-  .topbar .meta .menu-toggle { display: inline-flex; }
-}
 
 /* ---------- mobile ---------- */
 @media (max-width: 760px) {
@@ -900,20 +766,12 @@
      `.composer textarea` at 14.5px) without us having to chase every selector. */
   input, textarea { font-size: 16px !important; }
   .body { grid-template-columns: 1fr !important; }
-  .body .left, .body .right { display: none; }
+  .body .left { display: none; }
   .body.show-left .left {
     display: flex;
     position: fixed;
     top: 48px; left: 0; bottom: 0;
     width: min(86vw, 320px);
-    z-index: 30;
-    box-shadow: 0 0 32px oklch(0 0 0 / 0.55);
-  }
-  .body.show-right .right {
-    display: flex;
-    position: fixed;
-    top: 48px; right: 0; bottom: 0;
-    width: min(94vw, 380px);
     z-index: 30;
     box-shadow: 0 0 32px oklch(0 0 0 / 0.55);
   }

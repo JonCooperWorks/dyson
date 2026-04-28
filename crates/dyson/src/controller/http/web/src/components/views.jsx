@@ -1,26 +1,17 @@
-/* Dyson — primary views: TopBar, LeftRail, RightRail.
+/* Dyson — primary views: TopBar, LeftRail.
  *
  * Secondary views (Mind / Activity / Artefacts) live in
  * views-secondary.jsx so they can be code-split and lazy-loaded — the
  * cold-paint bundle carries only the conversation shell. */
 
-import React, { useState, useEffect, useRef, useLayoutEffect, Suspense, lazy } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
-import { useSession } from '../hooks/useSession.js';
 import {
   switchProviderModel, removeConversation, upsertConversation,
 } from '../store/app.js';
-import { deleteSession, updateSession, closePanel } from '../store/sessions.js';
-
-// ToolPanel dispatches to ~8 tool-view renderers (bash/diff/sbom/taint/
-// read/image/thinking/fallback).  None are invoked on the cold-paint
-// route because session.panels starts empty — defer the whole module
-// so the initial bundle shrinks by the weight of every renderer that
-// hasn't been asked for yet.
-const ToolPanel = lazy(() =>
-  import('./panels.jsx').then(m => ({ default: m.ToolPanel })));
+import { deleteSession } from '../store/sessions.js';
 
 const NAVS = [
   { id: 'conv',      name: 'Conversations', k: '1', icon: 'chat' },
@@ -29,7 +20,7 @@ const NAVS = [
   { id: 'activity',  name: 'Activity',      k: '4', icon: 'activity' },
 ];
 
-function TopBar({ view, setView, onToggleLeft, onToggleRight, rightHidden }) {
+function TopBar({ view, setView, onToggleLeft }) {
   const client = useApi();
   const model = useAppState(s => s.activeModel);
   const providers = useAppState(s => s.providers);
@@ -81,11 +72,6 @@ function TopBar({ view, setView, onToggleLeft, onToggleRight, rightHidden }) {
             {totalModels > 0 && <Icon name="chevd" size={10}/>}
           </span>
         )}
-        <button className={`menu-toggle ${!rightHidden ? 'active' : ''}`}
-                title={rightHidden ? 'Show tool stack' : 'Hide tool stack'}
-                onClick={onToggleRight}>
-          <Icon name="plug" size={14}/>
-        </button>
         {menuOpen && totalModels > 0 && (
           <ModelMenu providers={providers} model={model} expanded={expanded}
                      onToggleGroup={id => setExpanded(e => ({ ...e, [id]: !e[id] }))}
@@ -228,116 +214,4 @@ function ConvRow({ c, active, onOpen, onDelete }) {
   );
 }
 
-// RightRail pulls its own session slice.  The active chat id is the
-// only prop — everything else (panels, panel close, tools dict) flows
-// through the store.
-function RightRail({ chatId }) {
-  const session = useSession(chatId);
-  const tools = useAppState(s => s.tools);
-  const panels = session?.panels || [];
-  const openTool = session?.openTool || null;
-  const runningSubagents = useRunningSubagents(chatId);
-  const pulseCount = runningSubagents.length;
-  const stackRef = useRef(null);
-
-  const onClose = (ref) => updateSession(chatId, s => closePanel(s, ref));
-
-  // Clicking a tool chip (or restoring `#/c/<id>/t/<ref>` from the URL)
-  // updates `session.openTool` — the stack already renders the panel,
-  // but if it's offscreen below the rail's fold the user sees nothing
-  // happen. Scroll the matching panel into view whenever openTool flips
-  // so the click-to-open feels like an actual jump. `block: 'nearest'`
-  // avoids yanking the rail when the panel is already visible. The
-  // requestAnimationFrame round-trip is for the lazy ToolPanel module:
-  // first render after Suspense resolves may not have the DOM node yet.
-  useLayoutEffect(() => {
-    if (!openTool || !stackRef.current) return;
-    const find = () => stackRef.current?.querySelector(
-      `[data-tool-ref="${cssEscape(openTool)}"]`);
-    const node = find();
-    if (node) { node.scrollIntoView({ block: 'nearest' }); return; }
-    const raf = requestAnimationFrame(() => {
-      const late = find();
-      if (late) late.scrollIntoView({ block: 'nearest' });
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [openTool, panels.length]);
-
-  return (
-    <aside className="right">
-      <div className="r-head">
-        <span className="title">Tool stack</span>
-        <span className="count">{panels.length}</span>
-        <div className="spacer"/>
-      </div>
-      <div className="r-stack" ref={stackRef}>
-        {pulseCount > 0 && <RunningSection agents={runningSubagents}/>}
-        {panels.length === 0 && pulseCount === 0 && (
-          <div style={{color:'var(--mute)', fontSize:12, padding:24, textAlign:'center', lineHeight:1.5}}>
-            Tool panels appear here when Dyson runs tools.
-            Click <span className="mono">[open]</span> on a tool chip in the transcript.
-          </div>
-        )}
-        {panels.length > 0 && (
-          <Suspense fallback={<div/>}>
-            {panels.map(ref => tools[ref] && (
-              <ToolPanel key={ref} toolRef={ref} tool={tools[ref]} onClose={() => onClose(ref)}/>
-            ))}
-          </Suspense>
-        )}
-      </div>
-    </aside>
-  );
-}
-
-// Tool refs are mint-generated (`${chatId}-${kind}-${counter}`) so they
-// can't contain quotes or backslashes today, but a tool id arriving over
-// SSE could theoretically. CSS.escape is the standards-compliant escape;
-// fall back to a hand-rolled minimal escape for older runtimes (jsdom in
-// some test setups).
-function cssEscape(s) {
-  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(s);
-  return String(s).replace(/["\\]/g, '\\$&');
-}
-
-// Poll /api/activity for this chat so the Tool Stack surfaces any
-// running subagent even when the user hasn't clicked a chip to open
-// its panel.  3s cadence matches ActivityView.
-function useRunningSubagents(chatId) {
-  const client = useApi();
-  const [running, setRunning] = useState([]);
-  useEffect(() => {
-    if (!chatId) { setRunning([]); return; }
-    let alive = true;
-    const refresh = () => client.getActivity(chatId).then(j => {
-      if (!alive || !j) return;
-      setRunning((j.lanes || []).filter(a => a.status === 'running'));
-    }).catch(() => {});
-    refresh();
-    const id = setInterval(() => { if (!document.hidden) refresh(); }, 3000);
-    return () => { alive = false; clearInterval(id); };
-  }, [chatId, client]);
-  return running;
-}
-
-function RunningSection({ agents }) {
-  return (
-    <div className="r-section">
-      <div className="r-section-head">
-        <span>Running</span>
-        <span className="count mono">{agents.length}</span>
-      </div>
-      <div className="r-running">
-        {agents.map((a, i) => (
-          <div key={i} className="r-running-row" title={a.note}>
-            <span className="dot running"/>
-            <span className="name mono">{a.name}</span>
-            <span className="note">{a.note}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-export { TopBar, LeftRail, RightRail };
+export { TopBar, LeftRail };

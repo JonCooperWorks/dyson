@@ -26,9 +26,14 @@ const src = (rel) => readFileSync(join(__dirname, '..', rel), 'utf8');
 
 describe('module exports', () => {
   it('views.jsx exports the primary shell components', () => {
-    for (const name of ['TopBar', 'LeftRail', 'RightRail']) {
+    for (const name of ['TopBar', 'LeftRail']) {
       expect(views[name], `views.jsx must export ${name}`).toBeTypeOf('function');
     }
+    // RightRail used to live here but tool calls render inline in the
+    // transcript now; the export must be gone so a future revival is
+    // an explicit choice, not an accidental import.
+    expect(views.RightRail, 'RightRail export must not return — tools render inline now')
+      .toBeUndefined();
   });
 
   it('views-secondary.jsx exports the lazy-loaded views', () => {
@@ -44,13 +49,13 @@ describe('module exports', () => {
     for (const dead of ['SubagentCard', 'ErrorCard']) {
       expect(turns[dead], `turns.jsx still exports deleted name ${dead}`).toBeUndefined();
     }
-    for (const live of ['Turn', 'ToolChip', 'Composer', 'EmptyState', 'markdown']) {
+    for (const live of ['Turn', 'ToolChip', 'ToolBlock', 'Composer', 'EmptyState', 'markdown']) {
       expect(turns[live], `turns.jsx must export ${live}`).toBeDefined();
     }
   });
 
   it('panels.jsx exports the tool panels', () => {
-    for (const name of ['PanelChrome', 'BashPanel', 'DiffPanel', 'SbomPanel', 'TaintPanel', 'ThinkingPanel', 'ImagePanel', 'FallbackPanel', 'ReadPanel', 'SubagentPanel', 'ToolPanel', 'copyTextForTool']) {
+    for (const name of ['PanelChrome', 'BashPanel', 'DiffPanel', 'SbomPanel', 'TaintPanel', 'ThinkingPanel', 'ImagePanel', 'FallbackPanel', 'ReadPanel', 'SubagentPanel', 'ToolBody', 'ToolPanel', 'copyTextForTool']) {
       expect(panels[name], `panels.jsx must export ${name}`).toBeDefined();
     }
   });
@@ -92,8 +97,8 @@ describe('app.jsx — keyboard + session regressions', () => {
     expect(app).toContain("ensureSession");
     expect(app, 'conv-change must NOT wipe liveTurns').not.toContain('setLiveTurns([])');
     expect(
-      app.includes('session.panels') || app.includes('session ? session.panels'),
-      'RightRail must take its panels from the active session',
+      app.includes('session.panels'),
+      'inline tool blocks must take their expanded set from the active session',
     ).toBe(true);
     // EventSource + per-chat counter live in the non-reactive resources
     // map — they're resources, not data, and can't be frozen.
