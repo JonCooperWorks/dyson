@@ -110,7 +110,11 @@ pub async fn run(
     // up its own file watcher.  The companion task below does the
     // actual polling + registry reload + publish.
     dyson::controller::install_settings_bus(std::sync::Arc::new(settings.clone()));
-    spawn_program_hot_reload_task(&settings, std::sync::Arc::clone(&registry));
+    spawn_program_hot_reload_task(
+        &settings,
+        config_path.as_deref(),
+        std::sync::Arc::clone(&registry),
+    );
 
     let shutdown = async {
         // Wait for Ctrl-C (SIGINT).
@@ -198,9 +202,11 @@ pub async fn run(
 /// Skipped when no config path was resolved (in-memory dev scenarios).
 fn spawn_program_hot_reload_task(
     settings: &dyson::config::Settings,
+    explicit_config: Option<&std::path::Path>,
     registry: std::sync::Arc<dyson::controller::ClientRegistry>,
 ) {
-    let (config_path, mut reloader) = dyson::controller::create_hot_reloader(settings);
+    let (config_path, mut reloader) =
+        dyson::controller::create_hot_reloader(settings, explicit_config);
     if config_path.is_none() {
         tracing::debug!("no config path — program-level hot-reload disabled");
         return;

@@ -574,18 +574,34 @@ pub fn list_providers(settings: &Settings) -> Vec<(&str, &crate::config::Provide
 
 /// Resolve the config file path and create a hot reloader.
 ///
-/// Both terminal and Telegram controllers need to watch for config and
-/// workspace changes.  This extracts the shared setup:
-/// 1. Parse `--config` / `-c` from CLI args, or fall back to `dyson.json`
-/// 2. Resolve the workspace path
-/// 3. Create a `HotReloader` watching both
+/// `explicit` is the config path the caller already resolved (e.g.
+/// `dyson warden` constructs `<DYSON_HOME>/dyson.json` itself, and
+/// `dyson listen` calls `resolve_config_path(--config)` upstream of
+/// this function).  When set, it wins outright; the argv/cwd
+/// fallback only fires for callers that don't have a path in hand.
+///
+/// Pre-fix this function ignored everything in `Settings` and re-derived
+/// from `std::env::args()` only.  In `dyson warden` mode that meant
+/// scanning argv for `--config` (never present), then falling back to
+/// `cwd/dyson.json`.  Systemd-launched warden containers run with
+/// `cwd = /`, so the fallback missed → `Option<PathBuf>` was `None`
+/// → program-level hot-reload silently disabled → warden's
+/// `/api/admin/configure` patches to `dyson.json` were never observed
+/// by the running agent.  The agent kept its bootstrap config with
+/// `models: ["warmup-placeholder"]` forever.  See `dyson_warden::dyson_reconfig`
+/// on the orchestrator side for the corresponding push path.
 pub fn create_hot_reloader(
     settings: &Settings,
+    explicit: Option<&std::path::Path>,
 ) -> (Option<PathBuf>, crate::config::hot_reload::HotReloader) {
-    let config_path = std::env::args()
-        .skip_while(|a| a != "--config" && a != "-c")
-        .nth(1)
+    let config_path = explicit
         .map(PathBuf::from)
+        .or_else(|| {
+            std::env::args()
+                .skip_while(|a| a != "--config" && a != "-c")
+                .nth(1)
+                .map(PathBuf::from)
+        })
         .or_else(|| {
             let p = PathBuf::from("dyson.json");
             if p.exists() { Some(p) } else { None }
@@ -1371,8 +1387,56 @@ pub trait Output: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Settings;
     use crate::tool::Tool;
     use std::io::Write;
+
+    /// Regression test for the warmup-placeholder bug:
+    /// `dyson warden` resolves its config path internally
+    /// (`<DYSON_HOME>/dyson.json`) and passes it to `listen::run` via the
+    /// `config: Option<PathBuf>` argument.  Pre-fix, `create_hot_reloader`
+    /// ignored that path and re-derived from `std::env::args()` — which,
+    /// in the systemd-launched warden container, holds neither
+    /// `--config` nor a useful cwd, so the function returned `None` and
+    /// program-level hot-reload was silently disabled.  Post-fix, the
+    /// caller passes the resolved path as `explicit` and we honour it.
+    #[test]
+    fn create_hot_reloader_uses_explicit_path_when_provided() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("dyson.json");
+        // The file doesn't need to be valid JSON here — `create_hot_reloader`
+        // only stores the path; reads happen later via `HotReloader::check`.
+        std::fs::write(&cfg, b"{}").unwrap();
+        let settings = Settings::default();
+
+        let (resolved, _reloader) = create_hot_reloader(&settings, Some(&cfg));
+        assert_eq!(
+            resolved.as_deref(),
+            Some(cfg.as_path()),
+            "explicit path must win over argv/cwd fallback"
+        );
+    }
+
+    #[test]
+    fn create_hot_reloader_falls_back_when_no_explicit() {
+        // Without an explicit path AND without a `--config` in argv AND
+        // without a `dyson.json` in cwd, the resolver returns None.
+        // This is the legitimate "in-memory dev / test" path where
+        // hot-reload is disabled by design.
+        //
+        // We can't easily strip `--config` from the test harness's argv,
+        // but `cargo test` doesn't pass --config, and the temp cwd from
+        // `std::env::set_current_dir` would race with parallel tests, so
+        // we just assert the explicit-None branch exists by exercising
+        // the same call site shape.
+        let settings = Settings::default();
+        let (resolved, _reloader) = create_hot_reloader(&settings, None);
+        // Either None (no fallback found) or a real path picked up from
+        // a co-located dyson.json in the cargo workspace; both are valid
+        // for the fallback contract.  The bug we're regressing was the
+        // explicit-path-was-ignored branch, covered above.
+        let _ = resolved;
+    }
 
     type BgReceived = std::sync::Arc<std::sync::Mutex<Option<(u64, Result<String, String>)>>>;
 

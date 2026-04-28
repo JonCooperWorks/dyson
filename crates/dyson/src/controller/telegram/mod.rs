@@ -363,7 +363,7 @@ impl super::Controller for TelegramController {
         // process regardless of how many controllers subscribe.
         // Telegram now subscribes to the shared bus and limits itself
         // to rebuilding its own agents when a change arrives.
-        let (config_path, _unused_reloader) = super::create_hot_reloader(settings);
+        let (config_path, _unused_reloader) = super::create_hot_reloader(settings, None);
         let mut settings_rx = super::subscribe_settings_updates();
 
         let bg_registry = std::sync::Arc::new(super::background::BackgroundAgentRegistry::new());

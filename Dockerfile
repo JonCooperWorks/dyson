@@ -53,5 +53,11 @@ ENV MALLOC_CONF=dirty_decay_ms:1000,muzzy_decay_ms:1000
 EXPOSE 80
 
 # tini reaps zombies and forwards signals to dyson.
+#
+# The `dyson warden` subcommand hardcodes dangerous-no-sandbox internally
+# (Cube already provides the sandbox boundary; nesting another sandbox
+# inside it is paranoia + a debug nightmare).  Pre-CLI-restructure the
+# flag was a top-level `dyson --dangerous-no-sandbox warden`; the newer
+# CLI rejects unknown top-level flags, so the flag is gone from here.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/dyson"]
 CMD ["warden"]

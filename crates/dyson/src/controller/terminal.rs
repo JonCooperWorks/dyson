@@ -138,7 +138,7 @@ impl super::Controller for TerminalController {
             super::active_provider_name(&current_settings).unwrap_or_default();
         let mut current_model = current_settings.agent.model.clone();
 
-        let (config_path, mut reloader) = super::create_hot_reloader(settings);
+        let (config_path, mut reloader) = super::create_hot_reloader(settings, None);
 
         let bg_registry = std::sync::Arc::new(super::background::BackgroundAgentRegistry::new());
 
