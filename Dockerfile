@@ -4,23 +4,23 @@
 #
 # Cube boots the OCI image as the rootfs of a MicroVM, then probes the
 # port given to `cubemastercli tpl create-from-image --probe`. Our
-# entrypoint runs `dyson warden` which reads WARDEN_* env vars and
-# brings up the HTTP controller on 0.0.0.0:80; warden's host-based
+# entrypoint runs `dyson swarm` which reads SWARM_* env vars and
+# brings up the HTTP controller on 0.0.0.0:80; swarm's host-based
 # dyson_proxy then forwards `<id>.<sandbox_domain>` traffic to it.
 #
 # We use debian-slim instead of ghcr.io/tencentcloud/cubesandbox-base
 # because the latter's anonymous pull is gated. envd (the cube file
 # ops/exec helper) is therefore absent — fine for the smoke test where
-# warden only needs HTTP. Add envd back if/when sandbox file ops or
+# swarm only needs HTTP. Add envd back if/when sandbox file ops or
 # `cube exec` matter.
 #
 # Build (uses prebuilt host binary at build/bin/dyson copied into context
 # as `dyson-bin`):
-#   docker build -t dyson:warden -t 127.0.0.1:5000/dyson:warden .
+#   docker build -t dyson:swarm -t 127.0.0.1:5000/dyson:swarm .
 #
 # Register with cube:
 #   cubemastercli tpl create-from-image \
-#       --image 127.0.0.1:5000/dyson:warden \
+#       --image 127.0.0.1:5000/dyson:swarm \
 #       --writable-layer-size 1G \
 #       --expose-port 80 \
 #       --probe 80 \
@@ -41,7 +41,7 @@ RUN apt-get update \
 COPY dyson-bin /usr/local/bin/dyson
 RUN chmod 0755 /usr/local/bin/dyson
 
-# Workspace lives at /var/lib/dyson; the warden subcommand creates it on
+# Workspace lives at /var/lib/dyson; the swarm subcommand creates it on
 # first boot. Pre-create with the right perms so the agent can write
 # IDENTITY.md / TASK.md without elevating.
 RUN mkdir -p /var/lib/dyson && chmod 0755 /var/lib/dyson
@@ -54,10 +54,10 @@ EXPOSE 80
 
 # tini reaps zombies and forwards signals to dyson.
 #
-# The `dyson warden` subcommand hardcodes dangerous-no-sandbox internally
+# The `dyson swarm` subcommand hardcodes dangerous-no-sandbox internally
 # (Cube already provides the sandbox boundary; nesting another sandbox
 # inside it is paranoia + a debug nightmare).  Pre-CLI-restructure the
-# flag was a top-level `dyson --dangerous-no-sandbox warden`; the newer
+# flag was a top-level `dyson --dangerous-no-sandbox swarm`; the newer
 # CLI rejects unknown top-level flags, so the flag is gone from here.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/dyson"]
-CMD ["warden"]
+CMD ["swarm"]

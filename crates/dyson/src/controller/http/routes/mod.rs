@@ -61,7 +61,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
 
     // `/healthz` is intentionally unauthenticated: external probes
-    // (Cube template builder, warden's health prober, load balancers)
+    // (Cube template builder, swarm's health prober, load balancers)
     // need a credential-free liveness endpoint. Returns 200 with a
     // tiny JSON body — clients only check the status code.
     if matches!((&method, segs.as_slice()), (&Method::GET, ["healthz"])) {
@@ -222,8 +222,8 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&Method::POST,   ["api", "mind", "file"]) => mind::post_file(req, &state).await,
         (&Method::GET,    ["api", "activity"])     => activity::get(&state, req.uri().query().unwrap_or("")),
 
-        // ─── admin (warden runtime reconfigure) ────────────────────────
-        // Lets dyson-orchestrator push the real WARDEN_MODEL/TASK
+        // ─── admin (swarm runtime reconfigure) ────────────────────────
+        // Lets dyson-orchestrator push the real SWARM_MODEL/TASK
         // envelope after a sandbox restore — Cube's snapshot/restore
         // freezes the dyson process's env at warmup time, so without
         // this every instance shows "warmup-placeholder" forever.

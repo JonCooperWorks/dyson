@@ -2,10 +2,10 @@
 // /api/admin/configure — runtime reconfigure of name / task / models.
 //
 // Why this exists: Cube takes the cube-template snapshot during the
-// dyson-warden warmup boot, when WARDEN_MODEL / WARDEN_TASK / etc are
+// dyson-swarm warmup boot, when SWARM_MODEL / SWARM_TASK / etc are
 // unset.  On instance create, Cube restores the snapshot — preserving
 // the running dyson process's frozen `/proc/self/environ`, so the env
-// envelope warden injects on cube.create_sandbox never reaches the
+// envelope swarm injects on cube.create_sandbox never reaches the
 // agent.  Result without this endpoint: every dyson instance shows
 // "warmup-placeholder" as its model and no IDENTITY.md / mission.
 //
@@ -20,11 +20,11 @@
 //
 // Auth: same as every `/api/*` route — `state.auth` validates the
 // inbound bearer.  When dyson booted in dangerous-no-auth (warmup),
-// any caller is accepted, which is how warden gets the very first
+// any caller is accepted, which is how swarm gets the very first
 // configure call through after the snapshot restore (the dyson
 // process still thinks it's in warmup mode).  The sandbox is
 // network-isolated except via cubeproxy, so "any caller" is in
-// practice "warden via dyson_proxy".
+// practice "swarm via dyson_proxy".
 
 use hyper::Request;
 use serde::Deserialize;
@@ -37,10 +37,10 @@ use super::super::state::HttpState;
 /// but small enough to swat away accidental large payloads.
 const MAX_CONFIGURE_BODY: usize = 64 * 1024;
 
-/// Header warden sends with the per-instance configure secret
+/// Header swarm sends with the per-instance configure secret
 /// (32-hex plaintext from `Uuid::new_v4().simple()`).  Dyson hashes
 /// it on first sighting (TOFU) and verifies on every subsequent call.
-const CONFIGURE_HEADER: &str = "x-warden-configure";
+const CONFIGURE_HEADER: &str = "x-swarm-configure";
 
 /// Filename inside the dyson home dir that holds the argon2id hash
 /// of the configure secret.  Lives next to `workspace/`, persists
@@ -66,24 +66,24 @@ pub(super) struct ConfigureBody {
     /// Empty list is a no-op (existing config is left alone).
     #[serde(default)]
     models: Vec<String>,
-    /// Warden-side instance id.  Surfaced in IDENTITY.md as
-    /// `Warden instance id: <value>` so the agent can reference it
-    /// in tool calls back to warden.
+    /// Swarm-side instance id.  Surfaced in IDENTITY.md as
+    /// `Swarm instance id: <value>` so the agent can reference it
+    /// in tool calls back to swarm.
     #[serde(default)]
     instance_id: Option<String>,
     /// Replacement value for `providers.<agent.provider>.api_key` —
-    /// the per-instance proxy_token warden minted at create time.
+    /// the per-instance proxy_token swarm minted at create time.
     /// Without this, the dyson.json keeps the boot-time
     /// `warmup-placeholder` literal as its api_key (Cube freezes
-    /// `/proc/self/environ` at warmup, so the `WARDEN_PROXY_TOKEN`
-    /// env warden injects on instance create never reaches the
+    /// `/proc/self/environ` at warmup, so the `SWARM_PROXY_TOKEN`
+    /// env swarm injects on instance create never reaches the
     /// running dyson process).
     #[serde(default)]
     proxy_token: Option<String>,
     /// Replacement value for `providers.<agent.provider>.base_url` —
-    /// warden's `/llm` URL the agent should call.  Same root cause
+    /// swarm's `/llm` URL the agent should call.  Same root cause
     /// as `proxy_token`: the boot-time value is empty / loopback
-    /// and Cube's snapshot freeze means warden can't ride env vars
+    /// and Cube's snapshot freeze means swarm can't ride env vars
     /// to fix it.
     #[serde(default)]
     proxy_base: Option<String>,
@@ -107,7 +107,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     // Resolve the hash file's path.  Living next to `workspace/`
     // means a cube template restore picks it up via the writable
     // layer — same spot dyson_home resolves to from
-    // `dyson warden`'s DYSON_HOME env (default /var/lib/dyson).
+    // `dyson swarm`'s DYSON_HOME env (default /var/lib/dyson).
     let snapshot = state.settings_snapshot();
     let hash_dir = workspace_parent_dir(&snapshot.workspace.connection_string.expose());
     let hash_path = hash_dir.join(CONFIGURE_HASH_FILENAME);
@@ -115,7 +115,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     // TOFU: if no hash on disk, this is the first call — argon2id
     // the inbound plaintext and persist.  Any later call presenting
     // a different plaintext is rejected.  Single-tenant, so the
-    // first caller IS warden (network isolation gates access to
+    // first caller IS swarm (network isolation gates access to
     // cubeproxy in the first place).
     use argon2::password_hash::{PasswordHash, PasswordVerifier, PasswordHasher, SaltString, rand_core::OsRng};
     use argon2::Argon2;
@@ -172,7 +172,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         // references to temporaries.
         let existing = ws.get("IDENTITY.md").unwrap_or_default();
         let prior_name = extract_field(&existing, "Name");
-        let prior_instance = extract_field(&existing, "Warden instance id");
+        let prior_instance = extract_field(&existing, "Swarm instance id");
         let prior_mission = extract_section(&existing, "Mission");
         let merged = build_identity_md(
             body.name.as_deref().or(prior_name.as_deref()),
@@ -229,7 +229,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
 /// it via the writable layer.  `connection_string` for the in-memory
 /// workspace is its directory path; for the file-backed default
 /// it's the directory directly.  For unknown shapes we fall back to
-/// `/var/lib/dyson` which matches `dyson warden`'s default home.
+/// `/var/lib/dyson` which matches `dyson swarm`'s default home.
 fn workspace_parent_dir(connection_string: &str) -> std::path::PathBuf {
     let p = std::path::PathBuf::from(connection_string);
     if let Some(parent) = p.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -239,7 +239,7 @@ fn workspace_parent_dir(connection_string: &str) -> std::path::PathBuf {
     }
 }
 
-/// Render the IDENTITY.md body in the same shape `dyson warden` writes
+/// Render the IDENTITY.md body in the same shape `dyson swarm` writes
 /// at boot.  `Workspace::system_prompt()` injects the file under the
 /// `## IDENTITY` section of the agent's system prompt, so the format
 /// here is read by the model on every turn.
@@ -253,7 +253,7 @@ fn build_identity_md(
         body.push_str(&format!("Name: {n}\n"));
     }
     if let Some(id) = instance_id.filter(|s| !s.is_empty()) {
-        body.push_str(&format!("Warden instance id: {id}\n"));
+        body.push_str(&format!("Swarm instance id: {id}\n"));
     }
     if let Some(m) = mission.filter(|s| !s.is_empty()) {
         body.push_str(&format!("\n## Mission\n\n{m}\n"));
@@ -356,7 +356,7 @@ mod tests {
     fn build_identity_md_skips_empty_sections() {
         let s = build_identity_md(Some("Bob"), Some("u1"), None);
         assert!(s.contains("Name: Bob"));
-        assert!(s.contains("Warden instance id: u1"));
+        assert!(s.contains("Swarm instance id: u1"));
         assert!(!s.contains("## Mission"));
     }
 
@@ -368,9 +368,9 @@ mod tests {
 
     #[test]
     fn extract_field_picks_first_match() {
-        let b = "Name: Alice\nWarden instance id: u9\n";
+        let b = "Name: Alice\nSwarm instance id: u9\n";
         assert_eq!(extract_field(b, "Name"), Some("Alice".into()));
-        assert_eq!(extract_field(b, "Warden instance id"), Some("u9".into()));
+        assert_eq!(extract_field(b, "Swarm instance id"), Some("u9".into()));
         assert_eq!(extract_field(b, "Missing"), None);
     }
 

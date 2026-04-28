@@ -573,13 +573,13 @@ pub fn list_providers(settings: &Settings) -> Vec<(&str, &crate::config::Provide
 // ---------------------------------------------------------------------------
 
 /// Process-wide store for the resolved config-file path.  Set once by
-/// `command::listen` (or `command::warden` via `listen::run`) at
+/// `command::listen` (or `command::swarm` via `listen::run`) at
 /// startup, read by every site that needs to know which `dyson.json`
 /// the program is actually backed by — `create_hot_reloader`, the
 /// HTTP controller's `HttpState::config_path` field, etc.
 ///
 /// Why this exists: the original layer of code re-derived the path
-/// from `std::env::args()` at every callsite.  In `dyson warden` mode
+/// from `std::env::args()` at every callsite.  In `dyson swarm` mode
 /// the path is constructed internally (no `--config` flag, systemd cwd
 /// is `/`), so each callsite's argv parse returned `None` and silent
 /// path-resolution-fallout shipped twice — once breaking program-level
@@ -1414,11 +1414,11 @@ mod tests {
     use std::io::Write;
 
     /// Regression test for the warmup-placeholder bug:
-    /// `dyson warden` resolves its config path internally
+    /// `dyson swarm` resolves its config path internally
     /// (`<DYSON_HOME>/dyson.json`) and passes it to `listen::run` via the
     /// `config: Option<PathBuf>` argument.  Pre-fix, `create_hot_reloader`
     /// ignored that path and re-derived from `std::env::args()` — which,
-    /// in the systemd-launched warden container, holds neither
+    /// in the systemd-launched swarm container, holds neither
     /// `--config` nor a useful cwd, so the function returned `None` and
     /// program-level hot-reload was silently disabled.  Post-fix, the
     /// caller passes the resolved path as `explicit` and we honour it.

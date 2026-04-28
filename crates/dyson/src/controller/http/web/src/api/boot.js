@@ -21,9 +21,23 @@ export function boot(client, { pollMs = 10_000, doc = (typeof document !== 'unde
   let disposed = false;
   let intervalId = null;
 
-  client.listConversations().then(list => {
+  client.listConversations().then(async list => {
     if (disposed) return;
     setLive(true);
+    // First-login UX: if the user has no conversations yet, mint one
+    // so the chat surface is immediately usable.  Without this, the
+    // SPA renders an empty chat pane with no clear next step (the
+    // "+ New Conversation" button is in the sidebar drawer that's
+    // collapsed by default on mobile).
+    if (Array.isArray(list) && list.length === 0) {
+      try {
+        const fresh = await client.createChat('New conversation');
+        if (!disposed && fresh && fresh.id) list = [fresh];
+      } catch (e) {
+        // Best-effort — empty list is still better than crashing the boot.
+        console.info('[dyson] auto-create initial conversation failed', e);
+      }
+    }
     setConversations(list.map(toConvRow));
 
     client.listProviders().then(provs => {

@@ -275,11 +275,11 @@ impl Controller for HttpController {
         // Resolve the dyson.json path the operator started with so
         // `post_model` can persist the web UI's choice the same way
         // Telegram's /model command does, and `routes::admin::post`
-        // can patch `providers.<agent.provider>.models` on warden's
+        // can patch `providers.<agent.provider>.models` on swarm's
         // `/api/admin/configure` calls.  Goes through the shared
         // `resolve_config_path_for_runtime` so the path matches
         // whatever `command::listen` installed at startup — argv
-        // alone misses the `dyson warden` path (no `--config` flag,
+        // alone misses the `dyson swarm` path (no `--config` flag,
         // systemd cwd is `/`), which is exactly how the
         // warmup-placeholder bug shipped twice before this consolidation.
         let config_path = super::resolve_config_path_for_runtime(None);

@@ -210,19 +210,24 @@ pub(super) async fn post(
                         }
                     }
                     *guard = Some(a);
-                    // Snapshot workspace mtimes alongside the agent so the
-                    // next turn can detect dream-driven writes (skills,
-                    // MEMORY.md curation) or external edits and trigger a
-                    // rebuild — same role `check_and_reload_agent` plays
-                    // for the terminal controller.  Config (`dyson.json`)
-                    // reloads are handled by `subscribe_settings_updates`
-                    // already, so this watcher is workspace-only.
+                    // Watch BOTH dyson.json and the workspace.  dyson.json
+                    // catches swarm's runtime `/api/admin/configure`
+                    // patches (proxy_token / proxy_base / models); the
+                    // workspace catches dream-driven skill writes and
+                    // manual edits to MEMORY.md / SOUL.md.  Without
+                    // dyson.json in the per-chat watch set, the cached
+                    // agent kept its first-turn `warmup-placeholder`
+                    // client for the lifetime of the chat — every
+                    // subsequent turn 401'd against the warmup default.
+                    // Mirrors what `check_and_reload_agent` does for the
+                    // terminal controller.
                     let workspace_path = crate::workspace::FilesystemWorkspace::resolve_path(
                         Some(settings.workspace.connection_string.expose()),
                     );
+                    let config_path = crate::controller::resolve_config_path_for_runtime(None);
                     *chat_handle.reloader.lock().await = Some(
                         crate::config::hot_reload::HotReloader::new(
-                            None,
+                            config_path.as_deref(),
                             workspace_path.as_deref(),
                         ),
                     );
@@ -245,19 +250,21 @@ pub(super) async fn post(
                 }
             }
         } else {
-            // Hot-reload: if workspace files changed since the last turn
-            // for this chat, rebuild the cached agent so a skill written
-            // by `SelfImprovementDream` or a manual edit to `MEMORY.md`
-            // / `SOUL.md` actually takes effect.  Without this, the
-            // agent's system prompt and skill list — both baked in at
-            // build time — drift from disk for the entire lifetime of
-            // the chat.  Mirrors what `check_and_reload_agent` does for
-            // the terminal controller.
+            // Hot-reload: if dyson.json (swarm's `/api/admin/configure`
+            // patch — proxy_token / proxy_base / models) or workspace
+            // files (skills written by SelfImprovementDream, manual
+            // edits to MEMORY.md / SOUL.md) changed since the last turn
+            // for this chat, rebuild the cached agent so the new config
+            // takes effect.  Without watching dyson.json the cached
+            // agent pins its first-turn client (the registry's
+            // `warmup-placeholder` stub for a freshly-restored sandbox)
+            // for the lifetime of the chat.  Mirrors what
+            // `check_and_reload_agent` does for the terminal controller.
             let changed = match chat_handle.reloader.lock().await.as_mut() {
                 Some(r) => match r.check().await {
                     Ok((c, _)) => c,
                     Err(e) => {
-                        tracing::warn!(error = %e, chat_id = %chat_id, "workspace reload check failed");
+                        tracing::warn!(error = %e, chat_id = %chat_id, "config/workspace reload check failed");
                         false
                     }
                 },
@@ -272,14 +279,14 @@ pub(super) async fn post(
                     Ok(mut a) => {
                         a.set_messages(messages);
                         *guard = Some(a);
-                        tracing::info!(chat_id = %chat_id, "agent rebuilt: workspace changed");
+                        tracing::info!(chat_id = %chat_id, "agent rebuilt: dyson.json or workspace changed");
                     }
                     Err(e) => {
                         // Keep the previous agent — a partial failure
                         // shouldn't take the chat down.  The next turn
                         // will retry the rebuild if the watcher still
                         // sees a delta.
-                        tracing::warn!(error = %e, chat_id = %chat_id, "agent rebuild after workspace change failed; reusing previous agent");
+                        tracing::warn!(error = %e, chat_id = %chat_id, "agent rebuild after config/workspace change failed; reusing previous agent");
                     }
                 }
             }
@@ -533,5 +540,50 @@ mod tests {
             }],
         }]);
         assert!(atts.is_empty(), "malformed attachment must be skipped, not panic");
+    }
+
+    /// Regression for the chat-stuck-on-warmup-placeholder bug.
+    ///
+    /// The per-chat HotReloader watches dyson.json so swarm's runtime
+    /// `/api/admin/configure` patches (proxy_token / proxy_base /
+    /// models) trigger a per-chat agent rebuild on the next turn.
+    /// Before the fix this reloader was constructed with `None` for
+    /// the config path, so the cached agent kept its first-turn
+    /// `warmup-placeholder` client for the lifetime of the chat —
+    /// every turn 401'd against `https://api.openai.com` with the
+    /// placeholder bearer.
+    ///
+    /// This test stands in for the live setup: a reloader anchored on
+    /// a dyson.json file must report the file-changed signal that
+    /// drives the rebuild branch in the spawned task above.
+    #[tokio::test]
+    async fn config_changes_are_picked_up_by_per_chat_reloader() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = dir.path().join("dyson.json");
+        std::fs::write(&cfg, r#"{"agent":{}}"#).expect("seed config");
+
+        let mut reloader = crate::config::hot_reload::HotReloader::new(
+            Some(&cfg),
+            None,
+        );
+
+        let (changed, _) = reloader.check().await.expect("check");
+        assert!(!changed, "fresh reloader must not falsely report change");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        std::fs::write(
+            &cfg,
+            r#"{"agent":{},"providers":{"openrouter":{"type":"openai","api_key":"dy-real","base_url":"https://swarm.example/llm/openrouter"}}}"#,
+        )
+        .expect("rewrite config");
+
+        let (changed, _) = reloader.check().await.expect("check after change");
+        assert!(
+            changed,
+            "the per-chat reloader must observe dyson.json changes — \
+             without this the cached agent keeps its warmup-placeholder client \
+             for the lifetime of the chat"
+        );
     }
 }

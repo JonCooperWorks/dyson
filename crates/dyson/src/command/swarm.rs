@@ -1,24 +1,24 @@
 // ===========================================================================
-// `dyson warden` — boot mode for running inside a CubeSandbox MicroVM
-// under the dyson-orchestrator (warden).
+// `dyson swarm` — boot mode for running inside a CubeSandbox MicroVM
+// under the dyson-orchestrator (swarm).
 //
-// Reads the env envelope warden injects on sandbox creation:
-//   - WARDEN_BEARER_TOKEN — auth secret the dyson_proxy stamps on every
+// Reads the env envelope swarm injects on sandbox creation:
+//   - SWARM_BEARER_TOKEN — auth secret the dyson_proxy stamps on every
 //     forwarded request
-//   - WARDEN_PROXY_URL    — base URL of warden's /llm provider proxy
-//   - WARDEN_PROXY_TOKEN  — bearer for that proxy
-//   - WARDEN_MODEL        — model id the agent talks to (e.g.
+//   - SWARM_PROXY_URL    — base URL of swarm's /llm provider proxy
+//   - SWARM_PROXY_TOKEN  — bearer for that proxy
+//   - SWARM_MODEL        — model id the agent talks to (e.g.
 //                            "anthropic/claude-sonnet-4-5",
 //                            "openai/gpt-4o"). No default — empty in
 //                            warmup mode, required at instance boot.
-//   - WARDEN_TASK         — free-text task description (seeded into
+//   - SWARM_TASK         — free-text task description (seeded into
 //                            workspace/TASK.md)
-//   - WARDEN_NAME         — human-readable label
-//   - WARDEN_INSTANCE_ID  — warden-side instance id
+//   - SWARM_NAME         — human-readable label
+//   - SWARM_INSTANCE_ID  — swarm-side instance id
 //
-// Provider shape: warden's /llm proxy fronts upstream LLM APIs. We
+// Provider shape: swarm's /llm proxy fronts upstream LLM APIs. We
 // configure the dyson agent as an `openai`-compatible client pointed at
-// `<WARDEN_PROXY_URL>/openrouter` — OpenRouter speaks the OpenAI Chat
+// `<SWARM_PROXY_URL>/openrouter` — OpenRouter speaks the OpenAI Chat
 // Completions protocol, so the same client transport works for any of
 // its 200+ models. Switching to a different provider later is a one-
 // path-segment change in this file.
@@ -41,31 +41,31 @@ const DEFAULT_BIND: &str = "0.0.0.0:80";
 const DEFAULT_DYSON_HOME: &str = "/var/lib/dyson";
 
 pub async fn run() -> Result<()> {
-    // WARDEN_BEARER_TOKEN is the per-instance auth secret warden injects on
+    // SWARM_BEARER_TOKEN is the per-instance auth secret swarm injects on
     // create. It's NOT set during template build — Cube boots the rootfs
     // once to probe /healthz and snapshot; only post-snapshot restores
     // (instance creates) carry the env envelope. So treat the unset case
     // as "warmup" mode: bind with no inbound auth, serve /healthz, get
-    // snapshotted. When warden later restarts us with the env set, the
+    // snapshotted. When swarm later restarts us with the env set, the
     // bearer takes effect.
-    let bearer = std::env::var("WARDEN_BEARER_TOKEN").unwrap_or_default();
+    let bearer = std::env::var("SWARM_BEARER_TOKEN").unwrap_or_default();
     let warmup = bearer.is_empty();
     if warmup {
         tracing::warn!(
-            "WARDEN_BEARER_TOKEN unset — running in template-warmup mode with \
+            "SWARM_BEARER_TOKEN unset — running in template-warmup mode with \
              dangerous_no_auth on the HTTP controller. Expected during cube \
-             template build; warden injects the bearer on instance create."
+             template build; swarm injects the bearer on instance create."
         );
     }
 
     let bind = std::env::var("DYSON_BIND").unwrap_or_else(|_| DEFAULT_BIND.into());
     let home = std::env::var("DYSON_HOME").unwrap_or_else(|_| DEFAULT_DYSON_HOME.into());
-    let proxy_url = std::env::var("WARDEN_PROXY_URL").unwrap_or_default();
-    let proxy_token = std::env::var("WARDEN_PROXY_TOKEN").unwrap_or_default();
-    let task = std::env::var("WARDEN_TASK").unwrap_or_default();
-    let name = std::env::var("WARDEN_NAME").unwrap_or_default();
-    let instance_id = std::env::var("WARDEN_INSTANCE_ID").unwrap_or_default();
-    let model = std::env::var("WARDEN_MODEL").unwrap_or_default();
+    let proxy_url = std::env::var("SWARM_PROXY_URL").unwrap_or_default();
+    let proxy_token = std::env::var("SWARM_PROXY_TOKEN").unwrap_or_default();
+    let task = std::env::var("SWARM_TASK").unwrap_or_default();
+    let name = std::env::var("SWARM_NAME").unwrap_or_default();
+    let instance_id = std::env::var("SWARM_INSTANCE_ID").unwrap_or_default();
+    let model = std::env::var("SWARM_MODEL").unwrap_or_default();
 
     let home_path = PathBuf::from(&home);
     std::fs::create_dir_all(&home_path)
@@ -88,7 +88,7 @@ pub async fn run() -> Result<()> {
                 body.push_str(&format!("Name: {name}\n"));
             }
             if !instance_id.is_empty() {
-                body.push_str(&format!("Warden instance id: {instance_id}\n"));
+                body.push_str(&format!("Swarm instance id: {instance_id}\n"));
             }
             if !task.is_empty() {
                 body.push_str(&format!("\n## Mission\n\n{task}\n"));
@@ -104,17 +104,17 @@ pub async fn run() -> Result<()> {
         json!({ "type": "bearer", "hash": bearer_hash })
     };
 
-    // Provider config — warden's /llm proxy fronts the upstream LLM APIs.
+    // Provider config — swarm's /llm proxy fronts the upstream LLM APIs.
     // For the smoke test the agent is never invoked; the provider just
     // needs to parse cleanly so `listen` can come up. Dyson's loader
     // refuses base_url with an empty api_key (defends against env-var
     // fallback to a non-default endpoint) — supply a placeholder when
-    // warden hasn't set the proxy token (warmup).
+    // swarm hasn't set the proxy token (warmup).
     //
     // Dyson's loader also refuses to boot with no model set (validate_agent_model).
     // In warmup the agent never runs, so a placeholder model is fine; at
-    // instance boot the operator must supply WARDEN_MODEL via the create
-    // request's env (warden refuses the create otherwise — see the
+    // instance boot the operator must supply SWARM_MODEL via the create
+    // request's env (swarm refuses the create otherwise — see the
     // orchestrator's instance.rs).
     let api_key = if proxy_token.is_empty() {
         "warmup-placeholder".to_string()
@@ -135,16 +135,16 @@ pub async fn run() -> Result<()> {
     } else {
         json!({
             "type": "openai",
-            "base_url": warden_provider_base_url(&proxy_url),
+            "base_url": swarm_provider_base_url(&proxy_url),
             "api_key": api_key,
             "models": [model_id]
         })
     };
 
-    // Provider key mirrors the upstream warden's /llm proxy fronts —
+    // Provider key mirrors the upstream swarm's /llm proxy fronts —
     // OpenRouter today.  The Dyson UI surfaces this name in its
     // provider dropdown, so naming it after the actual upstream
-    // (rather than "warden") makes the source obvious to operators.
+    // (rather than "swarm") makes the source obvious to operators.
     let workspace_str = workspace.to_string_lossy();
     let cfg = json!({
         "config_version": 2,
@@ -173,7 +173,7 @@ pub async fn run() -> Result<()> {
         instance = %instance_id,
         name = %name,
         task_set = !task.is_empty(),
-        "dyson warden — starting HTTP controller"
+        "dyson swarm — starting HTTP controller"
     );
 
     super::listen::run(Some(cfg_path), true, None, None, None).await
@@ -186,8 +186,8 @@ pub async fn run() -> Result<()> {
 /// A base ending in `/v1` doubles up to `/openrouter/v1/v1/...`, routes to
 /// OR's marketing site, and dyson surfaces the resulting non-200 as a
 /// generic "upstream HTTP error" — the bug pinned by the regression test
-/// `warden_provider_base_url_has_no_trailing_v1`.
-fn warden_provider_base_url(proxy_url: &str) -> String {
+/// `swarm_provider_base_url_has_no_trailing_v1`.
+fn swarm_provider_base_url(proxy_url: &str) -> String {
     format!("{}/openrouter", proxy_url.trim_end_matches('/'))
 }
 
@@ -196,21 +196,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn warden_provider_base_url_has_no_trailing_v1() {
-        // The contract: warden's /llm proxy URL gets one provider segment
+    fn swarm_provider_base_url_has_no_trailing_v1() {
+        // The contract: swarm's /llm proxy URL gets one provider segment
         // appended.  `OpenAiCompatClient::stream` then appends
         // `/v1/chat/completions` itself.  Adding `/v1` here would
         // double it up.
         assert_eq!(
-            warden_provider_base_url("https://dyson.example.com/llm"),
+            swarm_provider_base_url("https://dyson.example.com/llm"),
             "https://dyson.example.com/llm/openrouter"
         );
     }
 
     #[test]
-    fn warden_provider_base_url_strips_trailing_slash() {
+    fn swarm_provider_base_url_strips_trailing_slash() {
         assert_eq!(
-            warden_provider_base_url("https://dyson.example.com/llm/"),
+            swarm_provider_base_url("https://dyson.example.com/llm/"),
             "https://dyson.example.com/llm/openrouter"
         );
     }
