@@ -40,6 +40,17 @@ use dyson::error::{DysonError, Result};
 const DEFAULT_BIND: &str = "0.0.0.0:80";
 const DEFAULT_DYSON_HOME: &str = "/var/lib/dyson";
 
+/// Provider name in `providers` that the `image_generate` tool reads
+/// from.  Separate from the chat provider so the chat path keeps its
+/// (working) `type: openai` shape and the image factory dispatches on
+/// `LlmProvider::OpenRouter` for the modalities-aware code path.
+const IMAGE_PROVIDER_NAME: &str = "openrouter-image";
+
+/// Default image generation model on OpenRouter.  Picked because
+/// Google's Gemini 3 image preview is the highest-quality general
+/// image model available through the OpenRouter proxy today.
+const DEFAULT_IMAGE_MODEL: &str = "google/gemini-3-pro-image-preview";
+
 pub async fn run() -> Result<()> {
     // SWARM_BEARER_TOKEN is the per-instance auth secret swarm injects on
     // create. It's NOT set during template build — Cube boots the rootfs
@@ -126,40 +137,14 @@ pub async fn run() -> Result<()> {
     } else {
         model
     };
-    let provider_block = if proxy_url.is_empty() {
-        json!({
-            "type": "openai",
-            "api_key": api_key,
-            "models": [model_id]
-        })
-    } else {
-        json!({
-            "type": "openai",
-            "base_url": swarm_provider_base_url(&proxy_url),
-            "api_key": api_key,
-            "models": [model_id]
-        })
-    };
-
-    // Provider key mirrors the upstream swarm's /llm proxy fronts —
-    // OpenRouter today.  The Dyson UI surfaces this name in its
-    // provider dropdown, so naming it after the actual upstream
-    // (rather than "swarm") makes the source obvious to operators.
-    let workspace_str = workspace.to_string_lossy();
-    let cfg = json!({
-        "config_version": 2,
-        "providers": { "openrouter": provider_block },
-        "agent": { "provider": "openrouter" },
-        "controllers": [
-            {
-                "type": "http",
-                "bind": bind,
-                "auth": auth_block,
-                "dangerous_no_tls": true
-            }
-        ],
-        "workspace": { "connection_string": workspace_str },
-        "skills": { "builtin": { "tools": [] } }
+    let workspace_str = workspace.to_string_lossy().into_owned();
+    let cfg = build_swarm_config(SwarmConfigInputs {
+        bind: &bind,
+        proxy_url: &proxy_url,
+        api_key: &api_key,
+        model_id: &model_id,
+        workspace_str: &workspace_str,
+        auth_block,
     });
 
     let cfg_path = home_path.join("dyson.json");
@@ -177,6 +162,85 @@ pub async fn run() -> Result<()> {
     );
 
     super::listen::run(Some(cfg_path), true, None, None, None).await
+}
+
+/// Inputs threaded into `build_swarm_config`.  Borrowed strings keep
+/// the call site free of clones; the function returns a fresh JSON
+/// value so the caller owns it for serialisation.
+struct SwarmConfigInputs<'a> {
+    bind: &'a str,
+    /// Empty when `dyson swarm` is in template-warmup mode (no swarm
+    /// proxy URL injected yet) — provider blocks fall back to direct
+    /// OpenAI / OpenRouter endpoints with the placeholder api_key.
+    proxy_url: &'a str,
+    api_key: &'a str,
+    model_id: &'a str,
+    workspace_str: &'a str,
+    auth_block: serde_json::Value,
+}
+
+/// Render the dyson.json body for a swarm-mode boot.  Pure — no
+/// filesystem or env access — so it's directly testable.
+fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
+    let chat_block = if inputs.proxy_url.is_empty() {
+        json!({
+            "type": "openai",
+            "api_key": inputs.api_key,
+            "models": [inputs.model_id]
+        })
+    } else {
+        json!({
+            "type": "openai",
+            "base_url": swarm_provider_base_url(inputs.proxy_url),
+            "api_key": inputs.api_key,
+            "models": [inputs.model_id]
+        })
+    };
+
+    // Image generation provider — a second openrouter-typed entry
+    // dedicated to the `image_generate` tool.  It rides the same
+    // `<proxy_base>/openrouter` swarm proxy as chat (so we don't need
+    // a second API key), but `image_generate.rs` dispatches on
+    // `provider_type`: only `LlmProvider::OpenRouter` and `Gemini`
+    // are wired for image generation today.  Keeping it as a separate
+    // provider entry leaves the chat path's `type: openai` exactly as
+    // it was — switching the chat type to `openrouter` would change
+    // which `LlmClient` builds (`OpenRouterClient` ignores `base_url`
+    // so the swarm proxy hop would silently disappear).
+    let image_block = if inputs.proxy_url.is_empty() {
+        None
+    } else {
+        Some(json!({
+            "type": "openrouter",
+            "base_url": swarm_provider_base_url(inputs.proxy_url),
+            "api_key": inputs.api_key,
+            "models": [DEFAULT_IMAGE_MODEL]
+        }))
+    };
+
+    let mut providers = json!({ "openrouter": chat_block });
+    let mut agent = json!({ "provider": "openrouter" });
+    if let Some(block) = image_block {
+        providers[IMAGE_PROVIDER_NAME] = block;
+        agent["image_generation_provider"] = json!(IMAGE_PROVIDER_NAME);
+        agent["image_generation_model"] = json!(DEFAULT_IMAGE_MODEL);
+    }
+
+    json!({
+        "config_version": 2,
+        "providers": providers,
+        "agent": agent,
+        "controllers": [
+            {
+                "type": "http",
+                "bind": inputs.bind,
+                "auth": inputs.auth_block,
+                "dangerous_no_tls": true
+            }
+        ],
+        "workspace": { "connection_string": inputs.workspace_str },
+        "skills": { "builtin": { "tools": [] } }
+    })
 }
 
 /// Build the `providers.openrouter.base_url` value that lands in dyson.json.
@@ -213,5 +277,69 @@ mod tests {
             swarm_provider_base_url("https://dyson.example.com/llm/"),
             "https://dyson.example.com/llm/openrouter"
         );
+    }
+
+    fn cfg_with_proxy() -> serde_json::Value {
+        build_swarm_config(SwarmConfigInputs {
+            bind: "0.0.0.0:80",
+            proxy_url: "https://dyson.example.com/llm",
+            api_key: "swarm-token",
+            model_id: "anthropic/claude-sonnet-4-5",
+            workspace_str: "/var/lib/dyson/workspace",
+            auth_block: json!({ "type": "dangerous_no_auth" }),
+        })
+    }
+
+    #[test]
+    fn swarm_config_registers_openrouter_image_provider_by_default() {
+        // The swarm-mode dyson.json must auto-wire the image_generate
+        // tool to OpenRouter through the same /llm proxy as chat — so
+        // any deployed instance can produce images out of the box,
+        // without operators editing per-instance config.
+        let cfg = cfg_with_proxy();
+        let img = &cfg["providers"]["openrouter-image"];
+        assert_eq!(img["type"], "openrouter");
+        assert_eq!(img["base_url"], "https://dyson.example.com/llm/openrouter");
+        assert_eq!(img["models"][0], "google/gemini-3-pro-image-preview");
+
+        let agent = &cfg["agent"];
+        assert_eq!(agent["provider"], "openrouter");
+        assert_eq!(agent["image_generation_provider"], "openrouter-image");
+        assert_eq!(agent["image_generation_model"], "google/gemini-3-pro-image-preview");
+    }
+
+    #[test]
+    fn swarm_config_chat_provider_unchanged_after_image_wiring() {
+        // Belt-and-braces: adding the second provider entry must not
+        // perturb the chat shape — `type: openai`, base_url stops at
+        // /openrouter, the configured chat model is the only entry in
+        // models[].  These bits are exactly what previous regressions
+        // pinned (`swarm_provider_base_url_has_no_trailing_v1`,
+        // `create_pushes_proxy_base_without_trailing_v1`).
+        let cfg = cfg_with_proxy();
+        let chat = &cfg["providers"]["openrouter"];
+        assert_eq!(chat["type"], "openai");
+        assert_eq!(chat["base_url"], "https://dyson.example.com/llm/openrouter");
+        assert_eq!(chat["models"], json!(["anthropic/claude-sonnet-4-5"]));
+        assert_eq!(chat["api_key"], "swarm-token");
+    }
+
+    #[test]
+    fn swarm_config_in_warmup_mode_has_no_image_provider() {
+        // No proxy URL ⇒ template-warmup boot.  Image generation is
+        // pointless until the per-instance proxy URL is patched in,
+        // and a `type: openrouter` block with a placeholder api_key
+        // pointing at api.openrouter.ai would 401 noisily.  Skip it.
+        let cfg = build_swarm_config(SwarmConfigInputs {
+            bind: "0.0.0.0:80",
+            proxy_url: "",
+            api_key: "warmup-placeholder",
+            model_id: "warmup-placeholder",
+            workspace_str: "/var/lib/dyson/workspace",
+            auth_block: json!({ "type": "dangerous_no_auth" }),
+        });
+        assert!(cfg["providers"]["openrouter-image"].is_null());
+        assert!(cfg["agent"]["image_generation_provider"].is_null());
+        assert!(cfg["agent"]["image_generation_model"].is_null());
     }
 }

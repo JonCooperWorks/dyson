@@ -200,13 +200,156 @@ impl ImageGenerationProvider for GeminiImageProvider {
 }
 
 // ---------------------------------------------------------------------------
+// OpenRouterImageProvider — OpenRouter's `chat/completions` with
+// `modalities: ["image", "text"]`.  OpenRouter fronts every image-capable
+// model behind one OpenAI-compatible URL, so the same transport that
+// drives chat in `dyson swarm` mode can drive image generation through
+// the swarm's `/llm/openrouter` proxy without a separate API key.
+// ---------------------------------------------------------------------------
+
+const OPENROUTER_DEFAULT_BASE: &str = "https://openrouter.ai/api";
+
+/// OpenRouter image generation provider.
+///
+/// Posts to `<base_url>/v1/chat/completions` with `modalities`
+/// requesting an image.  Response shape (per OpenRouter docs, mirrors
+/// the OpenAI multimodal-output convention): `choices[].message.images[]
+/// .image_url.url` is a `data:image/...;base64,...` URL.
+pub struct OpenRouterImageProvider {
+    client: reqwest::Client,
+    api_key: crate::auth::Credential,
+    model: String,
+    base_url: String,
+}
+
+impl OpenRouterImageProvider {
+    pub fn new(api_key: crate::auth::Credential, model: String, base_url: Option<String>) -> Self {
+        Self {
+            client: crate::http::client().clone(),
+            api_key,
+            model,
+            base_url: base_url.unwrap_or_else(|| OPENROUTER_DEFAULT_BASE.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl ImageGenerationProvider for OpenRouterImageProvider {
+    async fn generate(
+        &self,
+        prompt: &str,
+        count: usize,
+        _resolution: &str,
+    ) -> Result<Vec<GeneratedImage>> {
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.base_url.trim_end_matches('/')
+        );
+        let body = json!({
+            "model": self.model,
+            "modalities": ["image", "text"],
+            "messages": [{ "role": "user", "content": prompt }],
+        });
+
+        // OpenRouter's chat completions API returns a single assistant
+        // message per request; `n` for image-output models is not
+        // universally honoured, so emit `count` independent requests
+        // and merge the results — matches the per-image fan-out the
+        // Gemini provider does for the same reason.
+        let mut images = Vec::new();
+        for _ in 0..count.clamp(1, 4) {
+            let resp = self
+                .client
+                .post(&url)
+                .bearer_auth(self.api_key.expose())
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| DysonError::tool("image_generate", format!("request failed: {e}")))?;
+
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(DysonError::tool(
+                    "image_generate",
+                    format!("OpenRouter API returned {status}: {body}"),
+                ));
+            }
+
+            let resp_body: serde_json::Value = resp.json().await.map_err(|e| {
+                DysonError::tool("image_generate", format!("invalid JSON response: {e}"))
+            })?;
+
+            extend_with_openrouter_images(&mut images, &resp_body)?;
+        }
+
+        if images.is_empty() {
+            return Err(DysonError::tool(
+                "image_generate",
+                "provider returned no images in the response",
+            ));
+        }
+        Ok(images)
+    }
+}
+
+/// Pull images out of an OpenRouter chat completion.  Walks
+/// `choices[].message.images[].image_url.url` and decodes any
+/// `data:image/...;base64,...` URLs we find.  Non-data URLs are not
+/// fetched here — every image-output model on OpenRouter returns
+/// inline base64 today, and a follow-up GET would punch through the
+/// swarm proxy auth boundary.
+fn extend_with_openrouter_images(
+    out: &mut Vec<GeneratedImage>,
+    resp_body: &serde_json::Value,
+) -> Result<()> {
+    let Some(choices) = resp_body["choices"].as_array() else {
+        return Ok(());
+    };
+    for choice in choices {
+        let Some(arr) = choice["message"]["images"].as_array() else {
+            continue;
+        };
+        for img in arr {
+            let url = img["image_url"]["url"].as_str().unwrap_or("");
+            if !url.starts_with("data:") {
+                continue;
+            }
+            let comma = match url.find(',') {
+                Some(i) => i,
+                None => continue,
+            };
+            let header = &url[5..comma]; // strip "data:"
+            let mime = header.split(';').next().unwrap_or("image/png").to_string();
+            if !mime.starts_with("image/") {
+                continue;
+            }
+            let b64 = &url[comma + 1..];
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| {
+                    DysonError::tool(
+                        "image_generate",
+                        format!("invalid base64 in response: {e}"),
+                    )
+                })?;
+            out.push(GeneratedImage {
+                data,
+                mime_type: mime,
+            });
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Factory — create an ImageGenerationProvider from a ProviderConfig.
 // ---------------------------------------------------------------------------
 
 /// Create an `ImageGenerationProvider` from a provider configuration.
 ///
 /// Dispatches on `provider_type` to select the right backend.
-/// Currently supported: `Gemini`.
+/// Currently supported: `Gemini`, `OpenRouter`.
 ///
 /// When `model_override` is set, it takes precedence over the provider's
 /// default model.  This lets users configure a chat model as the provider
@@ -223,8 +366,14 @@ pub fn create_provider(
             config.api_key.clone(),
             model,
         ))),
+        LlmProvider::OpenRouter => Ok(Arc::new(OpenRouterImageProvider::new(
+            config.api_key.clone(),
+            model,
+            config.base_url.clone(),
+        ))),
         ref other => Err(DysonError::Config(format!(
-            "provider type {other:?} does not support image generation (supported: gemini)"
+            "provider type {other:?} does not support image generation \
+             (supported: gemini, openrouter)"
         ))),
     }
 }
@@ -518,6 +667,102 @@ mod tests {
     fn tool_name_is_image_generate() {
         let tool = mock_tool(vec![]);
         assert_eq!(tool.name(), "image_generate");
+    }
+
+    #[test]
+    fn openrouter_response_with_inline_data_url_is_decoded() {
+        // Smallest plausible OpenRouter chat-completions response with
+        // an image attached: choices[0].message.images[].image_url.url
+        // is a data URL containing the same single-pixel PNG bytes the
+        // other tests use.  extend_with_openrouter_images must decode
+        // the base64 payload and surface it as a GeneratedImage.
+        let png = tiny_png();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+        let resp = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "images": [
+                        { "image_url": { "url": format!("data:image/png;base64,{b64}") } }
+                    ]
+                }
+            }]
+        });
+        let mut out = Vec::new();
+        extend_with_openrouter_images(&mut out, &resp).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].mime_type, "image/png");
+        assert_eq!(out[0].data, png);
+    }
+
+    #[test]
+    fn openrouter_response_without_images_is_a_noop() {
+        // Text-only completion: nothing to decode, no error.  Caller
+        // accumulates an empty Vec and surfaces "no images" upstream.
+        let resp = json!({
+            "choices": [{ "message": { "role": "assistant", "content": "ok" } }]
+        });
+        let mut out = Vec::new();
+        extend_with_openrouter_images(&mut out, &resp).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn openrouter_response_skips_non_data_urls() {
+        // A future model might return an https URL instead of a data
+        // URL.  We don't fetch those (would punch the swarm proxy auth
+        // boundary); they're silently skipped so callers fall through
+        // to the "no images" error path.
+        let resp = json!({
+            "choices": [{
+                "message": {
+                    "images": [
+                        { "image_url": { "url": "https://cdn.example/foo.png" } }
+                    ]
+                }
+            }]
+        });
+        let mut out = Vec::new();
+        extend_with_openrouter_images(&mut out, &resp).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn factory_creates_openrouter_provider_with_explicit_model_override() {
+        // The factory uses the model_override when one is supplied —
+        // crucial for `dyson swarm`, where the chat provider's default
+        // model is the user's chat pick (e.g. claude-sonnet-4) but the
+        // image_generate tool must always route to the image-capable
+        // model id.  We can't easily downcast through dyn Trait, so
+        // exercise the construction path directly: an unsupported
+        // variant is rejected, OpenRouter succeeds.
+        let or_config = ProviderConfig {
+            provider_type: LlmProvider::OpenRouter,
+            models: vec!["openrouter-default-chat-model".into()],
+            api_key: crate::auth::Credential::from("sk-or-test".to_string()),
+            base_url: Some("https://swarm.example/llm/openrouter".into()),
+        };
+        assert!(create_provider(&or_config, Some("google/gemini-3-pro-image-preview")).is_ok());
+
+        let unsupported = ProviderConfig {
+            provider_type: LlmProvider::Anthropic,
+            models: vec!["claude".into()],
+            api_key: crate::auth::Credential::from("sk-ant".to_string()),
+            base_url: None,
+        };
+        // The trait object isn't Debug, so unwrap_err panics on the
+        // bound — match by hand instead.
+        let err = match create_provider(&unsupported, None) {
+            Ok(_) => panic!("anthropic must not be wired for image generation"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("does not support image generation"),
+            "unexpected error: {msg}"
+        );
+        assert!(msg.contains("openrouter"), "error must list openrouter as supported: {msg}");
     }
 
     #[tokio::test]
