@@ -18,10 +18,14 @@
 # as `dyson-bin`):
 #   docker build -t dyson:swarm -t 127.0.0.1:5000/dyson:swarm .
 #
-# Register with cube:
+# Register with cube (resource flags come from deploy/config.env via
+# bring-up.sh's `register_cube_template` helper; the values shown here
+# are today's defaults):
 #   cubemastercli tpl create-from-image \
 #       --image 127.0.0.1:5000/dyson:swarm \
-#       --writable-layer-size 1G \
+#       --writable-layer-size 5G \
+#       --cpu 2000 \
+#       --memory 2000 \
 #       --expose-port 80 \
 #       --probe 80 \
 #       --probe-path /healthz
