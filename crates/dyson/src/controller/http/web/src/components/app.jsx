@@ -579,9 +579,27 @@ function streamCallbacks(conv) {
         return;
       }
       const ref = id || mintToolRef(conv, 'live');
-      setTool(ref, mkTool(name, { status: 'running', dur: '…' }));
+      // Dedupe: when a mid-turn reload reattaches the SSE stream, the
+      // server's replay ring re-emits every tool_start for the
+      // in-flight turn.  Hydrate already minted a `{ type: 'tool',
+      // ref }` block from the persisted transcript for any tool
+      // call already on disk, so appending again here would render
+      // the same tool twice — a stale "running" twin above the live
+      // result.  If the ref is already on the agent turn, leave the
+      // block alone and just refresh the panel/phase markers.
+      const alreadyOnTimeline = (() => {
+        const s = getSession(conv);
+        if (!s) return false;
+        for (let i = s.liveTurns.length - 1; i >= 0; i--) {
+          const t = s.liveTurns[i];
+          if (t.role !== 'agent') continue;
+          return t.blocks.some(b => b.type === 'tool' && b.ref === ref);
+        }
+        return false;
+      })();
+      if (!alreadyOnTimeline) setTool(ref, mkTool(name, { status: 'running', dur: '…' }));
       updateSession(conv, s => ({
-        ...openPanel(appendAgentBlock(s, { type: 'tool', ref }), ref),
+        ...openPanel(alreadyOnTimeline ? s : appendAgentBlock(s, { type: 'tool', ref }), ref),
         phase: 'tool', tname: name, liveToolRef: ref,
       }));
     },
