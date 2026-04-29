@@ -126,6 +126,16 @@ pub(super) struct ConfigureBody {
     /// is the retroactive fix.
     #[serde(default)]
     reset_skills: bool,
+    /// Per-server stanzas to write under top-level `mcp_servers.<name>`.
+    /// Each value is the JSON the loader's `parse_mcp_servers` already
+    /// understands — typically `{ url, headers, auth? }` for HTTP MCP.
+    /// Swarm builds these with its own proxied URL + the per-instance
+    /// bearer so the agent never sees the upstream URL or its
+    /// credentials.  `None` leaves the existing block alone; an empty
+    /// map clears it.  Replaces the whole block — incremental edits
+    /// aren't supported (callers who want add/remove read the file first).
+    #[serde(default)]
+    mcp_servers: Option<serde_json::Map<String, Value>>,
 }
 
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
@@ -305,7 +315,23 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         false
     };
 
-    let any_config_changed = provider_changed || image_changed || skills_changed;
+    // 5. MCP servers: replace the top-level `mcp_servers` block.  None
+    //    leaves it alone; an empty map clears it.  Distinct from the
+    //    skills block because MCP servers are a sibling key in the
+    //    loader's `JsonRoot`, not nested under `skills`.
+    let mcp_changed = if let Some(servers) = &body.mcp_servers {
+        match state.config_path() {
+            Some(path) => match patch_mcp_servers_in_config(path, servers) {
+                Ok(changed) => changed,
+                Err(e) => return bad_request(&format!("mcp_servers patch failed: {e}")),
+            },
+            None => false,
+        }
+    } else {
+        false
+    };
+
+    let any_config_changed = provider_changed || image_changed || skills_changed || mcp_changed;
 
     // Eagerly reload the settings + ClientRegistry instead of waiting
     // for the 2s polling HotReloader to notice the mtime change.  Two
@@ -349,6 +375,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "provider_updated": provider_changed,
         "image_generation_updated": image_changed,
         "skills_reset": skills_changed,
+        "mcp_servers_updated": mcp_changed,
     }))
 }
 
@@ -557,6 +584,41 @@ fn clear_skills_in_config(path: &std::path::Path) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Replace the top-level `mcp_servers` block in dyson.json with the
+/// supplied map.  Empty map clears the block (loader treats absent
+/// and empty identically — no MCP skills register).  Returns
+/// `Ok(true)` when the file was rewritten, `Ok(false)` when the
+/// existing block already matched and no write was needed.
+///
+/// Atomic write via tmp + rename — same posture as the sibling
+/// helpers above.  HotReloader picks the rewritten file up on the
+/// next mtime tick, and the eager-reload at the end of `post()`
+/// closes the window between this write and the next agent build.
+fn patch_mcp_servers_in_config(
+    path: &std::path::Path,
+    servers: &serde_json::Map<String, Value>,
+) -> Result<bool, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let root = doc
+        .as_object_mut()
+        .ok_or_else(|| "config root is not an object".to_string())?;
+    let new_block = Value::Object(servers.clone());
+    if root.get("mcp_servers") == Some(&new_block) {
+        return Ok(false);
+    }
+    if servers.is_empty() {
+        root.remove("mcp_servers");
+    } else {
+        root.insert("mcp_servers".to_string(), new_block);
+    }
+    let tmp = path.with_extension("json.tmp");
+    let pretty = serde_json::to_vec_pretty(&doc).map_err(|e| format!("serialise: {e}"))?;
+    std::fs::write(&tmp, &pretty).map_err(|e| format!("write tmp: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename: {e}"))?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,5 +807,45 @@ mod tests {
         // Idempotent second call: no skills key means nothing to remove.
         assert!(!clear_skills_in_config(&path).unwrap(),
             "second call must report no-op when skills already absent");
+    }
+
+    #[test]
+    fn patch_mcp_servers_replaces_block_and_is_idempotent() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dyson.json");
+        let initial = serde_json::json!({
+            "agent": { "provider": "openrouter" },
+            "providers": { "openrouter": { "type": "openai", "api_key": "x", "models": ["m"] } }
+        });
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        drop(f);
+
+        // Insert a server.
+        let mut servers = serde_json::Map::new();
+        servers.insert(
+            "linear".into(),
+            serde_json::json!({
+                "url": "https://swarm.example/mcp/i-1/linear",
+                "headers": { "Authorization": "Bearer tok" }
+            }),
+        );
+        assert!(patch_mcp_servers_in_config(&path, &servers).unwrap());
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["mcp_servers"]["linear"]["url"], "https://swarm.example/mcp/i-1/linear");
+        // Sibling keys untouched.
+        assert_eq!(after["agent"]["provider"], "openrouter");
+
+        // Idempotent: the same map yields no rewrite.
+        assert!(!patch_mcp_servers_in_config(&path, &servers).unwrap());
+
+        // Empty map clears the block.
+        let empty = serde_json::Map::new();
+        assert!(patch_mcp_servers_in_config(&path, &empty).unwrap());
+        let after2: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(after2.get("mcp_servers").is_none());
     }
 }
