@@ -38,8 +38,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tini \
     && rm -rf /var/lib/apt/lists/*
 
-COPY dyson-bin /usr/local/bin/dyson
-RUN chmod 0755 /usr/local/bin/dyson
+# `--chmod=0755` folds the COPY + chmod into one layer.  Without it
+# the chmod RUN copies the 48 MB binary again into a fresh layer, so
+# the image carries two 48 MB copies of the same bytes — Docker
+# dedupes within a local image but not across registry pulls, so
+# every `docker push` ate the duplicate over the wire.
+COPY --chmod=0755 dyson-bin /usr/local/bin/dyson
 
 # Workspace lives at /var/lib/dyson; the swarm subcommand creates it on
 # first boot. Pre-create with the right perms so the agent can write
