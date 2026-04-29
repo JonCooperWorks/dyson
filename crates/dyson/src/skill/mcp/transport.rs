@@ -445,8 +445,14 @@ impl HttpTransport {
 
     /// Parse an HTTP response into a JSON-RPC result.
     ///
-    /// Checks HTTP status, reads body, deserializes JSON-RPC, checks for
-    /// RPC-level errors.  Shared by the normal path and the 401 retry path.
+    /// Streamable HTTP MCP servers may return either `application/json`
+    /// (single response in the body) or `text/event-stream` (one or
+    /// more `event: message\ndata: <json>\n\n` frames).  Context7,
+    /// GitHub MCP, Linear, and most reference servers prefer SSE — the
+    /// initial-only-JSON path was the previous behavior and silently
+    /// dropped any SSE-shaped response with "expected value at line 1".
+    ///
+    /// Shared by the normal path and the 401 retry path.
     async fn parse_rpc_response(
         &self,
         response: reqwest::Response,
@@ -463,13 +469,31 @@ impl HttpTransport {
             });
         }
 
+        let is_sse = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.split(';').next().is_some_and(|m| m.trim().eq_ignore_ascii_case("text/event-stream")));
+
         let body = response.text().await.map_err(|e| DysonError::Mcp {
             server: self.url.clone(),
             message: format!("failed to read response: {e}"),
         })?;
 
+        let rpc_body: std::borrow::Cow<'_, str> = if is_sse {
+            match extract_last_sse_data(&body) {
+                Some(s) => std::borrow::Cow::Owned(s),
+                None => return Err(DysonError::Mcp {
+                    server: self.url.clone(),
+                    message: "SSE response had no `data:` frame".into(),
+                }),
+            }
+        } else {
+            std::borrow::Cow::Borrowed(body.as_str())
+        };
+
         let rpc_response: JsonRpcResponse =
-            serde_json::from_str(&body).map_err(|e| DysonError::Mcp {
+            serde_json::from_str(&rpc_body).map_err(|e| DysonError::Mcp {
                 server: self.url.clone(),
                 message: format!("failed to parse response: {e}"),
             })?;
@@ -486,6 +510,43 @@ impl HttpTransport {
             message: "response has neither result nor error".into(),
         })
     }
+}
+
+/// Extract the last `data:` payload from a Server-Sent Events body.
+///
+/// Streamable HTTP MCP servers wrap the JSON-RPC response in an
+/// `event: message\ndata: {...}\n\n` envelope (RFC-style SSE).  For
+/// the request/response shape MCP uses for initialize / tools/list /
+/// tools/call, exactly one frame is emitted — but defensively we
+/// take the LAST `data:` line so future server behavior (a status
+/// frame followed by the response, etc.) doesn't trip the parser.
+fn extract_last_sse_data(body: &str) -> Option<String> {
+    let mut last: Option<String> = None;
+    let mut current: Option<String> = None;
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("data:") {
+            // Per the SSE spec the body starts after the colon and one
+            // optional space.  Concatenate multi-line `data:` frames
+            // with a `\n` separator (also per the spec).
+            let chunk = rest.strip_prefix(' ').unwrap_or(rest);
+            current = Some(match current.take() {
+                Some(prev) => format!("{prev}\n{chunk}"),
+                None => chunk.to_string(),
+            });
+        } else if line.is_empty() {
+            // Blank line terminates an event.  Promote the current
+            // accumulator to `last` and reset.
+            if let Some(c) = current.take() {
+                last = Some(c);
+            }
+        }
+    }
+    // Trailing event without a blank-line terminator (some servers
+    // skip the terminator on the final frame).
+    if let Some(c) = current {
+        last = Some(c);
+    }
+    last
 }
 
 #[async_trait]
@@ -588,6 +649,53 @@ mod tests {
         let transport = spawn_echo_server().await;
         let result = transport.send_request("test/method", None).await.unwrap();
         assert_eq!(result, serde_json::json!({"ok": true}));
+    }
+
+    #[test]
+    fn extract_last_sse_data_handles_single_frame() {
+        // The shape Context7 (and most streamable HTTP MCP servers)
+        // emit for initialize: one event with one data line, blank
+        // line terminator.
+        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
+        let extracted = extract_last_sse_data(body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(v["result"]["ok"], true);
+    }
+
+    #[test]
+    fn extract_last_sse_data_takes_final_event() {
+        // Defense for servers that ship a status frame before the
+        // response — we want the LAST `data:`, not the first.
+        let body = "event: message\ndata: {\"status\":\"in_progress\"}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":42}\n\n";
+        let extracted = extract_last_sse_data(body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(v["result"], 42);
+    }
+
+    #[test]
+    fn extract_last_sse_data_concatenates_multiline_data_per_spec() {
+        // SSE spec: multiple `data:` lines in one event get joined
+        // with `\n`.  Real-world: rare for JSON payloads but valid
+        // and we should not silently drop the second half.
+        let body = "data: line one\ndata: line two\n\n";
+        assert_eq!(extract_last_sse_data(body).unwrap(), "line one\nline two");
+    }
+
+    #[test]
+    fn extract_last_sse_data_tolerates_missing_terminator() {
+        // Some servers omit the trailing blank line on the final
+        // event — we still need to surface that data.
+        let body = "data: {\"a\":1}";
+        assert_eq!(extract_last_sse_data(body).unwrap(), "{\"a\":1}");
+    }
+
+    #[test]
+    fn extract_last_sse_data_returns_none_on_no_data_line() {
+        // If the body is somehow empty or contains only `event:`
+        // lines, we should return None so the caller surfaces a
+        // useful error rather than panicking on parse.
+        assert!(extract_last_sse_data("").is_none());
+        assert!(extract_last_sse_data(":heartbeat\n\n").is_none());
     }
 
     #[tokio::test]
