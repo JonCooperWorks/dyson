@@ -226,6 +226,16 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
         agent["image_generation_model"] = json!(DEFAULT_IMAGE_MODEL);
     }
 
+    // `skills` is omitted intentionally.  The dyson loader treats an
+    // absent `skills` block (or an absent `skills.builtin`) as "wire
+    // every builtin tool"; an EXPLICIT `"builtin": { "tools": [] }`
+    // is parsed as "register zero builtin tools" (see
+    // `config::loader::collect_skill_configs`'s explicit-empty-array
+    // branch).  Earlier versions of this writer emitted the explicit
+    // empty array and shipped every dyson swarm instance toolless —
+    // bash, read_file, image_generate, the lot, all silently absent.
+    // Omitting the key is the only correct way to say "give me the
+    // defaults".
     json!({
         "config_version": 2,
         "providers": providers,
@@ -238,8 +248,7 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
                 "dangerous_no_tls": true
             }
         ],
-        "workspace": { "connection_string": inputs.workspace_str },
-        "skills": { "builtin": { "tools": [] } }
+        "workspace": { "connection_string": inputs.workspace_str }
     })
 }
 
@@ -322,6 +331,22 @@ mod tests {
         assert_eq!(chat["base_url"], "https://dyson.example.com/llm/openrouter");
         assert_eq!(chat["models"], json!(["anthropic/claude-sonnet-4-5"]));
         assert_eq!(chat["api_key"], "swarm-token");
+    }
+
+    #[test]
+    fn swarm_config_omits_skills_block_to_inherit_all_builtin_tools() {
+        // Regression for "the agent has no tools".  An explicit
+        // `skills.builtin = { tools: [] }` block is parsed by the
+        // dyson loader as "register zero builtin tools" — the agent
+        // boots without bash, read_file, image_generate, anything.
+        // Omitting the skills key entirely is the only way to inherit
+        // the full builtin toolbox on a swarm-managed dyson.
+        let cfg = cfg_with_proxy();
+        assert!(
+            cfg.get("skills").is_none(),
+            "swarm config must NOT carry a skills key — that triggers the \
+             loader's explicit-empty-array branch and ships a toolless dyson"
+        );
     }
 
     #[test]

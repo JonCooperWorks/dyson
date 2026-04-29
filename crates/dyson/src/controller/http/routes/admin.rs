@@ -115,6 +115,17 @@ pub(super) struct ConfigureBody {
     /// factory falls back to the provider's first `models` entry.
     #[serde(default)]
     image_generation_model: Option<String>,
+    /// Reset the `skills` block in dyson.json to "use defaults".
+    /// Removes the key entirely so the loader's
+    /// no-skills-block branch fires and every builtin tool registers
+    /// (`bash`, `read_file`, `image_generate`, etc.).  Originally
+    /// added because earlier `dyson swarm` boots wrote
+    /// `"skills": { "builtin": { "tools": [] } }`, which the loader
+    /// parses as "register zero builtin tools" — every instance
+    /// shipped without a single tool.  Setting this flag on a sweep
+    /// is the retroactive fix.
+    #[serde(default)]
+    reset_skills: bool,
 }
 
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
@@ -277,7 +288,24 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     } else {
         false
     };
-    let any_config_changed = provider_changed || image_changed;
+    // 4. Skills: when `reset_skills` is set, drop the `skills` key
+    //    from dyson.json so the loader's defaults path registers every
+    //    builtin tool.  Independent of the chat / image patches —
+    //    swarm's sweep flips it on every push so toolless instances
+    //    self-heal on the next configure.
+    let skills_changed = if body.reset_skills {
+        match state.config_path() {
+            Some(path) => match clear_skills_in_config(path) {
+                Ok(changed) => changed,
+                Err(e) => return bad_request(&format!("skills reset failed: {e}")),
+            },
+            None => false,
+        }
+    } else {
+        false
+    };
+
+    let any_config_changed = provider_changed || image_changed || skills_changed;
 
     // Eagerly reload the settings + ClientRegistry instead of waiting
     // for the 2s polling HotReloader to notice the mtime change.  Two
@@ -320,6 +348,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "models_updated": models_changed,
         "provider_updated": provider_changed,
         "image_generation_updated": image_changed,
+        "skills_reset": skills_changed,
     }))
 }
 
@@ -500,6 +529,34 @@ fn patch_image_generation_in_config(
     Ok(())
 }
 
+/// Drop the `skills` key from dyson.json so the loader's defaults
+/// branch registers every builtin tool.  Returns `Ok(true)` when the
+/// key was present and removed, `Ok(false)` when it was already
+/// absent (no write fired).
+///
+/// Atomic write via tmp + rename for the same reason as the sibling
+/// patch helpers — the HotReloader debounces 500ms on mtime so a
+/// half-written file is unlikely, but rename gives us the
+/// belt-and-braces guarantee that a crash mid-write leaves the
+/// previous version in place.
+fn clear_skills_in_config(path: &std::path::Path) -> Result<bool, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let removed = doc
+        .as_object_mut()
+        .ok_or_else(|| "config root is not an object".to_string())?
+        .remove("skills")
+        .is_some();
+    if !removed {
+        return Ok(false);
+    }
+    let tmp = path.with_extension("json.tmp");
+    let pretty = serde_json::to_vec_pretty(&doc).map_err(|e| format!("serialise: {e}"))?;
+    std::fs::write(&tmp, &pretty).map_err(|e| format!("write tmp: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename: {e}"))?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,5 +713,37 @@ mod tests {
         // Provider block models[] left alone — the model id only flows
         // through the agent.image_generation_model override.
         assert_eq!(after["providers"]["openrouter-image"]["models"][0], "google/old-model");
+    }
+
+    #[test]
+    fn clear_skills_drops_the_block_so_loader_registers_all_builtins() {
+        // Regression for "the agent has no tools".  Older `dyson swarm`
+        // boots wrote `skills.builtin.tools = []`, which the loader
+        // parses as "register zero builtin tools".  The configure-time
+        // skills reset must remove the key entirely so the loader's
+        // no-skills-block branch fires on next reload.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dyson.json");
+        let initial = serde_json::json!({
+            "agent": { "provider": "openrouter" },
+            "providers": { "openrouter": { "type": "openai", "api_key": "x", "models": ["m"] } },
+            "skills": { "builtin": { "tools": [] } }
+        });
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        drop(f);
+
+        assert!(clear_skills_in_config(&path).unwrap(), "first call must report a change");
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(after.get("skills").is_none(), "skills key must be removed");
+        // Other top-level keys unchanged — clearing skills must not
+        // perturb providers / agent.
+        assert_eq!(after["agent"]["provider"], "openrouter");
+        assert_eq!(after["providers"]["openrouter"]["api_key"], "x");
+
+        // Idempotent second call: no skills key means nothing to remove.
+        assert!(!clear_skills_in_config(&path).unwrap(),
+            "second call must report no-op when skills already absent");
     }
 }
