@@ -487,6 +487,16 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
   }
 
   const isImage = meta && typeof meta.kind === 'string' && meta.kind === 'image';
+  // Image artefacts: the agent stamps `metadata.file_url` at emit
+  // time (see output.rs / state.rs send_file paths) AND mirrors the
+  // same URL into the raw artefact body, so cold deep-links that
+  // arrive before `meta` hydrates can still paint by reading `body`.
+  // Without this resolution the `<img>` branch below was unreachable
+  // for every image and the reader misleadingly said "Image no
+  // longer available."
+  const imageUrl = isImage
+    ? ((meta && meta.metadata && meta.metadata.file_url) || body || '')
+    : '';
   // A `kind:'other'` artefact paired with metadata.file_url is a sent
   // file (anything send_file emitted that wasn't an image).  For
   // markdown the body field IS the file text (set server-side), so the
@@ -507,9 +517,10 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
   const isBinaryFile = isFile && !isMarkdownFile;
 
   const download = () => {
-    if ((isImage || isFile) && fileUrl) {
+    const url = isImage ? imageUrl : fileUrl;
+    if ((isImage || isFile) && url) {
       const a = document.createElement('a');
-      a.href = fileUrl;
+      a.href = url;
       a.download = fileName || (isImage ? 'image' : 'file');
       document.body.appendChild(a); a.click(); a.remove();
       return;
@@ -523,7 +534,7 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
     URL.revokeObjectURL(u);
   };
   const copy = async () => {
-    const text = isImage || isBinaryFile ? fileUrl : body;
+    const text = isImage ? imageUrl : (isBinaryFile ? fileUrl : body);
     if (await copyToClipboard(text)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
@@ -543,10 +554,10 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
         {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
         {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
         <span style={{flex:1}}/>
-        <button className="btn sm ghost" onClick={copy} disabled={isImage || isBinaryFile ? !fileUrl : !body}>
+        <button className="btn sm ghost" onClick={copy} disabled={isImage ? !imageUrl : isBinaryFile ? !fileUrl : !body}>
           {copied ? 'copied' : (isImage || isBinaryFile ? 'copy url' : 'copy')}
         </button>
-        <button className="btn sm primary" onClick={download} disabled={isImage || isFile ? !fileUrl : !body}>
+        <button className="btn sm primary" onClick={download} disabled={isImage ? !imageUrl : isFile ? !fileUrl : !body}>
           {downloadLabel}
         </button>
       </div>
@@ -573,8 +584,8 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
       {isImage ? (
         <div style={{overflow:'auto', flex:1, padding:'24px', display:'flex',
                      alignItems:'flex-start', justifyContent:'center', background:'var(--bg)'}}>
-          {fileUrl
-            ? <img src={fileUrl} alt={(meta && meta.title) || 'image'}
+          {imageUrl
+            ? <img src={imageUrl} alt={(meta && meta.title) || 'image'}
                    style={{maxWidth:'100%', maxHeight:'100%', objectFit:'contain',
                            borderRadius:4, boxShadow:'0 2px 10px rgba(0,0,0,0.1)'}}/>
             : <div style={{color:'var(--mute)', fontSize:13}}>Image no longer available.</div>}

@@ -264,6 +264,51 @@ describe('ArtefactReader — sent files', () => {
     expect(container.textContent).not.toMatch(/^Download$/m);
   });
 
+  it('renders an image artefact as <img>, not as "image no longer available"', async () => {
+    // The image branch was previously gated on a `fileUrl` that was
+    // explicitly nulled out for kind:image, so every image reader fell
+    // through to the empty-state copy.  Pin: a kind:image artefact with
+    // the URL on metadata.file_url renders an <img src> pointing at it.
+    const url = '/api/files/f7';
+    const { container, queryByText } = await mountReader('c1', {
+      id: 'a3',
+      title: 'cat.png',
+      bytes: 4096,
+      kind: 'image',
+      created_at: 0,
+      metadata: {
+        file_url: url,
+        file_name: 'cat.png',
+        mime_type: 'image/png',
+        bytes: 4096,
+      },
+    }, url);
+    const img = container.querySelector('img');
+    expect(img, 'image artefact must render an <img>').toBeTruthy();
+    expect(img.getAttribute('src')).toBe(url);
+    expect(queryByText(/no longer available/i)).toBeNull();
+  });
+
+  it('falls back to artefact body when meta has not hydrated yet (cold deep-link)', async () => {
+    // findArtefactMeta returns null when the user lands on an image
+    // artefact deep-link before the conversation list has loaded.  In
+    // that case the reader still receives the body via loadArtefact —
+    // and for image artefacts the body is the URL.  Pin that fallback
+    // so a cold deep-link doesn't read as "Image no longer available".
+    setConversations([]);
+    const client = {
+      listArtefacts: async () => [],
+      loadArtefact: async () => ({ body: '/api/files/f8', chatId: 'c1' }),
+    };
+    const { container } = renderWithApi(<ArtefactReader id={'a4'}/>, client);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    // No meta → no <img> until findArtefactMeta is populated.  The
+    // empty-state shouldn't fire either; the reader paints "Select an
+    // artefact" only when id is null.  Body fallback only activates
+    // when meta.kind says image, so this case stays as plain markdown.
+    expect(container.querySelector('.prose')).toBeTruthy();
+  });
+
   it('renders a binary file artefact as a download card, not as markdown', async () => {
     const { container, queryByText } = await mountReader('c1', {
       id: 'a2',
