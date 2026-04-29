@@ -237,6 +237,10 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         // this every instance shows "warmup-placeholder" forever.
         // See routes/admin.rs.
         (&Method::POST,   ["api", "admin", "configure"]) => admin::post(req, &state).await,
+        // Diagnostic — returns the live skill / tool inventory so an
+        // operator can verify which MCP servers actually loaded.
+        // Same configure-secret auth as the POST sibling.
+        (&Method::GET,    ["api", "admin", "skills"])    => admin::get_skills(req, &state).await,
 
         // ─── files & artefacts ─────────────────────────────────────────
         // Strict decode here — these ids feed `safe_store_id` which

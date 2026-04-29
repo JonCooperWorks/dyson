@@ -379,6 +379,136 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     }))
 }
 
+/// Diagnostic: return the live skill / tool inventory so an operator
+/// can confirm which MCP servers actually loaded after a configure
+/// push.  Same configure-secret auth as `post()` (the only auth
+/// surface on `/api/admin/*`).  Builds a throwaway agent off the
+/// current settings so we report the actual `on_load` outcome — a
+/// live `state.registry` only caches LLM clients, not skills.
+pub(super) async fn get_skills(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
+    use argon2::{password_hash::{PasswordHash, PasswordVerifier}, Argon2};
+    use crate::skill::Skill;
+    #[allow(unused_imports)]
+    use crate::tool::Tool;
+    let secret = match req
+        .headers()
+        .get(CONFIGURE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => s.to_owned(),
+        None => return unauthorized(state),
+    };
+    let snapshot = state.settings_snapshot();
+    let hash_dir = workspace_parent_dir(&snapshot.workspace.connection_string.expose());
+    let hash_path = hash_dir.join(CONFIGURE_HASH_FILENAME);
+    let stored = match std::fs::read_to_string(&hash_path) {
+        Ok(s) => s,
+        Err(_) => return unauthorized(state),
+    };
+    let parsed = match PasswordHash::new(stored.trim()) {
+        Ok(p) => p,
+        Err(_) => return unauthorized(state),
+    };
+    if Argon2::default()
+        .verify_password(secret.as_bytes(), &parsed)
+        .is_err()
+    {
+        return unauthorized(state);
+    }
+
+    // Re-load settings fresh from disk — this is the same path
+    // build_agent uses, so the result reflects what an actual chat
+    // turn would build with.
+    let path = match state.config_path() {
+        Some(p) => p.to_path_buf(),
+        None => return bad_request("config_path is not set"),
+    };
+    let settings = match crate::config::loader::load_settings(Some(&path)) {
+        Ok(s) => s,
+        Err(e) => return bad_request(&format!("load_settings: {e}")),
+    };
+
+    let mut by_kind: Vec<serde_json::Value> = Vec::new();
+    let mut mcp_listed: Vec<serde_json::Value> = Vec::new();
+    for sk in &settings.skills {
+        match sk {
+            crate::config::SkillConfig::Builtin(b) => {
+                by_kind.push(serde_json::json!({
+                    "kind": "builtin",
+                    "tools_filter": b.tools.len(),
+                }));
+            }
+            crate::config::SkillConfig::Local(l) => {
+                by_kind.push(serde_json::json!({
+                    "kind": "local",
+                    "name": l.name,
+                    "path": l.path,
+                }));
+            }
+            crate::config::SkillConfig::Subagent(sa) => {
+                by_kind.push(serde_json::json!({
+                    "kind": "subagent",
+                    "agents": sa.agents.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+                }));
+            }
+            crate::config::SkillConfig::Mcp(m) => {
+                let transport = match &m.transport {
+                    crate::config::McpTransportConfig::Http { url, headers, auth } => {
+                        serde_json::json!({
+                            "type": "http",
+                            "url": url,
+                            "header_keys": headers.keys().collect::<Vec<_>>(),
+                            "oauth": auth.is_some(),
+                        })
+                    }
+                    crate::config::McpTransportConfig::Stdio { command, .. } => {
+                        serde_json::json!({ "type": "stdio", "command": command })
+                    }
+                };
+                mcp_listed.push(serde_json::json!({
+                    "name": m.name,
+                    "transport": transport,
+                }));
+            }
+        }
+    }
+
+    // Try to actually load each MCP skill so we can report the
+    // on_load outcome — handshake errors (the silent-skip path in
+    // skill::build_skills) surface here as `loaded: false` with the
+    // captured error string.  Doesn't share state with running
+    // chats; just a probe.
+    let mut mcp_probes: Vec<serde_json::Value> = Vec::new();
+    for sk in &settings.skills {
+        if let crate::config::SkillConfig::Mcp(cfg) = sk {
+            let mut skill = crate::skill::mcp::McpSkill::new(*cfg.clone());
+            let result = skill.on_load().await;
+            mcp_probes.push(match result {
+                Ok(()) => serde_json::json!({
+                    "name": cfg.name,
+                    "loaded": true,
+                    "tools": skill.tools().len(),
+                    "tool_names": skill.tools().iter().map(|t| t.name().to_string()).collect::<Vec<_>>(),
+                }),
+                Err(e) => serde_json::json!({
+                    "name": cfg.name,
+                    "loaded": false,
+                    "error": e.to_string(),
+                }),
+            });
+        }
+    }
+
+    json_ok(&serde_json::json!({
+        "ok": true,
+        "skills": by_kind,
+        "mcp_servers": mcp_listed,
+        "mcp_probes": mcp_probes,
+    }))
+}
+
 /// Resolve the directory the configure-secret hash lives in.  We
 /// keep it next to the workspace so cube template restores preserve
 /// it via the writable layer.  `connection_string` for the in-memory
