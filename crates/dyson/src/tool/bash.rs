@@ -156,7 +156,19 @@ impl Tool for BashTool {
             .current_dir(&ctx.working_dir)
             .env_clear();
 
-        // Allow-list of safe environment variable prefixes/names to pass through.
+        // Source from the process env first so the spawned shell at least
+        // has PATH, HTTPS_PROXY, etc. — the parent dyson process inherits
+        // these from the cube image, and without them every shell command
+        // runs without a $PATH and curl has no proxy URL to dial.
+        // Then layer ctx.env on top so callers can override or add per-
+        // invocation overrides (mostly tests).  Allow-list filter applies
+        // identically to both sources so secrets in either layer are
+        // dropped.
+        for (key, value) in std::env::vars() {
+            if is_safe_env_var(&key) {
+                cmd.env(key, value);
+            }
+        }
         for (key, value) in &ctx.env {
             if is_safe_env_var(key) {
                 cmd.env(key, value);
