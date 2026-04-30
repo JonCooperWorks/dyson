@@ -369,8 +369,7 @@ export function ArtefactsView({ conv, setConv }) {
         ) : (
           <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center', padding:'24px'}}>
             <div style={{color:'var(--fg-dim)', fontSize:13, lineHeight:1.6, textAlign:'center', maxWidth:'320px'}}>
-              No artefacts yet.<br/><br/>
-              The security_engineer subagent emits its final report here.
+              No artefacts yet.
             </div>
           </div>
         )}
@@ -756,6 +755,7 @@ function ShareMenu({ canShare, busy, onMint }) {
           <button className="btn xs ghost" onClick={() => pick('1d')}>1 day</button>
           <button className="btn xs ghost" onClick={() => pick('7d')}>7 days</button>
           <button className="btn xs ghost" onClick={() => pick('30d')}>30 days</button>
+          <button className="btn xs ghost" onClick={() => pick('never')} title="revoke manually from the shared tab">never</button>
         </div>
       )}
     </span>
