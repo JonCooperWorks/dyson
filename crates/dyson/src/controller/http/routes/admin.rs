@@ -126,6 +126,14 @@ pub(super) struct ConfigureBody {
     /// is the retroactive fix.
     #[serde(default)]
     reset_skills: bool,
+    /// Explicit builtin-tool allowlist.  When `Some`, dyson rewrites
+    /// `skills.builtin.tools` to this exact list; the loader registers
+    /// only those builtins.  An empty vec is meaningful — register
+    /// zero builtins.  Distinct from `reset_skills` (which drops the
+    /// block entirely).  When both are set, `tools` wins (a caller
+    /// asking for a subset clearly does NOT want defaults).
+    #[serde(default)]
+    tools: Option<Vec<String>>,
     /// Per-server stanzas to write under top-level `mcp_servers.<name>`.
     /// Each value is the JSON the loader's `parse_mcp_servers` already
     /// understands — typically `{ url, headers, auth? }` for HTTP MCP.
@@ -298,12 +306,22 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     } else {
         false
     };
-    // 4. Skills: when `reset_skills` is set, drop the `skills` key
-    //    from dyson.json so the loader's defaults path registers every
-    //    builtin tool.  Independent of the chat / image patches —
-    //    swarm's sweep flips it on every push so toolless instances
-    //    self-heal on the next configure.
-    let skills_changed = if body.reset_skills {
+    // 4. Skills: an explicit `tools` list rewrites
+    //    `skills.builtin.tools` to that exact set; otherwise
+    //    `reset_skills` drops the `skills` key so the loader's
+    //    defaults path registers every builtin.  Independent of the
+    //    chat / image patches — swarm's sweep flips one of these on
+    //    every push so toolless instances self-heal on the next
+    //    configure.  `tools` wins if both are set.
+    let skills_changed = if let Some(allowlist) = body.tools.as_deref() {
+        match state.config_path() {
+            Some(path) => match set_skills_tools_in_config(path, allowlist) {
+                Ok(changed) => changed,
+                Err(e) => return bad_request(&format!("skills tools patch failed: {e}")),
+            },
+            None => false,
+        }
+    } else if body.reset_skills {
         match state.config_path() {
             Some(path) => match clear_skills_in_config(path) {
                 Ok(changed) => changed,
@@ -714,6 +732,47 @@ fn clear_skills_in_config(path: &std::path::Path) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Set `skills.builtin.tools` to an explicit allowlist.  Mirrors the
+/// `dyson swarm` boot writer — empty list lands as `tools: []` (loader
+/// registers zero builtins), non-empty as the exact subset.  Other
+/// keys under `skills` (subagents, locals) are preserved.  Atomic
+/// write via tmp + rename, same posture as the sibling helpers.
+fn set_skills_tools_in_config(
+    path: &std::path::Path,
+    tools: &[String],
+) -> Result<bool, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let root = doc
+        .as_object_mut()
+        .ok_or_else(|| "config root is not an object".to_string())?;
+    let new_tools = Value::Array(
+        tools
+            .iter()
+            .map(|t| Value::String(t.clone()))
+            .collect(),
+    );
+    let skills = root
+        .entry("skills".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| "skills is not an object".to_string())?;
+    let builtin = skills
+        .entry("builtin".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| "skills.builtin is not an object".to_string())?;
+    if builtin.get("tools") == Some(&new_tools) {
+        return Ok(false);
+    }
+    builtin.insert("tools".to_string(), new_tools);
+    let tmp = path.with_extension("json.tmp");
+    let pretty = serde_json::to_vec_pretty(&doc).map_err(|e| format!("serialise: {e}"))?;
+    std::fs::write(&tmp, &pretty).map_err(|e| format!("write tmp: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename: {e}"))?;
+    Ok(true)
+}
+
 /// Replace the top-level `mcp_servers` block in dyson.json with the
 /// supplied map.  Empty map clears the block (loader treats absent
 /// and empty identically — no MCP skills register).  Returns
@@ -937,6 +996,41 @@ mod tests {
         // Idempotent second call: no skills key means nothing to remove.
         assert!(!clear_skills_in_config(&path).unwrap(),
             "second call must report no-op when skills already absent");
+    }
+
+    #[test]
+    fn set_skills_tools_writes_explicit_allowlist_and_is_idempotent() {
+        // Editing an instance's tool selection in the orchestrator UI
+        // must rewrite `skills.builtin.tools` to the chosen subset on
+        // the running dyson; otherwise the live agent keeps registering
+        // the boot-time set.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dyson.json");
+        let initial = serde_json::json!({
+            "agent": { "provider": "openrouter" },
+            "providers": { "openrouter": { "type": "openai", "api_key": "x", "models": ["m"] } }
+        });
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        drop(f);
+
+        let tools = vec!["bash".to_string(), "read_file".to_string()];
+        assert!(set_skills_tools_in_config(&path, &tools).unwrap(), "first write must report a change");
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["skills"]["builtin"]["tools"], serde_json::json!(["bash", "read_file"]));
+        // Sibling keys preserved.
+        assert_eq!(after["agent"]["provider"], "openrouter");
+        assert_eq!(after["providers"]["openrouter"]["api_key"], "x");
+
+        // Same allowlist a second time is a no-op.
+        assert!(!set_skills_tools_in_config(&path, &tools).unwrap(),
+            "no-change call must report no-op");
+
+        // Empty list lands as `tools: []` so the loader registers zero builtins.
+        assert!(set_skills_tools_in_config(&path, &[]).unwrap(), "shrink to empty must report a change");
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["skills"]["builtin"]["tools"], serde_json::json!([]));
     }
 
     #[test]
