@@ -447,16 +447,21 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
   const [meta, setMeta] = useState(null);
   const [err, setErr]  = useState('');
   const [copied, setCopied] = useState(false);
+  const [chatId, setChatId] = useState(null);
 
   useEffect(() => {
-    if (!id || !client) { setBody(''); setMeta(null); setErr(''); return; }
+    if (!id || !client) { setBody(''); setMeta(null); setErr(''); setChatId(null); return; }
     setErr('');
     const hit = findArtefactMeta(id);
     setMeta(hit);
+    if (hit && hit.chat_id) setChatId(hit.chat_id);
     client.loadArtefact(id)
-      .then(({ body, chatId }) => {
+      .then(({ body, chatId: cid }) => {
         setBody(body);
-        if (chatId) requestOpenArtefact(id);
+        if (cid) {
+          setChatId(cid);
+          requestOpenArtefact(id);
+        }
       })
       .catch(e => setErr(String(e.message || e)));
   }, [id, client]);
@@ -545,6 +550,23 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
     : isFile ? 'download'
     : 'download .md';
 
+  // Anonymous share: open the swarm SPA at the parent apex with the
+  // artefact + chat ids in the hash fragment so SharesPanel auto-opens
+  // its mint dialog pre-filled.  We can't mint in-page because the
+  // dyson SPA is on a sandbox subdomain and swarm's /v1/* sits behind
+  // OIDC at the apex — `SameSite=Strict` blocks cross-origin fetch.
+  // The swarm UI handles the rest of the flow (TTL pick, copy URL).
+  const openShare = () => {
+    if (!id || !chatId) return;
+    const apex = computeApex();
+    if (!apex) return;
+    const inst = computeInstanceId();
+    if (!inst) return;
+    const url = `https://${apex}/#/i/${encodeURIComponent(inst)}?share_artefact=${encodeURIComponent(id)}&share_chat=${encodeURIComponent(chatId)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+  const canShare = Boolean(id && chatId);
+
   return (
     <section className="mind-pane">
       <div style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
@@ -554,6 +576,9 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
         {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
         {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
         <span style={{flex:1}}/>
+        <button className="btn sm ghost" onClick={openShare} disabled={!canShare} title="anonymous shareable link">
+          share…
+        </button>
         <button className="btn sm ghost" onClick={copy} disabled={isImage ? !imageUrl : isBinaryFile ? !fileUrl : !body}>
           {copied ? 'copied' : (isImage || isBinaryFile ? 'copy url' : 'copy')}
         </button>
@@ -628,4 +653,33 @@ function kfmt(n) {
   const v = Number(n) || 0;
   if (v >= 1000) return `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k`;
   return String(v);
+}
+
+// Dyson is reached at `<instance_id>.<apex>` via swarm's host-based
+// dispatcher (see dyson-swarm/src/http/dyson_proxy.rs).  Stripping
+// the leading single-label subdomain gives the apex; the leading
+// label itself is the instance_id.  Returns null in dev (`localhost`,
+// `127.0.0.1`) where no subdomain is present, in which case the
+// share button is disabled — there's no swarm to open at the apex.
+function computeApex() {
+  try {
+    const host = window.location.host;
+    const noPort = host.split(':')[0];
+    const dot = noPort.indexOf('.');
+    if (dot <= 0) return null;
+    const apex = noPort.slice(dot + 1);
+    // Bare TLD or empty rest — not a real apex.
+    if (!apex || !apex.includes('.')) return null;
+    return apex;
+  } catch { return null; }
+}
+
+function computeInstanceId() {
+  try {
+    const host = window.location.host;
+    const noPort = host.split(':')[0];
+    const dot = noPort.indexOf('.');
+    if (dot <= 0) return null;
+    return noPort.slice(0, dot);
+  } catch { return null; }
 }
