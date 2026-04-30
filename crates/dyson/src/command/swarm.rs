@@ -77,6 +77,11 @@ pub async fn run() -> Result<()> {
     let name = std::env::var("SWARM_NAME").unwrap_or_default();
     let instance_id = std::env::var("SWARM_INSTANCE_ID").unwrap_or_default();
     let model = std::env::var("SWARM_MODEL").unwrap_or_default();
+    // Optional builtin-tool allowlist.  Swarm only stamps this on the
+    // env envelope when the operator picked a strict subset (or asked
+    // for zero tools); when unset, dyson registers every builtin.
+    // Empty CSV ("") means "register zero tools".
+    let tools_csv = std::env::var("SWARM_TOOLS").ok();
 
     let home_path = PathBuf::from(&home);
     std::fs::create_dir_all(&home_path)
@@ -138,6 +143,13 @@ pub async fn run() -> Result<()> {
         model
     };
     let workspace_str = workspace.to_string_lossy().into_owned();
+    let tools = tools_csv.as_deref().map(|csv| {
+        csv.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+    });
     let cfg = build_swarm_config(SwarmConfigInputs {
         bind: &bind,
         proxy_url: &proxy_url,
@@ -145,6 +157,7 @@ pub async fn run() -> Result<()> {
         model_id: &model_id,
         workspace_str: &workspace_str,
         auth_block,
+        tools: tools.as_deref(),
     });
 
     let cfg_path = home_path.join("dyson.json");
@@ -177,6 +190,11 @@ struct SwarmConfigInputs<'a> {
     model_id: &'a str,
     workspace_str: &'a str,
     auth_block: serde_json::Value,
+    /// Builtin-tool allowlist parsed from `SWARM_TOOLS`.  `None` ⇒ omit
+    /// the `skills` block (loader interprets as "all builtins").
+    /// `Some(&[])` ⇒ write an explicit empty `tools: []` so the loader
+    /// registers zero builtins.  `Some(&[..])` ⇒ register exactly those.
+    tools: Option<&'a [String]>,
 }
 
 /// Render the dyson.json body for a swarm-mode boot.  Pure — no
@@ -226,17 +244,16 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
         agent["image_generation_model"] = json!(DEFAULT_IMAGE_MODEL);
     }
 
-    // `skills` is omitted intentionally.  The dyson loader treats an
-    // absent `skills` block (or an absent `skills.builtin`) as "wire
-    // every builtin tool"; an EXPLICIT `"builtin": { "tools": [] }`
-    // is parsed as "register zero builtin tools" (see
-    // `config::loader::collect_skill_configs`'s explicit-empty-array
-    // branch).  Earlier versions of this writer emitted the explicit
-    // empty array and shipped every dyson swarm instance toolless —
-    // bash, read_file, image_generate, the lot, all silently absent.
-    // Omitting the key is the only correct way to say "give me the
-    // defaults".
-    json!({
+    // `skills` is omitted unless the operator supplied an allowlist via
+    // `SWARM_TOOLS`.  The dyson loader treats an absent `skills` block
+    // (or an absent `skills.builtin`) as "wire every builtin tool"; an
+    // EXPLICIT `"builtin": { "tools": [...] }` is parsed as that exact
+    // set, and `"tools": []` as zero builtins.  Earlier versions of
+    // this writer emitted the explicit empty array unconditionally and
+    // shipped every dyson swarm instance toolless — bash, read_file,
+    // image_generate, the lot, all silently absent.  Omitting the key
+    // is the correct way to say "give me the defaults".
+    let mut cfg = json!({
         "config_version": 2,
         "providers": providers,
         "agent": agent,
@@ -249,7 +266,11 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
             }
         ],
         "workspace": { "connection_string": inputs.workspace_str }
-    })
+    });
+    if let Some(tools) = inputs.tools {
+        cfg["skills"] = json!({ "builtin": { "tools": tools } });
+    }
+    cfg
 }
 
 /// Build the `providers.openrouter.base_url` value that lands in dyson.json.
@@ -296,6 +317,7 @@ mod tests {
             model_id: "anthropic/claude-sonnet-4-5",
             workspace_str: "/var/lib/dyson/workspace",
             auth_block: json!({ "type": "dangerous_no_auth" }),
+            tools: None,
         })
     }
 
@@ -362,9 +384,51 @@ mod tests {
             model_id: "warmup-placeholder",
             workspace_str: "/var/lib/dyson/workspace",
             auth_block: json!({ "type": "dangerous_no_auth" }),
+            tools: None,
         });
         assert!(cfg["providers"]["openrouter-image"].is_null());
         assert!(cfg["agent"]["image_generation_provider"].is_null());
         assert!(cfg["agent"]["image_generation_model"].is_null());
+    }
+
+    #[test]
+    fn swarm_config_writes_explicit_tool_allowlist_when_supplied() {
+        // When swarm passes a `SWARM_TOOLS` allowlist, the swarm-mode
+        // config writer must emit `skills.builtin.tools = [..]` so the
+        // dyson loader registers exactly that subset.  Previously the
+        // writer ignored the env var and always shipped every builtin,
+        // which is what operators were seeing in production.
+        let tools = vec!["bash".to_string(), "read_file".to_string()];
+        let cfg = build_swarm_config(SwarmConfigInputs {
+            bind: "0.0.0.0:80",
+            proxy_url: "https://dyson.example.com/llm",
+            api_key: "swarm-token",
+            model_id: "anthropic/claude-sonnet-4-5",
+            workspace_str: "/var/lib/dyson/workspace",
+            auth_block: json!({ "type": "dangerous_no_auth" }),
+            tools: Some(&tools),
+        });
+        assert_eq!(
+            cfg["skills"]["builtin"]["tools"],
+            json!(["bash", "read_file"])
+        );
+    }
+
+    #[test]
+    fn swarm_config_writes_empty_tool_list_for_zero_tools() {
+        // Operator picked zero tools: emit `skills.builtin.tools = []`,
+        // which the loader's explicit-empty-array branch reads as
+        // "register no builtins".  Distinct from the omitted-skills
+        // case, which means "all builtins".
+        let cfg = build_swarm_config(SwarmConfigInputs {
+            bind: "0.0.0.0:80",
+            proxy_url: "https://dyson.example.com/llm",
+            api_key: "swarm-token",
+            model_id: "anthropic/claude-sonnet-4-5",
+            workspace_str: "/var/lib/dyson/workspace",
+            auth_block: json!({ "type": "dangerous_no_auth" }),
+            tools: Some(&[]),
+        });
+        assert_eq!(cfg["skills"]["builtin"]["tools"], json!([]));
     }
 }
