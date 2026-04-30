@@ -70,6 +70,7 @@ export class DysonClient {
 
   listProviders() { return this._json('/api/providers'); }
   getMind()       { return this._json('/api/mind'); }
+  getAgent()      { return this._json('/api/agent'); }
 
   getActivity(chatId) {
     const qs = chatId ? `?chat=${encodeURIComponent(chatId)}` : '';

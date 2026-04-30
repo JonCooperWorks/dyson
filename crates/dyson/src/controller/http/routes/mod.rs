@@ -26,6 +26,7 @@ use super::state::HttpState;
 
 mod activity;
 mod admin;
+mod agent;
 mod artefacts;
 pub(super) mod conversations;
 mod debug_log;
@@ -225,6 +226,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         // ─── providers / model / mind / activity ───────────────────────
         (&Method::GET,    ["api", "providers"])    => providers::list(&state),
         (&Method::POST,   ["api", "model"])        => model::post(req, Arc::clone(&state)).await,
+        (&Method::GET,    ["api", "agent"])        => agent::get(&state).await,
         (&Method::GET,    ["api", "mind"])         => mind::get(&state).await,
         (&Method::GET,    ["api", "mind", "file"]) => mind::get_file(&state, req.uri().query().unwrap_or("")).await,
         (&Method::POST,   ["api", "mind", "file"]) => mind::post_file(req, &state).await,

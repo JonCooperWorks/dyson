@@ -53,6 +53,14 @@ describe('DysonClient — GET endpoints', () => {
     expect(args(fetch)[0]).toBe('/api/mind');
   });
 
+  it('getAgent → GET /api/agent', async () => {
+    const fetch = mockFetch(() => ({ body: { name: 'Atlas' } }));
+    const client = new DysonClient({ fetch });
+    const out = await client.getAgent();
+    expect(args(fetch)[0]).toBe('/api/agent');
+    expect(out).toEqual({ name: 'Atlas' });
+  });
+
   it('getActivity → GET /api/activity (no chat filter)', async () => {
     const fetch = mockFetch(() => ({ body: { lanes: [] } }));
     const client = new DysonClient({ fetch });

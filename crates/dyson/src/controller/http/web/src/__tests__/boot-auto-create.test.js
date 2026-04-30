@@ -13,6 +13,7 @@ const noopClient = (overrides = {}) => ({
   listConversations: async () => [],
   listProviders:     async () => [],
   getMind:           async () => ({ backend: 'fs', files: [] }),
+  getAgent:          async () => ({ name: '' }),
   getActivity:       async () => ({ lanes: [] }),
   createChat:        async () => ({ id: 'c-0001', title: 'New conversation' }),
   ...overrides,
