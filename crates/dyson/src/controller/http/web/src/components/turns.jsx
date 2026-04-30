@@ -165,7 +165,7 @@ function Turn({ turn, tools, onOpenTool, expandedTools, turnIndex, rating, onRat
           <Icon name={copied ? 'rate' : 'copy'} size={11}/>
         </button>
         <div className="who">
-          <span className="name">{isUser ? 'jcooper' : agentName}</span>
+          <span className="name">{isUser ? 'you' : agentName}</span>
           {turn.model && <span className="model">{turn.model}</span>}
           {turn.queued && (
             <span
