@@ -800,7 +800,11 @@
   border: 0;
   resize: none;
   color: var(--fg);
-  font: 400 14.5px/1.55 var(--font-ui);
+  /* iOS Safari auto-zooms into form inputs whose computed font-size
+     is < 16px when they receive focus; the page then sits at a wrong
+     scale until the user pinches out manually.  Holding the textarea
+     at 16px on every viewport prevents the focus-zoom entirely. */
+  font: 400 16px/1.55 var(--font-ui);
   outline: none;
 }
 .composer textarea::placeholder { color: var(--mute); }

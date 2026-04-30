@@ -130,8 +130,14 @@
   border-radius: 0;
   position: relative;
   box-shadow: 0 4px 12px -8px oklch(0 0 0 / 0.8) inset;
+  /* Tabular command output (free -h, df -h, ps aux) used to wrap on
+     whitespace under `pre-wrap`, which mangled aligned columns into
+     unreadable zigzags on mobile.  Preserve newlines but keep each
+     line as a single horizontally-scrollable strip so the original
+     column alignment survives. */
+  overflow-x: auto;
 }
-.term .line { white-space: pre-wrap; }
+.term .line { white-space: pre; }
 .term .p { color: var(--accent); text-shadow: 0 0 8px var(--accent-wash); }
 .term .c { color: #fff; }
 .term .e { color: #ff8a8a; }
