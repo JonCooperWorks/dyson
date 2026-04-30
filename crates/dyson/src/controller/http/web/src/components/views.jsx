@@ -20,10 +20,23 @@ const NAVS = [
   { id: 'activity',  name: 'Activity',      k: '4', icon: 'activity' },
 ];
 
+// Brand label + initial pulled from the swarm-set agent name (lives in
+// IDENTITY.md `Name:`, populated by SWARM_NAME).  Falls back to "Dyson"
+// when the agent hasn't been named yet — same fallback the per-turn
+// header uses.  Exported for tests so the fallback rule stays pinned.
+export function brandLabel(agentName) {
+  return (agentName || '').trim() || 'Dyson';
+}
+export function brandMark(agentName) {
+  const name = brandLabel(agentName);
+  return name.replace(/\s+/g, '').slice(0, 1).toUpperCase() || 'D';
+}
+
 function TopBar({ view, setView, onToggleLeft }) {
   const client = useApi();
   const model = useAppState(s => s.activeModel);
   const providers = useAppState(s => s.providers);
+  const agentName = useAppState(s => s.agentName);
   const totalModels = providers.reduce((n, p) => n + (p.models?.length || 0), 0);
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -53,7 +66,7 @@ function TopBar({ view, setView, onToggleLeft }) {
       <button className="menu-toggle" title="Conversations" onClick={onToggleLeft}>
         <Icon name="menu" size={14}/>
       </button>
-      <div className="brand"><div className="mark">D</div><div className="name">Dyson</div></div>
+      <div className="brand"><div className="mark">{brandMark(agentName)}</div><div className="name">{brandLabel(agentName)}</div></div>
       <nav>
         {NAVS.map(n => (
           <button key={n.id} className={view === n.id ? 'active' : ''} onClick={() => setView(n.id)}

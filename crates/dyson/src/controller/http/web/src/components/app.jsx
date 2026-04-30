@@ -127,6 +127,16 @@ function App() {
 
   const conversations = useAppState(s => s.conversations);
   const pendingArtefactId = useAppState(s => s.ui.pendingArtefactId);
+  const agentName = useAppState(s => s.agentName);
+
+  // Sync the document title with the swarm-set agent name so the
+  // browser tab reads as the agent — replaces the static "Dyson —
+  // controller" baked into index.html.  Falls back to the original
+  // text when the agent hasn't been named yet.
+  useEffect(() => {
+    const trimmed = (agentName || '').trim();
+    document.title = trimmed ? `${trimmed} — controller` : 'Dyson — controller';
+  }, [agentName]);
 
   // First live arrival: snap to the first conversation.  Only fires when
   // conv is empty so a deep-link's conv wins.
@@ -281,6 +291,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
   const mutate = useSessionMutator(conv);
   const tools = useAppState(s => s.tools);
   const conversations = useAppState(s => s.conversations);
+  const agentName = useAppState(s => s.agentName);
   const scrollRef = useRef(null);
 
   // URL → state: when the hash points at a specific tool ref (deep-
@@ -449,7 +460,15 @@ function ConversationView({ conv, toolRef, setToolRef }) {
 
   if (!session) return <ConversationShell onSend={noop} onCancel={noop}/>;
 
-  const title = conversations.find(c => c.id === conv)?.title || conv || '';
+  const convTitle = conversations.find(c => c.id === conv)?.title || conv || '';
+  // Chat header reads as "<agent name> / <conversation title>".  The
+  // agent name is the swarm-set label (IDENTITY.md `Name:`); the
+  // conversation title is the per-chat slug.  When they coincide, we
+  // collapse the slash and just show one.
+  const trimmedAgent = (agentName || '').trim();
+  const headTitle = trimmedAgent && trimmedAgent !== convTitle
+    ? `${trimmedAgent} / ${convTitle}`
+    : (trimmedAgent || convTitle);
   const empty = session.liveTurns.length === 0 && !session.running;
 
   const onExport = () => client.exportConversation(conv).then(downloadBlob(`${conv}.sharegpt.json`))
@@ -459,7 +478,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     <div className={`centre${empty ? ' empty' : ''}`}>
       <div className="aurora-sweep" aria-hidden="true"/>
       <div className="context">
-        <div className="crumbs"><span className="c-leaf">{title}</span></div>
+        <div className="crumbs"><span className="c-leaf">{headTitle}</span></div>
         <div className="right">
           <button className="btn sm ghost" title="Download ShareGPT export"
                   onClick={onExport} disabled={!conv} style={{padding:'4px 8px'}}>
