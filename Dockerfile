@@ -103,6 +103,28 @@ RUN mkdir -p /var/lib/dyson && chmod 0755 /var/lib/dyson
 # deployments — Cube cells are small so we want freed pages returned fast.
 ENV MALLOC_CONF=dirty_decay_ms:1000,muzzy_decay_ms:1000
 
+# HTTP/HTTPS forward proxy for outbound traffic.  The cube's eBPF SNAT
+# uses bpf_redirect which bypasses the host kernel's TCP stack, and
+# some upstream networks (Google, GitHub via Microsoft) silently drop
+# return packets for those flows.  Routing TCP through the
+# host-resident tinyproxy at mvm_gateway_ip:3128 makes the connection
+# originate from the host's kernel stack so every destination accepts
+# it.  These vars must be baked into the image because the cube
+# template's snapshot freezes /proc/<dyson>/environ at warmup time —
+# per-instance envVars passed by swarm at create-time never reach the
+# running process.  Per-policy gating happens host-side: tinyproxy
+# only accepts CONNECT from cube IPs whose policy allows public
+# egress (the swarm rewrites /etc/tinyproxy/cube-allow.conf on every
+# instance lifecycle event), so a cube under Airgap or Allowlist
+# carries the env but the proxy returns 403 — no internet leak.
+# NO_PROXY keeps swarm /llm and the local CoreDNS resolver direct.
+ENV HTTPS_PROXY=http://169.254.68.5:3128
+ENV HTTP_PROXY=http://169.254.68.5:3128
+ENV https_proxy=http://169.254.68.5:3128
+ENV http_proxy=http://169.254.68.5:3128
+ENV NO_PROXY=169.254.68.5,169.254.254.53,127.0.0.1,localhost
+ENV no_proxy=169.254.68.5,169.254.254.53,127.0.0.1,localhost
+
 EXPOSE 80
 
 # tini reaps zombies and forwards signals to dyson.
