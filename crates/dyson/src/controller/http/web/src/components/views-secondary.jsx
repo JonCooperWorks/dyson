@@ -448,6 +448,16 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
   const [err, setErr]  = useState('');
   const [copied, setCopied] = useState(false);
   const [chatId, setChatId] = useState(null);
+  // Share affordance state.  All useState/useEffect for the share
+  // flow MUST live above the `if (!id)` early-return so React's
+  // hook count stays stable across the empty-state and loaded-state
+  // renders — otherwise we'd hit "Rendered more hooks than during
+  // the previous render" the moment the user navigates away from a
+  // selected artefact.
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareUrl, setShareUrl] = useState(null);
+  const [shareErr, setShareErr] = useState('');
+  const [shareCopied, setShareCopied] = useState(false);
 
   useEffect(() => {
     if (!id || !client) { setBody(''); setMeta(null); setErr(''); setChatId(null); return; }
@@ -550,22 +560,47 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
     : isFile ? 'download'
     : 'download .md';
 
-  // Anonymous share: open the swarm SPA at the parent apex with the
-  // artefact + chat ids in the hash fragment so SharesPanel auto-opens
-  // its mint dialog pre-filled.  We can't mint in-page because the
-  // dyson SPA is on a sandbox subdomain and swarm's /v1/* sits behind
-  // OIDC at the apex — `SameSite=Strict` blocks cross-origin fetch.
-  // The swarm UI handles the rest of the flow (TTL pick, copy URL).
-  const openShare = () => {
-    if (!id || !chatId) return;
-    const apex = computeApex();
-    if (!apex) return;
-    const inst = computeInstanceId();
-    if (!inst) return;
-    const url = `https://${apex}/#/i/${encodeURIComponent(inst)}?share_artefact=${encodeURIComponent(id)}&share_chat=${encodeURIComponent(chatId)}`;
-    window.open(url, '_blank', 'noopener,noreferrer');
-  };
+  // Anonymous share — mint same-origin via the swarm escape route on
+  // dyson_proxy.  `<id>.<apex>/_swarm/share-mint` is intercepted
+  // before the request reaches the cube; swarm uses the user identity
+  // already resolved on the way in (cookie or Authorization) and
+  // calls ShareService::mint server-side.  No cross-origin fetch
+  // needed; the URL lands in `shareUrl` for one-click copy.
   const canShare = Boolean(id && chatId);
+  const mintShare = async (ttl) => {
+    if (!canShare) return;
+    setShareBusy(true);
+    setShareErr('');
+    try {
+      const r = await fetch('/_swarm/share-mint', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artefact_id: id,
+          chat_id: chatId,
+          ttl,
+        }),
+      });
+      if (!r.ok) {
+        const text = await r.text().catch(() => '');
+        throw new Error(`HTTP ${r.status}: ${text || 'mint failed'}`);
+      }
+      const m = await r.json();
+      setShareUrl(m.url || null);
+    } catch (e) {
+      setShareErr(String(e.message || e));
+    } finally {
+      setShareBusy(false);
+    }
+  };
+  const copyShareUrl = async () => {
+    if (!shareUrl) return;
+    if (await copyToClipboard(shareUrl)) {
+      setShareCopied(true);
+      setTimeout(() => setShareCopied(false), 1500);
+    }
+  };
 
   return (
     <section className="mind-pane">
@@ -576,9 +611,11 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
         {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
         {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
         <span style={{flex:1}}/>
-        <button className="btn sm ghost" onClick={openShare} disabled={!canShare} title="anonymous shareable link">
-          share…
-        </button>
+        <ShareMenu
+          canShare={canShare}
+          busy={shareBusy}
+          onMint={mintShare}
+        />
         <button className="btn sm ghost" onClick={copy} disabled={isImage ? !imageUrl : isBinaryFile ? !fileUrl : !body}>
           {copied ? 'copied' : (isImage || isBinaryFile ? 'copy url' : 'copy')}
         </button>
@@ -586,6 +623,33 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
           {downloadLabel}
         </button>
       </div>
+      {(shareUrl || shareErr) && (
+        <div style={{
+          padding: '10px 18px', borderBottom: '1px solid var(--line)',
+          background: 'var(--panel)', display: 'flex', flexWrap: 'wrap',
+          alignItems: 'center', gap: 10, fontSize: 12,
+        }}>
+          {shareErr ? (
+            <>
+              <span style={{ color: 'var(--err)' }}>share failed: {shareErr}</span>
+              <button className="btn xs ghost" onClick={() => setShareErr('')}>dismiss</button>
+            </>
+          ) : (
+            <>
+              <span style={{ color: 'var(--mute)' }}>anonymous share URL:</span>
+              <code className="mono" style={{
+                flex: 1, minWidth: 0,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                color: 'var(--fg)',
+              }} title={shareUrl}>{shareUrl}</code>
+              <button className="btn xs primary" onClick={copyShareUrl}>
+                {shareCopied ? 'copied' : 'copy'}
+              </button>
+              <button className="btn xs ghost" onClick={() => setShareUrl(null)}>dismiss</button>
+            </>
+          )}
+        </div>
+      )}
       {meta && meta.metadata && !isImage && !isFile && (
         <div style={{display:'flex', flexWrap:'wrap', gap:14, padding:'8px 18px',
                      borderBottom:'1px solid var(--line)', background:'var(--panel)', fontSize:11.5}}>
@@ -655,31 +719,45 @@ function kfmt(n) {
   return String(v);
 }
 
-// Dyson is reached at `<instance_id>.<apex>` via swarm's host-based
-// dispatcher (see dyson-swarm/src/http/dyson_proxy.rs).  Stripping
-// the leading single-label subdomain gives the apex; the leading
-// label itself is the instance_id.  Returns null in dev (`localhost`,
-// `127.0.0.1`) where no subdomain is present, in which case the
-// share button is disabled — there's no swarm to open at the apex.
-function computeApex() {
-  try {
-    const host = window.location.host;
-    const noPort = host.split(':')[0];
-    const dot = noPort.indexOf('.');
-    if (dot <= 0) return null;
-    const apex = noPort.slice(dot + 1);
-    // Bare TLD or empty rest — not a real apex.
-    if (!apex || !apex.includes('.')) return null;
-    return apex;
-  } catch { return null; }
-}
-
-function computeInstanceId() {
-  try {
-    const host = window.location.host;
-    const noPort = host.split(':')[0];
-    const dot = noPort.indexOf('.');
-    if (dot <= 0) return null;
-    return noPort.slice(0, dot);
-  } catch { return null; }
+// TTL picker for the share-mint affordance.  Inline dropdown rather
+// than a modal: minting a share is a one-decision flow and the
+// resulting URL gets surfaced in a copy-row immediately under the
+// action bar, so a full dialog is overkill.
+function ShareMenu({ canShare, busy, onMint }) {
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+  const pick = (ttl) => { setOpen(false); onMint(ttl); };
+  return (
+    <span ref={ref} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        className="btn sm ghost"
+        onClick={() => setOpen(o => !o)}
+        disabled={!canShare || busy}
+        title="anonymous shareable link"
+      >
+        {busy ? 'minting…' : 'share…'}
+      </button>
+      {open && (
+        <div role="menu" style={{
+          position: 'absolute', right: 0, top: '100%', marginTop: 4,
+          background: 'var(--panel)', border: '1px solid var(--line)',
+          borderRadius: 6, padding: 4, zIndex: 20, display: 'flex',
+          flexDirection: 'column', minWidth: 110,
+          boxShadow: '0 4px 12px rgba(0,0,0,0.35)',
+        }}>
+          <button className="btn xs ghost" onClick={() => pick('1d')}>1 day</button>
+          <button className="btn xs ghost" onClick={() => pick('7d')}>7 days</button>
+          <button className="btn xs ghost" onClick={() => pick('30d')}>30 days</button>
+        </div>
+      )}
+    </span>
+  );
 }
