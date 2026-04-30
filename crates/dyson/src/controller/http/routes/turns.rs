@@ -105,10 +105,36 @@ pub(super) async fn post(
         return json_ok(&serde_json::json!({ "ok": true, "cleared": true }));
     }
 
-    if handle
+    let prev_busy = handle
         .busy
-        .swap(true, std::sync::atomic::Ordering::SeqCst)
-    {
+        .swap(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Quiesce gate.  Order of operations matters: we ALWAYS swap busy
+    // before reading `quiesced` so the SeqCst pair on this side
+    // interlocks with the SeqCst pair in `routes::admin::post_quiesce`
+    // (store quiesced → load all `busy`).  Either:
+    //   - we passed busy.swap before the quiescer's store → the
+    //     quiescer's busy scan sees us → it 409s, we keep running;
+    //   - we passed busy.swap after the quiescer's store → we see
+    //     quiesced=true here → we undo busy and 503.
+    // The race window where both succeed is closed by SeqCst.
+    if state.quiesced.load(std::sync::atomic::Ordering::SeqCst) {
+        if !prev_busy {
+            handle
+                .busy
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("Content-Type", "application/json")
+            .header("Retry-After", "30")
+            .body(boxed(Bytes::from_static(
+                br#"{"error":"instance is quiescing for upgrade"}"#,
+            )))
+            .unwrap();
+    }
+
+    if prev_busy {
         // Already running a turn for this chat — try to enqueue the
         // new POST instead of rejecting it.  When the in-flight turn
         // ends, the spawned task drains the queue and runs one more
