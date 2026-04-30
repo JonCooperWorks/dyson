@@ -296,9 +296,22 @@ pub async fn create_skills(
     // Built-in subagents (planner, researcher) are always included.
     // User-defined subagents from dyson.json are appended after them,
     // so user configs can override built-ins by using the same name.
+    //
+    // Allowlist semantics: when `skills.builtin.tools` is set to an
+    // explicit non-empty list (i.e. the operator picked a subset via
+    // the SPA's tool-picker), the SAME list also gates subagents,
+    // coder, and orchestrators — the picker collapses all of them
+    // into one checklist, so a name that's missing from the list
+    // means "the operator turned this off."  Sentinel values (empty
+    // tools list = "all builtins") leave subagents alone.
+    let allowlist = derive_subagent_allowlist(&settings.skills);
+
     let builtin_count = subagent::builtin_subagent_configs().len();
     let mut all_subagent_configs = subagent::builtin_subagent_configs();
     all_subagent_configs.extend(subagent_configs);
+    if let Some(allow) = allowlist.as_ref() {
+        all_subagent_configs.retain(|c| allow.contains(&c.name));
+    }
 
     {
         // Specialist subagents (security_engineer, etc.) filter `parent_tools`
@@ -325,6 +338,7 @@ pub async fn create_skills(
             workspace_arc,
             &parent_tools,
             registry,
+            allowlist.as_ref(),
         );
 
         if !subagent_skill.tools().is_empty() {
@@ -333,4 +347,52 @@ pub async fn create_skills(
     }
 
     skills
+}
+
+/// Derive the unified subagent/coder/orchestrator allowlist from the
+/// parsed settings.  When `skills.builtin.tools` is set to a non-empty
+/// list, that same list gates subagents — the SPA tool-picker
+/// collapses them into one checklist.  An empty list (sentinel for
+/// "all builtins") and a missing entry both return `None` so the
+/// pre-allowlist behaviour is preserved.
+fn derive_subagent_allowlist(
+    skills: &[crate::config::SkillConfig],
+) -> Option<std::collections::HashSet<String>> {
+    skills.iter().find_map(|c| match c {
+        crate::config::SkillConfig::Builtin(cfg) if !cfg.tools.is_empty() => {
+            Some(cfg.tools.iter().cloned().collect())
+        }
+        _ => None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{BuiltinSkillConfig, SkillConfig};
+
+    #[test]
+    fn allowlist_present_when_builtin_tools_explicit() {
+        let skills = vec![SkillConfig::Builtin(BuiltinSkillConfig {
+            tools: vec!["read_file".into(), "planner".into()],
+        })];
+        let got = derive_subagent_allowlist(&skills).expect("allowlist");
+        assert_eq!(got.len(), 2);
+        assert!(got.contains("read_file"));
+        assert!(got.contains("planner"));
+    }
+
+    #[test]
+    fn allowlist_none_when_builtin_tools_empty_sentinel() {
+        // Empty `tools` is the loader's sentinel for "register every
+        // builtin" — it must NOT lock out subagents.
+        let skills = vec![SkillConfig::Builtin(BuiltinSkillConfig { tools: vec![] })];
+        assert!(derive_subagent_allowlist(&skills).is_none());
+    }
+
+    #[test]
+    fn allowlist_none_when_no_builtin_skill_present() {
+        // No SkillConfig::Builtin at all — leave subagents alone.
+        assert!(derive_subagent_allowlist(&[]).is_none());
+    }
 }

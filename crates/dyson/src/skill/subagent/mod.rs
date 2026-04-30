@@ -547,6 +547,12 @@ impl SubagentSkill {
     /// `configs` resolve against `settings.providers`; the sentinel
     /// `"default"` uses the parent's active provider so built-ins work
     /// with no extra config.
+    ///
+    /// `name_allowlist` gates which subagents/orchestrators/coder are
+    /// registered.  `None` means "register everything" (default
+    /// behaviour); `Some(set)` means "only register tools whose name
+    /// appears in `set`" — used by the SPA tool-picker to disable
+    /// individual subagents without dropping the whole skill.
     pub fn new(
         configs: &[SubagentAgentConfig],
         settings: &crate::config::Settings,
@@ -554,7 +560,17 @@ impl SubagentSkill {
         workspace: Option<WorkspaceHandle>,
         parent_tools: &[Arc<dyn Tool>],
         registry: &crate::controller::ClientRegistry,
+        name_allowlist: Option<&std::collections::HashSet<String>>,
     ) -> Self {
+        // Closure form so the same predicate is applied to every
+        // tool source below — config-driven subagents are filtered
+        // by the caller before they reach this fn (skill::create_skills
+        // pre-trims `configs` against the same allowlist), but coder
+        // and orchestrators are added unconditionally here, so we
+        // re-apply the predicate locally for those.
+        let allowed = |name: &str| -> bool {
+            name_allowlist.is_none_or(|s| s.contains(name))
+        };
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut prompt_lines: Vec<String> = Vec::new();
 
@@ -619,10 +635,12 @@ impl SubagentSkill {
             tools.push(Arc::new(tool));
         }
 
-        // Coder is always present: it takes a `path` and scopes the
-        // child's `working_dir`, behavior SubagentTool doesn't expose.
-        // Built-in tools (coder, orchestrators, inner subagents) all
-        // inherit the parent's configured model — never a registry default.
+        // Coder is "always present" by default — it takes a `path`
+        // and scopes the child's `working_dir`, behavior SubagentTool
+        // doesn't expose.  When the operator's allowlist is set and
+        // doesn't include "coder", skip registration.  Built-in tools
+        // (coder, orchestrators, inner subagents) all inherit the
+        // parent's configured model — never a registry default.
         let coder_provider = settings.agent.provider.clone();
         let coder_model = settings.agent.model.clone();
         let coder_client = registry.get_default();
@@ -634,12 +652,20 @@ impl SubagentSkill {
             workspace.clone(),
             parent_tools,
         );
-        prompt_lines.push(format!("- **{}**: {}", coder_tool.name(), coder_tool.description()));
-        tools.push(Arc::new(coder_tool));
+        if allowed(coder_tool.name()) {
+            prompt_lines.push(format!("- **{}**: {}", coder_tool.name(), coder_tool.description()));
+            tools.push(Arc::new(coder_tool));
+        }
 
         // Orchestrators: composable subagents that get direct tools + inner
         // subagent dispatch.  Each is defined by an OrchestratorConfig.
-        let orch_configs = builtin_orchestrator_configs();
+        // Filter the configs by the operator's allowlist before any
+        // construction work — building an inner-subagent fanout that
+        // we then throw away wastes startup time.
+        let orch_configs: Vec<_> = builtin_orchestrator_configs()
+            .into_iter()
+            .filter(|cfg| allowed(&cfg.name))
+            .collect();
         if !orch_configs.is_empty() {
             // Build inner subagent tools once — shared across all orchestrators.
             let builtin_configs = builtin_subagent_configs();

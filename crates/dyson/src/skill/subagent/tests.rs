@@ -534,7 +534,7 @@ fn subagent_skill_system_prompt_lists_agents() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
     let registry = crate::controller::ClientRegistry::new(&settings, None);
-    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry);
+    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
     assert_eq!(skill.name(), "subagents");
     // 1 config-driven subagent + 1 coder + 1 security_engineer = 3
@@ -569,7 +569,7 @@ fn subagent_skill_skips_unknown_provider() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
     let registry = crate::controller::ClientRegistry::new(&settings, None);
-    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry);
+    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
     // Should have skipped the subagent with unknown provider,
     // but the built-in coder and security_engineer are always present.
@@ -578,6 +578,112 @@ fn subagent_skill_skips_unknown_provider() {
     assert_eq!(skill.tools()[1].name(), "security_engineer");
     assert!(skill.system_prompt().unwrap().contains("coder"));
     assert!(skill.system_prompt().unwrap().contains("security_engineer"));
+}
+
+#[test]
+fn name_allowlist_drops_coder_and_orchestrators_when_excluded() {
+    // The SPA's tool-picker collapses builtins, coder, and the
+    // orchestrator subagents (security_engineer) into one checklist.
+    // When the operator's allowlist excludes those names, dyson must
+    // skip registering them — otherwise the agent introspects them
+    // as available even though the operator turned them off.
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        "claude".to_string(),
+        crate::config::ProviderConfig {
+            provider_type: LlmProvider::Anthropic,
+            models: vec!["claude-sonnet-4-20250514".into()],
+            api_key: crate::auth::Credential::new(String::new()),
+            base_url: None,
+        },
+    );
+    let settings = crate::config::Settings {
+        providers,
+        ..Default::default()
+    };
+
+    let configs = vec![SubagentAgentConfig {
+        name: "research_agent".into(),
+        description: "Research specialist".into(),
+        system_prompt: "You are a researcher.".into(),
+        provider: "claude".into(),
+        model: None,
+        max_iterations: None,
+        max_tokens: None,
+        tools: None,
+        injects_protocol: None,
+    }];
+
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let registry = crate::controller::ClientRegistry::new(&settings, None);
+
+    // Allowlist contains only the user-defined subagent and a couple
+    // of (irrelevant) builtin tool names.  coder + security_engineer
+    // are NOT in the list; they must be dropped.
+    let allow: std::collections::HashSet<String> = [
+        "research_agent".to_string(),
+        "read_file".to_string(),
+        "write_file".to_string(),
+    ]
+    .into_iter()
+    .collect();
+    let skill = SubagentSkill::new(
+        &configs,
+        &settings,
+        sandbox,
+        None,
+        &[],
+        &registry,
+        Some(&allow),
+    );
+
+    // Only research_agent survives — coder and security_engineer are
+    // gone because they weren't in the allowlist.
+    let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
+    assert_eq!(names, vec!["research_agent"]);
+    let prompt = skill.system_prompt().unwrap();
+    assert!(prompt.contains("research_agent"));
+    assert!(!prompt.contains("- **coder**"),
+        "coder must not appear in the prompt when filtered out");
+    assert!(!prompt.contains("- **security_engineer**"),
+        "security_engineer must not appear in the prompt when filtered out");
+}
+
+#[test]
+fn name_allowlist_keeps_only_listed_orchestrators() {
+    // Allowlist includes coder but not security_engineer — coder
+    // survives, the orchestrator gets dropped.
+    let settings = crate::config::Settings::default();
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let registry = crate::controller::ClientRegistry::new(&settings, None);
+    let allow: std::collections::HashSet<String> =
+        ["coder".to_string()].into_iter().collect();
+    let skill = SubagentSkill::new(
+        &[],
+        &settings,
+        sandbox,
+        None,
+        &[],
+        &registry,
+        Some(&allow),
+    );
+    let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
+    assert_eq!(names, vec!["coder"]);
+}
+
+#[test]
+fn name_allowlist_none_preserves_default_registration() {
+    // Sanity: passing None (no allowlist) keeps the pre-existing
+    // behaviour — coder + every orchestrator register unconditionally.
+    let settings = crate::config::Settings::default();
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let registry = crate::controller::ClientRegistry::new(&settings, None);
+    let skill = SubagentSkill::new(&[], &settings, sandbox, None, &[], &registry, None);
+    let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
+    assert!(names.contains(&"coder"),
+        "coder must be present when no allowlist is supplied");
+    assert!(names.contains(&"security_engineer"),
+        "security_engineer must be present when no allowlist is supplied");
 }
 
 // -----------------------------------------------------------------------
@@ -704,7 +810,7 @@ fn injects_protocol_fragment_appended_to_system_prompt() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
     let registry = crate::controller::ClientRegistry::new(&settings, None);
-    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry);
+    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
     let prompt = skill.system_prompt().unwrap();
     assert!(prompt.contains("Usage Protocol"));
@@ -736,7 +842,7 @@ fn verification_protocol_absent_without_verifier() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
     let registry = crate::controller::ClientRegistry::new(&settings, None);
-    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry);
+    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
     let prompt = skill.system_prompt().unwrap();
     assert!(!prompt.contains("Verification Protocol"));
@@ -769,7 +875,7 @@ fn default_provider_resolves_to_agent_settings() {
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
     let registry = crate::controller::ClientRegistry::new(&settings, None);
-    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry);
+    let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
     // Should have resolved successfully (1 config-driven + 1 coder + 1 security_engineer = 3 tools).
     assert_eq!(skill.tools().len(), 3);
