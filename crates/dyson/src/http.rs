@@ -148,18 +148,64 @@ pub fn is_metadata_host(host: &str) -> bool {
 /// Process-wide HTTP client singleton.
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     ensure_crypto_provider();
-    reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .pool_idle_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(32)
-        .redirect(safe_redirect_policy())
+        .redirect(safe_redirect_policy());
+    // Wire up HTTP_PROXY / HTTPS_PROXY explicitly because the crate is
+    // built with `default-features = false`, which disables reqwest's
+    // automatic env-based proxy detection.  The cube image bakes
+    // these vars into its env so curl / requests / etc pick them up
+    // for free; without this, dyson's own reqwest client would dial
+    // every destination directly and silently bypass the host
+    // tinyproxy that the cube relies on for upstreams that drop
+    // eBPF-SNAT'd connections (Google, GitHub via Microsoft, …).
+    //
+    // NO_PROXY is honoured separately for each scheme: hosts in
+    // NO_PROXY (typically the swarm /llm gateway and the local
+    // CoreDNS resolver) bypass the proxy and connect directly.
+    if let Some(proxy) = build_proxy_from_env() {
+        builder = builder.proxy(proxy);
+    }
+    builder
         .build()
         // INVARIANT: TLS crypto provider installed above; builder only fails
         // on TLS init, which is fatal (no recovery possible).
         .expect("failed to build HTTP client")
 });
+
+/// Read `HTTPS_PROXY` / `HTTP_PROXY` (uppercase or lowercase) from env
+/// and turn them into a single `reqwest::Proxy` that handles both
+/// schemes, with `NO_PROXY` mapped onto reqwest's exclusion API.
+///
+/// Returns `None` when no proxy env var is set — the client then
+/// connects directly, same as before this function existed.
+fn build_proxy_from_env() -> Option<reqwest::Proxy> {
+    fn read(name_upper: &str, name_lower: &str) -> Option<String> {
+        std::env::var(name_upper)
+            .or_else(|_| std::env::var(name_lower))
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    }
+    let https = read("HTTPS_PROXY", "https_proxy");
+    let http = read("HTTP_PROXY", "http_proxy");
+    let url = https.as_ref().or(http.as_ref())?;
+    let proxy = reqwest::Proxy::all(url).ok()?;
+    let proxy = if let Some(no) = read("NO_PROXY", "no_proxy") {
+        // reqwest expects a comma-separated host list; the env var
+        // already uses that convention.
+        match reqwest::NoProxy::from_string(&no) {
+            Some(np) => proxy.no_proxy(Some(np)),
+            None => proxy,
+        }
+    } else {
+        proxy
+    };
+    Some(proxy)
+}
 
 
 /// Returns the shared HTTP client.

@@ -349,6 +349,21 @@ fn is_safe_env_var(name: &str) -> bool {
         "RBENV_ROOT",
         // Dyson-internal context (no secrets).
         "DYSON_WORKING_DIR",
+        // HTTP forward-proxy configuration.  Values, not secrets — the
+        // proxy URL just tells `curl` / `wget` / language SDKs which
+        // host to dial when stepping outbound.  Required when the
+        // agent runs in a sandbox where direct egress doesn't reach
+        // every destination (some upstream networks drop SYN-ACKs for
+        // the kernel-bypass NAT path the cube uses); without these
+        // forwarded into the spawned shell, `curl https://google.com`
+        // dials Google directly and silently times out even though
+        // the cube image bakes in a working proxy.
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
     ];
     // Prefix matches — locale variants and terminal/CI signalling.
     const SAFE_PREFIXES: &[&str] = &[
