@@ -39,7 +39,52 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tini \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tini \
+        git \
+        curl \
+        wget \
+        openssh-client \
+        build-essential \
+        pkg-config \
+        make \
+        patch \
+        python3 \
+        python3-pip \
+        python3-venv \
+        nodejs \
+        npm \
+        rustc \
+        cargo \
+        jq \
+        vim \
+        less \
+        tree \
+        unzip \
+        zip \
+        xz-utils \
+        gzip \
+        tar \
+        file \
+        procps \
+        htop \
+        lsof \
+        iputils-ping \
+        iputils-tracepath \
+        traceroute \
+        mtr-tiny \
+        dnsutils \
+        iproute2 \
+        net-tools \
+        ncat \
+        telnet \
+        whois \
+        openssl \
+        tcpdump \
+        iperf3 \
+        sysstat \
+        strace \
     && rm -rf /var/lib/apt/lists/*
 
 # `--chmod=0755` folds the COPY + chmod into one layer.  Without it
