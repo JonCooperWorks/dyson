@@ -8,8 +8,21 @@
  */
 
 import {
-  setLive, setConversations, setProviders, setMind, setActivity,
+  setLive, setConversations, setProviders, setMind, setActivity, setAgentName,
 } from '../store/app.js';
+
+// Pull the user-facing agent name out of IDENTITY.md.  swarm.rs writes
+// "Name: <name>" on instance create; users editing the file in the Mind
+// view follow the same convention.  Returns '' when no Name line is
+// present so the caller's fallback to "dyson" kicks in.
+function parseAgentName(md) {
+  if (typeof md !== 'string') return '';
+  for (const line of md.split('\n')) {
+    const m = /^\s*Name\s*:\s*(.+?)\s*$/i.exec(line);
+    if (m) return m[1];
+  }
+  return '';
+}
 
 const toConvRow = (c) => ({
   id: c.id, title: c.title,
@@ -59,6 +72,13 @@ export function boot(client, { pollMs = 10_000, doc = (typeof document !== 'unde
         })),
         open: { path: '', content: '' },
       });
+      const hasIdentity = (m.files || []).some(f => f.path === 'IDENTITY.md');
+      if (hasIdentity) {
+        client.mindFile('IDENTITY.md').then(file => {
+          if (disposed) return;
+          setAgentName(parseAgentName(file?.content || ''));
+        }).catch(() => {});
+      }
     }).catch(() => {});
 
     client.getActivity().then(act => {

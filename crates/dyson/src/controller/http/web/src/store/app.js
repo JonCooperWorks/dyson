@@ -14,6 +14,11 @@ const INITIAL = {
   // shell with empty lists until then.
   live: false,
   activeModel: '',
+  // Display name for the agent in the chat header.  Sourced from
+  // `Name: <name>` in workspace/IDENTITY.md (set by `dyson swarm`'s
+  // SWARM_NAME envelope, or hand-edited in the Mind view).  Empty
+  // string falls back to the literal "dyson" at the render site.
+  agentName: '',
   // Flat list — a chat carries `source: 'http' | 'telegram'` if we
   // ever want to render a provenance badge.  The old DYSON_DATA
   // shape grouped by controller but every consumer flattened it back,
@@ -102,6 +107,11 @@ export function switchProviderModel(provider, modelName) {
 
 export function setMind(mind) {
   app.dispatch(s => ({ ...s, mind: { ...s.mind, ...mind } }));
+}
+
+export function setAgentName(name) {
+  const v = (name || '').trim();
+  app.dispatch(s => s.agentName === v ? s : { ...s, agentName: v });
 }
 
 export function setActivity(lanes) {

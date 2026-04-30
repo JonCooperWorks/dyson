@@ -120,7 +120,12 @@ function Turn({ turn, tools, onOpenTool, expandedTools, turnIndex, rating, onRat
     ? expandedTools
     : new Set(Array.isArray(expandedTools) ? expandedTools : []);
   const isUser = turn.role === 'user';
-  const avatarL = isUser ? 'JC' : 'DY';
+  const agentName = useAppState(s => s.agentName) || 'dyson';
+  // Two-letter avatar pulled from the agent name's first two glyphs
+  // (uppercased) so a user-set "Atlas" reads as AT, not DY.  Falls back
+  // to DY when agentName came up empty so the existing visual stays put.
+  const agentInitials = (agentName.replace(/\s+/g, '').slice(0, 2) || 'dy').toUpperCase();
+  const avatarL = isUser ? 'JC' : agentInitials;
   const ratable = !isUser && turnIndex != null && typeof onRate === 'function';
   const [copied, setCopied] = useState(false);
 
@@ -160,13 +165,13 @@ function Turn({ turn, tools, onOpenTool, expandedTools, turnIndex, rating, onRat
           <Icon name={copied ? 'rate' : 'copy'} size={11}/>
         </button>
         <div className="who">
-          <span className="name">{isUser ? 'jcooper' : 'dyson'}</span>
+          <span className="name">{isUser ? 'jcooper' : agentName}</span>
           {turn.model && <span className="model">{turn.model}</span>}
           {turn.queued && (
             <span
               className="queued-badge"
               title={turn.queuedCount > 1
-                ? `${turn.queuedCount} messages queued — Dyson will answer them in one reply`
+                ? `${turn.queuedCount} messages queued — ${agentName} will answer them in one reply`
                 : 'Queued behind the in-flight turn'}>
               queued{turn.queuedCount > 1 ? ` ×${turn.queuedCount}` : ''}
             </span>
@@ -365,6 +370,7 @@ function Composer({ onSend, onCancel, running }) {
   const taRef = useRef();
   const fileRef = useRef();
   const activeModel = useAppState(s => s.activeModel);
+  const agentName = useAppState(s => s.agentName) || 'dyson';
   const filtered = slash ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(val.split(/\s/)[0] || '/')) : [];
 
   useEffect(() => {
@@ -414,7 +420,7 @@ function Composer({ onSend, onCancel, running }) {
         <textarea
           ref={taRef}
           value={val}
-          placeholder={running ? "Dyson is working — this queues" : "Reply to Dyson…"}
+          placeholder={running ? `${agentName} is working — this queues` : `Reply to ${agentName}…`}
           onChange={e => {
             setVal(e.target.value);
             setSlash(e.target.value.startsWith('/'));
@@ -463,6 +469,7 @@ function EmptyState() {
   // endpoint exists.
   const model = useAppState(s => s.activeModel);
   const mind = useAppState(s => s.mind);
+  const agentName = useAppState(s => s.agentName) || 'Dyson';
   const wsBackend = (mind && mind.backend) || '';
   const builtinCount = 0;
   const mcpCount = 0;
@@ -472,7 +479,7 @@ function EmptyState() {
         <span className="es-dot"/>
         <span>online · ready</span>
       </div>
-      <h1>You're talking to <em>Dyson</em>.</h1>
+      <h1>You're talking to <em>{agentName}</em>.</h1>
       <p>
         {model && <>Model <span className="mono es-pill">{model}</span>. </>}
         {builtinCount > 0 && <>{builtinCount} builtin tools{mcpCount > 0 && ` + ${mcpCount} MCP`}. </>}
