@@ -732,11 +732,28 @@ fn clear_skills_in_config(path: &std::path::Path) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Set `skills.builtin.tools` to an explicit allowlist.  Mirrors the
-/// `dyson swarm` boot writer — empty list lands as `tools: []` (loader
-/// registers zero builtins), non-empty as the exact subset.  Other
-/// keys under `skills` (subagents, locals) are preserved.  Atomic
-/// write via tmp + rename, same posture as the sibling helpers.
+/// Apply an explicit allowlist to BOTH `skills.builtin.tools` and
+/// `skills.subagents`.  The orchestrator's tool-picker UI flattens
+/// builtins and subagents into a single checklist, so the two have
+/// to share one allowlist — otherwise unchecking a subagent in the
+/// SPA leaves it loaded at runtime, and the agent introspects it as
+/// available even though the operator disabled it.
+///
+/// Behaviour:
+/// - `skills.builtin.tools` becomes the exact list passed in.  Empty
+///   vec lands as `tools: []` so the loader registers zero builtins.
+/// - `skills.subagents` is filtered by name: only entries whose
+///   `name` appears in the allowlist survive.  An empty allowlist
+///   drops the whole `subagents` key (consistent with "register zero
+///   subagents", same shape parse_skills uses for an empty agent
+///   list — no `Subagent` skill config gets pushed).
+/// - Sibling keys under `skills` (locals, anything else) are
+///   preserved verbatim.
+///
+/// Atomic write via tmp + rename, same posture as the sibling
+/// helpers.  Returns `Ok(true)` when the file was rewritten,
+/// `Ok(false)` when both blocks already matched and no write was
+/// needed.
 fn set_skills_tools_in_config(
     path: &std::path::Path,
     tools: &[String],
@@ -757,15 +774,66 @@ fn set_skills_tools_in_config(
         .or_insert_with(|| Value::Object(serde_json::Map::new()))
         .as_object_mut()
         .ok_or_else(|| "skills is not an object".to_string())?;
+
+    // 1. builtin.tools: rewrite to the exact list.
     let builtin = skills
         .entry("builtin".to_string())
         .or_insert_with(|| Value::Object(serde_json::Map::new()))
         .as_object_mut()
         .ok_or_else(|| "skills.builtin is not an object".to_string())?;
-    if builtin.get("tools") == Some(&new_tools) {
+    let builtin_unchanged = builtin.get("tools") == Some(&new_tools);
+    if !builtin_unchanged {
+        builtin.insert("tools".to_string(), new_tools);
+    }
+
+    // 2. subagents: filter by name.  Operate via take/replace so the
+    //    skills map can be mutated independently of the read borrow.
+    let allowed: std::collections::HashSet<&str> =
+        tools.iter().map(String::as_str).collect();
+    let prev = skills.remove("subagents");
+    let subagents_unchanged = match prev {
+        Some(Value::Array(arr)) => {
+            let kept: Vec<Value> = arr
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .as_object()
+                        .and_then(|o| o.get("name"))
+                        .and_then(Value::as_str)
+                        .map(|n| allowed.contains(n))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
+            let unchanged = kept.len() == arr.len() && kept == arr;
+            if !kept.is_empty() {
+                // Re-insert the filtered array — preserves entry
+                // ordering and any non-`name` fields per agent.
+                skills.insert("subagents".to_string(), Value::Array(kept));
+            }
+            // kept.is_empty() means the allowlist excludes every
+            // subagent — leave the key absent so the loader doesn't
+            // push an empty Subagent skill (parse_skills only emits
+            // one when the array is non-empty; matching that
+            // contract keeps round-trips clean).
+            unchanged
+        }
+        Some(other) => {
+            // Malformed pre-existing value (not an array).  Restore
+            // it so we don't silently destroy operator state, and
+            // treat the call as a no-op for the subagents half.
+            skills.insert("subagents".to_string(), other);
+            true
+        }
+        None => {
+            // No subagents key — nothing to filter, nothing to write.
+            true
+        }
+    };
+
+    if builtin_unchanged && subagents_unchanged {
         return Ok(false);
     }
-    builtin.insert("tools".to_string(), new_tools);
     let tmp = path.with_extension("json.tmp");
     let pretty = serde_json::to_vec_pretty(&doc).map_err(|e| format!("serialise: {e}"))?;
     std::fs::write(&tmp, &pretty).map_err(|e| format!("write tmp: {e}"))?;
@@ -1031,6 +1099,80 @@ mod tests {
         assert!(set_skills_tools_in_config(&path, &[]).unwrap(), "shrink to empty must report a change");
         let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(after["skills"]["builtin"]["tools"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn set_skills_tools_filters_subagents_by_same_allowlist() {
+        // The orchestrator's tool-picker collapses builtins and
+        // subagents into one checklist; unchecking a subagent in the
+        // SPA must drop it from the running dyson too.  Otherwise the
+        // agent introspects its loaded subagents and reports them as
+        // available even though the operator disabled them — which is
+        // the bug this rule fixes.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dyson.json");
+        let initial = serde_json::json!({
+            "agent": { "provider": "openrouter" },
+            "providers": { "openrouter": { "type": "openai", "api_key": "x", "models": ["m"] } },
+            "skills": {
+                "builtin": { "tools": ["read_file", "write_file"] },
+                "subagents": [
+                    { "name": "planner",     "description": "p", "system_prompt": "sp" },
+                    { "name": "researcher",  "description": "r", "system_prompt": "sr" },
+                    { "name": "coder",       "description": "c", "system_prompt": "sc" }
+                ]
+            }
+        });
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        drop(f);
+
+        // Allowlist keeps two builtins + one of the three subagents.
+        let allow = vec![
+            "read_file".to_string(),
+            "write_file".to_string(),
+            "planner".to_string(),
+        ];
+        assert!(set_skills_tools_in_config(&path, &allow).unwrap(),
+            "filtering must report a change");
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        // Builtin allowlist round-trips verbatim — including the two
+        // subagent-shaped names.  parse_skills' loader-side filter
+        // ignores names that don't match a real builtin, so the only
+        // tools that actually register are the genuine builtins.
+        assert_eq!(
+            after["skills"]["builtin"]["tools"],
+            serde_json::json!(["read_file", "write_file", "planner"])
+        );
+
+        // Subagents: only "planner" survives; "researcher" and "coder"
+        // are gone because they weren't in the allowlist.  The other
+        // fields on the kept entry round-trip verbatim.
+        let subagents = after["skills"]["subagents"].as_array().unwrap();
+        assert_eq!(subagents.len(), 1, "only planner should survive");
+        assert_eq!(subagents[0]["name"], "planner");
+        assert_eq!(subagents[0]["description"], "p");
+        assert_eq!(subagents[0]["system_prompt"], "sp");
+
+        // Same call a second time is a no-op (idempotent).
+        assert!(!set_skills_tools_in_config(&path, &allow).unwrap(),
+            "no-change call must report no-op");
+
+        // Allowlist that excludes every subagent drops the subagents
+        // key entirely — keeps the loader's contract that an empty
+        // array doesn't get a Subagent skill config pushed.
+        let no_subagents = vec!["read_file".to_string()];
+        assert!(set_skills_tools_in_config(&path, &no_subagents).unwrap(),
+            "narrowing the allowlist must report a change");
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            after["skills"].get("subagents").is_none(),
+            "subagents key must be absent when the allowlist excludes every entry, got {:?}",
+            after["skills"].get("subagents")
+        );
+        assert_eq!(after["skills"]["builtin"]["tools"], serde_json::json!(["read_file"]));
     }
 
     #[test]
