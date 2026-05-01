@@ -538,6 +538,13 @@ pub struct HttpState {
     /// `?access_token=` query path — same ticket lifecycle, no URL
     /// surface to leak via proxy access logs / Referer.
     pub(crate) sse_tickets: std::sync::Mutex<HashMap<String, SseTicket>>,
+    /// Live artefact-ingest target (URL + bearer).  `None` when swarm
+    /// hasn't pushed one yet — `send_artefact` skips the push in
+    /// that case.  Mutated only by the configure-push handler; cloned
+    /// snapshot is taken on each emit so the lock window is tight.
+    /// One shared `Arc` so per-turn `SseOutput` can clone a handle
+    /// without re-locking the chats map.
+    pub(crate) ingest: Arc<std::sync::Mutex<Option<IngestConfig>>>,
     /// `true` when the HTTP listener terminates TLS itself.  Drives
     /// the `Secure` cookie attribute on the SSE ticket cookie so
     /// browsers refuse to send it over plain HTTP.  Loopback dev
@@ -554,6 +561,21 @@ pub struct HttpState {
 pub(crate) struct SseTicket {
     pub(crate) identity: String,
     pub(crate) expires_at: std::time::Instant,
+}
+
+/// Per-process artefact-ingest target.  Pushed by swarm via
+/// `/api/admin/configure` (Stage 8 posture: cube's snapshot/restore
+/// freezes `/proc/self/environ`, so the matching `SWARM_INGEST_*`
+/// env vars only land on the warmup-time process — same root cause
+/// the `proxy_token` / `proxy_base` configure-push exists for).
+///
+/// Read by `SseOutput::send_artefact` on every emit; missing fields
+/// (URL or token empty) signal "ingest disabled" and the push is
+/// skipped.  None on a fresh boot before the first configure-push.
+#[derive(Clone, Debug)]
+pub(crate) struct IngestConfig {
+    pub(crate) url: String,
+    pub(crate) token: String,
 }
 
 /// Scan the chat directory (files + archives + artefact metadata) for
@@ -657,6 +679,22 @@ impl HttpState {
             tls_enabled,
             titles: std::sync::Mutex::new(HashMap::new()),
             allowed_identity: std::sync::Mutex::new(allowed_identity),
+            // Warmup-time defaults from the env envelope.  Cube's
+            // snapshot/restore freezes /proc/self/environ at the
+            // template-build boot — these reads return empty strings
+            // for swarm-managed instances until /api/admin/configure
+            // patches in the live values.  A non-swarm dyson (terminal
+            // / telegram only) sees both empty and skips the push.
+            ingest: {
+                let url = std::env::var("SWARM_INGEST_URL").unwrap_or_default();
+                let token = std::env::var("SWARM_INGEST_TOKEN").unwrap_or_default();
+                let cfg = if !url.is_empty() && !token.is_empty() {
+                    Some(IngestConfig { url, token })
+                } else {
+                    None
+                };
+                Arc::new(std::sync::Mutex::new(cfg))
+            },
         }
     }
 

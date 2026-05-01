@@ -144,6 +144,21 @@ pub(super) struct ConfigureBody {
     /// aren't supported (callers who want add/remove read the file first).
     #[serde(default)]
     mcp_servers: Option<serde_json::Map<String, Value>>,
+    /// Full URL the agent's `Output::send_artefact` POSTs to.  Mirrors
+    /// `SWARM_INGEST_URL` in the env envelope; pushed here because
+    /// the cube's snapshot/restore freezes /proc/self/environ at
+    /// warmup, same root cause `proxy_token` already needs a
+    /// configure-push.  When set together with `ingest_token` (both
+    /// non-empty), `state.ingest` is updated and subsequent
+    /// `send_artefact` calls fire a fire-and-forget POST.  Empty or
+    /// missing leaves the existing config alone — a re-push that
+    /// only updates other fields shouldn't wipe ingest.
+    #[serde(default)]
+    ingest_url: Option<String>,
+    /// Per-instance `it_<32hex>` bearer for the ingest endpoint.
+    /// Mirrors `SWARM_INGEST_TOKEN`.  See `ingest_url` for posture.
+    #[serde(default)]
+    ingest_token: Option<String>,
 }
 
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
@@ -386,6 +401,34 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         }
     }
 
+    // Patch the runtime artefact-ingest target.  Both fields must be
+    // non-empty in the same body to take effect — a partial body
+    // (just `ingest_url` without a token) leaves the existing config
+    // alone rather than landing a half-broken target.  Same posture
+    // as the proxy_token / proxy_base patch: mutating in place keeps
+    // a running `SseOutput` reading the live values without an
+    // agent rebuild.  Both empty strings → clear the config (operator
+    // turned ingest off explicitly).
+    let ingest_changed = match (&body.ingest_url, &body.ingest_token) {
+        (Some(url), Some(tok)) if !url.is_empty() && !tok.is_empty() => {
+            let cfg = super::super::state::IngestConfig {
+                url: url.clone(),
+                token: tok.clone(),
+            };
+            if let Ok(mut g) = state.ingest.lock() {
+                *g = Some(cfg);
+            }
+            true
+        }
+        (Some(url), Some(tok)) if url.is_empty() && tok.is_empty() => {
+            if let Ok(mut g) = state.ingest.lock() {
+                *g = None;
+            }
+            true
+        }
+        _ => false,
+    };
+
     json_ok(&serde_json::json!({
         "ok": true,
         "identity_updated": identity_changed,
@@ -394,6 +437,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "image_generation_updated": image_changed,
         "skills_reset": skills_changed,
         "mcp_servers_updated": mcp_changed,
+        "ingest_updated": ingest_changed,
     }))
 }
 

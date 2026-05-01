@@ -175,6 +175,7 @@ pub(super) async fn post(
     let artefacts = Arc::clone(&state.artefacts);
     let artefact_id = Arc::clone(&state.artefact_id);
     let data_dir = state.data_dir.clone();
+    let ingest = Arc::clone(&state.ingest);
 
     tokio::spawn(async move {
         tracing::info!(chat_id = %chat_id, "TURN_WORKER: spawned");
@@ -188,6 +189,7 @@ pub(super) async fn post(
             next_artefact_id: artefact_id,
             data_dir,
             current_tool_use_id: None,
+            ingest,
         };
 
         // Lazily build the agent on first use.  If a transcript exists

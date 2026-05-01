@@ -148,6 +148,7 @@ pub async fn emit_agent_file_for_tool(
         next_artefact_id: state.artefact_id.clone(),
         data_dir: state.data_dir.clone(),
         current_tool_use_id: tool_use_id.map(|s| s.to_string()),
+        ingest: Arc::clone(&state.ingest),
     };
     out.send_file(path)
 }
@@ -193,6 +194,7 @@ pub async fn emit_agent_artefact(
         next_artefact_id: state.artefact_id.clone(),
         data_dir: state.data_dir.clone(),
         current_tool_use_id: None,
+        ingest: Arc::clone(&state.ingest),
     };
     out.send_artefact(&artefact)
 }

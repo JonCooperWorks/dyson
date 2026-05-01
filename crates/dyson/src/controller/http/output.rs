@@ -20,6 +20,7 @@ use crate::tool::{CheckpointEvent, ToolOutput};
 
 use super::Output;
 use super::responses::mime_for_extension;
+use super::state::IngestConfig;
 use super::stores::{ArtefactEntry, ArtefactStore, FileEntry, FileStore};
 use super::wire::SseEvent;
 
@@ -54,6 +55,18 @@ pub(crate) struct SseOutput {
     /// wire image artefacts back to the originating tool panel on
     /// chat reload.
     pub(crate) current_tool_use_id: Option<String>,
+    /// Live artefact-ingest target shared with `HttpState`.  A
+    /// snapshot is taken in `send_artefact` and, when present,
+    /// drives a fire-and-forget POST so swarm gets the bytes for
+    /// durability + anonymous shares.  `None`-config or push
+    /// failures never block the chat — the in-memory + on-disk
+    /// caches the controller already maintains stay authoritative
+    /// for the live UI read path.
+    ///
+    /// HTTP transport is the process-wide `crate::http::client()`
+    /// singleton — no per-output client allocation; cloned at the
+    /// spawn point so the spawned task owns its own handle.
+    pub(crate) ingest: Arc<std::sync::Mutex<Option<IngestConfig>>>,
 }
 
 impl SseOutput {
@@ -274,6 +287,10 @@ impl Output for SseOutput {
         // reader fetches them itself once mounted.
         let url = format!("/#/artefacts/{id}");
         let bytes = artefact.content.len();
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let entry = ArtefactEntry {
             chat_id: self.chat_id.clone(),
             kind: artefact.kind,
@@ -282,10 +299,7 @@ impl Output for SseOutput {
             mime_type: artefact.mime_type.clone(),
             metadata: artefact.metadata.clone(),
             tool_use_id: self.current_tool_use_id.clone(),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+            created_at,
         };
         if let Some(dir) = self.data_dir.as_ref() {
             ArtefactStore::persist_static(dir, &id, &entry);
@@ -297,7 +311,7 @@ impl Output for SseOutput {
         s.put(id.clone(), entry);
         drop(s);
         self.send(SseEvent::Artefact {
-            id,
+            id: id.clone(),
             kind: artefact.kind,
             title: artefact.title.clone(),
             url,
@@ -305,6 +319,104 @@ impl Output for SseOutput {
             metadata: artefact.metadata.clone(),
             parent_tool_id: None,
         });
+
+        // Phase 3: fire-and-forget push to swarm so artefact bytes
+        // outlive the cube and feed the swarm UI's artefact list.
+        // Invariants:
+        //   - never blocks the agent's output stream (spawn + return)
+        //   - never propagates errors (logged on failure)
+        //   - skips entirely when no ingest config is set (terminal /
+        //     telegram / non-swarm dyson)
+        let cfg_snapshot = match self.ingest.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        if let Some(cfg) = cfg_snapshot {
+            // Resolve the body bytes the push should carry.  Three
+            // cases mirror the reader-side branches the SPA already
+            // understands (see send_file at L218):
+            //   * Image / Other-with-URL-body: `content` is the
+            //     `/api/files/<id>` URL — look up the FileEntry's
+            //     bytes from the FileStore so swarm gets the actual
+            //     binary, not the URL string.
+            //   * Markdown / SecurityReview / other text: `content`
+            //     is the inline body — use it directly.
+            //   * Lookup failure: fall back to the content bytes
+            //     (best-effort; the swarm side just sees the URL).
+            let push_bytes: Vec<u8> = if artefact.content.starts_with("/api/files/") {
+                let file_id = artefact.content
+                    .trim_start_matches("/api/files/")
+                    .to_string();
+                let from_store = match self.files.lock() {
+                    Ok(g) => g.items.get(&file_id).map(|e| e.bytes.clone()),
+                    Err(p) => p.into_inner().items.get(&file_id).map(|e| e.bytes.clone()),
+                };
+                from_store.unwrap_or_else(|| artefact.content.as_bytes().to_vec())
+            } else {
+                artefact.content.as_bytes().to_vec()
+            };
+
+            let chat_id = self.chat_id.clone();
+            let artefact_id = id.clone();
+            // Match the wire string swarm's `IngestRequest.kind`
+            // expects.  `ArtefactKind` has #[serde(rename_all =
+            // "snake_case")] so a serde detour would yield the same,
+            // but the explicit match keeps the wire shape obvious
+            // at the call site.
+            let kind = match artefact.kind {
+                crate::message::ArtefactKind::SecurityReview => "security_review",
+                crate::message::ArtefactKind::Image => "image",
+                crate::message::ArtefactKind::Other => "other",
+            }
+            .to_owned();
+            let title = artefact.title.clone();
+            let mime = artefact.mime_type.clone();
+            let metadata = artefact.metadata.clone();
+            tokio::spawn(async move {
+                use base64::engine::general_purpose::STANDARD as B64;
+                use base64::Engine as _;
+                let payload = serde_json::json!({
+                    "chat_id": chat_id,
+                    "artefact_id": artefact_id,
+                    "kind": kind,
+                    "title": title,
+                    "mime": mime,
+                    "metadata": metadata,
+                    "created_at": created_at as i64,
+                    "body_b64": B64.encode(&push_bytes),
+                });
+                let r = crate::http::client()
+                    .post(&cfg.url)
+                    .bearer_auth(&cfg.token)
+                    .timeout(std::time::Duration::from_secs(10))
+                    .json(&payload)
+                    .send()
+                    .await;
+                match r {
+                    Ok(resp) if resp.status().is_success() => {
+                        tracing::debug!(
+                            artefact = %artefact_id,
+                            chat = %chat_id,
+                            "ingest: pushed",
+                        );
+                    }
+                    Ok(resp) => {
+                        tracing::warn!(
+                            artefact = %artefact_id,
+                            status = %resp.status(),
+                            "ingest: swarm rejected artefact push",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            artefact = %artefact_id,
+                            error = %e,
+                            "ingest: swarm push failed (network/timeout)",
+                        );
+                    }
+                }
+            });
+        }
         Ok(())
     }
 
@@ -335,6 +447,17 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     fn fixture(data_dir: Option<PathBuf>) -> (SseOutput, broadcast::Receiver<SseEvent>) {
+        fixture_with_ingest(data_dir, None)
+    }
+
+    /// Variant that lets a test wire an `IngestConfig` through so the
+    /// fire-and-forget push fires.  Tests that don't care about
+    /// ingest call `fixture(...)` and get `None` (push path is
+    /// silently skipped).
+    fn fixture_with_ingest(
+        data_dir: Option<PathBuf>,
+        ingest: Option<IngestConfig>,
+    ) -> (SseOutput, broadcast::Receiver<SseEvent>) {
         let (tx, rx) = broadcast::channel(64);
         let out = SseOutput {
             chat_id: "c-0001".to_string(),
@@ -346,6 +469,7 @@ mod tests {
             next_artefact_id: Arc::new(AtomicU64::new(1)),
             data_dir,
             current_tool_use_id: None,
+            ingest: Arc::new(std::sync::Mutex::new(ingest)),
         };
         (out, rx)
     }
@@ -546,5 +670,226 @@ mod tests {
             Err(p) => p.into_inner(),
         };
         assert_eq!(s.items.len(), 1, "send_artefact must land despite poisoned lock");
+    }
+
+    /// Spin up an in-process HTTP recorder bound to 127.0.0.1:0.
+    /// Returns the URL plus a shared vec the test can read after the
+    /// fire-and-forget push lands.  Each recorded entry is the raw
+    /// JSON request body — tests assert on its structure.
+    async fn ingest_recorder() -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+        use hyper::body::Incoming;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        let captured: Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured_for_task = Arc::clone(&captured);
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let captured = Arc::clone(&captured_for_task);
+                let svc = hyper::service::service_fn(
+                    move |req: hyper::Request<Incoming>| {
+                        let captured = Arc::clone(&captured);
+                        async move {
+                            let bytes = http_body_util::BodyExt::collect(req.into_body())
+                                .await
+                                .map(|c| c.to_bytes())
+                                .unwrap_or_default();
+                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                                captured.lock().unwrap().push(v);
+                            }
+                            Ok::<_, std::convert::Infallible>(
+                                hyper::Response::builder()
+                                    .status(204)
+                                    .body(http_body_util::Empty::<hyper::body::Bytes>::new())
+                                    .unwrap(),
+                            )
+                        }
+                    },
+                );
+                tokio::spawn(async move {
+                    let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(stream), svc)
+                        .await;
+                });
+            }
+        });
+        (format!("http://{addr}/ingest"), captured)
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = false)]
+    async fn send_artefact_skips_push_when_no_ingest_config() {
+        // Phase 3: with no IngestConfig wired, send_artefact must
+        // emit + persist as before and NOT spawn any push task.  We
+        // can't introspect the runtime's task list — but a fixture
+        // built without ingest will not call into the push branch,
+        // and no panic / no extra event past Artefact is the
+        // observable contract.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut out, mut rx) = fixture(Some(dir.path().to_path_buf()));
+        let art = Artefact {
+            id: String::new(),
+            kind: ArtefactKind::SecurityReview,
+            title: "no-push.md".into(),
+            content: "## Findings".into(),
+            mime_type: "text/markdown".into(),
+            metadata: None,
+        };
+        out.send_artefact(&art).unwrap();
+        match rx.try_recv().unwrap() {
+            SseEvent::Artefact { id, .. } => assert_eq!(id, "a1"),
+            other => panic!("expected artefact event, got {}", serde_json::to_string(&other).unwrap()),
+        }
+        // No further events queued — push branch was correctly skipped.
+        assert!(rx.try_recv().is_err(), "no extra events");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_artefact_pushes_inline_text_to_swarm() {
+        // Phase 3 happy path: with an IngestConfig pointing at our
+        // recorder, send_artefact spawns a fire-and-forget POST.  We
+        // assert on the recorded JSON envelope: chat_id, artefact_id,
+        // kind (snake_case wire string), title, mime, base64 body
+        // round-trips back to the input plaintext.
+        use base64::Engine;
+        let (url, captured) = ingest_recorder().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut out, _rx) = fixture_with_ingest(
+            Some(dir.path().to_path_buf()),
+            Some(IngestConfig { url, token: "it_test".into() }),
+        );
+        let art = Artefact {
+            id: String::new(),
+            kind: ArtefactKind::SecurityReview,
+            title: "report.md".into(),
+            content: "## Findings\n\n* one".into(),
+            mime_type: "text/markdown".into(),
+            metadata: Some(serde_json::json!({"k": "v"})),
+        };
+        out.send_artefact(&art).unwrap();
+
+        // Wait up to 2s for the spawned push to land at the recorder.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if !captured.lock().unwrap().is_empty() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("ingest push did not land at recorder within 2s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let captured = captured.lock().unwrap().clone();
+        assert_eq!(captured.len(), 1, "exactly one push fired");
+        let body = &captured[0];
+        assert_eq!(body["chat_id"], "c-0001");
+        assert_eq!(body["artefact_id"], "a1");
+        assert_eq!(body["kind"], "security_review");
+        assert_eq!(body["title"], "report.md");
+        assert_eq!(body["mime"], "text/markdown");
+        assert_eq!(body["metadata"]["k"], "v");
+        let b64 = body["body_b64"].as_str().expect("body_b64 string");
+        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        assert_eq!(decoded, b"## Findings\n\n* one");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_artefact_push_uses_filestore_bytes_for_url_body() {
+        // For Image / Other-with-URL-body artefacts (`content` is the
+        // /api/files/<id> deeplink), the push must resolve the bytes
+        // out of the FileStore, not send the URL string.  We seed a
+        // FileEntry directly, build an artefact whose content points
+        // at it, and verify the recorded push carries the binary
+        // bytes base64-encoded.
+        use base64::Engine;
+        let (url, captured) = ingest_recorder().await;
+        let (mut out, _rx) = fixture_with_ingest(
+            None,
+            Some(IngestConfig { url, token: "it_test".into() }),
+        );
+        // Seed a binary FileEntry for id "f1".
+        out.files.lock().unwrap().put(
+            "f1".into(),
+            FileEntry {
+                bytes: vec![0xDE, 0xAD, 0xBE, 0xEF],
+                mime: "application/octet-stream".into(),
+                name: "blob.bin".into(),
+            },
+        );
+        let art = Artefact {
+            id: String::new(),
+            kind: ArtefactKind::Other,
+            title: "blob.bin".into(),
+            content: "/api/files/f1".into(),
+            mime_type: "application/octet-stream".into(),
+            metadata: None,
+        };
+        out.send_artefact(&art).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if !captured.lock().unwrap().is_empty() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("ingest push did not land at recorder within 2s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let captured = captured.lock().unwrap().clone();
+        let body = &captured[0];
+        let b64 = body["body_b64"].as_str().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        assert_eq!(
+            decoded,
+            vec![0xDE, 0xAD, 0xBE, 0xEF],
+            "URL-body artefact must push the FileStore bytes, not the URL string",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_artefact_swallows_push_failure() {
+        // When the swarm endpoint is unreachable / 5xx, the push task
+        // logs and returns — send_artefact itself must still succeed
+        // (returns Ok(())) and the SSE Artefact event must still
+        // emit.  Caller (the agent) sees a normal completion.
+        // Simulate "endpoint unreachable" by pointing at a port we
+        // explicitly don't bind.  reqwest's connect-refused happens
+        // in the spawned task; the test just verifies send_artefact
+        // returned Ok and the event landed.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut out, mut rx) = fixture_with_ingest(
+            Some(dir.path().to_path_buf()),
+            Some(IngestConfig {
+                url: "http://127.0.0.1:1/nope".into(),
+                token: "it_test".into(),
+            }),
+        );
+        let art = Artefact {
+            id: String::new(),
+            kind: ArtefactKind::SecurityReview,
+            title: "doomed.md".into(),
+            content: "won't reach swarm".into(),
+            mime_type: "text/markdown".into(),
+            metadata: None,
+        };
+        // The call must NOT propagate the network failure.
+        out.send_artefact(&art).expect("send_artefact must not error on push failure");
+        // SSE event still landed.
+        match rx.try_recv().unwrap() {
+            SseEvent::Artefact { id, title, .. } => {
+                assert_eq!(id, "a1");
+                assert_eq!(title, "doomed.md");
+            }
+            other => panic!("expected artefact event, got {}", serde_json::to_string(&other).unwrap()),
+        }
+        // Brief wait for the spawned task to fail; nothing observable
+        // to check here besides "we didn't crash".  Logs land in
+        // captured tracing but tests don't gate on them.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
