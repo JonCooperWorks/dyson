@@ -16,6 +16,9 @@ use dyson::config::{ChatHistoryConfig, LlmProvider, ProviderConfig, Settings};
 use dyson::controller::ClientRegistry;
 use dyson::controller::http::{HttpState, test_helpers};
 use dyson::feedback::FeedbackStore;
+use dyson::llm::stream::{StopReason, StreamEvent};
+use dyson::llm::{CompletionConfig, LlmClient, StreamResponse, ToolDefinition, ToolMode};
+use dyson::message::Message;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::{Method, Request, Response, StatusCode};
@@ -33,6 +36,33 @@ struct Rig {
     chat_dir: tempfile::TempDir,
     workspace_dir: tempfile::TempDir,
     _handle: JoinHandle<dyson::error::Result<()>>,
+}
+
+struct StubLlmClient;
+
+#[async_trait::async_trait]
+impl LlmClient for StubLlmClient {
+    async fn stream(
+        &self,
+        _messages: &[Message],
+        _system: &str,
+        _system_suffix: &str,
+        _tools: &[ToolDefinition],
+        _config: &CompletionConfig,
+    ) -> dyson::error::Result<StreamResponse> {
+        let events = vec![
+            Ok(StreamEvent::TextDelta("ok".to_string())),
+            Ok(StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: Some(1),
+            }),
+        ];
+        Ok(StreamResponse {
+            stream: Box::pin(tokio_stream::iter(events)),
+            tool_mode: ToolMode::Execute,
+            input_tokens: None,
+        })
+    }
 }
 
 async fn rig() -> Rig {
@@ -58,6 +88,7 @@ async fn rig_with_auth(auth: Arc<dyn Auth>) -> Rig {
     );
 
     let mut settings = Settings::default();
+    settings.dangerous_no_sandbox = true;
     settings.agent.provider = LlmProvider::OpenRouter;
     settings.agent.model = "qwen/qwen3.6-plus".into();
     settings.providers = providers;
@@ -70,7 +101,10 @@ async fn rig_with_auth(auth: Arc<dyn Auth>) -> Rig {
         ),
     };
 
-    let registry = Arc::new(ClientRegistry::new(&settings, None));
+    let registry = Arc::new(ClientRegistry::new_with_default_client_for_test(
+        &settings,
+        Box::new(StubLlmClient),
+    ));
     let history: Arc<dyn ChatHistory> = Arc::new(
         DiskChatHistory::new(chat_dir.path().to_path_buf()).expect("disk history"),
     );
@@ -3823,4 +3857,3 @@ async fn unauthorized_strips_quote_from_oidc_authorization_endpoint() {
     // sanitisation only strips bytes from operator-supplied URLs.
     assert!(www.contains(r#"realm="dyson""#));
 }
-

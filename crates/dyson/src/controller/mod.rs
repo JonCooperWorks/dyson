@@ -192,6 +192,32 @@ impl ClientRegistry {
         }
     }
 
+    /// Create a registry with an already-installed default client.
+    ///
+    /// Test rigs use this to exercise controller behavior without making
+    /// network calls to a real LLM provider.
+    #[doc(hidden)]
+    pub fn new_with_default_client_for_test(
+        settings: &Settings,
+        client: Box<dyn crate::llm::LlmClient>,
+    ) -> Self {
+        let mut clients = std::collections::HashMap::new();
+        let rate_limited = crate::agent::rate_limiter::RateLimited::unlimited(client);
+        if let Some(name) = active_provider_name(settings) {
+            clients.insert(name, rate_limited);
+        } else {
+            clients.insert("__default__".to_string(), rate_limited);
+        }
+
+        Self {
+            inner: std::sync::Mutex::new(ClientRegistryInner {
+                clients,
+                settings: settings.clone(),
+                workspace: None,
+            }),
+        }
+    }
+
     /// Drop all cached clients and swap in new settings.
     ///
     /// Subsequent `get()` calls will create new clients with the updated
