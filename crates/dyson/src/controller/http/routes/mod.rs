@@ -243,11 +243,6 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         // operator can verify which MCP servers actually loaded.
         // Same configure-secret auth as the POST sibling.
         (&Method::GET,    ["api", "admin", "skills"])    => admin::get_skills(req, &state).await,
-        // Quiesce control plane — swarm calls these to gate a cube
-        // upgrade.  See `routes::admin::post_quiesce`.
-        (&Method::GET,    ["api", "admin", "idle"])      => admin::get_idle(req, &state).await,
-        (&Method::POST,   ["api", "admin", "quiesce"])   => admin::post_quiesce(req, &state).await,
-        (&Method::POST,   ["api", "admin", "unquiesce"]) => admin::post_unquiesce(req, &state).await,
 
         // ─── files & artefacts ─────────────────────────────────────────
         // Strict decode here — these ids feed `safe_store_id` which

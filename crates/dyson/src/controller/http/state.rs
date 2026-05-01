@@ -544,16 +544,6 @@ pub struct HttpState {
     /// (`dangerous_no_tls`) sets this to `false` so the cookie is
     /// still usable on `http://127.0.0.1:7878`.
     pub(crate) tls_enabled: bool,
-    /// Refuse-new-turns latch held during a swarm-orchestrated cube
-    /// upgrade.  Toggled by `/api/admin/quiesce` (test-and-set: only
-    /// flips when nothing is in flight) and `/api/admin/unquiesce`.
-    /// `routes::turns::post` checks it after `handle.busy.swap` —
-    /// SeqCst ordering on both sides closes the swap/check race so
-    /// either the turn aborts cleanly or the quiesce 409s, never both
-    /// "turn started" and "quiesce returned ok".  In-memory only;
-    /// resets on every dyson process restart (which is exactly what
-    /// the post-upgrade fresh cube wants — it boots unquiesced).
-    pub(crate) quiesced: std::sync::atomic::AtomicBool,
 }
 
 /// Stored per-ticket: the bound identity (so we can attach it on
@@ -667,7 +657,6 @@ impl HttpState {
             tls_enabled,
             titles: std::sync::Mutex::new(HashMap::new()),
             allowed_identity: std::sync::Mutex::new(allowed_identity),
-            quiesced: std::sync::atomic::AtomicBool::new(false),
         }
     }
 

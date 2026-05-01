@@ -26,12 +26,11 @@
 // network-isolated except via cubeproxy, so "any caller" is in
 // practice "swarm via dyson_proxy".
 
-use hyper::body::Bytes;
-use hyper::{Request, Response, StatusCode};
+use hyper::Request;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::super::responses::{Resp, bad_request, boxed, json_ok, read_json_capped, unauthorized};
+use super::super::responses::{Resp, bad_request, json_ok, read_json_capped, unauthorized};
 use super::super::state::HttpState;
 
 /// Cap for the configure body.  Generous for very long task prompts
@@ -526,156 +525,6 @@ pub(super) async fn get_skills(req: Request<hyper::body::Incoming>, state: &Http
         "mcp_servers": mcp_listed,
         "mcp_probes": mcp_probes,
     }))
-}
-
-/// Verify the inbound `x-swarm-configure` plaintext against the
-/// argon2id hash on disk.  Returns `Ok(())` on match, an unauthorized
-/// `Resp` on miss/missing/malformed.  Shared by `get_skills`, the new
-/// idle/quiesce/unquiesce admin endpoints, and (eventually) anywhere
-/// else that wants the same configure-secret guard.  We intentionally
-/// don't TOFU here — the very first `/configure` call still owns the
-/// hash-creation path; callers of these other endpoints come AFTER
-/// configure has run, so a missing hash file is a real auth failure
-/// and not a fresh-instance state.
-fn verify_configure_secret(
-    req: &Request<hyper::body::Incoming>,
-    state: &HttpState,
-) -> Result<(), Resp> {
-    use argon2::{password_hash::{PasswordHash, PasswordVerifier}, Argon2};
-    let secret = match req
-        .headers()
-        .get(CONFIGURE_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(s) => s.to_owned(),
-        None => return Err(unauthorized(state)),
-    };
-    let snapshot = state.settings_snapshot();
-    let hash_dir = workspace_parent_dir(&snapshot.workspace.connection_string.expose());
-    let hash_path = hash_dir.join(CONFIGURE_HASH_FILENAME);
-    let stored = match std::fs::read_to_string(&hash_path) {
-        Ok(s) => s,
-        Err(_) => return Err(unauthorized(state)),
-    };
-    let parsed = match PasswordHash::new(stored.trim()) {
-        Ok(p) => p,
-        Err(_) => return Err(unauthorized(state)),
-    };
-    if Argon2::default()
-        .verify_password(secret.as_bytes(), &parsed)
-        .is_err()
-    {
-        return Err(unauthorized(state));
-    }
-    Ok(())
-}
-
-/// `GET /api/admin/idle` — observability endpoint paired with the
-/// quiesce/unquiesce control plane.  Returns whether the controller
-/// would currently accept a new turn (no in-flight, not quiesced) plus
-/// the per-chat in-flight count so swarm's wait-loop can log progress
-/// while polling.  Auth: same configure secret as `/configure`.
-pub(super) async fn get_idle(
-    req: Request<hyper::body::Incoming>,
-    state: &HttpState,
-) -> Resp {
-    if let Err(resp) = verify_configure_secret(&req, state) {
-        return resp;
-    }
-    use std::sync::atomic::Ordering;
-    let chats = state.chats.lock().await;
-    let in_flight = chats
-        .values()
-        .filter(|h| h.busy.load(Ordering::SeqCst))
-        .count();
-    let quiesced = state.quiesced.load(Ordering::SeqCst);
-    json_ok(&serde_json::json!({
-        "idle": in_flight == 0 && !quiesced,
-        "in_flight_chats": in_flight,
-        "quiesced": quiesced,
-    }))
-}
-
-/// `POST /api/admin/quiesce` — atomic test-and-set: if no chat is
-/// in flight, latch `quiesced=true` and refuse new turns until
-/// `/unquiesce`.  Otherwise undo the latch and 409 with the busy
-/// count so swarm can decide to wait + retry.
-///
-/// Ordering: we set `quiesced=true` BEFORE scanning per-chat `busy`.
-/// `routes::turns::post` does the symmetric pair (swap busy → load
-/// quiesced) so any turn that slipped through before our latch is
-/// caught by the busy scan; any turn arriving after sees quiesced
-/// and aborts cleanly.  Both sides use SeqCst so the swap-then-load
-/// and store-then-load orderings are observable globally.
-pub(super) async fn post_quiesce(
-    req: Request<hyper::body::Incoming>,
-    state: &HttpState,
-) -> Resp {
-    if let Err(resp) = verify_configure_secret(&req, state) {
-        return resp;
-    }
-    use std::sync::atomic::Ordering;
-    // If already quiesced, this is a no-op success — swarm retrying
-    // a quiesce after a transient network hiccup must be idempotent.
-    if state.quiesced.swap(true, Ordering::SeqCst) {
-        let chats = state.chats.lock().await;
-        let in_flight = chats
-            .values()
-            .filter(|h| h.busy.load(Ordering::SeqCst))
-            .count();
-        return json_ok(&serde_json::json!({
-            "quiesced": true,
-            "already": true,
-            "in_flight_chats": in_flight,
-        }));
-    }
-    // Latch is held; now check nothing slipped through.  Any chat
-    // that swapped busy=true before our store is here; any that runs
-    // after our store sees quiesced=true and aborts.
-    let chats = state.chats.lock().await;
-    let in_flight = chats
-        .values()
-        .filter(|h| h.busy.load(Ordering::SeqCst))
-        .count();
-    if in_flight > 0 {
-        // Race lost — undo the latch so the caller can retry.
-        state.quiesced.store(false, Ordering::SeqCst);
-        return Response::builder()
-            .status(StatusCode::CONFLICT)
-            .header("Content-Type", "application/json")
-            .body(boxed(Bytes::from(
-                serde_json::to_vec(&serde_json::json!({
-                    "quiesced": false,
-                    "in_flight_chats": in_flight,
-                    "error": "instance is busy; retry after current turn(s) complete",
-                }))
-                .unwrap_or_default(),
-            )))
-            .unwrap();
-    }
-    json_ok(&serde_json::json!({
-        "quiesced": true,
-        "in_flight_chats": 0,
-    }))
-}
-
-/// `POST /api/admin/unquiesce` — release the latch.  Idempotent: a
-/// double-unquiesce is a 200.  Used by swarm only when an upgrade
-/// attempt aborts AFTER quiesce succeeded (e.g. cube create failed)
-/// so the user's chat resumes on the original cube instead of being
-/// stuck behind a 503.
-pub(super) async fn post_unquiesce(
-    req: Request<hyper::body::Incoming>,
-    state: &HttpState,
-) -> Resp {
-    if let Err(resp) = verify_configure_secret(&req, state) {
-        return resp;
-    }
-    use std::sync::atomic::Ordering;
-    state.quiesced.store(false, Ordering::SeqCst);
-    json_ok(&serde_json::json!({"quiesced": false}))
 }
 
 /// Resolve the directory the configure-secret hash lives in.  We
