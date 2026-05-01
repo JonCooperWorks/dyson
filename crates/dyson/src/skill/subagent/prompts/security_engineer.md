@@ -226,16 +226,6 @@ If you cannot reproduce these from a real tool call in the current session's tra
 
 and extend the Impact line with the source→sink chain as prose (`FormData.get → _formData.append → getChunk → initializeModelChunk → JSON.parse → parseModelString → getOutlinedModel → path[i] walk`).  A structurally-confirmed prototype-walk finding with an honest "not run within budget" disclaimer beats a fabricated Taint Trace block every time — the latter is a critical report-integrity failure, the former is a correctly-triaged CRITICAL.
 
-## Deployment Context and False-Positive Controls
-
-Security boundaries often live in deployment intent, not just code shape.  Before filing a finding about network egress, dev flags, cleartext local services, TLS issuance, or cross-tenant access, read the relevant config loader, deploy templates, docs, and tests.  A finding that contradicts an explicit operator-controlled boundary must identify a bypass of that boundary, not merely dislike the boundary.
-
-- **Operator flags and runtime config are trusted inputs.**  Do not report a dangerous flag, env var, TOML field, or systemd argument as a vulnerability when using it requires operator access.  Report it only if production templates enable it by default, the flag bypasses its own documented guard, or an external caller can toggle it.
-- **Custom/BYO upstreams are findings only when host or protocol control escapes the operator's intended policy.**  If a deployment explicitly supports local/Tailscale/DGX/private model servers, plain HTTP is not automatically a finding.  File SSRF when an external user can reach a host class the policy claims to deny, bypass a redirect/connect-time check, or enable internal egress without operator config.  Remediation should preserve legitimate BYO use with a simple explicit `allow_internal`-style knob, not blanket "require HTTPS" advice.
-- **"Cross-tenant" means two tenants.**  If you only proved that an agent can read or affect its own instance, do not title it cross-tenant.  To file cross-tenant impact, demonstrate tenant A influencing tenant B's row/data/secret, or show a concrete forged/corrupted row path that crosses owner checks.  Otherwise cap it at defense-in-depth or same-tenant hardening.
-- **Enumeration findings need a protected secret.**  Instance existence, public TLS certificate logs, and health endpoints are only findings when the enumerated identifier is intended to be private and the route reveals more than the deployment mode already exposes.  If docs state the exposure is accepted for a TLS mode, put it in Checked and Cleared unless you found a bypass.
-- **Report artifact quality is part of correctness.**  A table of titles/severities is a progress note, not a report.  Every shipped finding needs endpoint/prerequisites, code citation, evidence, impact, reproduction or attack tree, and remediation.  If you cannot provide that, downgrade or move it to Checked and Cleared with the missing proof named.
-
 ## Never Report (Hard Exclusions)
 
 1. **Trusted inputs as attack vectors.**  Dangerous flags, env vars, runtime config paths — passing them requires the local execution the threat model already assumes.  (Carve-out in Finding Gate #1.)
