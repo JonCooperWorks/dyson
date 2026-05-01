@@ -48,11 +48,7 @@ impl BotApi {
     ///
     /// Requests message, callback_query, and message_reaction update types
     /// so we can capture emoji feedback on bot responses.
-    pub async fn get_updates(
-        &self,
-        offset: i64,
-        timeout: u64,
-    ) -> Result<Vec<Update>, DysonError> {
+    pub async fn get_updates(&self, offset: i64, timeout: u64) -> Result<Vec<Update>, DysonError> {
         let body = json!({
             "offset": offset,
             "timeout": timeout,
@@ -63,11 +59,7 @@ impl BotApi {
     }
 
     /// Send a text message.
-    pub async fn send_message(
-        &self,
-        chat_id: ChatId,
-        text: &str,
-    ) -> Result<Message, DysonError> {
+    pub async fn send_message(&self, chat_id: ChatId, text: &str) -> Result<Message, DysonError> {
         let body = json!({
             "chat_id": chat_id.0,
             "text": text,
@@ -143,11 +135,7 @@ impl BotApi {
     }
 
     /// Send a document (file) by path.
-    pub async fn send_document(
-        &self,
-        chat_id: ChatId,
-        path: &Path,
-    ) -> Result<Message, DysonError> {
+    pub async fn send_document(&self, chat_id: ChatId, path: &Path) -> Result<Message, DysonError> {
         let file_name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -172,12 +160,12 @@ impl BotApi {
             .map_err(DysonError::Http)?;
 
         let api_resp: ApiResponse<Message> = resp.json().await.map_err(DysonError::Http)?;
-        api_resp
-            .result
-            .ok_or_else(|| DysonError::Llm(format!(
+        api_resp.result.ok_or_else(|| {
+            DysonError::Llm(format!(
                 "sendDocument failed: {}",
                 api_resp.description.unwrap_or_default()
-            )))
+            ))
+        })
     }
 
     /// Answer a callback query (dismiss the loading spinner on inline buttons).
@@ -227,9 +215,9 @@ impl BotApi {
             )));
         }
 
-        let file_path = file.file_path.ok_or_else(|| {
-            DysonError::Llm("Telegram getFile returned no file_path".to_string())
-        })?;
+        let file_path = file
+            .file_path
+            .ok_or_else(|| DysonError::Llm("Telegram getFile returned no file_path".to_string()))?;
 
         let url = format!(
             "https://api.telegram.org/file/bot{}/{}",
@@ -339,9 +327,7 @@ mod tests {
         let resp = ApiResponse::<serde_json::Value> {
             ok: false,
             result: None,
-            description: Some(
-                "Bad Request: can't parse entities: Unexpected end tag".to_string(),
-            ),
+            description: Some("Bad Request: can't parse entities: Unexpected end tag".to_string()),
         };
         let err = check_edit_ok(resp, "editMessageText").unwrap_err();
         assert!(err.to_string().contains("can't parse entities"));

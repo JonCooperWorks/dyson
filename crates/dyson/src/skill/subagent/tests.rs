@@ -62,13 +62,15 @@ fn capture_output_ignores_file_sends() {
 
 /// Build a `CaptureOutput` with a real `SubagentEventBus` wired and
 /// return both halves so a test can assert on the broadcast frames.
-fn capture_with_bus(parent_tool_id: &str)
-    -> (CaptureOutput, tokio::sync::broadcast::Receiver<crate::controller::http::SseEvent>)
-{
+fn capture_with_bus(
+    parent_tool_id: &str,
+) -> (
+    CaptureOutput,
+    tokio::sync::broadcast::Receiver<crate::controller::http::SseEvent>,
+) {
     let (tx, rx) = tokio::sync::broadcast::channel(64);
     let bus = crate::controller::http::SubagentEventBus::new(tx);
-    let cap = CaptureOutput::new()
-        .with_ui_sink(Some(bus), Some(parent_tool_id.to_string()));
+    let cap = CaptureOutput::new().with_ui_sink(Some(bus), Some(parent_tool_id.to_string()));
     (cap, rx)
 }
 
@@ -78,7 +80,11 @@ fn capture_output_tees_inner_tool_start_with_parent_id() {
     let (mut cap, mut rx) = capture_with_bus("parent_subagent");
     cap.tool_use_start("inner_1", "bash").unwrap();
     match rx.try_recv().unwrap() {
-        SseEvent::ToolStart { id, name, parent_tool_id } => {
+        SseEvent::ToolStart {
+            id,
+            name,
+            parent_tool_id,
+        } => {
             assert_eq!(id, "inner_1");
             assert_eq!(name, "bash");
             assert_eq!(parent_tool_id.as_deref(), Some("parent_subagent"));
@@ -95,7 +101,13 @@ fn capture_output_tees_tool_result_with_parent_and_inner_id() {
     let _ = rx.try_recv(); // discard the ToolStart frame
     cap.tool_result(&ToolOutput::success("ok")).unwrap();
     match rx.try_recv().unwrap() {
-        SseEvent::ToolResult { content, is_error, parent_tool_id, tool_use_id, .. } => {
+        SseEvent::ToolResult {
+            content,
+            is_error,
+            parent_tool_id,
+            tool_use_id,
+            ..
+        } => {
             assert_eq!(content, "ok");
             assert!(!is_error);
             assert_eq!(parent_tool_id.as_deref(), Some("parent_subagent"));
@@ -140,9 +152,13 @@ fn capture_output_tee_requires_both_bus_and_parent_id() {
     let bus = crate::controller::http::SubagentEventBus::new(tx);
     let mut cap = CaptureOutput::new().with_ui_sink(Some(bus), None);
     cap.tool_use_start("inner_1", "bash").unwrap();
-    assert!(matches!(rx.try_recv(),
-        Err(tokio::sync::broadcast::error::TryRecvError::Empty)),
-        "no frame should have been sent");
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "no frame should have been sent"
+    );
 }
 
 #[test]
@@ -155,8 +171,10 @@ fn capture_output_text_path_does_not_tee_to_bus() {
     // delete the assertion explicitly.
     let (mut cap, mut rx) = capture_with_bus("parent_subagent");
     cap.text_delta("hidden inner reasoning").unwrap();
-    assert!(matches!(rx.try_recv(),
-        Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
     assert_eq!(cap.text(), "hidden inner reasoning");
 }
 
@@ -201,9 +219,11 @@ fn subagent_tool_name_and_description() {
         config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
-        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
-        ),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         vec![],
@@ -231,9 +251,11 @@ fn subagent_tool_input_schema_has_required_task() {
         config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
-        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
-        ),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         vec![],
@@ -323,8 +345,17 @@ async fn subagent_runs_child_and_returns_result() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(FilteredSkill { tools: vec![] })];
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent =
-        crate::agent::Agent::new(crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+    let mut agent = crate::agent::Agent::new(
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     agent.set_depth(1);
 
     let mut capture = CaptureOutput::new();
@@ -421,9 +452,11 @@ async fn subagent_depth_limit_prevents_recursion() {
         config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
-        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
-        ),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         vec![],
@@ -439,8 +472,8 @@ async fn subagent_depth_limit_prevents_recursion() {
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
-    tool_use_id: None,
-    subagent_events: None,
+        tool_use_id: None,
+        subagent_events: None,
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -468,9 +501,11 @@ async fn subagent_missing_task_returns_error() {
         config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
-        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
-        ),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         vec![],
@@ -643,10 +678,14 @@ fn name_allowlist_drops_coder_and_orchestrators_when_excluded() {
     assert_eq!(names, vec!["research_agent"]);
     let prompt = skill.system_prompt().unwrap();
     assert!(prompt.contains("research_agent"));
-    assert!(!prompt.contains("- **coder**"),
-        "coder must not appear in the prompt when filtered out");
-    assert!(!prompt.contains("- **security_engineer**"),
-        "security_engineer must not appear in the prompt when filtered out");
+    assert!(
+        !prompt.contains("- **coder**"),
+        "coder must not appear in the prompt when filtered out"
+    );
+    assert!(
+        !prompt.contains("- **security_engineer**"),
+        "security_engineer must not appear in the prompt when filtered out"
+    );
 }
 
 #[test]
@@ -656,17 +695,8 @@ fn name_allowlist_keeps_only_listed_orchestrators() {
     let settings = crate::config::Settings::default();
     let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
     let registry = crate::controller::ClientRegistry::new(&settings, None);
-    let allow: std::collections::HashSet<String> =
-        ["coder".to_string()].into_iter().collect();
-    let skill = SubagentSkill::new(
-        &[],
-        &settings,
-        sandbox,
-        None,
-        &[],
-        &registry,
-        Some(&allow),
-    );
+    let allow: std::collections::HashSet<String> = ["coder".to_string()].into_iter().collect();
+    let skill = SubagentSkill::new(&[], &settings, sandbox, None, &[], &registry, Some(&allow));
     let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
     assert_eq!(names, vec!["coder"]);
 }
@@ -680,10 +710,14 @@ fn name_allowlist_none_preserves_default_registration() {
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&[], &settings, sandbox, None, &[], &registry, None);
     let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
-    assert!(names.contains(&"coder"),
-        "coder must be present when no allowlist is supplied");
-    assert!(names.contains(&"security_engineer"),
-        "security_engineer must be present when no allowlist is supplied");
+    assert!(
+        names.contains(&"coder"),
+        "coder must be present when no allowlist is supplied"
+    );
+    assert!(
+        names.contains(&"security_engineer"),
+        "security_engineer must be present when no allowlist is supplied"
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -1002,9 +1036,11 @@ fn make_coder_tool() -> CoderTool {
     CoderTool::new(
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
-        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
-        ),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         &[],
@@ -1044,8 +1080,8 @@ async fn coder_depth_limit_prevents_recursion() {
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
-    tool_use_id: None,
-    subagent_events: None,
+        tool_use_id: None,
+        subagent_events: None,
     };
 
     let input = serde_json::json!({"path": ".", "task": "should fail"});
@@ -1121,9 +1157,11 @@ fn coder_filters_to_correct_tools() {
     let tool = CoderTool::new(
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
-        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
-        ),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         &parent_tools,
@@ -1198,9 +1236,11 @@ fn orchestrator_tool_uses_config_name_and_description() {
         config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
-        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
-        ),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         &[],
@@ -1220,7 +1260,11 @@ fn security_engineer_config_produces_correct_values() {
     assert_eq!(config.max_tokens, 8192);
     assert!(config.injects_protocol.is_some());
     assert!(config.direct_tool_names.contains(&"ast_query"));
-    assert!(config.direct_tool_names.contains(&"attack_surface_analyzer"));
+    assert!(
+        config
+            .direct_tool_names
+            .contains(&"attack_surface_analyzer")
+    );
     assert!(config.direct_tool_names.contains(&"exploit_builder"));
 }
 
@@ -1247,9 +1291,11 @@ fn orchestrator_filters_to_config_tool_names() {
         security_engineer_config(),
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
-        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
-        ),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         &parent_tools,
@@ -1280,9 +1326,11 @@ async fn orchestrator_depth_limit_prevents_recursion() {
         security_engineer_config(),
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
-        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
-        ),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         &[],
@@ -1298,8 +1346,8 @@ async fn orchestrator_depth_limit_prevents_recursion() {
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
-    tool_use_id: None,
-    subagent_events: None,
+        tool_use_id: None,
+        subagent_events: None,
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -1337,7 +1385,10 @@ async fn orchestrator_runs_child_and_returns_result() {
 
     let result = tool.run(&input, &ctx).await.unwrap();
     assert!(!result.is_error);
-    assert_eq!(result.content, "Security review complete. No critical issues found.");
+    assert_eq!(
+        result.content,
+        "Security review complete. No critical issues found."
+    );
 }
 
 // Programmatic artefact emission regression test.  Prior to this change,
@@ -1382,8 +1433,14 @@ async fn orchestrator_emits_artefact_for_non_report_shaped_output() {
         result.artefacts.len(),
     );
     let art = &result.artefacts[0];
-    assert!(matches!(art.kind, crate::message::ArtefactKind::SecurityReview));
-    assert_eq!(art.content, "Security review complete. No critical issues found.");
+    assert!(matches!(
+        art.kind,
+        crate::message::ArtefactKind::SecurityReview
+    ));
+    assert_eq!(
+        art.content,
+        "Security review complete. No critical issues found."
+    );
     assert!(art.title.starts_with("Security review: "));
 }
 
@@ -1414,7 +1471,10 @@ async fn orchestrator_suppresses_artefact_when_output_is_whitespace_only() {
     let ctx = ToolContext::from_cwd().unwrap();
     let input = serde_json::json!({ "task": "Review the module" });
     let result = tool.run(&input, &ctx).await.unwrap();
-    assert!(result.artefacts.is_empty(), "whitespace-only content should not emit");
+    assert!(
+        result.artefacts.is_empty(),
+        "whitespace-only content should not emit"
+    );
 }
 
 #[test]
@@ -1442,9 +1502,11 @@ fn orchestrator_with_custom_config() {
         config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
-        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
-        ),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         &parent_tools,
@@ -1484,9 +1546,11 @@ async fn orchestrator_rejects_nonexistent_path() {
         security_engineer_config(),
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
-        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
-        ),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         &[],
@@ -1509,19 +1573,18 @@ async fn orchestrator_rejects_nonexistent_path() {
 #[tokio::test]
 async fn orchestrator_rejects_path_pointing_to_file() {
     // Write a temp file, then try to scope the orchestrator at it.
-    let file = std::env::temp_dir().join(format!(
-        "dyson-orch-test-{}.tmp",
-        std::process::id()
-    ));
+    let file = std::env::temp_dir().join(format!("dyson-orch-test-{}.tmp", std::process::id()));
     std::fs::write(&file, b"not a directory").unwrap();
 
     let tool = OrchestratorTool::new(
         security_engineer_config(),
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
-        crate::agent::rate_limiter::RateLimitedHandle::unlimited(
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false),
-        ),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
         None,
         &[],
@@ -1560,11 +1623,7 @@ impl Tool for WorkingDirSpy {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({ "type": "object", "properties": {} })
     }
-    async fn run(
-        &self,
-        _input: &serde_json::Value,
-        ctx: &ToolContext,
-    ) -> Result<ToolOutput> {
+    async fn run(&self, _input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         *self.captured.lock().unwrap() = Some(ctx.working_dir.clone());
         Ok(ToolOutput::success("captured"))
     }
@@ -1738,8 +1797,8 @@ async fn subagent_inherits_parents_working_dir() {
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
-    tool_use_id: None,
-    subagent_events: None,
+        tool_use_id: None,
+        subagent_events: None,
     };
 
     let input = serde_json::json!({ "task": "call the spy" });
@@ -1752,7 +1811,8 @@ async fn subagent_inherits_parents_working_dir() {
         .clone()
         .expect("spy was never invoked");
     assert_eq!(
-        captured_dir, scoped,
+        captured_dir,
+        scoped,
         "inner subagent's working_dir should inherit the caller's ctx.working_dir \
          (got {}, expected {})",
         captured_dir.display(),

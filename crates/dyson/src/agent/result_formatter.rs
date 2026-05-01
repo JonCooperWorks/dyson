@@ -17,7 +17,6 @@ use crate::tool::ToolOutput;
 /// Outputs longer than this are marked as truncated.
 const TRUNCATION_THRESHOLD: usize = 30_000;
 
-
 // ---------------------------------------------------------------------------
 // FormattedResult
 // ---------------------------------------------------------------------------
@@ -214,15 +213,14 @@ pub(crate) fn sanitize_tool_output(s: &str) -> std::borrow::Cow<'_, str> {
     /// Semantic markers — matched case-insensitively.  Only the opening
     /// `<` / `</` + tag name is listed; we don't try to match the full
     /// closing `>` because attackers can stuff attributes in between.
-    const SEMANTIC_NEEDLES: &[&str] = &[
-        "<system-reminder",
-        "</system-reminder",
-    ];
+    const SEMANTIC_NEEDLES: &[&str] = &["<system-reminder", "</system-reminder"];
 
     let has_exact = EXACT_NEEDLES.iter().any(|n| s.contains(n));
     // eq_ignore_ascii_case on windowed bytes is cheaper than allocating a
     // lowercase copy; bail on the first semantic hit.
-    let has_semantic = SEMANTIC_NEEDLES.iter().any(|n| contains_ignore_ascii_case(s, n));
+    let has_semantic = SEMANTIC_NEEDLES
+        .iter()
+        .any(|n| contains_ignore_ascii_case(s, n));
     if !has_exact && !has_semantic {
         return std::borrow::Cow::Borrowed(s);
     }

@@ -206,14 +206,17 @@ fn append_lockfile_warnings(report: &mut ScanReport) {
 /// `append_lockfile_warnings` summary.
 fn filter_redundant_manifests(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let name_of = |p: &Path| -> Option<String> {
-        p.file_name().and_then(|n| n.to_str()).map(|s| s.to_ascii_lowercase())
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_ascii_lowercase())
     };
     let has = |target: &str| -> bool {
-        paths.iter().any(|p| name_of(p).is_some_and(|n| n == target))
+        paths
+            .iter()
+            .any(|p| name_of(p).is_some_and(|n| n == target))
     };
     let cargo_lock = has("cargo.lock");
-    let npm_lock =
-        has("package-lock.json") || has("yarn.lock") || has("pnpm-lock.yaml");
+    let npm_lock = has("package-lock.json") || has("yarn.lock") || has("pnpm-lock.yaml");
     paths
         .into_iter()
         .filter(|p| {
@@ -245,23 +248,23 @@ fn is_exact_version(v: &str) -> bool {
         return false;
     }
     // Any range operator or wildcard → not exact.
-    if v.contains(['^', '~', '*', '<', '>', '=', '|', ' ', ','])
-    {
+    if v.contains(['^', '~', '*', '<', '>', '=', '|', ' ', ',']) {
         return false;
     }
     // Must have at least `MAJOR.MINOR.PATCH`.  Semver's pre-release
     // (`-alpha`) and build-metadata (`+git.abc`) suffixes are fine —
     // we only require three numeric leading components separated
     // by `.`.
-    let core_end = v
-        .find(['-', '+'])
-        .unwrap_or(v.len());
+    let core_end = v.find(['-', '+']).unwrap_or(v.len());
     let core = &v[..core_end];
     let parts: Vec<&str> = core.split('.').collect();
     if parts.len() < 3 {
         return false;
     }
-    parts.iter().take(3).all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    parts
+        .iter()
+        .take(3)
+        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn discover(root: &Path, opts: &ScanOptions) -> Result<Vec<PathBuf>> {
@@ -310,11 +313,7 @@ mod tests {
         // Regression: the old cargo parser emitted a per-Cargo.toml
         // warning that fired for every workspace member, even though
         // the workspace root's `Cargo.lock` already pinned versions.
-        let mut r = report_with(&[
-            "Cargo.lock",
-            "crates/a/Cargo.toml",
-            "crates/b/Cargo.toml",
-        ]);
+        let mut r = report_with(&["Cargo.lock", "crates/a/Cargo.toml", "crates/b/Cargo.toml"]);
         append_lockfile_warnings(&mut r);
         assert!(
             r.warnings.is_empty(),
@@ -341,7 +340,11 @@ mod tests {
         // E.g. scan of a non-Rust repo — nothing to warn about.
         let mut r = report_with(&["package.json", "package-lock.json"]);
         append_lockfile_warnings(&mut r);
-        assert!(r.warnings.is_empty(), "no-op when manifest absent: {:?}", r.warnings);
+        assert!(
+            r.warnings.is_empty(),
+            "no-op when manifest absent: {:?}",
+            r.warnings
+        );
     }
 
     #[test]
@@ -390,15 +393,27 @@ mod tests {
         // doesn't return "every advisory that ever mentioned this
         // package" as a match.
         for bad in [
-            "", "1", "1.0", "^1.2", "~1.2.3", ">=1.0,<2.0", "1.2.*",
-            "1.0 || 2.0", " ", "latest",
+            "",
+            "1",
+            "1.0",
+            "^1.2",
+            "~1.2.3",
+            ">=1.0,<2.0",
+            "1.2.*",
+            "1.0 || 2.0",
+            " ",
+            "latest",
         ] {
             assert!(!is_exact_version(bad), "must reject: {bad:?}");
         }
         // Real lockfile-resolved versions.
         for good in [
-            "1.52.1", "0.3.32", "2.0.0-alpha.1", "1.0.0+git.abcdef",
-            "0.0.1", "10.0.0",
+            "1.52.1",
+            "0.3.32",
+            "2.0.0-alpha.1",
+            "1.0.0+git.abcdef",
+            "0.0.1",
+            "10.0.0",
         ] {
             assert!(is_exact_version(good), "must accept: {good:?}");
         }

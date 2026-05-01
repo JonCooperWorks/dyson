@@ -247,13 +247,11 @@ impl LlmClient for AnthropicClient {
         // The API requires `"system"` as an array of content blocks (not a
         // plain string) when using `cache_control`.
 
-        let mut system_blocks_vec = vec![
-            serde_json::json!({
-                "type": "text",
-                "text": system,
-                "cache_control": { "type": "ephemeral" }
-            }),
-        ];
+        let mut system_blocks_vec = vec![serde_json::json!({
+            "type": "text",
+            "text": system,
+            "cache_control": { "type": "ephemeral" }
+        })];
 
         // Append the ephemeral suffix as a separate block (no cache_control)
         // so the stable prefix remains cacheable across turns.
@@ -521,8 +519,7 @@ impl SseJsonParser for AnthropicJsonParser {
                             StopReason::EndTurn
                         }
                     };
-                    let output_tokens =
-                        json["usage"]["output_tokens"].as_u64().map(|n| n as usize);
+                    let output_tokens = json["usage"]["output_tokens"].as_u64().map(|n| n as usize);
                     events.push(Ok(StreamEvent::MessageComplete {
                         stop_reason,
                         output_tokens,
@@ -567,7 +564,7 @@ impl SseJsonParser for AnthropicJsonParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{SseStreamParser, MAX_ACTIVE_TOOL_BUFFERS};
+    use crate::llm::{MAX_ACTIVE_TOOL_BUFFERS, SseStreamParser};
 
     /// Helper: feed SSE lines through the parser and collect events.
     fn parse_sse(lines: &str) -> Vec<Result<StreamEvent>> {

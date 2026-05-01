@@ -126,10 +126,7 @@ impl Sandbox for PolicySandbox {
             // ----- Network tools + unknown tools (including MCP) -----
             _ => {
                 if policy.network == Access::Deny {
-                    tracing::warn!(
-                        tool = tool_name,
-                        "sandbox DENY: network access blocked"
-                    );
+                    tracing::warn!(tool = tool_name, "sandbox DENY: network access blocked");
                     return Ok(SandboxDecision::Deny {
                         reason: format!(
                             "sandbox policy denies network access for tool '{tool_name}'"
@@ -296,7 +293,11 @@ fn check_file_access(
     };
 
     if check_read && !check_path_access(&policy.file_read, file_path, working_dir) {
-        tracing::warn!(tool = tool_name, path = file_path, "sandbox DENY: file read blocked");
+        tracing::warn!(
+            tool = tool_name,
+            path = file_path,
+            "sandbox DENY: file read blocked"
+        );
         return Ok(SandboxDecision::Deny {
             reason: format!(
                 "sandbox policy denies file read for '{file_path}' by tool '{tool_name}'"
@@ -305,7 +306,11 @@ fn check_file_access(
     }
 
     if check_write && !check_path_access(&policy.file_write, file_path, working_dir) {
-        tracing::warn!(tool = tool_name, path = file_path, "sandbox DENY: file write blocked");
+        tracing::warn!(
+            tool = tool_name,
+            path = file_path,
+            "sandbox DENY: file write blocked"
+        );
         return Ok(SandboxDecision::Deny {
             reason: format!(
                 "sandbox policy denies file write for '{file_path}' by tool '{tool_name}'"
@@ -323,10 +328,7 @@ fn check_file_access(
 /// Same pattern as `check_file_access` but for URLs instead of paths.
 /// Blocks requests to loopback, private, link-local, and multicast addresses
 /// to prevent SSRF attacks.
-fn check_web_fetch(
-    input: &serde_json::Value,
-    policy: &SandboxPolicy,
-) -> Result<SandboxDecision> {
+fn check_web_fetch(input: &serde_json::Value, policy: &SandboxPolicy) -> Result<SandboxDecision> {
     // Network policy gate (same as the catch-all for unknown tools).
     if policy.network == Access::Deny {
         return Ok(SandboxDecision::Deny {
@@ -566,7 +568,9 @@ mod tests {
             workspace: None,
             depth: 0,
             dangerous_no_sandbox: false,
-            taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
             activity: None,
             tool_use_id: None,
             subagent_events: None,

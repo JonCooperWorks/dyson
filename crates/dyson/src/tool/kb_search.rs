@@ -69,7 +69,9 @@ impl Tool for KbSearchTool {
             .collect();
 
         if filtered.is_empty() {
-            return Ok(ToolOutput::success("No results found in the knowledge base."));
+            return Ok(ToolOutput::success(
+                "No results found in the knowledge base.",
+            ));
         }
 
         let mut output = String::new();
@@ -100,8 +102,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_results_returns_message() {
-        let ws = InMemoryWorkspace::new()
-            .with_file("kb/raw/doc.md", "some content about rust");
+        let ws = InMemoryWorkspace::new().with_file("kb/raw/doc.md", "some content about rust");
         let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = KbSearchTool;
         let input = serde_json::json!({"query": "nonexistent_topic_xyz"});
@@ -126,8 +127,8 @@ mod tests {
 
     #[tokio::test]
     async fn scope_wiki_filters_correctly() {
-        let ws = InMemoryWorkspace::new()
-            .with_file("kb/wiki/article.md", "wiki content about testing");
+        let ws =
+            InMemoryWorkspace::new().with_file("kb/wiki/article.md", "wiki content about testing");
         let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = KbSearchTool;
         let input = serde_json::json!({"query": "testing", "scope": "wiki"});

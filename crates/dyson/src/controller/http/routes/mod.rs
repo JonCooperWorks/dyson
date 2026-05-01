@@ -80,7 +80,10 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     // `/api/auth/config` is intentionally unauthenticated: the SPA
     // calls it before it has a token to discover whether one is
     // required, and (for OIDC) where to start the auth code flow.
-    if matches!((&method, segs.as_slice()), (&Method::GET, ["api", "auth", "config"])) {
+    if matches!(
+        (&method, segs.as_slice()),
+        (&Method::GET, ["api", "auth", "config"])
+    ) {
         return get_auth_config(&state);
     }
 
@@ -93,7 +96,10 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     // ticket never appears in the URL or in any access log.  Mint
     // still requires the bearer in the Authorization header so the
     // rest of the auth chain stays the source of identity truth.
-    if matches!((&method, segs.as_slice()), (&Method::POST, ["api", "auth", "sse-ticket"])) {
+    if matches!(
+        (&method, segs.as_slice()),
+        (&Method::POST, ["api", "auth", "sse-ticket"])
+    ) {
         match state.auth.validate_request(req.headers()).await {
             Ok(info) => {
                 // Bind the ticket to the most specific identity the
@@ -102,11 +108,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
                 // scheme tag in `identity` (e.g. `bearer`).  The
                 // ticket consumer reuses this when the controller
                 // is locked to a single user via `allowed_identity`.
-                let identity = info
-                    .metadata
-                    .get("sub")
-                    .cloned()
-                    .unwrap_or(info.identity);
+                let identity = info.metadata.get("sub").cloned().unwrap_or(info.identity);
                 let ticket = state.mint_sse_ticket(&identity);
                 let mut resp = super::responses::json_ok(&serde_json::json!({
                     "expires_in": 30,
@@ -131,13 +133,15 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     // Authorization header on the SSE open.
     let is_events = segs.last() == Some(&"events") && segs.first() == Some(&"api");
     let mut ticket_authorized = false;
-    if is_events && method == Method::GET && !req.headers().contains_key("authorization")
+    if is_events
+        && method == Method::GET
+        && !req.headers().contains_key("authorization")
         && let Some(ticket) = extract_sse_ticket_cookie(req.headers())
-            && let Some(identity) = state.consume_sse_ticket(&ticket)
-        {
-            tracing::debug!(identity, "SSE ticket consumed (cookie)");
-            ticket_authorized = true;
-        }
+        && let Some(identity) = state.consume_sse_ticket(&ticket)
+    {
+        tracing::debug!(identity, "SSE ticket consumed (cookie)");
+        ticket_authorized = true;
+    }
 
     // DNS-rebinding gate.  Enabled only when the controller bound to
     // a loopback address with `DangerousNoAuth` — that pairing is the
@@ -175,10 +179,12 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     // credential.  SSE endpoints can't send headers from the browser,
     // so the SPA exchanges its bearer for a one-shot ticket above and
     // we skip the regular gate when it consumed.
-    if path.starts_with("/api/") && !ticket_authorized
-        && state.auth.validate_request(req.headers()).await.is_err() {
-            return unauthorized(&state);
-        }
+    if path.starts_with("/api/")
+        && !ticket_authorized
+        && state.auth.validate_request(req.headers()).await.is_err()
+    {
+        return unauthorized(&state);
+    }
 
     // CSRF gate: every state-changing `/api/*` request must carry the
     // `X-Dyson-CSRF` custom header.  Browsers can't set custom headers
@@ -211,26 +217,42 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
 
     match (&method, segs.as_slice()) {
         // ─── conversations ─────────────────────────────────────────────
-        (&Method::GET,    ["api", "conversations"])                 => conversations::list(&state).await,
-        (&Method::POST,   ["api", "conversations"])                 => conversations::create(req, &state).await,
-        (&Method::GET,    ["api", "conversations", id])             => conversations::get(&state, id).await,
-        (&Method::DELETE, ["api", "conversations", id])             => conversations::delete(&state, id).await,
-        (&Method::POST,   ["api", "conversations", id, "turn"])     => turns::post(req, Arc::clone(&state), id).await,
-        (&Method::POST,   ["api", "conversations", id, "cancel"])   => conversations::cancel(&state, id).await,
-        (&Method::GET,    ["api", "conversations", id, "events"])   => sse::events(&state, id, &req).await,
-        (&Method::GET,    ["api", "conversations", id, "feedback"]) => feedback::get(&state, id).await,
-        (&Method::POST,   ["api", "conversations", id, "feedback"]) => feedback::post(req, &state, id).await,
-        (&Method::GET,    ["api", "conversations", id, "artefacts"]) => artefacts::list(&state, id).await,
-        (&Method::GET,    ["api", "conversations", id, "export"])   => artefacts::export(&state, id).await,
+        (&Method::GET, ["api", "conversations"]) => conversations::list(&state).await,
+        (&Method::POST, ["api", "conversations"]) => conversations::create(req, &state).await,
+        (&Method::GET, ["api", "conversations", id]) => conversations::get(&state, id).await,
+        (&Method::DELETE, ["api", "conversations", id]) => conversations::delete(&state, id).await,
+        (&Method::POST, ["api", "conversations", id, "turn"]) => {
+            turns::post(req, Arc::clone(&state), id).await
+        }
+        (&Method::POST, ["api", "conversations", id, "cancel"]) => {
+            conversations::cancel(&state, id).await
+        }
+        (&Method::GET, ["api", "conversations", id, "events"]) => {
+            sse::events(&state, id, &req).await
+        }
+        (&Method::GET, ["api", "conversations", id, "feedback"]) => feedback::get(&state, id).await,
+        (&Method::POST, ["api", "conversations", id, "feedback"]) => {
+            feedback::post(req, &state, id).await
+        }
+        (&Method::GET, ["api", "conversations", id, "artefacts"]) => {
+            artefacts::list(&state, id).await
+        }
+        (&Method::GET, ["api", "conversations", id, "export"]) => {
+            artefacts::export(&state, id).await
+        }
 
         // ─── providers / model / mind / activity ───────────────────────
-        (&Method::GET,    ["api", "providers"])    => providers::list(&state),
-        (&Method::POST,   ["api", "model"])        => model::post(req, Arc::clone(&state)).await,
-        (&Method::GET,    ["api", "agent"])        => agent::get(&state).await,
-        (&Method::GET,    ["api", "mind"])         => mind::get(&state).await,
-        (&Method::GET,    ["api", "mind", "file"]) => mind::get_file(&state, req.uri().query().unwrap_or("")).await,
-        (&Method::POST,   ["api", "mind", "file"]) => mind::post_file(req, &state).await,
-        (&Method::GET,    ["api", "activity"])     => activity::get(&state, req.uri().query().unwrap_or("")),
+        (&Method::GET, ["api", "providers"]) => providers::list(&state),
+        (&Method::POST, ["api", "model"]) => model::post(req, Arc::clone(&state)).await,
+        (&Method::GET, ["api", "agent"]) => agent::get(&state).await,
+        (&Method::GET, ["api", "mind"]) => mind::get(&state).await,
+        (&Method::GET, ["api", "mind", "file"]) => {
+            mind::get_file(&state, req.uri().query().unwrap_or("")).await
+        }
+        (&Method::POST, ["api", "mind", "file"]) => mind::post_file(req, &state).await,
+        (&Method::GET, ["api", "activity"]) => {
+            activity::get(&state, req.uri().query().unwrap_or(""))
+        }
 
         // ─── admin (swarm runtime reconfigure) ────────────────────────
         // Lets dyson-orchestrator push the real SWARM_MODEL/TASK
@@ -238,11 +260,11 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         // freezes the dyson process's env at warmup time, so without
         // this every instance shows "warmup-placeholder" forever.
         // See routes/admin.rs.
-        (&Method::POST,   ["api", "admin", "configure"]) => admin::post(req, &state).await,
+        (&Method::POST, ["api", "admin", "configure"]) => admin::post(req, &state).await,
         // Diagnostic — returns the live skill / tool inventory so an
         // operator can verify which MCP servers actually loaded.
         // Same configure-secret auth as the POST sibling.
-        (&Method::GET,    ["api", "admin", "skills"])    => admin::get_skills(req, &state).await,
+        (&Method::GET, ["api", "admin", "skills"]) => admin::get_skills(req, &state).await,
 
         // ─── files & artefacts ─────────────────────────────────────────
         // Strict decode here — these ids feed `safe_store_id` which
@@ -345,14 +367,19 @@ mod tests {
         assert!(c.contains("SameSite=Strict"));
         assert!(c.contains("Path=/api/conversations"));
         assert!(c.contains("Max-Age=30"));
-        assert!(c.contains("Secure"), "TLS deployments must mark cookie Secure");
+        assert!(
+            c.contains("Secure"),
+            "TLS deployments must mark cookie Secure"
+        );
     }
 
     #[test]
     fn sse_ticket_cookie_omits_secure_when_tls_off() {
         let c = build_sse_ticket_cookie("abc123", false, 30);
-        assert!(!c.contains("Secure"),
-                "loopback/dev must not set Secure or browsers refuse to send the cookie");
+        assert!(
+            !c.contains("Secure"),
+            "loopback/dev must not set Secure or browsers refuse to send the cookie"
+        );
     }
 
     #[test]
@@ -360,7 +387,9 @@ mod tests {
         let mut h = hyper::HeaderMap::new();
         h.insert(
             hyper::header::COOKIE,
-            "session=xyz; dyson_sse=mytoken; theme=dark".parse().unwrap(),
+            "session=xyz; dyson_sse=mytoken; theme=dark"
+                .parse()
+                .unwrap(),
         );
         assert_eq!(extract_sse_ticket_cookie(&h).as_deref(), Some("mytoken"));
     }
@@ -383,7 +412,10 @@ mod tests {
     #[test]
     fn extract_sse_ticket_cookie_rejects_empty_value() {
         let mut h = hyper::HeaderMap::new();
-        h.insert(hyper::header::COOKIE, "dyson_sse=; other=1".parse().unwrap());
+        h.insert(
+            hyper::header::COOKIE,
+            "dyson_sse=; other=1".parse().unwrap(),
+        );
         assert!(extract_sse_ticket_cookie(&h).is_none());
     }
 
@@ -403,7 +435,10 @@ mod tests {
         }
         // /api root
         assert_eq!(segs("/api/conversations"), vec!["api", "conversations"]);
-        assert_eq!(segs("/api/conversations/c-1"), vec!["api", "conversations", "c-1"]);
+        assert_eq!(
+            segs("/api/conversations/c-1"),
+            vec!["api", "conversations", "c-1"]
+        );
         assert_eq!(
             segs("/api/conversations/c-1/turn"),
             vec!["api", "conversations", "c-1", "turn"],

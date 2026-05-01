@@ -5,9 +5,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::dependency_analysis::{
-    self, Dependency, OsvClient, ScanOptions, ScanReport, Severity,
-};
+use crate::dependency_analysis::{self, Dependency, OsvClient, ScanOptions, ScanReport, Severity};
 use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
@@ -66,7 +64,10 @@ impl Tool for DependencyScanTool {
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let parsed: Input = serde_json::from_value(input.clone())
             .map_err(|e| DysonError::tool("dependency_scan", format!("invalid input: {e}")))?;
-        let root = match ctx.resolve_path(&parsed.path) { Ok(p) => p, Err(e) => return Ok(e) };
+        let root = match ctx.resolve_path(&parsed.path) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
         let opts = ScanOptions {
             recursive: parsed.recursive,
             severity_min: parse_severity(parsed.severity_min.as_deref()),
@@ -78,8 +79,11 @@ impl Tool for DependencyScanTool {
         let out = match parsed.format.as_deref() {
             Some("json") => serde_json::to_string_pretty(&report)
                 .map_err(|e| DysonError::tool("dependency_scan", format!("json encode: {e}")))?,
-            Some("cyclonedx") => serde_json::to_string_pretty(&render_cyclonedx(&report))
-                .map_err(|e| DysonError::tool("dependency_scan", format!("cyclonedx encode: {e}")))?,
+            Some("cyclonedx") => {
+                serde_json::to_string_pretty(&render_cyclonedx(&report)).map_err(|e| {
+                    DysonError::tool("dependency_scan", format!("cyclonedx encode: {e}"))
+                })?
+            }
             _ => render_text(&report),
         };
         let view = build_sbom_view(&report);
@@ -417,12 +421,7 @@ mod tests {
         assert_eq!(vuln["id"], "GHSA-xxxx");
         assert_eq!(vuln["ratings"][0]["severity"], "high");
         assert_eq!(vuln["source"]["name"], "OSV");
-        assert!(
-            vuln["recommendation"]
-                .as_str()
-                .unwrap()
-                .contains("1.0.1")
-        );
+        assert!(vuln["recommendation"].as_str().unwrap().contains("1.0.1"));
         assert_eq!(
             vuln["references"][0]["url"],
             "https://example.invalid/advisory"

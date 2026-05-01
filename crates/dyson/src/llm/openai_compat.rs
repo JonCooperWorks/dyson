@@ -17,10 +17,12 @@ use async_trait::async_trait;
 
 use crate::auth::Auth;
 use crate::error::Result;
-use crate::llm::dialects::{deepseek, text_tool_handler_for_model, TextToolExtractorStream};
-use crate::llm::openai::{message_to_openai, OpenAiClient};
+use crate::llm::dialects::{TextToolExtractorStream, deepseek, text_tool_handler_for_model};
+use crate::llm::openai::{OpenAiClient, message_to_openai};
 use crate::llm::sse_parser::BaseSseParser;
-use crate::llm::{concat_system_prompt, CompletionConfig, LlmClient, StreamResponse, ToolDefinition};
+use crate::llm::{
+    CompletionConfig, LlmClient, StreamResponse, ToolDefinition, concat_system_prompt,
+};
 use crate::message::Message;
 
 // ---------------------------------------------------------------------------

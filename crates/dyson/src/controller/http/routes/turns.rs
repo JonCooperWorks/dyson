@@ -35,7 +35,9 @@ pub(super) async fn post(
         && let Some(len) = cl.to_str().ok().and_then(|s| s.parse::<usize>().ok())
         && len > MAX_TURN_BODY
     {
-        return bad_request(&format!("request body too large ({len} bytes; max {MAX_TURN_BODY})"));
+        return bad_request(&format!(
+            "request body too large ({len} bytes; max {MAX_TURN_BODY})"
+        ));
     }
     let body: TurnBody = match read_json_capped(req, MAX_TURN_BODY).await {
         Ok(b) => b,
@@ -53,8 +55,12 @@ pub(super) async fn post(
                 mime_type: a.mime_type.clone(),
                 file_name: a.name.clone(),
             }),
-            Err(e) => return bad_request(&format!("attachment '{}' base64 decode failed: {e}",
-                a.name.as_deref().unwrap_or("<unnamed>"))),
+            Err(e) => {
+                return bad_request(&format!(
+                    "attachment '{}' base64 decode failed: {e}",
+                    a.name.as_deref().unwrap_or("<unnamed>")
+                ));
+            }
         }
     }
 
@@ -105,10 +111,7 @@ pub(super) async fn post(
         return json_ok(&serde_json::json!({ "ok": true, "cleared": true }));
     }
 
-    if handle
-        .busy
-        .swap(true, std::sync::atomic::Ordering::SeqCst)
-    {
+    if handle.busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
         // Already running a turn for this chat — try to enqueue the
         // new POST instead of rejecting it.  When the in-flight turn
         // ends, the spawned task drains the queue and runs one more
@@ -128,9 +131,9 @@ pub(super) async fn post(
                 .collect(),
         };
         return match handle.enqueue_turn(queued).await {
-            super::super::state::EnqueueResult::Queued { position } => json_ok(
-                &serde_json::json!({"ok": true, "queued": true, "position": position}),
-            ),
+            super::super::state::EnqueueResult::Queued { position } => {
+                json_ok(&serde_json::json!({"ok": true, "queued": true, "position": position}))
+            }
             super::super::state::EnqueueResult::Full => Response::builder()
                 .status(StatusCode::CONFLICT)
                 .header("Content-Type", "application/json")
@@ -207,7 +210,16 @@ pub(super) async fn post(
         };
         if guard.is_none() {
             tracing::info!(chat_id = %chat_id, "TURN_WORKER: agent is None — calling build_agent");
-            match build_agent(&settings, None, AgentMode::Private, client.clone(), &registry, None).await {
+            match build_agent(
+                &settings,
+                None,
+                AgentMode::Private,
+                client.clone(),
+                &registry,
+                None,
+            )
+            .await
+            {
                 Ok(mut a) => {
                     tracing::info!(chat_id = %chat_id, "TURN_WORKER: build_agent OK");
                     if let Some(h) = history.as_ref() {
@@ -228,16 +240,15 @@ pub(super) async fn post(
                     // subsequent turn 401'd against the warmup default.
                     // Mirrors what `check_and_reload_agent` does for the
                     // terminal controller.
-                    let workspace_path = crate::workspace::FilesystemWorkspace::resolve_path(
-                        Some(settings.workspace.connection_string.expose()),
-                    );
+                    let workspace_path = crate::workspace::FilesystemWorkspace::resolve_path(Some(
+                        settings.workspace.connection_string.expose(),
+                    ));
                     let config_path = crate::controller::resolve_config_path_for_runtime(None);
-                    *chat_handle.reloader.lock().await = Some(
-                        crate::config::hot_reload::HotReloader::new(
+                    *chat_handle.reloader.lock().await =
+                        Some(crate::config::hot_reload::HotReloader::new(
                             config_path.as_deref(),
                             workspace_path.as_deref(),
-                        ),
-                    );
+                        ));
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, chat_id = %chat_id, "agent build failed");
@@ -282,7 +293,16 @@ pub(super) async fn post(
                     .as_ref()
                     .map(|a| a.messages().to_vec())
                     .unwrap_or_default();
-                match build_agent(&settings, None, AgentMode::Private, client.clone(), &registry, None).await {
+                match build_agent(
+                    &settings,
+                    None,
+                    AgentMode::Private,
+                    client.clone(),
+                    &registry,
+                    None,
+                )
+                .await
+                {
                     Ok(mut a) => {
                         a.set_messages(messages);
                         *guard = Some(a);
@@ -398,9 +418,10 @@ pub(super) async fn post(
             // Persist the conversation to disk after every (sub-)turn.
             // Canonical save point — controllers/telegram does the same.
             if let Some(h) = history.as_ref()
-                && let Err(e) = h.save(&chat_id, agent.messages()) {
-                    tracing::warn!(error = %e, chat_id = %chat_id, "failed to save chat history");
-                }
+                && let Err(e) = h.save(&chat_id, agent.messages())
+            {
+                tracing::warn!(error = %e, chat_id = %chat_id, "failed to save chat history");
+            }
 
             chat_handle.emit(SseEvent::Done);
             // Wipe the per-turn replay ring before either looping or
@@ -463,7 +484,9 @@ pub(crate) fn coalesce_queued(
                     mime_type: a.mime_type.clone(),
                     file_name: a.name.clone(),
                 }),
-                Err(e) => tracing::warn!(error = %e, name = ?a.name, "queued attachment had malformed base64; skipping"),
+                Err(e) => {
+                    tracing::warn!(error = %e, name = ?a.name, "queued attachment had malformed base64; skipping")
+                }
             }
         }
     }
@@ -485,8 +508,8 @@ pub(crate) fn coalesce_queued(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::state::{QueuedAttachment, QueuedTurn};
+    use super::*;
 
     #[test]
     fn coalesce_single_turn_passes_through() {
@@ -501,9 +524,18 @@ mod tests {
     #[test]
     fn coalesce_multi_turn_numbers_with_preamble() {
         let (prompt, _) = coalesce_queued(vec![
-            QueuedTurn { prompt: "first".into(), attachments: vec![] },
-            QueuedTurn { prompt: "second".into(), attachments: vec![] },
-            QueuedTurn { prompt: "third".into(), attachments: vec![] },
+            QueuedTurn {
+                prompt: "first".into(),
+                attachments: vec![],
+            },
+            QueuedTurn {
+                prompt: "second".into(),
+                attachments: vec![],
+            },
+            QueuedTurn {
+                prompt: "third".into(),
+                attachments: vec![],
+            },
         ]);
         assert!(prompt.starts_with("I sent 3 more messages while you were working:"));
         assert!(prompt.contains("1. first"));
@@ -550,7 +582,10 @@ mod tests {
                 data_base64: "not!!!base64".into(),
             }],
         }]);
-        assert!(atts.is_empty(), "malformed attachment must be skipped, not panic");
+        assert!(
+            atts.is_empty(),
+            "malformed attachment must be skipped, not panic"
+        );
     }
 
     /// Regression for the chat-stuck-on-warmup-placeholder bug.
@@ -574,10 +609,7 @@ mod tests {
         let cfg = dir.path().join("dyson.json");
         std::fs::write(&cfg, r#"{"agent":{}}"#).expect("seed config");
 
-        let mut reloader = crate::config::hot_reload::HotReloader::new(
-            Some(&cfg),
-            None,
-        );
+        let mut reloader = crate::config::hot_reload::HotReloader::new(Some(&cfg), None);
 
         let (changed, _) = reloader.check().await.expect("check");
         assert!(!changed, "fresh reloader must not falsely report change");

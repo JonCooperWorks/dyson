@@ -70,10 +70,7 @@ mod tests {
             headers.get("authorization").unwrap().to_str().unwrap(),
             "Bearer my-token"
         );
-        assert_eq!(
-            headers.get("x-custom").unwrap().to_str().unwrap(),
-            "val"
-        );
+        assert_eq!(headers.get("x-custom").unwrap().to_str().unwrap(), "val");
     }
 
     #[tokio::test]

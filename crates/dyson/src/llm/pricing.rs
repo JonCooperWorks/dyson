@@ -39,7 +39,10 @@ pub struct ModelPricing {
 impl ModelPricing {
     /// Construct a pricing record from rate-card values.
     pub const fn new(input_per_mtok: f64, output_per_mtok: f64) -> Self {
-        Self { input_per_mtok, output_per_mtok }
+        Self {
+            input_per_mtok,
+            output_per_mtok,
+        }
     }
 
     /// Compute the total USD cost for a given (input, output) token pair.
@@ -80,9 +83,7 @@ pub fn lookup(provider: &LlmProvider, model: &str) -> Option<ModelPricing> {
     }
     let mut best: Option<(&str, ModelPricing)> = None;
     for (name, pricing) in table {
-        if key.starts_with(name)
-            && best.is_none_or(|(b, _)| name.len() > b.len())
-        {
+        if key.starts_with(name) && best.is_none_or(|(b, _)| name.len() > b.len()) {
             best = Some((name, *pricing));
         }
     }
@@ -111,31 +112,31 @@ fn normalize(model: &str) -> String {
 
 const ANTHROPIC: &[(&str, ModelPricing)] = &[
     // Claude 4.x family — current flagship line.
-    ("claude-opus-4-7",     ModelPricing::new(15.00, 75.00)),
-    ("claude-opus-4-6",     ModelPricing::new(15.00, 75.00)),
-    ("claude-opus-4",       ModelPricing::new(15.00, 75.00)),
-    ("claude-sonnet-4-6",   ModelPricing::new( 3.00, 15.00)),
-    ("claude-sonnet-4",     ModelPricing::new( 3.00, 15.00)),
-    ("claude-haiku-4-5",    ModelPricing::new( 1.00,  5.00)),
-    ("claude-haiku-4",      ModelPricing::new( 1.00,  5.00)),
+    ("claude-opus-4-7", ModelPricing::new(15.00, 75.00)),
+    ("claude-opus-4-6", ModelPricing::new(15.00, 75.00)),
+    ("claude-opus-4", ModelPricing::new(15.00, 75.00)),
+    ("claude-sonnet-4-6", ModelPricing::new(3.00, 15.00)),
+    ("claude-sonnet-4", ModelPricing::new(3.00, 15.00)),
+    ("claude-haiku-4-5", ModelPricing::new(1.00, 5.00)),
+    ("claude-haiku-4", ModelPricing::new(1.00, 5.00)),
     // Claude 3.x fall-through for older configs.
-    ("claude-3-5-sonnet",   ModelPricing::new( 3.00, 15.00)),
-    ("claude-3-5-haiku",    ModelPricing::new( 0.80,  4.00)),
-    ("claude-3-opus",       ModelPricing::new(15.00, 75.00)),
-    ("claude-3-haiku",      ModelPricing::new( 0.25,  1.25)),
+    ("claude-3-5-sonnet", ModelPricing::new(3.00, 15.00)),
+    ("claude-3-5-haiku", ModelPricing::new(0.80, 4.00)),
+    ("claude-3-opus", ModelPricing::new(15.00, 75.00)),
+    ("claude-3-haiku", ModelPricing::new(0.25, 1.25)),
 ];
 
 const OPENAI: &[(&str, ModelPricing)] = &[
-    ("gpt-4o",              ModelPricing::new( 2.50, 10.00)),
-    ("gpt-4o-mini",         ModelPricing::new( 0.15,  0.60)),
-    ("gpt-4.1",             ModelPricing::new( 2.00,  8.00)),
-    ("gpt-4.1-mini",        ModelPricing::new( 0.40,  1.60)),
-    ("gpt-4.1-nano",        ModelPricing::new( 0.10,  0.40)),
-    ("o1",                  ModelPricing::new(15.00, 60.00)),
-    ("o1-mini",             ModelPricing::new( 3.00, 12.00)),
-    ("o3",                  ModelPricing::new( 2.00,  8.00)),
-    ("o3-mini",             ModelPricing::new( 1.10,  4.40)),
-    ("o4-mini",             ModelPricing::new( 1.10,  4.40)),
+    ("gpt-4o", ModelPricing::new(2.50, 10.00)),
+    ("gpt-4o-mini", ModelPricing::new(0.15, 0.60)),
+    ("gpt-4.1", ModelPricing::new(2.00, 8.00)),
+    ("gpt-4.1-mini", ModelPricing::new(0.40, 1.60)),
+    ("gpt-4.1-nano", ModelPricing::new(0.10, 0.40)),
+    ("o1", ModelPricing::new(15.00, 60.00)),
+    ("o1-mini", ModelPricing::new(3.00, 12.00)),
+    ("o3", ModelPricing::new(2.00, 8.00)),
+    ("o3-mini", ModelPricing::new(1.10, 4.40)),
+    ("o4-mini", ModelPricing::new(1.10, 4.40)),
 ];
 
 // OpenRouter proxies many underlying providers; model identifiers include
@@ -143,13 +144,16 @@ const OPENAI: &[(&str, ModelPricing)] = &[
 // we actually use against OpenRouter in the smoke examples.  Unknown IDs
 // fall through to None.
 const OPENROUTER: &[(&str, ModelPricing)] = &[
-    ("anthropic/claude-opus-4-7",   ModelPricing::new(15.00, 75.00)),
-    ("anthropic/claude-sonnet-4-6", ModelPricing::new( 3.00, 15.00)),
-    ("anthropic/claude-haiku-4-5",  ModelPricing::new( 1.00,  5.00)),
-    ("openai/gpt-4o",               ModelPricing::new( 2.50, 10.00)),
-    ("openai/gpt-4o-mini",          ModelPricing::new( 0.15,  0.60)),
-    ("google/gemini-2.5-pro",       ModelPricing::new( 1.25, 10.00)),
-    ("qwen/qwen-2.5-72b-instruct",  ModelPricing::new( 0.35,  0.40)),
+    ("anthropic/claude-opus-4-7", ModelPricing::new(15.00, 75.00)),
+    (
+        "anthropic/claude-sonnet-4-6",
+        ModelPricing::new(3.00, 15.00),
+    ),
+    ("anthropic/claude-haiku-4-5", ModelPricing::new(1.00, 5.00)),
+    ("openai/gpt-4o", ModelPricing::new(2.50, 10.00)),
+    ("openai/gpt-4o-mini", ModelPricing::new(0.15, 0.60)),
+    ("google/gemini-2.5-pro", ModelPricing::new(1.25, 10.00)),
+    ("qwen/qwen-2.5-72b-instruct", ModelPricing::new(0.35, 0.40)),
 ];
 
 #[cfg(test)]

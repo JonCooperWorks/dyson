@@ -322,7 +322,8 @@ pub fn strip_bot_mention(text: &str, bot_username: &str) -> String {
     if let Some(at) = text.find('@')
         && text.starts_with('/')
     {
-        let after = text[at..].find(' ')
+        let after = text[at..]
+            .find(' ')
             .map(|sp| &text[at + sp..])
             .unwrap_or("");
         return format!("{}{}", &text[..at], after);
@@ -362,7 +363,7 @@ pub fn is_public_command(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{classify_llm_error, LlmErrorKind};
+    use crate::error::{LlmErrorKind, classify_llm_error};
 
     #[test]
     fn plain_text_passthrough() {
@@ -568,9 +569,18 @@ mod tests {
 
     #[test]
     fn classify_unrelated_errors() {
-        assert!(matches!(classify_llm_error("rate limit exceeded"), LlmErrorKind::Other));
-        assert!(matches!(classify_llm_error("invalid API key"), LlmErrorKind::Other));
-        assert!(matches!(classify_llm_error("context length exceeded"), LlmErrorKind::Other));
+        assert!(matches!(
+            classify_llm_error("rate limit exceeded"),
+            LlmErrorKind::Other
+        ));
+        assert!(matches!(
+            classify_llm_error("invalid API key"),
+            LlmErrorKind::Other
+        ));
+        assert!(matches!(
+            classify_llm_error("context length exceeded"),
+            LlmErrorKind::Other
+        ));
     }
 
     #[test]
@@ -585,7 +595,10 @@ mod tests {
 
     #[test]
     fn strip_bot_mention_with_botname_and_args() {
-        assert_eq!(strip_bot_mention("/logs@dysonbot 10", "dysonbot"), "/logs 10");
+        assert_eq!(
+            strip_bot_mention("/logs@dysonbot 10", "dysonbot"),
+            "/logs 10"
+        );
     }
 
     #[test]
@@ -639,18 +652,12 @@ mod tests {
 
     #[test]
     fn strip_bot_mention_case_insensitive() {
-        assert_eq!(
-            strip_bot_mention("@DysonBot hello", "dysonbot"),
-            "hello"
-        );
+        assert_eq!(strip_bot_mention("@DysonBot hello", "dysonbot"), "hello");
     }
 
     #[test]
     fn strip_bot_mention_no_username() {
-        assert_eq!(
-            strip_bot_mention("@dysonbot hello", ""),
-            "@dysonbot hello"
-        );
+        assert_eq!(strip_bot_mention("@dysonbot hello", ""), "@dysonbot hello");
     }
 
     #[test]
@@ -710,6 +717,9 @@ mod tests {
         let html = markdown_to_telegram_html("---");
         let parts = split_for_telegram(&html);
         assert_eq!(parts.len(), 1);
-        assert!(parts[0].is_empty(), "part should be empty after HR conversion");
+        assert!(
+            parts[0].is_empty(),
+            "part should be empty after HR conversion"
+        );
     }
 }

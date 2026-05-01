@@ -239,14 +239,11 @@ async fn connection_limit_rejects_excess() {
         // Read response — should be empty or connection reset.
         use tokio::io::AsyncReadExt;
         let mut buf = vec![0u8; 1024];
-        let n = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            stream.read(&mut buf),
-        )
-        .await;
+        let n = tokio::time::timeout(std::time::Duration::from_millis(500), stream.read(&mut buf))
+            .await;
 
         match n {
-            Ok(Ok(0)) => {} // Connection closed — expected.
+            Ok(Ok(0)) => {}  // Connection closed — expected.
             Ok(Err(_)) => {} // Connection reset — also expected.
             Err(_) => {}     // Timeout — server dropped the connection.
             Ok(Ok(_)) => {

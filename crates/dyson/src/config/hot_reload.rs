@@ -242,9 +242,7 @@ impl HotReloader {
 
         // Only reload settings when the config file itself changed.
         let mut new_settings = None;
-        if config_changed
-            && let Some(ref config_path) = self.config_path
-        {
+        if config_changed && let Some(ref config_path) = self.config_path {
             match crate::config::loader::load_settings(Some(config_path)) {
                 Ok(s) => new_settings = Some(s),
                 Err(e) => {

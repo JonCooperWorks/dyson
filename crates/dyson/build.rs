@@ -49,9 +49,7 @@ fn main() {
         ensure_node_modules(&web);
         run_npm_build(&web);
     } else {
-        println!(
-            "cargo:warning=dyson: frontend dist/ is up to date, skipping vite build"
-        );
+        println!("cargo:warning=dyson: frontend dist/ is up to date, skipping vite build");
     }
 
     generate_asset_table(&dist, &out_dir.join("web_assets.rs"));
@@ -94,7 +92,12 @@ fn needs_rebuild(web: &Path, dist: &Path) -> bool {
 
 fn inputs_newest_mtime(web: &Path) -> Option<SystemTime> {
     let mut newest = None;
-    for rel in ["index.html", "package.json", "package-lock.json", "vite.config.js"] {
+    for rel in [
+        "index.html",
+        "package.json",
+        "package-lock.json",
+        "vite.config.js",
+    ] {
         if let Ok(m) = fs::metadata(web.join(rel)).and_then(|m| m.modified()) {
             newest = Some(newest.map_or(m, |n: SystemTime| n.max(m)));
         }
@@ -126,7 +129,9 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     }
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
         for e in entries.flatten() {
             let path = e.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -148,7 +153,11 @@ fn walk(root: &Path) -> Vec<PathBuf> {
 }
 
 fn ensure_npm_available() {
-    let ok = Command::new("npm").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    let ok = Command::new("npm")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     if !ok {
         panic!(
             "npm is required to build the dyson frontend.  Install Node.js 20+ \
@@ -166,7 +175,9 @@ fn ensure_node_modules(web: &Path) {
     let lock = web.join("package-lock.json");
     let hash = fs::read(&lock).map(hash_bytes).unwrap_or(0);
 
-    let existing = fs::read_to_string(&stamp).ok().and_then(|s| s.trim().parse::<u64>().ok());
+    let existing = fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
     if existing == Some(hash) && web.join("node_modules").exists() {
         return;
     }

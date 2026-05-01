@@ -213,8 +213,12 @@ pub fn trace(
         // Same-frame sink reachability: propagate assignments up to sink_line,
         // then check overlap.  Only run when we're actually in the sink's fn.
         if sink_fn == Some(frame.fn_id) {
-            let running = propagate_until(&frame.tainted, local_assigns, index, |a| a.line < sink_line);
-            if sink_identifiers.iter().any(|s| path_is_tainted(s, &running)) {
+            let running =
+                propagate_until(&frame.tainted, local_assigns, index, |a| a.line < sink_line);
+            if sink_identifiers
+                .iter()
+                .any(|s| path_is_tainted(s, &running))
+            {
                 let mut hops = frame.hops.clone();
                 hops.push(Hop {
                     file: sink_rel.clone(),
@@ -261,7 +265,11 @@ pub fn trace(
                 continue;
             }
 
-            let candidates = index.by_name.get(&cs.callee).map(Vec::as_slice).unwrap_or(&[]);
+            let candidates = index
+                .by_name
+                .get(&cs.callee)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             if candidates.is_empty() {
                 // Unresolved callee — annotate but don't extend path.
                 let mut hops = frame.hops.clone();
@@ -282,7 +290,8 @@ pub fn trace(
 
             let ambiguous = candidates.len() > 1;
             for &cand in candidates {
-                let (new_tainted, imprecise) = bind_args(&index.fn_defs[cand].params, &tainted_args);
+                let (new_tainted, imprecise) =
+                    bind_args(&index.fn_defs[cand].params, &tainted_args);
                 let kind = if imprecise {
                     HopKind::ImpreciseBinding
                 } else if ambiguous {
@@ -304,7 +313,11 @@ pub fn trace(
                     byte_range: cs.byte_range.clone(),
                     detail,
                     kind,
-                    ambiguous_candidates: if ambiguous { candidates.to_vec() } else { Vec::new() },
+                    ambiguous_candidates: if ambiguous {
+                        candidates.to_vec()
+                    } else {
+                        Vec::new()
+                    },
                 });
 
                 if new_hops.len() > opts.max_depth + 1 {
@@ -345,11 +358,19 @@ pub fn trace(
 // ---------------------------------------------------------------------------
 
 fn calls_for(index: &SymbolIndex, fn_id: FnId) -> &[usize] {
-    index.calls_by_fn.get(&fn_id).map(Vec::as_slice).unwrap_or(&[])
+    index
+        .calls_by_fn
+        .get(&fn_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
 }
 
 fn assigns_for(index: &SymbolIndex, fn_id: FnId) -> &[usize] {
-    index.assigns_by_fn.get(&fn_id).map(Vec::as_slice).unwrap_or(&[])
+    index
+        .assigns_by_fn
+        .get(&fn_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
 }
 
 fn apply_assignment(running: &mut BTreeSet<String>, a: &super::types::Assignment) {
@@ -373,7 +394,9 @@ fn path_is_tainted(path: &str, tainted: &BTreeSet<String>) -> bool {
     if tainted.contains(path) {
         return true;
     }
-    tainted.iter().any(|t| is_dotted_prefix(path, t) || is_dotted_prefix(t, path))
+    tainted
+        .iter()
+        .any(|t| is_dotted_prefix(path, t) || is_dotted_prefix(t, path))
 }
 
 /// Whether `prefix` is a dotted-path prefix of `path`.  Requires that
@@ -407,7 +430,11 @@ fn tainted_arg_positions(arg_idents: &[Vec<String>], running: &BTreeSet<String>)
     arg_idents
         .iter()
         .enumerate()
-        .filter_map(|(i, args)| args.iter().any(|id| path_is_tainted(id, running)).then_some(i))
+        .filter_map(|(i, args)| {
+            args.iter()
+                .any(|id| path_is_tainted(id, running))
+                .then_some(i)
+        })
         .collect()
 }
 
@@ -431,8 +458,16 @@ fn render_param_binding(bound: &BTreeSet<String>) -> String {
     if bound.is_empty() {
         return "no param binding".into();
     }
-    let joined = bound.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
-    format!("param{} {}", if bound.len() == 1 { "" } else { "s" }, joined)
+    let joined = bound
+        .iter()
+        .map(|p| format!("`{p}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "param{} {}",
+        if bound.len() == 1 { "" } else { "s" },
+        joined
+    )
 }
 
 fn render_tainted_args(arg_idents: &[Vec<String>], tainted_positions: &[usize]) -> String {
@@ -440,7 +475,11 @@ fn render_tainted_args(arg_idents: &[Vec<String>], tainted_positions: &[usize]) 
         .iter()
         .enumerate()
         .map(|(i, args)| {
-            let joined = if args.is_empty() { "_".into() } else { args.join("+") };
+            let joined = if args.is_empty() {
+                "_".into()
+            } else {
+                args.join("+")
+            };
             if tainted_positions.contains(&i) {
                 format!("[{joined}]")
             } else {
@@ -592,7 +631,9 @@ fn extract_source_taint(
         return fn_params.iter().cloned().collect();
     }
 
-    let node = enclosing_fn.descendant_for_byte_range(byte, byte).unwrap_or(enclosing_fn);
+    let node = enclosing_fn
+        .descendant_for_byte_range(byte, byte)
+        .unwrap_or(enclosing_fn);
     let stmt = climb_to_statement(node);
     let mut collected = Vec::new();
     // Prefer the RHS of a declaration so the LHS receiver isn't itself a taint source.

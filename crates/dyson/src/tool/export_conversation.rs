@@ -15,9 +15,9 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::feedback::FeedbackStore;
 use crate::error::DysonError;
 use crate::export::sharegpt;
+use crate::feedback::FeedbackStore;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 pub struct ExportConversationTool;
@@ -140,12 +140,8 @@ impl Tool for ExportConversationTool {
             None
         };
 
-        let conversation = sharegpt::to_sharegpt_with_feedback(
-            &messages,
-            system_prompt.as_deref(),
-            id,
-            &feedback,
-        );
+        let conversation =
+            sharegpt::to_sharegpt_with_feedback(&messages, system_prompt.as_deref(), id, &feedback);
 
         let feedback_count = feedback.len();
         let conversations = vec![conversation];
@@ -268,9 +264,9 @@ mod tests {
             depth: 0,
             dangerous_no_sandbox: false,
             taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
+            activity: None,
+            tool_use_id: None,
+            subagent_events: None,
         };
 
         (ctx, tmp)
@@ -368,9 +364,9 @@ mod tests {
             depth: 0,
             dangerous_no_sandbox: false,
             taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        activity: None,
-        tool_use_id: None,
-        subagent_events: None,
+            activity: None,
+            tool_use_id: None,
+            subagent_events: None,
         };
 
         let tool = ExportConversationTool;

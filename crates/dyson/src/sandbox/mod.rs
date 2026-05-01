@@ -232,8 +232,7 @@ pub fn create_sandbox(
         }
     }
 
-    let working_dir =
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+    let working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
 
     tracing::info!(
         tool_policies = config.tool_policies.len(),

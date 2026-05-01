@@ -126,12 +126,9 @@ impl Tool for TaintTraceTool {
         let index = match index {
             Some(idx) if !taint::is_stale(&idx, &ctx.working_dir) => idx,
             _ => {
-                let fresh =
-                    taint::build_index(config, &ctx.working_dir)
-                        .await
-                        .map_err(|e| {
-                            DysonError::tool("taint_trace", format!("index build: {e}"))
-                        })?;
+                let fresh = taint::build_index(config, &ctx.working_dir)
+                    .await
+                    .map_err(|e| DysonError::tool("taint_trace", format!("index build: {e}")))?;
                 let arc = Arc::new(fresh);
                 let mut guard = ctx.taint_indexes.write().await;
                 guard.insert(config.display_name, Arc::clone(&arc));
@@ -540,16 +537,8 @@ mod tests {
             "def handler(req):\n    apply(req)\n",
         )
         .unwrap();
-        std::fs::write(
-            tmp.path().join("m1.py"),
-            "def apply(x):\n    return x\n",
-        )
-        .unwrap();
-        std::fs::write(
-            tmp.path().join("m2.py"),
-            "def apply(y):\n    return y\n",
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("m1.py"), "def apply(x):\n    return x\n").unwrap();
+        std::fs::write(tmp.path().join("m2.py"), "def apply(y):\n    return y\n").unwrap();
 
         let ctx = ToolContext::for_test(tmp.path());
         let tool = TaintTraceTool;

@@ -83,8 +83,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_results_returns_message() {
-        let ws = InMemoryWorkspace::new()
-            .with_file("memory/notes/test.md", "some memory content");
+        let ws = InMemoryWorkspace::new().with_file("memory/notes/test.md", "some memory content");
         let ctx = ToolContext::for_test_with_workspace(ws);
         let tool = MemorySearchTool;
         let input = serde_json::json!({"query": "nonexistent_xyz"});

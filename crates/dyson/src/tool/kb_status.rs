@@ -33,7 +33,11 @@ impl Tool for KbStatusTool {
         })
     }
 
-    async fn run(&self, _input: &serde_json::Value, ctx: &ToolContext) -> crate::Result<ToolOutput> {
+    async fn run(
+        &self,
+        _input: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> crate::Result<ToolOutput> {
         let ws = ctx.workspace("kb_status")?;
 
         // Collect data under the lock, then format outside it.
@@ -81,7 +85,11 @@ impl Tool for KbStatusTool {
         writeln!(
             &mut output,
             "- **INDEX.md:** {}",
-            if has_index { "present" } else { "not yet created" }
+            if has_index {
+                "present"
+            } else {
+                "not yet created"
+            }
         )
         .unwrap();
 

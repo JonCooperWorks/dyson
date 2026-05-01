@@ -254,9 +254,7 @@ fn build_query(dep: &Dependency) -> QueryOne {
     // available (SBOMs always ship them).
     if let Some(purl) = &dep.purl {
         return QueryOne::WithPurl {
-            package: PackagePurl {
-                purl: purl.clone(),
-            },
+            package: PackagePurl { purl: purl.clone() },
         };
     }
     QueryOne::WithPackage {

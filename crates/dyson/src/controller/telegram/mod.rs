@@ -195,9 +195,9 @@ struct DownloadLimits {
 impl Default for DownloadLimits {
     fn default() -> Self {
         Self {
-            image_max_bytes: 50 * 1024 * 1024,    // 50 MB
+            image_max_bytes: 50 * 1024 * 1024,     // 50 MB
             audio_max_bytes: 50 * 1024 * 1024,     // 50 MB
-            document_max_bytes: 200 * 1024 * 1024,  // 200 MB
+            document_max_bytes: 200 * 1024 * 1024, // 200 MB
             text_max_bytes: 1024 * 1024,           // 1 MiB
         }
     }
@@ -393,19 +393,20 @@ impl super::Controller for TelegramController {
             // broadcaster sends again.  Registry + config-file
             // reload already happened centrally before this fires.
             if let Some(rx) = settings_rx.as_mut()
-                && rx.has_changed().unwrap_or(false) {
-                    let fresh = rx.borrow_and_update().clone();
-                    current_settings = (*fresh).clone();
-                    rebuild_agents_on_reload(
-                        &agents,
-                        &current_settings,
-                        controller_prompt.as_deref(),
-                        &chat_store,
-                        &feedback_dir,
-                        registry,
-                    )
-                    .await;
-                }
+                && rx.has_changed().unwrap_or(false)
+            {
+                let fresh = rx.borrow_and_update().clone();
+                current_settings = (*fresh).clone();
+                rebuild_agents_on_reload(
+                    &agents,
+                    &current_settings,
+                    controller_prompt.as_deref(),
+                    &chat_store,
+                    &feedback_dir,
+                    registry,
+                )
+                .await;
+            }
 
             // Poll for updates with a timeout, racing against Ctrl-C.
             let updates = tokio::select! {
@@ -554,18 +555,22 @@ impl super::Controller for TelegramController {
                 }
 
                 if let Some(handled) = handle_instant_command(
-                    &bot, &text, chat_id, &current_settings,
-                    registry, &bg_registry, &agents, &chat_store,
-                ).await
+                    &bot,
+                    &text,
+                    chat_id,
+                    &current_settings,
+                    registry,
+                    &bg_registry,
+                    &agents,
+                    &chat_store,
+                )
+                .await
                     && handled
                 {
                     continue;
                 }
 
-                if text == "/clear"
-                    || text == "/compact"
-                    || text.starts_with("/model ")
-                {
+                if text == "/clear" || text == "/compact" || text.starts_with("/model ") {
                     let chat_cx = ChatContext {
                         settings: &current_settings,
                         controller_prompt: controller_prompt.as_deref(),
@@ -573,20 +578,14 @@ impl super::Controller for TelegramController {
                         feedback_dir: &feedback_dir,
                         registry,
                     };
-                    let entry = match get_or_create_entry(
-                        &agents,
-                        chat_id.0,
-                        is_group,
-                        &chat_cx,
-                    )
-                    .await
-                    {
-                        Ok(e) => e,
-                        Err(e) => {
-                            let _ = bot.send_message(chat_id, &format!("Error: {e}")).await;
-                            continue;
-                        }
-                    };
+                    let entry =
+                        match get_or_create_entry(&agents, chat_id.0, is_group, &chat_cx).await {
+                            Ok(e) => e,
+                            Err(e) => {
+                                let _ = bot.send_message(chat_id, &format!("Error: {e}")).await;
+                                continue;
+                            }
+                        };
                     handle_per_chat_command(
                         &bot,
                         &text,
@@ -610,13 +609,7 @@ impl super::Controller for TelegramController {
                     feedback_dir: &feedback_dir,
                     registry,
                 };
-                let entry = match get_or_create_entry(
-                    &agents,
-                    chat_id.0,
-                    is_group,
-                    &chat_cx,
-                )
-                .await
+                let entry = match get_or_create_entry(&agents, chat_id.0, is_group, &chat_cx).await
                 {
                     Ok(e) => e,
                     Err(e) => {
@@ -682,7 +675,12 @@ async fn rebuild_agents_on_reload(
         let ca = entry.agent.lock().await;
         let provider_name = ca.provider_name.clone();
         let model = ca.model.clone();
-        let messages = ca.agent.as_ref().expect("agent not available").messages().to_vec();
+        let messages = ca
+            .agent
+            .as_ref()
+            .expect("agent not available")
+            .messages()
+            .to_vec();
         let is_group = entry.is_group;
         drop(ca);
 
@@ -696,31 +694,39 @@ async fn rebuild_agents_on_reload(
             super::AgentMode::Private
         };
         let channel_id_str = chat_id.to_string();
-        let ch = if is_group { Some(channel_id_str.as_str()) } else { None };
-        let agent_result = super::build_agent(settings, controller_prompt, mode, default_client, registry, ch)
-            .await
-            .map(|mut a| {
-                a.set_messages(messages.clone());
-                // If this private agent was using a non-default provider, swap
-                // to the correct client from the registry.
-                if !is_group
-                    && let Some(pc) = settings.providers.get(&provider_name)
-                    && let Ok(handle) = registry.get(&provider_name)
-                {
-                    a.swap_client(handle, &model, &pc.provider_type);
-                }
-                a
-            });
+        let ch = if is_group {
+            Some(channel_id_str.as_str())
+        } else {
+            None
+        };
+        let agent_result = super::build_agent(
+            settings,
+            controller_prompt,
+            mode,
+            default_client,
+            registry,
+            ch,
+        )
+        .await
+        .map(|mut a| {
+            a.set_messages(messages.clone());
+            // If this private agent was using a non-default provider, swap
+            // to the correct client from the registry.
+            if !is_group
+                && let Some(pc) = settings.providers.get(&provider_name)
+                && let Ok(handle) = registry.get(&provider_name)
+            {
+                a.swap_client(handle, &model, &pc.provider_type);
+            }
+            a
+        });
 
         match agent_result {
             Ok(mut new_agent) => {
-                new_agent.set_chat_history(
-                    Arc::clone(chat_store),
-                    chat_id.to_string(),
-                );
-                new_agent.set_feedback_store(
-                    crate::feedback::FeedbackStore::new(feedback_dir.to_path_buf()),
-                );
+                new_agent.set_chat_history(Arc::clone(chat_store), chat_id.to_string());
+                new_agent.set_feedback_store(crate::feedback::FeedbackStore::new(
+                    feedback_dir.to_path_buf(),
+                ));
                 let sys_prompt = new_agent.system_prompt().to_string();
                 let cfg = new_agent.config().clone();
                 agents_map.insert(
@@ -804,7 +810,9 @@ async fn handle_callback_query(
     let pc = match settings.providers.get(provider) {
         Some(pc) => pc,
         None => {
-            let _ = bot.send_message(chat_id, &format!("Unknown provider '{provider}'")).await;
+            let _ = bot
+                .send_message(chat_id, &format!("Unknown provider '{provider}'"))
+                .await;
             return;
         }
     };
@@ -812,7 +820,9 @@ async fn handle_callback_query(
     let handle = match registry.get(provider) {
         Ok(h) => h,
         Err(e) => {
-            let _ = bot.send_message(chat_id, &format!("Switch error: {e}")).await;
+            let _ = bot
+                .send_message(chat_id, &format!("Switch error: {e}"))
+                .await;
             return;
         }
     };
@@ -868,7 +878,11 @@ async fn handle_reaction(
     let turn_index = match id_map.get(&message_id) {
         Some(&idx) => idx,
         None => {
-            tracing::debug!(chat_id, message_id, "reaction on unmapped message — ignoring");
+            tracing::debug!(
+                chat_id,
+                message_id,
+                "reaction on unmapped message — ignoring"
+            );
             return;
         }
     };
@@ -892,19 +906,20 @@ async fn handle_reaction(
     }
 
     // Extract the first standard emoji from the reaction.
-    let emoji = reaction
-        .new_reaction
-        .iter()
-        .find_map(|r| {
-            if r.reaction_type == "emoji" {
-                r.emoji.as_deref()
-            } else {
-                None
-            }
-        });
+    let emoji = reaction.new_reaction.iter().find_map(|r| {
+        if r.reaction_type == "emoji" {
+            r.emoji.as_deref()
+        } else {
+            None
+        }
+    });
 
     let Some(emoji) = emoji else {
-        tracing::debug!(chat_id, message_id, "reaction has no standard emoji — ignoring");
+        tracing::debug!(
+            chat_id,
+            message_id,
+            "reaction has no standard emoji — ignoring"
+        );
         return;
     };
 
@@ -991,12 +1006,12 @@ async fn handle_per_chat_command(
     // Snapshot state from the agent while we still own it (no lock needed).
     let agent = guard.agent.as_ref().expect("still held");
     let (snapshot_msgs, snapshot_prompt, snapshot_config) = match &result {
-        super::CommandResult::Compacted => {
-            (Some(agent.messages().to_vec()), None, None)
-        }
-        super::CommandResult::ModelSwitched { .. } => {
-            (None, Some(agent.system_prompt().to_string()), Some(agent.config().clone()))
-        }
+        super::CommandResult::Compacted => (Some(agent.messages().to_vec()), None, None),
+        super::CommandResult::ModelSwitched { .. } => (
+            None,
+            Some(agent.system_prompt().to_string()),
+            Some(agent.config().clone()),
+        ),
         _ => (None, None, None),
     };
 
@@ -1089,11 +1104,10 @@ async fn run_agent_for_message(
 
     // Set attribution for write auditing in public agents.
     // Uses the sender's @username, falling back to their numeric user ID.
-    let sender_label = msg.from.as_ref().map(|u| {
-        u.username
-            .clone()
-            .unwrap_or_else(|| u.id.to_string())
-    });
+    let sender_label = msg
+        .from
+        .as_ref()
+        .map(|u| u.username.clone().unwrap_or_else(|| u.id.to_string()));
     agent.set_attribution(sender_label.as_deref()).await;
 
     // Update snapshot so quick responses see latest context.
@@ -1104,7 +1118,9 @@ async fn run_agent_for_message(
     let result = if attachments.is_empty() {
         agent.run(&text, &mut output).await
     } else {
-        agent.run_with_attachments(&text, attachments, &mut output).await
+        agent
+            .run_with_attachments(&text, attachments, &mut output)
+            .await
     };
 
     if let Err(e) = result {
@@ -1125,7 +1141,10 @@ async fn run_agent_for_message(
     let sent_ids = output.sent_message_ids();
     if !sent_ids.is_empty() {
         // Find the last assistant message index in the conversation.
-        if let Some(turn_index) = msgs.iter().rposition(|m| m.role == crate::message::Role::Assistant) {
+        if let Some(turn_index) = msgs
+            .iter()
+            .rposition(|m| m.role == crate::message::Role::Assistant)
+        {
             let mut id_map = entry.message_id_map.write().await;
             for msg_id in sent_ids {
                 id_map.insert(msg_id.0, turn_index);
@@ -1263,14 +1282,9 @@ async fn handle_instant_command(
             }
         });
     });
-    let result = super::execute_lockfree_command(
-        text,
-        settings,
-        registry,
-        bg_registry,
-        Some(on_complete),
-    )
-    .await;
+    let result =
+        super::execute_lockfree_command(text, settings, registry, bg_registry, Some(on_complete))
+            .await;
     if matches!(result, super::CommandResult::NotHandled) {
         return None;
     }
@@ -1338,7 +1352,9 @@ async fn render_command_result_telegram(
             let _ = bot.send_message(chat_id, "Context compacted.").await;
         }
         super::CommandResult::CompactError(e) => {
-            let _ = bot.send_message(chat_id, &format!("Compaction failed: {e}")).await;
+            let _ = bot
+                .send_message(chat_id, &format!("Compaction failed: {e}"))
+                .await;
         }
         super::CommandResult::ModelSwitched {
             provider_name,
@@ -1353,7 +1369,9 @@ async fn render_command_result_telegram(
                 .await;
         }
         super::CommandResult::ModelSwitchError(e) => {
-            let _ = bot.send_message(chat_id, &format!("Switch error: {e}")).await;
+            let _ = bot
+                .send_message(chat_id, &format!("Switch error: {e}"))
+                .await;
         }
         super::CommandResult::ModelParseError(e) => {
             let _ = bot.send_message(chat_id, e).await;
@@ -1374,9 +1392,16 @@ async fn render_command_result_telegram(
         super::CommandResult::LogsError(e) => {
             let _ = bot.send_message(chat_id, &format!("Logs error: {e}")).await;
         }
-        super::CommandResult::LoopStarted { id, chat_id: bg_chat_id, .. } => {
+        super::CommandResult::LoopStarted {
+            id,
+            chat_id: bg_chat_id,
+            ..
+        } => {
             let _ = bot
-                .send_message(chat_id, &format!("Agent #{id} started — chat: {bg_chat_id}"))
+                .send_message(
+                    chat_id,
+                    &format!("Agent #{id} started — chat: {bg_chat_id}"),
+                )
                 .await;
         }
         super::CommandResult::LoopError(e) => {
@@ -1384,7 +1409,9 @@ async fn render_command_result_telegram(
         }
         super::CommandResult::AgentList { agents } => {
             if agents.is_empty() {
-                let _ = bot.send_message(chat_id, "No background agents running.").await;
+                let _ = bot
+                    .send_message(chat_id, "No background agents running.")
+                    .await;
             } else {
                 let keyboard = build_agents_keyboard(agents);
                 let _ = bot
@@ -1397,7 +1424,9 @@ async fn render_command_result_telegram(
             }
         }
         super::CommandResult::AgentStopped { id } => {
-            let _ = bot.send_message(chat_id, &format!("Agent #{id} stopped.")).await;
+            let _ = bot
+                .send_message(chat_id, &format!("Agent #{id} stopped."))
+                .await;
         }
         super::CommandResult::StopError(e) => {
             let _ = bot.send_message(chat_id, &format!("Stop error: {e}")).await;
@@ -1413,8 +1442,7 @@ async fn handle_models_command(bot: &BotApi, chat_id: ChatId, settings: &Setting
         return;
     }
 
-    let current_provider =
-        super::active_provider_name(settings).unwrap_or_default();
+    let current_provider = super::active_provider_name(settings).unwrap_or_default();
     let current_model = &settings.agent.model;
     let providers: Vec<super::ProviderInfo> = super::list_providers(settings)
         .into_iter()
@@ -1432,7 +1460,9 @@ async fn handle_models_command(bot: &BotApi, chat_id: ChatId, settings: &Setting
         })
         .collect();
     let keyboard = build_model_keyboard(&providers);
-    let _ = bot.send_message_with_keyboard(chat_id, "Select a model:", &keyboard).await;
+    let _ = bot
+        .send_message_with_keyboard(chat_id, "Select a model:", &keyboard)
+        .await;
 }
 
 /// Returns true if the message text mentions the given bot username.
@@ -1456,8 +1486,7 @@ fn is_bot_mentioned(msg: &types::Message, bot_username: &str) -> bool {
         let after = search_from + rel + target.len();
         // Valid Telegram username chars: [a-zA-Z0-9_]
         let at_boundary = after >= lower.len()
-            || !lower.as_bytes()[after].is_ascii_alphanumeric()
-                && lower.as_bytes()[after] != b'_';
+            || !lower.as_bytes()[after].is_ascii_alphanumeric() && lower.as_bytes()[after] != b'_';
         if at_boundary {
             return true;
         }
@@ -1526,7 +1555,9 @@ async fn get_or_create_entry(
     {
         let map = agents.read().await;
         if let Some(entry) = map.get(&chat_id) {
-            entry.last_active.store(epoch_secs(), std::sync::atomic::Ordering::Relaxed);
+            entry
+                .last_active
+                .store(epoch_secs(), std::sync::atomic::Ordering::Relaxed);
             return Ok(Arc::clone(entry));
         }
     }
@@ -1539,29 +1570,37 @@ async fn get_or_create_entry(
     };
     let client = cx.registry.get_default();
     let chat_key = chat_id.to_string();
-    let ch = if is_group { Some(chat_key.as_str()) } else { None };
-    let mut agent =
-        crate::controller::build_agent(cx.settings, cx.controller_prompt, mode, client, cx.registry, ch).await?;
+    let ch = if is_group {
+        Some(chat_key.as_str())
+    } else {
+        None
+    };
+    let mut agent = crate::controller::build_agent(
+        cx.settings,
+        cx.controller_prompt,
+        mode,
+        client,
+        cx.registry,
+        ch,
+    )
+    .await?;
 
     // Attach chat history so compaction can rotate pre-compaction snapshots.
     agent.set_chat_history(Arc::clone(cx.chat_store), chat_key.clone());
-    agent.set_feedback_store(crate::feedback::FeedbackStore::new(cx.feedback_dir.to_path_buf()));
+    agent.set_feedback_store(crate::feedback::FeedbackStore::new(
+        cx.feedback_dir.to_path_buf(),
+    ));
 
     let mut restored_messages = Vec::new();
     if let Ok(messages) = cx.chat_store.load(&chat_key)
         && !messages.is_empty()
     {
-        tracing::info!(
-            chat_id,
-            messages = messages.len(),
-            "restored chat history"
-        );
+        tracing::info!(chat_id, messages = messages.len(), "restored chat history");
         agent.set_messages(messages.clone());
         restored_messages = messages;
     }
 
-    let provider_name =
-        super::active_provider_name(cx.settings).unwrap_or_default();
+    let provider_name = super::active_provider_name(cx.settings).unwrap_or_default();
     let model = cx.settings.agent.model.clone();
     let sys_prompt = agent.system_prompt().to_string();
     let config = agent.config().clone();
@@ -1585,21 +1624,20 @@ async fn get_or_create_entry(
     // Conversation history is already persisted to chat_store on every
     // turn, so the evicted chat can be fully restored on next message.
     let mut map = agents.write().await;
-    if map.len() >= MAX_CHAT_ENTRIES && !map.contains_key(&chat_id)
+    if map.len() >= MAX_CHAT_ENTRIES
+        && !map.contains_key(&chat_id)
         && let Some((&victim_id, _)) = map
             .iter()
             .min_by_key(|(_, e)| e.last_active.load(std::sync::atomic::Ordering::Relaxed))
-        {
-            tracing::info!(
-                evicted_chat_id = victim_id,
-                active_chats = map.len(),
-                "evicting least-recently-active chat entry"
-            );
-            map.remove(&victim_id);
-        }
-    let entry = Arc::clone(
-        map.entry(chat_id).or_insert_with(|| Arc::clone(&entry)),
-    );
+    {
+        tracing::info!(
+            evicted_chat_id = victim_id,
+            active_chats = map.len(),
+            "evicting least-recently-active chat entry"
+        );
+        map.remove(&victim_id);
+    }
+    let entry = Arc::clone(map.entry(chat_id).or_insert_with(|| Arc::clone(&entry)));
     Ok(entry)
 }
 
@@ -1705,7 +1743,10 @@ async fn extract_attachments(
             height = photo.height,
             "downloading photo from Telegram"
         );
-        match bot.download_file(&photo.file_id, limits.image_max_bytes).await {
+        match bot
+            .download_file(&photo.file_id, limits.image_max_bytes)
+            .await
+        {
             Ok(data) => {
                 attachments.push(media::Attachment {
                     data,
@@ -1728,7 +1769,10 @@ async fn extract_attachments(
             .as_deref()
             .unwrap_or("audio/ogg")
             .to_string();
-        match bot.download_file(&voice.file_id, limits.audio_max_bytes).await {
+        match bot
+            .download_file(&voice.file_id, limits.audio_max_bytes)
+            .await
+        {
             Ok(data) => {
                 attachments.push(media::Attachment {
                     data,
@@ -1774,12 +1818,16 @@ async fn extract_attachments(
                 Ok(data) => {
                     // Text documents need UTF-8 validation; reject if invalid.
                     if matches!(kind, DocumentKind::Text) && std::str::from_utf8(&data).is_err() {
-                        tracing::warn!(file_name = display_name.as_str(), "not valid UTF-8 — dropping");
+                        tracing::warn!(
+                            file_name = display_name.as_str(),
+                            "not valid UTF-8 — dropping"
+                        );
                         skip_reasons.push(format!(
                             "Skipped `{display_name}` — looked like text but isn't valid UTF-8."
                         ));
                     } else {
-                        let effective_mime = resolve_effective_mime(&mime, kind, file_name.as_deref());
+                        let effective_mime =
+                            resolve_effective_mime(&mime, kind, file_name.as_deref());
                         attachments.push(media::Attachment {
                             data,
                             mime_type: effective_mime,
@@ -1856,21 +1904,23 @@ fn extension_of(name: &str) -> Option<String> {
 /// media resolver can route it properly.
 fn resolve_effective_mime(original: &str, kind: DocumentKind, file_name: Option<&str>) -> String {
     match kind {
-        DocumentKind::Office if !crate::media::is_office_mime(original) => {
-            file_name
-                .and_then(extension_of)
-                .and_then(|ext| match ext.as_str() {
-                    "docx" => Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
-                    "xlsx" => Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-                    "pptx" => Some("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
-                    "doc" => Some("application/msword"),
-                    "xls" => Some("application/vnd.ms-excel"),
-                    "ppt" => Some("application/vnd.ms-powerpoint"),
-                    _ => None,
-                })
-                .unwrap_or(original)
-                .to_string()
-        }
+        DocumentKind::Office if !crate::media::is_office_mime(original) => file_name
+            .and_then(extension_of)
+            .and_then(|ext| match ext.as_str() {
+                "docx" => {
+                    Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                }
+                "xlsx" => Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+                "pptx" => Some(
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ),
+                "doc" => Some("application/msword"),
+                "xls" => Some("application/vnd.ms-excel"),
+                "ppt" => Some("application/vnd.ms-powerpoint"),
+                _ => None,
+            })
+            .unwrap_or(original)
+            .to_string(),
         DocumentKind::Text if !crate::media::is_text_like_mime(original) => {
             "text/plain".to_string()
         }
@@ -1891,10 +1941,7 @@ mod tests {
     fn make_msg(text: &str, chat_type: ChatType) -> Message {
         Message {
             message_id: 1,
-            chat: Chat {
-                id: 100,
-                chat_type,
-            },
+            chat: Chat { id: 100, chat_type },
             from: None,
             text: Some(text.to_string()),
             caption: None,
@@ -1916,10 +1963,7 @@ mod tests {
             classify_document("image/png", Some("a.png")),
             DocumentKind::Image
         );
-        assert_eq!(
-            classify_document("image/jpeg", None),
-            DocumentKind::Image
-        );
+        assert_eq!(classify_document("image/jpeg", None), DocumentKind::Image);
     }
 
     #[test]
@@ -2138,26 +2182,50 @@ mod tests {
 
     #[test]
     fn is_group_for_group_chat() {
-        let chat = Chat { id: 1, chat_type: ChatType::Group };
-        assert!(chat.is_group(), "Group chats should be identified as groups");
+        let chat = Chat {
+            id: 1,
+            chat_type: ChatType::Group,
+        };
+        assert!(
+            chat.is_group(),
+            "Group chats should be identified as groups"
+        );
     }
 
     #[test]
     fn is_group_for_supergroup_chat() {
-        let chat = Chat { id: 1, chat_type: ChatType::Supergroup };
-        assert!(chat.is_group(), "Supergroup chats should be identified as groups");
+        let chat = Chat {
+            id: 1,
+            chat_type: ChatType::Supergroup,
+        };
+        assert!(
+            chat.is_group(),
+            "Supergroup chats should be identified as groups"
+        );
     }
 
     #[test]
     fn is_group_false_for_private_chat() {
-        let chat = Chat { id: 1, chat_type: ChatType::Private };
-        assert!(!chat.is_group(), "Private chats should not be identified as groups");
+        let chat = Chat {
+            id: 1,
+            chat_type: ChatType::Private,
+        };
+        assert!(
+            !chat.is_group(),
+            "Private chats should not be identified as groups"
+        );
     }
 
     #[test]
     fn is_group_false_for_channel() {
-        let chat = Chat { id: 1, chat_type: ChatType::Channel };
-        assert!(!chat.is_group(), "Channels should not be identified as groups");
+        let chat = Chat {
+            id: 1,
+            chat_type: ChatType::Channel,
+        };
+        assert!(
+            !chat.is_group(),
+            "Channels should not be identified as groups"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -2313,8 +2381,14 @@ mod tests {
     #[test]
     fn group_command_all_commands_restricted_for_non_operator() {
         let commands = [
-            "/logs", "/logs 50", "/memory", "/memory some note",
-            "/clear", "/compact", "/model provider", "/models",
+            "/logs",
+            "/logs 50",
+            "/memory",
+            "/memory some note",
+            "/clear",
+            "/compact",
+            "/model provider",
+            "/models",
         ];
         for cmd in commands {
             assert!(
@@ -2331,9 +2405,7 @@ mod tests {
     /// Replicate the directed-message check for group chats.
     fn is_directed_group_msg(msg: &Message, bot_username: &str, bot_id: i64) -> bool {
         let text = msg.text.as_deref().unwrap_or_default();
-        text.starts_with('/')
-            || is_bot_mentioned(msg, bot_username)
-            || is_reply_to_bot(msg, bot_id)
+        text.starts_with('/') || is_bot_mentioned(msg, bot_username) || is_reply_to_bot(msg, bot_id)
     }
 
     #[test]
@@ -2418,9 +2490,9 @@ mod tests {
         }
 
         // Public-agent suffix.
-        agent_settings.system_prompt.push_str(
-            "\n\nYou are a public-facing agent.",
-        );
+        agent_settings
+            .system_prompt
+            .push_str("\n\nYou are a public-facing agent.");
 
         // Telegram controller prompt.
         let telegram_prompt = "You are responding via Telegram. Keep these rules:\n\
@@ -2430,12 +2502,24 @@ mod tests {
 
         let prompt = &agent_settings.system_prompt;
         // Identity content from workspace system prompt.
-        assert!(prompt.contains("I speak like a pirate."), "should contain SOUL.md content");
-        assert!(prompt.contains("I am Captain Bot."), "should contain IDENTITY.md content");
+        assert!(
+            prompt.contains("I speak like a pirate."),
+            "should contain SOUL.md content"
+        );
+        assert!(
+            prompt.contains("I am Captain Bot."),
+            "should contain IDENTITY.md content"
+        );
         // Public-agent suffix present.
-        assert!(prompt.contains("public-facing agent"), "should contain public suffix");
+        assert!(
+            prompt.contains("public-facing agent"),
+            "should contain public suffix"
+        );
         // Telegram controller prompt present.
-        assert!(prompt.contains("Telegram"), "should contain Telegram prompt");
+        assert!(
+            prompt.contains("Telegram"),
+            "should contain Telegram prompt"
+        );
         assert!(prompt.contains("4096"), "should mention character limit");
     }
 
@@ -2448,9 +2532,14 @@ mod tests {
             allowed_chat_ids: vec![],
             download_limits: Arc::new(DownloadLimits::default()),
         };
-        let prompt = ctrl.system_prompt().expect("Telegram controller must provide a system prompt");
+        let prompt = ctrl
+            .system_prompt()
+            .expect("Telegram controller must provide a system prompt");
         assert!(prompt.contains("Telegram"), "should reference Telegram");
-        assert!(prompt.contains("4096"), "should mention the message character limit");
+        assert!(
+            prompt.contains("4096"),
+            "should mention the message character limit"
+        );
     }
 
     // -------------------------------------------------------------------

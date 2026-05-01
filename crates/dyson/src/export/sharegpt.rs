@@ -405,9 +405,7 @@ mod tests {
     fn no_feedback_has_no_rating_fields() {
         let messages = vec![
             Message::user("Hello"),
-            Message::assistant(vec![ContentBlock::Text {
-                text: "Hi!".into(),
-            }]),
+            Message::assistant(vec![ContentBlock::Text { text: "Hi!".into() }]),
         ];
 
         let conv = to_sharegpt(&messages, None, None);
@@ -420,9 +418,7 @@ mod tests {
     fn with_feedback_annotates_turns() {
         let messages = vec![
             Message::user("Hello"),
-            Message::assistant(vec![ContentBlock::Text {
-                text: "Hi!".into(),
-            }]),
+            Message::assistant(vec![ContentBlock::Text { text: "Hi!".into() }]),
             Message::user("Do something"),
             Message::assistant(vec![ContentBlock::Text {
                 text: "Done!".into(),
@@ -442,7 +438,10 @@ mod tests {
         assert!(conv.conversations[0].rating.is_none());
 
         // First assistant turn: rated excellent.
-        assert_eq!(conv.conversations[1].rating, Some(FeedbackRating::Excellent));
+        assert_eq!(
+            conv.conversations[1].rating,
+            Some(FeedbackRating::Excellent)
+        );
         assert_eq!(conv.conversations[1].score, Some(3));
 
         // Second assistant turn: no explicit feedback → decent.

@@ -241,7 +241,11 @@ impl LlmClient for CodexClient {
         let mut mcp_token: Option<String> = None;
 
         if let Some(ref workspace) = self.workspace {
-            let extra = self.mcp_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+            let extra = self
+                .mcp_tools
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let info = super::start_mcp_server(workspace, extra).await?;
             tracing::info!(port = info.port, "MCP server started for Codex");
             mcp_url = Some(info.url);
@@ -301,7 +305,10 @@ impl LlmClient for CodexClient {
         let filtered: std::collections::HashMap<_, _> =
             tools.into_iter().filter(|(_, t)| !t.agent_only()).collect();
         tracing::info!(tool_count = filtered.len(), "MCP tools registered");
-        *self.mcp_tools.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = filtered;
+        *self
+            .mcp_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = filtered;
     }
 }
 
@@ -845,10 +852,12 @@ mod tests {
             Some("http://127.0.0.1:9999/mcp"),
             Some("secret-token-123"),
         );
-        assert!(args.contains(
-            &"mcp_servers.dyson-workspace.headers.Authorization=Bearer secret-token-123"
-                .to_string()
-        ));
+        assert!(
+            args.contains(
+                &"mcp_servers.dyson-workspace.headers.Authorization=Bearer secret-token-123"
+                    .to_string()
+            )
+        );
     }
 
     #[test]

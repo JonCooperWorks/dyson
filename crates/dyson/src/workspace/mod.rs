@@ -39,13 +39,13 @@
 // ===========================================================================
 
 pub mod channel;
+pub mod filesystem;
 pub mod in_memory;
 pub mod memory_store;
 pub mod migrate;
-pub mod filesystem;
 
-pub use in_memory::InMemoryWorkspace;
 pub use filesystem::FilesystemWorkspace;
+pub use in_memory::InMemoryWorkspace;
 
 use std::sync::Arc;
 
@@ -281,16 +281,18 @@ pub fn create_channel_workspace(
     for file in ["SOUL.md", "IDENTITY.md"] {
         let target = channel_path.join(file);
         let source = main_path.join(file);
-        if !target.exists() && source.exists()
-            && let Err(e) = std::os::unix::fs::symlink(&source, &target) {
-                tracing::warn!(
-                    file,
-                    source = %source.display(),
-                    target = %target.display(),
-                    error = %e,
-                    "failed to symlink identity file into channel workspace"
-                );
-            }
+        if !target.exists()
+            && source.exists()
+            && let Err(e) = std::os::unix::fs::symlink(&source, &target)
+        {
+            tracing::warn!(
+                file,
+                source = %source.display(),
+                target = %target.display(),
+                error = %e,
+                "failed to symlink identity file into channel workspace"
+            );
+        }
     }
 
     let ws = FilesystemWorkspace::load(&channel_path, config.memory.clone())?;

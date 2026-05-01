@@ -67,7 +67,10 @@ fn append_improvements_repairs_malformed_frontmatter() {
 
     // Verify it parses as a valid skill body.
     let body = crate::skill::local::LocalSkill::parse_body(&improved);
-    assert!(body.is_some(), "repaired output should parse as valid skill");
+    assert!(
+        body.is_some(),
+        "repaired output should parse as valid skill"
+    );
 }
 
 #[tokio::test]

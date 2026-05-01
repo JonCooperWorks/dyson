@@ -17,8 +17,8 @@ use std::fmt::Write as _;
 use async_trait::async_trait;
 use tokio::io::AsyncBufReadExt;
 
-use crate::error::{DysonError, Result};
 use crate::ast;
+use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::truncate_output;
 
@@ -82,7 +82,10 @@ impl Tool for ReadFileTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("read_file", "missing or invalid 'file_path'"))?;
 
-        let path = match ctx.resolve_path(file_path) { Ok(p) => p, Err(e) => return Ok(e) };
+        let path = match ctx.resolve_path(file_path) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
 
         let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize;
         let limit = input["limit"].as_u64().map(|l| l as usize);
@@ -124,7 +127,10 @@ impl Tool for ReadFileTool {
         }
 
         // PDF files: extract text as Markdown instead of reading raw binary.
-        if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) {
+        if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+        {
             return read_document_as_markdown(&path, extract_pdf_text).await;
         }
 
@@ -243,11 +249,7 @@ fn extract_symbol(
         if i > 0 {
             out.push_str("\n\n");
         }
-        let _ = writeln!(
-            out,
-            "// {}:{} ({})",
-            parsed_file.rel_path, m.line, m.kind
-        );
+        let _ = writeln!(out, "// {}:{} ({})", parsed_file.rel_path, m.line, m.kind);
         out.push_str(&parsed_file.source[m.start_byte..m.end_byte]);
         if !out.ends_with('\n') {
             out.push('\n');
@@ -326,9 +328,7 @@ where
             MAX_EXTRACTED_BYTES / (1024 * 1024),
         )));
     }
-    if input_len >= RATIO_MIN_INPUT_BYTES
-        && text.len() / input_len.max(1) >= MAX_EXTRACT_RATIO
-    {
+    if input_len >= RATIO_MIN_INPUT_BYTES && text.len() / input_len.max(1) >= MAX_EXTRACT_RATIO {
         return Ok(ToolOutput::error(format!(
             "document '{}' decompression ratio {}x exceeds limit {}x — refusing to process",
             path.display(),
@@ -364,7 +364,10 @@ mod tests {
 
         let tool = ReadFileTool;
         let input = serde_json::json!({"file_path": "test.txt"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("line one"));
         assert!(output.content.contains("line three"));
@@ -381,7 +384,10 @@ mod tests {
 
         let tool = ReadFileTool;
         let input = serde_json::json!({"file_path": "test.txt", "offset": 3, "limit": 2});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("line 3"));
         assert!(output.content.contains("line 4"));
@@ -393,7 +399,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = ReadFileTool;
         let input = serde_json::json!({"file_path": "nope.txt"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(output.is_error);
     }
 
@@ -419,7 +428,10 @@ mod tests {
 
         let tool = ReadFileTool;
         let input = serde_json::json!({"file_path": "lib.rs", "symbol": "target"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error, "error: {}", output.content);
         assert!(output.content.contains("fn target()"));
         assert!(output.content.contains("x + 1"));
@@ -439,7 +451,10 @@ mod tests {
 
         let tool = ReadFileTool;
         let input = serde_json::json!({"file_path": "lib.rs", "symbol": "target"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error, "error: {}", output.content);
         assert!(output.content.contains("fn target(&self)"));
     }
@@ -489,7 +504,10 @@ mod tests {
 
         let tool = ReadFileTool;
         let input = serde_json::json!({"file_path": "lib.rs", "symbol": "ghost"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error, "error: {}", output.content);
         assert!(output.content.contains("no definition named 'ghost'"));
     }
@@ -501,7 +519,10 @@ mod tests {
 
         let tool = ReadFileTool;
         let input = serde_json::json!({"file_path": "notes.md", "symbol": "target"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("no tree-sitter grammar"));
     }
@@ -513,7 +534,10 @@ mod tests {
 
         let tool = ReadFileTool;
         let input = serde_json::json!({"file_path": "lib.rs", "symbol": ""});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("must not be empty"));
     }

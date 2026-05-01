@@ -20,8 +20,8 @@ use std::path::Path;
 
 use async_trait::async_trait;
 
-use crate::error::{DysonError, Result};
 use crate::ast;
+use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::MAX_OUTPUT_BYTES;
 
@@ -100,7 +100,10 @@ impl Tool for SearchFilesTool {
         };
 
         let search_dir = match input["path"].as_str() {
-            Some(sub) => match ctx.resolve_path(sub) { Ok(p) => p, Err(e) => return Ok(e) },
+            Some(sub) => match ctx.resolve_path(sub) {
+                Ok(p) => p,
+                Err(e) => return Ok(e),
+            },
             None => ctx.working_dir.clone(),
         };
 
@@ -235,7 +238,14 @@ fn scan_file_ast(
         .is_some_and(|c| !c.identifier_types.is_empty());
 
     if ast_capable {
-        scan_ast_path(path, working_dir_canon, rel_path, name, matches, total_bytes);
+        scan_ast_path(
+            path,
+            working_dir_canon,
+            rel_path,
+            name,
+            matches,
+            total_bytes,
+        );
     } else {
         scan_text_fallback(path, rel_path, name, matches, total_bytes);
     }
@@ -260,7 +270,13 @@ fn scan_ast_path(
         name,
         config.identifier_types,
     );
-    push_positions(&parsed_file.source, rel_path, &positions, matches, total_bytes);
+    push_positions(
+        &parsed_file.source,
+        rel_path,
+        &positions,
+        matches,
+        total_bytes,
+    );
 }
 
 fn scan_text_fallback(
@@ -334,7 +350,10 @@ mod tests {
 
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "fn \\w+"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("fn hello"));
         assert!(output.content.contains("fn world"));
@@ -347,7 +366,10 @@ mod tests {
 
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "zzzzz"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("No matches"));
     }
@@ -357,7 +379,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "[invalid"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(output.is_error);
     }
 
@@ -377,7 +402,10 @@ mod tests {
             "pattern": "target",
             "include": "*.rs"
         });
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("a.rs"));
         // b.txt should be filtered out by the include glob.
@@ -396,7 +424,10 @@ mod tests {
 
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "match_line"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("truncated"));
     }
@@ -422,7 +453,10 @@ mod tests {
 
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "target", "ast": true});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error, "error: {}", output.content);
         // Two identifier hits: definition and call site.
         let lines: Vec<&str> = output.content.lines().collect();
@@ -443,7 +477,10 @@ mod tests {
 
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "Config", "ast": true});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error, "error: {}", output.content);
         // Line 1 matches `Config`; line 2's `ConfigManager` does not (word boundary).
         assert!(output.content.contains("README.md:1"));
@@ -461,7 +498,10 @@ mod tests {
 
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "target", "ast": true});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error, "error: {}", output.content);
         // Both the method definition and the Self::target reference.
         assert!(output.content.contains("a.rs:3"));
@@ -473,7 +513,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "", "ast": true});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("must not be empty"));
     }
@@ -488,7 +531,10 @@ mod tests {
 
         let tool = SearchFilesTool;
         let input = serde_json::json!({"pattern": "target.*", "ast": true});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("No matches"));
     }

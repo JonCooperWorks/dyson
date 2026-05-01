@@ -25,8 +25,8 @@ use async_trait::async_trait;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Query, QueryCursor};
 
-use crate::error::{DysonError, Result};
 use crate::ast;
+use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::MAX_OUTPUT_BYTES;
 
@@ -103,19 +103,23 @@ impl Tool for AstQueryTool {
         let config = match input["language"].as_str() {
             Some(name) => match ast::config_for_language_name(name) {
                 Some(c) => c,
-                None => return Ok(ToolOutput::error(format!(
-                    "unknown language '{name}'.  Supported: rust, python, javascript, \
+                None => {
+                    return Ok(ToolOutput::error(format!(
+                        "unknown language '{name}'.  Supported: rust, python, javascript, \
                      typescript, tsx, go, java, c, cpp, csharp, ruby, kotlin, swift, zig, \
                      elixir, erlang, ocaml, haskell, nix, json"
-                ))),
+                    )));
+                }
             },
             None => match include_glob.as_deref().and_then(ast::config_for_glob) {
                 Some(c) => c,
-                None => return Ok(ToolOutput::error(
-                    "missing 'language' and couldn't infer it from `include`.  Pass \
+                None => {
+                    return Ok(ToolOutput::error(
+                        "missing 'language' and couldn't infer it from `include`.  Pass \
                      `language` explicitly or use an `include` pattern ending in a \
                      known extension like '*.rs' or '*.py'.",
-                )),
+                    ));
+                }
             },
         };
 
@@ -147,12 +151,15 @@ impl Tool for AstQueryTool {
                  (identifier) @fn_name)` or `(call_expression) @call`.  \
                  Without a capture, tree-sitter matches internally but the \
                  tool has no handle to report."
-                .to_string(),
+                    .to_string(),
             ));
         }
 
         let search_dir = match input["path"].as_str() {
-            Some(sub) => match ctx.resolve_path(sub) { Ok(p) => p, Err(e) => return Ok(e) },
+            Some(sub) => match ctx.resolve_path(sub) {
+                Ok(p) => p,
+                Err(e) => return Ok(e),
+            },
             None => ctx.working_dir.clone(),
         };
 
@@ -209,8 +216,7 @@ pub fn execute_query_string(
     search_dir: &std::path::Path,
     include_glob: Option<&str>,
 ) -> std::result::Result<Vec<String>, String> {
-    let query = Query::new(&config.language, query_str)
-        .map_err(|e| format!("compile: {e}"))?;
+    let query = Query::new(&config.language, query_str).map_err(|e| format!("compile: {e}"))?;
     if query.capture_names().is_empty() {
         return Err("query has no captures".to_string());
     }
@@ -295,8 +301,8 @@ fn run_query(
         // is a progress_callback that returns ControlFlow::Break to
         // abort.  Same 5s wall-clock budget as before, but enforced via
         // the callback rather than an internal deadline.
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_micros(QUERY_TIMEOUT_MICROS);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_micros(QUERY_TIMEOUT_MICROS);
         let mut on_progress = move |_: &tree_sitter::QueryCursorState| {
             if std::time::Instant::now() >= deadline {
                 std::ops::ControlFlow::Break(())
@@ -304,17 +310,12 @@ fn run_query(
                 std::ops::ControlFlow::Continue(())
             }
         };
-        let options = tree_sitter::QueryCursorOptions::new()
-            .progress_callback(&mut on_progress);
+        let options = tree_sitter::QueryCursorOptions::new().progress_callback(&mut on_progress);
 
         // QueryMatches implements StreamingIterator (not Iterator) because
         // the underlying C library reuses the match struct on each advance.
-        let mut matches = cursor.matches_with_options(
-            query,
-            parsed.tree.root_node(),
-            source_bytes,
-            options,
-        );
+        let mut matches =
+            cursor.matches_with_options(query, parsed.tree.root_node(), source_bytes, options);
         while let Some(m) = matches.next() {
             if results.len() >= MAX_MATCHES || total_bytes >= MAX_OUTPUT_BYTES {
                 break;
@@ -326,12 +327,10 @@ fn run_query(
                 }
 
                 let node = capture.node;
-                let capture_name = capture_names
-                    .get(capture.index as usize)
-                    .unwrap_or(&"?");
+                let capture_name = capture_names.get(capture.index as usize).unwrap_or(&"?");
 
-                let node_text = &parsed.source
-                    [node.start_byte()..node.end_byte().min(parsed.source.len())];
+                let node_text =
+                    &parsed.source[node.start_byte()..node.end_byte().min(parsed.source.len())];
                 // Truncate very long node texts to avoid flooding output.
                 let display_text: std::borrow::Cow<'_, str> = if node_text.len() > 120 {
                     format!("{}...", &node_text[..120]).into()
@@ -384,10 +383,22 @@ mod tests {
             .await
             .unwrap();
         assert!(!output.is_error, "error: {}", output.content);
-        assert!(output.content.contains("hello"), "output: {}", output.content);
-        assert!(output.content.contains("world"), "output: {}", output.content);
+        assert!(
+            output.content.contains("hello"),
+            "output: {}",
+            output.content
+        );
+        assert!(
+            output.content.contains("world"),
+            "output: {}",
+            output.content
+        );
         // Should NOT match struct Foo.
-        assert!(!output.content.contains("Foo"), "output: {}", output.content);
+        assert!(
+            !output.content.contains("Foo"),
+            "output: {}",
+            output.content
+        );
     }
 
     #[tokio::test]
@@ -409,9 +420,17 @@ mod tests {
             .await
             .unwrap();
         assert!(!output.is_error, "error: {}", output.content);
-        assert!(output.content.contains("system"), "output: {}", output.content);
+        assert!(
+            output.content.contains("system"),
+            "output: {}",
+            output.content
+        );
         // Should not match print.
-        assert!(!output.content.contains("print"), "output: {}", output.content);
+        assert!(
+            !output.content.contains("print"),
+            "output: {}",
+            output.content
+        );
     }
 
     #[tokio::test]
@@ -500,8 +519,16 @@ mod tests {
             .await
             .unwrap();
         assert!(!output.is_error, "error: {}", output.content);
-        assert!(output.content.contains("lib.rs"), "output: {}", output.content);
-        assert!(!output.content.contains("app.py"), "output: {}", output.content);
+        assert!(
+            output.content.contains("lib.rs"),
+            "output: {}",
+            output.content
+        );
+        assert!(
+            !output.content.contains("app.py"),
+            "output: {}",
+            output.content
+        );
     }
 
     #[test]

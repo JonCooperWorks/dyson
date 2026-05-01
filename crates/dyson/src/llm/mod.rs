@@ -49,8 +49,6 @@ pub mod registry;
 pub(crate) mod sse_parser;
 pub mod stream;
 
-
-
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -118,7 +116,6 @@ pub struct ToolDefinition {
     /// (Claude Code, Codex) will not see this tool.
     pub agent_only: bool,
 }
-
 
 // ---------------------------------------------------------------------------
 // ToolMode — how the agent loop should handle tool calls from this stream.
@@ -586,11 +583,7 @@ impl RetryingLlmClient {
     /// Test-only constructor that lets tests run the retry loop without
     /// waiting seconds for each backoff.
     #[cfg(test)]
-    fn with_base_delay(
-        inner: Box<dyn LlmClient>,
-        max_retries: usize,
-        base_delay_ms: u64,
-    ) -> Self {
+    fn with_base_delay(inner: Box<dyn LlmClient>, max_retries: usize, base_delay_ms: u64) -> Self {
         Self {
             inner,
             max_retries,
@@ -626,9 +619,7 @@ impl LlmClient for RetryingLlmClient {
                         | DysonError::LlmOverloaded { retry_after, .. } => *retry_after,
                         _ => None,
                     };
-                    let exp_ms = self
-                        .base_delay_ms
-                        .saturating_mul(1u64 << attempt.min(6));
+                    let exp_ms = self.base_delay_ms.saturating_mul(1u64 << attempt.min(6));
                     let jitter_ms = rand::random::<u64>() % (exp_ms / 2 + 1);
                     let backoff_ms = exp_ms + jitter_ms;
                     const MAX_HINT_MS: u64 = 90_000;
@@ -1242,11 +1233,7 @@ mod tests {
         ]);
         let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 2, 1);
 
-        let err = assert_err(
-            client
-                .stream(&[], "", "", &[], &empty_config())
-                .await,
-        );
+        let err = assert_err(client.stream(&[], "", "", &[], &empty_config()).await);
         assert!(matches!(err, DysonError::LlmRateLimit { .. }));
         // initial + 2 retries = 3 attempts.
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
@@ -1258,11 +1245,7 @@ mod tests {
             ScriptedClient::new(vec![Err(DysonError::Llm("auth failed".into()))]);
         let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 5, 1);
 
-        let err = assert_err(
-            client
-                .stream(&[], "", "", &[], &empty_config())
-                .await,
-        );
+        let err = assert_err(client.stream(&[], "", "", &[], &empty_config()).await);
         assert!(matches!(err, DysonError::Llm(_)));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
@@ -1272,11 +1255,7 @@ mod tests {
         let (scripted, attempts) = ScriptedClient::new(vec![Err(overloaded_err(None))]);
         let client = RetryingLlmClient::with_base_delay(Box::new(scripted), 0, 1);
 
-        let err = assert_err(
-            client
-                .stream(&[], "", "", &[], &empty_config())
-                .await,
-        );
+        let err = assert_err(client.stream(&[], "", "", &[], &empty_config()).await);
         assert!(matches!(err, DysonError::LlmOverloaded { .. }));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
@@ -1292,7 +1271,11 @@ mod tests {
     #[test]
     fn parse_retry_hint_reads_x_ratelimit_reset_seconds() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let target = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 45;
+        let target = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 45;
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("x-ratelimit-reset", target.to_string().parse().unwrap());
         let hint = parse_retry_hint(&headers).expect("expected a hint");
@@ -1306,7 +1289,12 @@ mod tests {
     #[test]
     fn parse_retry_hint_handles_x_ratelimit_reset_milliseconds() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let target_ms = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 60) * 1000;
+        let target_ms = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60)
+            * 1000;
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("x-ratelimit-reset", target_ms.to_string().parse().unwrap());
         let hint = parse_retry_hint(&headers).expect("expected a hint");
@@ -1331,8 +1319,14 @@ mod tests {
             "you are being rate limited",
         );
         match err {
-            DysonError::LlmRateLimit { message, retry_after } => {
-                assert_eq!(message, "OpenAI (429 Too Many Requests): you are being rate limited");
+            DysonError::LlmRateLimit {
+                message,
+                retry_after,
+            } => {
+                assert_eq!(
+                    message,
+                    "OpenAI (429 Too Many Requests): you are being rate limited"
+                );
                 assert_eq!(retry_after, Some(std::time::Duration::from_secs(7)));
             }
             other => panic!("expected LlmRateLimit, got {other:?}"),

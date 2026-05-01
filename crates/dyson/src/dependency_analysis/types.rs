@@ -216,12 +216,18 @@ mod tests {
         let id = Ecosystem::CratesIo.osv_id();
         assert!(matches!(id, Cow::Borrowed(_)));
         assert_eq!(id.as_ref(), "crates.io");
-        assert_eq!(Ecosystem::Other("Debian:11".into()).osv_id().as_ref(), "Debian:11");
+        assert_eq!(
+            Ecosystem::Other("Debian:11".into()).osv_id().as_ref(),
+            "Debian:11"
+        );
     }
 
     #[test]
     fn from_purl_type_common() {
-        assert_eq!(Ecosystem::from_purl_type("cargo"), Some(Ecosystem::CratesIo));
+        assert_eq!(
+            Ecosystem::from_purl_type("cargo"),
+            Some(Ecosystem::CratesIo)
+        );
         assert_eq!(Ecosystem::from_purl_type("golang"), Some(Ecosystem::Go));
         assert_eq!(Ecosystem::from_purl_type("nope"), None);
     }

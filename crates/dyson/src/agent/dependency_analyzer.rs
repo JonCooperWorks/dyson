@@ -111,7 +111,8 @@ impl DependencyAnalyzer {
         }
 
         // Step 1: Extract resource accesses for each call.
-        let accesses: Vec<Vec<ResourceAccess>> = calls.iter().map(|c| extract_resources(c)).collect();
+        let accesses: Vec<Vec<ResourceAccess>> =
+            calls.iter().map(|c| extract_resources(c)).collect();
 
         // Step 2: Build dependency edges.
         // depends_on[i] contains indices of calls that call i depends on.

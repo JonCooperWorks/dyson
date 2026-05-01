@@ -76,7 +76,10 @@ impl MemoryStore {
 
     /// Insert or update a file in the FTS5 index.
     pub fn index(&self, key: &str, content: &str) {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Delete existing entry first (upsert pattern for FTS5).
         if let Err(e) = conn
             .prepare_cached("DELETE FROM memory_fts WHERE key = ?1")
@@ -107,7 +110,10 @@ impl MemoryStore {
             return vec![];
         }
 
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut stmt = match conn.prepare_cached(
             "SELECT key, snippet(memory_fts, 1, '**', '**', '...', 64) \
              FROM memory_fts WHERE memory_fts MATCH ?1 \
@@ -131,14 +137,21 @@ impl MemoryStore {
             .map(|rows| rows.filter_map(std::result::Result::ok).collect())
             .unwrap_or_default();
 
-        tracing::debug!(query = query, results = results.len(), "memory store search");
+        tracing::debug!(
+            query = query,
+            results = results.len(),
+            "memory store search"
+        );
         results
     }
 
     /// Remove a file from the FTS5 index.
     #[cfg(test)]
     pub fn remove(&self, key: &str) {
-        let conn = self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Err(e) = conn
             .prepare_cached("DELETE FROM memory_fts WHERE key = ?1")
             .and_then(|mut stmt| stmt.execute(rusqlite::params![key]))

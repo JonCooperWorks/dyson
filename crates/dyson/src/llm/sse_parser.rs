@@ -18,8 +18,8 @@ use std::collections::{HashMap, HashSet};
 use crate::error::{DysonError, Result};
 use crate::llm::stream::StreamEvent;
 use crate::llm::{
-    SseLineBuffer, SseStreamParser, ToolCallBuffer,
-    MAX_ACTIVE_TOOL_BUFFERS, MAX_TOOL_JSON, MAX_TOTAL_TOOL_JSON, finalize_tool_call,
+    MAX_ACTIVE_TOOL_BUFFERS, MAX_TOOL_JSON, MAX_TOTAL_TOOL_JSON, SseLineBuffer, SseStreamParser,
+    ToolCallBuffer, finalize_tool_call,
 };
 
 /// Provider-specific SSE JSON parsing.
@@ -102,11 +102,7 @@ impl ToolBufferContext {
     /// Returns `Some(error event)` if the accumulated JSON exceeds either the
     /// per-buffer (`MAX_TOOL_JSON`) or per-stream aggregate
     /// (`MAX_TOTAL_TOOL_JSON`) size limit.
-    pub(crate) fn append_tool_json(
-        &mut self,
-        index: usize,
-        partial: &str,
-    ) -> Option<StreamEvent> {
+    pub(crate) fn append_tool_json(&mut self, index: usize, partial: &str) -> Option<StreamEvent> {
         if self.total_exceeded {
             return None;
         }

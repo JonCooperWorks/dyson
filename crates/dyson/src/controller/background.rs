@@ -66,9 +66,8 @@ struct Inner {
 impl Inner {
     /// Remove entries whose tasks have finished.
     fn prune(&mut self) {
-        self.agents.retain(|_, info| {
-            info.handle.as_ref().is_none_or(|h| !h.is_finished())
-        });
+        self.agents
+            .retain(|_, info| info.handle.as_ref().is_none_or(|h| !h.is_finished()));
     }
 }
 
@@ -209,7 +208,9 @@ mod tests {
     #[test]
     fn allocate_and_list() {
         let reg = BackgroundAgentRegistry::new();
-        let id = reg.allocate("test prompt".into(), CancellationToken::new()).unwrap();
+        let id = reg
+            .allocate("test prompt".into(), CancellationToken::new())
+            .unwrap();
         assert_eq!(id, 1);
 
         let entries = reg.list();
@@ -222,7 +223,9 @@ mod tests {
     #[test]
     fn remove_clears_entry() {
         let reg = BackgroundAgentRegistry::new();
-        let id = reg.allocate("test".into(), CancellationToken::new()).unwrap();
+        let id = reg
+            .allocate("test".into(), CancellationToken::new())
+            .unwrap();
         reg.remove(id);
         assert!(reg.list().is_empty());
     }
@@ -249,9 +252,13 @@ mod tests {
     fn capacity_limit() {
         let reg = BackgroundAgentRegistry::new();
         for _ in 0..MAX_BACKGROUND_AGENTS {
-            reg.allocate("test".into(), CancellationToken::new()).unwrap();
+            reg.allocate("test".into(), CancellationToken::new())
+                .unwrap();
         }
-        assert!(reg.allocate("overflow".into(), CancellationToken::new()).is_err());
+        assert!(
+            reg.allocate("overflow".into(), CancellationToken::new())
+                .is_err()
+        );
     }
 
     #[test]
@@ -265,7 +272,9 @@ mod tests {
     #[tokio::test]
     async fn prune_removes_finished_tasks() {
         let reg = BackgroundAgentRegistry::new();
-        let id = reg.allocate("done".into(), CancellationToken::new()).unwrap();
+        let id = reg
+            .allocate("done".into(), CancellationToken::new())
+            .unwrap();
 
         // Attach a handle that completes immediately.
         reg.set_handle(id, tokio::spawn(async {}));
@@ -281,17 +290,25 @@ mod tests {
         for _ in 0..MAX_BACKGROUND_AGENTS {
             reg.allocate("x".into(), CancellationToken::new()).unwrap();
         }
-        assert!(reg.allocate("overflow".into(), CancellationToken::new()).is_err());
+        assert!(
+            reg.allocate("overflow".into(), CancellationToken::new())
+                .is_err()
+        );
 
         // Remove one — simulates the spawned task calling remove().
         reg.remove(1);
-        assert!(reg.allocate("fits".into(), CancellationToken::new()).is_ok());
+        assert!(
+            reg.allocate("fits".into(), CancellationToken::new())
+                .is_ok()
+        );
     }
 
     #[test]
     fn stop_after_remove_errors() {
         let reg = BackgroundAgentRegistry::new();
-        let id = reg.allocate("test".into(), CancellationToken::new()).unwrap();
+        let id = reg
+            .allocate("test".into(), CancellationToken::new())
+            .unwrap();
         reg.remove(id);
         assert!(reg.stop(id).is_err());
     }

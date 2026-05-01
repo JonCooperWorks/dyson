@@ -172,8 +172,11 @@ mod tests {
     }
 
     fn temp_store(name: &str) -> (PathBuf, FeedbackStore) {
-        let dir = std::env::temp_dir()
-            .join(format!("dyson_feedback_test_{}_{}", name, std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "dyson_feedback_test_{}_{}",
+            name,
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = FeedbackStore::new(dir.clone());
@@ -201,8 +204,12 @@ mod tests {
     fn upsert_and_load() {
         let (dir, store) = temp_store("upsert_load");
 
-        store.upsert("chat_1", make_entry(3, FeedbackRating::Good)).unwrap();
-        store.upsert("chat_1", make_entry(7, FeedbackRating::Excellent)).unwrap();
+        store
+            .upsert("chat_1", make_entry(3, FeedbackRating::Good))
+            .unwrap();
+        store
+            .upsert("chat_1", make_entry(7, FeedbackRating::Excellent))
+            .unwrap();
 
         let entries = store.load("chat_1").unwrap();
         assert_eq!(entries.len(), 2);
@@ -220,8 +227,12 @@ mod tests {
     fn upsert_overwrites_existing() {
         let (dir, store) = temp_store("upsert_overwrite");
 
-        store.upsert("chat_1", make_entry(3, FeedbackRating::Good)).unwrap();
-        store.upsert("chat_1", make_entry(3, FeedbackRating::Excellent)).unwrap();
+        store
+            .upsert("chat_1", make_entry(3, FeedbackRating::Good))
+            .unwrap();
+        store
+            .upsert("chat_1", make_entry(3, FeedbackRating::Excellent))
+            .unwrap();
 
         let entries = store.load("chat_1").unwrap();
         assert_eq!(entries.len(), 1);
@@ -234,8 +245,12 @@ mod tests {
     fn remove_feedback() {
         let (dir, store) = temp_store("remove");
 
-        store.upsert("chat_1", make_entry(3, FeedbackRating::Good)).unwrap();
-        store.upsert("chat_1", make_entry(7, FeedbackRating::Bad)).unwrap();
+        store
+            .upsert("chat_1", make_entry(3, FeedbackRating::Good))
+            .unwrap();
+        store
+            .upsert("chat_1", make_entry(7, FeedbackRating::Bad))
+            .unwrap();
 
         store.remove("chat_1", 3).unwrap();
 

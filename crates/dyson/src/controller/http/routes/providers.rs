@@ -16,11 +16,7 @@ pub(super) fn list(state: &HttpState) -> Resp {
     // the list and the active-model calculation read the same
     // settings (no cross-call torn reads if a hot-reload races this).
     let snapshot = state.settings_snapshot();
-    let runtime = state
-        .runtime_model
-        .lock()
-        .ok()
-        .and_then(|g| g.clone());
+    let runtime = state.runtime_model.lock().ok().and_then(|g| g.clone());
     let active_name = runtime
         .as_ref()
         .map(|(p, _)| p.clone())

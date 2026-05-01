@@ -49,7 +49,8 @@ pub async fn run(
         std::sync::Arc::new(tokio::sync::RwLock::new(workspace));
 
     let sandbox = dyson::sandbox::create_sandbox(&settings.sandbox, settings.dangerous_no_sandbox);
-    let registry = dyson::controller::ClientRegistry::new(&settings, Some(std::sync::Arc::clone(&workspace)));
+    let registry =
+        dyson::controller::ClientRegistry::new(&settings, Some(std::sync::Arc::clone(&workspace)));
     let client = registry.get_default();
     let skills = {
         let ws = workspace.read().await;

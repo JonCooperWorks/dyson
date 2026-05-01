@@ -80,8 +80,7 @@ pub async fn run(
                     }
                 }
                 "http" => {
-                    if let Some(ctrl) =
-                        dyson::controller::http::HttpController::from_config(config)
+                    if let Some(ctrl) = dyson::controller::http::HttpController::from_config(config)
                     {
                         controllers.push(Box::new(ctrl));
                     } else {
@@ -131,12 +130,11 @@ pub async fn run(
         // On Unix, also listen for SIGTERM for graceful container shutdown.
         #[cfg(unix)]
         {
-            let mut sigterm = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            )
-            // INVARIANT: signal handler registration only fails if the OS
-            // signal subsystem is broken — fatal, no recovery possible.
-            .expect("failed to register SIGTERM handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    // INVARIANT: signal handler registration only fails if the OS
+                    // signal subsystem is broken — fatal, no recovery possible.
+                    .expect("failed to register SIGTERM handler");
 
             tokio::select! {
                 _ = ctrl_c => tracing::info!("received SIGINT"),
@@ -152,7 +150,10 @@ pub async fn run(
     };
 
     if controllers.len() == 1 {
-        let controller = controllers.into_iter().next().expect("length checked above");
+        let controller = controllers
+            .into_iter()
+            .next()
+            .expect("length checked above");
         tracing::info!(controller = controller.name(), "starting controller");
         tokio::select! {
             result = controller.run(&settings, &registry) => { result?; }

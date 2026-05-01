@@ -53,9 +53,7 @@ use crate::feedback::FeedbackStore;
 use crate::util::resolve_tilde;
 
 use super::ClientRegistry;
-use super::stores::{
-    ArtefactEntry, ArtefactStore, FileEntry, FileStore, max_file_id,
-};
+use super::stores::{ArtefactEntry, ArtefactStore, FileEntry, FileStore, max_file_id};
 use super::wire::{AuthMode, SseEvent};
 
 /// One pending POST /turn that arrived while a turn was already running.
@@ -207,8 +205,8 @@ impl EventRing {
 
 #[cfg(test)]
 mod ring_tests {
-    use super::*;
     use super::SseEvent;
+    use super::*;
     // Stand-alone tests for the rolling buffer — no async, no
     // tokio.  Asserts the FIFO bound and the `since` cutoff that
     // the SSE replay path depends on.
@@ -217,7 +215,9 @@ mod ring_tests {
         let mut r = EventRing::new();
         let cap = EventRing::CAP;
         for n in 0..(cap + 5) {
-            r.push(SseEvent::Text { delta: format!("e{n}") });
+            r.push(SseEvent::Text {
+                delta: format!("e{n}"),
+            });
         }
         assert_eq!(r.entries.len(), cap, "ring must hold the cap");
         // Earliest entry id is 6 (5 evicted + 1-based).
@@ -229,7 +229,9 @@ mod ring_tests {
     fn event_ring_since_skips_seen_events() {
         let mut r = EventRing::new();
         for n in 0..5 {
-            r.push(SseEvent::Text { delta: format!("e{n}") });
+            r.push(SseEvent::Text {
+                delta: format!("e{n}"),
+            });
         }
         let after = r.since(2);
         let ids: Vec<u64> = after.iter().map(|(i, _)| *i).collect();
@@ -246,18 +248,25 @@ mod ring_tests {
         // the visible "subsequent message responds with the last
         // message" duplication bug.
         let mut r = EventRing::new();
-        r.push(SseEvent::Text { delta: "stale-a".into() });
+        r.push(SseEvent::Text {
+            delta: "stale-a".into(),
+        });
         let last_done = r.push(SseEvent::Done);
         assert_eq!(r.since(0).len(), 2, "preconditions");
 
         r.clear();
         assert!(r.entries.is_empty(), "clear must wipe entries");
-        assert!(r.since(0).is_empty(), "since(0) returns nothing after clear");
+        assert!(
+            r.since(0).is_empty(),
+            "since(0) returns nothing after clear"
+        );
 
         // next_id stays monotonic so any live subscriber that's still
         // around (e.g. the previous turn's ES racing to receive Done)
         // doesn't observe a regressed id from a future emit.
-        let next = r.push(SseEvent::Text { delta: "fresh".into() });
+        let next = r.push(SseEvent::Text {
+            delta: "fresh".into(),
+        });
         assert!(
             next > last_done,
             "next_id must remain monotonic across clear ({next} <= {last_done})"
@@ -307,7 +316,9 @@ impl ChatHandle {
                 let mut q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
                 *q = items.into();
             }
-            Err(e) => tracing::warn!(error = %e, chat_id = %self.chat_id, "queued turns file malformed; ignoring"),
+            Err(e) => {
+                tracing::warn!(error = %e, chat_id = %self.chat_id, "queued turns file malformed; ignoring")
+            }
         }
     }
 
@@ -384,7 +395,9 @@ impl ChatHandle {
                     tracing::warn!(error = %e, chat_id = %self.chat_id, "failed to persist queued turns");
                 }
             }
-            Err(e) => tracing::warn!(error = %e, chat_id = %self.chat_id, "failed to serialize queued turns"),
+            Err(e) => {
+                tracing::warn!(error = %e, chat_id = %self.chat_id, "failed to serialize queued turns")
+            }
         }
     }
 
@@ -652,9 +665,7 @@ impl HttpState {
             chat_next = max_chat_id_n(dir, &artefacts).saturating_add(1);
         }
 
-        let activity = Arc::new(crate::controller::ActivityRegistry::new(
-            data_dir.clone(),
-        ));
+        let activity = Arc::new(crate::controller::ActivityRegistry::new(data_dir.clone()));
 
         Self {
             settings: std::sync::RwLock::new(settings),
@@ -959,7 +970,8 @@ impl HttpState {
 
         let file_id = format!(
             "f{}",
-            self.file_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            self.file_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let file_url = format!("/api/files/{file_id}");
         let file_entry = FileEntry {

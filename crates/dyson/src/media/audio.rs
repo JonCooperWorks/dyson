@@ -159,9 +159,7 @@ pub fn create_transcriber(
 ) -> Arc<dyn Transcriber> {
     match config {
         Some(cfg) => match cfg.provider.as_str() {
-            "whisper" | "whisper-cli" => {
-                Arc::new(WhisperCliTranscriber::new(cfg.model.clone()))
-            }
+            "whisper" | "whisper-cli" => Arc::new(WhisperCliTranscriber::new(cfg.model.clone())),
             other => {
                 tracing::warn!(
                     provider = other,

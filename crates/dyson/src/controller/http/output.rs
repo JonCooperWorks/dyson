@@ -146,7 +146,8 @@ impl Output for SseOutput {
                 self.send(SseEvent::Text {
                     delta: format!(
                         "\n[file: {} too large ({} MB) — not delivered]\n",
-                        path.display(), m.len() / (1024 * 1024),
+                        path.display(),
+                        m.len() / (1024 * 1024),
                     ),
                 });
                 return Ok(());
@@ -176,12 +177,17 @@ impl Output for SseOutput {
         let mime = mime_for_extension(path);
         let id = format!(
             "f{}",
-            self.next_file_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            self.next_file_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
         let inline_image = mime.starts_with("image/");
         let url = format!("/api/files/{id}");
         let bytes_len = bytes.len();
-        let entry = FileEntry { bytes, mime: mime.clone(), name: name.clone() };
+        let entry = FileEntry {
+            bytes,
+            mime: mime.clone(),
+            name: name.clone(),
+        };
         // Write-through to disk first so a controller crash between
         // the memory put and the disk write doesn't leak a dangling
         // in-memory reference that can't be rehydrated.
@@ -244,7 +250,11 @@ impl Output for SseOutput {
         // "text/plain") — the chat-history File block is happy with
         // that.  The *artefact* mime is the one that drives the
         // reader's branch, so promote markdown explicitly.
-        let artefact_mime = if is_markdown { "text/markdown".to_string() } else { mime.clone() };
+        let artefact_mime = if is_markdown {
+            "text/markdown".to_string()
+        } else {
+            mime.clone()
+        };
         let artefact = crate::message::Artefact {
             id: String::new(),
             kind,
@@ -344,7 +354,8 @@ impl Output for SseOutput {
             //   * Lookup failure: fall back to the content bytes
             //     (best-effort; the swarm side just sees the URL).
             let push_bytes: Vec<u8> = if artefact.content.starts_with("/api/files/") {
-                let file_id = artefact.content
+                let file_id = artefact
+                    .content
                     .trim_start_matches("/api/files/")
                     .to_string();
                 let from_store = match self.files.lock() {
@@ -373,8 +384,8 @@ impl Output for SseOutput {
             let mime = artefact.mime_type.clone();
             let metadata = artefact.metadata.clone();
             tokio::spawn(async move {
-                use base64::engine::general_purpose::STANDARD as B64;
                 use base64::Engine as _;
+                use base64::engine::general_purpose::STANDARD as B64;
                 let payload = serde_json::json!({
                     "chat_id": chat_id,
                     "artefact_id": artefact_id,
@@ -480,7 +491,10 @@ mod tests {
         out.text_delta("hello").unwrap();
         match rx.try_recv().unwrap() {
             SseEvent::Text { delta } => assert_eq!(delta, "hello"),
-            other => panic!("unexpected event: {other:?}", other = serde_json::to_string(&other).unwrap()),
+            other => panic!(
+                "unexpected event: {other:?}",
+                other = serde_json::to_string(&other).unwrap()
+            ),
         }
     }
 
@@ -493,7 +507,10 @@ mod tests {
         out.tool_use_start("tool_42", "image_generate").unwrap();
         assert_eq!(out.current_tool_use_id.as_deref(), Some("tool_42"));
         out.flush().unwrap();
-        assert!(out.current_tool_use_id.is_none(), "flush must clear the current tool");
+        assert!(
+            out.current_tool_use_id.is_none(),
+            "flush must clear the current tool"
+        );
     }
 
     #[test]
@@ -518,9 +535,9 @@ mod tests {
             _ => panic!("expected artefact event"),
         }
         // On-disk write-through under the chat's artefacts dir.
-        let body = std::fs::read_to_string(
-            dir.path().join("c-0001").join("artefacts").join("a1.body")
-        ).unwrap();
+        let body =
+            std::fs::read_to_string(dir.path().join("c-0001").join("artefacts").join("a1.body"))
+                .unwrap();
         assert_eq!(body, "# Findings\n…");
     }
 
@@ -529,7 +546,8 @@ mod tests {
         let (mut out, mut rx) = fixture(None);
         // Non-existent file: no panic, no file event — just a text
         // event so the user sees what happened.
-        out.send_file(std::path::Path::new("/nonexistent/path-for-test.dat")).unwrap();
+        out.send_file(std::path::Path::new("/nonexistent/path-for-test.dat"))
+            .unwrap();
         match rx.try_recv().unwrap() {
             SseEvent::Text { delta } => {
                 assert!(delta.contains("/nonexistent/path-for-test.dat"));
@@ -554,29 +572,42 @@ mod tests {
         // the artefact event with the promoted markdown mime.
         match rx.try_recv().unwrap() {
             SseEvent::File { name, .. } => assert_eq!(name, "findings.md"),
-            other => panic!("expected file event, got {:?}", serde_json::to_string(&other).unwrap()),
+            other => panic!(
+                "expected file event, got {:?}",
+                serde_json::to_string(&other).unwrap()
+            ),
         }
         match rx.try_recv().unwrap() {
-            SseEvent::Artefact { id, kind, title, metadata, .. } => {
+            SseEvent::Artefact {
+                id,
+                kind,
+                title,
+                metadata,
+                ..
+            } => {
                 assert_eq!(id, "a1");
                 assert_eq!(kind, ArtefactKind::Other);
                 assert_eq!(title, "findings.md");
                 let m = metadata.expect("metadata should be set");
                 assert_eq!(m["file_name"], "findings.md");
-                assert_eq!(m["mime_type"], "text/markdown",
-                    "metadata mime is the promoted markdown mime, not the OS guess");
+                assert_eq!(
+                    m["mime_type"], "text/markdown",
+                    "metadata mime is the promoted markdown mime, not the OS guess"
+                );
                 assert_eq!(m["file_url"], "/api/files/f1");
                 assert_eq!(m["bytes"].as_u64(), Some(20));
             }
-            other => panic!("expected artefact event, got {:?}", serde_json::to_string(&other).unwrap()),
+            other => panic!(
+                "expected artefact event, got {:?}",
+                serde_json::to_string(&other).unwrap()
+            ),
         }
 
         // The artefact body is the markdown text itself (not the URL);
         // that's what makes the existing reader Just Work.
-        let body = std::fs::read_to_string(
-            dir.path().join("c-0001").join("artefacts").join("a1.body"),
-        )
-        .unwrap();
+        let body =
+            std::fs::read_to_string(dir.path().join("c-0001").join("artefacts").join("a1.body"))
+                .unwrap();
         assert_eq!(body, "# Findings\n\n* a\n* b\n");
     }
 
@@ -595,7 +626,12 @@ mod tests {
         // Drop the file event, inspect the artefact.
         let _ = rx.try_recv().unwrap();
         match rx.try_recv().unwrap() {
-            SseEvent::Artefact { kind, title, metadata, .. } => {
+            SseEvent::Artefact {
+                kind,
+                title,
+                metadata,
+                ..
+            } => {
                 assert_eq!(kind, ArtefactKind::Other);
                 assert_eq!(title, "data.bin");
                 let m = metadata.expect("metadata");
@@ -604,12 +640,14 @@ mod tests {
                 // is that the artefact metadata carries a usable file_url.
                 assert_eq!(m["file_url"], "/api/files/f1");
             }
-            other => panic!("expected artefact event, got {:?}", serde_json::to_string(&other).unwrap()),
+            other => panic!(
+                "expected artefact event, got {:?}",
+                serde_json::to_string(&other).unwrap()
+            ),
         }
-        let body = std::fs::read_to_string(
-            dir.path().join("c-0001").join("artefacts").join("a1.body"),
-        )
-        .unwrap();
+        let body =
+            std::fs::read_to_string(dir.path().join("c-0001").join("artefacts").join("a1.body"))
+                .unwrap();
         assert_eq!(body, "/api/files/f1", "binary artefact body is the URL");
     }
 
@@ -626,7 +664,10 @@ mod tests {
         let _ = rx.try_recv().unwrap();
         match rx.try_recv().unwrap() {
             SseEvent::Artefact { kind, .. } => assert_eq!(kind, ArtefactKind::Image),
-            other => panic!("expected artefact event, got {:?}", serde_json::to_string(&other).unwrap()),
+            other => panic!(
+                "expected artefact event, got {:?}",
+                serde_json::to_string(&other).unwrap()
+            ),
         }
     }
 
@@ -669,7 +710,11 @@ mod tests {
             Ok(s) => s,
             Err(p) => p.into_inner(),
         };
-        assert_eq!(s.items.len(), 1, "send_artefact must land despite poisoned lock");
+        assert_eq!(
+            s.items.len(),
+            1,
+            "send_artefact must land despite poisoned lock"
+        );
     }
 
     /// Spin up an in-process HTTP recorder bound to 127.0.0.1:0.
@@ -691,26 +736,24 @@ mod tests {
                     Err(_) => break,
                 };
                 let captured = Arc::clone(&captured_for_task);
-                let svc = hyper::service::service_fn(
-                    move |req: hyper::Request<Incoming>| {
-                        let captured = Arc::clone(&captured);
-                        async move {
-                            let bytes = http_body_util::BodyExt::collect(req.into_body())
-                                .await
-                                .map(|c| c.to_bytes())
-                                .unwrap_or_default();
-                            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                                captured.lock().unwrap().push(v);
-                            }
-                            Ok::<_, std::convert::Infallible>(
-                                hyper::Response::builder()
-                                    .status(204)
-                                    .body(http_body_util::Empty::<hyper::body::Bytes>::new())
-                                    .unwrap(),
-                            )
+                let svc = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
+                    let captured = Arc::clone(&captured);
+                    async move {
+                        let bytes = http_body_util::BodyExt::collect(req.into_body())
+                            .await
+                            .map(|c| c.to_bytes())
+                            .unwrap_or_default();
+                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                            captured.lock().unwrap().push(v);
                         }
-                    },
-                );
+                        Ok::<_, std::convert::Infallible>(
+                            hyper::Response::builder()
+                                .status(204)
+                                .body(http_body_util::Empty::<hyper::body::Bytes>::new())
+                                .unwrap(),
+                        )
+                    }
+                });
                 tokio::spawn(async move {
                     let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
                         .serve_connection(TokioIo::new(stream), svc)
@@ -742,7 +785,10 @@ mod tests {
         out.send_artefact(&art).unwrap();
         match rx.try_recv().unwrap() {
             SseEvent::Artefact { id, .. } => assert_eq!(id, "a1"),
-            other => panic!("expected artefact event, got {}", serde_json::to_string(&other).unwrap()),
+            other => panic!(
+                "expected artefact event, got {}",
+                serde_json::to_string(&other).unwrap()
+            ),
         }
         // No further events queued — push branch was correctly skipped.
         assert!(rx.try_recv().is_err(), "no extra events");
@@ -760,7 +806,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut out, _rx) = fixture_with_ingest(
             Some(dir.path().to_path_buf()),
-            Some(IngestConfig { url, token: "it_test".into() }),
+            Some(IngestConfig {
+                url,
+                token: "it_test".into(),
+            }),
         );
         let art = Artefact {
             id: String::new(),
@@ -793,7 +842,9 @@ mod tests {
         assert_eq!(body["mime"], "text/markdown");
         assert_eq!(body["metadata"]["k"], "v");
         let b64 = body["body_b64"].as_str().expect("body_b64 string");
-        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
         assert_eq!(decoded, b"## Findings\n\n* one");
     }
 
@@ -809,7 +860,10 @@ mod tests {
         let (url, captured) = ingest_recorder().await;
         let (mut out, _rx) = fixture_with_ingest(
             None,
-            Some(IngestConfig { url, token: "it_test".into() }),
+            Some(IngestConfig {
+                url,
+                token: "it_test".into(),
+            }),
         );
         // Seed a binary FileEntry for id "f1".
         out.files.lock().unwrap().put(
@@ -843,7 +897,9 @@ mod tests {
         let captured = captured.lock().unwrap().clone();
         let body = &captured[0];
         let b64 = body["body_b64"].as_str().unwrap();
-        let decoded = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
         assert_eq!(
             decoded,
             vec![0xDE, 0xAD, 0xBE, 0xEF],
@@ -878,14 +934,18 @@ mod tests {
             metadata: None,
         };
         // The call must NOT propagate the network failure.
-        out.send_artefact(&art).expect("send_artefact must not error on push failure");
+        out.send_artefact(&art)
+            .expect("send_artefact must not error on push failure");
         // SSE event still landed.
         match rx.try_recv().unwrap() {
             SseEvent::Artefact { id, title, .. } => {
                 assert_eq!(id, "a1");
                 assert_eq!(title, "doomed.md");
             }
-            other => panic!("expected artefact event, got {}", serde_json::to_string(&other).unwrap()),
+            other => panic!(
+                "expected artefact event, got {}",
+                serde_json::to_string(&other).unwrap()
+            ),
         }
         // Brief wait for the spawned task to fail; nothing observable
         // to check here besides "we didn't crash".  Logs land in

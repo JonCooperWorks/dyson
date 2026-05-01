@@ -123,8 +123,9 @@ fn format_sse(id: u64, evt: &SseEvent) -> String {
             // The synthetic event is built from `&str` and should always
             // serialise; if it doesn't, fall back to a hand-rolled frame
             // so the client still sees an error rather than `{}`.
-            let json = serde_json::to_string(&synthetic).unwrap_or_else(|_|
-                r#"{"type":"llm_error","message":"internal SSE serialisation error"}"#.to_string());
+            let json = serde_json::to_string(&synthetic).unwrap_or_else(|_| {
+                r#"{"type":"llm_error","message":"internal SSE serialisation error"}"#.to_string()
+            });
             format!("id: {id}\ndata: {json}\n\n")
         }
     }
@@ -157,7 +158,9 @@ mod tests {
 
     #[test]
     fn format_sse_produces_one_frame_per_event() {
-        let evt = SseEvent::Text { delta: "hi".to_string() };
+        let evt = SseEvent::Text {
+            delta: "hi".to_string(),
+        };
         let frame = format_sse(7, &evt);
         assert!(frame.starts_with("id: 7\n"));
         assert!(frame.contains("\ndata: "));

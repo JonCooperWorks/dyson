@@ -56,9 +56,7 @@ fn parse_pipfile_lock(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
         let version = entry
             .version
             .map(|v| v.trim_start_matches("==").to_string());
-        parsed
-            .deps
-            .push(dep(name, version, Ecosystem::PyPI, path));
+        parsed.deps.push(dep(name, version, Ecosystem::PyPI, path));
     }
     Ok(parsed)
 }

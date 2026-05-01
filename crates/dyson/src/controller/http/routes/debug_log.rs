@@ -4,9 +4,9 @@
 // surface that ships with the binary; it should be ripped out (or
 // gated behind a build feature) once the underlying bug is closed.
 
-use hyper::{header, Response, StatusCode};
+use hyper::{Response, StatusCode, header};
 
-use super::super::responses::{boxed, Resp};
+use super::super::responses::{Resp, boxed};
 
 const TAIL_BYTES: u64 = 200_000;
 

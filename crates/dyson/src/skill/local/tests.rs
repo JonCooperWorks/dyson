@@ -141,14 +141,10 @@ fn parse_malformed_frontmatter_only_falls_back_to_whole_file() {
     // All frontmatter, no closing `---`, no body — previously rejected,
     // now loads with the raw file as the body so the author doesn't lose
     // their skill to a syntax nit.
-    let content =
-        "---\nname: pastebin\ndescription: Posts things. No auth, no API key.";
+    let content = "---\nname: pastebin\ndescription: Posts things. No auth, no API key.";
     let skill = LocalSkill::parse(content, "pastebin", &test_path()).unwrap();
     assert_eq!(skill.name, "pastebin");
-    assert_eq!(
-        skill.description,
-        "Posts things. No auth, no API key."
-    );
+    assert_eq!(skill.description, "Posts things. No auth, no API key.");
     assert!(skill.body.contains("name: pastebin"));
 }
 
@@ -167,7 +163,10 @@ Provide actionable feedback.
 ";
     let skill = LocalSkill::parse(content, "code-review", &test_path()).unwrap();
     assert_eq!(skill.name, "code-review");
-    assert_eq!(skill.description, "Reviews code for quality and security issues");
+    assert_eq!(
+        skill.description,
+        "Reviews code for quality and security issues"
+    );
     assert!(skill.body.contains("You are a code review expert."));
 }
 

@@ -229,7 +229,9 @@ impl FilesystemWorkspace {
     /// Create default files if they don't exist.
     fn ensure_defaults(&mut self) -> Result<()> {
         let defaults: &[(&str, &str)] = &[
-            ("SOUL.md", "\
+            (
+                "SOUL.md",
+                "\
 # SOUL.md — Who You Are
 
 Be genuinely helpful, not performatively helpful. Skip the filler words — just help.
@@ -263,8 +265,11 @@ You operate in a security-conscious environment. When examining systems:
 - Default to least privilege — don't suggest disabling security controls.
 
 Update this file as you learn who you are.
-"),
-            ("IDENTITY.md", "\
+",
+            ),
+            (
+                "IDENTITY.md",
+                "\
 # IDENTITY.md — Who Am I?
 
 - **Name:** Dyson
@@ -272,8 +277,11 @@ Update this file as you learn who you are.
 - **Powered by:** Dyson agent framework
 
 Update this file with your specific identity, capabilities, and context.
-"),
-            ("AGENTS.md", "\
+",
+            ),
+            (
+                "AGENTS.md",
+                "\
 # AGENTS.md — Operating Procedures
 
 ## Every Session
@@ -291,23 +299,33 @@ You wake up fresh each session. These files are your continuity:
 - **Long-term:** MEMORY.md — curated memories
 
 Capture what matters. Decisions, context, things to remember.
-"),
-            ("MEMORY.md", "\
+",
+            ),
+            (
+                "MEMORY.md",
+                "\
 # MEMORY.md — Long-Term Memory
 
 *Nothing here yet. Update this file as you learn things worth remembering.*
-"),
-            ("USER.md", "\
+",
+            ),
+            (
+                "USER.md",
+                "\
 # USER.md — User Profile
 
 *Nothing here yet. Update this file as you learn about the user.*
-"),
-            ("HEARTBEAT.md", "\
+",
+            ),
+            (
+                "HEARTBEAT.md",
+                "\
 # HEARTBEAT.md
 
 # Keep this file empty to skip heartbeat tasks.
 # Add tasks below when you want the agent to check something periodically.
-"),
+",
+            ),
         ];
 
         for (name, content) in defaults {
@@ -332,7 +350,10 @@ impl Workspace for FilesystemWorkspace {
 
     fn set(&mut self, name: &str, content: &str) {
         self.files.insert(name.to_string(), content.to_string());
-        self.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(name.to_string());
+        self.dirty
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(name.to_string());
         if name.starts_with("memory/") || name.starts_with("kb/") {
             self.memory_store.index(name, content);
         }
@@ -344,14 +365,20 @@ impl Workspace for FilesystemWorkspace {
             entry.push('\n');
         }
         entry.push_str(content);
-        self.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(name.to_string());
+        self.dirty
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(name.to_string());
         if name.starts_with("memory/") || name.starts_with("kb/") {
             self.memory_store.index(name, entry);
         }
     }
 
     fn save(&self) -> Result<()> {
-        let mut dirty = self.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut dirty = self
+            .dirty
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         if dirty.is_empty() {
             tracing::debug!("workspace save skipped — no dirty files");
@@ -933,8 +960,7 @@ mod tests {
         ws.set("memory/notes/deep/nested.md", "Deeply nested file");
         ws.save().unwrap();
 
-        let on_disk =
-            std::fs::read_to_string(dir.join("memory/notes/deep/nested.md")).unwrap();
+        let on_disk = std::fs::read_to_string(dir.join("memory/notes/deep/nested.md")).unwrap();
         assert_eq!(on_disk, "Deeply nested file");
         let _ = std::fs::remove_dir_all(&dir);
     }

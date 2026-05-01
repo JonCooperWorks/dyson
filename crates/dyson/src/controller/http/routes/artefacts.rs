@@ -219,16 +219,17 @@ pub(super) async fn list(state: &HttpState, chat_id: &str) -> Resp {
         };
         for id in store.order.iter().rev() {
             if let Some(entry) = store.items.get(id)
-                && entry.chat_id == chat_id {
-                    items.push(ArtefactDto {
-                        id: id.clone(),
-                        kind: entry.kind,
-                        title: entry.title.clone(),
-                        bytes: entry.content.len(),
-                        created_at: entry.created_at,
-                        metadata: entry.metadata.clone(),
-                    });
-                }
+                && entry.chat_id == chat_id
+            {
+                items.push(ArtefactDto {
+                    id: id.clone(),
+                    kind: entry.kind,
+                    title: entry.title.clone(),
+                    bytes: entry.content.len(),
+                    created_at: entry.created_at,
+                    metadata: entry.metadata.clone(),
+                });
+            }
         }
     }
     // Newest first.  read_dir is unordered, so sort by (created_at,
@@ -236,8 +237,14 @@ pub(super) async fn list(state: &HttpState, chat_id: &str) -> Resp {
     // artefacts share a wall-clock second.
     items.sort_by(|a, b| {
         b.created_at.cmp(&a.created_at).then_with(|| {
-            let an: u64 = a.id.strip_prefix('a').and_then(|s| s.parse().ok()).unwrap_or(0);
-            let bn: u64 = b.id.strip_prefix('a').and_then(|s| s.parse().ok()).unwrap_or(0);
+            let an: u64 =
+                a.id.strip_prefix('a')
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+            let bn: u64 =
+                b.id.strip_prefix('a')
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
             bn.cmp(&an)
         })
     });
@@ -262,7 +269,11 @@ fn read_meta_dto(sub: &std::path::Path, id: &str) -> Option<ArtefactDto> {
     Some(ArtefactDto {
         id: id.to_string(),
         kind,
-        title: meta.get("title").and_then(|v| v.as_str()).unwrap_or("Artefact").to_string(),
+        title: meta
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Artefact")
+            .to_string(),
         bytes,
         created_at: meta.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
         metadata: meta.get("metadata").cloned().filter(|v| !v.is_null()),

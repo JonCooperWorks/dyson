@@ -320,7 +320,10 @@ mod tests {
             process_exec: Access::Allow,
         };
         let cmd = build_bwrap_command_from_policy("ls", &policy, "/workspace");
-        assert!(cmd.contains("--unshare-net"), "network Deny must unshare net");
+        assert!(
+            cmd.contains("--unshare-net"),
+            "network Deny must unshare net"
+        );
         assert!(cmd.contains("--ro-bind / /"), "should have read-only root");
         assert!(
             cmd.contains("--bind '/workspace' '/workspace'"),
@@ -579,7 +582,10 @@ mod tests {
         let cmd = build_container_command_from_policy("ls", &policy, "/workspace");
         // /workspace should be writable, not read-only.
         assert!(cmd.contains("-v '/workspace':'/workspace'"));
-        assert!(!cmd.contains(":ro"), "should not have ro mount for writable path");
+        assert!(
+            !cmd.contains(":ro"),
+            "should not have ro mount for writable path"
+        );
     }
 
     #[test]

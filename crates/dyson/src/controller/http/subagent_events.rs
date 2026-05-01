@@ -61,12 +61,7 @@ impl SubagentEventBus {
     /// the call that just finished — the frontend uses it to update the
     /// correct child even when the subagent dispatched calls in
     /// parallel (where the most-recent-tool-start heuristic is unsafe).
-    pub fn tool_result(
-        &self,
-        parent_tool_id: &str,
-        child_id: Option<&str>,
-        output: &ToolOutput,
-    ) {
+    pub fn tool_result(&self, parent_tool_id: &str, child_id: Option<&str>, output: &ToolOutput) {
         let _ = self.tx.send(SseEvent::ToolResult {
             content: output.content.clone(),
             is_error: output.is_error,
@@ -92,12 +87,19 @@ mod tests {
         let (bus, mut rx) = fixture();
         bus.tool_start("parent_42", "child_7", "bash");
         match rx.try_recv().unwrap() {
-            SseEvent::ToolStart { id, name, parent_tool_id } => {
+            SseEvent::ToolStart {
+                id,
+                name,
+                parent_tool_id,
+            } => {
                 assert_eq!(id, "child_7");
                 assert_eq!(name, "bash");
                 assert_eq!(parent_tool_id.as_deref(), Some("parent_42"));
             }
-            other => panic!("unexpected event: {}", serde_json::to_string(&other).unwrap()),
+            other => panic!(
+                "unexpected event: {}",
+                serde_json::to_string(&other).unwrap()
+            ),
         }
     }
 
@@ -125,7 +127,10 @@ mod tests {
                 assert_eq!(parent_tool_id.as_deref(), Some("parent_42"));
                 assert_eq!(tool_use_id.as_deref(), Some("child_7"));
             }
-            other => panic!("unexpected event: {}", serde_json::to_string(&other).unwrap()),
+            other => panic!(
+                "unexpected event: {}",
+                serde_json::to_string(&other).unwrap()
+            ),
         }
     }
 

@@ -75,7 +75,17 @@ async fn simple_text_response() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent.run("hi", &mut output).await.unwrap();
@@ -121,7 +131,17 @@ async fn tool_call_loop() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent
@@ -164,7 +184,17 @@ async fn internal_tools_provider_skips_tool_execution() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent.run("list files", &mut output).await.unwrap();
@@ -194,8 +224,8 @@ async fn memory_system_prompt_contains_usage_stats_and_curation_rules() {
         dangerous_no_sandbox: false,
         taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         activity: None,
-    tool_use_id: None,
-    subagent_events: None,
+        tool_use_id: None,
+        subagent_events: None,
     };
 
     let prompt = reflection::build_memory_system_prompt(&ctx).await;
@@ -228,8 +258,8 @@ async fn reflection_system_prompt_lists_tools() {
         dangerous_no_sandbox: false,
         taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         activity: None,
-    tool_use_id: None,
-    subagent_events: None,
+        tool_use_id: None,
+        subagent_events: None,
     };
     let prompt = reflection::build_reflection_system_prompt(&ctx).await;
     assert!(prompt.contains("skill_create"));
@@ -316,7 +346,10 @@ fn summarize_for_reflection_handles_multibyte_utf8() {
 // Feedback summary formatting tests
 // -----------------------------------------------------------------------
 
-fn fb(turn_index: usize, rating: crate::feedback::FeedbackRating) -> crate::feedback::FeedbackEntry {
+fn fb(
+    turn_index: usize,
+    rating: crate::feedback::FeedbackRating,
+) -> crate::feedback::FeedbackEntry {
     crate::feedback::FeedbackEntry {
         turn_index,
         rating,
@@ -358,8 +391,8 @@ fn format_feedback_summary_all_positive() {
 
 #[tokio::test]
 async fn synthesize_to_workspace_updates_memory() {
-    let ws = crate::workspace::InMemoryWorkspace::new()
-        .with_file("MEMORY.md", "Old memory content.");
+    let ws =
+        crate::workspace::InMemoryWorkspace::new().with_file("MEMORY.md", "Old memory content.");
 
     let workspace: crate::workspace::WorkspaceHandle =
         Arc::new(tokio::sync::RwLock::new(Box::new(ws)));
@@ -524,7 +557,17 @@ async fn token_budget_stops_agent_loop() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     agent.conversation.token_budget.max_output_tokens = Some(150);
     let mut output = RecordingOutput::new();
 
@@ -655,7 +698,17 @@ async fn tool_output_files_dispatched_via_send_file() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(MockFileSkill::new())];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     let mut output = RecordingOutput::new();
 
     let result = agent.run("send me a file", &mut output).await.unwrap();
@@ -703,7 +756,17 @@ async fn tool_output_no_files_means_no_send_file() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     let mut output = RecordingOutput::new();
 
     agent.run("echo hello", &mut output).await.unwrap();
@@ -775,7 +838,17 @@ fn make_agent_with_history(
     };
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     agent.conversation.messages = messages;
     (agent, RecordingOutput::new())
 }
@@ -787,7 +860,8 @@ fn make_agent_with_history(
 #[tokio::test]
 async fn compact_on_empty_history_is_noop() {
     // No LLM responses queued — would panic if called.
-    let (mut agent, mut output) = make_agent_with_history(vec![], vec![], CompactionConfig::default());
+    let (mut agent, mut output) =
+        make_agent_with_history(vec![], vec![], CompactionConfig::default());
     agent.compact(&mut output).await.unwrap();
     assert!(agent.conversation.messages.is_empty());
 }
@@ -806,8 +880,7 @@ async fn compact_short_history_skips_when_no_middle() {
         protect_tail_tokens: 0,
         ..CompactionConfig::default()
     };
-    let (mut agent, mut output) =
-        make_agent_with_history(messages.clone(), vec![], config);
+    let (mut agent, mut output) = make_agent_with_history(messages.clone(), vec![], config);
 
     agent.compact(&mut output).await.unwrap();
     // All 3 messages preserved — no compaction needed.
@@ -864,7 +937,9 @@ async fn compact_preserves_head_and_tail() {
 
     // Summary should be present somewhere after head.
     let summary_idx = agent.conversation.messages.iter().position(|m| {
-        m.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.starts_with("[Context Summary]")))
+        m.content.iter().any(
+            |b| matches!(b, ContentBlock::Text { text } if text.starts_with("[Context Summary]")),
+        )
     });
     assert!(summary_idx.is_some(), "summary message should exist");
 
@@ -925,26 +1000,23 @@ async fn compact_prunes_tool_outputs_in_middle() {
     };
 
     let summary_response = vec![
-        StreamEvent::TextDelta(
-            "## Goal\nFile listing\n## Progress\nListed directories.".into(),
-        ),
+        StreamEvent::TextDelta("## Goal\nFile listing\n## Progress\nListed directories.".into()),
         StreamEvent::MessageComplete {
             stop_reason: StopReason::EndTurn,
             output_tokens: None,
         },
     ];
 
-    let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], config);
+    let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
 
     // The summary should exist and tool outputs in the middle should
     // have been pruned (replaced with placeholder) before summarisation.
     let has_summary = agent.conversation.messages.iter().any(|m| {
-        m.content.iter().any(
-            |b| matches!(b, ContentBlock::Text { text } if text.contains("[Context Summary]")),
-        )
+        m.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("[Context Summary]")))
     });
     assert!(has_summary, "should contain a context summary");
 
@@ -1003,8 +1075,7 @@ async fn compact_fixes_orphaned_tool_pairs() {
         },
     ];
 
-    let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], config);
+    let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
 
@@ -1067,8 +1138,7 @@ async fn compact_structured_summary_prompt() {
         },
     ];
 
-    let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], config);
+    let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
 
@@ -1118,8 +1188,7 @@ async fn compact_resets_token_budget() {
         },
     ];
 
-    let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], config);
+    let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
     agent.conversation.token_budget.record(50).unwrap();
     assert_eq!(agent.conversation.token_budget.output_tokens_used, 50);
@@ -1138,9 +1207,7 @@ async fn compact_iterative_merges_with_previous_summary() {
     // should produce an updated summary that merges old + new.
     let messages = vec![
         // Previous summary (from first compaction).
-        Message::user(
-            "[Context Summary]\n\n## Goal\nOriginal goal.\n## Progress\nStep 1 done.",
-        ),
+        Message::user("[Context Summary]\n\n## Goal\nOriginal goal.\n## Progress\nStep 1 done."),
         // New conversation since last compaction.
         Message::assistant(vec![ContentBlock::Text {
             text: "continuing work".into(),
@@ -1168,8 +1235,7 @@ async fn compact_iterative_merges_with_previous_summary() {
 
     let summary_response = vec![
         StreamEvent::TextDelta(
-            "## Goal\nOriginal goal.\n## Progress\nSteps 1-3 done.\n## Next Steps\nStep 4."
-                .into(),
+            "## Goal\nOriginal goal.\n## Progress\nSteps 1-3 done.\n## Next Steps\nStep 4.".into(),
         ),
         StreamEvent::MessageComplete {
             stop_reason: StopReason::EndTurn,
@@ -1177,8 +1243,7 @@ async fn compact_iterative_merges_with_previous_summary() {
         },
     ];
 
-    let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], config);
+    let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
 
@@ -1236,8 +1301,7 @@ async fn compact_empty_summary_keeps_original_history() {
     }];
 
     let original_len = messages.len();
-    let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], config);
+    let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
     // Original history should be preserved (though tool outputs may be pruned).
@@ -1277,8 +1341,7 @@ async fn compact_tail_protection_by_token_budget() {
         },
     ];
 
-    let (mut agent, mut output) =
-        make_agent_with_history(messages, vec![summary_response], config);
+    let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
     agent.compact(&mut output).await.unwrap();
 
@@ -1341,7 +1404,17 @@ async fn auto_compaction_triggers_on_threshold() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-    let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     let mut output = RecordingOutput::new();
 
     // First turn.
@@ -1392,10 +1465,8 @@ async fn compact_rotates_pre_compaction_history() {
         make_agent_with_history(messages.clone(), vec![summary_response], config);
 
     // Attach a disk chat history so we can verify the rotation.
-    let dir = std::env::temp_dir().join(format!(
-        "dyson_compact_rotate_test_{}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("dyson_compact_rotate_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let store = crate::chat_history::DiskChatHistory::new(dir.clone()).unwrap();
     let store: Arc<dyn crate::chat_history::ChatHistory> = Arc::new(store);
@@ -1407,7 +1478,10 @@ async fn compact_rotates_pre_compaction_history() {
 
     // Current chat file should be empty (it was rotated).
     let current = store.load("test_chat").unwrap();
-    assert!(current.is_empty(), "current chat should be empty after rotation");
+    assert!(
+        current.is_empty(),
+        "current chat should be empty after rotation"
+    );
 
     // A rotated file should exist with the pre-compaction messages —
     // per-chat layout puts archives under {id}/archives/.
@@ -1422,7 +1496,11 @@ async fn compact_rotates_pre_compaction_history() {
     // The rotated file should contain the original 6 messages.
     let rotated_content = std::fs::read_to_string(files[0].path()).unwrap();
     let rotated_msgs: Vec<Message> = serde_json::from_str(&rotated_content).unwrap();
-    assert_eq!(rotated_msgs.len(), 6, "rotated file should have all pre-compaction messages");
+    assert_eq!(
+        rotated_msgs.len(),
+        6,
+        "rotated file should have all pre-compaction messages"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1453,11 +1531,7 @@ async fn compact_without_chat_history_does_not_rotate() {
         ..CompactionConfig::default()
     };
 
-    let (mut agent, mut output) = make_agent_with_history(
-        messages,
-        vec![summary_response],
-        config,
-    );
+    let (mut agent, mut output) = make_agent_with_history(messages, vec![summary_response], config);
 
     assert!(agent.history_backend.is_none());
     agent.compact(&mut output).await.unwrap();
@@ -1482,9 +1556,7 @@ async fn quick_response_returns_text_without_tools() {
 
     let history = vec![
         Message::user("What is 2+2?"),
-        Message::assistant(vec![ContentBlock::Text {
-            text: "4".into(),
-        }]),
+        Message::assistant(vec![ContentBlock::Text { text: "4".into() }]),
     ];
 
     let config = CompletionConfig {
@@ -1620,10 +1692,10 @@ async fn quick_response_sends_no_tools() {
 // -----------------------------------------------------------------------
 
 mod test_tool_calling_integration {
-    use super::*;
     use super::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
     use super::result_formatter::ResultFormatter;
     use super::tool_limiter::ToolLimiter;
+    use super::*;
 
     #[test]
     fn full_pipeline_single_call() {
@@ -1699,7 +1771,17 @@ mod test_tool_calling_integration {
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+        let mut agent = Agent::new(
+            rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+            sandbox,
+            skills,
+            &settings,
+            None,
+            0,
+            None,
+            None,
+        )
+        .unwrap();
         agent.set_messages(messages.clone());
 
         let popped = agent.pop_last_message();
@@ -1721,7 +1803,17 @@ mod test_tool_calling_integration {
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+        let mut agent = Agent::new(
+            rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+            sandbox,
+            skills,
+            &settings,
+            None,
+            0,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(agent.pop_last_message().is_none());
     }
@@ -1735,7 +1827,17 @@ mod test_tool_calling_integration {
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+        let mut agent = Agent::new(
+            rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+            sandbox,
+            skills,
+            &settings,
+            None,
+            0,
+            None,
+            None,
+        )
+        .unwrap();
 
         agent.set_messages(vec![
             Message::user_multimodal(vec![
@@ -1786,7 +1888,17 @@ mod test_tool_calling_integration {
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
         let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
-        let mut agent = Agent::new(rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+        let mut agent = Agent::new(
+            rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+            sandbox,
+            skills,
+            &settings,
+            None,
+            0,
+            None,
+            None,
+        )
+        .unwrap();
 
         agent.set_messages(vec![
             Message::user("hello"),
@@ -1914,11 +2026,7 @@ fn find_existing_summary_found() {
         Message::assistant(vec![ContentBlock::Text { text: "ok".into() }]),
         Message::user("continue"),
     ];
-    let (agent, _) = make_agent_with_history(
-        msgs,
-        vec![],
-        CompactionConfig::default(),
-    );
+    let (agent, _) = make_agent_with_history(msgs, vec![], CompactionConfig::default());
     let summary = agent.find_existing_summary(2);
     assert!(summary.is_some());
     assert!(summary.unwrap().contains("Previous summary content"));
@@ -1930,11 +2038,7 @@ fn find_existing_summary_not_found() {
         Message::user("no summary here"),
         Message::assistant(vec![ContentBlock::Text { text: "ok".into() }]),
     ];
-    let (agent, _) = make_agent_with_history(
-        msgs,
-        vec![],
-        CompactionConfig::default(),
-    );
+    let (agent, _) = make_agent_with_history(msgs, vec![], CompactionConfig::default());
     assert!(agent.find_existing_summary(2).is_none());
 }
 
@@ -1949,11 +2053,7 @@ fn fix_orphaned_uses_inserts_synthetic() {
         }]),
         Message::user("continue"),
     ];
-    let (mut agent, _) = make_agent_with_history(
-        msgs,
-        vec![],
-        CompactionConfig::default(),
-    );
+    let (mut agent, _) = make_agent_with_history(msgs, vec![], CompactionConfig::default());
     agent.fix_orphaned_tool_pairs();
     // Should now have a synthetic ToolResult for orphan_1.
     let has_result = agent.conversation.messages.iter().any(|m| {
@@ -1961,7 +2061,10 @@ fn fix_orphaned_uses_inserts_synthetic() {
             matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "orphan_1")
         })
     });
-    assert!(has_result, "should insert synthetic result for orphaned tool_use");
+    assert!(
+        has_result,
+        "should insert synthetic result for orphaned tool_use"
+    );
 }
 
 #[test]
@@ -1972,11 +2075,7 @@ fn fix_orphaned_results_removed() {
         Message::tool_result("missing_call", "orphaned result", false),
         Message::user("continue"),
     ];
-    let (mut agent, _) = make_agent_with_history(
-        msgs,
-        vec![],
-        CompactionConfig::default(),
-    );
+    let (mut agent, _) = make_agent_with_history(msgs, vec![], CompactionConfig::default());
     agent.fix_orphaned_tool_pairs();
     // The orphaned result should be removed.
     let has_orphan = agent.conversation.messages.iter().any(|m| {
@@ -1999,11 +2098,7 @@ fn fix_orphaned_mixed() {
         Message::tool_result("result_no_use", "orphaned", false),
         Message::user("end"),
     ];
-    let (mut agent, _) = make_agent_with_history(
-        msgs,
-        vec![],
-        CompactionConfig::default(),
-    );
+    let (mut agent, _) = make_agent_with_history(msgs, vec![], CompactionConfig::default());
     agent.fix_orphaned_tool_pairs();
 
     // Synthetic result for "use_no_result" should exist.
@@ -2027,13 +2122,11 @@ fn fix_orphaned_mixed() {
 fn estimate_context_tokens_basic() {
     let msgs = vec![
         Message::user("hello world"),
-        Message::assistant(vec![ContentBlock::Text { text: "hi there friend".into() }]),
+        Message::assistant(vec![ContentBlock::Text {
+            text: "hi there friend".into(),
+        }]),
     ];
-    let (agent, _) = make_agent_with_history(
-        msgs,
-        vec![],
-        CompactionConfig::default(),
-    );
+    let (agent, _) = make_agent_with_history(msgs, vec![], CompactionConfig::default());
     let tokens = agent.estimate_context_tokens("system prompt here");
     // system: 3 words + messages: ~2 + ~3 + framing → should be > 0
     assert!(tokens > 0);
@@ -2089,7 +2182,9 @@ fn is_retryable_overloaded() {
     assert!(crate::llm::is_retryable(&mk("server overloaded")));
     assert!(crate::llm::is_retryable(&mk("HTTP 529")));
     assert!(crate::llm::is_retryable(&mk("HTTP 502 Bad Gateway")));
-    assert!(crate::llm::is_retryable(&mk("HTTP 503 Service Unavailable")));
+    assert!(crate::llm::is_retryable(&mk(
+        "HTTP 503 Service Unavailable"
+    )));
 }
 
 #[tokio::test]
@@ -2106,8 +2201,13 @@ async fn is_retryable_http_error() {
 
 #[test]
 fn is_retryable_other() {
-    assert!(!crate::llm::is_retryable(&DysonError::Config("bad config".into())));
-    assert!(!crate::llm::is_retryable(&DysonError::tool("bash", "command failed")));
+    assert!(!crate::llm::is_retryable(&DysonError::Config(
+        "bad config".into()
+    )));
+    assert!(!crate::llm::is_retryable(&DysonError::tool(
+        "bash",
+        "command failed"
+    )));
     assert!(!crate::llm::is_retryable(&DysonError::Cancelled));
 }
 
@@ -2132,15 +2232,17 @@ fn generic_advisor_inherits_parent_tools() {
 
     // Count the tools from skills (before advisor).
     let skill_tool_count: usize = skills.iter().map(|s| s.tools().len()).sum();
-    assert!(skill_tool_count > 0, "skills should provide at least one tool");
+    assert!(
+        skill_tool_count > 0,
+        "skills should provide at least one tool"
+    );
 
-    let advisor: Box<dyn crate::advisor::Advisor> = Box::new(
-        crate::advisor::generic::GenericAdvisor::new(
+    let advisor: Box<dyn crate::advisor::Advisor> =
+        Box::new(crate::advisor::generic::GenericAdvisor::new(
             "test-advisor-model".to_string(),
             crate::config::LlmProvider::OpenAi,
             rate_limiter::RateLimitedHandle::unlimited(Box::new(advisor_llm)),
-        ),
-    );
+        ));
 
     let agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
@@ -2190,7 +2292,9 @@ fn generic_advisor_shares_sandbox_with_parent() {
     crate::advisor::Advisor::bind(&mut advisor, Arc::clone(&sandbox), None, parent_tools);
 
     // The advisor's sandbox should be the same Arc instance.
-    let advisor_sandbox = advisor.sandbox().expect("sandbox should be set after bind()");
+    let advisor_sandbox = advisor
+        .sandbox()
+        .expect("sandbox should be set after bind()");
     assert!(
         Arc::ptr_eq(&sandbox, advisor_sandbox),
         "advisor sandbox must be the same Arc instance as the parent's"
@@ -2214,7 +2318,7 @@ fn native_anthropic_advisor_injects_api_tool() {
     let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
 
     let advisor_client = rate_limiter::RateLimitedHandle::unlimited(
-        Box::new(MockLlm::new(vec![])) as Box<dyn LlmClient>,
+        Box::new(MockLlm::new(vec![])) as Box<dyn LlmClient>
     );
     let advisor = crate::advisor::create_advisor(
         &crate::config::LlmProvider::Anthropic,

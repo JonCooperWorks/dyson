@@ -919,9 +919,15 @@ mod tests {
 
         // Everything else byte-for-byte identical (modulo the version stamp).
         let mut without_version = root.clone();
-        without_version.as_object_mut().unwrap().remove("config_version");
+        without_version
+            .as_object_mut()
+            .unwrap()
+            .remove("config_version");
         let mut original_without_version = original.clone();
-        original_without_version.as_object_mut().unwrap().remove("config_version");
+        original_without_version
+            .as_object_mut()
+            .unwrap()
+            .remove("config_version");
         assert_eq!(without_version, original_without_version);
     }
 

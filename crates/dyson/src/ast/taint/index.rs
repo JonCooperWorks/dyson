@@ -234,9 +234,7 @@ impl Walker<'_> {
             let elixir_skip = self.config.definitions_are_calls
                 && kind == "call"
                 && !nodes::is_elixir_definition(&node, self.source.as_bytes());
-            if !elixir_skip
-                && let Some(id) = self.record_definition(node)
-            {
+            if !elixir_skip && let Some(id) = self.record_definition(node) {
                 self.current_fn = Some(id);
             }
         }
@@ -285,8 +283,7 @@ impl Walker<'_> {
                 .child_by_field_name("body")
                 .map(|b| b.byte_range())
                 .unwrap_or_else(|| node.byte_range()),
-            name: nodes::extract_definition_name(&node, self.source.as_bytes())
-                .unwrap_or_default(),
+            name: nodes::extract_definition_name(&node, self.source.as_bytes()).unwrap_or_default(),
             params,
         });
         self.builder
@@ -401,7 +398,14 @@ fn flatten_callee<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
     // Recurse through wrapper fields.  `suffix` handles Swift's
     // navigation_expression chain; `attrpath` handles Nix dotted paths;
     // the rest cover JS/TS, Python, Rust, Go, OCaml.
-    for field in ["property", "field", "attribute", "name", "suffix", "attrpath"] {
+    for field in [
+        "property",
+        "field",
+        "attribute",
+        "name",
+        "suffix",
+        "attrpath",
+    ] {
         if let Some(n) = node.child_by_field_name(field)
             && let Some(name) = flatten_callee(n, source)
         {
@@ -494,7 +498,8 @@ pub(crate) fn extract_parameters(node: Node<'_>, source: &str) -> Vec<String> {
 
 fn find_child_of_kind<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
     let mut cursor = node.walk();
-    node.children(&mut cursor).find(|c| kinds.contains(&c.kind()))
+    node.children(&mut cursor)
+        .find(|c| kinds.contains(&c.kind()))
 }
 
 fn first_identifier_text<'a>(node: Node<'_>, source: &'a str) -> Option<&'a str> {
@@ -522,7 +527,12 @@ pub(crate) fn extract_arg_idents(
         .or_else(|| {
             find_child_of_kind(
                 call_node,
-                &["arguments", "argument_list", "value_arguments", "call_suffix"],
+                &[
+                    "arguments",
+                    "argument_list",
+                    "value_arguments",
+                    "call_suffix",
+                ],
             )
         });
     // Swift nests `value_arguments` inside a `call_suffix`.  Descend one
@@ -692,7 +702,14 @@ fn collect_chain_segments<'a>(
 /// and Zig's `field_expression` property slot expose the children
 /// unnamed — fall back to the first named child in that case.
 fn chain_object(node: Node<'_>) -> Option<Node<'_>> {
-    for field in ["object", "value", "operand", "argument", "expression", "target"] {
+    for field in [
+        "object",
+        "value",
+        "operand",
+        "argument",
+        "expression",
+        "target",
+    ] {
         if let Some(n) = node.child_by_field_name(field) {
             return Some(n);
         }
@@ -771,7 +788,10 @@ fn extract_positional_children(
     rhs: &mut Vec<String>,
 ) {
     let mut cursor = node.walk();
-    let named: Vec<_> = node.children(&mut cursor).filter(|c| c.is_named()).collect();
+    let named: Vec<_> = node
+        .children(&mut cursor)
+        .filter(|c| c.is_named())
+        .collect();
     if named.len() < 2 {
         return;
     }

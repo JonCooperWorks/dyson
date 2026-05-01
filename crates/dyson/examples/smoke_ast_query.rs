@@ -42,7 +42,10 @@ fn main() {
             sub: "tokio/src",
             language: "rust",
             queries: &[
-                ("function_item", "(function_item name: (identifier) @fn_name) @fn"),
+                (
+                    "function_item",
+                    "(function_item name: (identifier) @fn_name) @fn",
+                ),
                 ("call_expression", "(call_expression) @call"),
                 (
                     "scoped_identifier-fields",
@@ -66,7 +69,10 @@ fn main() {
             queries: &[
                 ("function_item", "(function_item name: (identifier) @fn) @_"),
                 ("call_expression", "(call_expression) @call"),
-                ("struct_item", "(struct_item name: (type_identifier) @name) @_"),
+                (
+                    "struct_item",
+                    "(struct_item name: (type_identifier) @name) @_",
+                ),
             ],
         },
         Target {
@@ -137,7 +143,10 @@ fn main() {
             sub: "src",
             language: "python",
             queries: &[
-                ("class_definition", "(class_definition name: (identifier) @name) @_"),
+                (
+                    "class_definition",
+                    "(class_definition name: (identifier) @name) @_",
+                ),
                 (
                     "pickle-family",
                     "(call function: (attribute object: (identifier) @mod (#match? @mod \"^(pickle|yaml|marshal)$\"))) @_",
@@ -266,10 +275,7 @@ fn main() {
             sub: "kotlinx-coroutines-core/jvm/src",
             language: "kotlin",
             queries: &[
-                (
-                    "function_declaration",
-                    "(function_declaration) @fn",
-                ),
+                ("function_declaration", "(function_declaration) @fn"),
                 ("call_expression", "(call_expression) @call"),
             ],
         },
@@ -305,10 +311,7 @@ fn main() {
             sub: "",
             language: "csharp",
             queries: &[
-                (
-                    "invocation_expression",
-                    "(invocation_expression) @call",
-                ),
+                ("invocation_expression", "(invocation_expression) @call"),
                 (
                     "method_declaration",
                     "(method_declaration name: (identifier) @name) @_",
@@ -364,9 +367,7 @@ fn main() {
     // Escape hatch: run only the in-process compile pass, no clones.
     // Useful on CI or when validating a grammar bump without network.
     if std::env::var("DYSON_SMOKE_COMPILE_ONLY").is_ok() {
-        println!(
-            "\nDYSON_SMOKE_COMPILE_ONLY set — skipping clone + execute phase."
-        );
+        println!("\nDYSON_SMOKE_COMPILE_ONLY set — skipping clone + execute phase.");
         if totals.errors > 0 {
             std::process::exit(1);
         }

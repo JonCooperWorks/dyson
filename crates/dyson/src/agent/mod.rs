@@ -99,6 +99,9 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use self::dream::{DreamEvent, DreamHandle};
+use self::result_formatter::ResultFormatter;
+use self::tool_limiter::ToolLimiter;
 use crate::chat_history::ChatHistory;
 use crate::config::{AgentSettings, CompactionConfig};
 use crate::controller::Output;
@@ -108,9 +111,6 @@ use crate::message::{ContentBlock, Message};
 use crate::sandbox::Sandbox;
 use crate::skill::Skill;
 use crate::tool::{Tool, ToolContext};
-use self::dream::{DreamEvent, DreamHandle};
-use self::result_formatter::ResultFormatter;
-use self::tool_limiter::ToolLimiter;
 
 use self::stream_handler::ToolCall;
 
@@ -119,8 +119,7 @@ use self::token_budget::TokenBudget;
 /// Injected after a tool call's JSON arguments were cut off by max_tokens.
 /// Retrying verbatim would just re-truncate, so we redirect to small-write
 /// primitives.
-const MAXTOKENS_TOOL_CALL_TRUNCATED: &str =
-    "[Your last tool call was cut off mid-argument because the output exceeded \
+const MAXTOKENS_TOOL_CALL_TRUNCATED: &str = "[Your last tool call was cut off mid-argument because the output exceeded \
      the max token limit.  Do NOT retry the same call — the JSON will \
      truncate again.  Instead: (1) use `write_file` instead of `bash` \
      heredocs to write files, or (2) split the content across multiple \
@@ -221,10 +220,7 @@ impl ToolRegistry {
             })
             .sum();
 
-        tracing::info!(
-            tool_count = tools.len(),
-            "tool registry built"
-        );
+        tracing::info!(tool_count = tools.len(), "tool registry built");
 
         Self {
             tools,
@@ -421,8 +417,7 @@ pub struct Agent {
 
 /// Callback fired whenever the agent's message history changes.
 /// See [`Agent::set_persist_hook`] for usage.
-pub type PersistHook =
-    std::sync::Arc<dyn Fn(&[crate::message::Message]) + Send + Sync>;
+pub type PersistHook = std::sync::Arc<dyn Fn(&[crate::message::Message]) + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // AgentBuilder
@@ -466,10 +461,7 @@ impl AgentBuilder {
     }
 
     /// Attach a workspace for identity, memory, and working directory.
-    pub fn workspace(
-        mut self,
-        ws: crate::workspace::WorkspaceHandle,
-    ) -> Self {
+    pub fn workspace(mut self, ws: crate::workspace::WorkspaceHandle) -> Self {
         self.workspace = Some(ws);
         self
     }
@@ -552,9 +544,7 @@ impl Agent {
         sandbox: Arc<dyn Sandbox>,
         skills: Vec<Box<dyn Skill>>,
         settings: &AgentSettings,
-        workspace: Option<
-            crate::workspace::WorkspaceHandle,
-        >,
+        workspace: Option<crate::workspace::WorkspaceHandle>,
         nudge_interval: usize,
         transcriber: Option<std::sync::Arc<dyn crate::media::audio::Transcriber>>,
         advisor: Option<Box<dyn crate::advisor::Advisor>>,
@@ -582,11 +572,13 @@ impl Agent {
         };
 
         let advisor_prompt = if advisor.is_some() {
-            Some("\n\nYou have access to an `advisor` tool — a more capable model \
+            Some(
+                "\n\nYou have access to an `advisor` tool — a more capable model \
                   you can consult for complex decisions. Use it when facing \
                   architectural choices, ambiguous trade-offs, or problems that \
                   would benefit from a second opinion. The advisor can read files \
-                  and investigate the codebase. Don't use it for simple tasks.")
+                  and investigate the codebase. Don't use it for simple tasks.",
+            )
         } else {
             None
         };
@@ -676,9 +668,7 @@ impl Agent {
     /// Resolve the working directory from the workspace and build a ToolContext.
     fn build_tool_context(
         sandbox: &Arc<dyn Sandbox>,
-        workspace: Option<
-            crate::workspace::WorkspaceHandle,
-        >,
+        workspace: Option<crate::workspace::WorkspaceHandle>,
     ) -> ToolContext {
         let working_dir = workspace
             .as_ref()
@@ -697,8 +687,8 @@ impl Agent {
             dangerous_no_sandbox: sandbox.skip_path_validation(),
             taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             activity: None,
-        tool_use_id: None,
-        subagent_events: None,
+            tool_use_id: None,
+            subagent_events: None,
         };
         tool_context.workspace = workspace;
         tool_context
@@ -715,14 +705,14 @@ impl Agent {
 
             if nudge_interval > 0 {
                 // Memory maintenance: update MEMORY.md / USER.md every N turns.
-                dreams.push(Arc::new(
-                    reflection::MemoryMaintenanceDream::new(nudge_interval),
-                ));
+                dreams.push(Arc::new(reflection::MemoryMaintenanceDream::new(
+                    nudge_interval,
+                )));
 
                 // Self-improvement: create skills every 2N turns.
-                dreams.push(Arc::new(
-                    reflection::SelfImprovementDream::new(nudge_interval),
-                ));
+                dreams.push(Arc::new(reflection::SelfImprovementDream::new(
+                    nudge_interval,
+                )));
             }
         }
 
@@ -776,10 +766,7 @@ impl Agent {
     /// context.  Populated by the HTTP controller per chat; other
     /// controllers leave it unset.  UI-only side channel — see
     /// `ToolContext::activity` for the LLM-boundary note.
-    pub fn set_activity_handle(
-        &mut self,
-        handle: crate::controller::ActivityHandle,
-    ) {
+    pub fn set_activity_handle(&mut self, handle: crate::controller::ActivityHandle) {
         self.tool_context.activity = Some(handle);
     }
 
@@ -787,10 +774,7 @@ impl Agent {
     /// HTTP controller — lets nested tool calls inside a subagent surface
     /// in the web UI without flowing into the parent's LLM conversation.
     /// See `ToolContext::subagent_events` for the boundary invariant.
-    pub fn set_subagent_events(
-        &mut self,
-        bus: crate::controller::http::SubagentEventBus,
-    ) {
+    pub fn set_subagent_events(&mut self, bus: crate::controller::http::SubagentEventBus) {
         self.tool_context.subagent_events = Some(bus);
     }
 
@@ -826,20 +810,20 @@ impl Agent {
             .feedback_store
             .as_ref()
             .zip(self.history_backend.as_ref())
-            .and_then(|(store, backend)| {
-                match store.load(&backend.chat_id) {
-                    Ok(entries) if !entries.is_empty() => Some(entries),
-                    Ok(_) => None,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to load feedback for dreams");
-                        None
-                    }
+            .and_then(|(store, backend)| match store.load(&backend.chat_id) {
+                Ok(entries) if !entries.is_empty() => Some(entries),
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to load feedback for dreams");
+                    None
                 }
             });
 
         self.dream_handle.fire(dream::DreamRequest {
             event,
-            client: self.client.with_priority(rate_limiter::Priority::Background),
+            client: self
+                .client
+                .with_priority(rate_limiter::Priority::Background),
             config: self.config.clone(),
             tool_context: self.tool_context.clone(),
             messages,
@@ -1101,7 +1085,9 @@ impl Agent {
             block_count = blocks.len(),
             "user multimodal message received"
         );
-        self.conversation.messages.push(Message::user_multimodal(blocks));
+        self.conversation
+            .messages
+            .push(Message::user_multimodal(blocks));
         self.persist();
         self.run_inner(output).await
     }
@@ -1184,9 +1170,8 @@ impl Agent {
         let turn_system_prompt: Arc<str> = if skill_fragments.is_empty() {
             Arc::clone(&self.system_prompt)
         } else {
-            let mut prompt = String::with_capacity(
-                self.system_prompt.len() + skill_fragments.len(),
-            );
+            let mut prompt =
+                String::with_capacity(self.system_prompt.len() + skill_fragments.len());
             prompt.push_str(&self.system_prompt);
             prompt.push_str(&skill_fragments);
             Arc::from(prompt)
@@ -1201,7 +1186,8 @@ impl Agent {
                 break;
             }
 
-            self.auto_compact_if_needed(&turn_system_prompt, output).await;
+            self.auto_compact_if_needed(&turn_system_prompt, output)
+                .await;
             self.log_iteration(iteration);
 
             output.typing_indicator(true)?;
@@ -1261,7 +1247,14 @@ impl Agent {
                     continue;
                 }
 
-                break (tool_mode, input_tokens, assistant_msg, tool_calls, output_tokens, stop_reason);
+                break (
+                    tool_mode,
+                    input_tokens,
+                    assistant_msg,
+                    tool_calls,
+                    output_tokens,
+                    stop_reason,
+                );
             };
 
             if let Some(input_tokens) = input_tokens {
@@ -1295,9 +1288,7 @@ impl Agent {
                 && tool_calls.is_empty()
                 && tool_mode != crate::llm::ToolMode::Observe
             {
-                tracing::warn!(
-                    "response truncated by max_tokens — injecting continuation prompt"
-                );
+                tracing::warn!("response truncated by max_tokens — injecting continuation prompt");
                 if let Some(text) = assistant_msg.last_text() {
                     continuation_prefix.push_str(text);
                 }
@@ -1316,18 +1307,27 @@ impl Agent {
             // strategy instead.
             if stop_reason == crate::llm::stream::StopReason::MaxTokens
                 && tool_mode != crate::llm::ToolMode::Observe
-                && tool_calls.iter().any(|c| c.input.get("_parse_error").is_some())
+                && tool_calls
+                    .iter()
+                    .any(|c| c.input.get("_parse_error").is_some())
             {
                 let names: Vec<&str> = tool_calls
                     .iter()
-                    .filter_map(|c| c.input.get("_parse_error").is_some().then_some(c.name.as_str()))
+                    .filter_map(|c| {
+                        c.input
+                            .get("_parse_error")
+                            .is_some()
+                            .then_some(c.name.as_str())
+                    })
                     .collect();
                 tracing::warn!(
                     tools = ?names,
                     "tool call JSON truncated by max_tokens — redirecting LLM to split work"
                 );
                 self.conversation.messages.push(assistant_msg);
-                self.conversation.messages.push(Message::user(MAXTOKENS_TOOL_CALL_TRUNCATED));
+                self.conversation
+                    .messages
+                    .push(Message::user(MAXTOKENS_TOOL_CALL_TRUNCATED));
                 continue;
             }
 
@@ -1351,11 +1351,8 @@ impl Agent {
                     );
                     final_text = last_streamed_text.clone();
                 } else {
-                    tracing::warn!(
-                        "LLM returned no text and no tool calls — sending fallback"
-                    );
-                    let fallback =
-                        "I wasn't able to generate a response. Please try again.";
+                    tracing::warn!("LLM returned no text and no tool calls — sending fallback");
+                    let fallback = "I wasn't able to generate a response. Please try again.";
                     output.text_delta(fallback)?;
                     final_text = fallback.to_string();
                 }
@@ -1390,11 +1387,7 @@ impl Agent {
                 && iteration == self.max_iterations - BUDGET_WARN_OFFSET
             {
                 let remaining = self.max_iterations - iteration - 1;
-                tracing::info!(
-                    iteration,
-                    remaining,
-                    "injecting budget warning"
-                );
+                tracing::info!(iteration, remaining, "injecting budget warning");
                 self.conversation.messages.push(Message::user(&format!(
                     "[BUDGET WARNING: you have {remaining} iterations left before the \
                      agent loop terminates. Stop all further investigation and write \
@@ -1459,11 +1452,7 @@ impl Agent {
     }
 
     /// Auto-compact if estimated context tokens exceed the threshold.
-    async fn auto_compact_if_needed(
-        &mut self,
-        turn_system_prompt: &str,
-        output: &mut dyn Output,
-    ) {
+    async fn auto_compact_if_needed(&mut self, turn_system_prompt: &str, output: &mut dyn Output) {
         if self.conversation.messages.len() <= self.compaction_config.protect_head {
             return;
         }
@@ -1502,23 +1491,31 @@ impl Agent {
                     crate::message::Role::User => "user",
                     crate::message::Role::Assistant => "assistant",
                 };
-                let block_summary: Vec<String> = msg.content.iter().map(|b| match b {
-                    crate::message::ContentBlock::Text { text } => {
-                        format!("text({})", text.len())
-                    }
-                    crate::message::ContentBlock::ToolUse { name, .. } => {
-                        format!("tool_use({name})")
-                    }
-                    crate::message::ContentBlock::ToolResult { tool_use_id, is_error, .. } => {
-                        format!("tool_result({tool_use_id}, error={is_error})")
-                    }
-                    crate::message::ContentBlock::Image { .. } => "image".to_string(),
-                    crate::message::ContentBlock::Document { .. } => "document".to_string(),
-                    crate::message::ContentBlock::Thinking { .. } => "thinking".to_string(),
-                    crate::message::ContentBlock::Artefact { kind, .. } => {
-                        format!("artefact({kind:?})")
-                    }
-                }).collect();
+                let block_summary: Vec<String> = msg
+                    .content
+                    .iter()
+                    .map(|b| match b {
+                        crate::message::ContentBlock::Text { text } => {
+                            format!("text({})", text.len())
+                        }
+                        crate::message::ContentBlock::ToolUse { name, .. } => {
+                            format!("tool_use({name})")
+                        }
+                        crate::message::ContentBlock::ToolResult {
+                            tool_use_id,
+                            is_error,
+                            ..
+                        } => {
+                            format!("tool_result({tool_use_id}, error={is_error})")
+                        }
+                        crate::message::ContentBlock::Image { .. } => "image".to_string(),
+                        crate::message::ContentBlock::Document { .. } => "document".to_string(),
+                        crate::message::ContentBlock::Thinking { .. } => "thinking".to_string(),
+                        crate::message::ContentBlock::Artefact { kind, .. } => {
+                            format!("artefact({kind:?})")
+                        }
+                    })
+                    .collect();
                 tracing::debug!(
                     msg_index = i,
                     role,
@@ -1610,9 +1607,7 @@ impl Agent {
             );
         }
     }
-
 }
-
 
 // ---------------------------------------------------------------------------
 // Quick response — lightweight no-tools LLM call for when the agent is busy.
@@ -1670,10 +1665,7 @@ pub async fn quick_response(
     output.flush()?;
 
     // Extract the final text.
-    let final_text = assistant_msg
-        .last_text()
-        .unwrap_or_default()
-        .to_string();
+    let final_text = assistant_msg.last_text().unwrap_or_default().to_string();
 
     Ok(final_text)
 }

@@ -553,9 +553,26 @@ mod tests {
     #[test]
     fn language_name_resolves_all_languages() {
         let names = [
-            "rust", "python", "javascript", "typescript", "tsx", "go", "java",
-            "c", "cpp", "csharp", "ruby", "kotlin", "swift", "zig", "elixir",
-            "erlang", "ocaml", "haskell", "nix", "json",
+            "rust",
+            "python",
+            "javascript",
+            "typescript",
+            "tsx",
+            "go",
+            "java",
+            "c",
+            "cpp",
+            "csharp",
+            "ruby",
+            "kotlin",
+            "swift",
+            "zig",
+            "elixir",
+            "erlang",
+            "ocaml",
+            "haskell",
+            "nix",
+            "json",
         ];
         for name in names {
             assert!(
@@ -589,14 +606,8 @@ mod tests {
             config_for_language_name("py").unwrap().display_name,
             "Python"
         );
-        assert_eq!(
-            config_for_language_name("rb").unwrap().display_name,
-            "Ruby"
-        );
-        assert_eq!(
-            config_for_language_name("rs").unwrap().display_name,
-            "Rust"
-        );
+        assert_eq!(config_for_language_name("rb").unwrap().display_name, "Ruby");
+        assert_eq!(config_for_language_name("rs").unwrap().display_name, "Rust");
         assert_eq!(
             config_for_language_name("golang").unwrap().display_name,
             "Go"
@@ -621,7 +632,10 @@ mod tests {
     #[test]
     fn glob_resolves_to_language_config() {
         assert_eq!(config_for_glob("*.rs").unwrap().display_name, "Rust");
-        assert_eq!(config_for_glob("src/**/*.py").unwrap().display_name, "Python");
+        assert_eq!(
+            config_for_glob("src/**/*.py").unwrap().display_name,
+            "Python"
+        );
         assert_eq!(config_for_glob("file.tsx").unwrap().display_name, "TSX");
     }
 

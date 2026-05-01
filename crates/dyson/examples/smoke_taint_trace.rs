@@ -38,66 +38,234 @@ async fn run() {
 
     let targets: &[Target] = &[
         // Rust (generics, macros, async, traits)
-        Target { slug: "tokio-rs/tokio", sub: "tokio/src", language: "rust" },
-        Target { slug: "BurntSushi/ripgrep", sub: "crates", language: "rust" },
-        Target { slug: "bevyengine/bevy", sub: "crates", language: "rust" },
-        Target { slug: "denoland/deno", sub: "cli", language: "rust" },
-        Target { slug: "nushell/nushell", sub: "crates", language: "rust" },
-        Target { slug: "clap-rs/clap", sub: "", language: "rust" },
+        Target {
+            slug: "tokio-rs/tokio",
+            sub: "tokio/src",
+            language: "rust",
+        },
+        Target {
+            slug: "BurntSushi/ripgrep",
+            sub: "crates",
+            language: "rust",
+        },
+        Target {
+            slug: "bevyengine/bevy",
+            sub: "crates",
+            language: "rust",
+        },
+        Target {
+            slug: "denoland/deno",
+            sub: "cli",
+            language: "rust",
+        },
+        Target {
+            slug: "nushell/nushell",
+            sub: "crates",
+            language: "rust",
+        },
+        Target {
+            slug: "clap-rs/clap",
+            sub: "",
+            language: "rust",
+        },
         // Go (structs, interfaces, receivers)
-        Target { slug: "gin-gonic/gin", sub: "", language: "go" },
-        Target { slug: "syncthing/syncthing", sub: "lib", language: "go" },
+        Target {
+            slug: "gin-gonic/gin",
+            sub: "",
+            language: "go",
+        },
+        Target {
+            slug: "syncthing/syncthing",
+            sub: "lib",
+            language: "go",
+        },
         // Python (classes, metaclasses, decorators)
-        Target { slug: "django/django", sub: "django", language: "python" },
-        Target { slug: "pallets/flask", sub: "src/flask", language: "python" },
-        Target { slug: "psf/requests", sub: "src", language: "python" },
+        Target {
+            slug: "django/django",
+            sub: "django",
+            language: "python",
+        },
+        Target {
+            slug: "pallets/flask",
+            sub: "src/flask",
+            language: "python",
+        },
+        Target {
+            slug: "psf/requests",
+            sub: "src",
+            language: "python",
+        },
         // TypeScript
-        Target { slug: "microsoft/TypeScript", sub: "src", language: "typescript" },
-        Target { slug: "facebook/react", sub: "packages", language: "typescript" },
-        Target { slug: "nestjs/nest", sub: "packages", language: "typescript" },
+        Target {
+            slug: "microsoft/TypeScript",
+            sub: "src",
+            language: "typescript",
+        },
+        Target {
+            slug: "facebook/react",
+            sub: "packages",
+            language: "typescript",
+        },
+        Target {
+            slug: "nestjs/nest",
+            sub: "packages",
+            language: "typescript",
+        },
         // TSX (React components)
-        Target { slug: "vercel/next.js", sub: "packages/next/src", language: "tsx" },
+        Target {
+            slug: "vercel/next.js",
+            sub: "packages/next/src",
+            language: "tsx",
+        },
         // JavaScript
-        Target { slug: "expressjs/express", sub: "lib", language: "javascript" },
-        Target { slug: "lodash/lodash", sub: "", language: "javascript" },
+        Target {
+            slug: "expressjs/express",
+            sub: "lib",
+            language: "javascript",
+        },
+        Target {
+            slug: "lodash/lodash",
+            sub: "",
+            language: "javascript",
+        },
         // Ruby (metaprogramming, open classes)
-        Target { slug: "rails/rails", sub: "activerecord/lib", language: "ruby" },
-        Target { slug: "sinatra/sinatra", sub: "", language: "ruby" },
-        Target { slug: "jekyll/jekyll", sub: "lib", language: "ruby" },
+        Target {
+            slug: "rails/rails",
+            sub: "activerecord/lib",
+            language: "ruby",
+        },
+        Target {
+            slug: "sinatra/sinatra",
+            sub: "",
+            language: "ruby",
+        },
+        Target {
+            slug: "jekyll/jekyll",
+            sub: "lib",
+            language: "ruby",
+        },
         // Java (annotations, generics)
-        Target { slug: "spring-projects/spring-petclinic", sub: "", language: "java" },
-        Target { slug: "junit-team/junit5", sub: "junit-jupiter-api/src/main/java", language: "java" },
+        Target {
+            slug: "spring-projects/spring-petclinic",
+            sub: "",
+            language: "java",
+        },
+        Target {
+            slug: "junit-team/junit5",
+            sub: "junit-jupiter-api/src/main/java",
+            language: "java",
+        },
         // C (K&R-style + modern)
-        Target { slug: "git/git", sub: "", language: "c" },
-        Target { slug: "redis/redis", sub: "src", language: "c" },
-        Target { slug: "DaveGamble/cJSON", sub: "", language: "c" },
-        Target { slug: "curl/curl", sub: "lib", language: "c" },
+        Target {
+            slug: "git/git",
+            sub: "",
+            language: "c",
+        },
+        Target {
+            slug: "redis/redis",
+            sub: "src",
+            language: "c",
+        },
+        Target {
+            slug: "DaveGamble/cJSON",
+            sub: "",
+            language: "c",
+        },
+        Target {
+            slug: "curl/curl",
+            sub: "lib",
+            language: "c",
+        },
         // C++ (templates, inheritance, operator overloading)
-        Target { slug: "SerenityOS/serenity", sub: "Kernel", language: "cpp" },
-        Target { slug: "nlohmann/json", sub: "include", language: "cpp" },
+        Target {
+            slug: "SerenityOS/serenity",
+            sub: "Kernel",
+            language: "cpp",
+        },
+        Target {
+            slug: "nlohmann/json",
+            sub: "include",
+            language: "cpp",
+        },
         // Kotlin
-        Target { slug: "Kotlin/kotlinx.coroutines", sub: "kotlinx-coroutines-core/jvm/src", language: "kotlin" },
-        Target { slug: "square/okhttp", sub: "okhttp-coroutines/src/main/kotlin", language: "kotlin" },
+        Target {
+            slug: "Kotlin/kotlinx.coroutines",
+            sub: "kotlinx-coroutines-core/jvm/src",
+            language: "kotlin",
+        },
+        Target {
+            slug: "square/okhttp",
+            sub: "okhttp-coroutines/src/main/kotlin",
+            language: "kotlin",
+        },
         // Swift (generics, protocols, property wrappers)
-        Target { slug: "apple/swift-nio", sub: "Sources", language: "swift" },
-        Target { slug: "apple/swift-collections", sub: "Sources", language: "swift" },
-        Target { slug: "vapor/vapor", sub: "Sources", language: "swift" },
+        Target {
+            slug: "apple/swift-nio",
+            sub: "Sources",
+            language: "swift",
+        },
+        Target {
+            slug: "apple/swift-collections",
+            sub: "Sources",
+            language: "swift",
+        },
+        Target {
+            slug: "vapor/vapor",
+            sub: "Sources",
+            language: "swift",
+        },
         // Zig (comptime, anytype)
-        Target { slug: "ziglang/zig", sub: "src", language: "zig" },
-        Target { slug: "zigtools/zls", sub: "src", language: "zig" },
+        Target {
+            slug: "ziglang/zig",
+            sub: "src",
+            language: "zig",
+        },
+        Target {
+            slug: "zigtools/zls",
+            sub: "src",
+            language: "zig",
+        },
         // Elixir (pattern matching, macros)
-        Target { slug: "elixir-lang/elixir", sub: "lib", language: "elixir" },
-        Target { slug: "elixir-plug/plug", sub: "", language: "elixir" },
+        Target {
+            slug: "elixir-lang/elixir",
+            sub: "lib",
+            language: "elixir",
+        },
+        Target {
+            slug: "elixir-plug/plug",
+            sub: "",
+            language: "elixir",
+        },
         // Erlang (pattern matching, OTP)
-        Target { slug: "ninenines/cowboy", sub: "", language: "erlang" },
+        Target {
+            slug: "ninenines/cowboy",
+            sub: "",
+            language: "erlang",
+        },
         // Haskell (typeclasses, GADTs, HKT)
-        Target { slug: "jgm/pandoc", sub: "", language: "haskell" },
+        Target {
+            slug: "jgm/pandoc",
+            sub: "",
+            language: "haskell",
+        },
         // OCaml (functors, variants)
-        Target { slug: "ocaml/dune", sub: "", language: "ocaml" },
+        Target {
+            slug: "ocaml/dune",
+            sub: "",
+            language: "ocaml",
+        },
         // C# (LINQ, async, generics)
-        Target { slug: "dotnet/samples", sub: "", language: "csharp" },
+        Target {
+            slug: "dotnet/samples",
+            sub: "",
+            language: "csharp",
+        },
         // Nix (packaging expressions — where real taint would live)
-        Target { slug: "nix-darwin/nix-darwin", sub: "modules", language: "nix" },
+        Target {
+            slug: "nix-darwin/nix-darwin",
+            sub: "modules",
+            language: "nix",
+        },
     ];
 
     let mut totals = Totals::default();
@@ -176,11 +344,7 @@ fn shallow_clone(slug: &str, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-async fn run_repo(
-    language: &'static str,
-    path: &Path,
-    totals: &mut Totals,
-) -> Result<(), String> {
+async fn run_repo(language: &'static str, path: &Path, totals: &mut Totals) -> Result<(), String> {
     let config = ast::config_for_language_name(language)
         .ok_or_else(|| format!("unknown language: {language}"))?;
 
@@ -193,18 +357,15 @@ async fn run_repo(
         }
     };
     let elapsed = started.elapsed();
-    let (unresolved_pct, confidence) = taint::Confidence::from_unresolved_ratio(
-        index.unresolved_callees,
-        index.call_sites.len(),
-    );
+    let (unresolved_pct, confidence) =
+        taint::Confidence::from_unresolved_ratio(index.unresolved_callees, index.call_sites.len());
     // Dotted LHS / RHS paths are the direct signal that the new
     // path-collector engaged on this corpus (vs. bare-identifier fallback).
     let field_assigns = index
         .assignments
         .iter()
         .filter(|a| {
-            a.lhs.iter().any(|s| s.contains('.'))
-                || a.rhs_idents.iter().any(|s| s.contains('.'))
+            a.lhs.iter().any(|s| s.contains('.')) || a.rhs_idents.iter().any(|s| s.contains('.'))
         })
         .count();
     println!(
@@ -276,30 +437,40 @@ async fn run_probe(
 
 fn pick_req_to_sink(index: &taint::SymbolIndex) -> Option<Probe> {
     const HINTS: &[&str] = &["req", "request", "input", "body", "query", "user"];
-    const SINKS: &[&str] = &["execute", "exec", "query", "system", "spawn", "eval", "write", "run"];
+    const SINKS: &[&str] = &[
+        "execute", "exec", "query", "system", "spawn", "eval", "write", "run",
+    ];
     let source_fn = find_def_with_param(index, HINTS)?;
     let sink_call = find_call_to(index, SINKS, source_fn)?;
-    Some(Probe { source_fn, sink_call })
+    Some(Probe {
+        source_fn,
+        sink_call,
+    })
 }
 
 fn pick_config_to_write(index: &taint::SymbolIndex) -> Option<Probe> {
-    const HINTS: &[&str] = &["config", "cfg", "opts", "options", "settings", "path", "file"];
+    const HINTS: &[&str] = &[
+        "config", "cfg", "opts", "options", "settings", "path", "file",
+    ];
     const SINKS: &[&str] = &["write", "save", "store", "send", "push"];
     let source_fn = find_def_with_param(index, HINTS)?;
     let sink_call = find_call_to(index, SINKS, source_fn)?;
-    Some(Probe { source_fn, sink_call })
+    Some(Probe {
+        source_fn,
+        sink_call,
+    })
 }
 
 fn pick_first_to_first(index: &taint::SymbolIndex) -> Option<Probe> {
-    let source_fn = index
-        .fn_defs
-        .iter()
-        .position(|d| !d.params.is_empty())?;
+    let source_fn = index.fn_defs.iter().position(|d| !d.params.is_empty())?;
     let sink_call = index
         .call_sites
         .iter()
         .position(|cs| cs.in_fn != source_fn && !cs.callee.is_empty())?;
-    Some(Probe { source_fn, sink_call })
+    Some(Probe {
+        source_fn,
+        sink_call,
+    })
 }
 
 fn find_def_with_param(index: &taint::SymbolIndex, hints: &[&str]) -> Option<usize> {

@@ -80,7 +80,11 @@ pub fn apply_overrides(
             // Bare provider type string (e.g. "anthropic").
             settings.agent.provider = provider_type;
         } else {
-            let available: Vec<&str> = settings.providers.keys().map(std::string::String::as_str).collect();
+            let available: Vec<&str> = settings
+                .providers
+                .keys()
+                .map(std::string::String::as_str)
+                .collect();
             return Err(dyson::error::DysonError::Config(format!(
                 "unknown provider '{provider_str}'.  \
                  Available: {available:?}.  \

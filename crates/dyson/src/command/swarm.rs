@@ -336,7 +336,10 @@ mod tests {
         let agent = &cfg["agent"];
         assert_eq!(agent["provider"], "openrouter");
         assert_eq!(agent["image_generation_provider"], "openrouter-image");
-        assert_eq!(agent["image_generation_model"], "google/gemini-3-pro-image-preview");
+        assert_eq!(
+            agent["image_generation_model"],
+            "google/gemini-3-pro-image-preview"
+        );
     }
 
     #[test]

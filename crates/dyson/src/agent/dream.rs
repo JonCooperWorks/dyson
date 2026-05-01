@@ -263,17 +263,18 @@ impl DreamRunner {
                     if let Err(e) = handle.await
                         && e.is_panic()
                     {
-                        tracing::error!(
-                            dream = dream_name_for_panic,
-                            "dream task panicked"
-                        );
+                        tracing::error!(dream = dream_name_for_panic, "dream task panicked");
                     }
                 });
             }
         }
 
         if activated == 0 {
-            tracing::debug!(?event, registered = self.dreams.len(), "no dreams matched event");
+            tracing::debug!(
+                ?event,
+                registered = self.dreams.len(),
+                "no dreams matched event"
+            );
         }
     }
 
@@ -379,7 +380,10 @@ impl DreamHandle {
                                 req.messages.len(),
                             ));
                         }
-                        tracing::debug!(summary_len = summary.len(), "conversation summarised for dreams");
+                        tracing::debug!(
+                            summary_len = summary.len(),
+                            "conversation summarised for dreams"
+                        );
                         runner.fire(&req.event, || DreamContext {
                             client: req.client.clone(),
                             config: req.config.clone(),
@@ -393,7 +397,11 @@ impl DreamHandle {
                         let msg = panic
                             .downcast_ref::<&str>()
                             .copied()
-                            .or_else(|| panic.downcast_ref::<String>().map(std::string::String::as_str))
+                            .or_else(|| {
+                                panic
+                                    .downcast_ref::<String>()
+                                    .map(std::string::String::as_str)
+                            })
                             .unwrap_or("unknown panic");
                         tracing::error!(reason = msg, "dream thread caught panic, continuing");
                     }
@@ -440,10 +448,22 @@ mod tests {
     fn every_n_turns_trigger() {
         let trigger = DreamTrigger::EveryNTurns(5);
 
-        assert!(!should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 1 }));
-        assert!(!should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 4 }));
-        assert!(should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 5 }));
-        assert!(should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 10 }));
+        assert!(!should_activate(
+            trigger,
+            &DreamEvent::TurnComplete { turn_count: 1 }
+        ));
+        assert!(!should_activate(
+            trigger,
+            &DreamEvent::TurnComplete { turn_count: 4 }
+        ));
+        assert!(should_activate(
+            trigger,
+            &DreamEvent::TurnComplete { turn_count: 5 }
+        ));
+        assert!(should_activate(
+            trigger,
+            &DreamEvent::TurnComplete { turn_count: 10 }
+        ));
         assert!(!should_activate(trigger, &DreamEvent::Compaction));
     }
 
@@ -452,7 +472,10 @@ mod tests {
         let trigger = DreamTrigger::AfterCompaction;
 
         assert!(should_activate(trigger, &DreamEvent::Compaction));
-        assert!(!should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 5 }));
+        assert!(!should_activate(
+            trigger,
+            &DreamEvent::TurnComplete { turn_count: 5 }
+        ));
     }
 
     #[test]
@@ -460,7 +483,10 @@ mod tests {
         let trigger = DreamTrigger::OnSessionEnd;
 
         assert!(should_activate(trigger, &DreamEvent::SessionEnd));
-        assert!(!should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 1 }));
+        assert!(!should_activate(
+            trigger,
+            &DreamEvent::TurnComplete { turn_count: 1 }
+        ));
         assert!(!should_activate(trigger, &DreamEvent::Compaction));
     }
 
@@ -491,8 +517,14 @@ mod tests {
     fn every_n_turns_zero_never_fires() {
         let trigger = DreamTrigger::EveryNTurns(0);
 
-        assert!(!should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 0 }));
-        assert!(!should_activate(trigger, &DreamEvent::TurnComplete { turn_count: 1 }));
+        assert!(!should_activate(
+            trigger,
+            &DreamEvent::TurnComplete { turn_count: 0 }
+        ));
+        assert!(!should_activate(
+            trigger,
+            &DreamEvent::TurnComplete { turn_count: 1 }
+        ));
     }
 
     #[test]

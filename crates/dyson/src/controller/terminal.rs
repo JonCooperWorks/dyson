@@ -74,7 +74,9 @@ fn render_command_result_terminal(result: &CommandResult) {
                 for a in agents {
                     eprintln!(
                         "  [{}] {} ({:.0}s)",
-                        a.id, a.prompt_preview, a.elapsed.as_secs_f64(),
+                        a.id,
+                        a.prompt_preview,
+                        a.elapsed.as_secs_f64(),
                     );
                 }
             }
@@ -296,10 +298,7 @@ impl Output for TerminalOutput {
         Ok(())
     }
 
-    fn send_artefact(
-        &mut self,
-        artefact: &crate::message::Artefact,
-    ) -> Result<(), DysonError> {
+    fn send_artefact(&mut self, artefact: &crate::message::Artefact) -> Result<(), DysonError> {
         // The terminal has no artefact panel — print a terse notice so
         // the user knows the report was emitted and how big it is.  The
         // full content is still in ToolOutput.content above, so a user

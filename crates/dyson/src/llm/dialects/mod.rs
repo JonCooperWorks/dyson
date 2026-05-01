@@ -28,8 +28,8 @@ use std::task::{Context, Poll};
 use tokio_stream::Stream;
 
 use crate::error::Result;
-use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::ToolDefinition;
+use crate::llm::stream::{StopReason, StreamEvent};
 
 // ---------------------------------------------------------------------------
 // TextToolHandler trait and types
@@ -151,11 +151,10 @@ impl TextToolExtractorStream {
             for call in calls {
                 let n = COUNTER.fetch_add(1, Ordering::Relaxed);
                 let id = format!("text_call_{}_{}", call.name, n);
-                self.pending_events
-                    .push_back(Ok(StreamEvent::ToolUseStart {
-                        id: id.clone(),
-                        name: call.name.clone(),
-                    }));
+                self.pending_events.push_back(Ok(StreamEvent::ToolUseStart {
+                    id: id.clone(),
+                    name: call.name.clone(),
+                }));
                 self.pending_events
                     .push_back(Ok(StreamEvent::ToolUseComplete {
                         id,
@@ -187,10 +186,7 @@ impl TextToolExtractorStream {
 impl Stream for TextToolExtractorStream {
     type Item = Result<StreamEvent>;
 
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
         // Drain pending events first.
@@ -294,9 +290,9 @@ mod tests {
         }
 
         // Should have: cleaned text, tool start, tool complete, message complete.
-        let has_text = events.iter().any(|e| {
-            matches!(e, StreamEvent::TextDelta(t) if t == "Let me check.")
-        });
+        let has_text = events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextDelta(t) if t == "Let me check."));
         assert!(has_text, "cleaned text should be emitted");
 
         let has_tool = events.iter().any(|e| {
@@ -306,7 +302,13 @@ mod tests {
         assert!(has_tool, "tool call should be extracted");
 
         let has_tool_stop = events.iter().any(|e| {
-            matches!(e, StreamEvent::MessageComplete { stop_reason: StopReason::ToolUse, .. })
+            matches!(
+                e,
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::ToolUse,
+                    ..
+                }
+            )
         });
         assert!(has_tool_stop, "stop reason should be ToolUse");
     }
@@ -369,7 +371,13 @@ mod tests {
         assert!(has_text);
 
         let has_end = events.iter().any(|e| {
-            matches!(e, StreamEvent::MessageComplete { stop_reason: StopReason::EndTurn, .. })
+            matches!(
+                e,
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    ..
+                }
+            )
         });
         assert!(has_end);
     }

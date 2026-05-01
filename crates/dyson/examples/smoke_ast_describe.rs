@@ -226,7 +226,11 @@ fn main() {
             snippet: "pub fn main() void { std.debug.print(\"hi\", .{}); }",
             // Current tree-sitter-zig uses `function_declaration` / `field_expression`;
             // older vocab (`FnProto`, `FieldAccessExpr`) is gone.
-            expect_kinds: &["function_declaration", "field_expression", "call_expression"],
+            expect_kinds: &[
+                "function_declaration",
+                "field_expression",
+                "call_expression",
+            ],
             file_ext: "zig",
         },
         Target {
@@ -302,9 +306,7 @@ fn main() {
     // Escape hatch: run only the in-process snippet pass, no clones.
     // Useful on CI or when validating a grammar bump without network.
     if std::env::var("DYSON_SMOKE_COMPILE_ONLY").is_ok() {
-        println!(
-            "\nDYSON_SMOKE_COMPILE_ONLY set — skipping clone + path-mode phase."
-        );
+        println!("\nDYSON_SMOKE_COMPILE_ONLY set — skipping clone + path-mode phase.");
         if totals.errors > 0 {
             std::process::exit(1);
         }
@@ -374,8 +376,7 @@ struct Totals {
 fn check_snippet(t: &Target) -> Result<(), String> {
     let config = ast::config_for_language_name(t.language)
         .ok_or_else(|| format!("unknown language: {}", t.language))?;
-    let out = describe_source(t.snippet, config, None, 20)
-        .map_err(|e| format!("describe: {e}"))?;
+    let out = describe_source(t.snippet, config, None, 20).map_err(|e| format!("describe: {e}"))?;
     for expected in t.expect_kinds {
         if !out.contains(expected) {
             return Err(format!(
@@ -442,13 +443,8 @@ fn run_repo(t: &Target, path: &Path, totals: &mut Totals) -> Result<(), String> 
             let mid = line_count / 2;
             let range_start = mid.saturating_sub(2).max(1);
             let range_end = (mid + 2).min(line_count);
-            let narrowed = describe_source(
-                &source,
-                config,
-                Some((range_start, range_end)),
-                20,
-            )
-            .map_err(|e| format!("line-range {}: {e}", file.display()))?;
+            let narrowed = describe_source(&source, config, Some((range_start, range_end)), 20)
+                .map_err(|e| format!("line-range {}: {e}", file.display()))?;
             if narrowed.len() < out.len() {
                 totals.line_ranges_narrowed += 1;
             }

@@ -163,7 +163,9 @@ pub struct ClientConfig<'a> {
 /// One entry per `LlmProvider` variant.  The unit test
 /// `registry_covers_all_variants` ensures nothing is missing.
 pub fn registry() -> &'static [ProviderEntry] {
-    use super::{anthropic, claude_code, codex, gemini, ollama_cloud, openai, openai_compat, openrouter};
+    use super::{
+        anthropic, claude_code, codex, gemini, ollama_cloud, openai, openai_compat, openrouter,
+    };
 
     static ENTRIES: std::sync::LazyLock<Vec<ProviderEntry>> = std::sync::LazyLock::new(|| {
         vec![
@@ -181,13 +183,11 @@ pub fn registry() -> &'static [ProviderEntry] {
                 aliases: &["openai", "gpt"],
                 env_var: Some("OPENAI_API_KEY"),
                 requires_api_key: true,
-                create_client: |c| {
-                    match c.base_url {
-                        Some(url) if !url.starts_with("https://api.openai.com") => {
-                            Box::new(openai_compat::OpenAiCompatClient::new(c.api_key, url))
-                        }
-                        _ => Box::new(openai::OpenAiClient::new(c.api_key)),
+                create_client: |c| match c.base_url {
+                    Some(url) if !url.starts_with("https://api.openai.com") => {
+                        Box::new(openai_compat::OpenAiCompatClient::new(c.api_key, url))
                     }
+                    _ => Box::new(openai::OpenAiClient::new(c.api_key)),
                 },
             },
             ProviderEntry {
@@ -196,9 +196,7 @@ pub fn registry() -> &'static [ProviderEntry] {
                 aliases: &["openrouter", "open-router", "open_router"],
                 env_var: Some("OPENROUTER_API_KEY"),
                 requires_api_key: true,
-                create_client: |c| {
-                    Box::new(openrouter::OpenRouterClient::new(c.api_key))
-                },
+                create_client: |c| Box::new(openrouter::OpenRouterClient::new(c.api_key)),
             },
             ProviderEntry {
                 provider: LlmProvider::ClaudeCode,
@@ -234,9 +232,7 @@ pub fn registry() -> &'static [ProviderEntry] {
                 aliases: &["ollama-cloud", "ollama_cloud", "ollama"],
                 env_var: Some("OLLAMA_API_KEY"),
                 requires_api_key: true,
-                create_client: |c| {
-                    Box::new(ollama_cloud::OllamaCloudClient::new(c.api_key))
-                },
+                create_client: |c| Box::new(ollama_cloud::OllamaCloudClient::new(c.api_key)),
             },
             ProviderEntry {
                 provider: LlmProvider::Gemini,
@@ -244,9 +240,7 @@ pub fn registry() -> &'static [ProviderEntry] {
                 aliases: &["gemini", "google"],
                 env_var: Some("GEMINI_API_KEY"),
                 requires_api_key: true,
-                create_client: |c| {
-                    Box::new(gemini::GeminiClient::new(c.api_key, c.base_url))
-                },
+                create_client: |c| Box::new(gemini::GeminiClient::new(c.api_key, c.base_url)),
             },
         ]
     });
@@ -340,7 +334,10 @@ mod tests {
         assert_eq!(from_str_loose("open-router"), Some(LlmProvider::OpenRouter));
         assert_eq!(from_str_loose("cc"), Some(LlmProvider::ClaudeCode));
         assert_eq!(from_str_loose("codex-cli"), Some(LlmProvider::Codex));
-        assert_eq!(from_str_loose("ollama-cloud"), Some(LlmProvider::OllamaCloud));
+        assert_eq!(
+            from_str_loose("ollama-cloud"),
+            Some(LlmProvider::OllamaCloud)
+        );
         assert_eq!(from_str_loose("ollama"), Some(LlmProvider::OllamaCloud));
         assert_eq!(from_str_loose("gemini"), Some(LlmProvider::Gemini));
         assert_eq!(from_str_loose("google"), Some(LlmProvider::Gemini));

@@ -14,17 +14,12 @@ use crate::message::ContentBlock;
 /// Supports docx, xlsx, and pptx.  Extracts content as Markdown via `undoc`.
 /// The `file_name` is used purely for labelling in the prompt.
 pub fn process_office(data: &[u8], file_name: Option<&str>) -> crate::Result<ContentBlock> {
-    let doc = undoc::parse_bytes(data).map_err(|e| {
-        crate::DysonError::Config(format!(
-            "failed to parse Office document: {e}"
-        ))
-    })?;
+    let doc = undoc::parse_bytes(data)
+        .map_err(|e| crate::DysonError::Config(format!("failed to parse Office document: {e}")))?;
 
     let options = undoc::render::RenderOptions::default();
     let markdown = undoc::render::to_markdown(&doc, &options).map_err(|e| {
-        crate::DysonError::Config(format!(
-            "failed to render Office document as markdown: {e}"
-        ))
+        crate::DysonError::Config(format!("failed to render Office document as markdown: {e}"))
     })?;
 
     if markdown.trim().is_empty() {

@@ -209,8 +209,7 @@ impl ActivityRegistry {
     pub fn snapshot_all(&self) -> Vec<ActivityEntry> {
         self.reconcile_stale_running();
         let guard = self.by_chat.lock().expect("activity by_chat poisoned");
-        let mut all: Vec<ActivityEntry> =
-            guard.values().flat_map(|v| v.iter().cloned()).collect();
+        let mut all: Vec<ActivityEntry> = guard.values().flat_map(|v| v.iter().cloned()).collect();
         all.sort_by_key(|e| std::cmp::Reverse(e.started_at));
         all
     }
@@ -219,8 +218,7 @@ impl ActivityRegistry {
     pub fn snapshot_chat(&self, chat_id: &str) -> Vec<ActivityEntry> {
         self.reconcile_stale_running();
         let guard = self.by_chat.lock().expect("activity by_chat poisoned");
-        let mut entries: Vec<ActivityEntry> =
-            guard.get(chat_id).cloned().unwrap_or_default();
+        let mut entries: Vec<ActivityEntry> = guard.get(chat_id).cloned().unwrap_or_default();
         entries.sort_by_key(|e| std::cmp::Reverse(e.started_at));
         entries
     }
@@ -591,8 +589,7 @@ mod tests {
         {
             let mut guard = reg.by_chat.lock().unwrap();
             let entries = guard.get_mut("c-0008").unwrap();
-            entries[0].started_at =
-                unix_seconds_now().saturating_sub(STALE_RUNNING_SECS + 300);
+            entries[0].started_at = unix_seconds_now().saturating_sub(STALE_RUNNING_SECS + 300);
         }
         // Tool call fires → touch() → last_progress_at = now.
         handle.touch();

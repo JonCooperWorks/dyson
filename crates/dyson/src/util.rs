@@ -134,9 +134,18 @@ mod tests {
 
     #[test]
     fn resolve_tilde_passes_through_other_inputs() {
-        assert_eq!(resolve_tilde("/etc/passwd"), std::path::PathBuf::from("/etc/passwd"));
-        assert_eq!(resolve_tilde("relative/path"), std::path::PathBuf::from("relative/path"));
+        assert_eq!(
+            resolve_tilde("/etc/passwd"),
+            std::path::PathBuf::from("/etc/passwd")
+        );
+        assert_eq!(
+            resolve_tilde("relative/path"),
+            std::path::PathBuf::from("relative/path")
+        );
         // ~user/ is not supported — per-user home lookup would need `getpwnam`.
-        assert_eq!(resolve_tilde("~alice/foo"), std::path::PathBuf::from("~alice/foo"));
+        assert_eq!(
+            resolve_tilde("~alice/foo"),
+            std::path::PathBuf::from("~alice/foo")
+        );
     }
 }

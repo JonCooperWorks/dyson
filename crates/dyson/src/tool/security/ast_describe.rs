@@ -153,16 +153,11 @@ impl Tool for AstDescribeTool {
                     Some(name) => match ast::config_for_language_name(name) {
                         Some(c) => c,
                         None => {
-                            return Ok(ToolOutput::error(format!(
-                                "unknown language '{name}'"
-                            )));
+                            return Ok(ToolOutput::error(format!("unknown language '{name}'")));
                         }
                     },
                     None => {
-                        let ext = resolved
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .unwrap_or("");
+                        let ext = resolved.extension().and_then(|e| e.to_str()).unwrap_or("");
                         match ast::config_for_extension(ext) {
                             Some(c) => c,
                             None => {
@@ -234,9 +229,9 @@ pub fn describe_source(
         .set_language(&config.language)
         .map_err(|e| format!("parser setup: {e}"))?;
 
-    let tree = parser
-        .parse(source, None)
-        .ok_or_else(|| "parser returned no tree — source may be too large or malformed".to_string())?;
+    let tree = parser.parse(source, None).ok_or_else(|| {
+        "parser returned no tree — source may be too large or malformed".to_string()
+    })?;
 
     let roots: Vec<Node<'_>> = match line_range {
         Some((start_line, end_line)) => {
@@ -303,11 +298,7 @@ fn parse_line_range(s: &str) -> std::result::Result<(usize, usize), String> {
 /// prefer named nodes at the top of each overlap — rendering the whole
 /// enclosing function when the range is just a few lines inside it is the
 /// useful default.
-fn nodes_overlapping_lines(
-    root: Node<'_>,
-    start_line: usize,
-    end_line: usize,
-) -> Vec<Node<'_>> {
+fn nodes_overlapping_lines(root: Node<'_>, start_line: usize, end_line: usize) -> Vec<Node<'_>> {
     // Convert to 0-indexed rows.
     let start_row = start_line - 1;
     let end_row = end_line - 1;

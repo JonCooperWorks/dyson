@@ -165,12 +165,9 @@ impl Framework {
             | Self::Adonis
             | Self::Meteor
             | Self::Nuxt => Language::JavaScript,
-            Self::Actix
-            | Self::Axum
-            | Self::Rocket
-            | Self::Warp
-            | Self::Tonic
-            | Self::Solana => Language::Rust,
+            Self::Actix | Self::Axum | Self::Rocket | Self::Warp | Self::Tonic | Self::Solana => {
+                Language::Rust
+            }
             Self::Rails | Self::Sinatra => Language::Ruby,
             Self::Spring
             | Self::Quarkus
@@ -224,7 +221,12 @@ pub fn detect_repo(root: &Path) -> Detection {
     }
 
     // Downward walk from the scoped path.
-    walk_down(root, &mut lang_counts, &mut frameworks, &mut seen_frameworks);
+    walk_down(
+        root,
+        &mut lang_counts,
+        &mut frameworks,
+        &mut seen_frameworks,
+    );
 
     // Rank by count desc; tiebreak by enum declaration order via Ord.
     // BTreeMap gives iteration sorted by key (Language's derived Ord);
@@ -592,11 +594,7 @@ fn requirement_name(req: &str) -> String {
     req[..cut].trim().to_ascii_lowercase()
 }
 
-fn scan_cargo_toml(
-    contents: &str,
-    frameworks: &mut Vec<Framework>,
-    seen: &mut HashSet<Framework>,
-) {
+fn scan_cargo_toml(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut HashSet<Framework>) {
     let Ok(doc) = toml::from_str::<toml::Value>(contents) else {
         return;
     };
@@ -702,7 +700,10 @@ fn scan_pom_xml(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut Hash
     if lower.contains("io.javalin") {
         push_framework(Framework::Javalin, frameworks, seen);
     }
-    if lower.contains("com.typesafe.play") || lower.contains("play-java") || lower.contains("play-scala") {
+    if lower.contains("com.typesafe.play")
+        || lower.contains("play-java")
+        || lower.contains("play-scala")
+    {
         push_framework(Framework::Play, frameworks, seen);
     }
     if lower.contains("io.dropwizard") {
@@ -741,7 +742,10 @@ fn scan_build_gradle(
     if lower.contains("io.javalin") {
         push_framework(Framework::Javalin, frameworks, seen);
     }
-    if lower.contains("com.typesafe.play") || lower.contains("play-java") || lower.contains("play-scala") {
+    if lower.contains("com.typesafe.play")
+        || lower.contains("play-java")
+        || lower.contains("play-scala")
+    {
         push_framework(Framework::Play, frameworks, seen);
     }
     if lower.contains("io.dropwizard") {
@@ -862,11 +866,7 @@ fn scan_package_swift(
 /// `*.cabal` — Haskell package description.  Substring match on
 /// `servant` / `servant-server` in the `build-depends:` section.
 /// Full-grammar parsing is heavier than the value here.
-fn scan_cabal_file(
-    contents: &str,
-    frameworks: &mut Vec<Framework>,
-    seen: &mut HashSet<Framework>,
-) {
+fn scan_cabal_file(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut HashSet<Framework>) {
     let lower = contents.to_ascii_lowercase();
     if lower.contains("servant") {
         push_framework(Framework::Servant, frameworks, seen);
@@ -876,11 +876,7 @@ fn scan_cabal_file(
 /// `dune` — OCaml build stanza file.  Substring match on `dream` in
 /// a `libraries` clause.  `dune-project` is at the repo root;
 /// per-dir `dune` files carry the actual library deps.
-fn scan_dune_file(
-    contents: &str,
-    frameworks: &mut Vec<Framework>,
-    seen: &mut HashSet<Framework>,
-) {
+fn scan_dune_file(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut HashSet<Framework>) {
     if contents.contains("dream") {
         push_framework(Framework::Dream, frameworks, seen);
     }
@@ -905,11 +901,7 @@ fn scan_rebar_config(
 /// rather than a single `openresty` package name.  A rockspec
 /// mentioning any `lua-resty-` prefix is almost certainly an
 /// OpenResty-targeted project.
-fn scan_rockspec(
-    contents: &str,
-    frameworks: &mut Vec<Framework>,
-    seen: &mut HashSet<Framework>,
-) {
+fn scan_rockspec(contents: &str, frameworks: &mut Vec<Framework>, seen: &mut HashSet<Framework>) {
     let lower = contents.to_ascii_lowercase();
     if lower.contains("lua-resty-") || lower.contains("openresty") {
         push_framework(Framework::OpenResty, frameworks, seen);
@@ -933,8 +925,7 @@ fn scan_rockspec(
 ///    1 of the retry).  Single-language sheets are capped at ~100
 ///    lines, so one sheet always fits.
 pub fn compose_cheatsheets(detection: &Detection) -> (String, Vec<&'static str>) {
-    let primary_langs: Vec<Language> =
-        detection.languages.iter().take(2).copied().collect();
+    let primary_langs: Vec<Language> = detection.languages.iter().take(2).copied().collect();
     if primary_langs.is_empty() {
         return (String::new(), Vec::new());
     }
@@ -959,22 +950,15 @@ pub fn compose_cheatsheets(detection: &Detection) -> (String, Vec<&'static str>)
     }
 
     // Drop second language too.
-    
+
     build_prompt(&primary_langs[..1], &[])
 }
 
 fn line_count(s: &str) -> usize {
-    if s.is_empty() {
-        0
-    } else {
-        s.lines().count()
-    }
+    if s.is_empty() { 0 } else { s.lines().count() }
 }
 
-fn build_prompt(
-    languages: &[Language],
-    frameworks: &[Framework],
-) -> (String, Vec<&'static str>) {
+fn build_prompt(languages: &[Language], frameworks: &[Framework]) -> (String, Vec<&'static str>) {
     let mut body = String::new();
     let mut names: Vec<&'static str> = Vec::new();
 
@@ -1015,9 +999,18 @@ fn lang_sheet(lang: Language) -> (&'static str, &'static str) {
             include_str!("prompts/cheatsheets/lang/javascript.md"),
         ),
         Language::Go => ("lang/go", include_str!("prompts/cheatsheets/lang/go.md")),
-        Language::Rust => ("lang/rust", include_str!("prompts/cheatsheets/lang/rust.md")),
-        Language::Ruby => ("lang/ruby", include_str!("prompts/cheatsheets/lang/ruby.md")),
-        Language::Java => ("lang/java", include_str!("prompts/cheatsheets/lang/java.md")),
+        Language::Rust => (
+            "lang/rust",
+            include_str!("prompts/cheatsheets/lang/rust.md"),
+        ),
+        Language::Ruby => (
+            "lang/ruby",
+            include_str!("prompts/cheatsheets/lang/ruby.md"),
+        ),
+        Language::Java => (
+            "lang/java",
+            include_str!("prompts/cheatsheets/lang/java.md"),
+        ),
         Language::Kotlin => (
             "lang/kotlin",
             include_str!("prompts/cheatsheets/lang/kotlin.md"),
@@ -1652,11 +1645,7 @@ mod tests {
     #[test]
     fn detects_axum_framework() {
         let tmp = TempDir::new().unwrap();
-        write(
-            tmp.path(),
-            "Cargo.toml",
-            "[dependencies]\naxum = \"0.7\"\n",
-        );
+        write(tmp.path(), "Cargo.toml", "[dependencies]\naxum = \"0.7\"\n");
         let det = detect_repo(tmp.path());
         assert_eq!(det.frameworks, vec![Framework::Axum]);
     }
@@ -1790,11 +1779,7 @@ mod tests {
     #[test]
     fn detects_go_via_go_mod() {
         let tmp = TempDir::new().unwrap();
-        write(
-            tmp.path(),
-            "go.mod",
-            "module example.com/x\n\ngo 1.22\n",
-        );
+        write(tmp.path(), "go.mod", "module example.com/x\n\ngo 1.22\n");
         let det = detect_repo(tmp.path());
         assert_eq!(det.languages, vec![Language::Go]);
     }
@@ -1929,11 +1914,7 @@ mod tests {
     #[test]
     fn detects_fastapi_via_requirements() {
         let tmp = TempDir::new().unwrap();
-        write(
-            tmp.path(),
-            "requirements.txt",
-            "fastapi>=0.100\nuvicorn\n",
-        );
+        write(tmp.path(), "requirements.txt", "fastapi>=0.100\nuvicorn\n");
         let det = detect_repo(tmp.path());
         assert_eq!(det.frameworks, vec![Framework::FastApi]);
     }
@@ -1958,9 +1939,11 @@ mod tests {
     fn detects_starlette_via_requirements() {
         let tmp = TempDir::new().unwrap();
         write(tmp.path(), "requirements.txt", "starlette>=0.37\nuvicorn\n");
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Starlette));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Starlette)
+        );
     }
 
     #[test]
@@ -1971,27 +1954,33 @@ mod tests {
             "pyproject.toml",
             "[project]\nname = \"x\"\ndependencies = [\"pyramid>=2\"]\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Pyramid));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Pyramid)
+        );
     }
 
     #[test]
     fn detects_falcon_via_requirements() {
         let tmp = TempDir::new().unwrap();
         write(tmp.path(), "requirements.txt", "falcon>=3\n");
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Falcon));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Falcon)
+        );
     }
 
     #[test]
     fn detects_bottle_via_requirements() {
         let tmp = TempDir::new().unwrap();
         write(tmp.path(), "requirements.txt", "bottle>=0.12\n");
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Bottle));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Bottle)
+        );
     }
 
     #[test]
@@ -2002,9 +1991,11 @@ mod tests {
             "pom.xml",
             "<project><dependencies><dependency><groupId>com.typesafe.play</groupId><artifactId>play-java</artifactId></dependency></dependencies></project>\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Play));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Play)
+        );
     }
 
     #[test]
@@ -2015,9 +2006,11 @@ mod tests {
             "pom.xml",
             "<project><dependencies><dependency><groupId>io.dropwizard</groupId><artifactId>dropwizard-core</artifactId></dependency></dependencies></project>\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Dropwizard));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Dropwizard)
+        );
     }
 
     #[test]
@@ -2028,9 +2021,11 @@ mod tests {
             "pom.xml",
             "<project><dependencies><dependency><groupId>io.helidon.webserver</groupId><artifactId>helidon-webserver</artifactId></dependency></dependencies></project>\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Helidon));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Helidon)
+        );
     }
 
     #[test]
@@ -2041,9 +2036,11 @@ mod tests {
             "pom.xml",
             "<project><dependencies><dependency><groupId>io.vertx</groupId><artifactId>vertx-core</artifactId></dependency></dependencies></project>\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Vertx));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Vertx)
+        );
     }
 
     #[test]
@@ -2054,9 +2051,11 @@ mod tests {
             "package.json",
             r#"{"name":"app","dependencies":{"@hapi/hapi":"^21"}}"#,
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Hapi));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Hapi)
+        );
     }
 
     #[test]
@@ -2067,9 +2066,11 @@ mod tests {
             "package.json",
             r#"{"name":"app","dependencies":{"@adonisjs/core":"^6"}}"#,
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Adonis));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Adonis)
+        );
     }
 
     #[test]
@@ -2082,9 +2083,11 @@ mod tests {
             "package.json",
             r#"{"name":"app","meteor":{"mainModule":{"client":"client/main.js"}},"dependencies":{"meteor-node-stubs":"^1"}}"#,
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Meteor));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Meteor)
+        );
     }
 
     #[test]
@@ -2095,9 +2098,11 @@ mod tests {
             "package.json",
             r#"{"name":"app","devDependencies":{"nuxt":"^3"}}"#,
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Nuxt));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Nuxt)
+        );
     }
 
     #[test]
@@ -2120,9 +2125,11 @@ mod tests {
             "app-1.0.0-1.rockspec",
             "package = \"app\"\nversion = \"1.0.0-1\"\ndependencies = {\n  \"lua-resty-openssl\",\n  \"lua-resty-http\",\n}\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::OpenResty));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::OpenResty)
+        );
     }
 
     // ------------------------------------------------------------------
@@ -2143,9 +2150,7 @@ mod tests {
             "package.json",
             r#"{"name":"app","dependencies":{"koa":"^2.15"}}"#,
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Koa));
+        assert!(detect_repo(tmp.path()).frameworks.contains(&Framework::Koa));
     }
 
     #[test]
@@ -2156,9 +2161,11 @@ mod tests {
             "package.json",
             r#"{"name":"app","dependencies":{"hono":"^4"}}"#,
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Hono));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Hono)
+        );
     }
 
     #[test]
@@ -2169,9 +2176,11 @@ mod tests {
             "package.json",
             r#"{"name":"app","devDependencies":{"@sveltejs/kit":"^2"}}"#,
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::SvelteKit));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::SvelteKit)
+        );
     }
 
     #[test]
@@ -2182,9 +2191,11 @@ mod tests {
             "package.json",
             r#"{"name":"app","dependencies":{"@remix-run/node":"^2"}}"#,
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Remix));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Remix)
+        );
     }
 
     #[test]
@@ -2195,36 +2206,44 @@ mod tests {
             "package.json",
             r#"{"name":"app","dependencies":{"@apollo/server":"^4","graphql":"^16"}}"#,
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::GraphQL));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::GraphQL)
+        );
     }
 
     #[test]
     fn detects_tornado_via_requirements() {
         let tmp = TempDir::new().unwrap();
         write(tmp.path(), "requirements.txt", "tornado>=6.4\n");
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Tornado));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Tornado)
+        );
     }
 
     #[test]
     fn detects_sanic_via_requirements() {
         let tmp = TempDir::new().unwrap();
         write(tmp.path(), "requirements.txt", "sanic>=23\n");
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Sanic));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Sanic)
+        );
     }
 
     #[test]
     fn detects_celery_via_requirements() {
         let tmp = TempDir::new().unwrap();
         write(tmp.path(), "requirements.txt", "celery>=5.3\nredis\n");
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Celery));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Celery)
+        );
     }
 
     #[test]
@@ -2235,9 +2254,11 @@ mod tests {
             "go.mod",
             "module x\n\ngo 1.22\n\nrequire github.com/gofiber/fiber/v2 v2.52.0\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Fiber));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Fiber)
+        );
     }
 
     #[test]
@@ -2248,22 +2269,22 @@ mod tests {
             "go.mod",
             "module x\n\ngo 1.22\n\nrequire github.com/gorilla/mux v1.8.1\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::GorillaMux));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::GorillaMux)
+        );
     }
 
     #[test]
     fn detects_warp_via_cargo_toml() {
         let tmp = TempDir::new().unwrap();
-        write(
-            tmp.path(),
-            "Cargo.toml",
-            "[dependencies]\nwarp = \"0.3\"\n",
+        write(tmp.path(), "Cargo.toml", "[dependencies]\nwarp = \"0.3\"\n");
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Warp)
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Warp));
     }
 
     #[test]
@@ -2274,9 +2295,11 @@ mod tests {
             "Cargo.toml",
             "[dependencies]\ntonic = \"0.11\"\nprost = \"0.12\"\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Tonic));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Tonic)
+        );
     }
 
     #[test]
@@ -2287,9 +2310,11 @@ mod tests {
             "pom.xml",
             "<project><dependencies>\n  <dependency><groupId>io.quarkus</groupId><artifactId>quarkus-rest</artifactId></dependency>\n</dependencies></project>\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Quarkus));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Quarkus)
+        );
     }
 
     #[test]
@@ -2300,9 +2325,11 @@ mod tests {
             "build.gradle",
             "plugins { id 'io.micronaut.application' version '4.3' }\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Micronaut));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Micronaut)
+        );
     }
 
     #[test]
@@ -2313,9 +2340,11 @@ mod tests {
             "build.gradle",
             "dependencies { implementation 'io.javalin:javalin:6.0.0' }\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Javalin));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Javalin)
+        );
     }
 
     #[test]
@@ -2326,9 +2355,11 @@ mod tests {
             "composer.json",
             r#"{"name":"app","require":{"slim/slim":"^4"}}"#,
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Slim));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Slim)
+        );
     }
 
     #[test]
@@ -2339,9 +2370,11 @@ mod tests {
             "composer.json",
             r#"{"name":"app","require":{"codeigniter4/framework":"^4"}}"#,
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::CodeIgniter));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::CodeIgniter)
+        );
     }
 
     #[test]
@@ -2353,9 +2386,11 @@ mod tests {
             "app.cabal",
             "build-depends: base, servant, servant-server\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Servant));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Servant)
+        );
     }
 
     #[test]
@@ -2367,9 +2402,11 @@ mod tests {
             "dune",
             "(executable (name app) (libraries dream))\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Dream));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Dream)
+        );
     }
 
     #[test]
@@ -2380,9 +2417,11 @@ mod tests {
             "rebar.config",
             "{deps, [\n  {cowboy, \"2.10.0\"}\n]}.\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Cowboy));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Cowboy)
+        );
     }
 
     #[test]
@@ -2393,19 +2432,17 @@ mod tests {
             "Package.swift",
             "// swift-tools-version:5.9\nimport PackageDescription\nlet package = Package(\n  name: \"app\",\n  dependencies: [\n    .package(url: \"https://github.com/hummingbird-project/hummingbird.git\", from: \"2.0.0\"),\n  ]\n)\n",
         );
-        assert!(detect_repo(tmp.path())
-            .frameworks
-            .contains(&Framework::Hummingbird));
+        assert!(
+            detect_repo(tmp.path())
+                .frameworks
+                .contains(&Framework::Hummingbird)
+        );
     }
 
     #[test]
     fn detects_aiohttp_via_requirements() {
         let tmp = TempDir::new().unwrap();
-        write(
-            tmp.path(),
-            "requirements.txt",
-            "aiohttp>=3.9\nuvloop\n",
-        );
+        write(tmp.path(), "requirements.txt", "aiohttp>=3.9\nuvloop\n");
         let det = detect_repo(tmp.path());
         assert_eq!(det.languages, vec![Language::Python]);
         assert!(det.frameworks.contains(&Framework::Aiohttp));
@@ -2719,11 +2756,7 @@ mod tests {
         // constant — covered by the "respects cap" invariant below.
         let det = Detection {
             languages: vec![Language::JavaScript, Language::Python],
-            frameworks: vec![
-                Framework::Express,
-                Framework::Django,
-                Framework::Flask,
-            ],
+            frameworks: vec![Framework::Express, Framework::Django, Framework::Flask],
         };
         let (body, names) = compose_cheatsheets(&det);
         // Either all four sheets fit (cap not hit) or frameworks were

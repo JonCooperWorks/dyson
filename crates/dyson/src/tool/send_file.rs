@@ -51,7 +51,10 @@ impl Tool for SendFileTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("send_file", "missing or invalid 'file_path'"))?;
 
-        let path = match ctx.resolve_path(file_path) { Ok(p) => p, Err(e) => return Ok(e) };
+        let path = match ctx.resolve_path(file_path) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
 
         if !path.exists() {
             return Ok(ToolOutput::error(format!(
@@ -86,7 +89,10 @@ mod tests {
 
         let tool = SendFileTool;
         let input = serde_json::json!({"file_path": "report.pdf"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0], file.canonicalize().unwrap());
@@ -97,7 +103,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = SendFileTool;
         let input = serde_json::json!({"file_path": "nope.txt"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(output.is_error);
         assert!(output.files.is_empty());
     }
@@ -109,7 +118,10 @@ mod tests {
 
         let tool = SendFileTool;
         let input = serde_json::json!({"file_path": "subdir"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("not a file"));
     }

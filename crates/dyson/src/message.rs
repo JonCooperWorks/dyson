@@ -203,7 +203,11 @@ pub struct Artefact {
 impl Artefact {
     /// Construct a markdown artefact without an id — the controller mints
     /// one on receipt.
-    pub fn markdown(kind: ArtefactKind, title: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn markdown(
+        kind: ArtefactKind,
+        title: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
         Self {
             id: String::new(),
             kind,
@@ -260,10 +264,7 @@ impl ContentBlock {
             Self::Text { text } => text.split_whitespace().count().max(1),
             Self::ToolUse { id, name, input } => {
                 let input_token_estimate = estimate_json_tokens(input);
-                name.len() / 4 + 1
-                    + id.len() / 4 + 1
-                    + input_token_estimate
-                    + 10 // JSON structure overhead
+                name.len() / 4 + 1 + id.len() / 4 + 1 + input_token_estimate + 10 // JSON structure overhead
             }
             Self::ToolResult {
                 tool_use_id,
@@ -302,9 +303,7 @@ pub(crate) fn estimate_json_tokens(value: &serde_json::Value) -> usize {
         serde_json::Value::Null | serde_json::Value::Bool(_) => 1,
         serde_json::Value::Number(_) => 1,
         serde_json::Value::String(s) => s.split_whitespace().count().max(1),
-        serde_json::Value::Array(arr) => {
-            arr.iter().map(estimate_json_tokens).sum::<usize>() + 2
-        }
+        serde_json::Value::Array(arr) => arr.iter().map(estimate_json_tokens).sum::<usize>() + 2,
         serde_json::Value::Object(map) => {
             map.iter()
                 .map(|(k, v)| k.len() / 4 + 1 + estimate_json_tokens(v))

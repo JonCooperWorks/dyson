@@ -189,8 +189,10 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     // a different plaintext is rejected.  Single-tenant, so the
     // first caller IS swarm (network isolation gates access to
     // cubeproxy in the first place).
-    use argon2::password_hash::{PasswordHash, PasswordVerifier, PasswordHasher, SaltString, rand_core::OsRng};
     use argon2::Argon2;
+    use argon2::password_hash::{
+        PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
+    };
     if let Ok(stored) = std::fs::read_to_string(&hash_path) {
         let parsed = match PasswordHash::new(stored.trim()) {
             Ok(p) => p,
@@ -230,35 +232,33 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     // 1. Workspace: rewrite IDENTITY.md from the new fields.  Empty
     //    fields are skipped (so a configure carrying only `models`
     //    won't blank the existing identity).
-    let identity_changed = if body.name.is_some()
-        || body.task.is_some()
-        || body.instance_id.is_some()
-    {
-        let mut ws = match crate::workspace::create_workspace(&snapshot.workspace) {
-            Ok(w) => w,
-            Err(e) => return bad_request(&format!("workspace open failed: {e}")),
+    let identity_changed =
+        if body.name.is_some() || body.task.is_some() || body.instance_id.is_some() {
+            let mut ws = match crate::workspace::create_workspace(&snapshot.workspace) {
+                Ok(w) => w,
+                Err(e) => return bad_request(&format!("workspace open failed: {e}")),
+            };
+            // Merge: keep the existing IDENTITY.md fields when the new
+            // body omits them, so a partial update doesn't wipe identity.
+            // Extract first into owned Strings so the merge doesn't dangle
+            // references to temporaries.
+            let existing = ws.get("IDENTITY.md").unwrap_or_default();
+            let prior_name = extract_field(&existing, "Name");
+            let prior_instance = extract_field(&existing, "Swarm instance id");
+            let prior_mission = extract_section(&existing, "Mission");
+            let merged = build_identity_md(
+                body.name.as_deref().or(prior_name.as_deref()),
+                body.instance_id.as_deref().or(prior_instance.as_deref()),
+                body.task.as_deref().or(prior_mission.as_deref()),
+            );
+            ws.set("IDENTITY.md", &merged);
+            if let Err(e) = ws.save() {
+                return bad_request(&format!("workspace save failed: {e}"));
+            }
+            true
+        } else {
+            false
         };
-        // Merge: keep the existing IDENTITY.md fields when the new
-        // body omits them, so a partial update doesn't wipe identity.
-        // Extract first into owned Strings so the merge doesn't dangle
-        // references to temporaries.
-        let existing = ws.get("IDENTITY.md").unwrap_or_default();
-        let prior_name = extract_field(&existing, "Name");
-        let prior_instance = extract_field(&existing, "Swarm instance id");
-        let prior_mission = extract_section(&existing, "Mission");
-        let merged = build_identity_md(
-            body.name.as_deref().or(prior_name.as_deref()),
-            body.instance_id.as_deref().or(prior_instance.as_deref()),
-            body.task.as_deref().or(prior_mission.as_deref()),
-        );
-        ws.set("IDENTITY.md", &merged);
-        if let Err(e) = ws.save() {
-            return bad_request(&format!("workspace save failed: {e}"));
-        }
-        true
-    } else {
-        false
-    };
 
     // 2. dyson.json: patch the agent provider's `models`, `api_key`,
     //    and/or `base_url` if the body supplies them.  All three
@@ -267,16 +267,28 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //    read-modify-write keeps the file in a consistent state and
     //    the HotReloader fires once per change cluster instead of
     //    three times.  Empty / None on a field means "leave alone".
-    let want_models   = !body.models.is_empty();
-    let want_api_key  = body.proxy_token.as_deref().is_some_and(|s| !s.is_empty());
+    let want_models = !body.models.is_empty();
+    let want_api_key = body.proxy_token.as_deref().is_some_and(|s| !s.is_empty());
     let want_base_url = body.proxy_base.as_deref().is_some_and(|s| !s.is_empty());
     let provider_changed = if want_models || want_api_key || want_base_url {
         match state.config_path() {
             Some(path) => match patch_provider_in_config(
                 path,
-                if want_models { Some(body.models.as_slice()) } else { None },
-                if want_api_key { body.proxy_token.as_deref() } else { None },
-                if want_base_url { body.proxy_base.as_deref() } else { None },
+                if want_models {
+                    Some(body.models.as_slice())
+                } else {
+                    None
+                },
+                if want_api_key {
+                    body.proxy_token.as_deref()
+                } else {
+                    None
+                },
+                if want_base_url {
+                    body.proxy_base.as_deref()
+                } else {
+                    None
+                },
             ) {
                 Ok(()) => true,
                 Err(e) => return bad_request(&format!("config patch failed: {e}")),
@@ -297,21 +309,40 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //    entries.  Existing dysons (created before this field was
     //    plumbed) get retroactively rewired by the swarm-side sweep
     //    that pushes a configure with these set.
-    let want_image_block    = body.image_provider_name.as_deref().is_some_and(|s| !s.is_empty())
+    let want_image_block = body
+        .image_provider_name
+        .as_deref()
+        .is_some_and(|s| !s.is_empty())
         && body.image_provider_block.is_some();
-    let want_image_provider = body.image_generation_provider.as_deref().is_some_and(|s| !s.is_empty());
-    let want_image_model    = body.image_generation_model.as_deref().is_some_and(|s| !s.is_empty());
+    let want_image_provider = body
+        .image_generation_provider
+        .as_deref()
+        .is_some_and(|s| !s.is_empty());
+    let want_image_model = body
+        .image_generation_model
+        .as_deref()
+        .is_some_and(|s| !s.is_empty());
     let image_changed = if want_image_block || want_image_provider || want_image_model {
         match state.config_path() {
             Some(path) => match patch_image_generation_in_config(
                 path,
                 if want_image_block {
-                    body.image_provider_name.as_deref().zip(body.image_provider_block.as_ref())
+                    body.image_provider_name
+                        .as_deref()
+                        .zip(body.image_provider_block.as_ref())
                 } else {
                     None
                 },
-                if want_image_provider { body.image_generation_provider.as_deref() } else { None },
-                if want_image_model    { body.image_generation_model.as_deref()    } else { None },
+                if want_image_provider {
+                    body.image_generation_provider.as_deref()
+                } else {
+                    None
+                },
+                if want_image_model {
+                    body.image_generation_model.as_deref()
+                } else {
+                    None
+                },
             ) {
                 Ok(()) => true,
                 Err(e) => return bad_request(&format!("image-gen patch failed: {e}")),
@@ -380,9 +411,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //      client; the per-chat HotReloader's baseline is then
     //      post-patch, so subsequent turns see no change and never
     //      rebuild.  Eager reload closes the window entirely.
-    if any_config_changed
-        && let Some(path) = state.config_path()
-    {
+    if any_config_changed && let Some(path) = state.config_path() {
         match crate::config::loader::load_settings(Some(path)) {
             Ok(new_settings) => {
                 state.registry.reload(&new_settings, None);
@@ -448,10 +477,13 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
 /// current settings so we report the actual `on_load` outcome — a
 /// live `state.registry` only caches LLM clients, not skills.
 pub(super) async fn get_skills(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    use argon2::{password_hash::{PasswordHash, PasswordVerifier}, Argon2};
     use crate::skill::Skill;
     #[allow(unused_imports)]
     use crate::tool::Tool;
+    use argon2::{
+        Argon2,
+        password_hash::{PasswordHash, PasswordVerifier},
+    };
     let secret = match req
         .headers()
         .get(CONFIGURE_HEADER)
@@ -637,7 +669,11 @@ fn extract_section(body: &str, name: &str) -> Option<String> {
         }
     }
     let trimmed = out.trim().to_owned();
-    if trimmed.is_empty() { None } else { Some(trimmed) }
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 /// Read dyson.json, patch any of `providers.<agent.provider>.models`,
@@ -657,13 +693,16 @@ fn patch_provider_in_config(
     base_url: Option<&str>,
 ) -> Result<(), String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let mut doc: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
 
     let provider_name = doc
         .get("agent")
         .and_then(|a| a.get("provider"))
         .and_then(|p| p.as_str())
-        .ok_or_else(|| "config has no agent.provider — can't tell which provider's config to patch".to_string())?
+        .ok_or_else(|| {
+            "config has no agent.provider — can't tell which provider's config to patch".to_string()
+        })?
         .to_owned();
 
     let providers = doc
@@ -712,7 +751,8 @@ fn patch_image_generation_in_config(
     image_model: Option<&str>,
 ) -> Result<(), String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let mut doc: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
 
     if let Some((name, block)) = provider_block {
         let providers = doc
@@ -734,7 +774,10 @@ fn patch_image_generation_in_config(
             .as_object_mut()
             .ok_or_else(|| "config agent is not an object".to_string())?;
         if let Some(p) = image_provider {
-            agent.insert("image_generation_provider".into(), Value::String(p.to_owned()));
+            agent.insert(
+                "image_generation_provider".into(),
+                Value::String(p.to_owned()),
+            );
         }
         if let Some(m) = image_model {
             agent.insert("image_generation_model".into(), Value::String(m.to_owned()));
@@ -760,7 +803,8 @@ fn patch_image_generation_in_config(
 /// previous version in place.
 fn clear_skills_in_config(path: &std::path::Path) -> Result<bool, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let mut doc: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
     let removed = doc
         .as_object_mut()
         .ok_or_else(|| "config root is not an object".to_string())?
@@ -798,21 +842,14 @@ fn clear_skills_in_config(path: &std::path::Path) -> Result<bool, String> {
 /// helpers.  Returns `Ok(true)` when the file was rewritten,
 /// `Ok(false)` when both blocks already matched and no write was
 /// needed.
-fn set_skills_tools_in_config(
-    path: &std::path::Path,
-    tools: &[String],
-) -> Result<bool, String> {
+fn set_skills_tools_in_config(path: &std::path::Path, tools: &[String]) -> Result<bool, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let mut doc: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
     let root = doc
         .as_object_mut()
         .ok_or_else(|| "config root is not an object".to_string())?;
-    let new_tools = Value::Array(
-        tools
-            .iter()
-            .map(|t| Value::String(t.clone()))
-            .collect(),
-    );
+    let new_tools = Value::Array(tools.iter().map(|t| Value::String(t.clone())).collect());
     let skills = root
         .entry("skills".to_string())
         .or_insert_with(|| Value::Object(serde_json::Map::new()))
@@ -832,8 +869,7 @@ fn set_skills_tools_in_config(
 
     // 2. subagents: filter by name.  Operate via take/replace so the
     //    skills map can be mutated independently of the read borrow.
-    let allowed: std::collections::HashSet<&str> =
-        tools.iter().map(String::as_str).collect();
+    let allowed: std::collections::HashSet<&str> = tools.iter().map(String::as_str).collect();
     let prev = skills.remove("subagents");
     let subagents_unchanged = match prev {
         Some(Value::Array(arr)) => {
@@ -900,7 +936,8 @@ fn patch_mcp_servers_in_config(
     servers: &serde_json::Map<String, Value>,
 ) -> Result<bool, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut doc: Value = serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let mut doc: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
     let root = doc
         .as_object_mut()
         .ok_or_else(|| "config root is not an object".to_string())?;
@@ -949,10 +986,7 @@ mod tests {
     #[test]
     fn extract_section_keeps_only_named_block() {
         let b = "# Identity\n\nName: A\n\n## Mission\n\nDo the thing.\n\n## Other\n\nelse";
-        assert_eq!(
-            extract_section(b, "Mission"),
-            Some("Do the thing.".into())
-        );
+        assert_eq!(extract_section(b, "Mission"), Some("Do the thing.".into()));
         assert_eq!(extract_section(b, "Other"), Some("else".into()));
         assert_eq!(extract_section(b, "Nope"), None);
     }
@@ -973,7 +1007,8 @@ mod tests {
             }
         });
         let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice())
+            .unwrap();
         drop(f);
 
         // `base_url` must NOT carry `/v1` — `OpenAiCompatClient` appends
@@ -1014,7 +1049,8 @@ mod tests {
             }
         });
         let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice())
+            .unwrap();
         drop(f);
 
         let block = serde_json::json!({
@@ -1036,8 +1072,14 @@ mod tests {
         assert_eq!(img["type"], "openrouter");
         assert_eq!(img["base_url"], "https://swarm/llm/openrouter");
         assert_eq!(img["models"][0], "google/gemini-3-pro-image-preview");
-        assert_eq!(after["agent"]["image_generation_provider"], "openrouter-image");
-        assert_eq!(after["agent"]["image_generation_model"], "google/gemini-3-pro-image-preview");
+        assert_eq!(
+            after["agent"]["image_generation_provider"],
+            "openrouter-image"
+        );
+        assert_eq!(
+            after["agent"]["image_generation_model"],
+            "google/gemini-3-pro-image-preview"
+        );
         // Chat side is untouched — a regression here would silently
         // break the chat path on every running instance the sweep
         // visits.
@@ -1066,16 +1108,23 @@ mod tests {
             }
         });
         let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice())
+            .unwrap();
         drop(f);
 
         patch_image_generation_in_config(&path, None, None, Some("google/new-model")).unwrap();
         let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(after["agent"]["image_generation_model"], "google/new-model");
-        assert_eq!(after["agent"]["image_generation_provider"], "openrouter-image");
+        assert_eq!(
+            after["agent"]["image_generation_provider"],
+            "openrouter-image"
+        );
         // Provider block models[] left alone — the model id only flows
         // through the agent.image_generation_model override.
-        assert_eq!(after["providers"]["openrouter-image"]["models"][0], "google/old-model");
+        assert_eq!(
+            after["providers"]["openrouter-image"]["models"][0],
+            "google/old-model"
+        );
     }
 
     #[test]
@@ -1094,10 +1143,14 @@ mod tests {
             "skills": { "builtin": { "tools": [] } }
         });
         let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice())
+            .unwrap();
         drop(f);
 
-        assert!(clear_skills_in_config(&path).unwrap(), "first call must report a change");
+        assert!(
+            clear_skills_in_config(&path).unwrap(),
+            "first call must report a change"
+        );
         let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(after.get("skills").is_none(), "skills key must be removed");
         // Other top-level keys unchanged — clearing skills must not
@@ -1106,8 +1159,10 @@ mod tests {
         assert_eq!(after["providers"]["openrouter"]["api_key"], "x");
 
         // Idempotent second call: no skills key means nothing to remove.
-        assert!(!clear_skills_in_config(&path).unwrap(),
-            "second call must report no-op when skills already absent");
+        assert!(
+            !clear_skills_in_config(&path).unwrap(),
+            "second call must report no-op when skills already absent"
+        );
     }
 
     #[test]
@@ -1124,23 +1179,35 @@ mod tests {
             "providers": { "openrouter": { "type": "openai", "api_key": "x", "models": ["m"] } }
         });
         let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice())
+            .unwrap();
         drop(f);
 
         let tools = vec!["bash".to_string(), "read_file".to_string()];
-        assert!(set_skills_tools_in_config(&path, &tools).unwrap(), "first write must report a change");
+        assert!(
+            set_skills_tools_in_config(&path, &tools).unwrap(),
+            "first write must report a change"
+        );
         let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(after["skills"]["builtin"]["tools"], serde_json::json!(["bash", "read_file"]));
+        assert_eq!(
+            after["skills"]["builtin"]["tools"],
+            serde_json::json!(["bash", "read_file"])
+        );
         // Sibling keys preserved.
         assert_eq!(after["agent"]["provider"], "openrouter");
         assert_eq!(after["providers"]["openrouter"]["api_key"], "x");
 
         // Same allowlist a second time is a no-op.
-        assert!(!set_skills_tools_in_config(&path, &tools).unwrap(),
-            "no-change call must report no-op");
+        assert!(
+            !set_skills_tools_in_config(&path, &tools).unwrap(),
+            "no-change call must report no-op"
+        );
 
         // Empty list lands as `tools: []` so the loader registers zero builtins.
-        assert!(set_skills_tools_in_config(&path, &[]).unwrap(), "shrink to empty must report a change");
+        assert!(
+            set_skills_tools_in_config(&path, &[]).unwrap(),
+            "shrink to empty must report a change"
+        );
         let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(after["skills"]["builtin"]["tools"], serde_json::json!([]));
     }
@@ -1169,7 +1236,8 @@ mod tests {
             }
         });
         let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice())
+            .unwrap();
         drop(f);
 
         // Allowlist keeps two builtins + one of the three subagents.
@@ -1178,8 +1246,10 @@ mod tests {
             "write_file".to_string(),
             "planner".to_string(),
         ];
-        assert!(set_skills_tools_in_config(&path, &allow).unwrap(),
-            "filtering must report a change");
+        assert!(
+            set_skills_tools_in_config(&path, &allow).unwrap(),
+            "filtering must report a change"
+        );
         let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
 
         // Builtin allowlist round-trips verbatim — including the two
@@ -1201,22 +1271,29 @@ mod tests {
         assert_eq!(subagents[0]["system_prompt"], "sp");
 
         // Same call a second time is a no-op (idempotent).
-        assert!(!set_skills_tools_in_config(&path, &allow).unwrap(),
-            "no-change call must report no-op");
+        assert!(
+            !set_skills_tools_in_config(&path, &allow).unwrap(),
+            "no-change call must report no-op"
+        );
 
         // Allowlist that excludes every subagent drops the subagents
         // key entirely — keeps the loader's contract that an empty
         // array doesn't get a Subagent skill config pushed.
         let no_subagents = vec!["read_file".to_string()];
-        assert!(set_skills_tools_in_config(&path, &no_subagents).unwrap(),
-            "narrowing the allowlist must report a change");
+        assert!(
+            set_skills_tools_in_config(&path, &no_subagents).unwrap(),
+            "narrowing the allowlist must report a change"
+        );
         let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(
             after["skills"].get("subagents").is_none(),
             "subagents key must be absent when the allowlist excludes every entry, got {:?}",
             after["skills"].get("subagents")
         );
-        assert_eq!(after["skills"]["builtin"]["tools"], serde_json::json!(["read_file"]));
+        assert_eq!(
+            after["skills"]["builtin"]["tools"],
+            serde_json::json!(["read_file"])
+        );
     }
 
     #[test]
@@ -1229,7 +1306,8 @@ mod tests {
             "providers": { "openrouter": { "type": "openai", "api_key": "x", "models": ["m"] } }
         });
         let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice()).unwrap();
+        f.write_all(serde_json::to_vec_pretty(&initial).unwrap().as_slice())
+            .unwrap();
         drop(f);
 
         // Insert a server.
@@ -1242,9 +1320,11 @@ mod tests {
             }),
         );
         assert!(patch_mcp_servers_in_config(&path, &servers).unwrap());
-        let after: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(after["mcp_servers"]["linear"]["url"], "https://swarm.example/mcp/i-1/linear");
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            after["mcp_servers"]["linear"]["url"],
+            "https://swarm.example/mcp/i-1/linear"
+        );
         // Sibling keys untouched.
         assert_eq!(after["agent"]["provider"], "openrouter");
 
@@ -1254,8 +1334,7 @@ mod tests {
         // Empty map clears the block.
         let empty = serde_json::Map::new();
         assert!(patch_mcp_servers_in_config(&path, &empty).unwrap());
-        let after2: Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let after2: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(after2.get("mcp_servers").is_none());
     }
 }

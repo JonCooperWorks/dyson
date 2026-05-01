@@ -52,7 +52,10 @@ impl Tool for ListFilesTool {
             .ok_or_else(|| DysonError::tool("list_files", "missing or invalid 'pattern'"))?;
 
         let base_dir = match input["path"].as_str() {
-            Some(sub) => match ctx.resolve_path(sub) { Ok(p) => p, Err(e) => return Ok(e) },
+            Some(sub) => match ctx.resolve_path(sub) {
+                Ok(p) => p,
+                Err(e) => return Ok(e),
+            },
             None => ctx.working_dir.clone(),
         };
 
@@ -131,7 +134,10 @@ mod tests {
 
         let tool = ListFilesTool;
         let input = serde_json::json!({"pattern": "*.rs"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("a.rs"));
         assert!(output.content.contains("b.rs"));
@@ -143,7 +149,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = ListFilesTool;
         let input = serde_json::json!({"pattern": "[invalid"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(output.is_error);
     }
 
@@ -157,7 +166,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tool = ListFilesTool;
         let input = serde_json::json!({"pattern": "*"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("No files matched"));
     }
@@ -172,7 +184,10 @@ mod tests {
 
         let tool = ListFilesTool;
         let input = serde_json::json!({"pattern": "*.txt"});
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
         assert!(output.content.contains("truncated"));
     }

@@ -207,7 +207,6 @@ fn build_proxy_from_env() -> Option<reqwest::Proxy> {
     Some(proxy)
 }
 
-
 /// Returns the shared HTTP client.
 ///
 /// All outbound HTTP requests should go through this client to get
@@ -237,7 +236,9 @@ pub fn client() -> &'static reqwest::Client {
 /// policy raises the bar significantly over doing nothing.
 pub async fn verify_url_safe(url: &str) -> Result<(), String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
-    let host = parsed.host_str().ok_or_else(|| "URL has no host".to_string())?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?;
 
     // Strip bracket on IPv6 literal.
     let raw = host.trim_start_matches('[').trim_end_matches(']');

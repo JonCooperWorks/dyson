@@ -82,8 +82,8 @@ impl Auth for HashedBearerAuth {
         // parse cost, and `PasswordHash` borrows from `self.phc` so we
         // can't cache a parsed value across awaits without self-
         // referential gymnastics.
-        let parsed = PasswordHash::new(&self.phc)
-            .map_err(|_| DysonError::Config("unauthorized".into()))?;
+        let parsed =
+            PasswordHash::new(&self.phc).map_err(|_| DysonError::Config("unauthorized".into()))?;
 
         Argon2::default()
             .verify_password(token.as_bytes(), &parsed)
@@ -123,7 +123,11 @@ mod tests {
     async fn rejects_missing_header() {
         let phc = HashedBearerAuth::hash("any").unwrap();
         let auth = HashedBearerAuth::from_phc(phc).unwrap();
-        assert!(auth.validate_request(&hyper::HeaderMap::new()).await.is_err());
+        assert!(
+            auth.validate_request(&hyper::HeaderMap::new())
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -231,10 +235,7 @@ mod tests {
         let phc = HashedBearerAuth::hash(&token).unwrap();
         let auth = HashedBearerAuth::from_phc(phc).unwrap();
         let mut h = hyper::HeaderMap::new();
-        h.insert(
-            "authorization",
-            format!("Bearer {token}").parse().unwrap(),
-        );
+        h.insert("authorization", format!("Bearer {token}").parse().unwrap());
         assert!(auth.validate_request(&h).await.is_ok());
     }
 
@@ -257,6 +258,9 @@ mod tests {
         let auth = HashedBearerAuth::from_phc(tampered).unwrap();
         let mut h = hyper::HeaderMap::new();
         h.insert("authorization", "Bearer token".parse().unwrap());
-        assert!(auth.validate_request(&h).await.is_err(), "tampered hash must reject");
+        assert!(
+            auth.validate_request(&h).await.is_err(),
+            "tampered hash must reject"
+        );
     }
 }

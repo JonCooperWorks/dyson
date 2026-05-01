@@ -1046,18 +1046,13 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // accidental invocation to silently fan out across billable runs.
     let selected: Vec<&Target> = match (args.target.as_deref(), args.expensive_scan_all_targets) {
         (Some(_), true) => {
-            return Err(
-                "--target and --expensive-scan-all-targets are mutually exclusive".into(),
-            );
+            return Err("--target and --expensive-scan-all-targets are mutually exclusive".into());
         }
         (Some(name), false) => {
             let matched: Vec<&Target> = TARGETS.iter().filter(|t| t.name == name).collect();
             if matched.is_empty() {
                 let known: Vec<&str> = TARGETS.iter().map(|t| t.name).collect();
-                return Err(format!(
-                    "unknown target {name:?}; known: {known:?}"
-                )
-                .into());
+                return Err(format!("unknown target {name:?}; known: {known:?}").into());
             }
             matched
         }
@@ -1079,7 +1074,16 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&output_dir)
         .map_err(|e| format!("create output dir {}: {}", output_dir.display(), e))?;
     for t in selected {
-        run_target(t, &cache, &sec_eng, suffix, ref_override, &output_dir, hints_on).await?;
+        run_target(
+            t,
+            &cache,
+            &sec_eng,
+            suffix,
+            ref_override,
+            &output_dir,
+            hints_on,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1214,8 +1218,7 @@ fn shallow_clone(slug: &str, dest: &Path, git_ref: Option<&str>) -> Result<(), S
             // FETCH_HEAD.  Works for tags, branches, and commit SHAs —
             // GitHub allows fetching arbitrary reachable SHAs over the
             // smart HTTP protocol.
-            std::fs::create_dir_all(dest)
-                .map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
+            std::fs::create_dir_all(dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
             run_git_in(&["init", "--quiet"], dest)?;
             run_git_in(&["remote", "add", "origin", &url], dest)?;
             run_git_in(&["fetch", "--depth", "1", "--quiet", "origin", r], dest)?;
@@ -1232,10 +1235,7 @@ fn run_git_in(args: &[&str], cwd: &Path) -> Result<(), String> {
         .status()
         .map_err(|e| format!("spawn git {args:?}: {e}"))?;
     if !status.success() {
-        return Err(format!(
-            "git {args:?} in {} exited {status}",
-            cwd.display()
-        ));
+        return Err(format!("git {args:?} in {} exited {status}", cwd.display()));
     }
     Ok(())
 }
@@ -1245,6 +1245,12 @@ fn run_git_in(args: &[&str], cwd: &Path) -> Result<(), String> {
 /// `release/v15` → `release_v15`).  Tags and SHAs pass through unchanged.
 fn sanitize_ref_for_path(r: &str) -> String {
     r.chars()
-        .map(|c| if matches!(c, '/' | '\\' | ':') { '_' } else { c })
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect()
 }

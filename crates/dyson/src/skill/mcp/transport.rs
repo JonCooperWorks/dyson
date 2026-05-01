@@ -209,11 +209,8 @@ impl StdioTransport {
                 .map(|o| o.status.success())
                 .unwrap_or(false);
             if has_bwrap {
-                let argv = crate::sandbox::os::build_bwrap_argv_for_mcp_stdio(
-                    command,
-                    args,
-                    deny_network,
-                );
+                let argv =
+                    crate::sandbox::os::build_bwrap_argv_for_mcp_stdio(command, args, deny_network);
                 return ("bwrap".to_string(), argv);
             }
             tracing::warn!(
@@ -473,7 +470,11 @@ impl HttpTransport {
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| ct.split(';').next().is_some_and(|m| m.trim().eq_ignore_ascii_case("text/event-stream")));
+            .is_some_and(|ct| {
+                ct.split(';')
+                    .next()
+                    .is_some_and(|m| m.trim().eq_ignore_ascii_case("text/event-stream"))
+            });
 
         let body = response.text().await.map_err(|e| DysonError::Mcp {
             server: self.url.clone(),
@@ -483,10 +484,12 @@ impl HttpTransport {
         let rpc_body: std::borrow::Cow<'_, str> = if is_sse {
             match extract_last_sse_data(&body) {
                 Some(s) => std::borrow::Cow::Owned(s),
-                None => return Err(DysonError::Mcp {
-                    server: self.url.clone(),
-                    message: "SSE response had no `data:` frame".into(),
-                }),
+                None => {
+                    return Err(DysonError::Mcp {
+                        server: self.url.clone(),
+                        message: "SSE response had no `data:` frame".into(),
+                    });
+                }
             }
         } else {
             std::borrow::Cow::Borrowed(body.as_str())
@@ -656,7 +659,8 @@ mod tests {
         // The shape Context7 (and most streamable HTTP MCP servers)
         // emit for initialize: one event with one data line, blank
         // line terminator.
-        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
+        let body =
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
         let extracted = extract_last_sse_data(body).unwrap();
         let v: serde_json::Value = serde_json::from_str(&extracted).unwrap();
         assert_eq!(v["result"]["ok"], true);

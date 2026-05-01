@@ -46,7 +46,10 @@ impl super::Agent {
 
         // Rotate pre-compaction snapshot for fine-tuning preservation.
         if let Some(ref backend) = self.history_backend {
-            if let Err(e) = backend.store.save(&backend.chat_id, &self.conversation.messages) {
+            if let Err(e) = backend
+                .store
+                .save(&backend.chat_id, &self.conversation.messages)
+            {
                 tracing::warn!(error = %e, "failed to save pre-compaction snapshot");
             } else if let Err(e) = backend.store.rotate(&backend.chat_id) {
                 tracing::warn!(error = %e, "failed to rotate pre-compaction snapshot");
@@ -123,7 +126,10 @@ impl super::Agent {
             .collect();
 
         // Phase 3: summarise the pruned middle section.
-        let summary = match self.summarise_messages(&pruned_middle, previous_summary.as_deref(), output).await {
+        let summary = match self
+            .summarise_messages(&pruned_middle, previous_summary.as_deref(), output)
+            .await
+        {
             Ok(s) => s,
             Err(e) => {
                 self.conversation.messages = messages;
@@ -139,9 +145,7 @@ impl super::Agent {
 
         // Phase 4: reassemble — head + summary + tail.
         let old_count = messages.len();
-        let mut new_messages = Vec::with_capacity(
-            head_end + 1 + (messages.len() - tail_start),
-        );
+        let mut new_messages = Vec::with_capacity(head_end + 1 + (messages.len() - tail_start));
 
         // Head: keep first N messages, but skip any old [Context Summary].
         for msg in &messages[..head_end] {
@@ -314,8 +318,10 @@ impl super::Agent {
             .map(|(id, &pos)| (id.clone(), pos))
             .collect();
 
-        let tool_use_ids: HashSet<&str> =
-            tool_use_positions.keys().map(std::string::String::as_str).collect();
+        let tool_use_ids: HashSet<&str> = tool_use_positions
+            .keys()
+            .map(std::string::String::as_str)
+            .collect();
         let orphaned_results: HashSet<String> = tool_result_ids
             .iter()
             .filter(|id| !tool_use_ids.contains(id.as_str()))
@@ -326,11 +332,8 @@ impl super::Agent {
         // Sort by descending position so earlier inserts don't shift later indices.
         orphaned_uses.sort_by(|a, b| b.1.cmp(&a.1));
         for (orphan_id, pos) in &orphaned_uses {
-            let synthetic = Message::tool_result(
-                orphan_id,
-                "[result included in context summary]",
-                false,
-            );
+            let synthetic =
+                Message::tool_result(orphan_id, "[result included in context summary]", false);
             self.conversation.messages.insert(pos + 1, synthetic);
         }
 
@@ -351,7 +354,12 @@ impl super::Agent {
     pub(super) fn estimate_context_tokens(&self, system_prompt: &str) -> usize {
         let system_tokens = system_prompt.split_whitespace().count();
 
-        let message_tokens: usize = self.conversation.messages.iter().map(super::super::message::Message::estimate_tokens).sum();
+        let message_tokens: usize = self
+            .conversation
+            .messages
+            .iter()
+            .map(super::super::message::Message::estimate_tokens)
+            .sum();
 
         system_tokens + message_tokens + self.tool_registry.cached_tokens
     }

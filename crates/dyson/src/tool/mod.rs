@@ -61,14 +61,14 @@ pub mod load_skill;
 pub mod memory_search;
 pub mod read_file;
 pub mod search_files;
-pub mod view;
+pub mod security;
 pub mod send_file;
 pub mod skill_create;
+pub mod view;
 pub mod web_fetch;
 pub mod web_search;
 pub mod workspace;
 pub mod write_file;
-pub mod security;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -528,9 +528,7 @@ pub fn resolve_and_validate_path(
                 }
             }
         }
-        Err(e) => {
-            return Err(path_err("resolve path", &candidate, e))
-        }
+        Err(e) => return Err(path_err("resolve path", &candidate, e)),
     };
 
     let canon_wd = working_dir

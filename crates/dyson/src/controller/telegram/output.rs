@@ -9,13 +9,13 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::controller::Output;
-use crate::error::{classify_llm_error, DysonError, LlmErrorKind, LlmRecovery};
+use crate::error::{DysonError, LlmErrorKind, LlmRecovery, classify_llm_error};
 use crate::tool::ToolOutput;
 
+use super::EDIT_INTERVAL_MS;
 use super::api::BotApi;
 use super::formatting::{escape_html, markdown_to_telegram_html, split_for_telegram};
 use super::types::{ChatId, MessageId};
-use super::EDIT_INTERVAL_MS;
 
 /// Output implementation that sends agent responses to a Telegram chat.
 ///
@@ -97,18 +97,16 @@ impl TelegramOutput {
     }
 
     fn edit_message(&self, message_id: MessageId, text: &str) {
-        let result = self.block_on(
-            self.bot
-                .edit_message_text(self.chat_id, message_id, text),
-        );
+        let result = self.block_on(self.bot.edit_message_text(self.chat_id, message_id, text));
         if let Err(e) = result {
             if is_telegram_parse_error(&e) {
                 tracing::warn!(error = %e, "HTML parse failed on edit, falling back to plain text");
                 let plain = strip_html_tags(text);
-                let _ = self.block_on(
-                    self.bot
-                        .edit_message_text_plain(self.chat_id, message_id, &plain),
-                );
+                let _ = self.block_on(self.bot.edit_message_text_plain(
+                    self.chat_id,
+                    message_id,
+                    &plain,
+                ));
             } else {
                 tracing::debug!(error = %e, "failed to edit Telegram message");
             }
@@ -234,10 +232,7 @@ impl Output for TelegramOutput {
         }
     }
 
-    fn send_artefact(
-        &mut self,
-        artefact: &crate::message::Artefact,
-    ) -> Result<(), DysonError> {
+    fn send_artefact(&mut self, artefact: &crate::message::Artefact) -> Result<(), DysonError> {
         // Telegram has no inline-markdown surface, so dump the report
         // to a throwaway temp file and send it as a document — the user
         // gets the same .md they'd download from the web UI.  We flush
@@ -252,7 +247,13 @@ impl Output for TelegramOutput {
         let mut safe_title: String = artefact
             .title
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '-' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect();
         if safe_title.is_empty() {
             safe_title.push_str("artefact");
@@ -292,13 +293,13 @@ impl Output for TelegramOutput {
     fn on_llm_error(&mut self, error: &DysonError) -> LlmRecovery {
         match classify_llm_error(&error.to_string()) {
             LlmErrorKind::NoToolUse => {
-                let _ = self
-                    .send_message("Model doesn't support tool use — retrying without tools.");
+                let _ =
+                    self.send_message("Model doesn't support tool use — retrying without tools.");
                 LlmRecovery::RetryWithoutTools
             }
             LlmErrorKind::NoVision if self.has_text => {
-                let _ = self
-                    .send_message("Model doesn't support vision — retrying with text only.");
+                let _ =
+                    self.send_message("Model doesn't support vision — retrying with text only.");
                 LlmRecovery::RetryWithoutImages
             }
             LlmErrorKind::NoVision => {
@@ -385,7 +386,9 @@ mod tests {
 
     #[test]
     fn non_parse_error_not_detected() {
-        let err = DysonError::Llm("Telegram sendMessage failed: Bad Request: text must be non-empty".to_string());
+        let err = DysonError::Llm(
+            "Telegram sendMessage failed: Bad Request: text must be non-empty".to_string(),
+        );
         assert!(!is_telegram_parse_error(&err));
     }
 
@@ -399,10 +402,7 @@ mod tests {
 
     #[test]
     fn strip_tags_pre_block() {
-        assert_eq!(
-            strip_html_tags("<pre>fn main() {}</pre>"),
-            "fn main() {}"
-        );
+        assert_eq!(strip_html_tags("<pre>fn main() {}</pre>"), "fn main() {}");
     }
 
     #[test]

@@ -49,14 +49,21 @@ impl Tool for WriteFileTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("write_file", "missing or invalid 'content'"))?;
 
-        let path = match ctx.resolve_path(file_path) { Ok(p) => p, Err(e) => return Ok(e) };
+        let path = match ctx.resolve_path(file_path) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
 
         // Create parent directories if needed.
         if let Some(parent) = path.parent()
             && !parent.exists()
             && let Err(e) = tokio::fs::create_dir_all(parent).await
         {
-            return Ok(ToolOutput::error(path_err("create directories for", &path, e)));
+            return Ok(ToolOutput::error(path_err(
+                "create directories for",
+                &path,
+                e,
+            )));
         }
 
         let bytes = content.len();
@@ -84,7 +91,10 @@ mod tests {
             "file_path": "hello.txt",
             "content": "hello world"
         });
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
 
         let content = std::fs::read_to_string(tmp.path().join("hello.txt")).unwrap();
@@ -99,7 +109,10 @@ mod tests {
             "file_path": "a/b/c.txt",
             "content": "nested"
         });
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
 
         let content = std::fs::read_to_string(tmp.path().join("a/b/c.txt")).unwrap();
@@ -116,7 +129,10 @@ mod tests {
             "file_path": "existing.txt",
             "content": "new"
         });
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
 
         let content = std::fs::read_to_string(tmp.path().join("existing.txt")).unwrap();

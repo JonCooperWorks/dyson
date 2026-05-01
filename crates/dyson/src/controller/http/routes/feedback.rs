@@ -15,11 +15,11 @@ pub(crate) fn emoji_to_rating(emoji: &str) -> Option<FeedbackRating> {
     // Telegram exactly.  Kept inline (not re-exported from the telegram
     // module) so the http controller doesn't depend on telegram's wiring.
     match emoji {
-        "💩" | "😡" | "🤮"          => Some(FeedbackRating::Terrible),
-        "👎"                           => Some(FeedbackRating::Bad),
-        "😢" | "😐"                    => Some(FeedbackRating::NotGood),
-        "👍" | "👏"                    => Some(FeedbackRating::Good),
-        "🔥" | "🎉" | "😂"             => Some(FeedbackRating::VeryGood),
+        "💩" | "😡" | "🤮" => Some(FeedbackRating::Terrible),
+        "👎" => Some(FeedbackRating::Bad),
+        "😢" | "😐" => Some(FeedbackRating::NotGood),
+        "👍" | "👏" => Some(FeedbackRating::Good),
+        "🔥" | "🎉" | "😂" => Some(FeedbackRating::VeryGood),
         "❤️" | "❤" | "🤯" | "💯" | "⚡" => Some(FeedbackRating::Excellent),
         _ => None,
     }
@@ -33,11 +33,7 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
     json_ok(&entries)
 }
 
-pub(super) async fn post(
-    req: Request<hyper::body::Incoming>,
-    state: &HttpState,
-    id: &str,
-) -> Resp {
+pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState, id: &str) -> Resp {
     let body: FeedbackBody = match read_json_capped(req, MAX_SMALL_BODY).await {
         Ok(b) => b,
         Err(e) => return bad_request(&e),

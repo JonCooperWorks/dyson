@@ -18,9 +18,9 @@ use crate::message::Message;
 use crate::sandbox::SandboxDecision;
 use crate::tool::ToolOutput;
 
+use super::Agent;
 use super::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
 use super::stream_handler::ToolCall;
-use super::Agent;
 
 impl Agent {
     /// Check rate limits, analyze dependencies, and execute tool calls in phases.
@@ -33,15 +33,17 @@ impl Agent {
         for (i, call) in tool_calls.iter().enumerate() {
             if let Err(e) = self.limiter.check(&call.name) {
                 tracing::warn!(tool = call.name, error = %e, "tool call rate-limited");
-                self.conversation.messages
-                    .push(Message::tool_result(&call.id, &e.to_string(), true));
+                self.conversation.messages.push(Message::tool_result(
+                    &call.id,
+                    &e.to_string(),
+                    true,
+                ));
             } else {
                 limited_calls.push(i);
             }
         }
 
-        let allowed_calls: Vec<&ToolCall> =
-            limited_calls.iter().map(|&i| &tool_calls[i]).collect();
+        let allowed_calls: Vec<&ToolCall> = limited_calls.iter().map(|&i| &tool_calls[i]).collect();
 
         if allowed_calls.is_empty() {
             return Ok(());
@@ -104,10 +106,7 @@ impl Agent {
             Ok(response) => {
                 let (assistant_msg, _tool_calls, _output_tokens, _stop_reason) =
                     super::stream_handler::process_stream(response.stream, output).await?;
-                let text = assistant_msg
-                    .last_text()
-                    .unwrap_or_default()
-                    .to_string();
+                let text = assistant_msg.last_text().unwrap_or_default().to_string();
                 self.conversation.messages.push(assistant_msg);
                 Ok(text)
             }
@@ -185,7 +184,10 @@ impl Agent {
     ///
     /// Returns the tool output paired with the wall-clock execution duration
     /// so the caller can thread it to the result formatter.
-    async fn execute_tool_call_timed(&self, call: &ToolCall) -> Result<(ToolOutput, std::time::Duration)> {
+    async fn execute_tool_call_timed(
+        &self,
+        call: &ToolCall,
+    ) -> Result<(ToolOutput, std::time::Duration)> {
         if tracing::enabled!(tracing::Level::INFO) {
             let input_str = call.input.to_string();
             let input_preview = super::result_formatter::preview(&input_str, 500);
@@ -205,15 +207,19 @@ impl Agent {
         // -- Pre-tool hooks --
         let effective_call;
         let call = if !self.tool_hooks.is_empty() {
-            use crate::tool_hooks::{ToolHookEvent, HookDecision, dispatch_hooks};
-            let decision = dispatch_hooks(
-                &self.tool_hooks,
-                &ToolHookEvent::PreToolUse { call },
-            );
+            use crate::tool_hooks::{HookDecision, ToolHookEvent, dispatch_hooks};
+            let decision = dispatch_hooks(&self.tool_hooks, &ToolHookEvent::PreToolUse { call });
             match decision {
                 HookDecision::Block { reason } => {
-                    tracing::info!(tool = call.name, reason = reason, "tool call blocked by hook");
-                    return Ok((ToolOutput::error(format!("Blocked by hook: {reason}")), std::time::Duration::ZERO));
+                    tracing::info!(
+                        tool = call.name,
+                        reason = reason,
+                        "tool call blocked by hook"
+                    );
+                    return Ok((
+                        ToolOutput::error(format!("Blocked by hook: {reason}")),
+                        std::time::Duration::ZERO,
+                    ));
                 }
                 HookDecision::Modify { input } => {
                     effective_call = ToolCall::new(&call.name, input);
@@ -316,11 +322,7 @@ impl Agent {
         // so they flow back to the LLM as tool_result messages instead of
         // crashing the agent loop.  A sandbox failure is not a fatal error —
         // the LLM should learn the tool was rejected and try something else.
-        let decision = match self
-            .sandbox
-            .check(&call.name, &call.input, &ctx)
-            .await
-        {
+        let decision = match self.sandbox.check(&call.name, &call.input, &ctx).await {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(tool = call.name, error = %e, "sandbox check failed");
@@ -333,10 +335,7 @@ impl Agent {
                 // Look up the tool.
                 let Some(tool) = self.tool_registry.get(&call.name) else {
                     tracing::warn!(tool = call.name, "unknown tool");
-                    return Ok(ToolOutput::error(format!(
-                        "Unknown tool '{}'",
-                        call.name
-                    )));
+                    return Ok(ToolOutput::error(format!("Unknown tool '{}'", call.name)));
                 };
 
                 // Execute the tool.

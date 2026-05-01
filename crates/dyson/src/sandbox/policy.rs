@@ -426,9 +426,7 @@ impl PathAccess {
         match self {
             Self::Allow => true,
             Self::Deny => false,
-            Self::RestrictTo(allowed) => {
-                allowed.iter().any(|prefix| path.starts_with(prefix))
-            }
+            Self::RestrictTo(allowed) => allowed.iter().any(|prefix| path.starts_with(prefix)),
         }
     }
 }

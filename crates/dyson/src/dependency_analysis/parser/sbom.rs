@@ -110,9 +110,7 @@ fn push_purl(
     purl: Option<String>,
 ) {
     let Some(purl) = purl else {
-        parsed
-            .warnings
-            .push(format!("{name}: no PURL; skipping"));
+        parsed.warnings.push(format!("{name}: no PURL; skipping"));
         return;
     };
     let Some((eco, _, _)) = split_purl(&purl) else {

@@ -104,10 +104,7 @@ pub fn build_observe_response(
 /// When a workspace is available, tools are served to the subprocess via
 /// MCP — return an empty list so the text prompt doesn't duplicate them.
 /// Otherwise, include non-agent-only tools for text-based tool descriptions.
-pub fn filter_tools_for_cli(
-    tools: &[ToolDefinition],
-    has_workspace: bool,
-) -> Vec<&ToolDefinition> {
+pub fn filter_tools_for_cli(tools: &[ToolDefinition], has_workspace: bool) -> Vec<&ToolDefinition> {
     if has_workspace {
         vec![]
     } else {

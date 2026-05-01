@@ -16,11 +16,11 @@
 
 use std::path::Path;
 
-use crate::error::Result;
-use crate::tool::ToolOutput;
 use crate::ast::{
     self, MAX_FILE_SIZE, MAX_FILES, find_identifier_positions, find_word_boundary_matches,
 };
+use crate::error::Result;
+use crate::tool::ToolOutput;
 
 /// Method used to rename a given file.
 #[derive(Clone, Copy)]
@@ -472,5 +472,4 @@ mod tests {
         let csv = std::fs::read_to_string(tmp.path().join("data.csv")).unwrap();
         assert!(csv.contains("renamed,value"));
     }
-
 }

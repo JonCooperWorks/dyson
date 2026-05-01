@@ -278,7 +278,6 @@ fn message_to_gemini(msg: &Message) -> serde_json::Value {
         });
     }
 
-
     let role = match msg.role {
         Role::User => "user",
         Role::Assistant => "model",
@@ -379,9 +378,7 @@ impl SseJsonParser for GeminiJsonParser {
 
                         // For Gemini, function calls arrive complete (not streamed
                         // in fragments like OpenAI), so we start + finalize in one go.
-                        if let Some(err) =
-                            ctx.start_tool(index, id.clone(), name.clone())
-                        {
+                        if let Some(err) = ctx.start_tool(index, id.clone(), name.clone()) {
                             events.push(Err(DysonError::Llm(format!("{err:?}"))));
                             return events;
                         }
@@ -514,9 +511,7 @@ mod tests {
 
     #[test]
     fn message_assistant_text() {
-        let msg = Message::assistant(vec![ContentBlock::Text {
-            text: "hi".into(),
-        }]);
+        let msg = Message::assistant(vec![ContentBlock::Text { text: "hi".into() }]);
         let json = message_to_gemini(&msg);
         assert_eq!(json["role"], "model");
         assert_eq!(json["parts"][0]["text"], "hi");

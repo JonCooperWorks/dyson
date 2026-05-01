@@ -238,13 +238,8 @@ impl Tool for BashTool {
                 // Build the typed view first while both streams are still
                 // borrowed, before `combined` consumes them via into_owned().
                 let duration_ms = started.elapsed().as_millis() as u64;
-                let view = build_bash_view(
-                    command,
-                    &stdout,
-                    &stderr,
-                    output.status.code(),
-                    duration_ms,
-                );
+                let view =
+                    build_bash_view(command, &stdout, &stderr, output.status.code(), duration_ms);
 
                 // Combine stdout and stderr.  If both are non-empty, label
                 // the stderr section so the LLM can distinguish them.
@@ -273,10 +268,7 @@ impl Tool for BashTool {
 
                 // Log the first portion of the output for debugging.
                 let output_preview = &truncated[..truncated.len().min(300)];
-                tracing::debug!(
-                    output_preview = output_preview,
-                    "bash output preview"
-                );
+                tracing::debug!(output_preview = output_preview, "bash output preview");
 
                 Ok(ToolOutput {
                     content: truncated.into_owned(),

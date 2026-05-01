@@ -318,8 +318,14 @@ fn group_all_protected_commands_blocked_for_non_operators() {
     let non_operator: Option<i64> = Some(999);
 
     let protected = [
-        "/logs", "/logs 50", "/memory", "/memory some note",
-        "/clear", "/compact", "/model provider", "/models",
+        "/logs",
+        "/logs 50",
+        "/memory",
+        "/memory some note",
+        "/clear",
+        "/compact",
+        "/model provider",
+        "/models",
     ];
 
     for cmd in protected {
@@ -423,7 +429,10 @@ async fn mcp_server_binds_to_loopback_only() {
         dyson::workspace::InMemoryWorkspace::new(),
     )));
 
-    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, std::collections::HashMap::new()));
+    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(
+        ws,
+        std::collections::HashMap::new(),
+    ));
     let (port, handle, token) = server.start().await.unwrap();
 
     // Verify the port is non-zero (OS assigned).
@@ -479,7 +488,10 @@ async fn mcp_server_rejects_unauthorized_request() {
         dyson::workspace::InMemoryWorkspace::new(),
     )));
 
-    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, std::collections::HashMap::new()));
+    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(
+        ws,
+        std::collections::HashMap::new(),
+    ));
     let (port, handle, _token) = server.start().await.unwrap();
 
     // Send a request with no Authorization header.
@@ -518,7 +530,10 @@ async fn mcp_server_rejects_wrong_bearer_token() {
         dyson::workspace::InMemoryWorkspace::new(),
     )));
 
-    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(ws, std::collections::HashMap::new()));
+    let server = Arc::new(dyson::skill::mcp::serve::McpHttpServer::new(
+        ws,
+        std::collections::HashMap::new(),
+    ));
     let (port, handle, _token) = server.start().await.unwrap();
 
     // Send a request with a wrong bearer token.
@@ -583,8 +598,10 @@ fn mcp_server_generates_unique_tokens() {
         RwLock::new(Box::new(dyson::workspace::InMemoryWorkspace::new())),
     );
 
-    let server1 = dyson::skill::mcp::serve::McpHttpServer::new(ws1, std::collections::HashMap::new());
-    let server2 = dyson::skill::mcp::serve::McpHttpServer::new(ws2, std::collections::HashMap::new());
+    let server1 =
+        dyson::skill::mcp::serve::McpHttpServer::new(ws1, std::collections::HashMap::new());
+    let server2 =
+        dyson::skill::mcp::serve::McpHttpServer::new(ws2, std::collections::HashMap::new());
 
     assert_ne!(
         server1.bearer_token(),
@@ -603,10 +620,12 @@ async fn bearer_auth_uses_constant_time_comparison() {
     // that it still correctly accepts/rejects tokens (functional test).
     // The actual constant-time property is verified by code inspection —
     // the test ensures the comparison function works after the change.
-    use dyson::auth::bearer::BearerTokenAuth;
     use dyson::auth::Auth;
+    use dyson::auth::bearer::BearerTokenAuth;
 
-    let auth = BearerTokenAuth::new("a]b]c]d]e]f]0123456789abcdef0123456789abcdef0123456789abcdef01".into());
+    let auth = BearerTokenAuth::new(
+        "a]b]c]d]e]f]0123456789abcdef0123456789abcdef0123456789abcdef01".into(),
+    );
 
     // Correct token.
     let mut headers = hyper::HeaderMap::new();
@@ -637,8 +656,8 @@ async fn bearer_auth_uses_constant_time_comparison() {
 
 #[tokio::test]
 async fn api_key_auth_uses_constant_time_comparison() {
-    use dyson::auth::api_key::ApiKeyAuth;
     use dyson::auth::Auth;
+    use dyson::auth::api_key::ApiKeyAuth;
 
     let auth = ApiKeyAuth::new("x-api-key", "sk-test-key-12345".into());
 
@@ -749,7 +768,8 @@ async fn bash_does_not_leak_secret_env_vars() {
         .insert("DYSON_TEST_API_KEY".into(), "super-secret-value".into());
     ctx.env
         .insert("DYSON_TEST_TOKEN".into(), "another-secret".into());
-    ctx.env.insert("PATH".into(), std::env::var("PATH").unwrap_or_default());
+    ctx.env
+        .insert("PATH".into(), std::env::var("PATH").unwrap_or_default());
 
     let input = serde_json::json!({"command": "env"});
     let output = tool.run(&input, &ctx).await.unwrap();
@@ -785,10 +805,12 @@ async fn list_files_rejects_path_traversal() {
         workspace: None,
         depth: 0,
         dangerous_no_sandbox: false,
-        taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
         activity: None,
-    tool_use_id: None,
-    subagent_events: None,
+        tool_use_id: None,
+        subagent_events: None,
     };
 
     let tool = dyson::tool::list_files::ListFilesTool;
@@ -812,10 +834,12 @@ async fn search_files_rejects_path_traversal() {
         workspace: None,
         depth: 0,
         dangerous_no_sandbox: false,
-        taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
         activity: None,
-    tool_use_id: None,
-    subagent_events: None,
+        tool_use_id: None,
+        subagent_events: None,
     };
 
     let tool = dyson::tool::search_files::SearchFilesTool;

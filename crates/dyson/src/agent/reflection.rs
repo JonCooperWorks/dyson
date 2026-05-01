@@ -300,8 +300,7 @@ pub(super) fn format_feedback_summary(
     }
 
     let total_rated = entries.len();
-    let avg_score: f64 =
-        entries.iter().map(|e| e.score as f64).sum::<f64>() / total_rated as f64;
+    let avg_score: f64 = entries.iter().map(|e| e.score as f64).sum::<f64>() / total_rated as f64;
 
     // Score distribution: indices 0..7 map to scores -3..+3.
     let mut dist = [0u32; 7];
@@ -385,8 +384,13 @@ impl Dream for LearningSynthesisDream {
         let start = std::time::Instant::now();
         let client = ctx.client.access()?;
 
-        synthesize_to_workspace(&**client, &ctx.config, &ctx.conversation_summary, &workspace)
-            .await?;
+        synthesize_to_workspace(
+            &**client,
+            &ctx.config,
+            &ctx.conversation_summary,
+            &workspace,
+        )
+        .await?;
 
         let new_len = {
             let ws = workspace.read().await;
@@ -666,9 +670,7 @@ impl Dream for SelfImprovementDream {
         let start = std::time::Instant::now();
         let reflection_system = build_reflection_system_prompt(&ctx.tool_context).await;
 
-        let tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(crate::tool::skill_create::SkillCreateTool),
-        ];
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(crate::tool::skill_create::SkillCreateTool)];
 
         let (actions_taken, artifacts) = run_mini_loop(
             &ctx,

@@ -113,7 +113,9 @@ mod tests {
                 }
             }
         }"#;
-        let parsed = NugetParser.parse(Path::new("packages.lock.json"), doc).unwrap();
+        let parsed = NugetParser
+            .parse(Path::new("packages.lock.json"), doc)
+            .unwrap();
         let names: Vec<&str> = parsed.deps.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"Newtonsoft.Json"));
         assert!(names.contains(&"Serilog"));

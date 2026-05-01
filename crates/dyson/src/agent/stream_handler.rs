@@ -239,7 +239,10 @@ pub async fn process_stream(
                 output.tool_use_complete()?;
             }
 
-            StreamEvent::MessageComplete { stop_reason, output_tokens } => {
+            StreamEvent::MessageComplete {
+                stop_reason,
+                output_tokens,
+            } => {
                 final_stop_reason = stop_reason;
                 api_output_tokens = output_tokens;
                 let elapsed = stream_start.elapsed();
@@ -501,7 +504,8 @@ mod tests {
         ]);
 
         let mut output = RecordingOutput::new();
-        let (message, tool_calls, _tokens, stop) = process_stream(stream, &mut output).await.unwrap();
+        let (message, tool_calls, _tokens, stop) =
+            process_stream(stream, &mut output).await.unwrap();
 
         assert_eq!(output.text(), "Hello world");
         assert!(tool_calls.is_empty());
@@ -533,7 +537,8 @@ mod tests {
         ]);
 
         let mut output = RecordingOutput::new();
-        let (message, tool_calls, _tokens, stop) = process_stream(stream, &mut output).await.unwrap();
+        let (message, tool_calls, _tokens, stop) =
+            process_stream(stream, &mut output).await.unwrap();
 
         assert_eq!(output.text(), "Checking.");
         assert_eq!(tool_calls.len(), 1);
@@ -574,7 +579,8 @@ mod tests {
         ]);
 
         let mut output = RecordingOutput::new();
-        let (message, tool_calls, _tokens, _stop) = process_stream(stream, &mut output).await.unwrap();
+        let (message, tool_calls, _tokens, _stop) =
+            process_stream(stream, &mut output).await.unwrap();
 
         // Transcript text is just the visible assistant text — no
         // "I'm thinking …" breadcrumb.
@@ -606,10 +612,13 @@ mod tests {
         let segs = p.feed("<think>reasoning here</think>visible text");
         let mut all = segs;
         all.extend(p.flush());
-        assert_eq!(all, vec![
-            (true, "reasoning here".to_string()),
-            (false, "visible text".to_string()),
-        ]);
+        assert_eq!(
+            all,
+            vec![
+                (true, "reasoning here".to_string()),
+                (false, "visible text".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -622,11 +631,13 @@ mod tests {
         all.extend(p.feed("think>hello"));
         all.extend(p.flush());
 
-        let thinking: String = all.iter()
+        let thinking: String = all
+            .iter()
             .filter(|(t, _)| *t)
             .map(|(_, s)| s.as_str())
             .collect();
-        let text: String = all.iter()
+        let text: String = all
+            .iter()
             .filter(|(t, _)| !*t)
             .map(|(_, s)| s.as_str())
             .collect();
@@ -768,5 +779,4 @@ mod tests {
         assert!(tool_calls.is_empty());
         assert_eq!(stop_reason, StopReason::MaxTokens);
     }
-
 }

@@ -64,7 +64,10 @@ fn parse_description(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
         let Some((field, body)) = line.split_once(':') else {
             continue;
         };
-        if !matches!(field.trim(), "Imports" | "Depends" | "LinkingTo" | "Suggests") {
+        if !matches!(
+            field.trim(),
+            "Imports" | "Depends" | "LinkingTo" | "Suggests"
+        ) {
             continue;
         }
         for item in body.split(',') {

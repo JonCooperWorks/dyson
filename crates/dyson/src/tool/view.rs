@@ -34,7 +34,10 @@ pub enum ToolView {
         highlight: Option<usize>,
     },
     /// SBOM + vulnerabilities — `dependency_scan`.
-    Sbom { rows: Vec<SbomRow>, counts: SbomCounts },
+    Sbom {
+        rows: Vec<SbomRow>,
+        counts: SbomCounts,
+    },
     /// Taint flow source → propagator(s) → sink — `taint_trace`.
     Taint { flow: Vec<TaintNode> },
 }

@@ -261,15 +261,30 @@ mod tests {
 
     #[test]
     fn classify_llm_error_detects_no_tool_use() {
-        assert_eq!(classify_llm_error("does not support tool use"), LlmErrorKind::NoToolUse);
-        assert_eq!(classify_llm_error("tool_use not available"), LlmErrorKind::NoToolUse);
+        assert_eq!(
+            classify_llm_error("does not support tool use"),
+            LlmErrorKind::NoToolUse
+        );
+        assert_eq!(
+            classify_llm_error("tool_use not available"),
+            LlmErrorKind::NoToolUse
+        );
     }
 
     #[test]
     fn classify_llm_error_detects_no_vision() {
-        assert_eq!(classify_llm_error("does not support image input"), LlmErrorKind::NoVision);
-        assert_eq!(classify_llm_error("vision not supported"), LlmErrorKind::NoVision);
-        assert_eq!(classify_llm_error("No endpoints found that support image input"), LlmErrorKind::NoVision);
+        assert_eq!(
+            classify_llm_error("does not support image input"),
+            LlmErrorKind::NoVision
+        );
+        assert_eq!(
+            classify_llm_error("vision not supported"),
+            LlmErrorKind::NoVision
+        );
+        assert_eq!(
+            classify_llm_error("No endpoints found that support image input"),
+            LlmErrorKind::NoVision
+        );
         assert_eq!(
             classify_llm_error("At most 0 image(s) may be provided in one prompt."),
             LlmErrorKind::NoVision
@@ -284,7 +299,10 @@ mod tests {
     fn classify_llm_error_generic_no_endpoints_is_other() {
         // "No endpoints found" without image/vision context should NOT be
         // classified as NoVision — it usually means the model is unavailable.
-        assert_eq!(classify_llm_error("No endpoints found"), LlmErrorKind::Other);
+        assert_eq!(
+            classify_llm_error("No endpoints found"),
+            LlmErrorKind::Other
+        );
         assert_eq!(
             classify_llm_error("No endpoints found for this model"),
             LlmErrorKind::Other,
@@ -317,18 +335,27 @@ mod tests {
             DysonError::mcp("github", "connection refused"),
             DysonError::oauth("google", "token expired"),
             DysonError::Config("missing API key".into()),
-            DysonError::RateLimit { limit: 10, window_secs: 60 },
+            DysonError::RateLimit {
+                limit: 10,
+                window_secs: 60,
+            },
             DysonError::Cancelled,
         ];
         for e in cases {
-            assert_eq!(e.sanitized_message(), e.to_string(),
-                       "application error must pass through: {e:?}");
+            assert_eq!(
+                e.sanitized_message(),
+                e.to_string(),
+                "application error must pass through: {e:?}"
+            );
         }
     }
 
     #[test]
     fn classify_llm_error_defaults_to_other() {
         assert_eq!(classify_llm_error("rate limited"), LlmErrorKind::Other);
-        assert_eq!(classify_llm_error("internal server error"), LlmErrorKind::Other);
+        assert_eq!(
+            classify_llm_error("internal server error"),
+            LlmErrorKind::Other
+        );
     }
 }

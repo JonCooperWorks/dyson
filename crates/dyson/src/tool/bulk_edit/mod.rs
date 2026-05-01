@@ -93,7 +93,10 @@ impl Tool for BulkEditTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("bulk_edit", "missing or invalid 'path'"))?;
 
-        let resolved = match ctx.resolve_path(path_str) { Ok(p) => p, Err(e) => return Ok(e) };
+        let resolved = match ctx.resolve_path(path_str) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
 
         let working_dir = ctx.working_dir.clone();
 

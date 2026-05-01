@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use dyson::agent::rate_limiter::RateLimitedHandle;
 use dyson::agent::Agent;
+use dyson::agent::rate_limiter::RateLimitedHandle;
 use dyson::config::AgentSettings;
 use dyson::controller::recording::RecordingOutput;
 use dyson::error::Result;
@@ -143,7 +143,10 @@ struct SelectiveDenySandbox {
 impl SelectiveDenySandbox {
     fn new(denied: &[&str]) -> Self {
         Self {
-            denied_tools: denied.iter().map(std::string::ToString::to_string).collect(),
+            denied_tools: denied
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
         }
     }
 }
@@ -185,7 +188,10 @@ fn builtin_skills() -> Vec<Box<dyn Skill>> {
 
 /// Build an agent with the no-sandbox default for the common case.
 fn test_agent(llm: MockLlm) -> Agent {
-    test_agent_with_sandbox(llm, Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox))
+    test_agent_with_sandbox(
+        llm,
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+    )
 }
 
 /// Build an agent with a custom sandbox.
@@ -261,7 +267,8 @@ async fn sandbox_deny_returns_error_to_llm() {
         text_response_events("I can't do that."),
     ]);
 
-    let mut agent = test_agent_with_sandbox(llm, Arc::new(DenySandbox::new("dangerous command blocked")));
+    let mut agent =
+        test_agent_with_sandbox(llm, Arc::new(DenySandbox::new("dangerous command blocked")));
     let mut output = RecordingOutput::new();
 
     let result = agent.run("delete everything", &mut output).await.unwrap();
@@ -650,7 +657,10 @@ async fn redirect_to_unknown_tool_is_handled_gracefully() {
     ]);
 
     // Redirect all calls to a tool that doesn't exist.
-    let mut agent = test_agent_with_sandbox(llm, Arc::new(RedirectSandbox::new("tool_that_does_not_exist")));
+    let mut agent = test_agent_with_sandbox(
+        llm,
+        Arc::new(RedirectSandbox::new("tool_that_does_not_exist")),
+    );
     let mut output = RecordingOutput::new();
 
     // The agent catches the unknown-tool error and sends it back to the LLM
@@ -889,10 +899,7 @@ async fn empty_response_retries_then_recovers() {
 #[tokio::test]
 async fn empty_response_retries_exhaust_then_fallback() {
     // If every retry also comes back empty, fall through to the fallback.
-    let llm = MockLlm::new(vec![
-        empty_response_events(),
-        empty_response_events(),
-    ]);
+    let llm = MockLlm::new(vec![empty_response_events(), empty_response_events()]);
 
     // max_retries=1 → one initial call + one retry, both empty.
     let settings = AgentSettings {
@@ -929,11 +936,7 @@ async fn tool_calls_then_empty_response_sends_fallback() {
     // tool calls). The user should still get a visible response.
     let llm = MockLlm::new(vec![
         // Iteration 0: LLM calls a tool.
-        tool_call_events(
-            "call_1",
-            "bash",
-            serde_json::json!({"command": "echo hi"}),
-        ),
+        tool_call_events("call_1", "bash", serde_json::json!({"command": "echo hi"})),
         // Iteration 1: LLM returns empty (no text, no tools).
         empty_response_events(),
     ]);
@@ -951,7 +954,10 @@ async fn tool_calls_then_empty_response_sends_fallback() {
     );
     let mut output = RecordingOutput::new();
 
-    let result = agent.run("search for something", &mut output).await.unwrap();
+    let result = agent
+        .run("search for something", &mut output)
+        .await
+        .unwrap();
 
     assert!(
         !result.is_empty(),

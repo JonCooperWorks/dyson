@@ -64,7 +64,10 @@ impl Tool for EditFileTool {
             return Ok(ToolOutput::error("old_string must not be empty"));
         }
 
-        let path = match ctx.resolve_path(file_path) { Ok(p) => p, Err(e) => return Ok(e) };
+        let path = match ctx.resolve_path(file_path) {
+            Ok(p) => p,
+            Err(e) => return Ok(e),
+        };
 
         // Check file size before reading.
         let metadata = match tokio::fs::metadata(&path).await {
@@ -182,7 +185,10 @@ mod tests {
             "old_string": "println!(\"hello\")",
             "new_string": "println!(\"world\")"
         });
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(!output.is_error);
 
         let content = std::fs::read_to_string(tmp.path().join("test.rs")).unwrap();
@@ -201,7 +207,10 @@ mod tests {
             "old_string": "aaa",
             "new_string": "ccc"
         });
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("2 times"));
     }
@@ -217,7 +226,10 @@ mod tests {
             "old_string": "xyz",
             "new_string": "abc"
         });
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("not found"));
     }
@@ -238,7 +250,10 @@ mod tests {
             "old_string": "",
             "new_string": "replaced"
         });
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("must not be empty"));
     }
@@ -257,7 +272,10 @@ mod tests {
             "old_string": "find me",
             "new_string": "replaced"
         });
-        let output = tool.run(&input, &ToolContext::for_test(tmp.path())).await.unwrap();
+        let output = tool
+            .run(&input, &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
         assert!(output.is_error);
         assert!(output.content.contains("too large"));
     }

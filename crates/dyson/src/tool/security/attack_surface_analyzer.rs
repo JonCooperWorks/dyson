@@ -19,9 +19,9 @@ use std::fmt::Write;
 use async_trait::async_trait;
 use tree_sitter::Node;
 
-use crate::error::{DysonError, Result};
-use crate::ast::{self, LanguageConfig};
 use crate::ast::nodes;
+use crate::ast::{self, LanguageConfig};
+use crate::error::{DysonError, Result};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::util::MAX_OUTPUT_BYTES;
 
@@ -34,56 +34,109 @@ const SURFACE_PATTERNS: &[(&str, &[&str])] = &[
     (
         "HTTP Handlers",
         &[
-            "route", "get", "post", "put", "delete", "patch", "app_route",
-            "api_view", "RequestMapping", "GetMapping", "PostMapping",
-            "PutMapping", "DeleteMapping", "PatchMapping", "HandleFunc",
-            "http_method_funcs", "Router",
+            "route",
+            "get",
+            "post",
+            "put",
+            "delete",
+            "patch",
+            "app_route",
+            "api_view",
+            "RequestMapping",
+            "GetMapping",
+            "PostMapping",
+            "PutMapping",
+            "DeleteMapping",
+            "PatchMapping",
+            "HandleFunc",
+            "http_method_funcs",
+            "Router",
         ],
     ),
     (
         "CLI / Entry Points",
         &[
-            "main", "argparse", "ArgumentParser", "clap", "structopt",
-            "flag", "pflag", "cobra", "click",
+            "main",
+            "argparse",
+            "ArgumentParser",
+            "clap",
+            "structopt",
+            "flag",
+            "pflag",
+            "cobra",
+            "click",
         ],
     ),
     (
         "Network Listeners",
         &[
-            "bind", "listen", "accept", "TcpListener", "UdpSocket",
-            "createServer", "http_createServer", "net_createServer",
-            "ServerSocket", "Socket",
+            "bind",
+            "listen",
+            "accept",
+            "TcpListener",
+            "UdpSocket",
+            "createServer",
+            "http_createServer",
+            "net_createServer",
+            "ServerSocket",
+            "Socket",
         ],
     ),
     (
         "Database Queries",
         &[
-            "execute", "query", "raw", "prepare", "cursor",
-            "executemany", "fetchone", "fetchall", "raw_sql",
+            "execute",
+            "query",
+            "raw",
+            "prepare",
+            "cursor",
+            "executemany",
+            "fetchone",
+            "fetchall",
+            "raw_sql",
         ],
     ),
     (
         "File I/O",
         &[
-            "open", "fopen", "readFile", "readFileSync", "writeFile",
-            "writeFileSync", "read_to_string", "File_open",
-            "fs_read", "fs_write",
+            "open",
+            "fopen",
+            "readFile",
+            "readFileSync",
+            "writeFile",
+            "writeFileSync",
+            "read_to_string",
+            "File_open",
+            "fs_read",
+            "fs_write",
         ],
     ),
     (
         "Environment Reads",
         &[
-            "getenv", "environ", "env_var", "process_env",
-            "os_getenv", "dotenv",
+            "getenv",
+            "environ",
+            "env_var",
+            "process_env",
+            "os_getenv",
+            "dotenv",
         ],
     ),
     (
         "Deserialization",
         &[
-            "json_loads", "json_load", "JSON_parse", "pickle_loads",
-            "pickle_load", "yaml_load", "yaml_safe_load",
-            "Marshal_load", "ObjectInputStream", "deserialize",
-            "from_json", "serde_json",
+            "json_loads",
+            "json_load",
+            "JSON_parse",
+            "pickle_loads",
+            "pickle_load",
+            "yaml_load",
+            "yaml_safe_load",
+            "Marshal_load",
+            "ObjectInputStream",
+            "deserialize",
+            "from_json",
+            "serde_json",
         ],
     ),
 ];
@@ -128,7 +181,10 @@ impl Tool for AttackSurfaceAnalyzerTool {
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let search_dir = match input["path"].as_str() {
-            Some(sub) => match ctx.resolve_path(sub) { Ok(p) => p, Err(e) => return Ok(e) },
+            Some(sub) => match ctx.resolve_path(sub) {
+                Ok(p) => p,
+                Err(e) => return Ok(e),
+            },
             None => ctx.working_dir.clone(),
         };
 
@@ -152,10 +208,7 @@ impl Tool for AttackSurfaceAnalyzerTool {
         })
         .await
         .map_err(|e| {
-            DysonError::tool(
-                "attack_surface_analyzer",
-                format!("scan task failed: {e}"),
-            )
+            DysonError::tool("attack_surface_analyzer", format!("scan task failed: {e}"))
         })?;
 
         if results.is_empty() {
@@ -284,9 +337,7 @@ fn scan_node(
                     let line = node.start_position().row + 1;
                     let enclosing = ast::find_enclosing_function(node, config, source_bytes)
                         .and_then(|n| nodes::extract_definition_name(&n, source_bytes));
-                    let context = enclosing
-                        .as_deref()
-                        .unwrap_or("<top-level>");
+                    let context = enclosing.as_deref().unwrap_or("<top-level>");
 
                     let entry = format!("{rel_path}:{line}: {context} — {ident}");
 

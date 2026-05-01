@@ -93,7 +93,10 @@ impl ChannelWorkspace {
 
     fn can_write(&self, name: &str) -> bool {
         self.writable.contains(name)
-            || self.writable_prefixes.iter().any(|p| name.starts_with(p.as_str()))
+            || self
+                .writable_prefixes
+                .iter()
+                .any(|p| name.starts_with(p.as_str()))
     }
 
     /// Record a write to the audit log on the inner workspace.
@@ -290,10 +293,8 @@ mod tests {
 
     #[test]
     fn unlisted_key_write_is_dropped() {
-        let inner = InMemoryWorkspace::new()
-            .with_file("SOUL.md", "Be helpful.");
-        let mut ws = ChannelWorkspace::new(Box::new(inner))
-            .allow("MEMORY.md");
+        let inner = InMemoryWorkspace::new().with_file("SOUL.md", "Be helpful.");
+        let mut ws = ChannelWorkspace::new(Box::new(inner)).allow("MEMORY.md");
 
         ws.set("SOUL.md", "Be evil.");
         assert_eq!(ws.get("SOUL.md").unwrap(), "Be helpful.");
@@ -301,10 +302,8 @@ mod tests {
 
     #[test]
     fn unlisted_key_append_is_dropped() {
-        let inner = InMemoryWorkspace::new()
-            .with_file("SOUL.md", "Be helpful.");
-        let mut ws = ChannelWorkspace::new(Box::new(inner))
-            .allow("MEMORY.md");
+        let inner = InMemoryWorkspace::new().with_file("SOUL.md", "Be helpful.");
+        let mut ws = ChannelWorkspace::new(Box::new(inner)).allow("MEMORY.md");
 
         ws.append("SOUL.md", " And evil.");
         assert_eq!(ws.get("SOUL.md").unwrap(), "Be helpful.");
@@ -312,10 +311,8 @@ mod tests {
 
     #[test]
     fn allowed_key_write_succeeds() {
-        let inner = InMemoryWorkspace::new()
-            .with_file("MEMORY.md", "old");
-        let mut ws = ChannelWorkspace::new(Box::new(inner))
-            .allow("MEMORY.md");
+        let inner = InMemoryWorkspace::new().with_file("MEMORY.md", "old");
+        let mut ws = ChannelWorkspace::new(Box::new(inner)).allow("MEMORY.md");
 
         ws.set("MEMORY.md", "new");
         assert_eq!(ws.get("MEMORY.md").unwrap(), "new");
@@ -324,8 +321,7 @@ mod tests {
     #[test]
     fn prefix_allows_nested_writes() {
         let inner = InMemoryWorkspace::new();
-        let mut ws = ChannelWorkspace::new(Box::new(inner))
-            .allow_prefix("memory/");
+        let mut ws = ChannelWorkspace::new(Box::new(inner)).allow_prefix("memory/");
 
         ws.set("memory/2026-04-09.md", "journal entry");
         assert_eq!(ws.get("memory/2026-04-09.md").unwrap(), "journal entry");
@@ -333,10 +329,8 @@ mod tests {
 
     #[test]
     fn prefix_does_not_allow_exact_match() {
-        let inner = InMemoryWorkspace::new()
-            .with_file("MEMORY.md", "original");
-        let mut ws = ChannelWorkspace::new(Box::new(inner))
-            .allow_prefix("memory/");
+        let inner = InMemoryWorkspace::new().with_file("MEMORY.md", "original");
+        let mut ws = ChannelWorkspace::new(Box::new(inner)).allow_prefix("memory/");
 
         // "memory/" prefix does not match "MEMORY.md"
         ws.set("MEMORY.md", "overwrite");
@@ -346,8 +340,7 @@ mod tests {
     #[test]
     fn new_unknown_file_is_protected_by_default() {
         let inner = InMemoryWorkspace::new();
-        let mut ws = ChannelWorkspace::new(Box::new(inner))
-            .allow("MEMORY.md");
+        let mut ws = ChannelWorkspace::new(Box::new(inner)).allow("MEMORY.md");
 
         ws.set("EVIL.md", "bad content");
         assert!(ws.get("EVIL.md").is_none());
@@ -372,8 +365,7 @@ mod tests {
     #[test]
     fn write_with_attribution_creates_audit_log() {
         let inner = InMemoryWorkspace::new();
-        let mut ws = ChannelWorkspace::new(Box::new(inner))
-            .allow("MEMORY.md");
+        let mut ws = ChannelWorkspace::new(Box::new(inner)).allow("MEMORY.md");
 
         ws.set_attribution(Some("alice"));
         ws.set("MEMORY.md", "hello");
@@ -387,8 +379,7 @@ mod tests {
     #[test]
     fn write_without_attribution_no_audit_log() {
         let inner = InMemoryWorkspace::new();
-        let mut ws = ChannelWorkspace::new(Box::new(inner))
-            .allow("MEMORY.md");
+        let mut ws = ChannelWorkspace::new(Box::new(inner)).allow("MEMORY.md");
 
         ws.set("MEMORY.md", "hello");
 
@@ -398,8 +389,7 @@ mod tests {
     #[test]
     fn audit_log_is_append_only() {
         let inner = InMemoryWorkspace::new();
-        let mut ws = ChannelWorkspace::new(Box::new(inner))
-            .allow("MEMORY.md");
+        let mut ws = ChannelWorkspace::new(Box::new(inner)).allow("MEMORY.md");
 
         ws.set_attribution(Some("alice"));
         ws.set("MEMORY.md", "first");
@@ -417,8 +407,7 @@ mod tests {
     #[test]
     fn audit_log_not_writable_by_llm() {
         let inner = InMemoryWorkspace::new();
-        let mut ws = ChannelWorkspace::new(Box::new(inner))
-            .allow("MEMORY.md");
+        let mut ws = ChannelWorkspace::new(Box::new(inner)).allow("MEMORY.md");
 
         // Write an audit entry first.
         ws.set_attribution(Some("alice"));
@@ -436,8 +425,7 @@ mod tests {
     #[test]
     fn clear_attribution_stops_auditing() {
         let inner = InMemoryWorkspace::new();
-        let mut ws = ChannelWorkspace::new(Box::new(inner))
-            .allow("MEMORY.md");
+        let mut ws = ChannelWorkspace::new(Box::new(inner)).allow("MEMORY.md");
 
         ws.set_attribution(Some("alice"));
         ws.set("MEMORY.md", "first");
@@ -453,8 +441,7 @@ mod tests {
     #[test]
     fn blocked_write_not_audited() {
         let inner = InMemoryWorkspace::new();
-        let mut ws = ChannelWorkspace::new(Box::new(inner))
-            .allow("MEMORY.md");
+        let mut ws = ChannelWorkspace::new(Box::new(inner)).allow("MEMORY.md");
 
         ws.set_attribution(Some("alice"));
         ws.set("SOUL.md", "evil");

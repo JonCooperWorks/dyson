@@ -41,7 +41,9 @@ pub(crate) fn parse_query(q: &str) -> Vec<(String, String)> {
 pub(crate) fn safe_store_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
-        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Gate for workspace path components that flow into
@@ -184,10 +186,7 @@ pub(crate) fn gzip_bytes(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use std::io::Write;
-    let mut enc = GzEncoder::new(
-        Vec::with_capacity(bytes.len() / 2),
-        Compression::default(),
-    );
+    let mut enc = GzEncoder::new(Vec::with_capacity(bytes.len() / 2), Compression::default());
     enc.write_all(bytes)?;
     enc.finish()
 }
@@ -306,7 +305,10 @@ pub(crate) fn apply_security_headers(resp: &mut Resp) {
     use hyper::header::HeaderValue;
     let h = resp.headers_mut();
     if !h.contains_key("X-Content-Type-Options") {
-        h.insert("X-Content-Type-Options", HeaderValue::from_static("nosniff"));
+        h.insert(
+            "X-Content-Type-Options",
+            HeaderValue::from_static("nosniff"),
+        );
     }
     if !h.contains_key("Referrer-Policy") {
         h.insert("Referrer-Policy", HeaderValue::from_static("no-referrer"));
@@ -462,10 +464,7 @@ pub(crate) async fn read_json_capped<T: for<'de> Deserialize<'de>>(
             return Err("expected Content-Type: application/json".to_string());
         }
     }
-    let collected = req
-        .collect()
-        .await
-        .map_err(|e| format!("body read: {e}"))?;
+    let collected = req.collect().await.map_err(|e| format!("body read: {e}"))?;
     let bytes = collected.to_bytes();
     if bytes.len() > max {
         return Err(format!("body too large ({} bytes; max {max})", bytes.len()));
@@ -523,7 +522,9 @@ pub(crate) fn sanitize_filename(s: &str) -> String {
 /// value layer doesn't enforce this in current hyper versions, so we
 /// keep our own gate.
 pub(crate) fn sanitize_header_value(s: &str) -> String {
-    s.chars().filter(|c| !matches!(c, '\r' | '\n' | '"')).collect()
+    s.chars()
+        .filter(|c| !matches!(c, '\r' | '\n' | '"'))
+        .collect()
 }
 
 #[cfg(test)]
@@ -602,7 +603,13 @@ mod tests {
         // Repeats are kept in order so callers can pick the last (or
         // first) per their own policy.
         let q = parse_query("k=1&k=2");
-        assert_eq!(q, vec![("k".to_string(), "1".to_string()), ("k".to_string(), "2".to_string())]);
+        assert_eq!(
+            q,
+            vec![
+                ("k".to_string(), "1".to_string()),
+                ("k".to_string(), "2".to_string())
+            ]
+        );
     }
 
     #[tokio::test]
@@ -644,7 +651,9 @@ mod tests {
             .unwrap();
         let out = maybe_gzip(resp, true).await;
         assert_eq!(
-            out.headers().get("Content-Encoding").map(|h| h.to_str().unwrap()),
+            out.headers()
+                .get("Content-Encoding")
+                .map(|h| h.to_str().unwrap()),
             Some("gzip"),
         );
         // Vary must be set so caches don't return gzip to a client
@@ -663,7 +672,6 @@ mod tests {
         assert!(out.headers().get("Content-Encoding").is_none());
     }
 
-
     #[test]
     fn sanitize_filename_strips_quote_breaking_chars() {
         assert_eq!(sanitize_filename("hello.md"), "hello.md");
@@ -680,8 +688,14 @@ mod tests {
         assert_eq!(mime_for_extension(Path::new("foo.JPEG")), "image/jpeg");
         assert_eq!(mime_for_extension(Path::new("foo.svg")), "image/svg+xml");
         assert_eq!(mime_for_extension(Path::new("foo.pdf")), "application/pdf");
-        assert_eq!(mime_for_extension(Path::new("foo.bin")), "application/octet-stream");
-        assert_eq!(mime_for_extension(Path::new("noext")), "application/octet-stream");
+        assert_eq!(
+            mime_for_extension(Path::new("foo.bin")),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            mime_for_extension(Path::new("noext")),
+            "application/octet-stream"
+        );
     }
 
     #[test]
@@ -712,7 +726,9 @@ mod tests {
         // (already compressed).  text/event-stream MUST stay out —
         // it's the SSE channel and buffering it would deadlock.
         assert!(compressible_content_type("text/html; charset=utf-8"));
-        assert!(compressible_content_type("application/javascript; charset=utf-8"));
+        assert!(compressible_content_type(
+            "application/javascript; charset=utf-8"
+        ));
         assert!(compressible_content_type("application/json"));
         assert!(compressible_content_type("image/svg+xml"));
         assert!(!compressible_content_type("text/event-stream"));
@@ -730,7 +746,10 @@ mod tests {
         // actually compresses (not just a no-op wrap).
         let payload = b"dyson ".repeat(10_000);
         let compressed = gzip_bytes(&payload).expect("gzip should succeed");
-        assert!(compressed.len() < payload.len() / 4, "should compress repetitive text");
+        assert!(
+            compressed.len() < payload.len() / 4,
+            "should compress repetitive text"
+        );
         let mut decoded = Vec::new();
         GzDecoder::new(&compressed[..])
             .read_to_end(&mut decoded)
@@ -749,7 +768,10 @@ mod tests {
         // Invalid hex digits.
         assert!(url_decode_strict("%ZZ").is_none());
         // Decoded bytes that aren't valid UTF-8.
-        assert!(url_decode_strict("%C3%28").is_none(), "lone-continuation byte must reject");
+        assert!(
+            url_decode_strict("%C3%28").is_none(),
+            "lone-continuation byte must reject"
+        );
     }
 
     #[test]
@@ -764,7 +786,11 @@ mod tests {
     #[test]
     fn parse_query_extracts_path() {
         let pairs = parse_query("path=memory%2FSOUL.md&x=1");
-        assert!(pairs.iter().any(|(k, v)| k == "path" && v == "memory/SOUL.md"));
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "path" && v == "memory/SOUL.md")
+        );
     }
 
     #[test]

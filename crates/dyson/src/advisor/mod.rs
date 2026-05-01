@@ -115,9 +115,7 @@ pub fn create_advisor(
     advisor_model: &str,
     client: RateLimitedHandle<Box<dyn LlmClient>>,
 ) -> Box<dyn Advisor> {
-    if *executor_provider == LlmProvider::Anthropic
-        && *advisor_provider == LlmProvider::Anthropic
-    {
+    if *executor_provider == LlmProvider::Anthropic && *advisor_provider == LlmProvider::Anthropic {
         tracing::info!(
             advisor_model = advisor_model,
             "using native Anthropic advisor"

@@ -21,8 +21,8 @@ fn test_ctx(dir: &Path) -> ToolContext {
         dangerous_no_sandbox: false,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         activity: None,
-    tool_use_id: None,
-    subagent_events: None,
+        tool_use_id: None,
+        subagent_events: None,
     }
 }
 
@@ -107,13 +107,7 @@ async fn rust_multiline_fn_declaration() {
                \x20\x20\x20\x20execute(input)\n\
                }\n\
                fn execute(data: String) -> String { data }\n";
-    let out = trace(
-        &[("app.rs", src)],
-        "rust",
-        ("app.rs", 1),
-        ("app.rs", 5),
-    )
-    .await;
+    let out = trace(&[("app.rs", src)], "rust", ("app.rs", 1), ("app.rs", 5)).await;
     assert_reaches(&out);
 }
 
@@ -161,13 +155,7 @@ async fn rust_self_method_call_resolves() {
                \x20\x20\x20\x20}\n\
                }\n\
                fn execute(s: String) {}\n";
-    let out = trace(
-        &[("app.rs", src)],
-        "rust",
-        ("app.rs", 3),
-        ("app.rs", 7),
-    )
-    .await;
+    let out = trace(&[("app.rs", src)], "rust", ("app.rs", 3), ("app.rs", 7)).await;
     assert_reaches(&out);
     assert!(
         !out.content.contains("UnresolvedCallee"),
@@ -186,13 +174,7 @@ async fn python_self_method_call_resolves() {
                \x20\x20\x20\x20\x20\x20\x20\x20execute(data)\n\
                def execute(x):\n\
                \x20\x20\x20\x20pass\n";
-    let out = trace(
-        &[("app.py", src)],
-        "python",
-        ("app.py", 2),
-        ("app.py", 5),
-    )
-    .await;
+    let out = trace(&[("app.py", src)], "python", ("app.py", 2), ("app.py", 5)).await;
     assert_reaches(&out);
 }
 
@@ -204,13 +186,7 @@ async fn go_receiver_method_resolves() {
                func (s *S) Handle(req string) { s.Exec(req) }\n\
                func (s *S) Exec(data string) { Run(data) }\n\
                func Run(x string) {}\n";
-    let out = trace(
-        &[("app.go", src)],
-        "go",
-        ("app.go", 3),
-        ("app.go", 4),
-    )
-    .await;
+    let out = trace(&[("app.go", src)], "go", ("app.go", 3), ("app.go", 4)).await;
     assert_reaches(&out);
     assert!(
         !out.content.contains("UnresolvedCallee"),
@@ -233,13 +209,7 @@ async fn rust_fn_header_taint_root_is_params_only() {
                \x20\x20\x20\x20consume(body)\n\
                }\n\
                fn consume(data: String) -> Result<String, String> { Ok(data) }\n";
-    let out = trace(
-        &[("app.rs", src)],
-        "rust",
-        ("app.rs", 2),
-        ("app.rs", 3),
-    )
-    .await;
+    let out = trace(&[("app.rs", src)], "rust", ("app.rs", 2), ("app.rs", 3)).await;
     assert_reaches(&out);
     // Taint root line lists tainted identifiers.  None of these types
     // should appear as taint roots.
@@ -254,7 +224,10 @@ async fn rust_fn_header_taint_root_is_params_only() {
             "type `{forbidden}` leaked into taint root: {root_line}",
         );
     }
-    assert!(root_line.contains("body"), "param `body` missing from taint: {root_line}");
+    assert!(
+        root_line.contains("body"),
+        "param `body` missing from taint: {root_line}"
+    );
 }
 
 #[tokio::test]
@@ -317,13 +290,7 @@ async fn kotlin_val_propagates_taint() {
                \x20\x20\x20\x20execute(x)\n\
                }\n\
                fun execute(s: String) {}\n";
-    let out = trace(
-        &[("app.kt", src)],
-        "kotlin",
-        ("app.kt", 1),
-        ("app.kt", 3),
-    )
-    .await;
+    let out = trace(&[("app.kt", src)], "kotlin", ("app.kt", 1), ("app.kt", 3)).await;
     assert_reaches(&out);
 }
 
@@ -372,13 +339,7 @@ async fn tsx_component_traces_to_sink() {
                \x20\x20return execute(s);\n\
                }\n\
                function execute(d: string) { return d; }\n";
-    let out = trace(
-        &[("app.tsx", src)],
-        "tsx",
-        ("app.tsx", 1),
-        ("app.tsx", 6),
-    )
-    .await;
+    let out = trace(&[("app.tsx", src)], "tsx", ("app.tsx", 1), ("app.tsx", 6)).await;
     assert_reaches(&out);
 }
 
@@ -396,13 +357,7 @@ async fn only_tainted_arg_binds_to_its_param_position() {
                \x20\x20\x20\x20execute(b)\n\
                def execute(x):\n\
                \x20\x20\x20\x20pass\n";
-    let out = trace(
-        &[("app.py", src)],
-        "python",
-        ("app.py", 1),
-        ("app.py", 4),
-    )
-    .await;
+    let out = trace(&[("app.py", src)], "python", ("app.py", 1), ("app.py", 4)).await;
     assert_reaches(&out);
     // `b` should be tainted in process, not `a` or `c`.
     assert!(
@@ -521,7 +476,9 @@ async fn rust_macro_invocation_resolves_callee() {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("app.rs"), src).unwrap();
     let config = dyson::ast::config_for_language_name("rust").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp.path()).await.unwrap();
+    let idx = dyson::ast::taint::build_index(config, tmp.path())
+        .await
+        .unwrap();
     let log_call = idx
         .call_sites
         .iter()
@@ -553,7 +510,8 @@ async fn swift_navigation_expression_resolves_method_callee() {
     .await;
     assert_reaches(&out);
     assert!(
-        !out.content.contains("device.makeQuery` — callee unresolved"),
+        !out.content
+            .contains("device.makeQuery` — callee unresolved"),
         "navigation_expression should resolve to `makeQuery`: {}",
         out.content,
     );
@@ -572,13 +530,7 @@ async fn zig_indexes_function_declarations() {
                fn execute(s: []const u8) void {\n\
                \x20\x20\x20\x20_ = s;\n\
                }\n";
-    let out = trace(
-        &[("app.zig", src)],
-        "zig",
-        ("app.zig", 1),
-        ("app.zig", 3),
-    )
-    .await;
+    let out = trace(&[("app.zig", src)], "zig", ("app.zig", 1), ("app.zig", 3)).await;
     assert_reaches(&out);
 }
 
@@ -594,13 +546,7 @@ async fn csharp_method_call_resolves() {
                \x20\x20\x20\x20// sink\n\
                \x20\x20}\n\
                }\n";
-    let out = trace(
-        &[("App.cs", src)],
-        "csharp",
-        ("App.cs", 2),
-        ("App.cs", 3),
-    )
-    .await;
+    let out = trace(&[("App.cs", src)], "csharp", ("App.cs", 2), ("App.cs", 3)).await;
     assert_reaches(&out);
 }
 
@@ -634,13 +580,7 @@ async fn ruby_method_trace_resolves() {
                end\n\
                def execute(data)\n\
                end\n";
-    let out = trace(
-        &[("app.rb", src)],
-        "ruby",
-        ("app.rb", 1),
-        ("app.rb", 2),
-    )
-    .await;
+    let out = trace(&[("app.rb", src)], "ruby", ("app.rb", 1), ("app.rb", 2)).await;
     assert_reaches(&out);
 }
 
@@ -651,13 +591,7 @@ async fn c_function_trace_resolves() {
                void handle(const char *req) {\n\
                \x20\x20\x20\x20execute(req);\n\
                }\n";
-    let out = trace(
-        &[("app.c", src)],
-        "c",
-        ("app.c", 3),
-        ("app.c", 4),
-    )
-    .await;
+    let out = trace(&[("app.c", src)], "c", ("app.c", 3), ("app.c", 4)).await;
     assert_reaches(&out);
 }
 
@@ -668,13 +602,7 @@ async fn cpp_function_trace_resolves() {
                void handle(const std::string& req) {\n\
                \x20\x20\x20\x20execute(req);\n\
                }\n";
-    let out = trace(
-        &[("app.cpp", src)],
-        "cpp",
-        ("app.cpp", 3),
-        ("app.cpp", 4),
-    )
-    .await;
+    let out = trace(&[("app.cpp", src)], "cpp", ("app.cpp", 3), ("app.cpp", 4)).await;
     assert_reaches(&out);
 }
 
@@ -684,13 +612,7 @@ async fn cpp_function_trace_resolves() {
 #[tokio::test]
 async fn ocaml_application_resolves_value_name() {
     let src = "let execute s = s\nlet handle req = execute req\n";
-    let out = trace(
-        &[("app.ml", src)],
-        "ocaml",
-        ("app.ml", 2),
-        ("app.ml", 2),
-    )
-    .await;
+    let out = trace(&[("app.ml", src)], "ocaml", ("app.ml", 2), ("app.ml", 2)).await;
     assert_reaches(&out);
 }
 
@@ -707,8 +629,13 @@ async fn haskell_indexes_apply_cleanly() {
     )
     .unwrap();
     let config = dyson::ast::config_for_language_name("haskell").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp.path()).await.unwrap();
-    assert!(!idx.call_sites.is_empty(), "Haskell should index apply calls");
+    let idx = dyson::ast::taint::build_index(config, tmp.path())
+        .await
+        .unwrap();
+    assert!(
+        !idx.call_sites.is_empty(),
+        "Haskell should index apply calls"
+    );
     let resolved = idx
         .call_sites
         .iter()
@@ -735,7 +662,9 @@ async fn erlang_indexes_call_cleanly() {
     )
     .unwrap();
     let config = dyson::ast::config_for_language_name("erlang").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp.path()).await.unwrap();
+    let idx = dyson::ast::taint::build_index(config, tmp.path())
+        .await
+        .unwrap();
     assert!(
         !idx.call_sites.is_empty(),
         "Erlang should index at least one call",
@@ -757,13 +686,7 @@ async fn elixir_function_trace_resolves() {
                \x20\x20\x20\x20data\n\
                \x20\x20end\n\
                end\n";
-    let out = trace(
-        &[("app.ex", src)],
-        "elixir",
-        ("app.ex", 2),
-        ("app.ex", 3),
-    )
-    .await;
+    let out = trace(&[("app.ex", src)], "elixir", ("app.ex", 2), ("app.ex", 3)).await;
     assert_reaches(&out);
 }
 
@@ -777,16 +700,26 @@ async fn functional_languages_at_least_index_cleanly() {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(tmp.path().join("a.ml"), ocaml).unwrap();
     let config = dyson::ast::config_for_language_name("ocaml").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp.path()).await.unwrap();
-    assert!(!idx.call_sites.is_empty(), "OCaml should index at least one call");
+    let idx = dyson::ast::taint::build_index(config, tmp.path())
+        .await
+        .unwrap();
+    assert!(
+        !idx.call_sites.is_empty(),
+        "OCaml should index at least one call"
+    );
 
     // Haskell
     let haskell = "execute s = s\nhandle req = execute req\n";
     let tmp2 = tempfile::tempdir().unwrap();
     fs::write(tmp2.path().join("A.hs"), haskell).unwrap();
     let config = dyson::ast::config_for_language_name("haskell").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp2.path()).await.unwrap();
-    assert!(!idx.call_sites.is_empty(), "Haskell should index at least one call");
+    let idx = dyson::ast::taint::build_index(config, tmp2.path())
+        .await
+        .unwrap();
+    assert!(
+        !idx.call_sites.is_empty(),
+        "Haskell should index at least one call"
+    );
 
     // Nix — wrap the apply inside a binding so the walker records it.
     // Top-level Nix expressions sit outside any binding scope; taint_trace
@@ -795,16 +728,26 @@ async fn functional_languages_at_least_index_cleanly() {
     let tmp3 = tempfile::tempdir().unwrap();
     fs::write(tmp3.path().join("a.nix"), nix).unwrap();
     let config = dyson::ast::config_for_language_name("nix").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp3.path()).await.unwrap();
-    assert!(!idx.call_sites.is_empty(), "Nix should index at least one call");
+    let idx = dyson::ast::taint::build_index(config, tmp3.path())
+        .await
+        .unwrap();
+    assert!(
+        !idx.call_sites.is_empty(),
+        "Nix should index at least one call"
+    );
 
     // Erlang
     let erlang = "-module(app).\nhandle(Req) -> execute(Req).\nexecute(Data) -> Data.\n";
     let tmp4 = tempfile::tempdir().unwrap();
     fs::write(tmp4.path().join("app.erl"), erlang).unwrap();
     let config = dyson::ast::config_for_language_name("erlang").unwrap();
-    let idx = dyson::ast::taint::build_index(config, tmp4.path()).await.unwrap();
-    assert!(!idx.call_sites.is_empty(), "Erlang should index at least one call");
+    let idx = dyson::ast::taint::build_index(config, tmp4.path())
+        .await
+        .unwrap();
+    assert!(
+        !idx.call_sites.is_empty(),
+        "Erlang should index at least one call"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,10 +950,8 @@ async fn multiple_language_indexes_coexist_in_cache() {
     let ctx = test_ctx(tmp.path());
     let tool = TaintTraceTool;
 
-    for (lang, file, src_line, sink_line) in [
-        ("python", "app.py", 1, 2),
-        ("rust", "app.rs", 1, 1),
-    ] {
+    for (lang, file, src_line, sink_line) in [("python", "app.py", 1, 2), ("rust", "app.rs", 1, 1)]
+    {
         let out = tool
             .run(
                 &json!({
@@ -1195,10 +1136,7 @@ async fn field_chain_truncates_at_max_depth_but_prefix_still_matches() {
 #[tokio::test]
 async fn output_header_surfaces_unresolved_pct_and_confidence() {
     let out = trace(
-        &[(
-            "app.py",
-            "def handler(req):\n    execute(req)\n",
-        )],
+        &[("app.py", "def handler(req):\n    execute(req)\n")],
         "python",
         ("app.py", 1),
         ("app.py", 2),
@@ -1371,14 +1309,37 @@ async fn go_selector_expression_precision_separates_siblings() {
 #[test]
 fn confidence_tiers_match_observed_smoke_ratios() {
     use dyson::ast::taint::Confidence;
-    assert_eq!(Confidence::from_unresolved_ratio(0, 100), (0, Confidence::High));
-    assert_eq!(Confidence::from_unresolved_ratio(12, 100), (12, Confidence::High));
-    assert_eq!(Confidence::from_unresolved_ratio(15, 100), (15, Confidence::High));
-    assert_eq!(Confidence::from_unresolved_ratio(16, 100), (16, Confidence::Medium));
-    assert_eq!(Confidence::from_unresolved_ratio(40, 100), (40, Confidence::Medium));
-    assert_eq!(Confidence::from_unresolved_ratio(41, 100), (41, Confidence::Low));
-    assert_eq!(Confidence::from_unresolved_ratio(100, 100), (100, Confidence::Low));
+    assert_eq!(
+        Confidence::from_unresolved_ratio(0, 100),
+        (0, Confidence::High)
+    );
+    assert_eq!(
+        Confidence::from_unresolved_ratio(12, 100),
+        (12, Confidence::High)
+    );
+    assert_eq!(
+        Confidence::from_unresolved_ratio(15, 100),
+        (15, Confidence::High)
+    );
+    assert_eq!(
+        Confidence::from_unresolved_ratio(16, 100),
+        (16, Confidence::Medium)
+    );
+    assert_eq!(
+        Confidence::from_unresolved_ratio(40, 100),
+        (40, Confidence::Medium)
+    );
+    assert_eq!(
+        Confidence::from_unresolved_ratio(41, 100),
+        (41, Confidence::Low)
+    );
+    assert_eq!(
+        Confidence::from_unresolved_ratio(100, 100),
+        (100, Confidence::Low)
+    );
     // Empty index: no division by zero, and no false LOW cap.
-    assert_eq!(Confidence::from_unresolved_ratio(0, 0), (0, Confidence::High));
+    assert_eq!(
+        Confidence::from_unresolved_ratio(0, 0),
+        (0, Confidence::High)
+    );
 }
-

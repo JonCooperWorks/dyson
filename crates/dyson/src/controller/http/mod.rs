@@ -63,9 +63,9 @@ pub use subagent_events::SubagentEventBus;
 // `wire` module.  `SseEvent` is documented as the SSE wire format and
 // already serialises into the public `/events` stream — promoting it
 // here doesn't expand the surface beyond what's already on the wire.
-pub use wire::SseEvent;
 use state::ChatHandle;
 use wire::AuthMode;
+pub use wire::SseEvent;
 
 // ---------------------------------------------------------------------------
 // HttpController
@@ -200,7 +200,11 @@ impl HttpController {
                 }
             }
         };
-        Some(Self { bind: raw.bind, init, tls: raw.tls })
+        Some(Self {
+            bind: raw.bind,
+            init,
+            tls: raw.tls,
+        })
     }
 }
 
@@ -210,11 +214,7 @@ impl Controller for HttpController {
         "http"
     }
 
-    async fn run(
-        &self,
-        settings: &Settings,
-        registry: &Arc<ClientRegistry>,
-    ) -> crate::Result<()> {
+    async fn run(&self, settings: &Settings, registry: &Arc<ClientRegistry>) -> crate::Result<()> {
         // Build the live auth + its public-discovery shape.  For OIDC
         // we run `.well-known/openid-configuration` here, in async
         // land, so a misconfigured issuer fails the controller start
@@ -318,7 +318,7 @@ impl Controller for HttpController {
         // running multiple HTTP controllers in one process is
         // unsupported.
         super::install_browser_artefact_sink(
-            Arc::clone(&state) as Arc<dyn super::BrowserArtefactSink>,
+            Arc::clone(&state) as Arc<dyn super::BrowserArtefactSink>
         );
 
         // Hydrate the chat list from disk so existing conversations show
@@ -359,7 +359,10 @@ impl Controller for HttpController {
         }
 
         let listener = TcpListener::bind(&self.bind).await.map_err(|e| {
-            DysonError::Config(format!("failed to bind {} for http controller: {e}", self.bind))
+            DysonError::Config(format!(
+                "failed to bind {} for http controller: {e}",
+                self.bind
+            ))
         })?;
 
         tracing::info!(
@@ -582,7 +585,10 @@ mod tests {
         assert!(ct.starts_with("text/html"));
         assert!(!bytes.is_empty());
         let body = std::str::from_utf8(bytes).unwrap();
-        assert!(body.contains("id=\"root\""), "index.html must mount React at #root");
+        assert!(
+            body.contains("id=\"root\""),
+            "index.html must mount React at #root"
+        );
     }
 
     #[test]
@@ -592,9 +598,9 @@ mod tests {
         // round-trip on cold paint.  So the contract here is (a) a JS
         // chunk exists and (b) the HTML carries the stylesheet rules
         // directly, NOT as a separate .css asset.
-        let has_js = assets::ASSETS.iter().any(|(p, _, ct)| {
-            p.ends_with(".js") && ct.starts_with("application/javascript")
-        });
+        let has_js = assets::ASSETS
+            .iter()
+            .any(|(p, _, ct)| p.ends_with(".js") && ct.starts_with("application/javascript"));
         let has_standalone_css = assets::ASSETS.iter().any(|(p, _, _)| p.ends_with(".css"));
         let (html_bytes, _) = assets::lookup("/").expect("/ must serve index.html");
         let html = std::str::from_utf8(html_bytes).unwrap();

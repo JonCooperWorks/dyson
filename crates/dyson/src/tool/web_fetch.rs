@@ -145,9 +145,7 @@ impl Tool for WebFetchTool {
 
         let status = response.status();
         if !status.is_success() {
-            return Ok(ToolOutput::error(format!(
-                "HTTP {status} fetching {url}",
-            )));
+            return Ok(ToolOutput::error(format!("HTTP {status} fetching {url}",)));
         }
 
         // --- Extract content type before consuming body ---
@@ -193,7 +191,9 @@ impl Tool for WebFetchTool {
         } else if content_type.contains("application/json") {
             // Try to pretty-print; fall back to raw.
             match serde_json::from_str::<serde_json::Value>(&body_str) {
-                Ok(val) => serde_json::to_string_pretty(&val).unwrap_or_else(|_| body_str.into_owned()),
+                Ok(val) => {
+                    serde_json::to_string_pretty(&val).unwrap_or_else(|_| body_str.into_owned())
+                }
                 Err(_) => body_str.into_owned(),
             }
         } else if content_type.contains("text/") {
@@ -243,7 +243,10 @@ mod tests {
     async fn file_url_rejected() {
         let t = tool();
         let ctx = ToolContext::from_cwd().unwrap();
-        let result = t.run(&json!({"url": "file:///etc/passwd"}), &ctx).await.unwrap();
+        let result = t
+            .run(&json!({"url": "file:///etc/passwd"}), &ctx)
+            .await
+            .unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("http://"));
     }

@@ -28,9 +28,13 @@ pub struct WorkspaceTool;
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 enum Op {
-    View { file: String },
+    View {
+        file: String,
+    },
     List,
-    Search { pattern: String },
+    Search {
+        pattern: String,
+    },
     Update {
         file: String,
         content: String,
@@ -116,7 +120,11 @@ impl Tool for WorkspaceTool {
             Op::View { file } => view(ws, &file).await,
             Op::List => list(ws).await,
             Op::Search { pattern } => search(ws, &pattern).await,
-            Op::Update { file, content, mode } => update(ws, &file, &content, mode).await,
+            Op::Update {
+                file,
+                content,
+                mode,
+            } => update(ws, &file, &content, mode).await,
         }
     }
 }

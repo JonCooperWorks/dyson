@@ -140,9 +140,15 @@ mod tests {
         // shapes operators actually paste into dyson.json under one
         // test so a future change is forced to think about each case.
         assert!(is_loopback_bind("127.0.0.1:7878"));
-        assert!(is_loopback_bind("127.0.0.99:7878"), "every 127/8 host is loopback");
+        assert!(
+            is_loopback_bind("127.0.0.99:7878"),
+            "every 127/8 host is loopback"
+        );
         assert!(is_loopback_bind("[::1]:7878"));
-        assert!(!is_loopback_bind("0.0.0.0:7878"), "0.0.0.0 is the trap we exist to catch");
+        assert!(
+            !is_loopback_bind("0.0.0.0:7878"),
+            "0.0.0.0 is the trap we exist to catch"
+        );
         assert!(!is_loopback_bind("[::]:7878"));
         assert!(!is_loopback_bind("192.168.1.10:7878"));
         assert!(!is_loopback_bind("10.0.0.1:7878"));
@@ -178,8 +184,8 @@ mod tests {
     fn dangerous_no_tls_is_off_by_default() {
         // The flag must require an explicit opt-in.  Default loads
         // (no field set) leave the gate strict.
-        let raw: HttpControllerConfigRaw = serde_json::from_value(serde_json::json!({}))
-            .expect("parse");
+        let raw: HttpControllerConfigRaw =
+            serde_json::from_value(serde_json::json!({})).expect("parse");
         assert!(!raw.dangerous_no_tls);
         assert!(raw.tls.is_none());
     }
@@ -192,7 +198,10 @@ mod tests {
         let raw: HttpControllerConfigRaw = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(raw.bind, "127.0.0.1:7878");
         assert!(is_loopback_bind(&raw.bind));
-        assert!(raw.auth.is_none(), "default auth is unset → loopback gets DangerousNoAuth");
+        assert!(
+            raw.auth.is_none(),
+            "default auth is unset → loopback gets DangerousNoAuth"
+        );
     }
 
     #[test]
@@ -212,10 +221,18 @@ mod tests {
         }))
         .unwrap();
         match oidc {
-            HttpAuthConfig::Oidc { issuer, audience, required_scopes, allowed_sub } => {
+            HttpAuthConfig::Oidc {
+                issuer,
+                audience,
+                required_scopes,
+                allowed_sub,
+            } => {
                 assert_eq!(issuer, "https://idp.example.com");
                 assert_eq!(audience, "dyson-web");
-                assert_eq!(required_scopes, vec!["dyson:api".to_string(), "openid".to_string()]);
+                assert_eq!(
+                    required_scopes,
+                    vec!["dyson:api".to_string(), "openid".to_string()]
+                );
                 assert!(allowed_sub.is_none(), "default allowed_sub is unset");
             }
             _ => panic!("expected Oidc"),

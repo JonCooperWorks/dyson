@@ -307,8 +307,7 @@ pub(crate) async fn spawn_child(spec: ChildSpawn<'_>) -> Result<ToolOutput> {
         "spawning child agent"
     );
 
-    let skills: Vec<Box<dyn Skill>> =
-        vec![Box::new(FilteredSkill::new(spec.inherited_tools))];
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(FilteredSkill::new(spec.inherited_tools))];
 
     let mut builder = crate::agent::Agent::builder(spec.client, spec.sandbox)
         .skills(skills)
@@ -446,9 +445,8 @@ impl Tool for SubagentTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let parsed: SubagentInput = serde_json::from_value(input.clone()).map_err(|e| {
-            DysonError::tool(&self.config.name, format!("invalid input: {e}"))
-        })?;
+        let parsed: SubagentInput = serde_json::from_value(input.clone())
+            .map_err(|e| DysonError::tool(&self.config.name, format!("invalid input: {e}")))?;
 
         let user_message = if parsed.context.is_empty() {
             parsed.task
@@ -568,9 +566,7 @@ impl SubagentSkill {
         // pre-trims `configs` against the same allowlist), but coder
         // and orchestrators are added unconditionally here, so we
         // re-apply the predicate locally for those.
-        let allowed = |name: &str| -> bool {
-            name_allowlist.is_none_or(|s| s.contains(name))
-        };
+        let allowed = |name: &str| -> bool { name_allowlist.is_none_or(|s| s.contains(name)) };
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut prompt_lines: Vec<String> = Vec::new();
 
@@ -653,7 +649,11 @@ impl SubagentSkill {
             parent_tools,
         );
         if allowed(coder_tool.name()) {
-            prompt_lines.push(format!("- **{}**: {}", coder_tool.name(), coder_tool.description()));
+            prompt_lines.push(format!(
+                "- **{}**: {}",
+                coder_tool.name(),
+                coder_tool.description()
+            ));
             tools.push(Arc::new(coder_tool));
         }
 

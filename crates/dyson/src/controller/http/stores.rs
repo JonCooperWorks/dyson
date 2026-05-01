@@ -29,7 +29,11 @@ pub(crate) struct EvictingStore<T> {
 
 impl<T> EvictingStore<T> {
     fn with_cap(cap: usize) -> Self {
-        Self { items: HashMap::new(), order: std::collections::VecDeque::new(), cap }
+        Self {
+            items: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            cap,
+        }
     }
 
     pub(crate) fn put(&mut self, id: String, entry: T) {
@@ -51,7 +55,9 @@ pub(crate) struct FileStore {
 
 impl Default for FileStore {
     fn default() -> Self {
-        Self { inner: EvictingStore::with_cap(Self::MAX_FILES) }
+        Self {
+            inner: EvictingStore::with_cap(Self::MAX_FILES),
+        }
     }
 }
 
@@ -61,10 +67,14 @@ impl Default for FileStore {
 // site to change.
 impl std::ops::Deref for FileStore {
     type Target = EvictingStore<FileEntry>;
-    fn deref(&self) -> &Self::Target { &self.inner }
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 impl std::ops::DerefMut for FileStore {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.inner }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
 }
 
 pub(crate) struct FileEntry {
@@ -92,8 +102,16 @@ impl FileStore {
         let bytes = std::fs::read(&bytes_path).ok()?;
         Some(FileEntry {
             bytes,
-            mime: meta.get("mime").and_then(|v| v.as_str()).unwrap_or("application/octet-stream").to_string(),
-            name: meta.get("name").and_then(|v| v.as_str()).unwrap_or("file").to_string(),
+            mime: meta
+                .get("mime")
+                .and_then(|v| v.as_str())
+                .unwrap_or("application/octet-stream")
+                .to_string(),
+            name: meta
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("file")
+                .to_string(),
         })
     }
 
@@ -152,16 +170,22 @@ pub(crate) struct ArtefactStore {
 
 impl Default for ArtefactStore {
     fn default() -> Self {
-        Self { inner: EvictingStore::with_cap(Self::MAX_ARTEFACTS) }
+        Self {
+            inner: EvictingStore::with_cap(Self::MAX_ARTEFACTS),
+        }
     }
 }
 
 impl std::ops::Deref for ArtefactStore {
     type Target = EvictingStore<ArtefactEntry>;
-    fn deref(&self) -> &Self::Target { &self.inner }
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 impl std::ops::DerefMut for ArtefactStore {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.inner }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
 }
 
 pub(crate) struct ArtefactEntry {
@@ -338,13 +362,28 @@ fn load_artefact_from_subdir(sub: &std::path::Path, id: &str) -> Option<Artefact
         .and_then(|k| serde_json::from_value(k.clone()).ok())
         .unwrap_or(crate::message::ArtefactKind::Other);
     Some(ArtefactEntry {
-        chat_id: meta.get("chat_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        chat_id: meta
+            .get("chat_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         kind,
-        title: meta.get("title").and_then(|v| v.as_str()).unwrap_or("Artefact").to_string(),
+        title: meta
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Artefact")
+            .to_string(),
         content: body,
-        mime_type: meta.get("mime_type").and_then(|v| v.as_str()).unwrap_or("text/markdown").to_string(),
+        mime_type: meta
+            .get("mime_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("text/markdown")
+            .to_string(),
         metadata: meta.get("metadata").cloned().filter(|v| !v.is_null()),
-        tool_use_id: meta.get("tool_use_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        tool_use_id: meta
+            .get("tool_use_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         created_at: meta.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
     })
 }
@@ -451,7 +490,11 @@ mod tests {
         assert_eq!(loaded.content, "content-7");
         assert_eq!(loaded.tool_use_id.as_deref(), Some("tool_42"));
         assert_eq!(
-            loaded.metadata.as_ref().and_then(|m| m.get("bytes")).and_then(|v| v.as_u64()),
+            loaded
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("bytes"))
+                .and_then(|v| v.as_u64()),
             Some(1024),
         );
     }
@@ -472,16 +515,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Mix two chats; max id is 9.  Hydrate should find at least
         // the newest entries and report 9 so next_id starts at 10.
-        for &(chat, n) in &[("c-0001", 1u64), ("c-0001", 3), ("c-0002", 9), ("c-0002", 5)] {
-            ArtefactStore::persist_static(
-                dir.path(),
-                &format!("a{n}"),
-                &art_entry(chat, n),
-            );
+        for &(chat, n) in &[
+            ("c-0001", 1u64),
+            ("c-0001", 3),
+            ("c-0002", 9),
+            ("c-0002", 5),
+        ] {
+            ArtefactStore::persist_static(dir.path(), &format!("a{n}"), &art_entry(chat, n));
         }
         let mut store = ArtefactStore::default();
         let max_n = store.hydrate_from_disk(dir.path());
-        assert_eq!(max_n, 9, "hydrate must return the largest id ever persisted");
+        assert_eq!(
+            max_n, 9,
+            "hydrate must return the largest id ever persisted"
+        );
         // Newest must be present in the in-memory index — older ids
         // may be evicted when the disk count exceeds MAX_ARTEFACTS,
         // but we have only four here so all four should be cached.
@@ -508,11 +555,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let n_entries: u64 = (ArtefactStore::MAX_ARTEFACTS as u64) + 18; // 50
         for n in 1..=n_entries {
-            ArtefactStore::persist_static(
-                dir.path(),
-                &format!("a{n}"),
-                &art_entry("c-0001", n),
-            );
+            ArtefactStore::persist_static(dir.path(), &format!("a{n}"), &art_entry("c-0001", n));
         }
         let mut store = ArtefactStore::default();
         let max_n = store.hydrate_from_disk(dir.path());
@@ -525,7 +568,10 @@ mod tests {
             n_entries,
         );
         // Oldest must still be present — that's the whole point.
-        assert!(store.items.contains_key("a1"), "oldest entry must survive hydration");
+        assert!(
+            store.items.contains_key("a1"),
+            "oldest entry must survive hydration"
+        );
         assert!(store.items.contains_key(&format!("a{n_entries}")));
     }
 
@@ -540,15 +586,15 @@ mod tests {
         let extra: u64 = 5;
         let n_entries: u64 = (ArtefactStore::MAX_ARTEFACTS as u64) + extra; // 37
         for n in 1..=n_entries {
-            ArtefactStore::persist_static(
-                dir.path(),
-                &format!("a{n}"),
-                &art_entry("c-0001", n),
-            );
+            ArtefactStore::persist_static(dir.path(), &format!("a{n}"), &art_entry("c-0001", n));
         }
         let mut store = ArtefactStore::default();
         let _ = store.hydrate_from_disk(dir.path());
-        assert_eq!(store.items.len() as u64, n_entries, "transient widening on hydrate");
+        assert_eq!(
+            store.items.len() as u64,
+            n_entries,
+            "transient widening on hydrate"
+        );
         // One live emission — evicts (extra + 1) oldest hydrated
         // entries to walk the cache back to the cap.
         store.put("a999".into(), art_entry("c-0001", 999));

@@ -29,7 +29,10 @@ pub fn parser_for(path: &Path) -> Option<Box<dyn ManifestParser>> {
 
     let by_name: Option<Box<dyn ManifestParser>> = match lower.as_str() {
         "cargo.lock" | "cargo.toml" => Some(Box::new(CargoParser)),
-        "package-lock.json" | "npm-shrinkwrap.json" | "yarn.lock" | "pnpm-lock.yaml"
+        "package-lock.json"
+        | "npm-shrinkwrap.json"
+        | "yarn.lock"
+        | "pnpm-lock.yaml"
         | "package.json" => Some(Box::new(NpmParser)),
         "requirements.txt" | "pipfile.lock" | "poetry.lock" | "uv.lock" | "pdm.lock"
         | "pyproject.toml" => Some(Box::new(PypiParser)),

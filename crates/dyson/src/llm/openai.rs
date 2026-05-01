@@ -349,10 +349,12 @@ pub(crate) fn message_to_openai(msg: &Message) -> serde_json::Value {
     }
 
     // Check if this message contains any image or document blocks.
-    let has_multimodal = msg
-        .content
-        .iter()
-        .any(|b| matches!(b, ContentBlock::Image { .. } | ContentBlock::Document { .. }));
+    let has_multimodal = msg.content.iter().any(|b| {
+        matches!(
+            b,
+            ContentBlock::Image { .. } | ContentBlock::Document { .. }
+        )
+    });
 
     if has_multimodal {
         // Multimodal format: content is an array of typed blocks.
@@ -458,8 +460,7 @@ impl SseJsonParser for OpenAiJsonParser {
                     if let Some(id) = tc["id"].as_str() {
                         let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
 
-                        if let Some(err_event) =
-                            ctx.start_tool(index, id.to_string(), name.clone())
+                        if let Some(err_event) = ctx.start_tool(index, id.to_string(), name.clone())
                         {
                             events.push(Err(DysonError::Llm(format!("{err_event:?}"))));
                             return events;
@@ -475,8 +476,7 @@ impl SseJsonParser for OpenAiJsonParser {
                         if let Some(err_event) = ctx.append_tool_json(index, args) {
                             events.push(Ok(err_event));
                         } else {
-                            events
-                                .push(Ok(StreamEvent::ToolUseInputDelta(args.to_string())));
+                            events.push(Ok(StreamEvent::ToolUseInputDelta(args.to_string())));
                         }
                     }
                 }
@@ -534,7 +534,7 @@ impl SseJsonParser for OpenAiJsonParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{SseStreamParser, MAX_ACTIVE_TOOL_BUFFERS};
+    use crate::llm::{MAX_ACTIVE_TOOL_BUFFERS, SseStreamParser};
 
     fn parse_sse(lines: &str) -> Vec<Result<StreamEvent>> {
         let mut parser = BaseSseParser::new(OpenAiJsonParser::new());

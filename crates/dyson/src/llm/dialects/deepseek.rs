@@ -106,10 +106,7 @@ impl SseJsonParser for DeepSeekJsonParser {
 /// `originals` and `messages_json` are aligned by index *after* the system
 /// message (i.e. `messages_json[0]` is the system message, subsequent
 /// entries correspond to `originals[i]`).
-pub fn inject_reasoning_content(
-    originals: &[Message],
-    messages_json: &mut [serde_json::Value],
-) {
+pub fn inject_reasoning_content(originals: &[Message], messages_json: &mut [serde_json::Value]) {
     let system_offset = 1;
     for (i, msg) in originals.iter().enumerate() {
         if !matches!(msg.role, Role::Assistant) {
@@ -133,8 +130,8 @@ pub fn inject_reasoning_content(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::sse_parser::BaseSseParser;
     use crate::llm::SseStreamParser;
+    use crate::llm::sse_parser::BaseSseParser;
 
     #[test]
     fn parser_emits_thinking_from_openrouter_reasoning_field() {

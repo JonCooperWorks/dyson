@@ -139,12 +139,9 @@ impl ImageGenerationProvider for GeminiImageProvider {
                 ));
             }
 
-            let resp_body: serde_json::Value = resp
-                .json()
-                .await
-                .map_err(|e| {
-                    DysonError::tool("image_generate", format!("invalid JSON response: {e}"))
-                })?;
+            let resp_body: serde_json::Value = resp.json().await.map_err(|e| {
+                DysonError::tool("image_generate", format!("invalid JSON response: {e}"))
+            })?;
 
             // Extract inline image data from response parts.
             // Response shape: candidates[].content.parts[].inlineData.{mimeType, data}
@@ -328,10 +325,7 @@ fn extend_with_openrouter_images(
             let data = base64::engine::general_purpose::STANDARD
                 .decode(b64)
                 .map_err(|e| {
-                    DysonError::tool(
-                        "image_generate",
-                        format!("invalid base64 in response: {e}"),
-                    )
+                    DysonError::tool("image_generate", format!("invalid base64 in response: {e}"))
                 })?;
             out.push(GeneratedImage {
                 data,
@@ -762,7 +756,10 @@ mod tests {
             msg.contains("does not support image generation"),
             "unexpected error: {msg}"
         );
-        assert!(msg.contains("openrouter"), "error must list openrouter as supported: {msg}");
+        assert!(
+            msg.contains("openrouter"),
+            "error must list openrouter as supported: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -770,15 +767,21 @@ mod tests {
         // Simulate a provider (like Gemini) that returns 3 images even
         // though only 1 was requested — the tool should cap to count.
         let tool = greedy_mock_tool(vec![
-            GeneratedImage { data: tiny_png(), mime_type: "image/png".into() },
-            GeneratedImage { data: tiny_png(), mime_type: "image/png".into() },
-            GeneratedImage { data: tiny_png(), mime_type: "image/png".into() },
+            GeneratedImage {
+                data: tiny_png(),
+                mime_type: "image/png".into(),
+            },
+            GeneratedImage {
+                data: tiny_png(),
+                mime_type: "image/png".into(),
+            },
+            GeneratedImage {
+                data: tiny_png(),
+                mime_type: "image/png".into(),
+            },
         ]);
         let ctx = ToolContext::from_cwd().unwrap();
-        let result = tool
-            .run(&json!({"prompt": "a robot"}), &ctx)
-            .await
-            .unwrap();
+        let result = tool.run(&json!({"prompt": "a robot"}), &ctx).await.unwrap();
         assert!(!result.is_error);
         assert_eq!(result.files.len(), 1, "should only send 1 image, not 3");
         assert!(result.content.contains("Generated 1 image(s)"));

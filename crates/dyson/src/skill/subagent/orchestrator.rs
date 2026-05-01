@@ -177,10 +177,8 @@ impl Tool for OrchestratorTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let parsed: OrchestratorInput =
-            serde_json::from_value(input.clone()).map_err(|e| {
-                DysonError::tool(self.config.name, format!("invalid input: {e}"))
-            })?;
+        let parsed: OrchestratorInput = serde_json::from_value(input.clone())
+            .map_err(|e| DysonError::tool(self.config.name, format!("invalid input: {e}")))?;
 
         // Validate + canonicalize the optional scope path before handing it
         // to the child.  `canonicalize` also implicitly checks existence.
@@ -246,11 +244,9 @@ impl Tool for OrchestratorTool {
         let mut system_prompt = self.config.system_prompt.to_string();
         let mut active_sheets: Vec<String> = Vec::new();
         if self.config.inject_cheatsheets && cheatsheets_enabled_via_env() {
-            let detect_root: &std::path::Path = scoped_dir
-                .as_deref()
-                .unwrap_or(ctx.working_dir.as_path());
-            let (body, sheets) =
-                super::repo_detect::detect_and_compose(detect_root);
+            let detect_root: &std::path::Path =
+                scoped_dir.as_deref().unwrap_or(ctx.working_dir.as_path());
+            let (body, sheets) = super::repo_detect::detect_and_compose(detect_root);
             if !sheets.is_empty() {
                 tracing::info!(
                     tool = self.config.name,
@@ -278,9 +274,15 @@ impl Tool for OrchestratorTool {
                     active_sheets.join(", "),
                 )
             };
-            phase_checkpoints.push(CheckpointEvent { message: msg, progress: Some(0.05) });
             phase_checkpoints.push(CheckpointEvent {
-                message: format!("{}: subagent analysing — this may take several minutes", self.config.name),
+                message: msg,
+                progress: Some(0.05),
+            });
+            phase_checkpoints.push(CheckpointEvent {
+                message: format!(
+                    "{}: subagent analysing — this may take several minutes",
+                    self.config.name
+                ),
                 progress: Some(0.1),
             });
         }
@@ -328,10 +330,7 @@ impl Tool for OrchestratorTool {
             Ok(o) => o,
             Err(e) => {
                 if let Some(tok) = activity_token.take() {
-                    tok.finish(
-                        crate::controller::ActivityStatus::Err,
-                        Some("spawn failed"),
-                    );
+                    tok.finish(crate::controller::ActivityStatus::Err, Some("spawn failed"));
                 }
                 return Err(e);
             }
@@ -351,7 +350,9 @@ impl Tool for OrchestratorTool {
                 CheckpointEvent {
                     message: format!(
                         "{}: completed in {}s · {} bytes",
-                        self.config.name, elapsed, out.content.len(),
+                        self.config.name,
+                        elapsed,
+                        out.content.len(),
                     ),
                     progress: Some(1.0),
                 }
@@ -465,8 +466,8 @@ impl Tool for OrchestratorTool {
                 progress: Some(1.0),
             });
 
-            let artefact = Artefact::markdown(kind, title, out.content.clone())
-                .with_metadata(metadata);
+            let artefact =
+                Artefact::markdown(kind, title, out.content.clone()).with_metadata(metadata);
             out.artefacts.push(artefact);
         }
 
@@ -474,19 +475,12 @@ impl Tool for OrchestratorTool {
         // via Drop is Ok-without-suffix, which loses the duration and
         // misreports an error result — always finish() explicitly.
         if let Some(tok) = activity_token.take() {
-            let elapsed = unix_seconds(std::time::SystemTime::now())
-                .saturating_sub(started_epoch);
+            let elapsed = unix_seconds(std::time::SystemTime::now()).saturating_sub(started_epoch);
             let suffix = format!("{elapsed}s");
             if out.is_error {
-                tok.finish(
-                    crate::controller::ActivityStatus::Err,
-                    Some(&suffix),
-                );
+                tok.finish(crate::controller::ActivityStatus::Err, Some(&suffix));
             } else {
-                tok.finish(
-                    crate::controller::ActivityStatus::Ok,
-                    Some(&suffix),
-                );
+                tok.finish(crate::controller::ActivityStatus::Ok, Some(&suffix));
             }
         }
 

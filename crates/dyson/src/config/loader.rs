@@ -441,8 +441,7 @@ pub fn validate_subagent_configs(settings: &Settings) -> Result<()> {
         };
         for agent in &cfg.agents {
             if agent.provider != "default" && !settings.providers.contains_key(&agent.provider) {
-                let known: Vec<&str> =
-                    settings.providers.keys().map(String::as_str).collect();
+                let known: Vec<&str> = settings.providers.keys().map(String::as_str).collect();
                 return Err(DysonError::Config(format!(
                     "subagent '{}' references unknown provider '{}'. \
                      Known providers: [{}] or \"default\"",
@@ -908,8 +907,9 @@ fn parse_mcp_servers(
                 .unwrap_or_default();
 
             let sandbox = server_json["sandbox"].as_bool().unwrap_or(false);
-            let sandbox_deny_network =
-                server_json["sandbox_deny_network"].as_bool().unwrap_or(false);
+            let sandbox_deny_network = server_json["sandbox_deny_network"]
+                .as_bool()
+                .unwrap_or(false);
 
             McpTransportConfig::Stdio {
                 command: command.to_string(),
@@ -956,8 +956,12 @@ fn parse_mcp_oauth(auth_json: &serde_json::Value) -> Option<McpAuthConfig> {
         return None;
     }
     Some(McpAuthConfig {
-        client_id: auth_json["client_id"].as_str().map(std::string::ToString::to_string),
-        client_secret: auth_json["client_secret"].as_str().map(std::string::ToString::to_string),
+        client_id: auth_json["client_id"]
+            .as_str()
+            .map(std::string::ToString::to_string),
+        client_secret: auth_json["client_secret"]
+            .as_str()
+            .map(std::string::ToString::to_string),
         scopes: auth_json["scopes"]
             .as_array()
             .map(|arr| {
@@ -966,11 +970,15 @@ fn parse_mcp_oauth(auth_json: &serde_json::Value) -> Option<McpAuthConfig> {
                     .collect()
             })
             .unwrap_or_default(),
-        redirect_uri: auth_json["redirect_uri"].as_str().map(std::string::ToString::to_string),
+        redirect_uri: auth_json["redirect_uri"]
+            .as_str()
+            .map(std::string::ToString::to_string),
         authorization_url: auth_json["authorization_url"]
             .as_str()
             .map(std::string::ToString::to_string),
-        token_url: auth_json["token_url"].as_str().map(std::string::ToString::to_string),
+        token_url: auth_json["token_url"]
+            .as_str()
+            .map(std::string::ToString::to_string),
         registration_url: auth_json["registration_url"]
             .as_str()
             .map(std::string::ToString::to_string),
@@ -1273,11 +1281,7 @@ fn resolve_api_keys(settings: &mut Settings, secrets: &SecretRegistry) -> Result
 /// HTTP to a non-localhost endpoint.  Keys over HTTP are transmitted in
 /// cleartext and can be intercepted by anyone on the network path — loading
 /// such a config is a mistake we refuse rather than warn about.
-fn reject_http_with_api_key(
-    base_url: &Option<String>,
-    api_key: &str,
-    label: &str,
-) -> Result<()> {
+fn reject_http_with_api_key(base_url: &Option<String>, api_key: &str, label: &str) -> Result<()> {
     let url = match base_url {
         Some(u) => u,
         None => return Ok(()), // Default endpoint — always HTTPS.
@@ -1399,9 +1403,9 @@ mod tests {
     fn http_with_api_key_still_rejected_for_remote_hosts() {
         for host in [
             "8.8.8.8",
-            "172.32.0.1",       // just outside 172.16/12
-            "192.169.0.1",      // just outside 192.168/16
-            "100.128.0.1",      // just outside 100.64/10
+            "172.32.0.1",  // just outside 172.16/12
+            "192.169.0.1", // just outside 192.168/16
+            "100.128.0.1", // just outside 100.64/10
             "api.openai.com",
             "openrouter.ai",
         ] {
@@ -1900,19 +1904,21 @@ mod tests {
     fn validate_rejects_subagent_with_unknown_provider() {
         let mut settings = Settings::default();
         // Note: no providers configured — "gpt" should be unknown.
-        settings.skills.push(SkillConfig::Subagent(SubagentSkillConfig {
-            agents: vec![SubagentAgentConfig {
-                name: "bad".into(),
-                description: "d".into(),
-                system_prompt: "p".into(),
-                provider: "gpt".into(),
-                model: None,
-                max_iterations: None,
-                max_tokens: None,
-                tools: None,
-                injects_protocol: None,
-            }],
-        }));
+        settings
+            .skills
+            .push(SkillConfig::Subagent(SubagentSkillConfig {
+                agents: vec![SubagentAgentConfig {
+                    name: "bad".into(),
+                    description: "d".into(),
+                    system_prompt: "p".into(),
+                    provider: "gpt".into(),
+                    model: None,
+                    max_iterations: None,
+                    max_tokens: None,
+                    tools: None,
+                    injects_protocol: None,
+                }],
+            }));
 
         let err = validate_subagent_configs(&settings).unwrap_err();
         let msg = format!("{err}");
@@ -1923,19 +1929,21 @@ mod tests {
     #[test]
     fn validate_accepts_default_provider() {
         let mut settings = Settings::default();
-        settings.skills.push(SkillConfig::Subagent(SubagentSkillConfig {
-            agents: vec![SubagentAgentConfig {
-                name: "good".into(),
-                description: "d".into(),
-                system_prompt: "p".into(),
-                provider: "default".into(),
-                model: None,
-                max_iterations: None,
-                max_tokens: None,
-                tools: None,
-                injects_protocol: None,
-            }],
-        }));
+        settings
+            .skills
+            .push(SkillConfig::Subagent(SubagentSkillConfig {
+                agents: vec![SubagentAgentConfig {
+                    name: "good".into(),
+                    description: "d".into(),
+                    system_prompt: "p".into(),
+                    provider: "default".into(),
+                    model: None,
+                    max_iterations: None,
+                    max_tokens: None,
+                    tools: None,
+                    injects_protocol: None,
+                }],
+            }));
 
         validate_subagent_configs(&settings).expect("default provider should validate");
     }

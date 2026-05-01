@@ -153,10 +153,8 @@ mod tests {
 
         body.extend_from_slice(xref.as_bytes());
         body.extend_from_slice(
-            format!(
-                "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n"
-            )
-            .as_bytes(),
+            format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n")
+                .as_bytes(),
         );
 
         body

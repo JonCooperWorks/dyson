@@ -125,10 +125,7 @@ impl Tool for AdvisorTool {
         let mut capture = crate::skill::subagent::CaptureOutput::new();
         match child_agent.run(query, &mut capture).await {
             Ok(final_text) => {
-                tracing::info!(
-                    result_len = final_text.len(),
-                    "advisor subagent completed"
-                );
+                tracing::info!(result_len = final_text.len(), "advisor subagent completed");
                 Ok(ToolOutput::success(final_text))
             }
             Err(e) => {

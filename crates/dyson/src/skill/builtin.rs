@@ -30,6 +30,7 @@ use crate::tool::bash::BashTool;
 use crate::tool::bulk_edit::BulkEditTool;
 use crate::tool::dependency_scan::DependencyScanTool;
 use crate::tool::edit_file::EditFileTool;
+use crate::tool::image_generate;
 use crate::tool::kb_search::KbSearchTool;
 use crate::tool::kb_status::KbStatusTool;
 use crate::tool::list_files::ListFilesTool;
@@ -41,7 +42,6 @@ use crate::tool::security::{
     AstDescribeTool, AstQueryTool, AttackSurfaceAnalyzerTool, ExploitBuilderTool, TaintTraceTool,
 };
 use crate::tool::send_file::SendFileTool;
-use crate::tool::image_generate;
 use crate::tool::web_fetch::WebFetchTool;
 use crate::tool::web_search;
 use crate::tool::workspace::WorkspaceTool;
@@ -180,7 +180,12 @@ impl BuiltinSkill {
         image_provider_config: Option<&crate::config::ProviderConfig>,
         image_model_override: Option<&str>,
     ) -> Self {
-        Self::new_filtered(web_search_config, image_provider_config, image_model_override, &[])
+        Self::new_filtered(
+            web_search_config,
+            image_provider_config,
+            image_model_override,
+            &[],
+        )
     }
 }
 
@@ -225,9 +230,7 @@ impl Skill for BuiltinSkill {
         let hour = day_secs / 3600;
         let minute = (day_secs % 3600) / 60;
 
-        let fragment = format!(
-            "[Current time: {y:04}-{m:02}-{d:02} {hour:02}:{minute:02} UTC]",
-        );
+        let fragment = format!("[Current time: {y:04}-{m:02}-{d:02} {hour:02}:{minute:02} UTC]",);
         Ok(Some(fragment))
     }
 }

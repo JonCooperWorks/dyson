@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
@@ -22,11 +22,11 @@ use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{RwLock, oneshot};
 use tokio::task::JoinHandle;
 
-use super::credential::Credential;
 use super::Auth;
+use super::credential::Credential;
 use crate::error::{DysonError, Result};
 
 /// OAuth 2.0 Authorization Server Metadata (RFC 8414).
@@ -80,19 +80,37 @@ pub struct PkceChallenge {
 
 /// Fetch metadata from `<origin>/.well-known/oauth-authorization-server`.
 pub async fn discover_metadata(server_url: &str, client: &reqwest::Client) -> Result<AuthMetadata> {
-    let url = format!("{}/.well-known/oauth-authorization-server", server_url.trim_end_matches('/'));
-    let resp = client.get(&url).send().await
+    let url = format!(
+        "{}/.well-known/oauth-authorization-server",
+        server_url.trim_end_matches('/')
+    );
+    let resp = client
+        .get(&url)
+        .send()
+        .await
         .map_err(|e| DysonError::oauth(server_url, format!("discovery failed: {e}")))?;
     check_status(&resp, server_url, "discovery")?;
-    resp.json().await.map_err(|e| DysonError::oauth(server_url, format!("bad metadata: {e}")))
+    resp.json()
+        .await
+        .map_err(|e| DysonError::oauth(server_url, format!("bad metadata: {e}")))
 }
 
 /// Register a client via Dynamic Client Registration (RFC 7591).
-pub async fn register_client(url: &str, req: &DcrRequest, client: &reqwest::Client) -> Result<DcrResponse> {
-    let resp = client.post(url).json(req).send().await
+pub async fn register_client(
+    url: &str,
+    req: &DcrRequest,
+    client: &reqwest::Client,
+) -> Result<DcrResponse> {
+    let resp = client
+        .post(url)
+        .json(req)
+        .send()
+        .await
         .map_err(|e| DysonError::oauth("dcr", format!("registration failed: {e}")))?;
     check_status(&resp, "dcr", "registration")?;
-    resp.json().await.map_err(|e| DysonError::oauth("dcr", format!("bad DCR response: {e}")))
+    resp.json()
+        .await
+        .map_err(|e| DysonError::oauth("dcr", format!("bad DCR response: {e}")))
 }
 
 /// Generate PKCE code_verifier (32 random bytes, base64url) + S256 challenge.
@@ -100,16 +118,27 @@ pub fn generate_pkce() -> PkceChallenge {
     let random_bytes: [u8; 32] = rand::rng().random();
     let verifier = URL_SAFE_NO_PAD.encode(random_bytes);
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    PkceChallenge { verifier, challenge }
+    PkceChallenge {
+        verifier,
+        challenge,
+    }
 }
 
 /// Build the authorization URL with query parameters.
 pub fn build_auth_url(
-    authorization_endpoint: &str, client_id: &str, scopes: &[String],
-    redirect_uri: &str, code_challenge: &str, state: &str,
+    authorization_endpoint: &str,
+    client_id: &str,
+    scopes: &[String],
+    redirect_uri: &str,
+    code_challenge: &str,
+    state: &str,
 ) -> Result<String> {
-    let mut url = reqwest::Url::parse(authorization_endpoint)
-        .map_err(|e| DysonError::oauth(authorization_endpoint, format!("invalid authorization endpoint URL: {e}")))?;
+    let mut url = reqwest::Url::parse(authorization_endpoint).map_err(|e| {
+        DysonError::oauth(
+            authorization_endpoint,
+            format!("invalid authorization endpoint URL: {e}"),
+        )
+    })?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
@@ -123,30 +152,47 @@ pub fn build_auth_url(
 
 /// Exchange an authorization code for tokens.
 pub async fn exchange_code(
-    token_url: &str, code: &str, verifier: &str, client_id: &str,
-    client_secret: Option<&str>, redirect_uri: &str, client: &reqwest::Client,
+    token_url: &str,
+    code: &str,
+    verifier: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    redirect_uri: &str,
+    client: &reqwest::Client,
 ) -> Result<TokenResponse> {
     let mut params = vec![
-        ("grant_type", "authorization_code"), ("code", code),
-        ("redirect_uri", redirect_uri), ("client_id", client_id),
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", client_id),
         ("code_verifier", verifier),
     ];
     let owned;
-    if let Some(s) = client_secret { owned = s.to_string(); params.push(("client_secret", &owned)); }
+    if let Some(s) = client_secret {
+        owned = s.to_string();
+        params.push(("client_secret", &owned));
+    }
     post_token_request(token_url, &params, "token exchange", client).await
 }
 
 /// Refresh an expired access token.
 pub async fn refresh_token(
-    token_url: &str, refresh_token: &str, client_id: &str,
-    client_secret: Option<&str>, client: &reqwest::Client,
+    token_url: &str,
+    refresh_token: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    client: &reqwest::Client,
 ) -> Result<TokenResponse> {
     let mut params = vec![
-        ("grant_type", "refresh_token"), ("refresh_token", refresh_token),
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
         ("client_id", client_id),
     ];
     let owned;
-    if let Some(s) = client_secret { owned = s.to_string(); params.push(("client_secret", &owned)); }
+    if let Some(s) = client_secret {
+        owned = s.to_string();
+        params.push(("client_secret", &owned));
+    }
     post_token_request(token_url, &params, "token refresh", client).await
 }
 
@@ -156,21 +202,38 @@ pub fn generate_state() -> String {
 }
 
 fn check_status(resp: &reqwest::Response, server: &str, context: &str) -> Result<()> {
-    if resp.status().is_success() { return Ok(()); }
-    Err(DysonError::oauth(server, format!("{context} returned HTTP {}", resp.status())))
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    Err(DysonError::oauth(
+        server,
+        format!("{context} returned HTTP {}", resp.status()),
+    ))
 }
 
 async fn post_token_request(
-    token_url: &str, params: &[(&str, &str)], context: &str, client: &reqwest::Client,
+    token_url: &str,
+    params: &[(&str, &str)],
+    context: &str,
+    client: &reqwest::Client,
 ) -> Result<TokenResponse> {
-    let resp = client.post(token_url).form(params).send().await
+    let resp = client
+        .post(token_url)
+        .form(params)
+        .send()
+        .await
         .map_err(|e| DysonError::oauth(token_url, format!("{context} failed: {e}")))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(DysonError::oauth(token_url, format!("{context}: HTTP {status}: {body}")));
+        return Err(DysonError::oauth(
+            token_url,
+            format!("{context}: HTTP {status}: {body}"),
+        ));
     }
-    resp.json().await.map_err(|e| DysonError::oauth(token_url, format!("{context}: bad response: {e}")))
+    resp.json()
+        .await
+        .map_err(|e| DysonError::oauth(token_url, format!("{context}: bad response: {e}")))
 }
 
 // --- Auth trait impl with auto-refresh ---
@@ -208,20 +271,35 @@ impl OAuth {
         }
     }
 
-    async fn do_refresh(cred: &RwLock<OAuthCredential>, client: &reqwest::Client, force: bool) -> Result<()> {
+    async fn do_refresh(
+        cred: &RwLock<OAuthCredential>,
+        client: &reqwest::Client,
+        force: bool,
+    ) -> Result<()> {
         let mut guard = cred.write().await;
-        if !force && !guard.is_expired() { return Ok(()); }
+        if !force && !guard.is_expired() {
+            return Ok(());
+        }
 
-        let refresh_tok = guard.refresh_token.as_ref()
-            .ok_or_else(|| DysonError::oauth(&guard.token_url, "token expired and no refresh token"))?;
+        let refresh_tok = guard.refresh_token.as_ref().ok_or_else(|| {
+            DysonError::oauth(&guard.token_url, "token expired and no refresh token")
+        })?;
 
         let response = refresh_token(
-            &guard.token_url, refresh_tok.expose(), &guard.client_id,
-            guard.client_secret.as_ref().map(super::credential::Credential::expose), client,
-        ).await?;
+            &guard.token_url,
+            refresh_tok.expose(),
+            &guard.client_id,
+            guard
+                .client_secret
+                .as_ref()
+                .map(super::credential::Credential::expose),
+            client,
+        )
+        .await?;
 
         guard.access_token = Credential::new(response.access_token);
-        guard.expires_at = response.expires_in
+        guard.expires_at = response
+            .expires_in
             .map(|secs| SystemTime::now() + Duration::from_secs(secs))
             .unwrap_or(SystemTime::UNIX_EPOCH);
         if let Some(rt) = response.refresh_token {
@@ -233,16 +311,25 @@ impl OAuth {
 
 #[async_trait]
 impl Auth for OAuth {
-    async fn apply_to_request(&self, request: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
+    async fn apply_to_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder> {
         {
             let guard = self.credential.read().await;
             if !guard.is_expired() {
-                return Ok(request.header("Authorization", format!("Bearer {}", guard.access_token.expose())));
+                return Ok(request.header(
+                    "Authorization",
+                    format!("Bearer {}", guard.access_token.expose()),
+                ));
             }
         }
         Self::do_refresh(&self.credential, &self.http_client, false).await?;
         let guard = self.credential.read().await;
-        Ok(request.header("Authorization", format!("Bearer {}", guard.access_token.expose())))
+        Ok(request.header(
+            "Authorization",
+            format!("Bearer {}", guard.access_token.expose()),
+        ))
     }
 
     async fn on_unauthorized(&self) -> Result<()> {
@@ -261,7 +348,8 @@ const STATE_MAX_AGE: Duration = Duration::from_secs(600); // 10 minutes
 /// Start a temporary HTTP server on `127.0.0.1:0` for the OAuth redirect.
 /// Returns `(port, task_handle, code_receiver)`.
 pub async fn start_callback_server(
-    expected_state: &str, timeout: Duration,
+    expected_state: &str,
+    timeout: Duration,
 ) -> Result<(u16, JoinHandle<()>, oneshot::Receiver<String>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
@@ -273,7 +361,9 @@ pub async fn start_callback_server(
         let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
         let _ = tokio::time::timeout(timeout, async {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { continue };
+                let Ok((stream, _)) = listener.accept().await else {
+                    continue;
+                };
                 let spawn_state = expected_state.clone();
                 let spawn_tx = tx.clone();
                 let created_at = state_created_at;
@@ -283,18 +373,24 @@ pub async fn start_callback_server(
                         let tx = spawn_tx.clone();
                         async move { handle_callback(req, &state, created_at, tx).await }
                     });
-                    let _ = http1::Builder::new().serve_connection(TokioIo::new(stream), svc).await;
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), svc)
+                        .await;
                 });
-                if tx.lock().await.is_none() { break; }
+                if tx.lock().await.is_none() {
+                    break;
+                }
             }
-        }).await;
+        })
+        .await;
     });
 
     Ok((port, handle, rx))
 }
 
 async fn handle_callback(
-    req: Request<hyper::body::Incoming>, expected_state: &str,
+    req: Request<hyper::body::Incoming>,
+    expected_state: &str,
     state_created_at: tokio::time::Instant,
     tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<String>>>>,
 ) -> std::result::Result<Response<Full<Bytes>>, Infallible> {
@@ -304,31 +400,64 @@ async fn handle_callback(
 
     let query = req.uri().query().unwrap_or("");
     let params: Vec<(String, String)> = reqwest::Url::parse(&format!("http://x?{query}"))
-        .map(|u| u.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect())
+        .map(|u| {
+            u.query_pairs()
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect()
+        })
         .unwrap_or_default();
-    let find = |key: &str| params.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+    let find = |key: &str| {
+        params
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    };
 
     if let Some(err) = find("error") {
-        return Ok(html_response(StatusCode::BAD_REQUEST,
-            &format!("Authorization Failed: {err}: {}", find("error_description").unwrap_or("unknown"))));
+        return Ok(html_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "Authorization Failed: {err}: {}",
+                find("error_description").unwrap_or("unknown")
+            ),
+        ));
     }
     let (Some(code), Some(state)) = (find("code"), find("state")) else {
-        return Ok(html_response(StatusCode::BAD_REQUEST, "Missing code or state parameter."));
+        return Ok(html_response(
+            StatusCode::BAD_REQUEST,
+            "Missing code or state parameter.",
+        ));
     };
     if state != expected_state {
-        return Ok(html_response(StatusCode::BAD_REQUEST, "State mismatch — possible CSRF."));
+        return Ok(html_response(
+            StatusCode::BAD_REQUEST,
+            "State mismatch — possible CSRF.",
+        ));
     }
     // Reject expired state parameters to prevent replay attacks.
     if state_created_at.elapsed() > STATE_MAX_AGE {
-        return Ok(html_response(StatusCode::BAD_REQUEST, "Authorization expired — please try again."));
+        return Ok(html_response(
+            StatusCode::BAD_REQUEST,
+            "Authorization expired — please try again.",
+        ));
     }
-    if let Some(sender) = tx.lock().await.take() { let _ = sender.send(code.to_string()); }
-    Ok(html_response(StatusCode::OK, "Authorization complete. You can close this tab."))
+    if let Some(sender) = tx.lock().await.take() {
+        let _ = sender.send(code.to_string());
+    }
+    Ok(html_response(
+        StatusCode::OK,
+        "Authorization complete. You can close this tab.",
+    ))
 }
 
 fn html_response(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
-    Response::builder().status(status).header("Content-Type", "text/html; charset=utf-8")
-        .body(Full::new(Bytes::from(format!("<html><body><h1>{msg}</h1></body></html>")))).unwrap()
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "text/html; charset=utf-8")
+        .body(Full::new(Bytes::from(format!(
+            "<html><body><h1>{msg}</h1></body></html>"
+        ))))
+        .unwrap()
 }
 
 // --- Token persistence ---
@@ -345,13 +474,19 @@ struct PersistedTokens {
 
 /// Persist tokens to `~/.dyson/tokens/<server>.json` (0o600 on Unix).
 pub async fn persist_tokens(
-    server_name: &str, response: &TokenResponse, token_url: &str,
-    client_id: &str, client_secret: Option<&str>,
+    server_name: &str,
+    response: &TokenResponse,
+    token_url: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
 ) -> Result<()> {
-    let expires_at_epoch = response.expires_in
+    let expires_at_epoch = response
+        .expires_in
         .map(|secs| SystemTime::now() + Duration::from_secs(secs))
         .unwrap_or(SystemTime::UNIX_EPOCH)
-        .duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     let data = serde_json::to_string_pretty(&PersistedTokens {
         access_token: response.access_token.clone(),
@@ -364,7 +499,8 @@ pub async fn persist_tokens(
 
     let dir = token_dir()?;
     tokio::fs::create_dir_all(&dir).await?;
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).await?;
     }
@@ -407,20 +543,29 @@ pub async fn load_tokens(server_name: &str) -> Result<Option<OAuthCredential>> {
         access_token: Credential::new(p.access_token),
         refresh_token: p.refresh_token.map(Credential::new),
         expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(p.expires_at_epoch),
-        token_url: p.token_url, client_id: p.client_id,
+        token_url: p.token_url,
+        client_id: p.client_id,
         client_secret: p.client_secret.map(Credential::new),
     }))
 }
 
 fn token_dir() -> Result<std::path::PathBuf> {
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| DysonError::Config("HOME not set".into()))?;
     Ok(std::path::PathBuf::from(home).join(".dyson").join("tokens"))
 }
 
 fn sanitize_filename(name: &str) -> String {
-    let s: String = name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+    let s: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("{s}.json")
 }
@@ -437,7 +582,10 @@ mod tests {
     #[test]
     fn pkce_challenge_is_sha256_of_verifier() {
         let pkce = generate_pkce();
-        assert_eq!(pkce.challenge, URL_SAFE_NO_PAD.encode(Sha256::digest(pkce.verifier.as_bytes())));
+        assert_eq!(
+            pkce.challenge,
+            URL_SAFE_NO_PAD.encode(Sha256::digest(pkce.verifier.as_bytes()))
+        );
     }
 
     #[test]
@@ -448,10 +596,14 @@ mod tests {
     #[test]
     fn build_auth_url_encodes_correctly() {
         let url = build_auth_url(
-            "https://auth.example.com/authorize", "my-client",
-            &["read".into(), "write".into()], "http://127.0.0.1:8080/callback",
-            "challenge", "state",
-        ).unwrap();
+            "https://auth.example.com/authorize",
+            "my-client",
+            &["read".into(), "write".into()],
+            "http://127.0.0.1:8080/callback",
+            "challenge",
+            "state",
+        )
+        .unwrap();
         let parsed = reqwest::Url::parse(&url).unwrap();
         let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
         assert_eq!(pairs["response_type"], "code");
@@ -464,8 +616,13 @@ mod tests {
     fn build_auth_url_preserves_existing_query() {
         let url = build_auth_url(
             "https://auth.example.com/authorize?extra=1",
-            "cid", &[], "http://localhost/cb", "ch", "st",
-        ).unwrap();
+            "cid",
+            &[],
+            "http://localhost/cb",
+            "ch",
+            "st",
+        )
+        .unwrap();
         let parsed = reqwest::Url::parse(&url).unwrap();
         let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
         assert_eq!(pairs["extra"], "1");
@@ -481,8 +638,9 @@ mod tests {
     #[test]
     fn token_response_deserialize() {
         let r: TokenResponse = serde_json::from_str(
-            r#"{"access_token":"t","token_type":"Bearer","expires_in":3600,"refresh_token":"r"}"#
-        ).unwrap();
+            r#"{"access_token":"t","token_type":"Bearer","expires_in":3600,"refresh_token":"r"}"#,
+        )
+        .unwrap();
         assert_eq!(r.access_token, "t");
         assert_eq!(r.expires_in, Some(3600));
         assert_eq!(r.refresh_token.as_deref(), Some("r"));
@@ -490,20 +648,28 @@ mod tests {
 
     #[test]
     fn token_response_minimal() {
-        let r: TokenResponse = serde_json::from_str(r#"{"access_token":"t","token_type":"Bearer"}"#).unwrap();
+        let r: TokenResponse =
+            serde_json::from_str(r#"{"access_token":"t","token_type":"Bearer"}"#).unwrap();
         assert!(r.expires_in.is_none());
     }
 
     #[test]
     fn sanitize_prevents_traversal() {
-        assert_eq!(sanitize_filename("../../etc/passwd"), "______etc_passwd.json");
+        assert_eq!(
+            sanitize_filename("../../etc/passwd"),
+            "______etc_passwd.json"
+        );
     }
 
     #[test]
     fn credential_expiry() {
         let mk = |expires_at| OAuthCredential {
-            access_token: Credential::new("t".into()), refresh_token: None, expires_at,
-            token_url: String::new(), client_id: String::new(), client_secret: None,
+            access_token: Credential::new("t".into()),
+            refresh_token: None,
+            expires_at,
+            token_url: String::new(),
+            client_id: String::new(),
+            client_secret: None,
         };
         assert!(mk(SystemTime::UNIX_EPOCH).is_expired());
         assert!(!mk(SystemTime::now() + Duration::from_secs(3600)).is_expired());
@@ -513,32 +679,53 @@ mod tests {
     #[tokio::test]
     async fn apply_adds_bearer_header() {
         let auth = OAuth::new(OAuthCredential {
-            access_token: Credential::new("test-token".into()), refresh_token: None,
+            access_token: Credential::new("test-token".into()),
+            refresh_token: None,
             expires_at: SystemTime::now() + Duration::from_secs(3600),
-            token_url: String::new(), client_id: String::new(), client_secret: None,
+            token_url: String::new(),
+            client_id: String::new(),
+            client_secret: None,
         });
-        let req = auth.apply_to_request(crate::http::client().post("http://localhost/test")).await.unwrap();
-        assert_eq!(req.build().unwrap().headers()["authorization"].to_str().unwrap(), "Bearer test-token");
+        let req = auth
+            .apply_to_request(crate::http::client().post("http://localhost/test"))
+            .await
+            .unwrap();
+        assert_eq!(
+            req.build().unwrap().headers()["authorization"]
+                .to_str()
+                .unwrap(),
+            "Bearer test-token"
+        );
     }
 
     #[test]
     fn persisted_tokens_round_trip() {
         let p = PersistedTokens {
-            access_token: "a".into(), refresh_token: Some("r".into()),
-            expires_at_epoch: 1700000000, token_url: "https://t".into(),
-            client_id: "c".into(), client_secret: None,
+            access_token: "a".into(),
+            refresh_token: Some("r".into()),
+            expires_at_epoch: 1700000000,
+            token_url: "https://t".into(),
+            client_id: "c".into(),
+            client_secret: None,
         };
-        let p2: PersistedTokens = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        let p2: PersistedTokens =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(p2.access_token, "a");
         assert_eq!(p2.refresh_token.as_deref(), Some("r"));
     }
 
     #[tokio::test]
     async fn callback_server_receives_code() {
-        let (port, handle, rx) = start_callback_server("my-state", Duration::from_secs(5)).await.unwrap();
+        let (port, handle, rx) = start_callback_server("my-state", Duration::from_secs(5))
+            .await
+            .unwrap();
         let resp = crate::http::client()
-            .get(format!("http://127.0.0.1:{port}/callback?code=abc&state=my-state"))
-            .send().await.unwrap();
+            .get(format!(
+                "http://127.0.0.1:{port}/callback?code=abc&state=my-state"
+            ))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(rx.await.unwrap(), "abc");
         handle.abort();
@@ -546,19 +733,30 @@ mod tests {
 
     #[tokio::test]
     async fn callback_server_rejects_wrong_state() {
-        let (port, handle, _) = start_callback_server("correct", Duration::from_secs(5)).await.unwrap();
+        let (port, handle, _) = start_callback_server("correct", Duration::from_secs(5))
+            .await
+            .unwrap();
         let resp = crate::http::client()
-            .get(format!("http://127.0.0.1:{port}/callback?code=c&state=wrong"))
-            .send().await.unwrap();
+            .get(format!(
+                "http://127.0.0.1:{port}/callback?code=c&state=wrong"
+            ))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 400);
         handle.abort();
     }
 
     #[tokio::test]
     async fn callback_server_404_on_wrong_path() {
-        let (port, handle, _) = start_callback_server("s", Duration::from_secs(5)).await.unwrap();
+        let (port, handle, _) = start_callback_server("s", Duration::from_secs(5))
+            .await
+            .unwrap();
         let resp = crate::http::client()
-            .get(format!("http://127.0.0.1:{port}/wrong")).send().await.unwrap();
+            .get(format!("http://127.0.0.1:{port}/wrong"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 404);
         handle.abort();
     }
@@ -577,10 +775,16 @@ mod tests {
         assert_eq!(STATE_MAX_AGE, Duration::from_secs(600));
 
         // Verify the happy path still works with a fresh state.
-        let (port, handle, rx) = start_callback_server("fresh-state", Duration::from_secs(5)).await.unwrap();
+        let (port, handle, rx) = start_callback_server("fresh-state", Duration::from_secs(5))
+            .await
+            .unwrap();
         let resp = crate::http::client()
-            .get(format!("http://127.0.0.1:{port}/callback?code=abc&state=fresh-state"))
-            .send().await.unwrap();
+            .get(format!(
+                "http://127.0.0.1:{port}/callback?code=abc&state=fresh-state"
+            ))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(rx.await.unwrap(), "abc");
         handle.abort();

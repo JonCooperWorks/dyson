@@ -27,10 +27,7 @@ pub(super) async fn list(state: &HttpState) -> Resp {
     // message sent on Telegram bubbles that chat to the top of the
     // HTTP sidebar at the next list call.  `disk::list()` already
     // sorts newest-first by `transcript.json` mtime.
-    let disk_order: Option<Vec<String>> = state
-        .history
-        .as_ref()
-        .and_then(|h| h.list().ok());
+    let disk_order: Option<Vec<String>> = state.history.as_ref().and_then(|h| h.list().ok());
     let mut order = match disk_order {
         Some(o) if !o.is_empty() => o,
         _ => state.order.lock().await.clone(),
@@ -40,8 +37,7 @@ pub(super) async fn list(state: &HttpState) -> Resp {
     // still shows up immediately.
     {
         let mem_order = state.order.lock().await;
-        let seen: std::collections::HashSet<&str> =
-            order.iter().map(String::as_str).collect();
+        let seen: std::collections::HashSet<&str> = order.iter().map(String::as_str).collect();
         let extras: Vec<String> = mem_order
             .iter()
             .filter(|id| !seen.contains(id.as_str()))
@@ -83,7 +79,11 @@ pub(super) async fn list(state: &HttpState) -> Resp {
             };
             chats.insert(
                 id.clone(),
-                Arc::new(ChatHandle::new(id.clone(), title, state.data_dir.as_deref())),
+                Arc::new(ChatHandle::new(
+                    id.clone(),
+                    title,
+                    state.data_dir.as_deref(),
+                )),
             );
         }
     }
@@ -92,8 +92,7 @@ pub(super) async fn list(state: &HttpState) -> Resp {
     // because it's just the in-memory index plus a one-shot scan of
     // each chat's `artefacts/` subdir for chats whose reports have
     // aged out of the FIFO cache.
-    let mut with_artefacts: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut with_artefacts: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
         let store = match state.artefacts.lock() {
             Ok(s) => s,
@@ -113,11 +112,7 @@ pub(super) async fn list(state: &HttpState) -> Resp {
                 .into_iter()
                 .flatten()
                 .flatten()
-                .any(|e| {
-                    e.path()
-                        .extension()
-                        .is_some_and(|x| x == "json")
-                })
+                .any(|e| e.path().extension().is_some_and(|x| x == "json"))
             {
                 with_artefacts.insert(id.clone());
             }
@@ -164,9 +159,10 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
     // context from the agent cache.
     if let Some(prev) = body.rotate_previous.as_deref() {
         if let Some(prev_handle) = state.chats.lock().await.get(prev).cloned()
-            && let Some(agent) = prev_handle.agent.lock().await.as_mut() {
-                agent.clear();
-            }
+            && let Some(agent) = prev_handle.agent.lock().await.as_mut()
+        {
+            agent.clear();
+        }
         // The previous chat's first-user-text is gone after rotate —
         // drop any cached title so the next list call rehydrates.
         if let Ok(mut t) = state.titles.lock() {
@@ -201,9 +197,10 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
     // save is best-effort: an IO failure is logged but doesn't fail
     // creation (the in-memory chat still works for this session).
     if let Some(h) = state.history.as_ref()
-        && let Err(e) = h.save(&id, &[]) {
-            tracing::warn!(error = %e, chat_id = %id, "failed to persist new chat");
-        }
+        && let Err(e) = h.save(&id, &[])
+    {
+        tracing::warn!(error = %e, chat_id = %id, "failed to persist new chat");
+    }
     json_ok(&serde_json::json!({ "id": id, "title": title }))
 }
 
@@ -213,10 +210,11 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
 pub(crate) async fn bump_to_front(state: &HttpState, id: &str) {
     let mut order = state.order.lock().await;
     if let Some(pos) = order.iter().position(|x| x == id)
-        && pos != 0 {
-            let entry = order.remove(pos);
-            order.insert(0, entry);
-        }
+        && pos != 0
+    {
+        let entry = order.remove(pos);
+        order.insert(0, entry);
+    }
 }
 
 pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
@@ -490,7 +488,9 @@ mod tests {
     fn first_user_text_picks_first_user_message() {
         let msgs = vec![
             Message::user("hello world"),
-            Message::assistant(vec![ContentBlock::Text { text: "hi back".into() }]),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "hi back".into(),
+            }]),
         ];
         assert_eq!(first_user_text(&msgs).as_deref(), Some("hello world"));
     }
@@ -521,7 +521,12 @@ mod tests {
             media_type: "image/png".to_string(),
         };
         match block_to_dto(&img) {
-            BlockDto::File { url, mime, inline_image, .. } => {
+            BlockDto::File {
+                url,
+                mime,
+                inline_image,
+                ..
+            } => {
                 assert!(url.starts_with("data:image/png;base64,Zm9v"));
                 assert_eq!(mime, "image/png");
                 assert!(inline_image);
@@ -533,7 +538,13 @@ mod tests {
             extracted_text: "Title\nbody".to_string(),
         };
         match block_to_dto(&pdf) {
-            BlockDto::File { url, mime, inline_image, name, .. } => {
+            BlockDto::File {
+                url,
+                mime,
+                inline_image,
+                name,
+                ..
+            } => {
                 assert!(url.starts_with("data:application/pdf;base64,"));
                 assert_eq!(mime, "application/pdf");
                 assert!(!inline_image);

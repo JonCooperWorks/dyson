@@ -163,9 +163,11 @@ impl OidcAuth {
             "{}/.well-known/openid-configuration",
             issuer.trim_end_matches('/')
         );
-        let resp = http.get(&url).send().await.map_err(|e| {
-            DysonError::Config(format!("oidc discovery failed for {url}: {e}"))
-        })?;
+        let resp = http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| DysonError::Config(format!("oidc discovery failed for {url}: {e}")))?;
         if !resp.status().is_success() {
             return Err(DysonError::Config(format!(
                 "oidc discovery {url} returned HTTP {}",
@@ -460,7 +462,10 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn now_secs() -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
     }
 
     /// Build an `OidcAuth` whose JWKS is preloaded with one HMAC key.
@@ -507,11 +512,7 @@ mod tests {
         }
     }
 
-    fn mint_hs256_token(
-        kid: &str,
-        secret: &[u8],
-        claims: serde_json::Value,
-    ) -> String {
+    fn mint_hs256_token(kid: &str, secret: &[u8], claims: serde_json::Value) -> String {
         let mut header = Header::new(Algorithm::HS256);
         header.kid = Some(kid.to_string());
         jsonwebtoken::encode(&header, &claims, &EncodingKey::from_secret(secret)).unwrap()
@@ -519,10 +520,7 @@ mod tests {
 
     fn header_with(token: &str) -> hyper::HeaderMap {
         let mut h = hyper::HeaderMap::new();
-        h.insert(
-            "authorization",
-            format!("Bearer {token}").parse().unwrap(),
-        );
+        h.insert("authorization", format!("Bearer {token}").parse().unwrap());
         h
     }
 
@@ -583,19 +581,23 @@ mod tests {
         // Build a valid `alg: none` token by hand.  jsonwebtoken's
         // public encoder refuses to mint one (good!), so we craft the
         // bytes directly: header + payload + empty signature.
-        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_string(&serde_json::json!({
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_string(&serde_json::json!({
                 "alg": "none",
                 "kid": "kid-1",
                 "typ": "JWT",
-            })).unwrap());
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_string(&serde_json::json!({
+            }))
+            .unwrap(),
+        );
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_string(&serde_json::json!({
                 "iss": "https://idp",
                 "aud": "dyson-web",
                 "sub": "alice",
                 "exp": now_secs() + 60,
-            })).unwrap());
+            }))
+            .unwrap(),
+        );
         let token = format!("{header}.{payload}.");
 
         let auth = hs256_auth(
@@ -743,7 +745,10 @@ mod tests {
             }),
         );
         let info = auth.validate_request(&header_with(&alice)).await.unwrap();
-        assert_eq!(info.metadata.get("sub").map(String::as_str), Some("alice@example.com"));
+        assert_eq!(
+            info.metadata.get("sub").map(String::as_str),
+            Some("alice@example.com")
+        );
 
         // Different sub — even with valid signature / iss / aud — rejected.
         let bob = mint_hs256_token(
@@ -786,7 +791,10 @@ mod tests {
                     "exp": now_secs() + 60,
                 }),
             );
-            assert!(auth.validate_request(&header_with(&token)).await.is_ok(), "sub={sub} must pass when unset");
+            assert!(
+                auth.validate_request(&header_with(&token)).await.is_ok(),
+                "sub={sub} must pass when unset"
+            );
         }
     }
 
@@ -840,7 +848,11 @@ mod tests {
                 "exp": now_secs() + 60,
             }),
         );
-        assert!(auth.validate_request(&header_with(&no_scope)).await.is_err());
+        assert!(
+            auth.validate_request(&header_with(&no_scope))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -940,17 +952,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let auth = OidcAuth::discover(
-            &issuer,
-            "dyson-web".to_string(),
-            vec![],
-            None,
-            None,
-        )
-        .await
-        .expect("discover should succeed");
+        let auth = OidcAuth::discover(&issuer, "dyson-web".to_string(), vec![], None, None)
+            .await
+            .expect("discover should succeed");
         assert_eq!(auth.issuer(), issuer);
-        assert_eq!(auth.token_endpoint(), Some(format!("{issuer}/token").as_str()));
+        assert_eq!(
+            auth.token_endpoint(),
+            Some(format!("{issuer}/token").as_str())
+        );
     }
 
     #[tokio::test]

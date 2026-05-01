@@ -21,8 +21,8 @@ pub mod nodes;
 pub mod taint;
 
 pub use languages::{
-    LanguageConfig, MAX_FILE_SIZE, MAX_FILES, ParsedFile, config_for_extension,
-    config_for_glob, config_for_language_name, try_parse_file, walk_dir,
+    LanguageConfig, MAX_FILE_SIZE, MAX_FILES, ParsedFile, config_for_extension, config_for_glob,
+    config_for_language_name, try_parse_file, walk_dir,
 };
 
 use tree_sitter::{Node, Tree};
@@ -253,8 +253,7 @@ mod tests {
         assert_eq!(matches[0].kind, "function");
         assert_eq!(matches[0].name, "target");
 
-        let body =
-            &parsed.source[matches[0].start_byte..matches[0].end_byte];
+        let body = &parsed.source[matches[0].start_byte..matches[0].end_byte];
         assert!(body.contains("fn target(&self)"));
     }
 

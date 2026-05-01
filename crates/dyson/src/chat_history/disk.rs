@@ -225,8 +225,7 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
     for msg in messages {
         for block in &msg.content {
             match block {
-                ContentBlock::Image { data, .. }
-                | ContentBlock::Document { data, .. }
+                ContentBlock::Image { data, .. } | ContentBlock::Document { data, .. }
                     if !data.starts_with(MEDIA_REF_PREFIX) =>
                 {
                     needs_externalization = true;
@@ -523,12 +522,10 @@ mod tests {
         store.save("c", &[Message::user("c")]).unwrap();
         store.rotate("c").unwrap();
 
-        let ids: std::collections::HashSet<String> =
-            store.list().unwrap().into_iter().collect();
+        let ids: std::collections::HashSet<String> = store.list().unwrap().into_iter().collect();
         assert!(ids.contains("a"));
         assert!(ids.contains("b"));
         assert!(!ids.contains("c"), "archive-only chats should not list");
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

@@ -267,10 +267,7 @@ pub async fn queue_path_for_test(
 /// after emitting `Done`.  Exposed so the integration tests can
 /// simulate a finished turn (then assert a fresh subscriber sees
 /// nothing stale) without a real agent run.
-pub async fn reset_replay_for_test(
-    state: Arc<HttpState>,
-    chat_id: &str,
-) -> crate::Result<()> {
+pub async fn reset_replay_for_test(state: Arc<HttpState>, chat_id: &str) -> crate::Result<()> {
     let handle = state
         .chats
         .lock()
@@ -319,10 +316,7 @@ pub async fn seed_transcript(
 /// Reach the per-chat activity handle a real turn would receive.
 /// Used by integration tests to drive the Activity registry
 /// without standing up a subagent tool call.
-pub fn activity_handle(
-    state: &HttpState,
-    chat_id: &str,
-) -> crate::controller::ActivityHandle {
+pub fn activity_handle(state: &HttpState, chat_id: &str) -> crate::controller::ActivityHandle {
     state.activity.handle_for(chat_id)
 }
 
@@ -340,9 +334,10 @@ pub fn activity_registry(state: &HttpState) -> Arc<crate::controller::ActivityRe
 pub async fn wait_for_sse_subscriber(state: Arc<HttpState>, chat_id: &str) {
     for _ in 0..200 {
         if let Some(h) = state.chats.lock().await.get(chat_id).cloned()
-            && h.events.receiver_count() > 0 {
-                return;
-            }
+            && h.events.receiver_count() > 0
+        {
+            return;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("no SSE subscriber for chat {chat_id} after 2s");

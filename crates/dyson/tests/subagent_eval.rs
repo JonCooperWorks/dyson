@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use dyson::agent::rate_limiter::RateLimitedHandle;
 use dyson::agent::Agent;
+use dyson::agent::rate_limiter::RateLimitedHandle;
 use dyson::config::AgentSettings;
 use dyson::controller::recording::RecordingOutput;
 use dyson::error::Result;
@@ -150,11 +150,20 @@ async fn subagent_child_agent_returns_result_via_capture_output() {
     };
 
     // Child gets no tools (just responds with text).
-    let skills: Vec<Box<dyn Skill>> = vec![Box::new(
-        dyson::skill::subagent::FilteredSkill::new(vec![]),
-    )];
+    let skills: Vec<Box<dyn Skill>> =
+        vec![Box::new(dyson::skill::subagent::FilteredSkill::new(vec![]))];
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let mut agent = Agent::new(RateLimitedHandle::unlimited(Box::new(child_llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+    let mut agent = Agent::new(
+        RateLimitedHandle::unlimited(Box::new(child_llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     agent.set_depth(1); // This is a child agent.
 
     let mut capture = dyson::skill::subagent::CaptureOutput::new();
@@ -188,8 +197,9 @@ async fn subagent_shares_sandbox_with_parent() {
         text_response_events("Done from parent."),
     ]);
 
-    let skills: Vec<Box<dyn Skill>> =
-        vec![Box::new(dyson::skill::builtin::BuiltinSkill::new(None, None, None))];
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(dyson::skill::builtin::BuiltinSkill::new(
+        None, None, None,
+    ))];
     let mut parent = Agent::new(
         RateLimitedHandle::unlimited(Box::new(parent_llm)),
         Arc::clone(&sandbox) as Arc<dyn Sandbox>,
@@ -222,8 +232,9 @@ async fn subagent_shares_sandbox_with_parent() {
         text_response_events("Done from child."),
     ]);
 
-    let child_skills: Vec<Box<dyn Skill>> =
-        vec![Box::new(dyson::skill::builtin::BuiltinSkill::new(None, None, None))];
+    let child_skills: Vec<Box<dyn Skill>> = vec![Box::new(
+        dyson::skill::builtin::BuiltinSkill::new(None, None, None),
+    )];
     let mut child = Agent::new(
         RateLimitedHandle::unlimited(Box::new(child_llm)),
         Arc::clone(&sandbox) as Arc<dyn Sandbox>,
@@ -274,8 +285,9 @@ async fn subagent_conversation_isolated_from_parent() {
     };
 
     let sandbox: Arc<dyn Sandbox> = Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox);
-    let skills: Vec<Box<dyn Skill>> =
-        vec![Box::new(dyson::skill::builtin::BuiltinSkill::new(None, None, None))];
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(dyson::skill::builtin::BuiltinSkill::new(
+        None, None, None,
+    ))];
 
     let mut parent = Agent::new(
         RateLimitedHandle::unlimited(Box::new(parent_llm)),
@@ -296,8 +308,9 @@ async fn subagent_conversation_isolated_from_parent() {
 
     // Now run a separate child agent.
     let child_llm = MockLlm::new(vec![text_response_events("Child says hi.")]);
-    let child_skills: Vec<Box<dyn Skill>> =
-        vec![Box::new(dyson::skill::builtin::BuiltinSkill::new(None, None, None))];
+    let child_skills: Vec<Box<dyn Skill>> = vec![Box::new(
+        dyson::skill::builtin::BuiltinSkill::new(None, None, None),
+    )];
     let mut child = Agent::new(
         RateLimitedHandle::unlimited(Box::new(child_llm)),
         sandbox,
@@ -335,9 +348,20 @@ async fn depth_propagates_to_child_tool_context() {
 
     // Create parent at depth 0, set child to depth 2.
     let llm = MockLlm::new(vec![text_response_events("OK.")]);
-    let skills: Vec<Box<dyn Skill>> =
-        vec![Box::new(dyson::skill::builtin::BuiltinSkill::new(None, None, None))];
-    let mut agent = Agent::new(RateLimitedHandle::unlimited(Box::new(llm)), sandbox, skills, &settings, None, 0, None, None).unwrap();
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(dyson::skill::builtin::BuiltinSkill::new(
+        None, None, None,
+    ))];
+    let mut agent = Agent::new(
+        RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
     agent.set_depth(2);
 
     let mut output = RecordingOutput::new();

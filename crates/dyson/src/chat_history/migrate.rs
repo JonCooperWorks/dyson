@@ -95,10 +95,16 @@ fn default_version_for(dir: &Path) -> u64 {
                 let s = name.to_string_lossy();
                 // Any flat-layout telltale: {id}.json, {id}.TIMESTAMP.json,
                 // {id}_feedback.json, {id}_media, or a shared artefacts dir.
-                s.ends_with(".json") || s.ends_with("_feedback.json") || s.ends_with("_media")
+                s.ends_with(".json")
+                    || s.ends_with("_feedback.json")
+                    || s.ends_with("_media")
                     || s == "artefacts"
             });
-            if has_flat_artifacts { 0 } else { CURRENT_CHATS_VERSION }
+            if has_flat_artifacts {
+                0
+            } else {
+                CURRENT_CHATS_VERSION
+            }
         }
         Err(_) => CURRENT_CHATS_VERSION,
     }
@@ -295,8 +301,11 @@ mod tests {
     use super::*;
 
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir()
-            .join(format!("dyson_chats_migrate_{}_{}", name, std::process::id()));
+        let d = std::env::temp_dir().join(format!(
+            "dyson_chats_migrate_{}_{}",
+            name,
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -324,14 +333,25 @@ mod tests {
         assert!(applied, "migration should run on a v0 dir");
 
         assert!(dir.join("c-0001").join("transcript.json").exists());
-        assert!(dir
-            .join("c-0001")
-            .join("archives")
-            .join("2026-04-22T12-00-00.json")
-            .exists());
+        assert!(
+            dir.join("c-0001")
+                .join("archives")
+                .join("2026-04-22T12-00-00.json")
+                .exists()
+        );
         assert!(dir.join("c-0001").join("feedback.json").exists());
-        assert!(dir.join("c-0001").join("media").join("deadbeef.b64").exists());
-        assert!(dir.join("c-0002").join("artefacts").join("a1.body").exists());
+        assert!(
+            dir.join("c-0001")
+                .join("media")
+                .join("deadbeef.b64")
+                .exists()
+        );
+        assert!(
+            dir.join("c-0002")
+                .join("artefacts")
+                .join("a1.body")
+                .exists()
+        );
         assert!(!dir.join("artefacts").exists());
 
         assert_eq!(read_version(&dir), CURRENT_CHATS_VERSION);
@@ -351,10 +371,7 @@ mod tests {
     fn already_migrated_dir_is_noop() {
         let dir = tmp("already");
         std::fs::create_dir_all(dir.join("c-0001")).unwrap();
-        std::fs::write(
-            dir.join("c-0001").join("transcript.json"),
-            b"[]",
-        ).unwrap();
+        std::fs::write(dir.join("c-0001").join("transcript.json"), b"[]").unwrap();
         write_version(&dir, CURRENT_CHATS_VERSION).unwrap();
 
         let applied = migrate(&dir).unwrap();

@@ -179,10 +179,7 @@ impl ClientRegistry {
     /// No clients are created yet — they are lazily instantiated on first
     /// `get()`.  The registry keeps a clone of `settings` so it can build
     /// clients at any time without borrowing from the controller.
-    pub fn new(
-        settings: &Settings,
-        workspace: Option<crate::workspace::WorkspaceHandle>,
-    ) -> Self {
+    pub fn new(settings: &Settings, workspace: Option<crate::workspace::WorkspaceHandle>) -> Self {
         Self {
             inner: std::sync::Mutex::new(ClientRegistryInner {
                 clients: std::collections::HashMap::new(),
@@ -272,7 +269,9 @@ impl ClientRegistry {
                 None => crate::agent::rate_limiter::RateLimited::unlimited(client),
             };
 
-            inner.clients.insert(provider_name.to_string(), rate_limited);
+            inner
+                .clients
+                .insert(provider_name.to_string(), rate_limited);
         }
 
         let rl = &inner.clients[provider_name];
@@ -315,11 +314,12 @@ impl ClientRegistry {
                 ),
                 None => crate::agent::rate_limiter::RateLimited::unlimited(client),
             };
-            inner.clients.insert("__default__".to_string(), rate_limited);
+            inner
+                .clients
+                .insert("__default__".to_string(), rate_limited);
         }
 
-        inner.clients["__default__"]
-            .handle(crate::agent::rate_limiter::Priority::UserFacing)
+        inner.clients["__default__"].handle(crate::agent::rate_limiter::Priority::UserFacing)
     }
 }
 
@@ -404,13 +404,9 @@ pub async fn build_agent(
     if let Some(ref smartest_model) = settings.agent.smartest_model {
         if let Some((provider_name, advisor_model)) = smartest_model.split_once('/') {
             // Skip if the advisor is the currently loaded model.
-            let is_same_model = settings
-                .providers
-                .get(provider_name)
-                .is_some_and(|pc| {
-                    pc.provider_type == settings.agent.provider
-                        && advisor_model == settings.agent.model
-                });
+            let is_same_model = settings.providers.get(provider_name).is_some_and(|pc| {
+                pc.provider_type == settings.agent.provider && advisor_model == settings.agent.model
+            });
 
             if !is_same_model {
                 let advisor_provider_type = settings
@@ -458,12 +454,7 @@ pub async fn build_agent(
 }
 
 /// Tools available to public agents — workspace memory + web research.
-const PUBLIC_AGENT_TOOLS: &[&str] = &[
-    "workspace",
-    "memory_search",
-    "web_fetch",
-    "web_search",
-];
+const PUBLIC_AGENT_TOOLS: &[&str] = &["workspace", "memory_search", "web_fetch", "web_search"];
 
 /// Build a public agent with a per-channel workspace.
 ///
@@ -477,25 +468,24 @@ fn build_public_agent(
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
     channel_id: &str,
 ) -> crate::Result<crate::agent::Agent> {
-    let filter: Vec<String> = PUBLIC_AGENT_TOOLS.iter().map(|s| (*s).to_string()).collect();
+    let filter: Vec<String> = PUBLIC_AGENT_TOOLS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
     let ig_provider = settings
         .agent
         .image_generation_provider
         .as_ref()
         .and_then(|name| settings.providers.get(name));
-    let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
-        crate::skill::builtin::BuiltinSkill::new_filtered(
+    let skills: Vec<Box<dyn crate::skill::Skill>> =
+        vec![Box::new(crate::skill::builtin::BuiltinSkill::new_filtered(
             settings.web_search.as_ref(),
             ig_provider,
             settings.agent.image_generation_model.as_deref(),
             &filter,
-        ),
-    )];
+        ))];
 
-    let workspace = crate::workspace::create_channel_workspace(
-        &settings.workspace,
-        channel_id,
-    )?;
+    let workspace = crate::workspace::create_channel_workspace(&settings.workspace, channel_id)?;
 
     let mut agent_settings = settings.agent.clone();
 
@@ -557,7 +547,10 @@ fn parse_model_command(
 
     // Case 1: first word is a known provider name.
     if providers.contains_key(first) {
-        return Ok((first.to_string(), second.map(std::string::ToString::to_string)));
+        return Ok((
+            first.to_string(),
+            second.map(std::string::ToString::to_string),
+        ));
     }
 
     // Case 2: not a provider — try as a model in the current provider.
@@ -612,8 +605,7 @@ pub fn list_providers(settings: &Settings) -> Vec<(&str, &crate::config::Provide
 /// hot-reload, once breaking `state.config_path()` for
 /// `/api/admin/configure`'s `patch_models_in_config` step.  Funnelling
 /// through a single OnceLock kills the failure mode at the source.
-pub(crate) static EXPLICIT_CONFIG_PATH: std::sync::OnceLock<PathBuf> =
-    std::sync::OnceLock::new();
+pub(crate) static EXPLICIT_CONFIG_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// Install the program's resolved config path.  First writer wins
 /// (`OnceLock` semantics) so a stray double-install in tests is a
@@ -699,10 +691,11 @@ pub fn publish_settings(new: std::sync::Arc<Settings>) {
 /// Subscribe to settings updates.  `None` when the bus hasn't been
 /// installed — e.g. an http_controller integration test that stands
 /// up `HttpState` directly without going through `command::listen`.
-pub fn subscribe_settings_updates()
-    -> Option<tokio::sync::watch::Receiver<std::sync::Arc<Settings>>>
+pub fn subscribe_settings_updates() -> Option<tokio::sync::watch::Receiver<std::sync::Arc<Settings>>>
 {
-    SETTINGS_BUS.get().map(tokio::sync::watch::Sender::subscribe)
+    SETTINGS_BUS
+        .get()
+        .map(tokio::sync::watch::Sender::subscribe)
 }
 
 // ---------------------------------------------------------------------------
@@ -790,7 +783,16 @@ pub async fn check_and_reload_agent(
 
     let messages = agent.messages().to_vec();
     let client = registry.get_default();
-    match build_agent(current_settings, controller_prompt, AgentMode::Private, client, registry, None).await {
+    match build_agent(
+        current_settings,
+        controller_prompt,
+        AgentMode::Private,
+        client,
+        registry,
+        None,
+    )
+    .await
+    {
         Ok(mut a) => {
             a.set_messages(messages);
             // Restore the user's provider/model selection if it differs
@@ -885,8 +887,7 @@ pub enum CommandResult {
 /// Receives the agent ID and either the final response text (`Ok`) or a
 /// human-readable failure message (`Err`).  Controllers use this to surface
 /// background agent results to the user who spawned them.
-pub type BackgroundCompletion =
-    std::sync::Arc<dyn Fn(u64, Result<String, String>) + Send + Sync>;
+pub type BackgroundCompletion = std::sync::Arc<dyn Fn(u64, Result<String, String>) + Send + Sync>;
 
 pub async fn execute_lockfree_command(
     input: &str,
@@ -1008,20 +1009,17 @@ pub async fn execute_agent_command(
         if args.is_empty() {
             return CommandResult::ModelUsage;
         }
-        let (target_provider, target_model) = match parse_model_command(
-            args,
-            &settings.providers,
-            ms.provider,
-        ) {
-            Ok(parsed) => parsed,
-            Err(e) => return CommandResult::ModelParseError(e),
-        };
+        let (target_provider, target_model) =
+            match parse_model_command(args, &settings.providers, ms.provider) {
+                Ok(parsed) => parsed,
+                Err(e) => return CommandResult::ModelParseError(e),
+            };
         let pc = match settings.providers.get(&target_provider) {
             Some(pc) => pc,
             None => {
                 return CommandResult::ModelSwitchError(format!(
                     "unknown provider '{target_provider}'"
-                ))
+                ));
             }
         };
         let resolved = target_model
@@ -1034,11 +1032,7 @@ pub async fn execute_agent_command(
                 *ms.model = resolved.clone();
                 *ms.provider = target_provider.clone();
                 if let Some(cp) = ms.config_path {
-                    crate::config::loader::persist_model_selection(
-                        cp,
-                        &target_provider,
-                        &resolved,
-                    );
+                    crate::config::loader::persist_model_selection(cp, &target_provider, &resolved);
                 }
                 return CommandResult::ModelSwitched {
                     provider_name: target_provider,
@@ -1160,7 +1154,8 @@ pub(crate) async fn spawn_background_agent(
     // Attach chat history so the conversation is persisted through the
     // existing chat store (same backend as Telegram / other controllers).
     if let Ok(store) = crate::chat_history::create_chat_history(&settings.chat_history) {
-        let store: std::sync::Arc<dyn crate::chat_history::ChatHistory> = std::sync::Arc::from(store);
+        let store: std::sync::Arc<dyn crate::chat_history::ChatHistory> =
+            std::sync::Arc::from(store);
         bg_agent.set_chat_history(store, chat_id.clone());
     }
 
@@ -1172,11 +1167,7 @@ pub(crate) async fn spawn_background_agent(
         tracing::info!(id, prompt = %prompt_owned, "background agent starting");
         let result: Result<String, String> = match bg_agent.run(&prompt_owned, &mut output).await {
             Ok(text) => {
-                tracing::info!(
-                    id,
-                    text_len = text.len(),
-                    "background agent completed"
-                );
+                tracing::info!(id, text_len = text.len(), "background agent completed");
                 Ok(text)
             }
             Err(e) => {
@@ -1241,10 +1232,7 @@ fn read_log_tail_from_dir(log_dir: &std::path::Path, n: usize) -> Result<String,
 
     // Read from the end of the file in chunks to find the last `n` lines,
     // avoiding loading the entire file into memory.
-    let file_len = file
-        .metadata()
-        .map_err(|e| e.to_string())?
-        .len();
+    let file_len = file.metadata().map_err(|e| e.to_string())?.len();
 
     if file_len == 0 {
         return Ok(String::new());
@@ -1266,7 +1254,8 @@ fn read_log_tail_from_dir(log_dir: &std::path::Path, n: usize) -> Result<String,
     'outer: while offset > 0 {
         let read_start = offset.saturating_sub(CHUNK);
         let read_len = (offset - read_start) as usize;
-        file.seek(SeekFrom::Start(read_start)).map_err(|e| e.to_string())?;
+        file.seek(SeekFrom::Start(read_start))
+            .map_err(|e| e.to_string())?;
 
         let mut buf = vec![0u8; read_len];
         file.read_exact(&mut buf).map_err(|e| e.to_string())?;
@@ -1288,9 +1277,11 @@ fn read_log_tail_from_dir(log_dir: &std::path::Path, n: usize) -> Result<String,
     }
 
     // Read from tail_start to end of file.
-    file.seek(SeekFrom::Start(tail_start)).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(tail_start))
+        .map_err(|e| e.to_string())?;
     let mut result = String::new();
-    file.read_to_string(&mut result).map_err(|e| e.to_string())?;
+    file.read_to_string(&mut result)
+        .map_err(|e| e.to_string())?;
 
     // Trim a single trailing newline so the caller gets clean lines.
     if result.ends_with('\n') {
@@ -1374,10 +1365,7 @@ pub trait Output: Send {
     ///
     /// The default impl drops the event; controllers that need to surface
     /// progress can override it.
-    fn checkpoint(
-        &mut self,
-        event: &CheckpointEvent,
-    ) -> std::result::Result<(), DysonError> {
+    fn checkpoint(&mut self, event: &CheckpointEvent) -> std::result::Result<(), DysonError> {
         let _ = event;
         Ok(())
     }
@@ -1767,18 +1755,18 @@ mod tests {
     #[test]
     fn public_agent_has_workspace_and_web_tools() {
         // Build an agent using the same skill filter as build_public_agent.
-        let filter: Vec<String> = PUBLIC_AGENT_TOOLS.iter().map(|s| (*s).to_string()).collect();
+        let filter: Vec<String> = PUBLIC_AGENT_TOOLS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
         let skills: Vec<Box<dyn crate::skill::Skill>> = vec![Box::new(
             crate::skill::builtin::BuiltinSkill::new_filtered(None, None, None, &filter),
         )];
 
         let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
             std::sync::Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
-        let client = crate::llm::create_client(
-            &crate::config::AgentSettings::default(),
-            None,
-            false,
-        );
+        let client =
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false);
         let client = crate::agent::rate_limiter::RateLimitedHandle::unlimited(client);
 
         let agent = crate::agent::Agent::builder(client, sandbox)
@@ -1799,7 +1787,10 @@ mod tests {
         assert!(!agent.has_tool("write_file"), "must not have write_file");
         assert!(!agent.has_tool("edit_file"), "must not have edit_file");
         assert!(!agent.has_tool("list_files"), "must not have list_files");
-        assert!(!agent.has_tool("search_files"), "must not have search_files");
+        assert!(
+            !agent.has_tool("search_files"),
+            "must not have search_files"
+        );
         assert!(!agent.has_tool("send_file"), "must not have send_file");
         assert!(!agent.has_tool("load_skill"), "must not have load_skill");
         assert!(!agent.has_tool("kb_search"), "must not have kb_search");
@@ -1862,5 +1853,4 @@ mod tests {
         let expected = &["workspace", "memory_search", "web_fetch", "web_search"];
         assert_eq!(PUBLIC_AGENT_TOOLS, expected);
     }
-
 }
