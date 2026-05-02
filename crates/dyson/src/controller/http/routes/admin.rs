@@ -159,6 +159,14 @@ pub(super) struct ConfigureBody {
     /// Mirrors `SWARM_INGEST_TOKEN`.  See `ingest_url` for posture.
     #[serde(default)]
     ingest_token: Option<String>,
+    /// Full URL the swarm-mode background state worker POSTs selected
+    /// workspace files to. Mirrors `SWARM_STATE_SYNC_URL`; pushed here
+    /// because warmup env is frozen for the running dyson process.
+    #[serde(default)]
+    state_sync_url: Option<String>,
+    /// Per-instance `st_<32hex>` bearer for the state-file endpoint.
+    #[serde(default)]
+    state_sync_token: Option<String>,
 }
 
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
@@ -457,6 +465,20 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         }
         _ => false,
     };
+    let state_sync_changed = match (&body.state_sync_url, &body.state_sync_token) {
+        (Some(url), Some(tok)) if !url.is_empty() && !tok.is_empty() => {
+            crate::swarm_state_sync::set_config(Some(crate::swarm_state_sync::StateSyncConfig {
+                url: url.clone(),
+                token: tok.clone(),
+            }));
+            true
+        }
+        (Some(url), Some(tok)) if url.is_empty() && tok.is_empty() => {
+            crate::swarm_state_sync::set_config(None);
+            true
+        }
+        _ => false,
+    };
 
     json_ok(&serde_json::json!({
         "ok": true,
@@ -467,6 +489,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "skills_reset": skills_changed,
         "mcp_servers_updated": mcp_changed,
         "ingest_updated": ingest_changed,
+        "state_sync_updated": state_sync_changed,
     }))
 }
 

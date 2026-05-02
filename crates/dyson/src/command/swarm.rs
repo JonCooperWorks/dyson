@@ -15,6 +15,7 @@
 //                            workspace/TASK.md)
 //   - SWARM_NAME         — human-readable label
 //   - SWARM_INSTANCE_ID  — swarm-side instance id
+//   - SWARM_STATE_SYNC_* — optional parent-swarm state mirror target
 //
 // Provider shape: swarm's /llm proxy fronts upstream LLM APIs. We
 // configure the dyson agent as an `openai`-compatible client pointed at
@@ -77,6 +78,7 @@ pub async fn run() -> Result<()> {
     let name = std::env::var("SWARM_NAME").unwrap_or_default();
     let instance_id = std::env::var("SWARM_INSTANCE_ID").unwrap_or_default();
     let model = std::env::var("SWARM_MODEL").unwrap_or_default();
+    let state_sync = dyson::swarm_state_sync::config_from_env();
     // Optional builtin-tool allowlist.  Swarm only stamps this on the
     // env envelope when the operator picked a strict subset (or asked
     // for zero tools); when unset, dyson registers every builtin.
@@ -165,6 +167,8 @@ pub async fn run() -> Result<()> {
         .map_err(|e| DysonError::Config(format!("serialize dyson.json: {e}")))?;
     std::fs::write(&cfg_path, cfg_bytes)
         .map_err(|e| DysonError::Config(format!("write {cfg_path:?}: {e}")))?;
+
+    dyson::swarm_state_sync::spawn_workspace_worker(workspace.clone(), state_sync);
 
     tracing::info!(
         bind = %bind,
