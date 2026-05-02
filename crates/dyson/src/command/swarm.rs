@@ -91,6 +91,9 @@ pub async fn run() -> Result<()> {
     let workspace = home_path.join("workspace");
     std::fs::create_dir_all(&workspace)
         .map_err(|e| DysonError::Config(format!("create workspace {workspace:?}: {e}")))?;
+    let chats = home_path.join("chats");
+    std::fs::create_dir_all(&chats)
+        .map_err(|e| DysonError::Config(format!("create chats dir {chats:?}: {e}")))?;
 
     // IDENTITY.md is what `Workspace::system_prompt` injects under the
     // "## IDENTITY" section of the agent's system prompt — so this is
@@ -145,6 +148,7 @@ pub async fn run() -> Result<()> {
         model
     };
     let workspace_str = workspace.to_string_lossy().into_owned();
+    let chats_str = chats.to_string_lossy().into_owned();
     let tools = tools_csv.as_deref().map(|csv| {
         csv.split(',')
             .map(str::trim)
@@ -158,6 +162,7 @@ pub async fn run() -> Result<()> {
         api_key: &api_key,
         model_id: &model_id,
         workspace_str: &workspace_str,
+        chats_str: &chats_str,
         auth_block,
         tools: tools.as_deref(),
     });
@@ -168,7 +173,7 @@ pub async fn run() -> Result<()> {
     std::fs::write(&cfg_path, cfg_bytes)
         .map_err(|e| DysonError::Config(format!("write {cfg_path:?}: {e}")))?;
 
-    dyson::swarm_state_sync::spawn_workspace_worker(workspace.clone(), state_sync);
+    dyson::swarm_state_sync::spawn_worker(workspace.clone(), chats.clone(), state_sync);
 
     tracing::info!(
         bind = %bind,
@@ -193,6 +198,7 @@ struct SwarmConfigInputs<'a> {
     api_key: &'a str,
     model_id: &'a str,
     workspace_str: &'a str,
+    chats_str: &'a str,
     auth_block: serde_json::Value,
     /// Builtin-tool allowlist parsed from `SWARM_TOOLS`.  `None` ⇒ omit
     /// the `skills` block (loader interprets as "all builtins").
@@ -269,7 +275,11 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
                 "dangerous_no_tls": true
             }
         ],
-        "workspace": { "connection_string": inputs.workspace_str }
+        "workspace": { "connection_string": inputs.workspace_str },
+        "chat_history": {
+            "backend": "disk",
+            "connection_string": inputs.chats_str
+        }
     });
     if let Some(tools) = inputs.tools {
         cfg["skills"] = json!({ "builtin": { "tools": tools } });
@@ -320,6 +330,7 @@ mod tests {
             api_key: "swarm-token",
             model_id: "anthropic/claude-sonnet-4-5",
             workspace_str: "/var/lib/dyson/workspace",
+            chats_str: "/var/lib/dyson/chats",
             auth_block: json!({ "type": "dangerous_no_auth" }),
             tools: None,
         })
@@ -379,6 +390,16 @@ mod tests {
     }
 
     #[test]
+    fn swarm_config_pins_chat_history_inside_dyson_home() {
+        let cfg = cfg_with_proxy();
+        assert_eq!(cfg["chat_history"]["backend"], "disk");
+        assert_eq!(
+            cfg["chat_history"]["connection_string"],
+            "/var/lib/dyson/chats"
+        );
+    }
+
+    #[test]
     fn swarm_config_in_warmup_mode_has_no_image_provider() {
         // No proxy URL ⇒ template-warmup boot.  Image generation is
         // pointless until the per-instance proxy URL is patched in,
@@ -390,6 +411,7 @@ mod tests {
             api_key: "warmup-placeholder",
             model_id: "warmup-placeholder",
             workspace_str: "/var/lib/dyson/workspace",
+            chats_str: "/var/lib/dyson/chats",
             auth_block: json!({ "type": "dangerous_no_auth" }),
             tools: None,
         });
@@ -412,6 +434,7 @@ mod tests {
             api_key: "swarm-token",
             model_id: "anthropic/claude-sonnet-4-5",
             workspace_str: "/var/lib/dyson/workspace",
+            chats_str: "/var/lib/dyson/chats",
             auth_block: json!({ "type": "dangerous_no_auth" }),
             tools: Some(&tools),
         });
@@ -433,6 +456,7 @@ mod tests {
             api_key: "swarm-token",
             model_id: "anthropic/claude-sonnet-4-5",
             workspace_str: "/var/lib/dyson/workspace",
+            chats_str: "/var/lib/dyson/chats",
             auth_block: json!({ "type": "dangerous_no_auth" }),
             tools: Some(&[]),
         });

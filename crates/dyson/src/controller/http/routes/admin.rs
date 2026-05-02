@@ -26,6 +26,10 @@
 // network-isolated except via cubeproxy, so "any caller" is in
 // practice "swarm via dyson_proxy".
 
+use std::path::{Component, Path, PathBuf};
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use hyper::Request;
 use serde::Deserialize;
 use serde_json::Value;
@@ -36,6 +40,11 @@ use super::super::state::HttpState;
 /// Cap for the configure body.  Generous for very long task prompts
 /// but small enough to swat away accidental large payloads.
 const MAX_CONFIGURE_BODY: usize = 64 * 1024;
+
+/// State replay carries base64 file bodies.  The sync worker caps source
+/// files at 5 MiB, so 8 MiB leaves JSON/base64 headroom without turning
+/// the admin surface into a bulk upload endpoint.
+const MAX_STATE_FILE_BODY: usize = 8 * 1024 * 1024;
 
 /// Header swarm sends with the per-instance configure secret
 /// (32-hex plaintext from `Uuid::new_v4().simple()`).  Dyson hashes
@@ -169,19 +178,27 @@ pub(super) struct ConfigureBody {
     state_sync_token: Option<String>,
 }
 
-pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    // Pull the configure secret BEFORE consuming the body — the
-    // header check runs first so an unauthenticated caller can't
-    // make us read a 64 KiB body just to reject it.
-    let secret = match req
-        .headers()
+#[derive(Debug, Deserialize)]
+struct RestoreStateFileBody {
+    namespace: String,
+    path: String,
+    #[serde(default)]
+    mime: Option<String>,
+    #[serde(default)]
+    deleted: bool,
+    #[serde(default)]
+    body_b64: Option<String>,
+}
+
+fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Result<(), Resp> {
+    let secret = match headers
         .get(CONFIGURE_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
         Some(s) => s.to_owned(),
-        None => return unauthorized(state),
+        None => return Err(unauthorized(state)),
     };
 
     // Resolve the hash file's path.  Living next to `workspace/`
@@ -189,14 +206,12 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     // layer — same spot dyson_home resolves to from
     // `dyson swarm`'s DYSON_HOME env (default /var/lib/dyson).
     let snapshot = state.settings_snapshot();
-    let hash_dir = workspace_parent_dir(&snapshot.workspace.connection_string.expose());
+    let hash_dir = workspace_parent_dir(snapshot.workspace.connection_string.expose());
     let hash_path = hash_dir.join(CONFIGURE_HASH_FILENAME);
 
     // TOFU: if no hash on disk, this is the first call — argon2id
     // the inbound plaintext and persist.  Any later call presenting
-    // a different plaintext is rejected.  Single-tenant, so the
-    // first caller IS swarm (network isolation gates access to
-    // cubeproxy in the first place).
+    // a different plaintext is rejected.
     use argon2::Argon2;
     use argon2::password_hash::{
         PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
@@ -204,25 +219,25 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     if let Ok(stored) = std::fs::read_to_string(&hash_path) {
         let parsed = match PasswordHash::new(stored.trim()) {
             Ok(p) => p,
-            Err(e) => return bad_request(&format!("stored hash unreadable: {e}")),
+            Err(e) => return Err(bad_request(&format!("stored hash unreadable: {e}"))),
         };
         if Argon2::default()
             .verify_password(secret.as_bytes(), &parsed)
             .is_err()
         {
-            return unauthorized(state);
+            return Err(unauthorized(state));
         }
     } else {
         let salt = SaltString::generate(&mut OsRng);
         let hash = match Argon2::default().hash_password(secret.as_bytes(), &salt) {
             Ok(h) => h.to_string(),
-            Err(e) => return bad_request(&format!("argon2: {e}")),
+            Err(e) => return Err(bad_request(&format!("argon2: {e}"))),
         };
         if let Err(e) = std::fs::create_dir_all(&hash_dir) {
-            return bad_request(&format!("mkdir {}: {e}", hash_dir.display()));
+            return Err(bad_request(&format!("mkdir {}: {e}", hash_dir.display())));
         }
         if let Err(e) = std::fs::write(&hash_path, hash) {
-            return bad_request(&format!("write {}: {e}", hash_path.display()));
+            return Err(bad_request(&format!("write {}: {e}", hash_path.display())));
         }
         // Mode 0600 on Unix — only the dyson process should read it.
         #[cfg(unix)]
@@ -231,11 +246,22 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
             let _ = std::fs::set_permissions(&hash_path, std::fs::Permissions::from_mode(0o600));
         }
     }
+    Ok(())
+}
+
+pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
+    // Pull the configure secret BEFORE consuming the body — the
+    // header check runs first so an unauthenticated caller can't
+    // make us read a 64 KiB body just to reject it.
+    if let Err(resp) = authorize_configure(req.headers(), state) {
+        return resp;
+    }
 
     let body: ConfigureBody = match read_json_capped(req, MAX_CONFIGURE_BODY).await {
         Ok(b) => b,
         Err(e) => return bad_request(&e),
     };
+    let snapshot = state.settings_snapshot();
 
     // 1. Workspace: rewrite IDENTITY.md from the new fields.  Empty
     //    fields are skipped (so a configure carrying only `models`
@@ -491,6 +517,115 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "ingest_updated": ingest_changed,
         "state_sync_updated": state_sync_changed,
     }))
+}
+
+pub(super) async fn post_state_file(
+    req: Request<hyper::body::Incoming>,
+    state: &HttpState,
+) -> Resp {
+    if let Err(resp) = authorize_configure(req.headers(), state) {
+        return resp;
+    }
+    let body: RestoreStateFileBody = match read_json_capped(req, MAX_STATE_FILE_BODY).await {
+        Ok(b) => b,
+        Err(e) => return bad_request(&e),
+    };
+    let snapshot = state.settings_snapshot();
+    let root = match state_root(&snapshot, &body.namespace) {
+        Ok(root) => root,
+        Err(e) => return bad_request(&e),
+    };
+    let rel = match clean_relative_path(&body.path) {
+        Ok(path) => path,
+        Err(e) => return bad_request(&e),
+    };
+    let abs = root.join(&rel);
+
+    if body.deleted {
+        match std::fs::remove_file(&abs) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return bad_request(&format!("remove {}: {e}", abs.display())),
+        }
+        return json_ok(&serde_json::json!({
+            "ok": true,
+            "namespace": body.namespace,
+            "path": body.path,
+            "deleted": true,
+        }));
+    }
+
+    let Some(encoded) = body.body_b64.as_deref() else {
+        return bad_request("body_b64 is required unless deleted=true");
+    };
+    let bytes = match B64.decode(encoded) {
+        Ok(bytes) => bytes,
+        Err(e) => return bad_request(&format!("body_b64 decode: {e}")),
+    };
+    if bytes.len() > 5 * 1024 * 1024 {
+        return bad_request("state file exceeds 5 MiB");
+    }
+    if let Some(parent) = abs.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return bad_request(&format!("mkdir {}: {e}", parent.display()));
+    }
+    let tmp = abs.with_extension("dyson-state-restore.tmp");
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        return bad_request(&format!("write {}: {e}", tmp.display()));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &abs) {
+        let _ = std::fs::remove_file(&tmp);
+        return bad_request(&format!(
+            "rename {} -> {}: {e}",
+            tmp.display(),
+            abs.display()
+        ));
+    }
+    json_ok(&serde_json::json!({
+        "ok": true,
+        "namespace": body.namespace,
+        "path": body.path,
+        "mime": body.mime,
+        "bytes": bytes.len(),
+        "deleted": false,
+    }))
+}
+
+fn state_root(
+    settings: &crate::config::Settings,
+    namespace: &str,
+) -> std::result::Result<PathBuf, String> {
+    match namespace {
+        "workspace" => Ok(crate::util::resolve_tilde(
+            settings.workspace.connection_string.expose(),
+        )),
+        "chats" => Ok(crate::util::resolve_tilde(
+            settings.chat_history.connection_string.expose(),
+        )),
+        _ => Err(format!("unsupported namespace {namespace:?}")),
+    }
+}
+
+fn clean_relative_path(path: &str) -> std::result::Result<PathBuf, String> {
+    if path.is_empty() || path.len() > 2048 || path.contains('\0') {
+        return Err("bad path length or nul byte".into());
+    }
+    if path.starts_with('/') || path.contains('\\') {
+        return Err("paths must be relative and slash-separated".into());
+    }
+    let p = Path::new(path);
+    let mut out = PathBuf::new();
+    for component in p.components() {
+        match component {
+            Component::Normal(part) if !part.is_empty() => out.push(part),
+            _ => return Err("paths must be clean relative paths".into()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        return Err("path is empty".into());
+    }
+    Ok(out)
 }
 
 /// Diagnostic: return the live skill / tool inventory so an operator
@@ -1359,5 +1494,18 @@ mod tests {
         assert!(patch_mcp_servers_in_config(&path, &empty).unwrap());
         let after2: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(after2.get("mcp_servers").is_none());
+    }
+
+    #[test]
+    fn clean_relative_path_rejects_escape_paths() {
+        assert_eq!(
+            clean_relative_path("c-1/transcript.json").unwrap(),
+            PathBuf::from("c-1").join("transcript.json")
+        );
+        assert!(clean_relative_path("../secret").is_err());
+        assert!(clean_relative_path("/etc/passwd").is_err());
+        assert!(clean_relative_path("c-1/../../secret").is_err());
+        assert!(clean_relative_path("c-1\\transcript.json").is_err());
+        assert!(clean_relative_path("").is_err());
     }
 }

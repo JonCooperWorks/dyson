@@ -60,13 +60,19 @@ pub fn set_config(config: Option<StateSyncConfig>) {
     }
 }
 
-pub fn spawn_workspace_worker(workspace: PathBuf, initial: Option<StateSyncConfig>) {
+pub fn spawn_worker(workspace: PathBuf, chats: PathBuf, initial: Option<StateSyncConfig>) {
     let config = install_config(initial);
     let _handle = tokio::spawn(async move {
-        let mut worker = StateSyncWorker::new(vec![SyncRoot {
-            namespace: "workspace",
-            path: workspace,
-        }]);
+        let mut worker = StateSyncWorker::new(vec![
+            SyncRoot {
+                namespace: "workspace",
+                path: workspace,
+            },
+            SyncRoot {
+                namespace: "chats",
+                path: chats,
+            },
+        ]);
         let mut last_config: Option<StateSyncConfig> = None;
         loop {
             let current = config.lock().ok().and_then(|guard| guard.clone());
@@ -282,7 +288,13 @@ fn collect_root(root: &SyncRoot, dir: &Path, out: &mut Vec<FileSnapshot>) {
 }
 
 fn should_sync(namespace: &str, rel: &Path) -> bool {
-    if namespace != "workspace" || has_hidden_or_unclean_component(rel) {
+    if has_hidden_or_unclean_component(rel) {
+        return false;
+    }
+    if namespace == "chats" {
+        return true;
+    }
+    if namespace != "workspace" {
         return false;
     }
     let parts: Vec<&str> = rel
@@ -369,10 +381,26 @@ mod tests {
         assert!(should_sync("workspace", Path::new("MEMORY.md")));
         assert!(should_sync("workspace", Path::new("kb/facts.json")));
         assert!(should_sync("workspace", Path::new("skills/a/SKILL.md")));
+        assert!(should_sync("workspace", Path::new("skills/a/icon.svg")));
         assert!(!should_sync("workspace", Path::new(".env")));
         assert!(!should_sync("workspace", Path::new("memory.db")));
         assert!(!should_sync("workspace", Path::new("../MEMORY.md")));
-        assert!(!should_sync("chats", Path::new("c-1/transcript.json")));
+    }
+
+    #[test]
+    fn chats_allowlist_keeps_clean_chat_tree() {
+        assert!(should_sync("chats", Path::new("c-1/transcript.json")));
+        assert!(should_sync(
+            "chats",
+            Path::new("c-1/archives/2026-05-02T10-00-00.json")
+        ));
+        assert!(should_sync("chats", Path::new("c-1/media/f1.b64")));
+        assert!(should_sync("chats", Path::new("c-1/artefacts/a1.body")));
+        assert!(should_sync("chats", Path::new("c-1/files/f1.bin")));
+        assert!(should_sync("chats", Path::new("c-1/feedback.json")));
+        assert!(!should_sync("chats", Path::new(".chats_version")));
+        assert!(!should_sync("chats", Path::new("c-1/.tmp")));
+        assert!(!should_sync("chats", Path::new("../c-1/transcript.json")));
     }
 
     #[tokio::test]
