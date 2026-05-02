@@ -107,16 +107,15 @@ ENV MALLOC_CONF=dirty_decay_ms:1000,muzzy_decay_ms:1000
 # uses bpf_redirect which bypasses the host kernel's TCP stack, and
 # some upstream networks (Google, GitHub via Microsoft) silently drop
 # return packets for those flows.  Routing TCP through the
-# host-resident tinyproxy at mvm_gateway_ip:3128 makes the connection
-# originate from the host's kernel stack so every destination accepts
-# it.  These vars must be baked into the image because the cube
+# host-resident dyson-egress-proxy at mvm_gateway_ip:3128 makes the
+# connection originate from the host's kernel stack so every destination
+# accepts it.  These vars must be baked into the image because the cube
 # template's snapshot freezes /proc/<dyson>/environ at warmup time —
 # per-instance envVars passed by swarm at create-time never reach the
-# running process.  Per-policy gating happens host-side: tinyproxy
-# only accepts CONNECT from cube IPs whose policy allows public
-# egress (the swarm rewrites /etc/tinyproxy/cube-allow.conf on every
-# instance lifecycle event), so a cube under Airgap or Allowlist
-# carries the env but the proxy returns 403 — no internet leak.
+# running process.  Per-policy gating happens host-side: the proxy
+# loads /run/dyson-egress/policies.json and checks both the source
+# sandbox IP and destination IPs before dialing, so proxy egress is
+# never broader than the sandbox's declared network policy.
 # NO_PROXY keeps swarm /llm and the local CoreDNS resolver direct.
 ENV HTTPS_PROXY=http://169.254.68.5:3128
 ENV HTTP_PROXY=http://169.254.68.5:3128

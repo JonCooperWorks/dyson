@@ -161,8 +161,8 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     // these vars into its env so curl / requests / etc pick them up
     // for free; without this, dyson's own reqwest client would dial
     // every destination directly and silently bypass the host
-    // tinyproxy that the cube relies on for upstreams that drop
-    // eBPF-SNAT'd connections (Google, GitHub via Microsoft, …).
+    // Dyson egress proxy that the cube relies on for upstreams that
+    // drop eBPF-SNAT'd connections (Google, GitHub via Microsoft, …).
     //
     // NO_PROXY is honoured separately for each scheme: hosts in
     // NO_PROXY (typically the swarm /llm gateway and the local
