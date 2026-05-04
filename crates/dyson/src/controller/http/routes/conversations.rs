@@ -146,11 +146,96 @@ pub(crate) fn source_for_chat_id(id: &str) -> &'static str {
     }
 }
 
+fn validate_requested_chat_id(id: &str) -> Result<(), &'static str> {
+    if id.len() < 3 {
+        return Err("chat id must not be empty");
+    }
+    if id.len() > 80 {
+        return Err("chat id too long (max 80 chars)");
+    }
+    if !id.starts_with("c-") {
+        return Err("chat id must start with c-");
+    }
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("chat id must contain only ascii letters, digits, hyphen or underscore");
+    }
+    Ok(())
+}
+
 pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
     let body: CreateChatBody = match read_json_capped(req, MAX_SMALL_BODY).await {
         Ok(b) => b,
         Err(e) => return bad_request(&e),
     };
+    let requested_id = match body.id.as_deref() {
+        Some(id) => {
+            if let Err(e) = validate_requested_chat_id(id) {
+                return bad_request(e);
+            }
+            Some(id.to_string())
+        }
+        None => None,
+    };
+
+    // Internal callers (swarm webhooks) can request a stable id.  Make
+    // that idempotent: if the chat is already in memory, or already has
+    // a current transcript on disk after a controller restart, return it
+    // instead of minting a one-shot chat or overwriting its transcript.
+    if let Some(id) = requested_id.as_deref() {
+        if let Some(title) = {
+            let chats = state.chats.lock().await;
+            chats.get(id).map(|h| h.title.clone())
+        } {
+            return json_ok(&serde_json::json!({ "id": id, "title": title }));
+        }
+
+        let persisted = match state.history.as_ref() {
+            Some(h) => match h.list() {
+                Ok(ids) => ids.iter().any(|existing| existing == id),
+                Err(e) => {
+                    tracing::warn!(error = %e, chat_id = %id, "failed to list chat history for requested id");
+                    false
+                }
+            },
+            None => false,
+        };
+        if persisted {
+            let title = body.title.clone().unwrap_or_else(|| {
+                state
+                    .history
+                    .as_ref()
+                    .and_then(|h| h.load(id).ok())
+                    .and_then(|msgs| first_user_text(&msgs))
+                    .unwrap_or_else(|| id.to_string())
+            });
+            let handle = Arc::new(ChatHandle::new(
+                id.to_string(),
+                title.clone(),
+                state.data_dir.as_deref(),
+            ));
+            handle.hydrate_queue_from_disk().await;
+            {
+                let mut chats = state.chats.lock().await;
+                if let Some(existing) = chats.get(id) {
+                    return json_ok(
+                        &serde_json::json!({ "id": id, "title": existing.title.clone() }),
+                    );
+                }
+                chats.insert(id.to_string(), handle);
+            }
+            {
+                let mut order = state.order.lock().await;
+                if !order.iter().any(|existing| existing == id) {
+                    order.insert(0, id.to_string());
+                }
+            }
+            return json_ok(&serde_json::json!({ "id": id, "title": title }));
+        }
+    }
+
     // Rotate the caller-supplied previous chat first so "+ New
     // Conversation" produces a dated archive the same way /clear does.
     // Best-effort: a missing chat or IO error is logged but doesn't
@@ -180,16 +265,30 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
             }
         }
     }
-    let id = state.mint_id().await;
+    let id = match requested_id {
+        Some(id) => id,
+        None => state.mint_id().await,
+    };
     let title = body.title.unwrap_or_else(|| "New conversation".to_string());
     let handle = Arc::new(ChatHandle::new(
         id.clone(),
         title.clone(),
         state.data_dir.as_deref(),
     ));
-    state.chats.lock().await.insert(id.clone(), handle);
+    {
+        let mut chats = state.chats.lock().await;
+        if let Some(existing) = chats.get(&id) {
+            return json_ok(&serde_json::json!({ "id": id, "title": existing.title.clone() }));
+        }
+        chats.insert(id.clone(), handle);
+    }
     // Newest first — push to front so the sidebar shows new chats on top.
-    state.order.lock().await.insert(0, id.clone());
+    {
+        let mut order = state.order.lock().await;
+        if !order.iter().any(|existing| existing == &id) {
+            order.insert(0, id.clone());
+        }
+    }
     // Persist immediately so every conversation lives on disk 1:1 with
     // the in-memory list.  Without this an empty chat vanishes on
     // restart — the user would see "1 chat" in the sidebar, restart,

@@ -101,6 +101,11 @@ pub(crate) enum BlockDto {
 
 #[derive(Deserialize)]
 pub(crate) struct CreateChatBody {
+    /// Optional stable chat id for trusted internal callers that need
+    /// idempotent create-or-get semantics.  The route validates this
+    /// as a safe HTTP chat id before it is used as an on-disk path.
+    #[serde(default)]
+    pub(crate) id: Option<String>,
     pub(crate) title: Option<String>,
     /// Chat id whose on-disk transcript should be rotated (archived)
     /// before the new conversation is minted.  The web sidebar's

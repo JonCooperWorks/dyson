@@ -18,7 +18,7 @@ use dyson::controller::http::{HttpState, test_helpers};
 use dyson::feedback::FeedbackStore;
 use dyson::llm::stream::{StopReason, StreamEvent};
 use dyson::llm::{CompletionConfig, LlmClient, StreamResponse, ToolDefinition, ToolMode};
-use dyson::message::Message;
+use dyson::message::{ContentBlock, Message};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::{Method, Request, Response, StatusCode};
@@ -307,6 +307,68 @@ async fn create_then_list_returns_chat_with_only_real_fields() {
         sorted,
         vec!["has_artefacts", "id", "live", "source", "title"]
     );
+}
+
+#[tokio::test]
+async fn create_with_requested_id_is_idempotent_and_preserves_history() {
+    let r = rig().await;
+    let chat_id = "c-swarm-webhooks";
+
+    let created = body_json(
+        post_json(
+            &format!("{}/api/conversations", r.base),
+            &serde_json::json!({ "id": chat_id, "title": "Webhook inbox" }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(created["id"], chat_id);
+    assert_eq!(created["title"], "Webhook inbox");
+
+    test_helpers::seed_transcript(
+        r.state.clone(),
+        chat_id,
+        &[("user", "first webhook payload")],
+    )
+    .await
+    .expect("seed transcript");
+
+    let again = body_json(
+        post_json(
+            &format!("{}/api/conversations", r.base),
+            &serde_json::json!({ "id": chat_id, "title": "Webhook inbox" }),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(again["id"], chat_id);
+
+    let stored = r
+        .state
+        .history_for_test()
+        .expect("history")
+        .load(chat_id)
+        .expect("load history");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].content.first(),
+        Some(&ContentBlock::Text {
+            text: "first webhook payload".into()
+        })
+    );
+}
+
+#[tokio::test]
+async fn create_rejects_unsafe_requested_id() {
+    let r = rig().await;
+    let resp = post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "id": "../nope", "title": "bad" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = body_string(resp).await;
+    assert!(body.contains("chat id must start with c-"));
 }
 
 #[tokio::test]
