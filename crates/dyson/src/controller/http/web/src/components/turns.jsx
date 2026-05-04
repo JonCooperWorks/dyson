@@ -125,7 +125,7 @@ function Turn({ turn, tools, onOpenTool, expandedTools, turnIndex, rating, onRat
   // (uppercased) so a user-set "Atlas" reads as AT, not DY.  Falls back
   // to DY when agentName came up empty so the existing visual stays put.
   const agentInitials = (agentName.replace(/\s+/g, '').slice(0, 2) || 'dy').toUpperCase();
-  const avatarL = isUser ? 'JC' : agentInitials;
+  const avatarL = isUser ? 'me' : agentInitials;
   const ratable = !isUser && turnIndex != null && typeof onRate === 'function';
   const [copied, setCopied] = useState(false);
 
