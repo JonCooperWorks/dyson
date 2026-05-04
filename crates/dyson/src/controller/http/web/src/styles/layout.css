@@ -764,7 +764,7 @@
      zoomed in" with content overflowing the viewport.  Force 16px on mobile.
      !important defeats the per-element font: shorthand declarations (e.g.
      `.composer textarea` at 14.5px) without us having to chase every selector. */
-  input, textarea { font-size: 16px !important; }
+  input, textarea, select { font-size: 16px !important; }
   .body { grid-template-columns: 1fr !important; }
   .body .left { display: none; }
   .body.show-left .left {

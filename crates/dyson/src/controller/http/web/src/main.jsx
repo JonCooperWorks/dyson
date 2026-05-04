@@ -8,6 +8,7 @@ import './styles/tokens.css';
 import './styles/layout.css';
 import './styles/turns.css';
 import './styles/panels.css';
+import './styles/swarm-theme.css';
 
 import React from 'react';
 import ReactDOM from 'react-dom/client';
