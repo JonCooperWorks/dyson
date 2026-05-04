@@ -72,20 +72,6 @@
   --lift-3: 0 6px 22px rgba(0, 0, 0, 0.25);
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f8fafc;
-    --bg-1: #ffffff;
-    --bg-2: #f1f5f9;
-    --fg: #0f172a;
-    --fg-muted: #475569;
-    --fg-faint: #94a3b8;
-    --border: #e2e8f0;
-    --accent-fg: #ffffff;
-    --line-2: color-mix(in srgb, var(--border) 62%, var(--fg-muted));
-  }
-}
-
 * { box-sizing: border-box; }
 
 html,
