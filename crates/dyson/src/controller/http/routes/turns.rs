@@ -526,7 +526,7 @@ fn spawn_title_generation(
                 handle.emit(SseEvent::Title { title });
             }
             Err(e) => {
-                tracing::debug!(error = %e, chat_id = %chat_id, "background chat title generation failed");
+                tracing::warn!(error = %e, chat_id = %chat_id, "background chat title generation failed");
             }
         }
     });
@@ -539,7 +539,9 @@ async fn generate_title(
 ) -> crate::error::Result<String> {
     let config = CompletionConfig {
         model,
-        max_tokens: 32,
+        // Reasoning models can spend tokens on hidden thinking before
+        // producing the short visible title.
+        max_tokens: 256,
         temperature: Some(0.2),
         api_tool_injections: Vec::new(),
     };
