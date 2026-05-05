@@ -242,6 +242,9 @@ pub enum SseEvent {
     LlmError {
         message: String,
     },
+    Title {
+        title: String,
+    },
     Done,
 }
 

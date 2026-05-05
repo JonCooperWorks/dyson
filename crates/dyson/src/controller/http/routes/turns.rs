@@ -15,14 +15,22 @@ use std::sync::Arc;
 use base64::Engine;
 use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode};
+use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
+
+use crate::agent::rate_limiter::{Priority, RateLimitedHandle};
+use crate::llm::stream::StreamEvent;
+use crate::llm::{CompletionConfig, LlmClient};
+use crate::message::Message;
 
 use super::super::output::SseOutput;
 use super::super::responses::{Resp, bad_request, boxed, json_ok, not_found, read_json_capped};
-use super::super::state::HttpState;
+use super::super::state::{ChatHandle, HttpState};
 use super::super::wire::{MAX_TURN_BODY, SseEvent, TurnBody};
 use super::super::{AgentMode, build_agent};
 use super::conversations::bump_to_front;
+
+const PLACEHOLDER_TITLE: &str = "New conversation";
 
 pub(super) async fn post(
     req: Request<hyper::body::Incoming>,
@@ -86,9 +94,13 @@ pub(super) async fn post(
         if let Ok(mut t) = state.titles.lock() {
             t.remove(id);
         }
+        handle.set_title(PLACEHOLDER_TITLE.to_string());
         if let Some(h) = state.history.as_ref() {
             if let Err(e) = h.rotate(id) {
                 tracing::warn!(error = %e, chat_id = %id, "failed to rotate chat history");
+            }
+            if let Err(e) = h.remove_title(id) {
+                tracing::warn!(error = %e, chat_id = %id, "failed to remove chat title");
             }
             // Re-create the current file as an empty transcript so the
             // chat stays visible across restarts.  Without this,
@@ -104,6 +116,9 @@ pub(super) async fn post(
         // to resurrect.  Cancel does NOT drain (queued messages there
         // are independent intentions); only /clear wipes them.
         handle.clear_queued().await;
+        handle.emit(SseEvent::Title {
+            title: PLACEHOLDER_TITLE.to_string(),
+        });
         handle.emit(SseEvent::Done);
         // /clear ends any in-flight stream — wipe the replay ring so a
         // subsequent send doesn't see this turn's events.
@@ -169,6 +184,7 @@ pub(super) async fn post(
     let registry = Arc::clone(&state.registry);
     let history = state.history.clone();
     let prompt = body.prompt;
+    let should_title = title_needs_generation(&handle.title()) && !prompt.trim().is_empty();
     let attachments = decoded;
     let chat_handle = Arc::clone(&handle);
     let chat_id = id.to_string();
@@ -179,6 +195,24 @@ pub(super) async fn post(
     let artefact_id = Arc::clone(&state.artefact_id);
     let data_dir = state.data_dir.clone();
     let ingest = Arc::clone(&state.ingest);
+
+    if should_title {
+        let title_client = match override_provider_name.as_deref() {
+            Some(p) => registry
+                .get(p)
+                .unwrap_or_else(|_| registry.get_default())
+                .with_priority(Priority::Background),
+            None => registry.get_default().with_priority(Priority::Background),
+        };
+        spawn_title_generation(
+            Arc::clone(&state),
+            Arc::clone(&handle),
+            id.to_string(),
+            prompt.clone(),
+            settings.agent.model.clone(),
+            title_client,
+        );
+    }
 
     tokio::spawn(async move {
         tracing::info!(chat_id = %chat_id, "TURN_WORKER: spawned");
@@ -464,6 +498,105 @@ pub(super) async fn post(
         .unwrap()
 }
 
+fn title_needs_generation(title: &str) -> bool {
+    let t = title.trim();
+    t.is_empty() || t.eq_ignore_ascii_case(PLACEHOLDER_TITLE)
+}
+
+fn spawn_title_generation(
+    state: Arc<HttpState>,
+    handle: Arc<ChatHandle>,
+    chat_id: String,
+    prompt: String,
+    model: String,
+    client: RateLimitedHandle<Box<dyn LlmClient>>,
+) {
+    tokio::spawn(async move {
+        match generate_title(client, model, prompt).await {
+            Ok(title) => {
+                handle.set_title(title.clone());
+                if let Ok(mut titles) = state.titles.lock() {
+                    titles.insert(chat_id.clone(), title.clone());
+                }
+                if let Some(h) = state.history.as_ref()
+                    && let Err(e) = h.save_title(&chat_id, &title)
+                {
+                    tracing::warn!(error = %e, chat_id = %chat_id, "failed to save generated chat title");
+                }
+                handle.emit(SseEvent::Title { title });
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, chat_id = %chat_id, "background chat title generation failed");
+            }
+        }
+    });
+}
+
+async fn generate_title(
+    client: RateLimitedHandle<Box<dyn LlmClient>>,
+    model: String,
+    prompt: String,
+) -> crate::error::Result<String> {
+    let config = CompletionConfig {
+        model,
+        max_tokens: 32,
+        temperature: Some(0.2),
+        api_tool_injections: Vec::new(),
+    };
+    let system = "You create concise chat titles. Return only a short title, 2-6 words, with no quotes, markdown, or trailing punctuation.";
+    let user = format!(
+        "Create a title for this new chat from the user's first message:\n\n{}",
+        prompt.trim()
+    );
+    let messages = vec![Message::user(&user)];
+    let response = client
+        .access()?
+        .stream(&messages, system, "", &[], &config)
+        .await?;
+    let mut stream = response.stream;
+    let mut raw = String::new();
+    while let Some(event) = stream.next().await {
+        match event? {
+            StreamEvent::TextDelta(delta) => raw.push_str(&delta),
+            StreamEvent::MessageComplete { .. } => break,
+            StreamEvent::Error(e) => return Err(e),
+            _ => {}
+        }
+    }
+    clean_generated_title(&raw).ok_or_else(|| {
+        crate::error::DysonError::Llm("title generation returned empty title".into())
+    })
+}
+
+fn clean_generated_title(raw: &str) -> Option<String> {
+    let mut title = raw.lines().find(|line| !line.trim().is_empty())?.trim();
+    if let Some(rest) = title.strip_prefix("Title:") {
+        title = rest.trim();
+    } else if let Some(rest) = title.strip_prefix("title:") {
+        title = rest.trim();
+    }
+    let mut title = title
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '*' || c == '#')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    while matches!(
+        title.chars().last(),
+        Some('.' | '!' | '?' | ':' | ';' | ',')
+    ) {
+        title.pop();
+    }
+    if title.chars().count() > 64 {
+        title = title.chars().take(64).collect::<String>();
+        title = title.trim().to_string();
+    }
+    if title.is_empty() || title_needs_generation(&title) {
+        None
+    } else {
+        Some(title)
+    }
+}
+
 /// Combine N queued turns into a single prompt + attachment set so the
 /// agent sees one coherent user message instead of having to deduce
 /// they came from separate POSTs.  Single-turn drains pass through
@@ -586,6 +719,15 @@ mod tests {
             atts.is_empty(),
             "malformed attachment must be skipped, not panic"
         );
+    }
+
+    #[test]
+    fn clean_generated_title_strips_model_wrapping() {
+        assert_eq!(
+            clean_generated_title("Title: \"Investigate Login Failure.\"\n").as_deref(),
+            Some("Investigate Login Failure")
+        );
+        assert_eq!(clean_generated_title("New conversation"), None);
     }
 
     /// Regression for the chat-stuck-on-warmup-placeholder bug.

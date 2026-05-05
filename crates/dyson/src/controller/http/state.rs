@@ -92,7 +92,7 @@ pub(crate) const QUEUE_CAP: usize = 16;
 /// Per-chat handle.  Agent built lazily on first turn so that listing chats
 /// or creating an empty one is cheap.
 pub(crate) struct ChatHandle {
-    pub(crate) title: String,
+    title: std::sync::RwLock<String>,
     /// The chat's id.  Carried on the handle so persistence helpers
     /// (queue, future state) don't need it threaded from the call site.
     pub(crate) chat_id: String,
@@ -284,7 +284,7 @@ impl ChatHandle {
         let (tx, _) = broadcast::channel(4096);
         let queue_path = data_dir.map(|d| d.join(&chat_id).join("queue.json"));
         Self {
-            title,
+            title: std::sync::RwLock::new(title),
             chat_id,
             queue_path,
             queued: std::sync::Mutex::new(std::collections::VecDeque::new()),
@@ -294,6 +294,20 @@ impl ChatHandle {
             replay: Arc::new(std::sync::Mutex::new(EventRing::new())),
             cancel: Mutex::new(None),
             busy: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub(crate) fn title(&self) -> String {
+        match self.title.read() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    pub(crate) fn set_title(&self, title: String) {
+        match self.title.write() {
+            Ok(mut g) => *g = title,
+            Err(p) => *p.into_inner() = title,
         }
     }
 

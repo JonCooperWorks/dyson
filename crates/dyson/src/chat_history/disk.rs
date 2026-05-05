@@ -78,6 +78,10 @@ impl DiskChatHistory {
         self.chat_root(chat_id).join("transcript.json")
     }
 
+    fn title_path(&self, chat_id: &str) -> PathBuf {
+        self.chat_root(chat_id).join("title.txt")
+    }
+
     fn archives_dir(&self, chat_id: &str) -> PathBuf {
         self.chat_root(chat_id).join("archives")
     }
@@ -137,6 +141,30 @@ impl ChatHistory for DiskChatHistory {
             "chat history loaded"
         );
         Ok(messages)
+    }
+
+    fn save_title(&self, chat_id: &str, title: &str) -> Result<()> {
+        let root = self.chat_root(chat_id);
+        std::fs::create_dir_all(&root)?;
+        std::fs::write(self.title_path(chat_id), title)?;
+        Ok(())
+    }
+
+    fn load_title(&self, chat_id: &str) -> Result<Option<String>> {
+        let path = self.title_path(chat_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let title = std::fs::read_to_string(path)?.trim().to_string();
+        Ok((!title.is_empty()).then_some(title))
+    }
+
+    fn remove_title(&self, chat_id: &str) -> Result<()> {
+        let path = self.title_path(chat_id);
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
     }
 
     fn rotate(&self, chat_id: &str) -> Result<()> {
@@ -495,6 +523,26 @@ mod tests {
             .filter_map(std::result::Result::ok)
             .collect();
         assert_eq!(archives.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn title_round_trips_independently_of_transcript() {
+        let (dir, store) = temp_store("title");
+        store
+            .save("chat_t", &[Message::user("first prompt")])
+            .unwrap();
+        store.save_title("chat_t", "Project Scope").unwrap();
+
+        assert_eq!(
+            store.load_title("chat_t").unwrap().as_deref(),
+            Some("Project Scope")
+        );
+
+        store.remove_title("chat_t").unwrap();
+        assert_eq!(store.load_title("chat_t").unwrap(), None);
+        assert_eq!(store.load("chat_t").unwrap().len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

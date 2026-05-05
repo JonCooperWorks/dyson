@@ -395,4 +395,14 @@ describe('turns.jsx — markdown + composer regressions', () => {
       'hardcoded fake screenshot.png attachment must be gone',
     ).toBe(true);
   });
+
+  it('new empty conversations focus the composer and accept title SSE', () => {
+    const app = src('components/app.jsx');
+    const stream = src('api/stream.js');
+    expect(app).toContain('autoFocusKey={empty ? conv : null}');
+    expect(turnsSrc).toContain('autoFocusKey');
+    expect(turnsSrc).toContain('preventScroll: true');
+    expect(stream).toContain("case 'title':");
+    expect(app).toContain('onTitle:');
+  });
 });

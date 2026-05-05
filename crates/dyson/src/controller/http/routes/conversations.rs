@@ -18,7 +18,9 @@ use crate::message::{ContentBlock, Message, Role};
 use super::super::responses::{Resp, bad_request, json_ok, not_found, read_json_capped};
 use super::super::state::{ChatHandle, HttpState};
 use super::super::stores::ArtefactStore;
-use super::super::wire::{BlockDto, ConversationDto, CreateChatBody, MAX_SMALL_BODY, MessageDto};
+use super::super::wire::{
+    BlockDto, ConversationDto, CreateChatBody, MAX_SMALL_BODY, MessageDto, SseEvent,
+};
 
 pub(super) async fn list(state: &HttpState) -> Resp {
     // Prefer the disk's mtime-sorted list when a ChatHistory is
@@ -71,8 +73,14 @@ pub(super) async fn list(state: &HttpState) -> Resp {
                 let t = state
                     .history
                     .as_ref()
-                    .and_then(|h| h.load(id).ok())
-                    .and_then(|msgs| first_user_text(&msgs))
+                    .and_then(|h| h.load_title(id).ok().flatten())
+                    .or_else(|| {
+                        state
+                            .history
+                            .as_ref()
+                            .and_then(|h| h.load(id).ok())
+                            .and_then(|msgs| first_user_text(&msgs))
+                    })
                     .unwrap_or_else(|| id.clone());
                 titles.insert(id.clone(), t.clone());
                 t
@@ -124,7 +132,7 @@ pub(super) async fn list(state: &HttpState) -> Resp {
         if let Some(h) = chats.get(id) {
             dtos.push(ConversationDto {
                 id: id.clone(),
-                title: h.title.clone(),
+                title: h.title(),
                 live: h.busy.load(std::sync::atomic::Ordering::Relaxed),
                 has_artefacts: with_artefacts.contains(id),
                 source: source_for_chat_id(id),
@@ -187,7 +195,7 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
     if let Some(id) = requested_id.as_deref() {
         if let Some(title) = {
             let chats = state.chats.lock().await;
-            chats.get(id).map(|h| h.title.clone())
+            chats.get(id).map(|h| h.title())
         } {
             return json_ok(&serde_json::json!({ "id": id, "title": title }));
         }
@@ -207,8 +215,14 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
                 state
                     .history
                     .as_ref()
-                    .and_then(|h| h.load(id).ok())
-                    .and_then(|msgs| first_user_text(&msgs))
+                    .and_then(|h| h.load_title(id).ok().flatten())
+                    .or_else(|| {
+                        state
+                            .history
+                            .as_ref()
+                            .and_then(|h| h.load(id).ok())
+                            .and_then(|msgs| first_user_text(&msgs))
+                    })
                     .unwrap_or_else(|| id.to_string())
             });
             let handle = Arc::new(ChatHandle::new(
@@ -220,9 +234,7 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
             {
                 let mut chats = state.chats.lock().await;
                 if let Some(existing) = chats.get(id) {
-                    return json_ok(
-                        &serde_json::json!({ "id": id, "title": existing.title.clone() }),
-                    );
+                    return json_ok(&serde_json::json!({ "id": id, "title": existing.title() }));
                 }
                 chats.insert(id.to_string(), handle);
             }
@@ -243,10 +255,14 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
     // cleared so a future turn on that id doesn't resurrect stale
     // context from the agent cache.
     if let Some(prev) = body.rotate_previous.as_deref() {
-        if let Some(prev_handle) = state.chats.lock().await.get(prev).cloned()
-            && let Some(agent) = prev_handle.agent.lock().await.as_mut()
-        {
-            agent.clear();
+        if let Some(prev_handle) = state.chats.lock().await.get(prev).cloned() {
+            if let Some(agent) = prev_handle.agent.lock().await.as_mut() {
+                agent.clear();
+            }
+            prev_handle.set_title("New conversation".to_string());
+            prev_handle.emit(SseEvent::Title {
+                title: "New conversation".to_string(),
+            });
         }
         // The previous chat's first-user-text is gone after rotate —
         // drop any cached title so the next list call rehydrates.
@@ -256,6 +272,9 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
         if let Some(h) = state.history.as_ref() {
             if let Err(e) = h.rotate(prev) {
                 tracing::warn!(error = %e, chat_id = %prev, "failed to rotate previous chat");
+            }
+            if let Err(e) = h.remove_title(prev) {
+                tracing::warn!(error = %e, chat_id = %prev, "failed to remove previous chat title");
             }
             // Keep the rotated chat visible across restarts by seeding
             // an empty current file — otherwise `list()` skips it and
@@ -278,7 +297,7 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
     {
         let mut chats = state.chats.lock().await;
         if let Some(existing) = chats.get(&id) {
-            return json_ok(&serde_json::json!({ "id": id, "title": existing.title.clone() }));
+            return json_ok(&serde_json::json!({ "id": id, "title": existing.title() }));
         }
         chats.insert(id.clone(), handle);
     }
@@ -299,6 +318,11 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
         && let Err(e) = h.save(&id, &[])
     {
         tracing::warn!(error = %e, chat_id = %id, "failed to persist new chat");
+    }
+    if let Some(h) = state.history.as_ref()
+        && let Err(e) = h.save_title(&id, &title)
+    {
+        tracing::warn!(error = %e, chat_id = %id, "failed to persist chat title");
     }
     json_ok(&serde_json::json!({ "id": id, "title": title }))
 }
@@ -373,7 +397,7 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
 
     json_ok(&serde_json::json!({
         "id": id,
-        "title": handle.title,
+        "title": handle.title(),
         // `live` mirrors the busy latch the list DTO already exposes,
         // so a mid-stream reload can decide to re-attach the SSE
         // stream instead of showing the chat blank.  Same Relaxed

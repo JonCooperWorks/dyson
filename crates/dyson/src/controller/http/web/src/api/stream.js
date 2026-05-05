@@ -13,6 +13,7 @@
  *   checkpoint  — { text }
  *   file        — { name, mime_type, url, inline_image, parent_tool_id? }
  *   artefact    — { id, kind, title, url, bytes, tool_use_id?, metadata?, parent_tool_id? }
+ *   title       — { title }
  *   llm_error   — { message }
  *   done        — terminator; caller should close the EventSource
  *
@@ -44,6 +45,7 @@ export function dispatchStreamEvent(msg, callbacks) {
     case 'checkpoint':  callbacks.onCheckpoint && callbacks.onCheckpoint(msg); return true;
     case 'file':        callbacks.onFile && callbacks.onFile(msg); return true;
     case 'artefact':    callbacks.onArtefact && callbacks.onArtefact(msg); return true;
+    case 'title':       callbacks.onTitle && callbacks.onTitle(msg); return true;
     case 'llm_error':   callbacks.onError && callbacks.onError(msg.message); return true;
     case 'done':        callbacks.onDone && callbacks.onDone(); return true;
     default:            return false;

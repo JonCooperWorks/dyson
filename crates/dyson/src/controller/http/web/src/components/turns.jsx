@@ -360,7 +360,7 @@ function TypingIndicator({ phase, tname, onJump }) {
   );
 }
 
-function Composer({ onSend, onCancel, running }) {
+function Composer({ onSend, onCancel, running, autoFocusKey }) {
   const [val, setVal] = useState('');
   const [slash, setSlash] = useState(false);
   // Real File objects from <input type="file"> or drag-drop.  Sent as
@@ -378,6 +378,12 @@ function Composer({ onSend, onCancel, running }) {
     taRef.current.style.height = 'auto';
     taRef.current.style.height = Math.min(240, taRef.current.scrollHeight) + 'px';
   }, [val]);
+
+  useEffect(() => {
+    if (!autoFocusKey) return;
+    const id = setTimeout(() => taRef.current?.focus({ preventScroll: true }), 0);
+    return () => clearTimeout(id);
+  }, [autoFocusKey]);
 
   const sub = (e) => {
     e?.preventDefault();

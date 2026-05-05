@@ -499,7 +499,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
       </div>
       <ComposerDock running={session.running} phase={session.phase} tname={session.tname}
                     onJump={() => session.liveToolRef && handleOpenTool(session.liveToolRef)}
-                    onSend={sendMsg} onCancel={onCancel}/>
+                    onSend={sendMsg} onCancel={onCancel} autoFocusKey={empty ? conv : null}/>
     </div>
   );
 }
@@ -520,12 +520,12 @@ function ConversationShell({ onSend, onCancel, children }) {
   );
 }
 
-function ComposerDock({ running, phase, tname, onJump, onSend, onCancel }) {
+function ComposerDock({ running, phase, tname, onJump, onSend, onCancel, autoFocusKey }) {
   return (
     <div className="composer-dock">
       <div style={{width:'100%',maxWidth:820,display:'flex',flexDirection:'column',alignItems:'stretch'}}>
         {running && <TypingIndicator phase={phase} tname={tname} onJump={onJump}/>}
-        <Composer onSend={onSend} onCancel={onCancel} running={!!running}/>
+        <Composer onSend={onSend} onCancel={onCancel} running={!!running} autoFocusKey={autoFocusKey}/>
       </div>
     </div>
   );
@@ -673,6 +673,10 @@ function streamCallbacks(conv) {
     onCheckpoint: ({ text }) => {
       const ref = getSession(conv)?.liveToolRef;
       if (ref) appendToolText(ref, text + '\n');
+    },
+
+    onTitle: ({ title }) => {
+      if (title) upsertConversation({ id: conv, title });
     },
 
     onError: (message) => updateSession(conv,

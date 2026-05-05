@@ -786,6 +786,38 @@ async fn post_turn_404_for_unknown_chat() {
 }
 
 #[tokio::test]
+async fn first_turn_generates_chat_title_in_background() {
+    let r = rig().await;
+    let id = create_chat(&r, "New conversation").await;
+    let resp = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "investigate the login failure" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let mut seen = None;
+    for _ in 0..20 {
+        let list = body_json(get(&format!("{}/api/conversations", r.base)).await).await;
+        seen = list
+            .as_array()
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row["id"].as_str() == Some(id.as_str()))
+            })
+            .and_then(|row| row["title"].as_str().map(str::to_string));
+        if seen.as_deref() == Some("ok") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(seen.as_deref(), Some("ok"));
+
+    let title_path = r.chat_dir.path().join(&id).join("title.txt");
+    assert_eq!(std::fs::read_to_string(title_path).unwrap(), "ok");
+}
+
+#[tokio::test]
 async fn post_turn_while_busy_enqueues_instead_of_409() {
     // Pre-fix behavior: a POST landing while a turn was running got a
     // 409 and the user's message was lost.  New behavior: queue it,

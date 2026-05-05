@@ -61,6 +61,21 @@ pub trait ChatHistory: Send + Sync {
     /// if no history exists for this chat_id.
     fn load(&self, chat_id: &str) -> Result<Vec<Message>>;
 
+    /// Save an optional display title for a chat.
+    fn save_title(&self, _chat_id: &str, _title: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Load a display title for a chat, when the backend stores one.
+    fn load_title(&self, _chat_id: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Remove a generated display title for a chat.
+    fn remove_title(&self, _chat_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Rotate the conversation history for a chat.
     ///
     /// Called on /clear.  The current history is archived (not deleted)
