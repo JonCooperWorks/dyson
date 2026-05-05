@@ -539,9 +539,9 @@ async fn generate_title(
 ) -> crate::error::Result<String> {
     let config = CompletionConfig {
         model,
-        // Reasoning models can spend tokens on hidden thinking before
-        // producing the short visible title.
-        max_tokens: 256,
+        // Reasoning models can spend hundreds of tokens on hidden
+        // thinking before producing the short visible title.
+        max_tokens: 1024,
         temperature: Some(0.2),
         api_tool_injections: Vec::new(),
     };
