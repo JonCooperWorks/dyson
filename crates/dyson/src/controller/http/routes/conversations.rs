@@ -15,7 +15,9 @@ use hyper::Request;
 
 use crate::message::{ContentBlock, Message, Role};
 
-use super::super::responses::{Resp, bad_request, json_ok, not_found, read_json_capped};
+use super::super::responses::{
+    Resp, bad_request, json_ok, not_found, read_json_capped, safe_store_id,
+};
 use super::super::state::{ChatHandle, HttpState};
 use super::super::stores::ArtefactStore;
 use super::super::wire::{
@@ -173,6 +175,14 @@ fn validate_requested_chat_id(id: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn validate_existing_chat_id(id: &str) -> Result<(), &'static str> {
+    if safe_store_id(id) {
+        Ok(())
+    } else {
+        Err("chat id must contain only ascii letters, digits, hyphen or underscore")
+    }
+}
+
 pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
     let body: CreateChatBody = match read_json_capped(req, MAX_SMALL_BODY).await {
         Ok(b) => b,
@@ -255,6 +265,9 @@ pub(super) async fn create(req: Request<hyper::body::Incoming>, state: &HttpStat
     // cleared so a future turn on that id doesn't resurrect stale
     // context from the agent cache.
     if let Some(prev) = body.rotate_previous.as_deref() {
+        if let Err(e) = validate_existing_chat_id(prev) {
+            return bad_request(e);
+        }
         if let Some(prev_handle) = state.chats.lock().await.get(prev).cloned() {
             if let Some(agent) = prev_handle.agent.lock().await.as_mut() {
                 agent.clear();

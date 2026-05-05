@@ -1403,6 +1403,27 @@ async fn create_conversation_rotates_previous_chat_when_requested() {
 }
 
 #[tokio::test]
+async fn create_conversation_rejects_traversal_rotate_previous() {
+    let r = rig().await;
+    let outside = r.chat_dir.path().parent().unwrap().join("escape");
+    let _ = std::fs::remove_dir_all(&outside);
+
+    let resp = post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({
+            "title": "new",
+            "rotate_previous": "../escape",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !outside.join("transcript.json").exists(),
+        "rotate_previous must not write outside the chat history root",
+    );
+}
+
+#[tokio::test]
 async fn mint_id_skips_ids_used_by_rotated_archives_or_orphan_artefacts() {
     // Regression: a freshly minted chat was inheriting artefacts from
     // a prior chat_id because `mint_id` only checked in-memory chats.
@@ -1786,6 +1807,35 @@ async fn bearer_auth_still_serves_static_shell_without_token() {
         let resp = get(&format!("{}{}", r.base, css)).await;
         assert_eq!(resp.status(), StatusCode::OK, "GET {css} must be exempt");
     }
+}
+
+#[tokio::test]
+async fn debug_log_endpoint_requires_api_auth() {
+    let auth = hashed_bearer_for_test("s3cret");
+    let r = rig_with_auth(auth).await;
+    let resp = get(&format!("{}/api/_debug/log", r.base)).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "debug log path must stay behind the normal /api auth gate",
+    );
+}
+
+#[tokio::test]
+async fn debug_log_endpoint_respects_loopback_host_gate() {
+    let r = rig_with_auth_and_mode(Arc::new(DangerousNoAuth), test_helpers::AuthMode::None).await;
+    let resp = request_with_headers(
+        &format!("{}/api/_debug/log", r.base),
+        Method::GET,
+        None,
+        &[("host", "evil.example")],
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::MISDIRECTED_REQUEST,
+        "debug log path must not bypass the DNS-rebinding Host gate",
+    );
 }
 
 #[tokio::test]

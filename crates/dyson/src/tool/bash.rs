@@ -41,6 +41,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
+use crate::sandbox::policy_sandbox::redact_secrets;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 // ---------------------------------------------------------------------------
@@ -142,7 +143,8 @@ impl Tool for BashTool {
             .as_str()
             .ok_or_else(|| DysonError::tool("bash", "missing or invalid 'command' field"))?;
 
-        tracing::info!(command = command, working_dir = %ctx.working_dir.display(), "executing bash command");
+        let log_command = redact_secrets(command);
+        tracing::info!(command = %log_command, working_dir = %ctx.working_dir.display(), "executing bash command");
 
         // -- Spawn the child process --
         //
@@ -266,9 +268,7 @@ impl Tool for BashTool {
                     "bash command completed"
                 );
 
-                // Log the first portion of the output for debugging.
-                let output_preview = &truncated[..truncated.len().min(300)];
-                tracing::debug!(output_preview = output_preview, "bash output preview");
+                tracing::debug!(output_len = truncated.len(), "bash output captured");
 
                 Ok(ToolOutput {
                     content: truncated.into_owned(),

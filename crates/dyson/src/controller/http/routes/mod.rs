@@ -29,7 +29,6 @@ mod admin;
 mod agent;
 mod artefacts;
 pub(super) mod conversations;
-mod debug_log;
 mod feedback;
 mod files;
 mod mind;
@@ -59,12 +58,6 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
-    // Auth-bypassed debug tail of the rolling log file.  Only purpose
-    // is to debug the cube → swarm /llm path from the host without an
-    // exec channel into the MicroVM.  GET only so no CSRF needed.
-    if method == Method::GET && path == "/api/_debug/log" {
-        return debug_log::tail();
-    }
     // Borrowed view of the path segments — `["api", "conversations", id, …]`
     // — keyed on once and reused by the route match.
     let segs: Vec<&str> = path.trim_matches('/').split('/').collect();
