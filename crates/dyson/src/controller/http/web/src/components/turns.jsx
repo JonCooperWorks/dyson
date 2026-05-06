@@ -12,6 +12,50 @@ import { SLASH_COMMANDS } from '../store/constants.js';
 import { ToolBody, copyTextForTool } from './panels.jsx';
 import MarkdownIt from 'markdown-it';
 
+const CLIPBOARD_IMAGE_EXT = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/bmp': 'bmp',
+  'image/svg+xml': 'svg',
+};
+
+function normalizeClipboardImage(file, index) {
+  if (!file || !(file.type || '').startsWith('image/')) return null;
+  const hasUsefulName = file.name && !/^image\.(?:png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name);
+  if (hasUsefulName) return file;
+  const ext = CLIPBOARD_IMAGE_EXT[file.type] || file.type.split('/')[1] || 'png';
+  const name = `pasted-image-${index + 1}.${ext.replace(/[^a-z0-9]+/gi, '') || 'png'}`;
+  return new File([file], name, {
+    type: file.type || 'image/png',
+    lastModified: file.lastModified || Date.now(),
+  });
+}
+
+function clipboardImageFiles(data) {
+  if (!data) return [];
+  const out = [];
+  const seen = new Set();
+  const add = (file) => {
+    if (!file || !(file.type || '').startsWith('image/')) return;
+    const rawSig = `${file.name || ''}:${file.type}:${file.size}:${file.lastModified}`;
+    if (seen.has(rawSig)) return;
+    const normalized = normalizeClipboardImage(file, out.length);
+    if (!normalized) return;
+    seen.add(rawSig);
+    out.push(normalized);
+  };
+
+  for (const item of Array.from(data.items || [])) {
+    if (item.kind === 'file' && (item.type || '').startsWith('image/')) {
+      add(item.getAsFile());
+    }
+  }
+  for (const file of Array.from(data.files || [])) add(file);
+  return out;
+}
+
 function ThinkingBlock({ text }) {
   return (
     <details className="thinking">
@@ -398,6 +442,13 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
     e.target.value = '';  // allow re-picking the same file
   };
 
+  const onPaste = (e) => {
+    const images = clipboardImageFiles(e.clipboardData);
+    if (!images.length) return;
+    e.preventDefault();
+    setAtts(a => [...a, ...images]);
+  };
+
   return (
     <div className="composer-wrap">
       {slash && filtered.length > 0 && (
@@ -431,6 +482,7 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
             setVal(e.target.value);
             setSlash(e.target.value.startsWith('/'));
           }}
+          onPaste={onPaste}
           onKeyDown={e => {
             // Enter alone sends; Shift+Enter inserts a newline.
             // Ignore other modifiers so OS-level shortcuts (⌘↵ etc.)
@@ -518,4 +570,4 @@ function fileToBase64(file) {
   });
 }
 
-export { Turn, ThinkingBlock, ToolChip, ToolBlock, FileBlock, ArtefactBlock, ErrorBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64 };
+export { Turn, ThinkingBlock, ToolChip, ToolBlock, FileBlock, ArtefactBlock, ErrorBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64, clipboardImageFiles };
