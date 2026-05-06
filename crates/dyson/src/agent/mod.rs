@@ -107,7 +107,7 @@ use crate::config::{AgentSettings, CompactionConfig};
 use crate::controller::Output;
 use crate::error::{DysonError, LlmRecovery, Result};
 use crate::llm::{CompletionConfig, LlmClient, ToolDefinition};
-use crate::message::{ContentBlock, Message};
+use crate::message::{ContentBlock, Message, Role};
 use crate::sandbox::Sandbox;
 use crate::skill::Skill;
 use crate::tool::{Tool, ToolContext};
@@ -302,6 +302,19 @@ impl Conversation {
             budget_warning_fired: false,
         }
     }
+}
+
+fn restored_turn_count(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| {
+            matches!(message.role, Role::User)
+                && !message
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        })
+        .count()
 }
 
 /// Persistence backend for rotating pre-compaction conversation snapshots.
@@ -848,6 +861,7 @@ impl Agent {
 
     /// Replace the conversation history (for restoring from persistence).
     pub fn set_messages(&mut self, messages: Vec<Message>) {
+        self.conversation.turn_count = restored_turn_count(&messages);
         self.conversation.messages = messages;
     }
 

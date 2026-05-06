@@ -1762,6 +1762,65 @@ mod test_tool_calling_integration {
     }
 
     #[test]
+    fn restored_turn_count_counts_human_turns_only() {
+        let messages = vec![
+            Message::user("first human turn"),
+            Message::assistant(vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"cmd": "true"}),
+            }]),
+            Message::tool_result("call_1", "ok", false),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "done".into(),
+            }]),
+            Message::user_multimodal(vec![
+                ContentBlock::Text {
+                    text: "second human turn".into(),
+                },
+                ContentBlock::Image {
+                    data: "aGVsbG8=".into(),
+                    media_type: "image/png".into(),
+                },
+            ]),
+        ];
+
+        assert_eq!(restored_turn_count(&messages), 2);
+    }
+
+    #[test]
+    fn set_messages_restores_turn_count_for_dream_scheduling() {
+        let messages = vec![
+            Message::user("one"),
+            Message::assistant(vec![ContentBlock::Text { text: "a".into() }]),
+            Message::tool_result("call_1", "tool output", false),
+            Message::user("two"),
+        ];
+        let settings = AgentSettings {
+            api_key: "test".into(),
+            ..Default::default()
+        };
+        let llm = MockLlm::new(vec![]);
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+        let mut agent = Agent::new(
+            rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+            sandbox,
+            skills,
+            &settings,
+            None,
+            0,
+            None,
+            None,
+        )
+        .unwrap();
+
+        agent.set_messages(messages);
+
+        assert_eq!(agent.conversation.turn_count, 2);
+    }
+
+    #[test]
     fn pop_last_message_removes_last() {
         let messages = vec![Message::user("hello"), Message::user("world")];
         let settings = AgentSettings {
