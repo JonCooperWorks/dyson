@@ -279,9 +279,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
             let existing = ws.get("IDENTITY.md").unwrap_or_default();
             let prior_name = extract_field(&existing, "Name");
             let prior_instance = extract_field(&existing, "Swarm instance id");
-            let prior_mission = extract_section(&existing, "Mission").or_else(|| {
-                looks_like_full_identity_doc(&existing).then(|| ensure_trailing_newline(&existing))
-            });
+            let prior_mission = extract_section(&existing, "Mission")
+                .or_else(|| looks_like_full_identity_doc(&existing).then(|| existing.clone()));
             let merged = build_identity_md(
                 body.name.as_deref().or(prior_name.as_deref()),
                 body.instance_id.as_deref().or(prior_instance.as_deref()),
@@ -788,7 +787,7 @@ fn build_identity_md(
     mission: Option<&str>,
 ) -> String {
     if let Some(m) = mission.filter(|s| looks_like_full_identity_doc(s)) {
-        return ensure_trailing_newline(m);
+        return m.to_owned();
     }
     let mut body = String::from("# Identity\n\n");
     if let Some(n) = name.filter(|s| !s.is_empty()) {
@@ -806,14 +805,6 @@ fn build_identity_md(
 fn looks_like_full_identity_doc(body: &str) -> bool {
     let trimmed = body.trim_start();
     trimmed.starts_with("# IDENTITY.md") || trimmed.starts_with("# Identity")
-}
-
-fn ensure_trailing_newline(body: &str) -> String {
-    let mut out = body.to_owned();
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
 }
 
 /// Crude `Key: value` line scanner — good enough for the two top-of-file
@@ -1153,7 +1144,7 @@ mod tests {
 
     #[test]
     fn build_identity_md_keeps_full_identity_doc_exact() {
-        let full = "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod\n";
+        let full = "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod";
         let s = build_identity_md(Some("Bob"), Some("u1"), Some(full));
         assert_eq!(s, full);
         assert!(!s.contains("Swarm instance id:"));
@@ -1162,10 +1153,9 @@ mod tests {
 
     #[test]
     fn existing_full_identity_doc_is_preserved_as_prior_mission() {
-        let existing = "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod\n";
-        let prior = extract_section(existing, "Mission").or_else(|| {
-            looks_like_full_identity_doc(existing).then(|| ensure_trailing_newline(existing))
-        });
+        let existing = "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod";
+        let prior = extract_section(existing, "Mission")
+            .or_else(|| looks_like_full_identity_doc(existing).then(|| existing.to_owned()));
         assert_eq!(prior.as_deref(), Some(existing));
     }
 

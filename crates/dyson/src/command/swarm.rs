@@ -179,7 +179,7 @@ pub async fn run() -> Result<()> {
 
 fn build_identity_md(name: &str, instance_id: &str, task: &str) -> String {
     if looks_like_full_identity_doc(task) {
-        return ensure_trailing_newline(task);
+        return task.to_owned();
     }
     let mut body = String::from("# Identity\n\n");
     if !name.is_empty() {
@@ -197,14 +197,6 @@ fn build_identity_md(name: &str, instance_id: &str, task: &str) -> String {
 fn looks_like_full_identity_doc(body: &str) -> bool {
     let trimmed = body.trim_start();
     trimmed.starts_with("# IDENTITY.md") || trimmed.starts_with("# Identity")
-}
-
-fn ensure_trailing_newline(body: &str) -> String {
-    let mut out = body.to_owned();
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
 }
 
 /// Inputs threaded into `build_swarm_config`.  Borrowed strings keep
@@ -334,7 +326,7 @@ mod tests {
 
     #[test]
     fn build_identity_md_keeps_full_identity_doc_exact() {
-        let full = "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod\n";
+        let full = "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod";
         assert_eq!(build_identity_md("Bob", "u1", full), full);
     }
 
