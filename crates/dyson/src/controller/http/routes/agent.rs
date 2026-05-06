@@ -29,9 +29,18 @@ pub(super) async fn get(state: &HttpState) -> Resp {
 
 fn parse_name(body: &str) -> Option<String> {
     body.lines()
-        .find_map(|l| l.strip_prefix("Name:"))
+        .find_map(parse_name_line)
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty())
+}
+
+fn parse_name_line(line: &str) -> Option<&str> {
+    let line = line.trim();
+    if let Some(rest) = line.strip_prefix("Name:") {
+        return Some(rest);
+    }
+    let line = line.strip_prefix("- ").unwrap_or(line);
+    line.strip_prefix("**Name:**")
 }
 
 #[cfg(test)]
@@ -52,5 +61,11 @@ mod tests {
     #[test]
     fn parse_name_skips_blank_value() {
         assert_eq!(parse_name("Name:   \n"), None);
+    }
+
+    #[test]
+    fn parse_name_reads_markdown_identity_field() {
+        let body = "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod\n";
+        assert_eq!(parse_name(body), Some("axelrod".into()));
     }
 }

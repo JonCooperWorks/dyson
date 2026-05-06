@@ -104,16 +104,7 @@ pub async fn run() -> Result<()> {
     if !name.is_empty() || !instance_id.is_empty() || !task.is_empty() {
         let identity = workspace.join("IDENTITY.md");
         if !identity.exists() {
-            let mut body = String::from("# Identity\n\n");
-            if !name.is_empty() {
-                body.push_str(&format!("Name: {name}\n"));
-            }
-            if !instance_id.is_empty() {
-                body.push_str(&format!("Swarm instance id: {instance_id}\n"));
-            }
-            if !task.is_empty() {
-                body.push_str(&format!("\n## Mission\n\n{task}\n"));
-            }
+            let body = build_identity_md(&name, &instance_id, &task);
             let _ = std::fs::write(&identity, body);
         }
     }
@@ -184,6 +175,36 @@ pub async fn run() -> Result<()> {
     );
 
     super::listen::run(Some(cfg_path), true, None, None, None).await
+}
+
+fn build_identity_md(name: &str, instance_id: &str, task: &str) -> String {
+    if looks_like_full_identity_doc(task) {
+        return ensure_trailing_newline(task);
+    }
+    let mut body = String::from("# Identity\n\n");
+    if !name.is_empty() {
+        body.push_str(&format!("Name: {name}\n"));
+    }
+    if !instance_id.is_empty() {
+        body.push_str(&format!("Swarm instance id: {instance_id}\n"));
+    }
+    if !task.is_empty() {
+        body.push_str(&format!("\n## Mission\n\n{task}\n"));
+    }
+    body
+}
+
+fn looks_like_full_identity_doc(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    trimmed.starts_with("# IDENTITY.md") || trimmed.starts_with("# Identity")
+}
+
+fn ensure_trailing_newline(body: &str) -> String {
+    let mut out = body.to_owned();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// Inputs threaded into `build_swarm_config`.  Borrowed strings keep
@@ -302,6 +323,20 @@ fn swarm_provider_base_url(proxy_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_identity_md_wraps_plain_task() {
+        let s = build_identity_md("Bob", "u1", "Watch PRs.");
+        assert!(s.contains("Name: Bob"));
+        assert!(s.contains("Swarm instance id: u1"));
+        assert!(s.contains("## Mission\n\nWatch PRs."));
+    }
+
+    #[test]
+    fn build_identity_md_keeps_full_identity_doc_exact() {
+        let full = "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod\n";
+        assert_eq!(build_identity_md("Bob", "u1", full), full);
+    }
 
     #[test]
     fn swarm_provider_base_url_has_no_trailing_v1() {
