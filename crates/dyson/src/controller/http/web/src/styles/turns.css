@@ -804,7 +804,10 @@
      is < 16px when they receive focus; the page then sits at a wrong
      scale until the user pinches out manually.  Holding the textarea
      at 16px on every viewport prevents the focus-zoom entirely. */
-  font: 400 16px/1.55 var(--font-ui);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.55;
   outline: none;
 }
 .composer textarea::placeholder { color: var(--mute); }
