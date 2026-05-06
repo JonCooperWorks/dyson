@@ -12,6 +12,7 @@
 
 use super::super::responses::{Resp, bad_request, json_ok};
 use super::super::state::HttpState;
+use crate::config::{McpTransportConfig, Settings, SkillConfig};
 
 pub(super) async fn get(state: &HttpState) -> Resp {
     let snapshot = state.settings_snapshot();
@@ -24,7 +25,50 @@ pub(super) async fn get(state: &HttpState) -> Resp {
         .as_deref()
         .and_then(parse_name)
         .unwrap_or_default();
-    json_ok(&serde_json::json!({ "name": name }))
+    let inventory_settings = state
+        .config_path()
+        .and_then(|path| crate::config::loader::load_settings(Some(path)).ok())
+        .unwrap_or_else(|| snapshot.clone());
+    json_ok(&serde_json::json!({
+        "name": name,
+        "skills": skill_inventory(&inventory_settings),
+    }))
+}
+
+fn skill_inventory(settings: &Settings) -> serde_json::Value {
+    let mut builtin = Vec::new();
+    let mut mcp = Vec::new();
+
+    for skill in &settings.skills {
+        match skill {
+            SkillConfig::Builtin(cfg) => {
+                builtin.push(serde_json::json!({
+                    "tools_filter": cfg.tools.len(),
+                    "tools": &cfg.tools,
+                }));
+            }
+            SkillConfig::Mcp(cfg) => {
+                mcp.push(serde_json::json!({
+                    "name": &cfg.name,
+                    "transport": mcp_transport_kind(&cfg.transport),
+                }));
+            }
+            SkillConfig::Local(_) | SkillConfig::Subagent(_) => {}
+        }
+    }
+
+    serde_json::json!({
+        "builtin": builtin,
+        "mcp": mcp,
+        "denials": [],
+    })
+}
+
+fn mcp_transport_kind(transport: &McpTransportConfig) -> &'static str {
+    match transport {
+        McpTransportConfig::Stdio { .. } => "stdio",
+        McpTransportConfig::Http { .. } => "http",
+    }
 }
 
 fn parse_name(body: &str) -> Option<String> {
@@ -67,5 +111,28 @@ mod tests {
     fn parse_name_reads_markdown_identity_field() {
         let body = "# IDENTITY.md — Who Am I?\n\n- **Name:** axelrod\n";
         assert_eq!(parse_name(body), Some("axelrod".into()));
+    }
+
+    #[test]
+    fn skill_inventory_lists_mcp_without_credentials() {
+        let mut settings = Settings::default();
+        settings
+            .skills
+            .push(SkillConfig::Mcp(Box::new(crate::config::McpConfig {
+                name: "mcp_massive".into(),
+                transport: McpTransportConfig::Http {
+                    url: "http://127.0.0.1/mcp".into(),
+                    headers: [("Authorization".to_string(), "Bearer secret".to_string())].into(),
+                    auth: None,
+                },
+            })));
+
+        let inventory = skill_inventory(&settings);
+        assert_eq!(inventory["mcp"][0]["name"], "mcp_massive");
+        assert_eq!(inventory["mcp"][0]["transport"], "http");
+        let encoded = serde_json::to_string(&inventory).unwrap();
+        assert!(!encoded.contains("secret"));
+        assert!(!encoded.contains("127.0.0.1"));
+        assert!(!encoded.contains("Authorization"));
     }
 }

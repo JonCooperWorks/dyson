@@ -114,6 +114,31 @@ export function setAgentName(name) {
   app.dispatch(s => s.agentName === v ? s : { ...s, agentName: v });
 }
 
+function normalizeSkills(skills) {
+  const mcp = Array.isArray(skills?.mcp)
+    ? skills.mcp
+        .map(s => ({
+          name: String(s?.name || '').trim(),
+          transport: String(s?.transport || '').trim(),
+        }))
+        .filter(s => s.name)
+    : [];
+  const builtin = Array.isArray(skills?.builtin) ? skills.builtin : [];
+  const denials = Array.isArray(skills?.denials) ? skills.denials : [];
+  return { builtin, mcp, denials };
+}
+
+export function setSkills(skills) {
+  const next = normalizeSkills(skills);
+  app.dispatch(s => ({ ...s, skills: next }));
+}
+
+export function setAgentInfo(agent) {
+  const name = (agent?.name || '').trim();
+  const skills = normalizeSkills(agent?.skills);
+  app.dispatch(s => ({ ...s, agentName: name, skills }));
+}
+
 export function setActivity(lanes) {
   app.dispatch(s => ({ ...s, activity: lanes }));
 }

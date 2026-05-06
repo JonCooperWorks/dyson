@@ -9,6 +9,8 @@ import {
   setProviders,
   switchProviderModel,
   setMind,
+  setAgentInfo,
+  setSkills,
   setActivity,
   setTool,
   updateTool,
@@ -121,6 +123,30 @@ describe('app store — live / mind / activity / UI nonces', () => {
     setMind({ files: [] });
     expect(app.getSnapshot().mind.backend).toBe('fs');
     expect(app.getSnapshot().mind.files).toEqual([]);
+  });
+
+  it('setAgentInfo stores visible MCP names and drops empty rows', () => {
+    setAgentInfo({
+      name: ' axelrod ',
+      skills: {
+        mcp: [
+          { name: 'mcp_massive', transport: 'http' },
+          { name: ' ', transport: 'stdio' },
+        ],
+      },
+    });
+    const snapshot = app.getSnapshot();
+    expect(snapshot.agentName).toBe('axelrod');
+    expect(snapshot.skills.mcp).toEqual([{ name: 'mcp_massive', transport: 'http' }]);
+  });
+
+  it('setSkills normalizes missing inventory sections', () => {
+    setSkills({ mcp: [{ name: 'brave-search' }] });
+    expect(app.getSnapshot().skills).toEqual({
+      builtin: [],
+      mcp: [{ name: 'brave-search', transport: '' }],
+      denials: [],
+    });
   });
 
   it('setActivity replaces lanes', () => {

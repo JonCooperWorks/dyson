@@ -37,7 +37,11 @@ function TopBar({ view, setView, onToggleLeft }) {
   const model = useAppState(s => s.activeModel);
   const providers = useAppState(s => s.providers);
   const agentName = useAppState(s => s.agentName);
+  const mcpServers = useAppState(s => s.skills?.mcp || []);
   const totalModels = providers.reduce((n, p) => n + (p.models?.length || 0), 0);
+  const mcpTitle = mcpServers.length
+    ? `MCP: ${mcpServers.map(s => s.name).join(', ')}`
+    : '';
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -77,6 +81,12 @@ function TopBar({ view, setView, onToggleLeft }) {
       </nav>
       <div className="spacer"/>
       <div className="meta" style={{position:'relative'}}>
+        {mcpServers.length > 0 && (
+          <span className="mcp-count" title={mcpTitle} aria-label={mcpTitle}>
+            <span className="label">mcp</span>
+            <span className="mono">{mcpServers.length}</span>
+          </span>
+        )}
         {model && (
           <span className="select" onClick={() => totalModels > 0 && setMenuOpen(o => !o)}
                 style={{cursor: totalModels > 0 ? 'pointer' : 'default', opacity: busy ? 0.5 : 1}}

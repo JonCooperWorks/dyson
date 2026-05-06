@@ -292,6 +292,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
   const tools = useAppState(s => s.tools);
   const conversations = useAppState(s => s.conversations);
   const agentName = useAppState(s => s.agentName);
+  const mcpServers = useAppState(s => s.skills?.mcp || []);
   const scrollRef = useRef(null);
 
   // URL → state: when the hash points at a specific tool ref (deep-
@@ -480,6 +481,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
       <div className="context">
         <div className="crumbs"><span className="c-leaf">{headTitle}</span></div>
         <div className="right">
+          <McpSummary servers={mcpServers}/>
           <button className="btn sm ghost" title="Download ShareGPT export"
                   onClick={onExport} disabled={!conv} style={{padding:'4px 8px'}}>
             <Icon name="download" size={13}/>
@@ -505,6 +507,23 @@ function ConversationView({ conv, toolRef, setToolRef }) {
 }
 
 const noop = () => {};
+
+function McpSummary({ servers }) {
+  const names = (Array.isArray(servers) ? servers : [])
+    .map(s => String(s?.name || '').trim())
+    .filter(Boolean);
+  if (!names.length) return null;
+  const shown = names.slice(0, 3);
+  const remaining = names.length - shown.length;
+  const title = `MCP: ${names.join(', ')}`;
+  return (
+    <div className="mcp-summary" title={title} aria-label={title}>
+      <span className="mcp-summary-label">MCP</span>
+      {shown.map(name => <span className="mcp-summary-chip mono" key={name}>{name}</span>)}
+      {remaining > 0 && <span className="mcp-summary-more mono">+{remaining}</span>}
+    </div>
+  );
+}
 
 // Default shell painted before the session hydrates (or when no chat
 // exists yet).  Keeps the app frame on screen during cold load instead

@@ -4,10 +4,10 @@
  * empty state and the user has to find and click "+ New Conversation"
  * in a sidebar drawer that's collapsed by default on mobile.
  */
-import { describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect } from 'vitest';
 
 import { boot } from '../api/boot.js';
-import { app } from '../store/app.js';
+import { app, __resetAppStoreForTests } from '../store/app.js';
 
 const noopClient = (overrides = {}) => ({
   listConversations: async () => [],
@@ -20,6 +20,10 @@ const noopClient = (overrides = {}) => ({
 });
 
 const flush = (ms = 5) => new Promise((r) => setTimeout(r, ms));
+
+beforeEach(() => {
+  __resetAppStoreForTests();
+});
 
 describe('boot — first-login auto-create', () => {
   it('mints a conversation when the server returns an empty list', async () => {
@@ -48,6 +52,31 @@ describe('boot — first-login auto-create', () => {
     await flush();
     expect(createCalled).toBe(0);
     expect(app.getSnapshot().conversations.map((c) => c.id)).toEqual(['c-existing']);
+    dispose();
+  });
+
+  it('stores MCP inventory returned by /api/agent', async () => {
+    const dispose = boot(
+      noopClient({
+        listConversations: async () => [{ id: 'c-existing', title: 't', live: false }],
+        getAgent: async () => ({
+          name: 'axelrod',
+          skills: {
+            builtin: [{ tools_filter: 11 }],
+            mcp: [
+              { name: 'mcp_massive', transport: 'http' },
+              { name: 'brave-search', transport: 'http' },
+            ],
+            denials: [],
+          },
+        }),
+      }),
+      { pollMs: 1_000_000 },
+    );
+    await flush();
+    const snapshot = app.getSnapshot();
+    expect(snapshot.agentName).toBe('axelrod');
+    expect(snapshot.skills.mcp.map(s => s.name)).toEqual(['mcp_massive', 'brave-search']);
     dispose();
   });
 });

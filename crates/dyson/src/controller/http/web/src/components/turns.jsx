@@ -522,15 +522,17 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
 
 function EmptyState() {
   // Real values only.  Model from /api/providers, mind backend from
-  // /api/mind — both live in the app store.  Skills isn't populated by
-  // the current controller; left as-is so the count stays 0 until the
-  // endpoint exists.
+  // /api/mind, MCP names from /api/agent — all live in the app store.
   const model = useAppState(s => s.activeModel);
   const mind = useAppState(s => s.mind);
   const agentName = useAppState(s => s.agentName) || 'Dyson';
+  const mcpServers = useAppState(s => s.skills?.mcp || []);
   const wsBackend = (mind && mind.backend) || '';
-  const builtinCount = 0;
-  const mcpCount = 0;
+  const mcpNames = mcpServers
+    .map(s => String(s?.name || '').trim())
+    .filter(Boolean);
+  const shownMcp = mcpNames.slice(0, 3).join(', ');
+  const hiddenMcp = Math.max(0, mcpNames.length - 3);
   return (
     <div className="empty-state">
       <div className="es-eyebrow">
@@ -540,7 +542,7 @@ function EmptyState() {
       <h1>You're talking to <em>{agentName}</em>.</h1>
       <p>
         {model && <>Model <span className="mono es-pill">{model}</span>. </>}
-        {builtinCount > 0 && <>{builtinCount} builtin tools{mcpCount > 0 && ` + ${mcpCount} MCP`}. </>}
+        {mcpNames.length > 0 && <>MCP <span className="mono es-pill">{shownMcp}{hiddenMcp > 0 ? `, +${hiddenMcp}` : ''}</span>. </>}
         {wsBackend && <>Workspace backend <span className="mono es-pill">{wsBackend}</span>.</>}
       </p>
       <div className="es-hint">Type a message to start.</div>
