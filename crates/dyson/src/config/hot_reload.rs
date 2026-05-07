@@ -298,6 +298,11 @@ impl HotReloader {
                         let mtime = Self::get_mtime(&skill_md);
                         watched.insert(skill_md, mtime);
                     }
+                    let metadata = entry.path().join("dyson-skill.json");
+                    if metadata.is_file() {
+                        let mtime = Self::get_mtime(&metadata);
+                        watched.insert(metadata, mtime);
+                    }
                 }
             }
         }

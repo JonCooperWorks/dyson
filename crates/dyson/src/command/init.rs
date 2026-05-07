@@ -67,7 +67,7 @@ pub fn run(
             },
             "agent": {
                 "provider": "default",
-                "max_iterations": 20,
+                "max_iterations": 40,
                 "max_tokens": 8192
             },
             "workspace": {

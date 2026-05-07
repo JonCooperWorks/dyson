@@ -485,29 +485,6 @@ textarea {
   letter-spacing: 0;
   text-transform: none;
 }
-.topbar .meta .mcp-count {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 0;
-  height: auto;
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-2);
-  color: var(--fg-muted);
-  font: 500 13px/1.5 var(--sans);
-  max-width: 96px;
-}
-.topbar .meta .mcp-count .label {
-  color: var(--fg-faint);
-  font-size: 11px;
-  letter-spacing: 0;
-  text-transform: none;
-}
-.topbar .meta .mcp-count .mono {
-  color: var(--fg);
-}
 .topbar .menu-toggle {
   width: 32px;
   height: 32px;
@@ -2070,8 +2047,6 @@ textarea {
   .topbar .meta .select .label,
   .topbar .meta .select .mono { display: none; }
   .topbar .meta .select { padding: 4px 6px; }
-  .topbar .meta .mcp-count { padding: 4px 6px; }
-  .topbar .meta .mcp-count .label { display: none; }
   .mcp-summary { max-width: 46vw; }
   .mcp-summary-chip { max-width: 92px; }
   .mcp-summary-chip:nth-of-type(n+4) { display: none; }

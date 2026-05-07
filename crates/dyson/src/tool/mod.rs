@@ -64,6 +64,7 @@ pub mod search_files;
 pub mod security;
 pub mod send_file;
 pub mod skill_create;
+pub mod skill_marketplace;
 pub mod view;
 pub mod web_fetch;
 pub mod web_search;

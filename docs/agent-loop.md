@@ -43,7 +43,7 @@ pub struct Agent {
 | `tool_definitions` | Sent to the LLM so it knows available tools |
 | `system_prompt` | Base prompt + all skill prompt fragments, composed at construction |
 | `config` | Model name, max_tokens, temperature |
-| `max_iterations` | Hard limit on LLM turns per `run()` call (default: 20) |
+| `max_iterations` | Hard limit on LLM turns per `run()` call (default: 40) |
 | `messages` | Conversation history — persists across `run()` calls |
 | `tool_context` | Working directory, env vars, cancellation token |
 | `limiter` | Per-turn tool call rate limiter (`ToolLimiter`) |
@@ -128,7 +128,7 @@ Some providers run their own agent loop with built-in tools. When `handles_tools
 
 ### Iteration limit
 
-`max_iterations` (default 20) prevents infinite loops. Each "turn" = one LLM call + tool execution.
+`max_iterations` (default 40) prevents infinite loops. Each "turn" = one LLM call + tool execution.
 
 ### Conversation persistence
 

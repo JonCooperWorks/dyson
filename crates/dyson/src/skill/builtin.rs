@@ -42,6 +42,7 @@ use crate::tool::security::{
     AstDescribeTool, AstQueryTool, AttackSurfaceAnalyzerTool, ExploitBuilderTool, TaintTraceTool,
 };
 use crate::tool::send_file::SendFileTool;
+use crate::tool::skill_marketplace::SkillMarketplaceTool;
 use crate::tool::web_fetch::WebFetchTool;
 use crate::tool::web_search;
 use crate::tool::workspace::WorkspaceTool;
@@ -102,6 +103,7 @@ impl BuiltinSkill {
             Arc::new(MemorySearchTool),
             Arc::new(WorkspaceTool),
             Arc::new(LoadSkillTool),
+            Arc::new(SkillMarketplaceTool),
             Arc::new(KbSearchTool),
             Arc::new(KbStatusTool),
             Arc::new(WebFetchTool::default()),

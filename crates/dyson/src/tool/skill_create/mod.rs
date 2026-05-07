@@ -34,6 +34,7 @@
 // ===========================================================================
 
 use std::fmt::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -122,6 +123,7 @@ impl Tool for SkillCreateTool {
         }
 
         let file_key = format!("skills/{name}/SKILL.md");
+        let metadata_key = format!("skills/{name}/dyson-skill.json");
 
         let mut ws = ws.write().await;
 
@@ -137,6 +139,7 @@ impl Tool for SkillCreateTool {
                 }
                 let content = format_skill_md(&name, &description, &instructions);
                 ws.set(&file_key, &content);
+                ws.set(&metadata_key, &learned_metadata(&name, &description));
                 ws.save()?;
 
                 // Journal the creation for memory.
@@ -156,6 +159,7 @@ impl Tool for SkillCreateTool {
                     "Created"
                 };
                 ws.set(&file_key, &content);
+                ws.set(&metadata_key, &learned_metadata(&name, &description));
                 ws.save()?;
 
                 ws.journal(&format!("{verb} skill '{name}': {description}"));
@@ -181,6 +185,7 @@ impl Tool for SkillCreateTool {
                 let improved = append_improvements(&existing_content, &description, &instructions);
 
                 ws.set(&file_key, &improved);
+                ws.set(&metadata_key, &learned_metadata(&name, &description));
                 ws.save()?;
 
                 ws.journal(&format!("Improved skill '{name}': {description}"));
@@ -211,6 +216,32 @@ fn is_valid_skill_name(name: &str) -> bool {
 /// Format a complete SKILL.md file.
 fn format_skill_md(name: &str, description: &str, instructions: &str) -> String {
     format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n")
+}
+
+fn learned_metadata(name: &str, description: &str) -> String {
+    let metadata = json!({
+        "schema_version": 1,
+        "name": name,
+        "version": "0.0.0-learned",
+        "description": description,
+        "origin": {
+            "kind": "learned",
+            "dream": "self-improvement",
+        },
+        "installed_at": now_unix_string(),
+    });
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(&metadata).unwrap_or_else(|_| "{}".into())
+    )
+}
+
+fn now_unix_string() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    secs.to_string()
 }
 
 /// Append improvement notes to an existing SKILL.md.

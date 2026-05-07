@@ -1468,7 +1468,7 @@ mod tests {
         // (run later by `load_settings`) will reject that so the user can't
         // silently boot on a hardcoded default.
         assert_eq!(settings.agent.model, "");
-        assert_eq!(settings.agent.max_iterations, 20);
+        assert_eq!(settings.agent.max_iterations, 40);
         assert!(!settings.skills.is_empty());
     }
 

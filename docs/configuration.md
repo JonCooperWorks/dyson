@@ -51,7 +51,7 @@ pub enum LlmProvider {
 | Field | Default | Env var | CLI flag |
 |-------|---------|---------|----------|
 | `model` | `claude-sonnet-4-20250514` | — | — |
-| `max_iterations` | `20` | — | — |
+| `max_iterations` | `40` | — | — |
 | `max_tokens` | `8192` | — | — |
 | `api_key` | (none) | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, or `OLLAMA_API_KEY` | — |
 | `provider` | `Anthropic` | — | `--provider` |
@@ -91,7 +91,7 @@ Dyson's native config format.  Example:
   },
   "agent": {
     "provider": "default",
-    "max_iterations": 20,
+    "max_iterations": 40,
     "max_tokens": 8192,
     "system_prompt": "You are a helpful coding assistant."
   },

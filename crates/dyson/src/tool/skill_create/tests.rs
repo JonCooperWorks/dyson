@@ -1,6 +1,21 @@
 use super::*;
 use crate::workspace::InMemoryWorkspace;
 
+fn assert_learned_metadata(content: &str, name: &str, description: &str) {
+    let metadata: serde_json::Value = serde_json::from_str(content).unwrap();
+    assert_eq!(metadata["schema_version"], 1);
+    assert_eq!(metadata["name"], name);
+    assert_eq!(metadata["version"], "0.0.0-learned");
+    assert_eq!(metadata["description"], description);
+    assert_eq!(metadata["origin"]["kind"], "learned");
+    assert_eq!(metadata["origin"]["dream"], "self-improvement");
+    assert!(
+        metadata["installed_at"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
+}
+
 #[test]
 fn valid_skill_names() {
     assert!(is_valid_skill_name("code-review"));
@@ -100,6 +115,8 @@ async fn create_skill() {
     let content = ws.get("skills/code-review/SKILL.md").unwrap();
     assert!(content.contains("name: code-review"));
     assert!(content.contains("Read the code"));
+    let metadata = ws.get("skills/code-review/dyson-skill.json").unwrap();
+    assert_learned_metadata(&metadata, "code-review", "Reviews code for quality");
 }
 
 #[tokio::test]
@@ -157,6 +174,8 @@ async fn update_overwrites() {
     let content = ws.get("skills/deploy/SKILL.md").unwrap();
     assert!(content.contains("New deploy instructions"));
     assert!(!content.contains("Old."));
+    let metadata = ws.get("skills/deploy/dyson-skill.json").unwrap();
+    assert_learned_metadata(&metadata, "deploy", "New deploy skill");
 }
 
 #[tokio::test]
@@ -191,6 +210,8 @@ async fn improve_appends() {
     assert!(content.contains("## Improvements"));
     assert!(content.contains("SQL injection"));
     assert!(content.contains("security focus"));
+    let metadata = ws.get("skills/review/dyson-skill.json").unwrap();
+    assert_learned_metadata(&metadata, "review", "Reviews code with security focus");
 }
 
 #[tokio::test]

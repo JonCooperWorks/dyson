@@ -53,7 +53,7 @@ in implementation:
 | **Streaming** | First-class SSE streaming; text tokens delivered immediately | Streaming supported via provider APIs |
 | **Tool dispatch** | Every call goes through `Sandbox.check()` before execution | Direct tool execution with container-level isolation |
 | **Post-processing** | `Sandbox.after()` hook inspects/redacts/audits output | Skill lifecycle hooks |
-| **Max iterations** | Configurable (default 20) | Configurable |
+| **Max iterations** | Configurable (default 40) | Configurable |
 
 ### Core Abstractions
 

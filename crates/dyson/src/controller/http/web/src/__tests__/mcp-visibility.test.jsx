@@ -2,7 +2,9 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 
+import { TopBar } from '../components/views.jsx';
 import { EmptyState } from '../components/turns.jsx';
+import { ApiProvider } from '../hooks/useApi.js';
 import { __resetAppStoreForTests, setAgentInfo, setProviders } from '../store/app.js';
 
 beforeEach(() => {
@@ -30,5 +32,28 @@ describe('MCP visibility', () => {
 
     expect(screen.getByText(/mcp_massive/)).toBeTruthy();
     expect(screen.getByText(/brave-search/)).toBeTruthy();
+  });
+
+  it('does not show the old header MCP count badge', () => {
+    setProviders([{ id: 'p', active: true, activeModel: 'm', models: ['m'] }], 'deepseek/v4');
+    setAgentInfo({
+      name: 'axelrod',
+      skills: {
+        mcp: [
+          { name: 'mcp_massive', transport: 'http' },
+          { name: 'brave-search', transport: 'http' },
+          { name: 'agentmail', transport: 'http' },
+        ],
+      },
+    });
+
+    const { container } = render(
+      <ApiProvider client={{ postModel: async () => ({}) }}>
+        <TopBar view="conv" setView={() => {}} onToggleLeft={() => {}}/>
+      </ApiProvider>
+    );
+
+    expect(container.querySelector('.mcp-count')).toBeNull();
+    expect(screen.getByText('deepseek/v4')).toBeTruthy();
   });
 });

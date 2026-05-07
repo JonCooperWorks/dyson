@@ -30,7 +30,7 @@
 // ===========================================================================
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use regex::RegexBuilder;
 
@@ -135,6 +135,8 @@ impl FilesystemWorkspace {
         }
 
         // Read skills/*/SKILL.md files so load_skill can find them via ws.get().
+        // Metadata is loaded too so marketplace provenance survives cold UI
+        // loads and tests can inspect it through the same workspace surface.
         let skills_dir = path.join("skills");
         if skills_dir.exists() {
             for entry in std::fs::read_dir(&skills_dir)? {
@@ -144,6 +146,11 @@ impl FilesystemWorkspace {
                 if entry.path().is_dir() && skill_md.is_file() {
                     let content = std::fs::read_to_string(&skill_md)?;
                     files.insert(format!("skills/{dir_name}/SKILL.md"), content);
+                    let metadata = entry.path().join("dyson-skill.json");
+                    if metadata.is_file() {
+                        let content = std::fs::read_to_string(&metadata)?;
+                        files.insert(format!("skills/{dir_name}/dyson-skill.json"), content);
+                    }
                 }
             }
         }
@@ -374,6 +381,21 @@ impl Workspace for FilesystemWorkspace {
         }
     }
 
+    fn remove(&mut self, name: &str) -> Result<bool> {
+        let path = workspace_child_path(&self.path, name)?;
+        let removed_from_memory = self.files.remove(name).is_some();
+        self.dirty
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(name);
+
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(removed_from_memory),
+            Err(e) => Err(DysonError::Io(e)),
+        }
+    }
+
     fn save(&self) -> Result<()> {
         let mut dirty = self
             .dirty
@@ -549,6 +571,26 @@ impl Workspace for FilesystemWorkspace {
         }
         Some(dir)
     }
+}
+
+fn workspace_child_path(root: &Path, name: &str) -> Result<PathBuf> {
+    let rel = Path::new(name);
+    if rel.is_absolute() {
+        return Err(DysonError::Config(
+            "workspace file path must be relative".into(),
+        ));
+    }
+    for component in rel.components() {
+        match component {
+            Component::Normal(_) => {}
+            _ => {
+                return Err(DysonError::Config(
+                    "workspace file path must not escape the workspace".into(),
+                ));
+            }
+        }
+    }
+    Ok(root.join(rel))
 }
 
 // ---------------------------------------------------------------------------

@@ -895,7 +895,7 @@ impl Default for AgentSettings {
             // configure their model explicitly so Dyson never silently bills
             // a model they didn't choose.
             model: String::new(),
-            max_iterations: 20,
+            max_iterations: 40,
             max_retries: 6,
             max_concurrent_llm_calls: 4,
             max_tokens: 8192,

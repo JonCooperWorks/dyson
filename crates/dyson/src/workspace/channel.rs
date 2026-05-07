@@ -229,6 +229,15 @@ impl Workspace for ChannelWorkspace {
         }
     }
 
+    fn remove(&mut self, name: &str) -> Result<bool> {
+        if self.can_write(name) {
+            self.audit(name, "remove");
+            self.inner.remove(name)
+        } else {
+            Ok(false)
+        }
+    }
+
     fn save(&self) -> Result<()> {
         self.inner.save()
     }

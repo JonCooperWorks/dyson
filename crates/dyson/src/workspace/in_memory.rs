@@ -73,6 +73,10 @@ impl Workspace for InMemoryWorkspace {
         entry.push_str(content);
     }
 
+    fn remove(&mut self, name: &str) -> Result<bool> {
+        Ok(self.files.remove(name).is_some())
+    }
+
     fn save(&self) -> Result<()> {
         Ok(()) // no-op
     }

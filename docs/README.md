@@ -14,6 +14,7 @@ layers on top of those primitives.
 | [Agent Loop](agent-loop.md) | The core loop: stream → detect tool calls → execute → repeat. Internal-tools providers (Claude Code) |
 | [LLM Clients](llm-clients.md) | Anthropic, OpenAI, and Claude Code streaming. SSE parsing, thinking tokens, provider abstraction |
 | [Tools & Skills](tools-and-skills.md) | Tool trait, Skill trait, BuiltinSkill, LocalSkill, adding new tools |
+| [Skill Marketplaces](skill-marketplaces.md) | Draft spec for Swarm-hosted skill marketplaces, Dyson install/load flow, dream-learned skills, and Swarm inventory visibility |
 | [Tool Execution Pipeline](tool-execution-pipeline.md) | Rate limiting, dependency analysis, result formatting, lifecycle hooks |
 | [AST-Aware Code Editing & Reading](ast.md) | Shared tree-sitter infra in `tool::ast`: `bulk_edit` rename/find_replace/list_definitions, `read_file` symbol extraction, `search_files` identifier mode, across 19 languages |
 | [Sandbox](sandbox.md) | OS sandbox (Seatbelt/bubblewrap), Allow/Deny/Redirect, composition, MCP result sandboxing |

@@ -87,6 +87,14 @@ pub trait Workspace: Send + Sync {
     /// Append to a file (creates it if it doesn't exist).
     fn append(&mut self, name: &str, content: &str);
 
+    /// Remove a file from the workspace.
+    ///
+    /// Returns true when the file existed in memory or on disk. Backends that
+    /// cannot delete files can keep the default no-op behavior.
+    fn remove(&mut self, _name: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Persist all pending changes to the backing store.
     fn save(&self) -> Result<()>;
 

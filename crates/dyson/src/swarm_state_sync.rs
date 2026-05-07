@@ -79,6 +79,10 @@ pub fn status_snapshot() -> StateSyncStatus {
         .unwrap_or_default()
 }
 
+pub fn config_snapshot() -> Option<StateSyncConfig> {
+    config_handle().lock().ok().and_then(|guard| guard.clone())
+}
+
 fn config_handle() -> Arc<Mutex<Option<StateSyncConfig>>> {
     CONFIG.get_or_init(|| Arc::new(Mutex::new(None))).clone()
 }
