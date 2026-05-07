@@ -27,6 +27,7 @@
 // | `runtime_model`              | `std::Mutex`       | `post_model`, `turns`| one `Option<(String, String)>` swap or clone   |
 // | `sse_tickets`                | `std::Mutex`       | mint + consume       | HashMap insert/remove                          |
 // | `titles`                     | `std::Mutex`       | conversations list   | HashMap insert/get                             |
+// | `quiesced`                   | `AtomicBool`       | admin + turns        | zero-lock snapshot/turn admission latch        |
 // | `ChatHandle.agent`           | `tokio::Mutex`     | one turn at a time   | the entire turn (`Agent::run` is `&mut self`)  |
 // | `ChatHandle.reloader`        | `tokio::Mutex`     | one turn at a time   | a `check()` + optional rebuild                 |
 // | `ChatHandle.cancel`          | `tokio::Mutex`     | turn start + cancel  | one `Option<CancellationToken>` swap           |
@@ -578,6 +579,11 @@ pub struct HttpState {
     /// (`dangerous_no_tls`) sets this to `false` so the cookie is
     /// still usable on `http://127.0.0.1:7878`.
     pub(crate) tls_enabled: bool,
+    /// Swarm latches this via `/api/admin/quiesce` before it snapshots
+    /// the cube for a template rotation. New `/turn` requests are
+    /// refused while true so no fresh transcript write lands after the
+    /// snapshot moment and disappears during the pointer swap.
+    pub(crate) quiesced: std::sync::atomic::AtomicBool,
 }
 
 /// Stored per-ticket: the bound identity (so we can attach it on
@@ -720,7 +726,36 @@ impl HttpState {
                 };
                 Arc::new(std::sync::Mutex::new(cfg))
             },
+            quiesced: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn is_quiesced(&self) -> bool {
+        self.quiesced.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn unquiesce(&self) {
+        self.quiesced
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) async fn in_flight_chats(&self) -> u32 {
+        let chats = self.chats.lock().await;
+        let count = chats
+            .values()
+            .filter(|h| h.busy.load(std::sync::atomic::Ordering::SeqCst))
+            .count();
+        u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    pub(crate) async fn try_quiesce(&self) -> u32 {
+        self.quiesced
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let in_flight = self.in_flight_chats().await;
+        if in_flight != 0 {
+            self.unquiesce();
+        }
+        in_flight
     }
 
     /// Mint a one-shot SSE ticket bound to `identity`.  Returns the

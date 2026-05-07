@@ -246,15 +246,16 @@ mod tests {
         // hash and the verifier must say no.  This guards against any
         // future "constant-time only on the right path" regression.
         let original = HashedBearerAuth::hash("token").unwrap();
-        // Tamper the last char.  PHC is `$...$<salt>$<hash>` — flipping
-        // a base64 char in the hash segment yields a syntactically
-        // valid PHC but a bytes-mismatch.
-        let mut chars: Vec<char> = original.chars().collect();
-        let last = chars.pop().unwrap();
-        // Pick a different char so we definitely change the encoded
-        // hash bytes.
-        chars.push(if last == 'A' { 'B' } else { 'A' });
-        let tampered: String = chars.into_iter().collect();
+        // PHC is `$...$<salt>$<hash>`. Flip the first character of the
+        // hash segment, not the tail: the final base64 character may
+        // encode unused bits, and changing it can make the PHC invalid
+        // before verification reaches the intended bytes-mismatch path.
+        let (prefix, hash) = original.rsplit_once('$').expect("hash segment");
+        let mut chars: Vec<char> = hash.chars().collect();
+        let first = chars.first_mut().expect("non-empty hash segment");
+        *first = if *first == 'A' { 'B' } else { 'A' };
+        let tampered_hash: String = chars.into_iter().collect();
+        let tampered = format!("{prefix}${tampered_hash}");
         let auth = HashedBearerAuth::from_phc(tampered).unwrap();
         let mut h = hyper::HeaderMap::new();
         h.insert("authorization", "Bearer token".parse().unwrap());

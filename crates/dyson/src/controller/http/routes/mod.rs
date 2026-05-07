@@ -257,6 +257,9 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&Method::POST, ["api", "admin", "state", "file"]) => {
             admin::post_state_file(req, &state).await
         }
+        (&Method::GET, ["api", "admin", "idle"]) => admin::get_idle(req, &state).await,
+        (&Method::POST, ["api", "admin", "quiesce"]) => admin::post_quiesce(req, &state).await,
+        (&Method::POST, ["api", "admin", "unquiesce"]) => admin::post_unquiesce(req, &state).await,
         // Diagnostic — returns the live skill / tool inventory so an
         // operator can verify which MCP servers actually loaded.
         // Same configure-secret auth as the POST sibling.

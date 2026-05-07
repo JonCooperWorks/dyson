@@ -30,11 +30,12 @@ use std::path::{Component, Path, PathBuf};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use hyper::Request;
+use hyper::body::Bytes;
+use hyper::{Request, Response, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::super::responses::{Resp, bad_request, json_ok, read_json_capped, unauthorized};
+use super::super::responses::{Resp, bad_request, boxed, json_ok, read_json_capped, unauthorized};
 use super::super::state::HttpState;
 
 /// Cap for the configure body.  Generous for very long task prompts
@@ -593,6 +594,57 @@ pub(super) async fn post_state_file(
     }))
 }
 
+pub(super) async fn get_idle(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
+    if let Err(resp) = authorize_configure(req.headers(), state) {
+        return resp;
+    }
+    let in_flight = state.in_flight_chats().await;
+    json_ok(&serde_json::json!({
+        "ok": true,
+        "idle": in_flight == 0,
+        "in_flight_chats": in_flight,
+        "quiesced": state.is_quiesced(),
+    }))
+}
+
+pub(super) async fn post_quiesce(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
+    if let Err(resp) = authorize_configure(req.headers(), state) {
+        return resp;
+    }
+    let in_flight = state.try_quiesce().await;
+    if in_flight != 0 {
+        let body = serde_json::json!({
+            "ok": false,
+            "idle": false,
+            "in_flight_chats": in_flight,
+            "quiesced": false,
+        })
+        .to_string();
+        return Response::builder()
+            .status(StatusCode::CONFLICT)
+            .header("Content-Type", "application/json")
+            .body(boxed(Bytes::from(body)))
+            .unwrap();
+    }
+    json_ok(&serde_json::json!({
+        "ok": true,
+        "idle": true,
+        "in_flight_chats": 0,
+        "quiesced": true,
+    }))
+}
+
+pub(super) async fn post_unquiesce(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
+    if let Err(resp) = authorize_configure(req.headers(), state) {
+        return resp;
+    }
+    state.unquiesce();
+    json_ok(&serde_json::json!({
+        "ok": true,
+        "quiesced": false,
+    }))
+}
+
 fn state_root(
     settings: &crate::config::Settings,
     namespace: &str,
@@ -639,36 +691,9 @@ pub(super) async fn get_skills(req: Request<hyper::body::Incoming>, state: &Http
     use crate::skill::Skill;
     #[allow(unused_imports)]
     use crate::tool::Tool;
-    use argon2::{
-        Argon2,
-        password_hash::{PasswordHash, PasswordVerifier},
-    };
-    let secret = match req
-        .headers()
-        .get(CONFIGURE_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(s) => s.to_owned(),
-        None => return unauthorized(state),
-    };
-    let snapshot = state.settings_snapshot();
-    let hash_dir = workspace_parent_dir(&snapshot.workspace.connection_string.expose());
-    let hash_path = hash_dir.join(CONFIGURE_HASH_FILENAME);
-    let stored = match std::fs::read_to_string(&hash_path) {
-        Ok(s) => s,
-        Err(_) => return unauthorized(state),
-    };
-    let parsed = match PasswordHash::new(stored.trim()) {
-        Ok(p) => p,
-        Err(_) => return unauthorized(state),
-    };
-    if Argon2::default()
-        .verify_password(secret.as_bytes(), &parsed)
-        .is_err()
-    {
-        return unauthorized(state);
+
+    if let Err(resp) = authorize_configure(req.headers(), state) {
+        return resp;
     }
 
     // Re-load settings fresh from disk — this is the same path

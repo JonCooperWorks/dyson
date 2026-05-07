@@ -65,11 +65,47 @@ impl LlmClient for StubLlmClient {
     }
 }
 
+struct BlockingLlmClient {
+    started: Arc<std::sync::atomic::AtomicBool>,
+    release: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl LlmClient for BlockingLlmClient {
+    async fn stream(
+        &self,
+        _messages: &[Message],
+        _system: &str,
+        _system_suffix: &str,
+        _tools: &[ToolDefinition],
+        _config: &CompletionConfig,
+    ) -> dyson::error::Result<StreamResponse> {
+        self.started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        while !self.release.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let events = vec![Ok(StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: Some(1),
+        })];
+        Ok(StreamResponse {
+            stream: Box::pin(tokio_stream::iter(events)),
+            tool_mode: ToolMode::Execute,
+            input_tokens: None,
+        })
+    }
+}
+
 async fn rig() -> Rig {
     rig_with_auth(Arc::new(DangerousNoAuth)).await
 }
 
 async fn rig_with_auth(auth: Arc<dyn Auth>) -> Rig {
+    rig_with_auth_and_client(auth, Box::new(StubLlmClient)).await
+}
+
+async fn rig_with_auth_and_client(auth: Arc<dyn Auth>, client: Box<dyn LlmClient>) -> Rig {
     let chat_dir = tempfile::tempdir().expect("chat tempdir");
     let workspace_dir = tempfile::tempdir().expect("workspace tempdir");
 
@@ -100,8 +136,7 @@ async fn rig_with_auth(auth: Arc<dyn Auth>) -> Rig {
     };
 
     let registry = Arc::new(ClientRegistry::new_with_default_client_for_test(
-        &settings,
-        Box::new(StubLlmClient),
+        &settings, client,
     ));
     let history: Arc<dyn ChatHistory> =
         Arc::new(DiskChatHistory::new(chat_dir.path().to_path_buf()).expect("disk history"));
@@ -142,6 +177,15 @@ async fn get_with_header(url: &str, name: &str, value: &str) -> Response<Incomin
 async fn post_json<B: serde::Serialize>(url: &str, body: &B) -> Response<Incoming> {
     let bytes = serde_json::to_vec(body).expect("serialize");
     request(url, Method::POST, Some(bytes)).await
+}
+
+async fn post_json_with_headers<B: serde::Serialize>(
+    url: &str,
+    body: &B,
+    extra_headers: &[(&str, &str)],
+) -> Response<Incoming> {
+    let bytes = serde_json::to_vec(body).expect("serialize");
+    request_with_headers(url, Method::POST, Some(bytes), extra_headers).await
 }
 
 async fn request(url: &str, method: Method, body: Option<Vec<u8>>) -> Response<Incoming> {
@@ -444,6 +488,124 @@ async fn skills_endpoint_is_gone() {
     let r = rig().await;
     let resp = get(&format!("{}/api/skills", r.base)).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn admin_idle_quiesce_blocks_new_turns_until_unquiesced() {
+    // Swarm's rotate-in-place path calls these endpoints before
+    // snapshotting a cube. They must exist on Dyson and must stop new
+    // writes while the snapshot is being taken.
+    let r = rig().await;
+    let id = create_chat(&r, "maintenance gate").await;
+    let secret = "test-configure-secret";
+    let configure = post_json_with_headers(
+        &format!("{}/api/admin/configure", r.base),
+        &serde_json::json!({}),
+        &[("x-swarm-configure", secret)],
+    )
+    .await;
+    assert_eq!(configure.status(), StatusCode::OK);
+
+    let idle = body_json(
+        get_with_header(
+            &format!("{}/api/admin/idle", r.base),
+            "x-swarm-configure",
+            secret,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(idle["idle"], true);
+    assert_eq!(idle["in_flight_chats"], 0);
+    assert_eq!(idle["quiesced"], false);
+
+    let quiesced = body_json(
+        post_json_with_headers(
+            &format!("{}/api/admin/quiesce", r.base),
+            &serde_json::json!({}),
+            &[("x-swarm-configure", secret)],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(quiesced["quiesced"], true);
+
+    let blocked = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "must not start" }),
+    )
+    .await;
+    assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let unquiesced = body_json(
+        post_json_with_headers(
+            &format!("{}/api/admin/unquiesce", r.base),
+            &serde_json::json!({}),
+            &[("x-swarm-configure", secret)],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(unquiesced["quiesced"], false);
+
+    let accepted = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "ok now" }),
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn admin_quiesce_returns_conflict_while_a_turn_is_in_flight() {
+    // The latch must be "only if idle": if a turn is already running,
+    // swarm should retry later instead of snapshotting mid-write.
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let r = rig_with_auth_and_client(
+        Arc::new(DangerousNoAuth),
+        Box::new(BlockingLlmClient {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        }),
+    )
+    .await;
+    let id = create_chat(&r, "busy gate").await;
+    let secret = "test-configure-secret";
+    let configure = post_json_with_headers(
+        &format!("{}/api/admin/configure", r.base),
+        &serde_json::json!({}),
+        &[("x-swarm-configure", secret)],
+    )
+    .await;
+    assert_eq!(configure.status(), StatusCode::OK);
+
+    let turn = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "stay busy" }),
+    )
+    .await;
+    assert_eq!(turn.status(), StatusCode::ACCEPTED);
+    for _ in 0..100 {
+        if started.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+
+    let resp = post_json_with_headers(
+        &format!("{}/api/admin/quiesce", r.base),
+        &serde_json::json!({}),
+        &[("x-swarm-configure", secret)],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = body_json(resp).await;
+    assert_eq!(body["quiesced"], false);
+    assert_eq!(body["in_flight_chats"], 1);
+
+    release.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[tokio::test]

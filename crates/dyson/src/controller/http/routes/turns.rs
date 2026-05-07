@@ -24,7 +24,9 @@ use crate::llm::{CompletionConfig, LlmClient};
 use crate::message::Message;
 
 use super::super::output::SseOutput;
-use super::super::responses::{Resp, bad_request, boxed, json_ok, not_found, read_json_capped};
+use super::super::responses::{
+    Resp, bad_request, boxed, json_ok, not_found, read_json_capped, service_unavailable,
+};
 use super::super::state::{ChatHandle, HttpState};
 use super::super::wire::{MAX_TURN_BODY, SseEvent, TurnBody};
 use super::super::{AgentMode, build_agent};
@@ -76,6 +78,10 @@ pub(super) async fn post(
         Some(h) => h,
         None => return not_found(),
     };
+
+    if state.is_quiesced() {
+        return service_unavailable("instance is quiesced for maintenance");
+    }
 
     // Intercept `/clear` before the busy latch + spawn path.  Without
     // this, the slash command listed in data.js would land at the LLM
@@ -157,6 +163,12 @@ pub(super) async fn post(
                 )))
                 .unwrap(),
         };
+    }
+    if state.is_quiesced() {
+        handle
+            .busy
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        return service_unavailable("instance is quiesced for maintenance");
     }
 
     // Set up cancellation.

@@ -284,6 +284,15 @@ pub(crate) fn bad_request(msg: &str) -> Resp {
         .unwrap()
 }
 
+pub(crate) fn service_unavailable(msg: &str) -> Resp {
+    let body = serde_json::json!({ "error": msg }).to_string();
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("Content-Type", "application/json")
+        .body(boxed(Bytes::from(body)))
+        .unwrap()
+}
+
 pub(crate) fn not_found() -> Resp {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
