@@ -303,13 +303,14 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //    read-modify-write keeps the file in a consistent state and
     //    the HotReloader fires once per change cluster instead of
     //    three times.  Empty / None on a field means "leave alone".
+    let config_path = state.config_path();
+    let has_config = config_path.is_some();
     let want_models = !body.models.is_empty();
-    let want_api_key = body.proxy_token.as_deref().is_some_and(|s| !s.is_empty());
-    let want_base_url = body.proxy_base.as_deref().is_some_and(|s| !s.is_empty());
-    let provider_applied =
-        (want_models || want_api_key || want_base_url) && state.config_path().is_some();
+    let want_api_key = has_text(body.proxy_token.as_deref());
+    let want_base_url = has_text(body.proxy_base.as_deref());
+    let provider_applied = (want_models || want_api_key || want_base_url) && has_config;
     let provider_changed = if want_models || want_api_key || want_base_url {
-        match state.config_path() {
+        match config_path {
             Some(path) => match patch_provider_in_config(
                 path,
                 if want_models {
@@ -348,23 +349,13 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //    entries.  Existing dysons (created before this field was
     //    plumbed) get retroactively rewired by the swarm-side sweep
     //    that pushes a configure with these set.
-    let want_image_block = body
-        .image_provider_name
-        .as_deref()
-        .is_some_and(|s| !s.is_empty())
-        && body.image_provider_block.is_some();
-    let want_image_provider = body
-        .image_generation_provider
-        .as_deref()
-        .is_some_and(|s| !s.is_empty());
-    let want_image_model = body
-        .image_generation_model
-        .as_deref()
-        .is_some_and(|s| !s.is_empty());
-    let image_applied = (want_image_block || want_image_provider || want_image_model)
-        && state.config_path().is_some();
+    let want_image_block =
+        has_text(body.image_provider_name.as_deref()) && body.image_provider_block.is_some();
+    let want_image_provider = has_text(body.image_generation_provider.as_deref());
+    let want_image_model = has_text(body.image_generation_model.as_deref());
+    let image_applied = (want_image_block || want_image_provider || want_image_model) && has_config;
     let image_changed = if want_image_block || want_image_provider || want_image_model {
-        match state.config_path() {
+        match config_path {
             Some(path) => match patch_image_generation_in_config(
                 path,
                 if want_image_block {
@@ -401,9 +392,9 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //    every push so toolless instances self-heal on the next
     //    configure.  `tools` wins if both are set.
     let skills_requested = body.tools.is_some() || body.reset_skills;
-    let skills_applied = skills_requested && state.config_path().is_some();
+    let skills_applied = skills_requested && has_config;
     let skills_changed = if let Some(allowlist) = body.tools.as_deref() {
-        match state.config_path() {
+        match config_path {
             Some(path) => match set_skills_tools_in_config(path, allowlist) {
                 Ok(changed) => changed,
                 Err(e) => return bad_request(&format!("skills tools patch failed: {e}")),
@@ -411,7 +402,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
             None => false,
         }
     } else if body.reset_skills {
-        match state.config_path() {
+        match config_path {
             Some(path) => match clear_skills_in_config(path) {
                 Ok(changed) => changed,
                 Err(e) => return bad_request(&format!("skills reset failed: {e}")),
@@ -426,9 +417,9 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //    leaves it alone; an empty map clears it.  Distinct from the
     //    skills block because MCP servers are a sibling key in the
     //    loader's `JsonRoot`, not nested under `skills`.
-    let mcp_applied = body.mcp_servers.is_some() && state.config_path().is_some();
+    let mcp_applied = body.mcp_servers.is_some() && has_config;
     let mcp_changed = if let Some(servers) = &body.mcp_servers {
-        match state.config_path() {
+        match config_path {
             Some(path) => match patch_mcp_servers_in_config(path, servers) {
                 Ok(changed) => changed,
                 Err(e) => return bad_request(&format!("mcp_servers patch failed: {e}")),
@@ -455,7 +446,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //      client; the per-chat HotReloader's baseline is then
     //      post-patch, so subsequent turns see no change and never
     //      rebuild.  Eager reload closes the window entirely.
-    if any_config_changed && let Some(path) = state.config_path() {
+    if any_config_changed && let Some(path) = config_path {
         match crate::config::loader::load_settings(Some(path)) {
             Ok(new_settings) => {
                 state.registry.reload(&new_settings, None);
@@ -482,22 +473,20 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     // a running `SseOutput` reading the live values without an
     // agent rebuild.  Both empty strings → clear the config (operator
     // turned ingest off explicitly).
-    let ingest_applied = matches!(
-        (&body.ingest_url, &body.ingest_token),
-        (Some(url), Some(tok)) if (!url.is_empty() && !tok.is_empty()) || (url.is_empty() && tok.is_empty())
-    );
-    let ingest_changed = match (&body.ingest_url, &body.ingest_token) {
-        (Some(url), Some(tok)) if !url.is_empty() && !tok.is_empty() => {
+    let ingest_patch = runtime_patch(&body.ingest_url, &body.ingest_token);
+    let ingest_applied = ingest_patch.is_some();
+    let ingest_changed = match &ingest_patch {
+        Some(RuntimePatch::Set { url, token }) => {
             let cfg = super::super::state::IngestConfig {
-                url: url.clone(),
-                token: tok.clone(),
+                url: url.to_string(),
+                token: token.to_string(),
             };
             if let Ok(mut g) = state.ingest.lock() {
                 *g = Some(cfg);
             }
             true
         }
-        (Some(url), Some(tok)) if url.is_empty() && tok.is_empty() => {
+        Some(RuntimePatch::Clear) => {
             if let Ok(mut g) = state.ingest.lock() {
                 *g = None;
             }
@@ -505,19 +494,17 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         }
         _ => false,
     };
-    let state_sync_applied = matches!(
-        (&body.state_sync_url, &body.state_sync_token),
-        (Some(url), Some(tok)) if (!url.is_empty() && !tok.is_empty()) || (url.is_empty() && tok.is_empty())
-    );
-    let state_sync_changed = match (&body.state_sync_url, &body.state_sync_token) {
-        (Some(url), Some(tok)) if !url.is_empty() && !tok.is_empty() => {
+    let state_sync_patch = runtime_patch(&body.state_sync_url, &body.state_sync_token);
+    let state_sync_applied = state_sync_patch.is_some();
+    let state_sync_changed = match &state_sync_patch {
+        Some(RuntimePatch::Set { url, token }) => {
             crate::swarm_state_sync::set_config(Some(crate::swarm_state_sync::StateSyncConfig {
-                url: url.clone(),
-                token: tok.clone(),
+                url: url.to_string(),
+                token: token.to_string(),
             }));
             true
         }
-        (Some(url), Some(tok)) if url.is_empty() && tok.is_empty() => {
+        Some(RuntimePatch::Clear) => {
             crate::swarm_state_sync::set_config(None);
             true
         }
@@ -542,6 +529,29 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "state_sync_updated": state_sync_changed,
         "state_sync_applied": state_sync_applied,
     }))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RuntimePatch<'a> {
+    Set { url: &'a str, token: &'a str },
+    Clear,
+}
+
+fn has_text(value: Option<&str>) -> bool {
+    value.is_some_and(|s| !s.is_empty())
+}
+
+fn runtime_patch<'a>(
+    url: &'a Option<String>,
+    token: &'a Option<String>,
+) -> Option<RuntimePatch<'a>> {
+    match (url.as_deref(), token.as_deref()) {
+        (Some(url), Some(token)) if !url.is_empty() && !token.is_empty() => {
+            Some(RuntimePatch::Set { url, token })
+        }
+        (Some(""), Some("")) => Some(RuntimePatch::Clear),
+        _ => None,
+    }
 }
 
 pub(super) async fn post_state_file(
@@ -1211,6 +1221,29 @@ mod tests {
         assert!(body.reset_skills);
         assert!(body.mcp_servers.as_ref().unwrap().contains_key("massive"));
         assert_eq!(body.state_sync_token.as_deref(), Some("st_123"));
+    }
+
+    #[test]
+    fn runtime_patch_requires_complete_pairs_and_supports_clear() {
+        assert_eq!(
+            runtime_patch(
+                &Some("https://swarm.test/ingest".into()),
+                &Some("it_123".into())
+            ),
+            Some(RuntimePatch::Set {
+                url: "https://swarm.test/ingest",
+                token: "it_123"
+            })
+        );
+        assert_eq!(
+            runtime_patch(&Some(String::new()), &Some(String::new())),
+            Some(RuntimePatch::Clear)
+        );
+        assert_eq!(
+            runtime_patch(&Some("https://swarm.test/ingest".into()), &None),
+            None
+        );
+        assert_eq!(runtime_patch(&None, &Some("it_123".into())), None);
     }
 
     #[test]

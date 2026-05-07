@@ -54,7 +54,7 @@ pub fn config_from_env() -> Option<StateSyncConfig> {
 }
 
 pub fn install_config(initial: Option<StateSyncConfig>) -> Arc<Mutex<Option<StateSyncConfig>>> {
-    let handle = CONFIG.get_or_init(|| Arc::new(Mutex::new(None))).clone();
+    let handle = config_handle();
     let configured = initial.is_some();
     if let Ok(mut guard) = handle.lock() {
         *guard = initial;
@@ -65,7 +65,7 @@ pub fn install_config(initial: Option<StateSyncConfig>) -> Arc<Mutex<Option<Stat
 
 pub fn set_config(config: Option<StateSyncConfig>) {
     let configured = config.is_some();
-    let handle = CONFIG.get_or_init(|| Arc::new(Mutex::new(None))).clone();
+    let handle = config_handle();
     if let Ok(mut guard) = handle.lock() {
         *guard = config;
     }
@@ -73,15 +73,24 @@ pub fn set_config(config: Option<StateSyncConfig>) {
 }
 
 pub fn status_snapshot() -> StateSyncStatus {
-    STATUS
-        .get_or_init(|| Arc::new(Mutex::new(StateSyncStatus::default())))
+    status_handle()
         .lock()
         .map(|guard| guard.clone())
         .unwrap_or_default()
 }
 
+fn config_handle() -> Arc<Mutex<Option<StateSyncConfig>>> {
+    CONFIG.get_or_init(|| Arc::new(Mutex::new(None))).clone()
+}
+
+fn status_handle() -> Arc<Mutex<StateSyncStatus>> {
+    STATUS
+        .get_or_init(|| Arc::new(Mutex::new(StateSyncStatus::default())))
+        .clone()
+}
+
 fn update_configured_status(configured: bool) {
-    let status = STATUS.get_or_init(|| Arc::new(Mutex::new(StateSyncStatus::default())));
+    let status = status_handle();
     if let Ok(mut guard) = status.lock() {
         guard.configured = configured;
         if !configured {
@@ -92,7 +101,7 @@ fn update_configured_status(configured: bool) {
 }
 
 fn record_success() {
-    let status = STATUS.get_or_init(|| Arc::new(Mutex::new(StateSyncStatus::default())));
+    let status = status_handle();
     if let Ok(mut guard) = status.lock() {
         guard.configured = true;
         guard.last_success_at = Some(now_secs());
@@ -102,7 +111,7 @@ fn record_success() {
 }
 
 fn record_error(error: impl Into<String>) {
-    let status = STATUS.get_or_init(|| Arc::new(Mutex::new(StateSyncStatus::default())));
+    let status = status_handle();
     if let Ok(mut guard) = status.lock() {
         guard.configured = true;
         guard.last_error_at = Some(now_secs());
