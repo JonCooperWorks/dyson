@@ -134,10 +134,18 @@ describe('app store — live / mind / activity / UI nonces', () => {
           { name: ' ', transport: 'stdio' },
         ],
       },
+      state_sync: {
+        configured: true,
+        last_success_at: 1778100000,
+        last_error_at: null,
+        last_error: null,
+      },
     });
     const snapshot = app.getSnapshot();
     expect(snapshot.agentName).toBe('axelrod');
     expect(snapshot.skills.mcp).toEqual([{ name: 'mcp_massive', transport: 'http' }]);
+    expect(snapshot.stateSync.configured).toBe(true);
+    expect(snapshot.stateSync.last_success_at).toBe(1778100000);
   });
 
   it('setSkills normalizes missing inventory sections', () => {

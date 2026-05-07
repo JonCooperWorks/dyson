@@ -32,6 +32,7 @@ const INITIAL = {
   // sessions.js `mintToolRef` for the generator.
   tools: {},
   skills: { builtin: [], mcp: [], denials: [] },
+  stateSync: { configured: false, last_success_at: null, last_error_at: null, last_error: null },
   // Imperative UI pokes.  Replaces the old `window.dispatchEvent(new
   // CustomEvent(...))` channel: a counter is the cheap way to signal
   // "fire this once" without the listener missing the dispatch (React
@@ -136,7 +137,19 @@ export function setSkills(skills) {
 export function setAgentInfo(agent) {
   const name = (agent?.name || '').trim();
   const skills = normalizeSkills(agent?.skills);
-  app.dispatch(s => ({ ...s, agentName: name, skills }));
+  app.dispatch(s => ({
+    ...s,
+    agentName: name,
+    skills,
+    stateSync: agent?.state_sync && typeof agent.state_sync === 'object'
+      ? {
+          configured: Boolean(agent.state_sync.configured),
+          last_success_at: agent.state_sync.last_success_at ?? null,
+          last_error_at: agent.state_sync.last_error_at ?? null,
+          last_error: agent.state_sync.last_error || null,
+        }
+      : s.stateSync,
+  }));
 }
 
 export function setActivity(lanes) {

@@ -527,6 +527,7 @@ function EmptyState() {
   const mind = useAppState(s => s.mind);
   const agentName = useAppState(s => s.agentName) || 'Dyson';
   const mcpServers = useAppState(s => s.skills?.mcp || []);
+  const stateSync = useAppState(s => s.stateSync);
   const wsBackend = (mind && mind.backend) || '';
   const mcpNames = mcpServers
     .map(s => String(s?.name || '').trim())
@@ -543,6 +544,7 @@ function EmptyState() {
       <p>
         {model && <>Model <span className="mono es-pill">{model}</span>. </>}
         {mcpNames.length > 0 && <>MCP <span className="mono es-pill">{shownMcp}{hiddenMcp > 0 ? `, +${hiddenMcp}` : ''}</span>. </>}
+        {stateSync?.configured && stateSync?.last_error && <>Memory sync <span className="mono es-pill">error</span>. </>}
         {wsBackend && <>Workspace backend <span className="mono es-pill">{wsBackend}</span>.</>}
       </p>
       <div className="es-hint">Type a message to start.</div>

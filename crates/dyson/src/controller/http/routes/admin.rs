@@ -306,6 +306,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     let want_models = !body.models.is_empty();
     let want_api_key = body.proxy_token.as_deref().is_some_and(|s| !s.is_empty());
     let want_base_url = body.proxy_base.as_deref().is_some_and(|s| !s.is_empty());
+    let provider_applied =
+        (want_models || want_api_key || want_base_url) && state.config_path().is_some();
     let provider_changed = if want_models || want_api_key || want_base_url {
         match state.config_path() {
             Some(path) => match patch_provider_in_config(
@@ -335,6 +337,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         false
     };
     let models_changed = provider_changed && want_models;
+    let models_applied = want_models && provider_applied;
 
     // 3. Image generation: register / replace the dedicated image
     //    provider block and point `agent.image_generation_*` at it.
@@ -358,6 +361,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         .image_generation_model
         .as_deref()
         .is_some_and(|s| !s.is_empty());
+    let image_applied = (want_image_block || want_image_provider || want_image_model)
+        && state.config_path().is_some();
     let image_changed = if want_image_block || want_image_provider || want_image_model {
         match state.config_path() {
             Some(path) => match patch_image_generation_in_config(
@@ -395,6 +400,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //    chat / image patches — swarm's sweep flips one of these on
     //    every push so toolless instances self-heal on the next
     //    configure.  `tools` wins if both are set.
+    let skills_requested = body.tools.is_some() || body.reset_skills;
+    let skills_applied = skills_requested && state.config_path().is_some();
     let skills_changed = if let Some(allowlist) = body.tools.as_deref() {
         match state.config_path() {
             Some(path) => match set_skills_tools_in_config(path, allowlist) {
@@ -419,6 +426,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //    leaves it alone; an empty map clears it.  Distinct from the
     //    skills block because MCP servers are a sibling key in the
     //    loader's `JsonRoot`, not nested under `skills`.
+    let mcp_applied = body.mcp_servers.is_some() && state.config_path().is_some();
     let mcp_changed = if let Some(servers) = &body.mcp_servers {
         match state.config_path() {
             Some(path) => match patch_mcp_servers_in_config(path, servers) {
@@ -474,6 +482,10 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     // a running `SseOutput` reading the live values without an
     // agent rebuild.  Both empty strings → clear the config (operator
     // turned ingest off explicitly).
+    let ingest_applied = matches!(
+        (&body.ingest_url, &body.ingest_token),
+        (Some(url), Some(tok)) if (!url.is_empty() && !tok.is_empty()) || (url.is_empty() && tok.is_empty())
+    );
     let ingest_changed = match (&body.ingest_url, &body.ingest_token) {
         (Some(url), Some(tok)) if !url.is_empty() && !tok.is_empty() => {
             let cfg = super::super::state::IngestConfig {
@@ -493,6 +505,10 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         }
         _ => false,
     };
+    let state_sync_applied = matches!(
+        (&body.state_sync_url, &body.state_sync_token),
+        (Some(url), Some(tok)) if (!url.is_empty() && !tok.is_empty()) || (url.is_empty() && tok.is_empty())
+    );
     let state_sync_changed = match (&body.state_sync_url, &body.state_sync_token) {
         (Some(url), Some(tok)) if !url.is_empty() && !tok.is_empty() => {
             crate::swarm_state_sync::set_config(Some(crate::swarm_state_sync::StateSyncConfig {
@@ -512,12 +528,19 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "ok": true,
         "identity_updated": identity_changed,
         "models_updated": models_changed,
+        "models_applied": models_applied,
         "provider_updated": provider_changed,
+        "provider_applied": provider_applied,
         "image_generation_updated": image_changed,
+        "image_generation_applied": image_applied,
         "skills_reset": skills_changed,
+        "skills_applied": skills_applied,
         "mcp_servers_updated": mcp_changed,
+        "mcp_servers_applied": mcp_applied,
         "ingest_updated": ingest_changed,
+        "ingest_applied": ingest_applied,
         "state_sync_updated": state_sync_changed,
+        "state_sync_applied": state_sync_applied,
     }))
 }
 
@@ -1152,6 +1175,43 @@ fn patch_mcp_servers_in_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configure_body_accepts_full_swarm_wire_contract() {
+        let body: ConfigureBody = serde_json::from_value(serde_json::json!({
+            "name": "axelrod",
+            "task": "research",
+            "models": ["deepseek/deepseek-v4-pro"],
+            "instance_id": "i-1",
+            "proxy_token": "pt_test",
+            "proxy_base": "https://swarm.test/llm/openrouter",
+            "image_provider_name": "image",
+            "image_provider_block": {
+                "type": "openrouter",
+                "api_key": "pt_test",
+                "models": ["google/gemini-image"]
+            },
+            "image_generation_provider": "image",
+            "image_generation_model": "google/gemini-image",
+            "reset_skills": true,
+            "tools": ["read_file"],
+            "mcp_servers": {
+                "massive": { "url": "https://swarm.test/mcp/i-1/massive" }
+            },
+            "ingest_url": "https://swarm.test/v1/internal/ingest",
+            "ingest_token": "it_123",
+            "state_sync_url": "https://swarm.test/v1/internal/state/file",
+            "state_sync_token": "st_123"
+        }))
+        .unwrap();
+
+        assert_eq!(body.name.as_deref(), Some("axelrod"));
+        assert_eq!(body.models, vec!["deepseek/deepseek-v4-pro"]);
+        assert_eq!(body.tools.as_deref(), Some(&["read_file".to_string()][..]));
+        assert!(body.reset_skills);
+        assert!(body.mcp_servers.as_ref().unwrap().contains_key("massive"));
+        assert_eq!(body.state_sync_token.as_deref(), Some("st_123"));
+    }
 
     #[test]
     fn build_identity_md_skips_empty_sections() {

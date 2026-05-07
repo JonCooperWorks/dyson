@@ -32,6 +32,7 @@ pub(super) async fn get(state: &HttpState) -> Resp {
     json_ok(&serde_json::json!({
         "name": name,
         "skills": skill_inventory(&inventory_settings),
+        "state_sync": crate::swarm_state_sync::status_snapshot(),
     }))
 }
 

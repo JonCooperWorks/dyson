@@ -33,6 +33,15 @@ struct SyncRoot {
 }
 
 static CONFIG: OnceLock<Arc<Mutex<Option<StateSyncConfig>>>> = OnceLock::new();
+static STATUS: OnceLock<Arc<Mutex<StateSyncStatus>>> = OnceLock::new();
+
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct StateSyncStatus {
+    pub configured: bool,
+    pub last_success_at: Option<i64>,
+    pub last_error_at: Option<i64>,
+    pub last_error: Option<String>,
+}
 
 pub fn config_from_env() -> Option<StateSyncConfig> {
     let url = std::env::var(ENV_STATE_SYNC_URL).unwrap_or_default();
@@ -46,17 +55,58 @@ pub fn config_from_env() -> Option<StateSyncConfig> {
 
 pub fn install_config(initial: Option<StateSyncConfig>) -> Arc<Mutex<Option<StateSyncConfig>>> {
     let handle = CONFIG.get_or_init(|| Arc::new(Mutex::new(None))).clone();
+    let configured = initial.is_some();
     if let Ok(mut guard) = handle.lock() {
         *guard = initial;
     }
+    update_configured_status(configured);
     handle
 }
 
 pub fn set_config(config: Option<StateSyncConfig>) {
-    if let Some(handle) = CONFIG.get()
-        && let Ok(mut guard) = handle.lock()
-    {
+    let configured = config.is_some();
+    let handle = CONFIG.get_or_init(|| Arc::new(Mutex::new(None))).clone();
+    if let Ok(mut guard) = handle.lock() {
         *guard = config;
+    }
+    update_configured_status(configured);
+}
+
+pub fn status_snapshot() -> StateSyncStatus {
+    STATUS
+        .get_or_init(|| Arc::new(Mutex::new(StateSyncStatus::default())))
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default()
+}
+
+fn update_configured_status(configured: bool) {
+    let status = STATUS.get_or_init(|| Arc::new(Mutex::new(StateSyncStatus::default())));
+    if let Ok(mut guard) = status.lock() {
+        guard.configured = configured;
+        if !configured {
+            guard.last_error = None;
+            guard.last_error_at = None;
+        }
+    }
+}
+
+fn record_success() {
+    let status = STATUS.get_or_init(|| Arc::new(Mutex::new(StateSyncStatus::default())));
+    if let Ok(mut guard) = status.lock() {
+        guard.configured = true;
+        guard.last_success_at = Some(now_secs());
+        guard.last_error = None;
+        guard.last_error_at = None;
+    }
+}
+
+fn record_error(error: impl Into<String>) {
+    let status = STATUS.get_or_init(|| Arc::new(Mutex::new(StateSyncStatus::default())));
+    if let Ok(mut guard) = status.lock() {
+        guard.configured = true;
+        guard.last_error_at = Some(now_secs());
+        guard.last_error = Some(error.into());
     }
 }
 
@@ -212,23 +262,30 @@ async fn post_state_file(
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_success() => true,
+        Ok(resp) if resp.status().is_success() => {
+            record_success();
+            true
+        }
         Ok(resp) => {
+            let error = format!("swarm rejected file push: {}", resp.status());
             tracing::warn!(
                 status = %resp.status(),
                 namespace = %file.namespace,
                 path = %file.rel_path,
                 "state-sync: swarm rejected file push"
             );
+            record_error(error);
             false
         }
         Err(e) => {
+            let error = e.to_string();
             tracing::warn!(
                 error = %e,
                 namespace = %file.namespace,
                 path = %file.rel_path,
                 "state-sync: file push failed"
             );
+            record_error(error);
             false
         }
     }
@@ -365,6 +422,13 @@ fn now_ns() -> u128 {
         .unwrap_or(0)
 }
 
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
 fn ns_to_secs(ns: u128) -> i64 {
     i64::try_from(ns / 1_000_000_000).unwrap_or(i64::MAX)
 }
@@ -375,6 +439,22 @@ mod tests {
     use serde_json::Value;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn set_config_initializes_global_handle() {
+        let cfg = StateSyncConfig {
+            url: "https://swarm.test/v1/internal/state/file".into(),
+            token: "st_test".into(),
+        };
+
+        set_config(Some(cfg.clone()));
+        let current = CONFIG
+            .get()
+            .and_then(|handle| handle.lock().ok().and_then(|guard| guard.clone()));
+
+        assert_eq!(current, Some(cfg));
+        assert!(status_snapshot().configured);
+    }
 
     #[test]
     fn workspace_allowlist_is_narrow() {
