@@ -78,6 +78,12 @@ pub struct SkillInstallOutcome {
     pub sha256: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SkillRemoveOutcome {
+    pub uninstalled: bool,
+    pub skill: String,
+}
+
 #[derive(Debug)]
 pub enum SkillInstallError {
     AlreadyInstalled { current_version: Option<String> },
@@ -85,7 +91,20 @@ pub enum SkillInstallError {
     Workspace(crate::DysonError),
 }
 
+#[derive(Debug)]
+pub enum SkillRemoveError {
+    Invalid(String),
+    NotInstalled,
+    Workspace(crate::DysonError),
+}
+
 impl From<crate::DysonError> for SkillInstallError {
+    fn from(value: crate::DysonError) -> Self {
+        Self::Workspace(value)
+    }
+}
+
+impl From<crate::DysonError> for SkillRemoveError {
     fn from(value: crate::DysonError) -> Self {
         Self::Workspace(value)
     }
@@ -351,25 +370,42 @@ async fn remove_skill(ctx: &ToolContext, skill: &str) -> crate::Result<ToolOutpu
     if skill.is_empty() {
         return Ok(ToolOutput::error("'skill' is required for remove"));
     }
-    if !is_valid_skill_name(skill) {
-        return Ok(ToolOutput::error(format!("Invalid skill name '{skill}'")));
-    }
     let ws = ctx.workspace("skill_marketplace")?;
-    let mut ws = ws.write().await;
+    match remove_skill_from_workspace(&ws, skill).await {
+        Ok(_) => Ok(ToolOutput::success(format!(
+            "Removed skill '{skill}' from skills/{skill}/SKILL.md."
+        ))),
+        Err(SkillRemoveError::Invalid(msg)) => Ok(ToolOutput::error(msg)),
+        Err(SkillRemoveError::NotInstalled) => Ok(ToolOutput::error(format!(
+            "Skill '{skill}' is not installed."
+        ))),
+        Err(SkillRemoveError::Workspace(err)) => Err(err),
+    }
+}
+
+pub async fn remove_skill_from_workspace(
+    workspace: &crate::workspace::WorkspaceHandle,
+    skill: &str,
+) -> Result<SkillRemoveOutcome, SkillRemoveError> {
+    if !is_valid_skill_name(skill) {
+        return Err(SkillRemoveError::Invalid(format!(
+            "Invalid skill name '{skill}'"
+        )));
+    }
+    let mut ws = workspace.write().await;
     let skill_key = format!("skills/{skill}/SKILL.md");
     let metadata_key = format!("skills/{skill}/dyson-skill.json");
     let removed_body = ws.remove(&skill_key)?;
     let removed_metadata = ws.remove(&metadata_key)?;
     if !removed_body && !removed_metadata {
-        return Ok(ToolOutput::error(format!(
-            "Skill '{skill}' is not installed."
-        )));
+        return Err(SkillRemoveError::NotInstalled);
     }
-    ws.journal(&format!("Removed marketplace skill '{skill}'."));
+    ws.journal(&format!("Removed skill '{skill}'."));
     ws.save()?;
-    Ok(ToolOutput::success(format!(
-        "Removed skill '{skill}' from {skill_key}."
-    )))
+    Ok(SkillRemoveOutcome {
+        uninstalled: true,
+        skill: skill.to_owned(),
+    })
 }
 
 async fn swarm_get<T: for<'de> Deserialize<'de>>(path: &str) -> crate::Result<T> {
@@ -573,5 +609,17 @@ mod tests {
         let ws = ws.read().await;
         assert!(ws.get("skills/code-review/SKILL.md").is_none());
         assert!(ws.get("skills/code-review/dyson-skill.json").is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_helper_reports_missing_skill() {
+        let ws = crate::workspace::InMemoryWorkspace::new();
+        let ctx = ToolContext::for_test_with_workspace(ws);
+        let workspace = ctx.workspace("test").unwrap().clone();
+
+        let out = remove_skill_from_workspace(&workspace, "code-review")
+            .await
+            .unwrap_err();
+        assert!(matches!(out, SkillRemoveError::NotInstalled));
     }
 }

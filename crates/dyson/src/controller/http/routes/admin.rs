@@ -695,6 +695,37 @@ pub(super) async fn post_skill_install(
     }
 }
 
+pub(super) async fn delete_skill(
+    req: Request<hyper::body::Incoming>,
+    state: &HttpState,
+    skill: &str,
+) -> Resp {
+    if let Some(resp) = authorize_configure(req.headers(), state) {
+        return resp;
+    }
+    let snapshot = state.settings_snapshot();
+    let workspace = match crate::workspace::create_workspace(&snapshot.workspace) {
+        Ok(w) => Arc::new(RwLock::new(w)),
+        Err(e) => return bad_request(&format!("workspace open failed: {e}")),
+    };
+    match crate::tool::skill_marketplace::remove_skill_from_workspace(&workspace, skill.trim())
+        .await
+    {
+        Ok(outcome) => json_ok(&outcome),
+        Err(crate::tool::skill_marketplace::SkillRemoveError::Invalid(msg)) => bad_request(&msg),
+        Err(crate::tool::skill_marketplace::SkillRemoveError::NotInstalled) => json_status(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({
+                "error": "skill_not_installed",
+                "skill": skill,
+            }),
+        ),
+        Err(crate::tool::skill_marketplace::SkillRemoveError::Workspace(err)) => {
+            bad_request(&format!("workspace uninstall failed: {err}"))
+        }
+    }
+}
+
 pub(super) async fn get_idle(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
     if let Some(resp) = authorize_configure(req.headers(), state) {
         return resp;

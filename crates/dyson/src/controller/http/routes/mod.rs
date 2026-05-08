@@ -260,6 +260,10 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&Method::POST, ["api", "admin", "skills", "install"]) => {
             admin::post_skill_install(req, &state).await
         }
+        (&Method::DELETE, ["api", "admin", "skills", skill]) => match url_decode_strict(skill) {
+            Some(skill) => admin::delete_skill(req, &state, &skill).await,
+            None => not_found(),
+        },
         (&Method::GET, ["api", "admin", "idle"]) => admin::get_idle(req, &state).await,
         (&Method::POST, ["api", "admin", "quiesce"]) => admin::post_quiesce(req, &state).await,
         (&Method::POST, ["api", "admin", "unquiesce"]) => admin::post_unquiesce(req, &state).await,
