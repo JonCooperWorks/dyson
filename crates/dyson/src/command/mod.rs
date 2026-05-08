@@ -106,6 +106,12 @@ pub fn apply_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn resolve_config_path_explicit_wins() {
@@ -116,6 +122,7 @@ mod tests {
 
     #[test]
     fn resolve_config_path_home_fallback() {
+        let _guard = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let dyson_dir = tmp.path().join(".dyson");
         std::fs::create_dir_all(&dyson_dir).unwrap();
@@ -137,6 +144,7 @@ mod tests {
 
     #[test]
     fn resolve_config_path_none() {
+        let _guard = env_lock();
         // With an explicit None and HOME pointing to a dir without config,
         // and CWD without dyson.json, result should be None.
         let tmp = tempfile::tempdir().unwrap();
