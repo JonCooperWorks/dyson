@@ -722,8 +722,6 @@ fn clean_relative_path(path: &str) -> std::result::Result<PathBuf, String> {
 /// live `state.registry` only caches LLM clients, not skills.
 pub(super) async fn get_skills(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
     use crate::skill::Skill;
-    #[allow(unused_imports)]
-    use crate::tool::Tool;
 
     if let Err(resp) = authorize_configure(req.headers(), state) {
         return resp;

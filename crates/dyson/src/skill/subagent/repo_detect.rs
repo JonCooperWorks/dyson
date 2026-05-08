@@ -1293,15 +1293,9 @@ pub fn detect_and_compose(root: &Path) -> (String, Vec<&'static str>) {
     compose_cheatsheets(&detect_repo(root))
 }
 
-/// Suppress `unused` when `dead_code` lint fires — this helper is part
-/// of the public detection surface even when no downstream caller is
-/// linked in the current build configuration.
-#[allow(dead_code)]
-fn _assert_detection_is_send_sync()
-where
-    Detection: Send + Sync,
-{
-}
+fn assert_send_sync<T: Send + Sync>() {}
+
+const _: fn() = assert_send_sync::<Detection>;
 
 #[cfg(test)]
 mod tests {
@@ -1411,90 +1405,98 @@ mod tests {
 
     /// Compile-time guard: if a new variant is added to either enum
     /// without updating `ALL_LANGUAGES` / `ALL_FRAMEWORKS` above, this
-    /// function fails to compile — the `match` loses exhaustivity.
-    /// Never called; exists purely for the compiler check.
-    #[allow(dead_code)]
-    fn _match_guard(lang: Language, fw: Framework) {
-        match lang {
-            Language::Python
-            | Language::JavaScript
-            | Language::Go
-            | Language::Rust
-            | Language::Ruby
-            | Language::Java
-            | Language::Kotlin
-            | Language::CSharp
-            | Language::Php
-            | Language::Cpp
-            | Language::Elixir
-            | Language::Haskell
-            | Language::Swift
-            | Language::Ocaml
-            | Language::Erlang
-            | Language::Zig
-            | Language::Nix
-            | Language::Lua => {}
+    /// test fails to compile — the `match` loses exhaustivity.
+    #[test]
+    fn enum_lists_are_exhaustive() {
+        fn match_guard(lang: Language, fw: Framework) {
+            match lang {
+                Language::Python
+                | Language::JavaScript
+                | Language::Go
+                | Language::Rust
+                | Language::Ruby
+                | Language::Java
+                | Language::Kotlin
+                | Language::CSharp
+                | Language::Php
+                | Language::Cpp
+                | Language::Elixir
+                | Language::Haskell
+                | Language::Swift
+                | Language::Ocaml
+                | Language::Erlang
+                | Language::Zig
+                | Language::Nix
+                | Language::Lua => {}
+            }
+            match fw {
+                Framework::Django
+                | Framework::Flask
+                | Framework::FastApi
+                | Framework::Aiohttp
+                | Framework::Tornado
+                | Framework::Sanic
+                | Framework::Celery
+                | Framework::Express
+                | Framework::NextJs
+                | Framework::Fastify
+                | Framework::NestJs
+                | Framework::Trpc
+                | Framework::Koa
+                | Framework::Hono
+                | Framework::SvelteKit
+                | Framework::Remix
+                | Framework::GraphQL
+                | Framework::Actix
+                | Framework::Axum
+                | Framework::Rocket
+                | Framework::Warp
+                | Framework::Tonic
+                | Framework::Rails
+                | Framework::Sinatra
+                | Framework::Spring
+                | Framework::Quarkus
+                | Framework::Micronaut
+                | Framework::Javalin
+                | Framework::Ktor
+                | Framework::AspNet
+                | Framework::Laravel
+                | Framework::Symfony
+                | Framework::Slim
+                | Framework::CodeIgniter
+                | Framework::Phoenix
+                | Framework::Gin
+                | Framework::Echo
+                | Framework::Chi
+                | Framework::Fiber
+                | Framework::GorillaMux
+                | Framework::Vapor
+                | Framework::Hummingbird
+                | Framework::Servant
+                | Framework::Dream
+                | Framework::Cowboy
+                | Framework::Starlette
+                | Framework::Pyramid
+                | Framework::Falcon
+                | Framework::Bottle
+                | Framework::Play
+                | Framework::Dropwizard
+                | Framework::Helidon
+                | Framework::Vertx
+                | Framework::Hapi
+                | Framework::Adonis
+                | Framework::Meteor
+                | Framework::Nuxt
+                | Framework::OpenResty
+                | Framework::Solana => {}
+            }
         }
-        match fw {
-            Framework::Django
-            | Framework::Flask
-            | Framework::FastApi
-            | Framework::Aiohttp
-            | Framework::Tornado
-            | Framework::Sanic
-            | Framework::Celery
-            | Framework::Express
-            | Framework::NextJs
-            | Framework::Fastify
-            | Framework::NestJs
-            | Framework::Trpc
-            | Framework::Koa
-            | Framework::Hono
-            | Framework::SvelteKit
-            | Framework::Remix
-            | Framework::GraphQL
-            | Framework::Actix
-            | Framework::Axum
-            | Framework::Rocket
-            | Framework::Warp
-            | Framework::Tonic
-            | Framework::Rails
-            | Framework::Sinatra
-            | Framework::Spring
-            | Framework::Quarkus
-            | Framework::Micronaut
-            | Framework::Javalin
-            | Framework::Ktor
-            | Framework::AspNet
-            | Framework::Laravel
-            | Framework::Symfony
-            | Framework::Slim
-            | Framework::CodeIgniter
-            | Framework::Phoenix
-            | Framework::Gin
-            | Framework::Echo
-            | Framework::Chi
-            | Framework::Fiber
-            | Framework::GorillaMux
-            | Framework::Vapor
-            | Framework::Hummingbird
-            | Framework::Servant
-            | Framework::Dream
-            | Framework::Cowboy
-            | Framework::Starlette
-            | Framework::Pyramid
-            | Framework::Falcon
-            | Framework::Bottle
-            | Framework::Play
-            | Framework::Dropwizard
-            | Framework::Helidon
-            | Framework::Vertx
-            | Framework::Hapi
-            | Framework::Adonis
-            | Framework::Meteor
-            | Framework::Nuxt
-            | Framework::OpenResty
-            | Framework::Solana => {}
+
+        for lang in ALL_LANGUAGES {
+            match_guard(*lang, Framework::Django);
+        }
+        for fw in ALL_FRAMEWORKS {
+            match_guard(Language::Python, *fw);
         }
     }
 

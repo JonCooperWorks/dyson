@@ -268,7 +268,6 @@ fn install_to_path(base: &Path) -> dyson::error::Result<()> {
 ///
 /// Intentionally synchronous: `dyson init` is a one-shot CLI command with no
 /// concurrent async work, so blocking `std::process::Command` calls are fine.
-#[allow(unused_variables)]
 fn install_systemd_service(
     base: &Path,
     config_path: &Path,
@@ -277,6 +276,7 @@ fn install_systemd_service(
 ) -> dyson::error::Result<()> {
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = (base, config_path, env_vars, dangerous_no_sandbox);
         eprintln!("--daemonize is only supported on Linux (systemd).");
         eprintln!("on macOS, use launchd instead (not yet implemented).");
         Ok(())

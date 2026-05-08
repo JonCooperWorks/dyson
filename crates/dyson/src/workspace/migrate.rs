@@ -61,16 +61,16 @@ enum Step {
 
     /// Rename a file or directory (from, to), relative to workspace root.
     /// No-op if source doesn't exist.
-    #[allow(dead_code)]
+    #[cfg(test)]
     Rename(&'static str, &'static str),
 
     /// Skip all remaining steps in this migration if a path exists.
     /// Used for idempotency.
-    #[allow(dead_code)]
+    #[cfg(test)]
     SkipIf(&'static str),
 
     /// Bail with an error if a path exists (ambiguous state).
-    #[allow(dead_code)]
+    #[cfg(test)]
     BailIf(&'static str, &'static str),
 
     /// Promote flat files in a directory to subdirectories.
@@ -235,6 +235,7 @@ fn apply_steps(workspace_path: &Path, steps: &[Step]) -> Result<()> {
                     ))
                 })?;
             }
+            #[cfg(test)]
             Step::Rename(from, to) => {
                 let src = workspace_path.join(from);
                 let dst = workspace_path.join(to);
@@ -257,11 +258,13 @@ fn apply_steps(workspace_path: &Path, steps: &[Step]) -> Result<()> {
                     })?;
                 }
             }
+            #[cfg(test)]
             Step::SkipIf(path) => {
                 if workspace_path.join(path).exists() {
                     return Ok(());
                 }
             }
+            #[cfg(test)]
             Step::BailIf(path, message) => {
                 if workspace_path.join(path).exists() {
                     return Err(DysonError::Config((*message).into()));

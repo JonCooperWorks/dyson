@@ -73,7 +73,7 @@ struct JsonRoot {
     /// Schema version — consumed by `migrate()`, retained here so
     /// `deny_unknown_fields` doesn't reject it.
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "serde-only compatibility field")]
     config_version: Option<u32>,
     /// Named provider configurations.
     ///
@@ -1733,10 +1733,7 @@ mod tests {
         let result = resolve_api_keys(&mut settings, &secrets);
 
         assert!(result.is_ok());
-        assert_eq!(
-            settings.agent.api_key.expose(),
-            "sk-explicit-for-proxy"
-        );
+        assert_eq!(settings.agent.api_key.expose(), "sk-explicit-for-proxy");
         assert_eq!(
             settings.agent.base_url.as_deref(),
             Some("https://my-proxy.example.com/v1")

@@ -73,7 +73,6 @@ enum Step {
     SetString(&'static str, &'static str),
 
     /// Remove a field at a path.  No-op if it doesn't exist.
-    #[allow(dead_code)]
     Remove(&'static str),
 
     /// Skip all remaining steps in this migration if a path exists.
@@ -84,7 +83,7 @@ enum Step {
     /// Bail with an error if a path exists.
     /// Used when the config is in an ambiguous state that can't be
     /// resolved automatically.
-    #[allow(dead_code)]
+    #[cfg(test)]
     BailIf(&'static str, &'static str),
 
     /// For each child object under `parent_path`, remove `old_key` and
@@ -256,6 +255,7 @@ fn apply_steps(root: &mut Value, steps: &[Step]) -> Result<()> {
                     return Ok(());
                 }
             }
+            #[cfg(test)]
             Step::BailIf(path, message) => {
                 if get_path(root, path).is_some() {
                     return Err(DysonError::Config((*message).into()));
