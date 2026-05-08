@@ -121,11 +121,16 @@ fn format_tools_for_prompt(tools: &[ToolDefinition]) -> String {
 
 fn extract_qwen_tool_calls(text: &str) -> Option<(String, Vec<ExtractedToolCall>)> {
     static TOOL_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?s)<tool_call>\s*<function=([^>\s]+)>(.*?)</function>\s*</tool_call>")
+        Regex::new(
+            r#"(?s)<tool_call>\s*<function(?:=([^>\s]+)|[^>]*\bname\s*=\s*["']?([^>"'\s]+)["']?[^>]*)>(.*?)</function>\s*</tool_call>"#,
+        )
             .expect("qwen tool-call regex")
     });
     static PARAM_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?s)<parameter=([^>\s]+)>(.*?)</parameter>").expect("qwen parameter regex")
+        Regex::new(
+            r#"(?s)<parameter(?:=([^>\s]+)|[^>]*\bname\s*=\s*["']?([^>"'\s]+)["']?[^>]*)>(.*?)</parameter>"#,
+        )
+        .expect("qwen parameter regex")
     });
 
     if !TOOL_CALL_RE.is_match(text) {
@@ -134,12 +139,29 @@ fn extract_qwen_tool_calls(text: &str) -> Option<(String, Vec<ExtractedToolCall>
 
     let mut calls = Vec::new();
     for cap in TOOL_CALL_RE.captures_iter(text) {
-        let name = cap[1].trim().to_string();
-        let body = &cap[2];
+        let name = cap
+            .get(1)
+            .or_else(|| cap.get(2))
+            .expect("function regex captures a name")
+            .as_str()
+            .trim()
+            .to_string();
+        let body = cap.get(3).expect("function regex captures a body").as_str();
         let mut map = serde_json::Map::new();
         for param in PARAM_RE.captures_iter(body) {
-            let key = param[1].trim().to_string();
-            let value = normalize_param_value(&param[2]);
+            let key = param
+                .get(1)
+                .or_else(|| param.get(2))
+                .expect("parameter regex captures a name")
+                .as_str()
+                .trim()
+                .to_string();
+            let value = normalize_param_value(
+                param
+                    .get(3)
+                    .expect("parameter regex captures a value")
+                    .as_str(),
+            );
             map.insert(key, serde_json::Value::String(value));
         }
         calls.push(ExtractedToolCall {
@@ -196,6 +218,16 @@ mod tests {
         assert_eq!(calls[0].name, "write_file");
         assert_eq!(calls[0].input["file_path"], "report.md");
         assert_eq!(calls[0].input["content"], "hello\nworld");
+    }
+
+    #[test]
+    fn extracts_qwen_xml_tool_call_with_name_attributes() {
+        let text = "<tool_call><function name=\"write_file\"><parameter name=\"file_path\">report.md</parameter><parameter name='content'>hello</parameter></function></tool_call>";
+        let (_, calls) = extract_qwen_tool_calls(text).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "write_file");
+        assert_eq!(calls[0].input["file_path"], "report.md");
+        assert_eq!(calls[0].input["content"], "hello");
     }
 
     #[test]

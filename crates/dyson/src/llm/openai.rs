@@ -57,7 +57,9 @@ use crate::auth::Auth;
 use crate::error::{DysonError, Result};
 use crate::llm::sse_parser::{BaseSseParser, SseJsonParser, ToolBufferContext};
 use crate::llm::stream::{StopReason, StreamEvent};
-use crate::llm::{CompletionConfig, LlmClient, ToolDefinition, concat_system_prompt};
+use crate::llm::{
+    CompletionConfig, LlmClient, StreamResponse, ToolDefinition, concat_system_prompt,
+};
 use crate::message::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
@@ -221,6 +223,13 @@ impl OpenAiClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| format!("HTTP {status}"));
+            tracing::warn!(
+                provider = %provider_label(&self.base_url),
+                model = %config.model,
+                phase = "response_status",
+                status = %status,
+                "OpenAI-compatible streaming request rejected"
+            );
             return Err(crate::llm::provider_http_error(
                 "OpenAI",
                 status,
@@ -229,8 +238,97 @@ impl OpenAiClient {
             ));
         }
 
-        Ok(crate::llm::build_stream_response(response, parser))
+        Ok(wrap_stream_error_logging(
+            crate::llm::build_stream_response(response, parser),
+            provider_label(&self.base_url),
+            config.model.clone(),
+            "stream",
+        ))
     }
+}
+
+fn wrap_stream_error_logging(
+    mut response: StreamResponse,
+    provider: String,
+    model: String,
+    phase: &'static str,
+) -> StreamResponse {
+    let mut inner = response.stream;
+    response.stream = Box::pin(async_stream::stream! {
+        use tokio_stream::StreamExt as _;
+
+        while let Some(item) = inner.next().await {
+            if let Err(error) = &item {
+                tracing::warn!(
+                    provider = %provider,
+                    model = %model,
+                    phase,
+                    error_kind = stream_error_kind(error),
+                    error_detail = %stream_error_detail(error),
+                    "OpenAI-compatible stream error"
+                );
+            }
+            yield item;
+        }
+    });
+    response
+}
+
+fn provider_label(base_url: &str) -> String {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| "openai-compatible".to_string())
+}
+
+fn stream_error_kind(error: &DysonError) -> &'static str {
+    match error {
+        DysonError::Llm(_) => "llm",
+        DysonError::LlmRateLimit { .. } => "rate_limit",
+        DysonError::LlmOverloaded { .. } => "overloaded",
+        DysonError::Http(_) => "http",
+        DysonError::Json(_) => "json",
+        DysonError::Io(_) => "io",
+        DysonError::Tool { .. } => "tool",
+        DysonError::Mcp { .. } => "mcp",
+        DysonError::OAuth { .. } => "oauth",
+        DysonError::Config(_) => "config",
+        DysonError::Cancelled => "cancelled",
+        DysonError::RateLimit { .. } => "local_rate_limit",
+    }
+}
+
+fn stream_error_detail(error: &DysonError) -> String {
+    match error {
+        DysonError::Http(e) => {
+            if e.is_timeout() {
+                "timeout".to_string()
+            } else if e.is_connect() {
+                "connect".to_string()
+            } else if e.is_body() {
+                "body".to_string()
+            } else if e.is_decode() {
+                "decode".to_string()
+            } else if let Some(status) = e.status() {
+                format!("status {}", status.as_u16())
+            } else {
+                "transport".to_string()
+            }
+        }
+        _ => truncate_for_log(&error.sanitized_message(), 240),
+    }
+}
+
+fn truncate_for_log(message: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (idx, ch) in message.chars().enumerate() {
+        if idx == max_chars {
+            out.push_str("...");
+            return out;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
