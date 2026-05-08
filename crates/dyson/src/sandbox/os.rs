@@ -46,6 +46,7 @@
 
 use crate::sandbox::policy::{Access, PathAccess, SandboxPolicy};
 use crate::util::escape_single_quotes;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Linux: bubblewrap (bwrap)
@@ -56,6 +57,63 @@ use crate::util::escape_single_quotes;
 /// Always mounted read-only when file_read is restricted, so that shell
 /// builtins, coreutils, and shared libraries are available.
 const ESSENTIAL_SYSTEM_DIRS: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MountSpec {
+    Root { writable: bool },
+    ReadOnly(PathBuf),
+    Writable(PathBuf),
+    Tmpfs(PathBuf),
+}
+
+fn policy_to_mount_specs(policy: &SandboxPolicy) -> Vec<MountSpec> {
+    let mut specs = Vec::new();
+
+    match &policy.file_read {
+        PathAccess::Allow if matches!(policy.file_write, PathAccess::Allow) => {
+            specs.push(MountSpec::Root { writable: true });
+        }
+        PathAccess::Allow => {
+            specs.push(MountSpec::Root { writable: false });
+            append_writable_mount_specs(&mut specs, &policy.file_write);
+        }
+        PathAccess::RestrictTo(read_paths) => {
+            for path in read_paths {
+                if !essential_system_dir_covers(path) {
+                    specs.push(MountSpec::ReadOnly(path.clone()));
+                }
+            }
+            append_writable_mount_specs(&mut specs, &policy.file_write);
+        }
+        PathAccess::Deny => {
+            append_writable_mount_specs(&mut specs, &policy.file_write);
+        }
+    }
+
+    specs
+}
+
+fn append_writable_mount_specs(specs: &mut Vec<MountSpec>, file_write: &PathAccess) {
+    if let PathAccess::RestrictTo(paths) = file_write {
+        for path in paths {
+            if is_tmp_path(path) {
+                specs.push(MountSpec::Tmpfs(PathBuf::from("/tmp")));
+            } else {
+                specs.push(MountSpec::Writable(path.clone()));
+            }
+        }
+    }
+}
+
+fn essential_system_dir_covers(path: &Path) -> bool {
+    ESSENTIAL_SYSTEM_DIRS
+        .iter()
+        .any(|sys| path.starts_with(sys))
+}
+
+fn is_tmp_path(path: &Path) -> bool {
+    path == Path::new("/tmp") || path == Path::new("/private/tmp")
+}
 
 /// Build a Linux bwrap command from a `SandboxPolicy`.
 ///
@@ -79,44 +137,35 @@ pub fn build_bwrap_command_from_policy(
 
     parts.push("bwrap".to_string());
 
-    // --- Filesystem mounts ---
-    //
-    // Strategy depends on the combination of file_read and file_write:
-    //   read=Allow, write=Allow  → --bind / / (full access)
-    //   read=Allow, write=other  → --ro-bind / / + selective writable binds
-    //   read=Restrict/Deny       → no root bind; selective ro-binds + system dirs
-    let full_read = matches!(policy.file_read, PathAccess::Allow);
-    let full_write = matches!(policy.file_write, PathAccess::Allow);
-
-    if full_read && full_write {
-        parts.push("--bind / /".to_string());
-    } else if full_read {
-        // Read everything, write selectively.
-        parts.push("--ro-bind / /".to_string());
-        add_writable_mounts(&mut parts, &policy.file_write);
-    } else {
+    let mount_specs = policy_to_mount_specs(policy);
+    if !matches!(policy.file_read, PathAccess::Allow) {
         // Restricted or denied reads — no root bind.
         // Mount essential system directories read-only so bash works.
         for dir in ESSENTIAL_SYSTEM_DIRS {
             parts.push(format!("--ro-bind {dir} {dir}"));
         }
+    }
+    format_bwrap_mounts(&mount_specs, &mut parts);
 
-        // Mount allowed read paths.
-        if let PathAccess::RestrictTo(read_paths) = &policy.file_read {
-            for path in read_paths {
-                let p = escape_single_quotes(&path.to_string_lossy());
-                // Don't duplicate system dirs already mounted above.
-                let already_covered = ESSENTIAL_SYSTEM_DIRS
-                    .iter()
-                    .any(|sys| path.starts_with(sys) || sys == &p.as_str());
-                if !already_covered {
+    fn format_bwrap_mounts(specs: &[MountSpec], parts: &mut Vec<String>) {
+        for spec in specs {
+            match spec {
+                MountSpec::Root { writable: true } => parts.push("--bind / /".to_string()),
+                MountSpec::Root { writable: false } => parts.push("--ro-bind / /".to_string()),
+                MountSpec::ReadOnly(path) => {
+                    let p = escape_single_quotes(&path.to_string_lossy());
                     parts.push(format!("--ro-bind '{p}' '{p}'"));
+                }
+                MountSpec::Writable(path) => {
+                    let p = escape_single_quotes(&path.to_string_lossy());
+                    parts.push(format!("--bind '{p}' '{p}'"));
+                }
+                MountSpec::Tmpfs(path) => {
+                    let p = escape_single_quotes(&path.to_string_lossy());
+                    parts.push(format!("--tmpfs {p}"));
                 }
             }
         }
-
-        // Layer writable paths on top (--bind overrides --ro-bind for same path).
-        add_writable_mounts(&mut parts, &policy.file_write);
     }
 
     // Always need /dev and /proc.
@@ -190,27 +239,6 @@ pub fn build_bwrap_argv_for_mcp_stdio(
     argv
 }
 
-/// Add writable mount flags for a `PathAccess` policy.
-///
-/// Special case: `/tmp` uses `--tmpfs /tmp` for isolation instead of
-/// `--bind /tmp /tmp` (which would expose the host's /tmp).
-fn add_writable_mounts(parts: &mut Vec<String>, file_write: &PathAccess) {
-    if let PathAccess::RestrictTo(paths) = file_write {
-        for path in paths {
-            let path_str = path.to_string_lossy();
-            if path_str == "/tmp" || path_str == "/private/tmp" {
-                // Isolated writable /tmp — not shared with the host.
-                parts.push("--tmpfs /tmp".to_string());
-            } else {
-                let p = escape_single_quotes(&path_str);
-                parts.push(format!("--bind '{p}' '{p}'"));
-            }
-        }
-    }
-    // file_write: Allow is handled at the caller level with --bind / /.
-    // file_write: Deny → no writable mounts.
-}
-
 // ---------------------------------------------------------------------------
 // macOS: Apple Containers
 // ---------------------------------------------------------------------------
@@ -243,50 +271,70 @@ pub fn build_container_command_from_policy(
         parts.push("--network none".to_string());
     }
 
+    let mount_specs = policy_to_mount_specs(policy);
+
     // Track writable paths to avoid duplicate read-only mounts.
     let mut mounted_rw: Vec<String> = Vec::new();
 
-    // Writable mounts.
-    match &policy.file_write {
-        PathAccess::Allow => {
-            // Full write access — mount working dir writable.
-            parts.push(format!("-v '{wd}':'{wd}'"));
-            mounted_rw.push(working_dir.to_string());
-        }
-        PathAccess::RestrictTo(paths) => {
-            for path in paths {
-                let p = path.to_string_lossy();
-                if p == "/tmp" || p == "/private/tmp" {
-                    parts.push("--tmpfs /tmp".to_string());
-                } else {
+    // Container CLI wants writable mounts before read-only mounts.
+    format_container_writable_mounts(&mount_specs, &mut parts, &mut mounted_rw, &wd, working_dir);
+    format_container_read_only_mounts(&mount_specs, &mut parts, &mounted_rw, &wd, working_dir);
+
+    fn format_container_writable_mounts(
+        specs: &[MountSpec],
+        parts: &mut Vec<String>,
+        mounted_rw: &mut Vec<String>,
+        wd: &str,
+        working_dir: &str,
+    ) {
+        for spec in specs {
+            match spec {
+                MountSpec::Root { writable: true } => {
+                    parts.push(format!("-v '{wd}':'{wd}'"));
+                    mounted_rw.push(working_dir.to_string());
+                }
+                MountSpec::Writable(path) => {
+                    let p = path.to_string_lossy();
                     let pe = escape_single_quotes(&p);
                     parts.push(format!("-v '{pe}':'{pe}'"));
                     mounted_rw.push(p.to_string());
                 }
+                MountSpec::Tmpfs(path) => {
+                    let p = escape_single_quotes(&path.to_string_lossy());
+                    parts.push(format!("--tmpfs {p}"));
+                }
+                MountSpec::Root { writable: false } | MountSpec::ReadOnly(_) => {}
             }
         }
-        PathAccess::Deny => {}
     }
 
-    // Read-only mounts (skip paths already mounted writable).
-    match &policy.file_read {
-        PathAccess::Allow => {
-            // Full read access — mount working dir read-only if not already writable.
-            if !mounted_rw.iter().any(|p| p == working_dir) {
-                parts.push(format!("-v '{wd}':'{wd}':ro"));
-            }
-        }
-        PathAccess::RestrictTo(paths) => {
-            for path in paths {
-                let p = path.to_string_lossy();
-                let already_writable = mounted_rw.iter().any(|rw| rw == p.as_ref());
-                if !already_writable {
-                    let pe = escape_single_quotes(&p);
-                    parts.push(format!("-v '{pe}':'{pe}':ro"));
+    fn format_container_read_only_mounts(
+        specs: &[MountSpec],
+        parts: &mut Vec<String>,
+        mounted_rw: &[String],
+        wd: &str,
+        working_dir: &str,
+    ) {
+        for spec in specs {
+            match spec {
+                MountSpec::Root { writable: false } => {
+                    if !mounted_rw.iter().any(|p| p == working_dir) {
+                        parts.push(format!("-v '{wd}':'{wd}':ro"));
+                    }
                 }
+                MountSpec::ReadOnly(path) => {
+                    let p = path.to_string_lossy();
+                    let already_writable = mounted_rw.iter().any(|rw| rw == p.as_ref());
+                    if !already_writable {
+                        let pe = escape_single_quotes(&p);
+                        parts.push(format!("-v '{pe}':'{pe}':ro"));
+                    }
+                }
+                MountSpec::Root { writable: true }
+                | MountSpec::Writable(_)
+                | MountSpec::Tmpfs(_) => {}
             }
         }
-        PathAccess::Deny => {}
     }
 
     // Working directory inside the container.
