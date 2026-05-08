@@ -1446,7 +1446,7 @@ mod tests {
 
         assert_eq!(settings.agent.model, "claude-sonnet-4-20250514");
         assert_eq!(settings.agent.max_iterations, 50);
-        assert_eq!(settings.agent.api_key, "sk-test");
+        assert_eq!(settings.agent.api_key.expose(), "sk-test");
         assert_eq!(
             settings.agent.provider,
             crate::config::LlmProvider::Anthropic
@@ -1535,8 +1535,8 @@ mod tests {
         let root: JsonRoot = serde_json::from_str(json).unwrap();
         let secrets = SecretRegistry::default();
         let settings = build_settings(Some(root), &secrets);
-        assert_eq!(settings.agent.api_key, "from_env");
-        assert_eq!(settings.providers["test"].api_key, "from_env");
+        assert_eq!(settings.agent.api_key.expose(), "from_env");
+        assert_eq!(settings.providers["test"].api_key.expose(), "from_env");
         unsafe { std::env::remove_var("DYSON_JSON_TEST_2") };
     }
 
@@ -1572,7 +1572,7 @@ mod tests {
             crate::config::LlmProvider::Anthropic
         );
         assert_eq!(settings.agent.model, "claude-opus-4-20250514");
-        assert_eq!(settings.agent.api_key, "sk-ant");
+        assert_eq!(settings.agent.api_key.expose(), "sk-ant");
 
         // All providers in the map.
         assert_eq!(settings.providers.len(), 3);
@@ -1703,8 +1703,11 @@ mod tests {
             result.is_ok(),
             "env-var fallback should work without custom base_url"
         );
-        assert_eq!(settings.agent.api_key, "sk-legit-key");
-        assert_eq!(settings.providers["claude"].api_key, "sk-legit-key");
+        assert_eq!(settings.agent.api_key.expose(), "sk-legit-key");
+        assert_eq!(
+            settings.providers["claude"].api_key.expose(),
+            "sk-legit-key"
+        );
 
         unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
     }
@@ -1730,7 +1733,10 @@ mod tests {
         let result = resolve_api_keys(&mut settings, &secrets);
 
         assert!(result.is_ok());
-        assert_eq!(settings.agent.api_key, "sk-explicit-for-proxy");
+        assert_eq!(
+            settings.agent.api_key.expose(),
+            "sk-explicit-for-proxy"
+        );
         assert_eq!(
             settings.agent.base_url.as_deref(),
             Some("https://my-proxy.example.com/v1")

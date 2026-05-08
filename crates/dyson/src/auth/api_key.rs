@@ -51,7 +51,7 @@ impl Auth for ApiKeyAuth {
         let valid = headers
             .get(&self.header_name)
             .and_then(|v| v.to_str().ok())
-            .map(|v| super::constant_time_eq(self.key.expose().as_bytes(), v.as_bytes()))
+            .map(|v| self.key.ct_eq(v.as_bytes()))
             .unwrap_or(false);
 
         if valid {

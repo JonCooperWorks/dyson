@@ -281,7 +281,7 @@ mod tests {
         let val = registry
             .resolve(&SecretValue::Literal("literal-value".into()))
             .unwrap();
-        assert_eq!(val, "literal-value");
+        assert_eq!(val.expose(), "literal-value");
     }
 
     #[test]
@@ -294,7 +294,7 @@ mod tests {
                 name: "DYSON_SECRET_TEST_1".into(),
             })
             .unwrap();
-        assert_eq!(val, "resolved");
+        assert_eq!(val.expose(), "resolved");
         unsafe { std::env::remove_var("DYSON_SECRET_TEST_1") };
     }
 
@@ -335,7 +335,7 @@ mod tests {
                 "UNUSED",
             )
             .unwrap();
-        assert_eq!(val, "explicit");
+        assert_eq!(val.expose(), "explicit");
         unsafe { std::env::remove_var("DYSON_SECRET_TEST_2") };
     }
 
@@ -349,7 +349,7 @@ mod tests {
                 "DYSON_SECRET_FALLBACK",
             )
             .unwrap();
-        assert_eq!(val, "from_env");
+        assert_eq!(val.expose(), "from_env");
         unsafe { std::env::remove_var("DYSON_SECRET_FALLBACK") };
     }
 
@@ -393,6 +393,6 @@ mod tests {
                 name: "my_secret".into(),
             })
             .unwrap();
-        assert_eq!(val, "mock:my_secret");
+        assert_eq!(val.expose(), "mock:my_secret");
     }
 }

@@ -77,7 +77,7 @@ impl Auth for BearerTokenAuth {
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|t| super::constant_time_eq(self.token.expose().as_bytes(), t.as_bytes()))
+            .map(|t| self.token.ct_eq(t.as_bytes()))
             .unwrap_or(false);
 
         if valid {
