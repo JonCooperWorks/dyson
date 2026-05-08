@@ -27,13 +27,15 @@
 // practice "swarm via dyson_proxy".
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::RwLock;
 
 use super::super::responses::{Resp, bad_request, boxed, json_ok, read_json_capped, unauthorized};
 use super::super::state::HttpState;
@@ -46,6 +48,10 @@ const MAX_CONFIGURE_BODY: usize = 64 * 1024;
 /// files at 5 MiB, so 8 MiB leaves JSON/base64 headroom without turning
 /// the admin surface into a bulk upload endpoint.
 const MAX_STATE_FILE_BODY: usize = 8 * 1024 * 1024;
+
+/// Package install payload is a validated SKILL.md body plus metadata.
+/// Keep it above the swarm-side skill body cap to leave JSON overhead.
+const MAX_SKILL_INSTALL_BODY: usize = 96 * 1024;
 
 /// Header swarm sends with the per-instance configure secret
 /// (32-hex plaintext from `Uuid::new_v4().simple()`).  Dyson hashes
@@ -191,6 +197,15 @@ struct RestoreStateFileBody {
     body_b64: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct InstallSkillAdminBody {
+    marketplace: String,
+    skill: String,
+    #[serde(default)]
+    force: bool,
+    package: crate::tool::skill_marketplace::SkillBody,
+}
+
 fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Option<Resp> {
     let secret = match headers
         .get(CONFIGURE_HEADER)
@@ -248,6 +263,17 @@ fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Option<
         }
     }
     None
+}
+
+fn json_status<T: Serialize>(status: StatusCode, v: &T) -> Resp {
+    match serde_json::to_vec(v) {
+        Ok(bytes) => Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .body(boxed(Bytes::from(bytes)))
+            .expect("status + content-type are valid"),
+        Err(e) => bad_request(&format!("serialize: {e}")),
+    }
 }
 
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
@@ -625,6 +651,48 @@ pub(super) async fn post_state_file(
         "bytes": bytes.len(),
         "deleted": false,
     }))
+}
+
+pub(super) async fn post_skill_install(
+    req: Request<hyper::body::Incoming>,
+    state: &HttpState,
+) -> Resp {
+    if let Some(resp) = authorize_configure(req.headers(), state) {
+        return resp;
+    }
+    let body: InstallSkillAdminBody = match read_json_capped(req, MAX_SKILL_INSTALL_BODY).await {
+        Ok(b) => b,
+        Err(e) => return bad_request(&e),
+    };
+    let snapshot = state.settings_snapshot();
+    let workspace = match crate::workspace::create_workspace(&snapshot.workspace) {
+        Ok(w) => Arc::new(RwLock::new(w)),
+        Err(e) => return bad_request(&format!("workspace open failed: {e}")),
+    };
+    match crate::tool::skill_marketplace::install_skill_package_to_workspace(
+        &workspace,
+        body.marketplace.trim(),
+        body.skill.trim(),
+        body.package,
+        body.force,
+    )
+    .await
+    {
+        Ok(outcome) => json_ok(&outcome),
+        Err(crate::tool::skill_marketplace::SkillInstallError::AlreadyInstalled {
+            current_version,
+        }) => json_status(
+            StatusCode::CONFLICT,
+            &serde_json::json!({
+                "error": "already_installed",
+                "current_version": current_version,
+            }),
+        ),
+        Err(crate::tool::skill_marketplace::SkillInstallError::Invalid(msg)) => bad_request(&msg),
+        Err(crate::tool::skill_marketplace::SkillInstallError::Workspace(err)) => {
+            bad_request(&format!("workspace install failed: {err}"))
+        }
+    }
 }
 
 pub(super) async fn get_idle(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {

@@ -3,7 +3,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -60,15 +60,35 @@ struct SkillDetail {
 }
 
 #[derive(Debug, Deserialize)]
-struct SkillBody {
-    marketplace_id: String,
-    marketplace_name: String,
-    name: String,
-    version: String,
-    description: String,
-    declared_sha256: Option<String>,
-    computed_sha256: String,
-    skill_md: String,
+pub struct SkillBody {
+    pub marketplace_id: String,
+    pub marketplace_name: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub declared_sha256: Option<String>,
+    pub computed_sha256: String,
+    pub skill_md: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillInstallOutcome {
+    pub installed: bool,
+    pub version: String,
+    pub sha256: String,
+}
+
+#[derive(Debug)]
+pub enum SkillInstallError {
+    AlreadyInstalled { current_version: Option<String> },
+    Invalid(String),
+    Workspace(crate::DysonError),
+}
+
+impl From<crate::DysonError> for SkillInstallError {
+    fn from(value: crate::DysonError) -> Self {
+        Self::Workspace(value)
+    }
 }
 
 pub struct SkillMarketplaceTool;
@@ -224,37 +244,49 @@ async fn install_skill(
         url_component(skill)
     );
     let package: SkillBody = swarm_get(&body_path).await?;
-    install_skill_package(ctx, marketplace, skill, package, force).await
+    let ws = ctx.workspace("skill_marketplace")?;
+    match install_skill_package_to_workspace(ws, marketplace, skill, package, force).await {
+        Ok(_outcome) => Ok(ToolOutput::success(format!(
+            "Installed skill '{}' from marketplace '{}'. It is available at skills/{}/SKILL.md and will appear in <available_skills> after reload.",
+            skill, marketplace, skill
+        ))),
+        Err(SkillInstallError::AlreadyInstalled { .. }) => Ok(ToolOutput::error(format!(
+            "Skill '{}' already exists. Use op='update' or force=true to overwrite.",
+            skill
+        ))),
+        Err(SkillInstallError::Invalid(msg)) => Ok(ToolOutput::error(msg)),
+        Err(SkillInstallError::Workspace(err)) => Err(err),
+    }
 }
 
-async fn install_skill_package(
-    ctx: &ToolContext,
+pub async fn install_skill_package_to_workspace(
+    workspace: &crate::workspace::WorkspaceHandle,
     marketplace: &str,
     skill: &str,
     package: SkillBody,
     force: bool,
-) -> crate::Result<ToolOutput> {
+) -> Result<SkillInstallOutcome, SkillInstallError> {
     if package.marketplace_id != marketplace {
-        return Ok(ToolOutput::error(format!(
+        return Err(SkillInstallError::Invalid(format!(
             "Marketplace response id mismatch: requested '{}', returned '{}'",
             marketplace, package.marketplace_id
         )));
     }
     if package.name != skill {
-        return Ok(ToolOutput::error(format!(
+        return Err(SkillInstallError::Invalid(format!(
             "Marketplace skill name mismatch: requested '{}', returned '{}'",
             skill, package.name
         )));
     }
     if !is_valid_skill_name(&package.name) {
-        return Ok(ToolOutput::error(format!(
+        return Err(SkillInstallError::Invalid(format!(
             "Marketplace returned invalid skill name '{}'",
             package.name
         )));
     }
     let computed = sha256_hex(package.skill_md.as_bytes());
     if computed != package.computed_sha256 {
-        return Ok(ToolOutput::error(format!(
+        return Err(SkillInstallError::Invalid(format!(
             "Swarm package hash mismatch: local {computed}, swarm {}",
             package.computed_sha256
         )));
@@ -262,26 +294,25 @@ async fn install_skill_package(
     if let Some(declared) = package.declared_sha256.as_deref()
         && !declared.eq_ignore_ascii_case(&computed)
     {
-        return Ok(ToolOutput::error(format!(
+        return Err(SkillInstallError::Invalid(format!(
             "Declared package hash mismatch: declared {declared}, computed {computed}"
         )));
     }
 
-    let ws = ctx.workspace("skill_marketplace")?;
-    let mut ws = ws.write().await;
+    let mut ws = workspace.write().await;
     let skill_key = format!("skills/{}/SKILL.md", package.name);
     let metadata_key = format!("skills/{}/dyson-skill.json", package.name);
     if ws.get(&skill_key).is_some() && !force {
-        return Ok(ToolOutput::error(format!(
-            "Skill '{}' already exists. Use op='update' or force=true to overwrite.",
-            package.name
-        )));
+        return Err(SkillInstallError::AlreadyInstalled {
+            current_version: installed_skill_version(ws.get(&metadata_key).as_deref()),
+        });
     }
     ws.set(&skill_key, &package.skill_md);
+    let version = package.version.clone();
     let metadata = json!({
         "schema_version": 1,
         "name": package.name,
-        "version": package.version,
+        "version": version,
         "description": package.description,
         "origin": {
             "kind": "marketplace",
@@ -299,10 +330,21 @@ async fn install_skill_package(
         skill, marketplace
     ));
     ws.save()?;
-    Ok(ToolOutput::success(format!(
-        "Installed skill '{}' from marketplace '{}'. It is available at {} and will appear in <available_skills> after reload.",
-        skill, marketplace, skill_key
-    )))
+    Ok(SkillInstallOutcome {
+        installed: true,
+        version,
+        sha256: computed,
+    })
+}
+
+fn installed_skill_version(metadata: Option<&str>) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(metadata?).ok()?;
+    value
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 async fn remove_skill(ctx: &ToolContext, skill: &str) -> crate::Result<ToolOutput> {
@@ -458,10 +500,19 @@ mod tests {
         let ws = crate::workspace::InMemoryWorkspace::new();
         let ctx = ToolContext::for_test_with_workspace(ws);
 
-        let out = install_skill_package(&ctx, "official", "code-review", package, false)
-            .await
-            .unwrap();
-        assert!(!out.is_error, "{}", out.content);
+        let workspace = ctx.workspace("test").unwrap().clone();
+        let out = install_skill_package_to_workspace(
+            &workspace,
+            "official",
+            "code-review",
+            package,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(out.installed);
+        assert_eq!(out.version, "1.0.0");
+        assert_eq!(out.sha256, computed_sha256);
 
         let ws = ctx.workspace.unwrap();
         let ws = ws.read().await;
@@ -493,11 +544,19 @@ mod tests {
         let ws = crate::workspace::InMemoryWorkspace::new();
         let ctx = ToolContext::for_test_with_workspace(ws);
 
-        let out = install_skill_package(&ctx, "official", "code-review", package, false)
-            .await
-            .unwrap();
-        assert!(out.is_error);
-        assert!(out.content.contains("Marketplace response id mismatch"));
+        let workspace = ctx.workspace("test").unwrap().clone();
+        let out = install_skill_package_to_workspace(
+            &workspace,
+            "official",
+            "code-review",
+            package,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(out, SkillInstallError::Invalid(msg) if msg.contains("Marketplace response id mismatch"))
+        );
     }
 
     #[tokio::test]
