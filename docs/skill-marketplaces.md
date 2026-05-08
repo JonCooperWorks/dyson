@@ -189,41 +189,28 @@ For URL-backed content:
 Relative content URLs resolve against the marketplace index URL or file
 directory. Absolute URLs must use `https`.
 
-## Configuration
+## Source Registry
 
-Add marketplace sources to Swarm config:
+Marketplace sources are Swarm database rows, not Swarm config. Operators add,
+disable, repair, or delete sources through the admin API/UI, and changes take
+effect without redeploying.
 
 ```json
 {
-  "skill_marketplace": {
-    "marketplaces": [
-      {
-        "id": "official",
-        "type": "http",
-        "url": "https://example.test/dyson-skills/marketplace.json"
-      },
-      {
-        "id": "local",
-        "type": "file",
-        "path": "~/.dyson/skill-marketplaces/local/marketplace.json"
-      }
-    ]
-  }
+  "id": "official",
+  "source_type": "http",
+  "location": "https://example.test/dyson-skills/marketplace.json",
+  "enabled": true
 }
 ```
 
-If no marketplaces are configured, Swarm should still support a local default
-index path if it exists:
-
-```text
-<swarm-data>/skill-marketplaces/marketplace.json
-```
-
-This gives operators and tests an offline marketplace without network setup.
-Individual Dyson instances should not need marketplace source configuration in
-normal Swarm-managed deployments. They need only their existing Swarm control
-plane connection. A standalone Dyson developer mode may support a local file
-marketplace later, but that is not the primary architecture.
+File-backed sources use `"source_type": "file"` and put the index path in
+`location`. If the table has no enabled rows, Swarm exposes no marketplace
+sources. Individual Dyson instances should not need marketplace source
+configuration in normal Swarm-managed deployments. They need only their
+existing Swarm control plane connection. A standalone Dyson developer mode may
+support a local file marketplace later, but that is not the primary
+architecture.
 
 ## Installed Metadata
 
@@ -536,13 +523,8 @@ Prompt injection posture:
 
 ## Cache
 
-HTTP marketplaces should cache indexes under Swarm's data directory:
-
-```text
-<swarm-data>/cache/skill-marketplaces/<marketplace-id>/marketplace.json
-```
-
-Cache entries should record:
+HTTP marketplaces may cache indexes, but source health belongs with the source
+row in Swarm's database. Cache entries should record:
 
 - fetched_at
 - source URL
