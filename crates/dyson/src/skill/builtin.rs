@@ -249,7 +249,7 @@ mod tests {
     fn has_builtin_tools() {
         let skill = BuiltinSkill::new(None, None, None);
         let tools = skill.tools();
-        assert_eq!(tools.len(), 20);
+        assert_eq!(tools.len(), 21);
         assert_eq!(tools[0].name(), "bash");
         assert_eq!(tools[1].name(), "read_file");
         assert_eq!(tools[2].name(), "write_file");
@@ -261,15 +261,16 @@ mod tests {
         assert_eq!(tools[8].name(), "memory_search");
         assert_eq!(tools[9].name(), "workspace");
         assert_eq!(tools[10].name(), "load_skill");
-        assert_eq!(tools[11].name(), "kb_search");
-        assert_eq!(tools[12].name(), "kb_status");
-        assert_eq!(tools[13].name(), "web_fetch");
-        assert_eq!(tools[14].name(), "dependency_scan");
-        assert_eq!(tools[15].name(), "ast_describe");
-        assert_eq!(tools[16].name(), "ast_query");
-        assert_eq!(tools[17].name(), "attack_surface_analyzer");
-        assert_eq!(tools[18].name(), "exploit_builder");
-        assert_eq!(tools[19].name(), "taint_trace");
+        assert_eq!(tools[11].name(), "skill_marketplace");
+        assert_eq!(tools[12].name(), "kb_search");
+        assert_eq!(tools[13].name(), "kb_status");
+        assert_eq!(tools[14].name(), "web_fetch");
+        assert_eq!(tools[15].name(), "dependency_scan");
+        assert_eq!(tools[16].name(), "ast_describe");
+        assert_eq!(tools[17].name(), "ast_query");
+        assert_eq!(tools[18].name(), "attack_surface_analyzer");
+        assert_eq!(tools[19].name(), "exploit_builder");
+        assert_eq!(tools[20].name(), "taint_trace");
     }
 
     /// The five AST/security tools used to be subagent-only — now they live
@@ -337,7 +338,7 @@ mod tests {
         let skill = BuiltinSkill::new(None, Some(&config), None);
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert!(names.contains(&"image_generate"));
-        assert_eq!(skill.tools().len(), 21);
+        assert_eq!(skill.tools().len(), 22);
     }
 
     #[test]
