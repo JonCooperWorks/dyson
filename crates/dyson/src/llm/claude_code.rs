@@ -536,26 +536,24 @@ impl CliLineParser for StreamParserState {
                 }
             }
 
-            "result" => {
-                if !self.completed {
-                    self.completed = true;
-                    if json["is_error"].as_bool() == Some(true) {
-                        let error_msg = json["result"].as_str().unwrap_or("unknown error");
-                        events.push(Err(DysonError::Llm(format!(
-                            "Claude Code error: {error_msg}"
-                        ))));
-                    } else {
-                        let stop_reason = match json["stop_reason"].as_str() {
-                            Some("end_turn") => StopReason::EndTurn,
-                            Some("tool_use") => StopReason::ToolUse,
-                            Some("max_tokens") => StopReason::MaxTokens,
-                            _ => StopReason::EndTurn,
-                        };
-                        events.push(Ok(StreamEvent::MessageComplete {
-                            stop_reason,
-                            output_tokens: None,
-                        }));
-                    }
+            "result" if !self.completed => {
+                self.completed = true;
+                if json["is_error"].as_bool() == Some(true) {
+                    let error_msg = json["result"].as_str().unwrap_or("unknown error");
+                    events.push(Err(DysonError::Llm(format!(
+                        "Claude Code error: {error_msg}"
+                    ))));
+                } else {
+                    let stop_reason = match json["stop_reason"].as_str() {
+                        Some("end_turn") => StopReason::EndTurn,
+                        Some("tool_use") => StopReason::ToolUse,
+                        Some("max_tokens") => StopReason::MaxTokens,
+                        _ => StopReason::EndTurn,
+                    };
+                    events.push(Ok(StreamEvent::MessageComplete {
+                        stop_reason,
+                        output_tokens: None,
+                    }));
                 }
             }
 

@@ -664,7 +664,7 @@ impl SubagentSkill {
         // we then throw away wastes startup time.
         let orch_configs: Vec<_> = builtin_orchestrator_configs()
             .into_iter()
-            .filter(|cfg| allowed(&cfg.name))
+            .filter(|cfg| allowed(cfg.name))
             .collect();
         if !orch_configs.is_empty() {
             // Build inner subagent tools once — shared across all orchestrators.

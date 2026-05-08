@@ -359,7 +359,7 @@ impl PolicyTable {
         }
 
         // Sort globs by pattern length descending (more specific first).
-        globs.sort_by(|a, b| b.0.as_str().len().cmp(&a.0.as_str().len()));
+        globs.sort_by_key(|(pattern, _)| std::cmp::Reverse(pattern.as_str().len()));
 
         Self {
             exact,

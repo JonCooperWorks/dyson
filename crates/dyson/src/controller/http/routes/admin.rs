@@ -191,7 +191,7 @@ struct RestoreStateFileBody {
     body_b64: Option<String>,
 }
 
-fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Result<(), Resp> {
+fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Option<Resp> {
     let secret = match headers
         .get(CONFIGURE_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -199,7 +199,7 @@ fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Result<
         .filter(|s| !s.is_empty())
     {
         Some(s) => s.to_owned(),
-        None => return Err(unauthorized(state)),
+        None => return Some(unauthorized(state)),
     };
 
     // Resolve the hash file's path.  Living next to `workspace/`
@@ -220,25 +220,25 @@ fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Result<
     if let Ok(stored) = std::fs::read_to_string(&hash_path) {
         let parsed = match PasswordHash::new(stored.trim()) {
             Ok(p) => p,
-            Err(e) => return Err(bad_request(&format!("stored hash unreadable: {e}"))),
+            Err(e) => return Some(bad_request(&format!("stored hash unreadable: {e}"))),
         };
         if Argon2::default()
             .verify_password(secret.as_bytes(), &parsed)
             .is_err()
         {
-            return Err(unauthorized(state));
+            return Some(unauthorized(state));
         }
     } else {
         let salt = SaltString::generate(&mut OsRng);
         let hash = match Argon2::default().hash_password(secret.as_bytes(), &salt) {
             Ok(h) => h.to_string(),
-            Err(e) => return Err(bad_request(&format!("argon2: {e}"))),
+            Err(e) => return Some(bad_request(&format!("argon2: {e}"))),
         };
         if let Err(e) = std::fs::create_dir_all(&hash_dir) {
-            return Err(bad_request(&format!("mkdir {}: {e}", hash_dir.display())));
+            return Some(bad_request(&format!("mkdir {}: {e}", hash_dir.display())));
         }
         if let Err(e) = std::fs::write(&hash_path, hash) {
-            return Err(bad_request(&format!("write {}: {e}", hash_path.display())));
+            return Some(bad_request(&format!("write {}: {e}", hash_path.display())));
         }
         // Mode 0600 on Unix — only the dyson process should read it.
         #[cfg(unix)]
@@ -247,14 +247,14 @@ fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Result<
             let _ = std::fs::set_permissions(&hash_path, std::fs::Permissions::from_mode(0o600));
         }
     }
-    Ok(())
+    None
 }
 
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
     // Pull the configure secret BEFORE consuming the body — the
     // header check runs first so an unauthenticated caller can't
     // make us read a 64 KiB body just to reject it.
-    if let Err(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state) {
         return resp;
     }
 
@@ -558,7 +558,7 @@ pub(super) async fn post_state_file(
     req: Request<hyper::body::Incoming>,
     state: &HttpState,
 ) -> Resp {
-    if let Err(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state) {
         return resp;
     }
     let body: RestoreStateFileBody = match read_json_capped(req, MAX_STATE_FILE_BODY).await {
@@ -628,7 +628,7 @@ pub(super) async fn post_state_file(
 }
 
 pub(super) async fn get_idle(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    if let Err(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state) {
         return resp;
     }
     let in_flight = state.in_flight_chats().await;
@@ -641,7 +641,7 @@ pub(super) async fn get_idle(req: Request<hyper::body::Incoming>, state: &HttpSt
 }
 
 pub(super) async fn post_quiesce(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    if let Err(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state) {
         return resp;
     }
     let in_flight = state.try_quiesce().await;
@@ -668,7 +668,7 @@ pub(super) async fn post_quiesce(req: Request<hyper::body::Incoming>, state: &Ht
 }
 
 pub(super) async fn post_unquiesce(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    if let Err(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state) {
         return resp;
     }
     state.unquiesce();
@@ -723,7 +723,7 @@ fn clean_relative_path(path: &str) -> std::result::Result<PathBuf, String> {
 pub(super) async fn get_skills(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
     use crate::skill::Skill;
 
-    if let Err(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state) {
         return resp;
     }
 

@@ -52,7 +52,7 @@ fn parse_pipfile_lock(path: &Path, bytes: &[u8]) -> Result<Parsed, ParseError> {
     let doc: PipfileLock = serde_json::from_slice(bytes)
         .map_err(|e| ParseError::malformed(path, format!("Pipfile.lock decode: {e}")))?;
     let mut parsed = Parsed::default();
-    for (name, entry) in doc.default.into_iter().chain(doc.develop.into_iter()) {
+    for (name, entry) in doc.default.into_iter().chain(doc.develop) {
         let version = entry
             .version
             .map(|v| v.trim_start_matches("==").to_string());

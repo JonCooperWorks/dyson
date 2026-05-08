@@ -169,7 +169,7 @@ fn process_file_ast(
     if !dry_run {
         // Sort by start_byte descending — replace from end to start so
         // earlier byte offsets remain valid.
-        matches.sort_by(|a, b| b.0.cmp(&a.0));
+        matches.sort_by_key(|(start, _)| std::cmp::Reverse(*start));
 
         let mut result = parsed.source;
         for (start, end) in &matches {

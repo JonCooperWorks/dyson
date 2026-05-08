@@ -232,7 +232,7 @@ pub fn detect_repo(root: &Path) -> Detection {
     // BTreeMap gives iteration sorted by key (Language's derived Ord);
     // a stable sort on count inherits that tiebreak.
     let mut ranked: Vec<(Language, usize)> = lang_counts.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
 
     let languages: Vec<Language> = ranked.into_iter().map(|(lang, _)| lang).collect();
 

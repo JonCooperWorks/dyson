@@ -28,7 +28,7 @@ impl ManifestParser for PackagistParser {
         let doc: ComposerLock = serde_json::from_slice(bytes)
             .map_err(|e| ParseError::malformed(path, format!("composer.lock decode: {e}")))?;
         let mut parsed = Parsed::default();
-        for pkg in doc.packages.into_iter().chain(doc.packages_dev.into_iter()) {
+        for pkg in doc.packages.into_iter().chain(doc.packages_dev) {
             let version = pkg.version.trim_start_matches('v').to_string();
             parsed
                 .deps

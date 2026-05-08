@@ -347,14 +347,12 @@ impl CliLineParser for StreamParserState {
         let event_type = json["type"].as_str().unwrap_or("");
 
         match event_type {
-            "turn.completed" => {
-                if !self.completed {
-                    self.completed = true;
-                    events.push(Ok(StreamEvent::MessageComplete {
-                        stop_reason: StopReason::EndTurn,
-                        output_tokens: None,
-                    }));
-                }
+            "turn.completed" if !self.completed => {
+                self.completed = true;
+                events.push(Ok(StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: None,
+                }));
             }
 
             "turn.failed" => {

@@ -330,7 +330,7 @@ impl super::Agent {
 
         // Insert synthetic results for orphaned uses.
         // Sort by descending position so earlier inserts don't shift later indices.
-        orphaned_uses.sort_by(|a, b| b.1.cmp(&a.1));
+        orphaned_uses.sort_by_key(|(_, pos)| std::cmp::Reverse(*pos));
         for (orphan_id, pos) in &orphaned_uses {
             let synthetic =
                 Message::tool_result(orphan_id, "[result included in context summary]", false);
