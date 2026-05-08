@@ -19,6 +19,7 @@
 
 pub mod deepseek;
 pub mod gemma;
+pub mod qwen;
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -77,6 +78,8 @@ pub trait TextToolHandler: Send + Sync {
 pub fn text_tool_handler_for_model(model: &str) -> Option<Box<dyn TextToolHandler>> {
     if gemma::is_gemma_model(model) {
         Some(Box::new(gemma::GemmaToolHandler))
+    } else if qwen::is_qwen_model(model) {
+        Some(Box::new(qwen::QwenToolHandler))
     } else {
         None
     }
@@ -380,5 +383,11 @@ mod tests {
             )
         });
         assert!(has_end);
+    }
+
+    #[test]
+    fn qwen_models_use_text_tool_handler() {
+        assert!(text_tool_handler_for_model("qwen/qwen3.6-max-preview").is_some());
+        assert!(text_tool_handler_for_model("Qwen3.6-Max").is_some());
     }
 }
