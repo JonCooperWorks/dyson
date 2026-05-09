@@ -26,6 +26,8 @@ use crate::llm::{
 };
 use crate::message::{ContentBlock, Message, Role};
 
+const MAX_TEXT_TOOL_TRANSCRIPT_STRING_CHARS: usize = 2_000;
+
 // ---------------------------------------------------------------------------
 // OpenAiCompatClient
 // ---------------------------------------------------------------------------
@@ -224,7 +226,8 @@ fn text_tool_message_content(
 }
 
 fn format_tool_call_transcript(id: &str, name: &str, input: &serde_json::Value) -> String {
-    let input_json = serde_json::to_string(input).unwrap_or_else(|_| "null".to_string());
+    let compact_input = compact_tool_call_input_for_history(name, input);
+    let input_json = serde_json::to_string(&compact_input).unwrap_or_else(|_| "null".to_string());
     format!("Tool call {id} ({name}):\n{input_json}")
 }
 
@@ -239,6 +242,70 @@ fn format_tool_result_transcript(
         Some(name) => format!("Tool result for {tool_use_id} ({name}) [{status}]:\n{content}"),
         None => format!("Tool result for {tool_use_id} [{status}]:\n{content}"),
     }
+}
+
+fn compact_tool_call_input_for_history(
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> serde_json::Value {
+    if tool_name == "write_file"
+        && let Some(obj) = input.as_object()
+    {
+        let mut compact = obj.clone();
+        if let Some(content) = compact.get("content").and_then(|v| v.as_str())
+            && content.chars().count() > MAX_TEXT_TOOL_TRANSCRIPT_STRING_CHARS
+        {
+            let preview = truncate_chars(content, MAX_TEXT_TOOL_TRANSCRIPT_STRING_CHARS);
+            compact.insert(
+                "content".to_string(),
+                serde_json::json!(format!(
+                    "[content omitted from history: {} chars; preview follows]\n{}",
+                    content.chars().count(),
+                    preview
+                )),
+            );
+        }
+        return serde_json::Value::Object(compact);
+    }
+
+    compact_json_strings_for_history(input)
+}
+
+fn compact_json_strings_for_history(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.chars().count() > MAX_TEXT_TOOL_TRANSCRIPT_STRING_CHARS {
+                serde_json::Value::String(format!(
+                    "[string omitted from history: {} chars; preview follows]\n{}",
+                    s.chars().count(),
+                    truncate_chars(s, MAX_TEXT_TOOL_TRANSCRIPT_STRING_CHARS)
+                ))
+            } else {
+                value.clone()
+            }
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(compact_json_strings_for_history).collect())
+        }
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), compact_json_strings_for_history(v)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (idx, ch) in value.chars().enumerate() {
+        if idx == max_chars {
+            out.push_str("\n[truncated]");
+            return out;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -285,5 +352,28 @@ mod tests {
                 .unwrap()
                 .contains("Tool result for text_call_write_file_0 (write_file) [ok]:")
         );
+    }
+
+    #[test]
+    fn text_tool_history_omits_large_write_file_content() {
+        let large_content = "x".repeat(80_000);
+        let messages = vec![Message::assistant(vec![ContentBlock::ToolUse {
+            id: "text_call_write_file_0".into(),
+            name: "write_file".into(),
+            input: serde_json::json!({
+                "file_path": "big-report.md",
+                "content": large_content,
+            }),
+        }])];
+
+        let json = build_text_tool_messages_json(&messages, "system", "");
+        let content = json[1]["content"].as_str().unwrap();
+
+        assert!(
+            content.len() < 8_000,
+            "large write_file arguments should not be echoed into text-tool history"
+        );
+        assert!(content.contains("big-report.md"));
+        assert!(content.contains("content omitted"));
     }
 }
