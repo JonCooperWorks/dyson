@@ -1,9 +1,10 @@
 //! Swarm-mode background state mirror.
 //!
-//! In swarm mode the local filesystem is the live projection the agent
-//! edits, while swarm is the durable authority. This worker scans
-//! selected state files, detects changes, and POSTs changed bytes to
-//! the parent swarm where they are sealed under the owning user's key.
+//! In swarm mode the local filesystem is the live hot-cache projection
+//! the agent edits, while swarm is the durable authority. This worker
+//! scans selected durable state files, detects changes, and POSTs changed
+//! bytes to the parent swarm where they are sealed under the owning user's
+//! key.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -341,6 +342,9 @@ fn collect_root(root: &SyncRoot, dir: &Path, out: &mut Vec<FileSnapshot>) {
             continue;
         };
         let rel_path = slash_path(rel);
+        if is_zero_byte_chat_transcript(root.namespace, &rel_path, meta.len()) {
+            continue;
+        }
         let key = format!("{}:{rel_path}", root.namespace);
         let mime = mime_for(rel);
         out.push(FileSnapshot {
@@ -378,8 +382,21 @@ fn should_sync(namespace: &str, rel: &Path) -> bool {
         [file] => file.ends_with(".md"),
         ["memory", ..] => rel.extension().and_then(|s| s.to_str()) == Some("md"),
         ["kb", ..] | ["skills", ..] => true,
+        ["channels", _channel, rest @ ..] => should_sync_channel_workspace(rest, rel),
         _ => false,
     }
+}
+
+fn should_sync_channel_workspace(parts: &[&str], rel: &Path) -> bool {
+    match parts {
+        [file] => file.ends_with(".md") || *file == "_audit.jsonl",
+        ["memory", ..] => rel.extension().and_then(|s| s.to_str()) == Some("md"),
+        _ => false,
+    }
+}
+
+fn is_zero_byte_chat_transcript(namespace: &str, rel_path: &str, len: u64) -> bool {
+    namespace == "chats" && len == 0 && rel_path.ends_with("/transcript.json")
 }
 
 fn has_hidden_or_unclean_component(path: &Path) -> bool {
@@ -416,6 +433,7 @@ fn mime_for(path: &Path) -> Option<&'static str> {
         Some("txt") => Some("text/plain"),
         Some("toml") => Some("application/toml"),
         Some("yaml" | "yml") => Some("application/yaml"),
+        Some("jsonl") => Some("application/x-ndjson"),
         _ => None,
     }
 }
@@ -475,8 +493,29 @@ mod tests {
         assert!(should_sync("workspace", Path::new("kb/facts.json")));
         assert!(should_sync("workspace", Path::new("skills/a/SKILL.md")));
         assert!(should_sync("workspace", Path::new("skills/a/icon.svg")));
+        assert!(should_sync(
+            "workspace",
+            Path::new("channels/group-1/MEMORY.md")
+        ));
+        assert!(should_sync(
+            "workspace",
+            Path::new("channels/group-1/memory/2026-05-09.md")
+        ));
+        assert!(should_sync(
+            "workspace",
+            Path::new("channels/group-1/_audit.jsonl")
+        ));
         assert!(!should_sync("workspace", Path::new(".env")));
+        assert!(!should_sync("workspace", Path::new("dyson.json")));
         assert!(!should_sync("workspace", Path::new("memory.db")));
+        assert!(!should_sync(
+            "workspace",
+            Path::new("channels/group-1/memory.db")
+        ));
+        assert!(!should_sync(
+            "workspace",
+            Path::new("channels/group-1/.workspace_version")
+        ));
         assert!(!should_sync("workspace", Path::new("../MEMORY.md")));
     }
 
@@ -532,6 +571,39 @@ mod tests {
             B64.decode(body["body_b64"].as_str().unwrap()).unwrap(),
             b"hello"
         );
+    }
+
+    #[tokio::test]
+    async fn sync_once_skips_zero_byte_chat_transcripts() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/state"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let chat = dir.path().join("c-1");
+        std::fs::create_dir_all(&chat).unwrap();
+        std::fs::write(chat.join("transcript.json"), b"").unwrap();
+        std::fs::write(chat.join("activity.jsonl"), b"{\"ok\":true}\n").unwrap();
+
+        let cfg = StateSyncConfig {
+            url: format!("{}/state", server.uri()),
+            token: "st_test".into(),
+        };
+        let mut worker = StateSyncWorker::new(vec![SyncRoot {
+            namespace: "chats",
+            path: dir.path().to_path_buf(),
+        }]);
+        worker.sync_once(&cfg).await;
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["namespace"], "chats");
+        assert_eq!(body["path"], "c-1/activity.jsonl");
     }
 
     #[tokio::test]
