@@ -600,6 +600,17 @@ pub(super) async fn post_state_file(
         Ok(path) => path,
         Err(e) => return bad_request(&e),
     };
+    let rel_path = rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    if !crate::swarm_state_sync::is_durable_state_file_path(&body.namespace, &rel_path) {
+        return bad_request("state file path is not durable state");
+    }
     let abs = root.join(&rel);
 
     if body.deleted {
@@ -625,6 +636,13 @@ pub(super) async fn post_state_file(
     };
     if bytes.len() > 5 * 1024 * 1024 {
         return bad_request("state file exceeds 5 MiB");
+    }
+    if crate::swarm_state_sync::is_zero_byte_chat_transcript(
+        &body.namespace,
+        &rel_path,
+        bytes.len() as u64,
+    ) {
+        return bad_request("zero-byte chat transcripts are not durable state");
     }
     if let Some(parent) = abs.parent()
         && let Err(e) = std::fs::create_dir_all(parent)

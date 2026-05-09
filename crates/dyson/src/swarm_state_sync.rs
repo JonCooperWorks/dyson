@@ -387,6 +387,10 @@ fn should_sync(namespace: &str, rel: &Path) -> bool {
     }
 }
 
+pub(crate) fn is_durable_state_file_path(namespace: &str, rel_path: &str) -> bool {
+    should_sync(namespace, Path::new(rel_path))
+}
+
 fn should_sync_channel_workspace(parts: &[&str], rel: &Path) -> bool {
     match parts {
         [file] => file.ends_with(".md") || *file == "_audit.jsonl",
@@ -395,7 +399,7 @@ fn should_sync_channel_workspace(parts: &[&str], rel: &Path) -> bool {
     }
 }
 
-fn is_zero_byte_chat_transcript(namespace: &str, rel_path: &str, len: u64) -> bool {
+pub(crate) fn is_zero_byte_chat_transcript(namespace: &str, rel_path: &str, len: u64) -> bool {
     namespace == "chats" && len == 0 && rel_path.ends_with("/transcript.json")
 }
 

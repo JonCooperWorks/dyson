@@ -491,6 +491,72 @@ async fn skills_endpoint_is_gone() {
 }
 
 #[tokio::test]
+async fn admin_state_file_replay_enforces_durable_allowlist() {
+    let r = rig().await;
+    let secret = "test-configure-secret";
+    let configure = post_json_with_headers(
+        &format!("{}/api/admin/configure", r.base),
+        &serde_json::json!({}),
+        &[("x-swarm-configure", secret)],
+    )
+    .await;
+    assert_eq!(configure.status(), StatusCode::OK);
+
+    let allowed = post_json_with_headers(
+        &format!("{}/api/admin/state/file", r.base),
+        &serde_json::json!({
+            "namespace": "workspace",
+            "path": "memory/SOUL.md",
+            "mime": "text/markdown",
+            "body_b64": "aGVsbG8="
+        }),
+        &[("x-swarm-configure", secret)],
+    )
+    .await;
+    assert_eq!(allowed.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(r.workspace_dir.path().join("memory/SOUL.md")).unwrap(),
+        "hello"
+    );
+
+    for path in ["dyson.json", ".env", "memory.db", "channels/c-1/memory.db"] {
+        let resp = post_json_with_headers(
+            &format!("{}/api/admin/state/file", r.base),
+            &serde_json::json!({
+                "namespace": "workspace",
+                "path": path,
+                "mime": "application/octet-stream",
+                "body_b64": "c2hvdWxkLW5vdC1iZS1kdXJhYmxl"
+            }),
+            &[("x-swarm-configure", secret)],
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "path {path}");
+        assert!(
+            !r.workspace_dir.path().join(path).exists(),
+            "forbidden replay wrote {path}"
+        );
+    }
+
+    let empty_chat = post_json_with_headers(
+        &format!("{}/api/admin/state/file", r.base),
+        &serde_json::json!({
+            "namespace": "chats",
+            "path": "c-1/transcript.json",
+            "mime": "application/json",
+            "body_b64": ""
+        }),
+        &[("x-swarm-configure", secret)],
+    )
+    .await;
+    assert_eq!(empty_chat.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        !r.chat_dir.path().join("c-1/transcript.json").exists(),
+        "zero-byte chat transcript replay should be rejected"
+    );
+}
+
+#[tokio::test]
 async fn admin_idle_quiesce_blocks_new_turns_until_unquiesced() {
     // Swarm's rotate-in-place path calls these endpoints before
     // snapshotting a cube. They must exist on Dyson and must stop new
