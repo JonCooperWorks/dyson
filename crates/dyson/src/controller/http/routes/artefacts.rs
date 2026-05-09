@@ -161,6 +161,10 @@ pub(super) async fn export(state: &HttpState, chat_id: &str) -> Resp {
 }
 
 pub(super) async fn list(state: &HttpState, chat_id: &str) -> Resp {
+    json_ok(&list_for_chat(state, chat_id))
+}
+
+pub(super) fn list_for_chat(state: &HttpState, chat_id: &str) -> Vec<ArtefactDto> {
     // Disk is the authoritative source — the in-memory FIFO has a hard
     // cap (`MAX_ARTEFACTS`) and a long-running session that emits more
     // than the cap will evict older entries from the cache, even
@@ -199,6 +203,7 @@ pub(super) async fn list(state: &HttpState, chat_id: &str) -> Resp {
                         title: entry.title.clone(),
                         bytes: entry.content.len(),
                         created_at: entry.created_at,
+                        tool_use_id: entry.tool_use_id.clone(),
                         metadata: entry.metadata.clone(),
                     },
                     _ => match read_meta_dto(&sub, &id) {
@@ -227,6 +232,7 @@ pub(super) async fn list(state: &HttpState, chat_id: &str) -> Resp {
                     title: entry.title.clone(),
                     bytes: entry.content.len(),
                     created_at: entry.created_at,
+                    tool_use_id: entry.tool_use_id.clone(),
                     metadata: entry.metadata.clone(),
                 });
             }
@@ -248,7 +254,7 @@ pub(super) async fn list(state: &HttpState, chat_id: &str) -> Resp {
             bn.cmp(&an)
         })
     });
-    json_ok(&items)
+    items
 }
 
 /// Read just enough of an artefact's metadata + body-size to populate
@@ -276,6 +282,10 @@ fn read_meta_dto(sub: &std::path::Path, id: &str) -> Option<ArtefactDto> {
             .to_string(),
         bytes,
         created_at: meta.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
+        tool_use_id: meta
+            .get("tool_use_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         metadata: meta.get("metadata").cloned().filter(|v| !v.is_null()),
     })
 }

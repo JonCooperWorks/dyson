@@ -380,27 +380,21 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
     // turn with one `Artefact` block per entry so the chat scroll
     // preserves image / report chips across browser refreshes and
     // controller restarts.
-    let artefact_blocks: Vec<BlockDto> = {
-        let store = match state.artefacts.lock() {
-            Ok(s) => s,
-            Err(p) => p.into_inner(),
-        };
-        store
-            .order
-            .iter()
-            .filter_map(|aid| store.items.get(aid).map(|e| (aid, e)))
-            .filter(|(_, e)| e.chat_id == id)
-            .map(|(aid, e)| BlockDto::Artefact {
-                id: aid.clone(),
-                kind: e.kind,
-                title: e.title.clone(),
-                url: format!("/#/artefacts/{aid}"),
-                bytes: e.content.len(),
-                tool_use_id: e.tool_use_id.clone(),
-                metadata: e.metadata.clone(),
-            })
-            .collect()
-    };
+    let artefact_blocks: Vec<BlockDto> = super::artefacts::list_for_chat(state, id)
+        .into_iter()
+        // The sidebar wants newest-first, but chat scroll chips should
+        // read chronologically inside the synthetic assistant turn.
+        .rev()
+        .map(|a| BlockDto::Artefact {
+            url: format!("/#/artefacts/{}", a.id),
+            id: a.id,
+            kind: a.kind,
+            title: a.title,
+            bytes: a.bytes,
+            tool_use_id: a.tool_use_id,
+            metadata: a.metadata,
+        })
+        .collect();
     if !artefact_blocks.is_empty() {
         messages.push(MessageDto {
             role: "assistant".to_string(),

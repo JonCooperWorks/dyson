@@ -308,6 +308,8 @@ pub(crate) struct ArtefactDto {
     pub(crate) bytes: usize,
     pub(crate) created_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tool_use_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) metadata: Option<serde_json::Value>,
 }
 

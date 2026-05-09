@@ -3183,6 +3183,46 @@ async fn chat_reload_shows_emitted_images_in_transcript() {
     assert!(url.starts_with("/#/artefacts/"), "chip url: {url}");
 }
 
+#[tokio::test]
+async fn chat_reload_shows_evicted_persisted_artefacts_in_transcript() {
+    // Regression: the Artefacts tab used the disk-backed list endpoint,
+    // but `/api/conversations/:id` rebuilt chat chips only from the
+    // in-memory FIFO.  Long chats that emitted more than MAX_ARTEFACTS
+    // kept the artefacts on disk but lost the older chips from the chat
+    // scroll on refresh.
+    let r = rig().await;
+    let id = create_chat(&r, "evicted artefacts").await;
+
+    const TOTAL: usize = 36; // MAX_ARTEFACTS is 32; force FIFO eviction.
+    for n in 0..TOTAL {
+        let artefact = dyson::message::Artefact::markdown(
+            dyson::message::ArtefactKind::Other,
+            format!("report-{n:02}"),
+            format!("body-{n}"),
+        );
+        test_helpers::emit_agent_artefact(r.state.clone(), &id, artefact)
+            .await
+            .expect("emit artefact");
+    }
+
+    let convo = body_json(get(&format!("{}/api/conversations/{}", r.base, id)).await).await;
+    let messages = convo["messages"].as_array().expect("messages array");
+    let titles: Vec<&str> = messages
+        .iter()
+        .flat_map(|m| m["blocks"].as_array().into_iter().flatten())
+        .filter(|b| b["type"] == "artefact")
+        .filter_map(|b| b["title"].as_str())
+        .collect();
+
+    assert_eq!(
+        titles.len(),
+        TOTAL,
+        "chat refresh must include every persisted artefact chip: {convo}",
+    );
+    assert_eq!(titles.first().copied(), Some("report-00"));
+    assert_eq!(titles.last().copied(), Some("report-35"));
+}
+
 // ---------------------------------------------------------------------------
 // Activity registry + /api/activity
 //
