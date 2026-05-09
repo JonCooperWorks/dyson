@@ -70,7 +70,16 @@ impl Tool for SendFileTool {
             )));
         }
 
-        Ok(ToolOutput::success(format!("Sent file: {}", path.display())).with_file(path))
+        let display_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("file");
+
+        Ok(
+            ToolOutput::success(format!("Attached file for the user: {display_name}"))
+                .with_file(path),
+        )
     }
 }
 
@@ -94,6 +103,9 @@ mod tests {
             .await
             .unwrap();
         assert!(!output.is_error);
+        assert_eq!(output.content, "Attached file for the user: report.pdf");
+        assert!(!output.content.contains(file.to_string_lossy().as_ref()));
+        assert!(!output.content.contains("file://"));
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0], file.canonicalize().unwrap());
     }
