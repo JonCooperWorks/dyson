@@ -1,9 +1,9 @@
 //! Swarm-mode background state mirror.
 //!
-//! The normal filesystem workspace stays local and authoritative. This
-//! worker runs only from `dyson swarm`: it scans selected durable state
-//! files, detects changes, and POSTs the changed bytes to the parent
-//! swarm where they are sealed under the owning user's key.
+//! In swarm mode the local filesystem is the live projection the agent
+//! edits, while swarm is the durable authority. This worker scans
+//! selected state files, detects changes, and POSTs changed bytes to
+//! the parent swarm where they are sealed under the owning user's key.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
