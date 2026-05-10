@@ -123,8 +123,10 @@ async fn rig_with_auth_and_client(auth: Arc<dyn Auth>, client: Box<dyn LlmClient
         },
     );
 
-    let mut settings = Settings::default();
-    settings.dangerous_no_sandbox = true;
+    let mut settings = Settings {
+        dangerous_no_sandbox: true,
+        ..Settings::default()
+    };
     settings.agent.provider = LlmProvider::OpenRouter;
     settings.agent.model = "qwen/qwen3.6-plus".into();
     settings.providers = providers;

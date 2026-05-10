@@ -123,18 +123,8 @@ pub async fn process_stream(
     stream: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>,
     output: &mut dyn Output,
 ) -> Result<(Message, Vec<ToolCall>, usize, StopReason)> {
-    let mut content_blocks: Vec<ContentBlock> = Vec::with_capacity(4);
+    let mut assembly = StreamAssembly::new();
     let mut tool_calls: Vec<ToolCall> = Vec::with_capacity(4);
-
-    // Buffer for accumulating text deltas into a single Text content block.
-    let mut current_text = String::new();
-
-    // Buffer for accumulating thinking deltas into a Thinking content block.
-    let mut current_thinking = String::new();
-
-    // Detects <think>…</think> tags in TextDelta events from OpenAI-compat
-    // servers and reclassifies them as thinking content.
-    let mut think_tag_parser = ThinkTagParser::new();
 
     // Timing, token counting, and stop reason tracking.
     let stream_start = std::time::Instant::now();
@@ -156,15 +146,12 @@ pub async fn process_stream(
                         tool_calls = tool_calls.len(),
                         "stream failed after complete tool call; executing completed tool calls"
                     );
-                    return finish_with_completed_tool_calls(
+                    return assembly.finish(
                         output,
-                        &mut think_tag_parser,
-                        &mut current_thinking,
-                        &mut current_text,
-                        content_blocks,
                         tool_calls,
                         api_output_tokens,
                         token_count,
+                        StopReason::ToolUse,
                     );
                 }
                 return Err(e);
@@ -185,14 +172,14 @@ pub async fn process_stream(
                 // text spam is gone now that controllers have a real
                 // channel for reasoning.
                 output.thinking_delta(&text)?;
-                current_thinking.push_str(&text);
+                assembly.current_thinking.push_str(&text);
             }
 
             StreamEvent::TextDelta(text) => {
                 // Run through the <think> tag parser — some OpenAI-compat
                 // servers embed reasoning in <think>…</think> tags in the
                 // content field rather than using a separate field.
-                let segments = think_tag_parser.feed(&text);
+                let segments = assembly.think_tag_parser.feed(&text);
                 for (is_thinking, segment) in segments {
                     if is_thinking {
                         tracing::debug!(thinking = segment, "model thinking (think tag)");
@@ -204,10 +191,10 @@ pub async fn process_stream(
                         // above; supports OpenAI-compat models that
                         // embed reasoning in <think>…</think> tags.
                         output.thinking_delta(&segment)?;
-                        current_thinking.push_str(&segment);
+                        assembly.current_thinking.push_str(&segment);
                     } else {
                         // Flush any accumulated thinking before text starts.
-                        flush_thinking(&mut current_thinking, &mut content_blocks);
+                        assembly.flush_thinking();
                         if first_token_time.is_none() {
                             first_token_time = Some(std::time::Instant::now());
                             let ttft_ms = first_token_time
@@ -222,7 +209,7 @@ pub async fn process_stream(
                         }
                         token_count += segment.split_whitespace().count().max(1);
                         output.text_delta(&segment)?;
-                        current_text.push_str(&segment);
+                        assembly.current_text.push_str(&segment);
                     }
                 }
             }
@@ -232,8 +219,8 @@ pub async fn process_stream(
                     output.typing_indicator(false)?;
                     typing_cleared = true;
                 }
-                flush_thinking(&mut current_thinking, &mut content_blocks);
-                flush_text(&mut current_text, &mut content_blocks);
+                assembly.flush_thinking();
+                assembly.flush_text();
                 tracing::info!(tool = name, id = id, "tool call started");
                 // A provider can drop the stream while it is still
                 // generating tool input JSON.  Don't surface a running tool
@@ -258,7 +245,7 @@ pub async fn process_stream(
                 // Store in content_blocks (for the Message) and tool_calls
                 // (for execution).  Clone into content_blocks, move into
                 // tool_calls to avoid a second deep-copy of the input Value.
-                content_blocks.push(ContentBlock::ToolUse {
+                assembly.content_blocks.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
@@ -297,16 +284,9 @@ pub async fn process_stream(
                     tool_calls = tool_calls.len(),
                     "stream complete"
                 );
-                for (is_thinking, segment) in think_tag_parser.flush() {
-                    if is_thinking {
-                        current_thinking.push_str(&segment);
-                    } else {
-                        output.text_delta(&segment)?;
-                        current_text.push_str(&segment);
-                    }
-                }
-                flush_thinking(&mut current_thinking, &mut content_blocks);
-                flush_text(&mut current_text, &mut content_blocks);
+                assembly.flush_pending_think_tags(output)?;
+                assembly.flush_thinking();
+                assembly.flush_text();
             }
 
             StreamEvent::Error(e) => {
@@ -316,15 +296,12 @@ pub async fn process_stream(
                         tool_calls = tool_calls.len(),
                         "stream error after complete tool call; executing completed tool calls"
                     );
-                    return finish_with_completed_tool_calls(
+                    return assembly.finish(
                         output,
-                        &mut think_tag_parser,
-                        &mut current_thinking,
-                        &mut current_text,
-                        content_blocks,
                         tool_calls,
                         api_output_tokens,
                         token_count,
+                        StopReason::ToolUse,
                     );
                 }
                 return Err(e);
@@ -332,68 +309,81 @@ pub async fn process_stream(
         }
     }
 
-    // Flush any remaining content held by the think tag parser.
-    for (is_thinking, segment) in think_tag_parser.flush() {
-        if is_thinking {
-            current_thinking.push_str(&segment);
-        } else {
-            output.text_delta(&segment)?;
-            current_text.push_str(&segment);
-        }
-    }
-    flush_thinking(&mut current_thinking, &mut content_blocks);
-    flush_text(&mut current_text, &mut content_blocks);
-
-    let message = Message::assistant(content_blocks);
-    let final_token_count = api_output_tokens.unwrap_or(token_count);
-    Ok((message, tool_calls, final_token_count, final_stop_reason))
+    assembly.finish(
+        output,
+        tool_calls,
+        api_output_tokens,
+        token_count,
+        final_stop_reason,
+    )
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// If there's accumulated text, push it as a ContentBlock and clear the buffer.
-fn flush_text(current_text: &mut String, content_blocks: &mut Vec<ContentBlock>) {
-    if !current_text.is_empty() {
-        content_blocks.push(ContentBlock::Text {
-            text: std::mem::take(current_text),
-        });
-    }
+struct StreamAssembly {
+    content_blocks: Vec<ContentBlock>,
+    current_text: String,
+    current_thinking: String,
+    think_tag_parser: ThinkTagParser,
 }
 
-/// If there's accumulated thinking, push it as a Thinking ContentBlock and clear the buffer.
-fn flush_thinking(current_thinking: &mut String, content_blocks: &mut Vec<ContentBlock>) {
-    if !current_thinking.is_empty() {
-        content_blocks.push(ContentBlock::Thinking {
-            thinking: std::mem::take(current_thinking),
-        });
-    }
-}
-
-fn finish_with_completed_tool_calls(
-    output: &mut dyn Output,
-    think_tag_parser: &mut ThinkTagParser,
-    current_thinking: &mut String,
-    current_text: &mut String,
-    mut content_blocks: Vec<ContentBlock>,
-    tool_calls: Vec<ToolCall>,
-    api_output_tokens: Option<usize>,
-    token_count: usize,
-) -> Result<(Message, Vec<ToolCall>, usize, StopReason)> {
-    for (is_thinking, segment) in think_tag_parser.flush() {
-        if is_thinking {
-            current_thinking.push_str(&segment);
-        } else {
-            output.text_delta(&segment)?;
-            current_text.push_str(&segment);
+impl StreamAssembly {
+    fn new() -> Self {
+        Self {
+            content_blocks: Vec::with_capacity(4),
+            current_text: String::new(),
+            current_thinking: String::new(),
+            think_tag_parser: ThinkTagParser::new(),
         }
     }
-    flush_thinking(current_thinking, &mut content_blocks);
-    flush_text(current_text, &mut content_blocks);
-    let message = Message::assistant(content_blocks);
-    let final_token_count = api_output_tokens.unwrap_or(token_count);
-    Ok((message, tool_calls, final_token_count, StopReason::ToolUse))
+
+    /// If there's accumulated text, push it as a ContentBlock and clear the buffer.
+    fn flush_text(&mut self) {
+        if !self.current_text.is_empty() {
+            self.content_blocks.push(ContentBlock::Text {
+                text: std::mem::take(&mut self.current_text),
+            });
+        }
+    }
+
+    /// If there's accumulated thinking, push it as a Thinking ContentBlock and clear the buffer.
+    fn flush_thinking(&mut self) {
+        if !self.current_thinking.is_empty() {
+            self.content_blocks.push(ContentBlock::Thinking {
+                thinking: std::mem::take(&mut self.current_thinking),
+            });
+        }
+    }
+
+    fn flush_pending_think_tags(&mut self, output: &mut dyn Output) -> Result<()> {
+        for (is_thinking, segment) in self.think_tag_parser.flush() {
+            if is_thinking {
+                self.current_thinking.push_str(&segment);
+            } else {
+                output.text_delta(&segment)?;
+                self.current_text.push_str(&segment);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(
+        mut self,
+        output: &mut dyn Output,
+        tool_calls: Vec<ToolCall>,
+        api_output_tokens: Option<usize>,
+        token_count: usize,
+        stop_reason: StopReason,
+    ) -> Result<(Message, Vec<ToolCall>, usize, StopReason)> {
+        self.flush_pending_think_tags(output)?;
+        self.flush_thinking();
+        self.flush_text();
+        let message = Message::assistant(self.content_blocks);
+        let final_token_count = api_output_tokens.unwrap_or(token_count);
+        Ok((message, tool_calls, final_token_count, stop_reason))
+    }
 }
 
 // ---------------------------------------------------------------------------
