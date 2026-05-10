@@ -563,9 +563,17 @@ fn parse_model_command(
     Err(format!("unknown provider or model '{first}'"))
 }
 
-/// Find the provider name in `settings.providers` that matches the active
-/// agent config (provider type + model).  Returns `None` if no match.
+/// Find the provider name in `settings.providers` that is active for this
+/// settings snapshot.
 pub fn active_provider_name(settings: &Settings) -> Option<String> {
+    if let Some(active) = settings.active_provider.as_ref()
+        && settings.providers.contains_key(active.name())
+    {
+        return Some(active.name().to_string());
+    }
+
+    // Compatibility for Settings built by tests or older call sites that
+    // populate only the flattened agent fields.
     settings.providers.iter().find_map(|(name, pc)| {
         if pc.provider_type == settings.agent.provider && pc.models.contains(&settings.agent.model)
         {

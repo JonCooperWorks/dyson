@@ -55,9 +55,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::config::{
-    BuiltinSkillConfig, CompactionConfig, ControllerConfig, LocalSkillConfig, McpAuthConfig,
-    McpConfig, McpTransportConfig, ProviderConfig, SandboxConfig, Settings, SkillConfig,
-    SubagentAgentConfig, SubagentSkillConfig,
+    ActiveProvider, BuiltinSkillConfig, CompactionConfig, ControllerConfig, LocalSkillConfig,
+    McpAuthConfig, McpConfig, McpTransportConfig, ProviderConfig, SandboxConfig, Settings,
+    SkillConfig, SubagentAgentConfig, SubagentSkillConfig,
 };
 use crate::error::{DysonError, Result};
 use crate::secret::{SecretRegistry, SecretValue};
@@ -706,9 +706,10 @@ fn parse_agent_settings(agent: Option<JsonAgent>, settings: &mut Settings) {
         Some(a) => a,
         None => return,
     };
+    let selected_provider_name = agent.provider.clone();
 
     // Apply the named provider's fields to agent settings.
-    if let Some(ref provider_name) = agent.provider {
+    if let Some(provider_name) = selected_provider_name.as_deref() {
         if let Some(pc) = settings.providers.get(provider_name) {
             settings.agent.provider = pc.provider_type.clone();
             settings.agent.model = pc.default_model().to_string();
@@ -716,7 +717,7 @@ fn parse_agent_settings(agent: Option<JsonAgent>, settings: &mut Settings) {
             settings.agent.base_url = pc.base_url.clone();
         } else {
             tracing::warn!(
-                provider = provider_name.as_str(),
+                provider = provider_name,
                 "agent references unknown provider name"
             );
         }
@@ -759,6 +760,10 @@ fn parse_agent_settings(agent: Option<JsonAgent>, settings: &mut Settings) {
     if agent.image_generation_model.is_some() {
         settings.agent.image_generation_model = agent.image_generation_model;
     }
+
+    settings.active_provider = selected_provider_name
+        .filter(|name| settings.providers.contains_key(name))
+        .and_then(|name| ActiveProvider::new(name, settings.agent.model.clone()));
 }
 
 /// Convert a JSON compaction value into a `CompactionConfig`.

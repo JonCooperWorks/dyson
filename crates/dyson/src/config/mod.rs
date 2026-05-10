@@ -58,6 +58,13 @@ pub struct Settings {
     /// Core agent behavior: model, limits, system prompt, API key.
     pub agent: AgentSettings,
 
+    /// Named provider selected by `agent.provider`, after config loading
+    /// has resolved any `agent.model` override.
+    ///
+    /// The flattened `agent` fields are kept for client/agent builders, but
+    /// the provider name is the stable identity used for registry lookups.
+    pub active_provider: Option<ActiveProvider>,
+
     /// Named provider configurations from the `"providers"` JSON map.
     ///
     /// Each entry is a fully-resolved provider (API key resolved, type
@@ -102,6 +109,36 @@ pub struct Settings {
     /// This is the ONLY way to disable all sandboxes.  It cannot be set
     /// from config — only from the command line, as a conscious decision.
     pub dangerous_no_sandbox: bool,
+}
+
+/// Resolved named provider selection.
+///
+/// Keeping this as a value instead of a `(String, String)` tuple makes call
+/// sites state whether they are using the provider identity or the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveProvider {
+    name: String,
+    model: String,
+}
+
+impl ActiveProvider {
+    pub fn new(name: impl Into<String>, model: impl Into<String>) -> Option<Self> {
+        let name = name.into().trim().to_string();
+        let model = model.into().trim().to_string();
+        if name.is_empty() || model.is_empty() {
+            None
+        } else {
+            Some(Self { name, model })
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -945,6 +982,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             agent: AgentSettings::default(),
+            active_provider: None,
             providers: std::collections::HashMap::new(),
             skills: vec![SkillConfig::Builtin(BuiltinSkillConfig { tools: vec![] })],
             controllers: vec![],

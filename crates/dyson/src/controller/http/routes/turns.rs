@@ -19,6 +19,7 @@ use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::rate_limiter::{Priority, RateLimitedHandle};
+use crate::config::Settings;
 use crate::llm::stream::StreamEvent;
 use crate::llm::{CompletionConfig, LlmClient};
 use crate::message::Message;
@@ -29,10 +30,76 @@ use super::super::responses::{
 };
 use super::super::state::{ChatHandle, HttpState};
 use super::super::wire::{MAX_TURN_BODY, SseEvent, TurnBody};
-use super::super::{AgentMode, build_agent};
+use super::super::{AgentMode, ClientRegistry, build_agent};
 use super::conversations::bump_to_front;
 
 const PLACEHOLDER_TITLE: &str = "New conversation";
+const WARMUP_PLACEHOLDER: &str = "warmup-placeholder";
+
+#[derive(Clone)]
+struct ReadyTurnConfig {
+    settings: Settings,
+    provider_name: Option<String>,
+}
+
+impl ReadyTurnConfig {
+    fn resolve(state: &HttpState) -> Result<Self, String> {
+        let mut settings = state.settings_snapshot();
+        let runtime = match state.runtime_model.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        let provider_name = if let Some(selection) = runtime {
+            selection.apply_to_settings(&mut settings)?;
+            Some(selection.provider().to_string())
+        } else {
+            crate::controller::active_provider_name(&settings)
+        };
+
+        reject_unready_agent_config(&settings, provider_name.as_deref())?;
+        Ok(Self {
+            settings,
+            provider_name,
+        })
+    }
+
+    fn client(
+        &self,
+        registry: &ClientRegistry,
+    ) -> crate::Result<RateLimitedHandle<Box<dyn LlmClient>>> {
+        match self.provider_name.as_deref() {
+            Some(provider) => registry.get(provider),
+            None => Ok(registry.get_default()),
+        }
+    }
+}
+
+fn reject_unready_agent_config(
+    settings: &Settings,
+    provider_name: Option<&str>,
+) -> Result<(), String> {
+    let model = settings.agent.model.trim();
+    if model.is_empty() {
+        return Err("agent is not configured yet: no model is selected".to_string());
+    }
+    if model == WARMUP_PLACEHOLDER {
+        return Err("agent is not configured yet: swarm warmup model is still active".to_string());
+    }
+
+    if let Some(provider_name) = provider_name {
+        let pc = settings
+            .providers
+            .get(provider_name)
+            .ok_or_else(|| format!("unknown provider '{provider_name}'"))?;
+        if pc.api_key.expose() == WARMUP_PLACEHOLDER {
+            return Err(format!(
+                "agent is not configured yet: provider '{provider_name}' still has the swarm warmup API key"
+            ));
+        }
+    }
+
+    Ok(())
+}
 
 pub(super) async fn post(
     req: Request<hyper::body::Incoming>,
@@ -171,29 +238,36 @@ pub(super) async fn post(
         return service_unavailable("instance is quiesced for maintenance");
     }
 
-    // Set up cancellation.
+    let registry = Arc::clone(&state.registry);
+    let turn_config = match ReadyTurnConfig::resolve(&state) {
+        Ok(config) => config,
+        Err(e) => {
+            handle
+                .busy
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return service_unavailable(&e);
+        }
+    };
+    let client = match turn_config.client(&registry) {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!(error = %e, chat_id = %id, "turn provider is not ready");
+            handle
+                .busy
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return service_unavailable(&format!(
+                "agent provider is not ready: {}",
+                e.sanitized_message()
+            ));
+        }
+    };
+    let settings = turn_config.settings;
+
+    // Set up cancellation only after configuration is ready.  A warmup
+    // instance should return 503 without installing per-turn state.
     let cancel = CancellationToken::new();
     *handle.cancel.lock().await = Some(cancel.clone());
 
-    // Apply the runtime model override before handing settings to
-    // `build_agent` so a brand-new chat picks up the operator's last
-    // model choice instead of the startup default.  `runtime_model`
-    // is set by `post_model`; when unset this is a no-op clone.
-    let mut settings = state.settings_snapshot();
-    let override_pm: Option<(String, String)> = match state.runtime_model.lock() {
-        Ok(g) => g.clone(),
-        Err(p) => p.into_inner().clone(),
-    };
-    let override_provider_name = if let Some((prov, model)) = override_pm {
-        if let Some(pc) = settings.providers.get(&prov) {
-            settings.agent.provider = pc.provider_type.clone();
-            settings.agent.model = model;
-        }
-        Some(prov)
-    } else {
-        None
-    };
-    let registry = Arc::clone(&state.registry);
     let history = state.history.clone();
     let prompt = body.prompt;
     let should_title = title_needs_generation(&handle.title()) && !prompt.trim().is_empty();
@@ -209,13 +283,7 @@ pub(super) async fn post(
     let ingest = Arc::clone(&state.ingest);
 
     if should_title {
-        let title_client = match override_provider_name.as_deref() {
-            Some(p) => registry
-                .get(p)
-                .unwrap_or_else(|_| registry.get_default())
-                .with_priority(Priority::Background),
-            None => registry.get_default().with_priority(Priority::Background),
-        };
+        let title_client = client.clone().with_priority(Priority::Background);
         spawn_title_generation(
             Arc::clone(&state),
             Arc::clone(&handle),
@@ -247,13 +315,6 @@ pub(super) async fn post(
         tracing::info!(chat_id = %chat_id, "TURN_WORKER: acquiring agent lock");
         let mut guard = chat_handle.agent.lock().await;
         tracing::info!(chat_id = %chat_id, "TURN_WORKER: agent lock acquired");
-        // Prefer the runtime-selected provider's client when one
-        // is set — falls back to the registry default otherwise
-        // (unknown provider name or no override set).
-        let client = match override_provider_name.as_deref() {
-            Some(p) => registry.get(p).unwrap_or_else(|_| registry.get_default()),
-            None => registry.get_default(),
-        };
         if guard.is_none() {
             tracing::info!(chat_id = %chat_id, "TURN_WORKER: agent is None — calling build_agent");
             match build_agent(

@@ -1096,6 +1096,49 @@ async fn post_turn_404_for_unknown_chat() {
 }
 
 #[tokio::test]
+async fn post_turn_rejects_swarm_warmup_config_before_building_agent() {
+    // Reproduces the swarm first-turn race: the HTTP process can be up
+    // before `/api/admin/configure` has replaced the warmup placeholder
+    // provider.  The turn must fail fast instead of caching a bad client
+    // on the chat and making every later turn hit upstream auth errors.
+    let r = rig().await;
+    let id = create_chat(&r, "New conversation").await;
+
+    let mut warmup_settings = r.state.settings_snapshot();
+    warmup_settings.agent.model = "warmup-placeholder".into();
+    if let Some(provider) = warmup_settings.providers.get_mut("default") {
+        provider.api_key = Credential::new("warmup-placeholder".into());
+        provider.models = vec!["warmup-placeholder".into()];
+    }
+    r.state.replace_settings_for_test(warmup_settings);
+
+    let rejected = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "what is secretpeek?" }),
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = body_json(rejected).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("not configured"),
+        "warmup rejection should be explicit: {body}"
+    );
+
+    // The failed admission must not leave the chat busy.  A second POST
+    // under the same warmup config should get the same explicit 503, not a
+    // 200 queued response behind a phantom in-flight turn.
+    let again = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "what is secretpeek?" }),
+    )
+    .await;
+    assert_eq!(again.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
 async fn first_turn_generates_chat_title_in_background() {
     let r = rig().await;
     let id = create_chat(&r, "New conversation").await;

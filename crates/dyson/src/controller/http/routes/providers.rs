@@ -19,9 +19,11 @@ pub(super) fn list(state: &HttpState) -> Resp {
     let runtime = state.runtime_model.lock().ok().and_then(|g| g.clone());
     let active_name = runtime
         .as_ref()
-        .map(|(p, _)| p.clone())
+        .map(|selection| selection.provider().to_string())
         .or_else(|| crate::controller::active_provider_name(&snapshot));
-    let active_model_override = runtime.as_ref().map(|(_, m)| m.clone());
+    let active_model_override = runtime
+        .as_ref()
+        .map(|selection| selection.model().to_string());
 
     let mut dtos: Vec<ProviderDto> = snapshot
         .providers

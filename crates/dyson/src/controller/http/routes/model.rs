@@ -10,8 +10,10 @@ use std::sync::Arc;
 
 use hyper::Request;
 
-use super::super::responses::{Resp, bad_request, json_ok, not_found, read_json_capped};
-use super::super::state::{ChatHandle, HttpState};
+use super::super::responses::{
+    Resp, bad_request, json_ok, not_found, read_json_capped, service_unavailable,
+};
+use super::super::state::{ChatHandle, HttpState, RuntimeModelSelection};
 use super::super::wire::{MAX_SMALL_BODY, ModelSwitchBody};
 
 pub(super) async fn post(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) -> Resp {
@@ -33,6 +35,21 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: Arc<HttpSta
         return bad_request("provider has no configured models");
     }
     let provider_type = provider_cfg.provider_type.clone();
+    let selection = match RuntimeModelSelection::new(body.provider.clone(), model.clone()) {
+        Ok(selection) => selection,
+        Err(e) => return bad_request(&e),
+    };
+    let client_for_swap = match state.registry.get(selection.provider()) {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!(error = %e, provider = selection.provider(), "model switch provider is not ready");
+            return service_unavailable(&format!(
+                "provider '{}' is not ready: {}",
+                selection.provider(),
+                e.sanitized_message()
+            ));
+        }
+    };
 
     let chats = state.chats.lock().await;
     let targets: Vec<Arc<ChatHandle>> = match body.chat_id {
@@ -48,11 +65,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: Arc<HttpSta
     for handle in targets {
         let mut guard = handle.agent.lock().await;
         if let Some(agent) = guard.as_mut() {
-            let client = state
-                .registry
-                .get(&body.provider)
-                .unwrap_or_else(|_| state.registry.get_default());
-            agent.swap_client(client, &model, &provider_type);
+            agent.swap_client(client_for_swap.clone(), &model, &provider_type);
             swapped += 1;
         }
     }
@@ -80,7 +93,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: Arc<HttpSta
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    *slot = Some((body.provider.clone(), model.clone()));
+    *slot = Some(selection);
     drop(slot);
 
     json_ok(&serde_json::json!({

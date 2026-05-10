@@ -24,7 +24,7 @@
 // | `order`                      | `tokio::Mutex`     | list / mint / delete | one Vec mutation                               |
 // | `files`                      | `std::Mutex`       | sync `Output::send_file` | HashMap put/get + Vec push                  |
 // | `artefacts`                  | `std::Mutex`       | sync `Output::send_artefact` + list/get | HashMap put/get + Vec push        |
-// | `runtime_model`              | `std::Mutex`       | `post_model`, `turns`| one `Option<(String, String)>` swap or clone   |
+// | `runtime_model`              | `std::Mutex`       | `post_model`, `turns`| one typed provider/model selection swap/clone  |
 // | `sse_tickets`                | `std::Mutex`       | mint + consume       | HashMap insert/remove                          |
 // | `titles`                     | `std::Mutex`       | conversations list   | HashMap insert/get                             |
 // | `quiesced`                   | `AtomicBool`       | admin + turns        | zero-lock snapshot/turn admission latch        |
@@ -49,7 +49,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::Agent;
 use crate::auth::Auth;
 use crate::chat_history::ChatHistory;
-use crate::config::Settings;
+use crate::config::{ActiveProvider, Settings};
 use crate::feedback::FeedbackStore;
 use crate::util::resolve_tilde;
 
@@ -75,6 +75,55 @@ pub(crate) struct QueuedAttachment {
     #[serde(default)]
     pub(crate) name: Option<String>,
     pub(crate) data_base64: String,
+}
+
+/// Runtime model switch selected through the HTTP controller.
+///
+/// This intentionally is not a tuple: every consumer must go through the
+/// same validation and settings-application path, so an unknown provider
+/// cannot silently fall back to the registry default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeModelSelection {
+    provider: String,
+    model: String,
+}
+
+impl RuntimeModelSelection {
+    pub(crate) fn new(
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Result<Self, String> {
+        let provider = provider.into().trim().to_string();
+        let model = model.into().trim().to_string();
+        if provider.is_empty() {
+            return Err("provider must not be empty".to_string());
+        }
+        if model.is_empty() {
+            return Err("model must not be empty".to_string());
+        }
+        Ok(Self { provider, model })
+    }
+
+    pub(crate) fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub(crate) fn apply_to_settings(&self, settings: &mut Settings) -> Result<(), String> {
+        let pc = settings
+            .providers
+            .get(&self.provider)
+            .ok_or_else(|| format!("unknown provider '{}'", self.provider))?;
+        settings.agent.provider = pc.provider_type.clone();
+        settings.agent.api_key = pc.api_key.clone();
+        settings.agent.base_url = pc.base_url.clone();
+        settings.agent.model = self.model.clone();
+        settings.active_provider = ActiveProvider::new(self.provider.clone(), self.model.clone());
+        Ok(())
+    }
 }
 
 /// Outcome of an enqueue attempt.
@@ -515,13 +564,13 @@ pub struct HttpState {
     /// web UI's choice got silently reverted the next time the
     /// process rebuilt an agent from settings.
     pub(crate) config_path: Option<PathBuf>,
-    /// In-memory override for `(provider, model)` applied to any
+    /// In-memory override for the selected provider/model applied to any
     /// agent built after `post_model` has run — `state.settings` is a
     /// frozen snapshot from startup, so without this override a new
     /// conversation (and any first-use agent build) would reuse the
     /// startup model.  Cleared on process restart — the persisted
     /// `dyson.json` write is what carries the choice across restarts.
-    pub(crate) runtime_model: std::sync::Mutex<Option<(String, String)>>,
+    pub(crate) runtime_model: std::sync::Mutex<Option<RuntimeModelSelection>>,
     /// Public auth-mode summary the frontend needs to bootstrap an
     /// auth code flow.  Surfaced via `/api/auth/config` (unauth-
     /// enticated) and embedded in `WWW-Authenticate` on 401s when the
@@ -999,9 +1048,12 @@ impl HttpState {
     /// Test hook — swap the live settings snapshot.  Lets the
     /// hot-reload regression test verify that a config change
     /// (e.g. a new model added to a provider) propagates through
-    /// `/api/providers` without restarting the controller.
+    /// `/api/providers` without restarting the controller.  Also
+    /// reloads the registry so the test mirrors the production
+    /// hot-reload order used by `command::listen`.
     #[doc(hidden)]
     pub fn replace_settings_for_test(&self, settings: Settings) {
+        self.registry.reload(&settings, None);
         let mut guard = match self.settings.write() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
