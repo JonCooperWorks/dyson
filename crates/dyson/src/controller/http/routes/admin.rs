@@ -661,6 +661,7 @@ pub(super) async fn post_state_file(
             abs.display()
         ));
     }
+    state.observe_replayed_state_file(&body.namespace, &rel_path);
     json_ok(&serde_json::json!({
         "ok": true,
         "namespace": body.namespace,

@@ -616,20 +616,11 @@ pub(crate) struct IngestConfig {
 /// a slot that another record still points at — otherwise the empty
 /// new chat would surface orphan artefacts filtered by the old id.
 pub(crate) fn max_chat_id_n(data_dir: &std::path::Path, artefacts: &ArtefactStore) -> u64 {
-    fn extract(name: &str) -> Option<u64> {
-        let stem = name.strip_prefix("c-")?;
-        let digits: String = stem.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if digits.is_empty() {
-            return None;
-        }
-        digits.parse().ok()
-    }
-
     let mut max_n: u64 = 0;
     if let Ok(iter) = std::fs::read_dir(data_dir) {
         for entry in iter.flatten() {
             if let Some(name) = entry.file_name().to_str()
-                && let Some(n) = extract(name)
+                && let Some(n) = chat_id_n(name)
             {
                 max_n = max_n.max(n);
             }
@@ -639,11 +630,54 @@ pub(crate) fn max_chat_id_n(data_dir: &std::path::Path, artefacts: &ArtefactStor
     // been purged — rotation leaves them orphaned on disk.  Walk the
     // in-memory index (already hydrated from disk) for c-NNNN hits.
     for entry in artefacts.items.values() {
-        if let Some(n) = extract(&entry.chat_id) {
+        if let Some(n) = chat_id_n(&entry.chat_id) {
             max_n = max_n.max(n);
         }
     }
     max_n
+}
+
+fn chat_id_n(name: &str) -> Option<u64> {
+    let stem = name.strip_prefix("c-")?;
+    let digits: String = stem.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn prefixed_numeric_id(stem: &str, prefix: char) -> Option<u64> {
+    stem.strip_prefix(prefix)
+        .and_then(|rest| rest.parse::<u64>().ok())
+}
+
+fn file_id_from_name(name: &str) -> Option<u64> {
+    let stem = name
+        .strip_suffix(".meta.json")
+        .or_else(|| name.strip_suffix(".bin"))?;
+    prefixed_numeric_id(stem, 'f')
+}
+
+fn artefact_id_from_name(name: &str) -> Option<u64> {
+    let stem = name
+        .strip_suffix(".meta.json")
+        .or_else(|| name.strip_suffix(".body"))?;
+    prefixed_numeric_id(stem, 'a')
+}
+
+fn advance_counter(counter: &std::sync::atomic::AtomicU64, next: u64) {
+    let mut current = counter.load(std::sync::atomic::Ordering::Relaxed);
+    while current < next {
+        match counter.compare_exchange(
+            current,
+            next,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(actual) => current = actual,
+        }
+    }
 }
 
 impl HttpState {
@@ -737,6 +771,41 @@ impl HttpState {
     pub(crate) fn unquiesce(&self) {
         self.quiesced
             .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Swarm replays durable files after the HTTP state has already been
+    /// constructed, so startup scans cannot see those restored ids.  Bump
+    /// the live counters as each accepted state file lands to keep future
+    /// chat/file/artefact ids globally unique for the process.
+    pub(crate) fn observe_replayed_state_file(&self, namespace: &str, rel_path: &str) {
+        if namespace != "chats" {
+            return;
+        }
+        let parts: Vec<&str> = rel_path.split('/').filter(|p| !p.is_empty()).collect();
+        if let Some(first) = parts.first().copied()
+            && let Some(n) = chat_id_n(first)
+        {
+            advance_counter(&self.next_id, n.saturating_add(1));
+        }
+
+        match parts.as_slice() {
+            ["files", name] => {
+                if let Some(n) = file_id_from_name(name) {
+                    advance_counter(&self.file_id, n.saturating_add(1));
+                }
+            }
+            [_, "files", name] => {
+                if let Some(n) = file_id_from_name(name) {
+                    advance_counter(&self.file_id, n.saturating_add(1));
+                }
+            }
+            [_, "artefacts", name] => {
+                if let Some(n) = artefact_id_from_name(name) {
+                    advance_counter(&self.artefact_id, n.saturating_add(1));
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(crate) async fn in_flight_chats(&self) -> u32 {

@@ -557,6 +557,86 @@ async fn admin_state_file_replay_enforces_durable_allowlist() {
 }
 
 #[tokio::test]
+async fn admin_state_file_replay_advances_file_and_artefact_ids() {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as B64;
+
+    let r = rig().await;
+    let secret = "test-configure-secret";
+    let configure = post_json_with_headers(
+        &format!("{}/api/admin/configure", r.base),
+        &serde_json::json!({}),
+        &[("x-swarm-configure", secret)],
+    )
+    .await;
+    assert_eq!(configure.status(), StatusCode::OK);
+
+    async fn replay_state_file(r: &Rig, secret: &str, path: &str, bytes: &[u8]) {
+        let resp = post_json_with_headers(
+            &format!("{}/api/admin/state/file", r.base),
+            &serde_json::json!({
+                "namespace": "chats",
+                "path": path,
+                "mime": "application/octet-stream",
+                "body_b64": B64.encode(bytes),
+            }),
+            &[("x-swarm-configure", secret)],
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "state replay path {path}");
+    }
+
+    replay_state_file(&r, secret, "files/f7.bin", b"legacy-file").await;
+    replay_state_file(
+        &r,
+        secret,
+        "files/f7.meta.json",
+        br#"{"mime":"text/markdown","name":"legacy.md"}"#,
+    )
+    .await;
+    replay_state_file(&r, secret, "c-old/artefacts/a9.body", b"legacy artefact").await;
+    replay_state_file(
+        &r,
+        secret,
+        "c-old/artefacts/a9.meta.json",
+        br#"{"chat_id":"c-old","kind":"other","title":"legacy.md","mime_type":"text/markdown","created_at":1,"metadata":{"file_url":"/api/files/f7"}}"#,
+    )
+    .await;
+    replay_state_file(&r, secret, "c-0042/transcript.json", b"[]").await;
+
+    let created = post_json(
+        &format!("{}/api/conversations", r.base),
+        &serde_json::json!({ "title": "after replay" }),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = body_json(created).await;
+    assert_eq!(
+        created["id"], "c-0043",
+        "new chat id must not collide with replayed state"
+    );
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"new file").unwrap();
+    let (file_id, artefact_id) =
+        dyson::controller::http::test_helpers::publish_file_as_artefact_for_test(
+            r.state.clone(),
+            "c-new",
+            tmp.path(),
+        )
+        .expect("publish file");
+
+    assert_eq!(
+        file_id, "f8",
+        "new file id must not collide with replayed state"
+    );
+    assert_eq!(
+        artefact_id, "a10",
+        "new artefact id must not collide with replayed state"
+    );
+}
+
+#[tokio::test]
 async fn admin_idle_quiesce_blocks_new_turns_until_unquiesced() {
     // Swarm's rotate-in-place path calls these endpoints before
     // snapshotting a cube. They must exist on Dyson and must stop new
