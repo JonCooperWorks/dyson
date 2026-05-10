@@ -4,6 +4,7 @@ use crate::message::{ContentBlock, Role};
 use crate::sandbox::no_sandbox::DangerousNoSandbox;
 use crate::skill::builtin::BuiltinSkill;
 use crate::tool::ToolOutput;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // -----------------------------------------------------------------------
 // Mock LLM client that returns a fixed response.
@@ -15,6 +16,40 @@ struct MockLlm {
     responses: std::sync::Mutex<Vec<Vec<StreamEvent>>>,
     /// Simulate a provider that handles tools internally (like Claude Code).
     tool_mode: crate::llm::ToolMode,
+}
+
+struct FallibleMockLlm {
+    responses: std::sync::Mutex<Vec<Vec<Result<StreamEvent>>>>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl FallibleMockLlm {
+    fn new(responses: Vec<Vec<Result<StreamEvent>>>, calls: Arc<AtomicUsize>) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(responses),
+            calls,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for FallibleMockLlm {
+    async fn stream(
+        &self,
+        _messages: &[Message],
+        _system: &str,
+        _system_suffix: &str,
+        _tools: &[ToolDefinition],
+        _config: &CompletionConfig,
+    ) -> Result<crate::llm::StreamResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let events = self.responses.lock().unwrap().remove(0);
+        Ok(crate::llm::StreamResponse {
+            stream: Box::pin(tokio_stream::iter(events)),
+            tool_mode: crate::llm::ToolMode::Execute,
+            input_tokens: None,
+        })
+    }
 }
 
 impl MockLlm {
@@ -91,6 +126,56 @@ async fn simple_text_response() {
     let result = agent.run("hi", &mut output).await.unwrap();
     assert_eq!(result, "Hello!");
     assert_eq!(output.text(), "Hello!");
+}
+
+#[tokio::test]
+async fn retries_retryable_error_while_consuming_stream() {
+    crate::http::ensure_crypto_provider();
+    let err = reqwest::Client::new()
+        .get("http://127.0.0.1:1")
+        .send()
+        .await
+        .unwrap_err();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let llm = FallibleMockLlm::new(
+        vec![
+            vec![Err(DysonError::Http(err))],
+            vec![
+                Ok(StreamEvent::TextDelta("Recovered.".into())),
+                Ok(StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: None,
+                }),
+            ],
+        ],
+        Arc::clone(&calls),
+    );
+
+    let settings = AgentSettings {
+        api_key: "test".into(),
+        max_retries: 1,
+        ..Default::default()
+    };
+
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut output = RecordingOutput::new();
+
+    let result = agent.run("hi", &mut output).await.unwrap();
+    assert_eq!(result, "Recovered.");
+    assert_eq!(output.text(), "Recovered.");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -2250,6 +2335,7 @@ fn is_retryable_overloaded() {
 async fn is_retryable_http_error() {
     // DysonError::Http is always retryable. Trigger a real reqwest error
     // by trying to connect to a port that's not listening.
+    crate::http::ensure_crypto_provider();
     let err = reqwest::Client::new()
         .get("http://127.0.0.1:1")
         .send()

@@ -1,13 +1,111 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::controller::Output;
 use crate::error::{LlmRecovery, Result};
-use crate::message::Message;
+use crate::message::{Artefact, Message};
+use crate::tool::{CheckpointEvent, ToolOutput};
 
 use super::dream::DreamEvent;
 use super::retry::{MAXTOKENS_TOOL_CALL_TRUNCATED, StreamResult};
 use super::stream_handler::{self, ToolCall};
 use super::{Agent, result_formatter};
+
+struct StreamRetryOutput<'a> {
+    inner: &'a mut dyn Output,
+    emitted_visible_output: bool,
+}
+
+impl<'a> StreamRetryOutput<'a> {
+    fn new(inner: &'a mut dyn Output) -> Self {
+        Self {
+            inner,
+            emitted_visible_output: false,
+        }
+    }
+
+    fn emitted_visible_output(&self) -> bool {
+        self.emitted_visible_output
+    }
+}
+
+impl Output for StreamRetryOutput<'_> {
+    fn text_delta(&mut self, text: &str) -> std::result::Result<(), crate::error::DysonError> {
+        if !text.is_empty() {
+            self.emitted_visible_output = true;
+        }
+        self.inner.text_delta(text)
+    }
+
+    fn thinking_delta(&mut self, text: &str) -> std::result::Result<(), crate::error::DysonError> {
+        self.inner.thinking_delta(text)
+    }
+
+    fn tool_use_start(
+        &mut self,
+        id: &str,
+        name: &str,
+    ) -> std::result::Result<(), crate::error::DysonError> {
+        self.emitted_visible_output = true;
+        self.inner.tool_use_start(id, name)
+    }
+
+    fn tool_use_complete(&mut self) -> std::result::Result<(), crate::error::DysonError> {
+        self.emitted_visible_output = true;
+        self.inner.tool_use_complete()
+    }
+
+    fn tool_result(
+        &mut self,
+        output: &ToolOutput,
+    ) -> std::result::Result<(), crate::error::DysonError> {
+        self.emitted_visible_output = true;
+        self.inner.tool_result(output)
+    }
+
+    fn send_file(&mut self, path: &Path) -> std::result::Result<(), crate::error::DysonError> {
+        self.emitted_visible_output = true;
+        self.inner.send_file(path)
+    }
+
+    fn checkpoint(
+        &mut self,
+        event: &CheckpointEvent,
+    ) -> std::result::Result<(), crate::error::DysonError> {
+        self.inner.checkpoint(event)
+    }
+
+    fn send_artefact(
+        &mut self,
+        artefact: &Artefact,
+    ) -> std::result::Result<(), crate::error::DysonError> {
+        self.emitted_visible_output = true;
+        self.inner.send_artefact(artefact)
+    }
+
+    fn error(
+        &mut self,
+        error: &crate::error::DysonError,
+    ) -> std::result::Result<(), crate::error::DysonError> {
+        self.emitted_visible_output = true;
+        self.inner.error(error)
+    }
+
+    fn on_llm_error(&mut self, error: &crate::error::DysonError) -> LlmRecovery {
+        self.inner.on_llm_error(error)
+    }
+
+    fn typing_indicator(
+        &mut self,
+        visible: bool,
+    ) -> std::result::Result<(), crate::error::DysonError> {
+        self.inner.typing_indicator(visible)
+    }
+
+    fn flush(&mut self) -> std::result::Result<(), crate::error::DysonError> {
+        self.inner.flush()
+    }
+}
 
 impl Agent {
     /// Inner agent loop shared by [`run()`], [`run_with_blocks()`], and
@@ -66,6 +164,7 @@ impl Agent {
             // text and no tool calls, retry the request per our retry policy
             // without advancing the iteration counter.
             let mut empty_attempts: usize = 0;
+            let mut stream_error_attempts: usize = 0;
             let (tool_mode, input_tokens, assistant_msg, tool_calls, output_tokens, stop_reason) = loop {
                 let response = match self
                     .stream_with_retry(&skill_fragments, &mut recovered_this_turn, output)
@@ -85,8 +184,42 @@ impl Agent {
                     "streaming response"
                 );
 
-                let (assistant_msg, tool_calls, output_tokens, stop_reason) =
-                    stream_handler::process_stream(response.stream, output).await?;
+                let (stream_result, emitted_visible_output) = {
+                    let mut retry_output = StreamRetryOutput::new(output);
+                    let stream_result =
+                        stream_handler::process_stream(response.stream, &mut retry_output).await;
+                    (stream_result, retry_output.emitted_visible_output())
+                };
+
+                let (assistant_msg, tool_calls, output_tokens, stop_reason) = match stream_result {
+                    Ok(result) => result,
+                    Err(e)
+                        if crate::llm::is_retryable(&e)
+                            && stream_error_attempts < self.max_retries
+                            && !emitted_visible_output =>
+                    {
+                        let base_ms = 1000 * 2u64.pow(stream_error_attempts as u32);
+                        let jitter_ms = rand::random::<u64>() % (base_ms / 2 + 1);
+                        let delay_ms = base_ms + jitter_ms;
+                        tracing::warn!(
+                            attempt = stream_error_attempts + 1,
+                            max = self.max_retries,
+                            delay_ms,
+                            error = %e,
+                            "LLM stream failed before visible output — retrying"
+                        );
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
+                            _ = self.tool_context.cancellation.cancelled() => {
+                                tracing::info!("retry backoff interrupted — agent cancelled");
+                                break 'iter;
+                            }
+                        }
+                        stream_error_attempts += 1;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
 
                 // Empty responses (no text, no tool calls) can happen
                 // transiently — retry per the same policy we use for network
