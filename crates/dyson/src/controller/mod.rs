@@ -282,6 +282,9 @@ impl ClientRegistry {
     ///
     /// Looks up the provider name that matches the current agent config,
     /// or falls back to creating a client directly from the agent settings.
+    /// HTTP turn admission rejects named-provider configs without an active
+    /// provider before reaching this fallback; keep it for legacy/direct
+    /// controllers that do not use a `providers` map.
     pub fn get_default(
         &self,
     ) -> crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>> {

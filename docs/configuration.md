@@ -75,8 +75,14 @@ work. A config with a version newer than the binary refuses to load.
 
 ## Provider Map
 
-Named providers live in the top-level `providers` map. `agent.provider`
-selects one by name.
+Named providers live in the top-level `providers` map. In config files,
+`agent.provider` names the active entry. After loading, `Settings.agent`
+contains the resolved backend type/API fields and `Settings.active_provider`
+keeps the selected provider name plus model for HTTP model switching.
+
+When a `providers` map exists, HTTP turns require a resolvable active provider;
+they do not fall back to an ad hoc default client. Direct fallback is only for
+legacy configs without a provider map.
 
 Each provider entry uses:
 

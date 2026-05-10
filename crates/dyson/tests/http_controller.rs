@@ -1139,6 +1139,36 @@ async fn post_turn_rejects_swarm_warmup_config_before_building_agent() {
 }
 
 #[tokio::test]
+async fn post_turn_rejects_named_provider_config_without_active_provider() {
+    // A settings snapshot with a providers map is in named-provider
+    // mode. If no active provider can be resolved, HTTP turns must not
+    // fall back to the registry's direct default client; in swarm that
+    // fallback is how a stale placeholder config becomes a real turn.
+    let r = rig().await;
+    let id = create_chat(&r, "New conversation").await;
+
+    let mut settings = r.state.settings_snapshot();
+    settings.active_provider = None;
+    settings.agent.model = "not-in-provider-list".into();
+    r.state.replace_settings_for_test(settings);
+
+    let rejected = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "what is secretpeek?" }),
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = body_json(rejected).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("no active provider"),
+        "missing active-provider rejection should be explicit: {body}"
+    );
+}
+
+#[tokio::test]
 async fn first_turn_generates_chat_title_in_background() {
     let r = rig().await;
     let id = create_chat(&r, "New conversation").await;

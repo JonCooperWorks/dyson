@@ -50,9 +50,10 @@ pub mod migrate;
 
 /// Complete, resolved configuration for a Dyson session.
 ///
-/// Built once at startup from config files + env vars + CLI flags, then
-/// passed (by reference) to the agent and all subsystems.  Immutable after
-/// construction — no runtime config changes.
+/// Built from config files + env vars + CLI flags, then passed to the agent
+/// and subsystems as a snapshot. Controllers may swap in a fresh `Settings`
+/// after hot reload or runtime model selection; each value remains immutable
+/// once published.
 #[derive(Debug, Clone)]
 pub struct Settings {
     /// Core agent behavior: model, limits, system prompt, API key.

@@ -85,6 +85,9 @@ fn reject_unready_agent_config(
     if model == WARMUP_PLACEHOLDER {
         return Err("agent is not configured yet: swarm warmup model is still active".to_string());
     }
+    if provider_name.is_none() && !settings.providers.is_empty() {
+        return Err("agent is not configured yet: no active provider is selected".to_string());
+    }
 
     if let Some(provider_name) = provider_name {
         let pc = settings
