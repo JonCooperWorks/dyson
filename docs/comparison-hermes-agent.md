@@ -154,7 +154,7 @@ LLM says: tool_use("bash", {"command": "rm -rf /"})
 
 Sandbox implementations:
 - **PolicySandbox** — app-level JSON policy (network, file_write, path restrictions)
-- **OsSandbox** — OS-native: bubblewrap (Linux) / Seatbelt (macOS)
+- **PolicySandbox OS wrapper** — bubblewrap (Linux) / Apple Containers (macOS)
 - **CompositeSandbox** — chain multiple sandboxes
 - **DangerousNoSandbox** — passthrough (development only, requires CLI flag)
 
@@ -176,7 +176,7 @@ Hermes relies on execution backends for security:
 | **Policy language** | JSON config per tool name (glob patterns) | Container/backend config |
 | **Redirect** | Yes — transparently swap tools | No |
 | **Output auditing** | `sandbox.after()` hook | — |
-| **OS sandboxing** | bwrap / Seatbelt wrapping bash | Docker / execution backend |
+| **OS sandboxing** | bwrap / Apple Containers wrapping bash | Docker / execution backend |
 
 Dyson offers finer-grained, application-level security. Hermes offers
 stronger infrastructure-level isolation via containers.

@@ -106,7 +106,7 @@ tools and prevents context window explosion.
 
 To disable all sandboxes (development only, CLI-only):
 ```bash
-cargo run -- --dangerous-no-sandbox "do something"
+cargo run -- run --dangerous-no-sandbox "do something"
 ```
 
 ---
@@ -276,7 +276,7 @@ Unspecified fields in a policy inherit from the tool's default.
 
 CLI override (disables everything):
 ```bash
-cargo run -- --dangerous-no-sandbox
+cargo run -- run --dangerous-no-sandbox "prompt"
 ```
 
 ---

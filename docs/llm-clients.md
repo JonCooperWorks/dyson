@@ -9,8 +9,10 @@ accumulation internally — the agent loop sees only a stream of `StreamEvent`s.
 - `src/llm/stream.rs` — `StreamEvent`, `StopReason`
 - `src/llm/anthropic.rs` — Anthropic Messages API (Claude models)
 - `src/llm/openai.rs` — OpenAI Chat Completions API (GPT, etc.)
+- `src/llm/openai_compat.rs` — OpenAI-compatible endpoints and model dialects
 - `src/llm/openrouter.rs` — OpenRouter API (200+ models via OpenAI-compatible endpoint)
 - `src/llm/ollama_cloud.rs` — Ollama Cloud API (cloud-hosted models on ollama.com)
+- `src/llm/gemini.rs` — Gemini `streamGenerateContent` API
 - `src/llm/claude_code.rs` — Claude Code CLI subprocess (no API key needed)
 - `src/llm/codex.rs` — Codex CLI subprocess (no API key needed)
 
@@ -50,31 +52,32 @@ Returns a `Stream` of `StreamEvent`s.  The stream ends with
 
 ## Provider Comparison
 
-All providers implement the same `LlmClient` trait.  Anthropic, OpenAI,
-OpenRouter, and Ollama Cloud are API-based; Claude Code and Codex are
-CLI-subprocess-based.
+All providers implement the same `LlmClient` trait.
 
-| Aspect | Anthropic | OpenAI | OpenRouter | Ollama Cloud | Claude Code | Codex |
-|--------|-----------|--------|------------|--------------|-------------|-------|
-| Transport | HTTP API | HTTP API | HTTP API | HTTP API | CLI subprocess | CLI subprocess |
-| Auth | `x-api-key` header | `Bearer` token | `Bearer` token | `Bearer` token | CLI's stored auth | CLI's stored auth |
-| API key needed? | Yes | Yes | Yes | Yes | No | No |
-| Tool execution | Dyson | Dyson | Dyson | Dyson | Internal | Internal |
-| `handles_tools_internally` | `false` | `false` | `false` | `false` | `true` | `true` |
+| Provider | Transport | Auth | Tool execution |
+|---|---|---|---|
+| Anthropic | HTTP API | `x-api-key` | Dyson |
+| OpenAI | HTTP API | `Bearer` | Dyson |
+| OpenRouter | HTTP API | `Bearer` | Dyson |
+| Gemini | HTTP API | `x-goog-api-key` | Dyson |
+| Ollama Cloud | HTTP API | `Bearer` | Dyson |
+| Claude Code | CLI subprocess | CLI stored auth | Internal |
+| Codex | CLI subprocess | CLI stored auth | Internal |
 
-### API Clients (Anthropic vs OpenAI)
+`handles_tools_internally()` is `true` only for Claude Code and Codex. For
+those providers, Dyson displays streamed tool events but does not send its own
+tool definitions or execute the returned tool calls.
 
-| Aspect | Anthropic | OpenAI |
-|--------|-----------|--------|
-| Endpoint | `/v1/messages` | `/v1/chat/completions` |
-| Auth header | `x-api-key: <key>` | `Authorization: Bearer <key>` |
-| System prompt | Separate `system` field | Message with role `"system"` |
-| Tool results | Role `"user"` + `tool_result` blocks | Role `"tool"` + `tool_call_id` |
-| Tool calls | Content blocks with type `"tool_use"` | Separate `tool_calls` array |
-| Tool input streaming | `input_json_delta` in content_block_delta | `function.arguments` fragments |
-| Block lifecycle | Explicit `start` / `delta` / `stop` events | Delta objects in `choices[0]` |
-| Stream end | `message_stop` event | `data: [DONE]` sentinel |
-| Stop reasons | `end_turn`, `tool_use`, `max_tokens` | `stop`, `tool_calls`, `length` |
+### API Clients
+
+| Aspect | Anthropic | OpenAI-compatible | Gemini |
+|---|---|---|---|
+| Endpoint | `/v1/messages` | `/v1/chat/completions` | `/v1beta/models/{model}:streamGenerateContent?alt=sse` |
+| System prompt | Separate `system` field | Message with role `"system"` | `systemInstruction` |
+| Tool results | User-role `tool_result` blocks | Tool-role messages | Function response parts |
+| Tool calls | `tool_use` content blocks | `tool_calls` array | Function call parts |
+| Tool input streaming | JSON fragments | `function.arguments` fragments | Complete function-call args |
+| Stream end | `message_stop` event | `data: [DONE]` sentinel | SSE stream exhaustion |
 
 ---
 
@@ -138,6 +141,19 @@ Thin wrapper around `OpenAiCompatClient` for [OpenRouter](https://openrouter.ai)
 
 ---
 
+## Gemini Client
+
+`GeminiClient` in `src/llm/gemini.rs`.
+
+Uses Google's `streamGenerateContent` SSE endpoint. Dyson converts internal
+messages to Gemini `contents`, sends the system prompt as `systemInstruction`,
+and sanitizes JSON Schemas because Gemini supports a smaller schema subset than
+OpenAI or Anthropic. Gemini function-call arguments arrive complete rather than
+as incremental JSON fragments, so the parser emits `ToolUseComplete` directly
+from the streamed part.
+
+---
+
 ## Claude Code Client
 
 `ClaudeCodeClient` in `src/llm/claude_code.rs`.
@@ -174,7 +190,10 @@ Some models emit reasoning tokens (Anthropic's extended thinking, OpenAI's o-ser
 
 ## Provider Selection
 
-Select via `--provider` CLI flag or `agent.provider` in `dyson.json`. API keys resolve from env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OLLAMA_API_KEY`); CLI providers need none.
+Select via `--provider` CLI flag or `agent.provider` in `dyson.json`. API keys
+resolve from provider config first, then from env vars when no `base_url`
+override is set: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`,
+`GEMINI_API_KEY`, or `OLLAMA_API_KEY`. CLI providers need none.
 
 See [Adding a Provider](adding-a-provider.md) for the 3-step process.
 

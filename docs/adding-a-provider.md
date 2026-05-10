@@ -98,21 +98,25 @@ Once registered, your provider works everywhere:
 
 ```json
 {
+  "config_version": 3,
   "providers": {
     "my-provider": {
       "type": "your-provider",
-      "model": "your-model",
+      "models": ["your-model"],
       "api_key": "sk-..."
     }
+  },
+  "agent": {
+    "provider": "my-provider"
   }
 }
 ```
 
 ```bash
-# Via CLI flag
-cargo run -- --provider your-provider --model your-model
+# Via CLI flag, selecting a named provider from dyson.json
+cargo run -- run --config dyson.json --provider my-provider "hello"
 
 # Via env var (if env_var is set in the registry entry)
 export YOUR_PROVIDER_API_KEY="sk-..."
-cargo run -- --provider your-provider
+cargo run -- run --config dyson.json "hello"
 ```

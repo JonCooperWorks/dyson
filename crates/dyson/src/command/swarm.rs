@@ -277,7 +277,7 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
     // image_generate, the lot, all silently absent.  Omitting the key
     // is the correct way to say "give me the defaults".
     let mut cfg = json!({
-        "config_version": 2,
+        "config_version": dyson::config::migrate::CURRENT_VERSION,
         "providers": providers,
         "agent": agent,
         "controllers": [

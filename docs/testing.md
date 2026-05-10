@@ -27,7 +27,10 @@ flowchart LR
 
 ## Unit tests — `cargo test`
 
-1100+ tests covering the full stack: SSE parsing, sandbox decisions, config loading, workspace persistence, the agent loop with mock LLM clients, every tool's input-validation and happy-path behavior.  These are the base.  Every new feature and every bug fix adds one.
+The unit suite covers the full stack: SSE parsing, sandbox decisions, config
+loading, workspace persistence, the agent loop with mock LLM clients, and tool
+input-validation/happy-path behavior. These are the base. Every new feature and
+every bug fix adds focused coverage near the seam it changes.
 
 ## Smoke tests — `cargo run -p dyson --example smoke_*`
 

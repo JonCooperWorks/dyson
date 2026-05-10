@@ -96,7 +96,7 @@ pub enum PathAccess {
 ///
 /// This struct expresses capabilities without specifying enforcement.
 /// It's the common language between configuration, default policies,
-/// and enforcement backends (bwrap, Seatbelt, application-level checks).
+/// and enforcement backends (bwrap, Apple Containers, application-level checks).
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     /// Can the tool make outbound network connections?

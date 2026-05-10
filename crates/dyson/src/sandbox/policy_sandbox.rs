@@ -13,7 +13,7 @@
 //      input schema for each built-in tool.
 //
 //   2. OS-level: For bash, translate the policy into bwrap flags (Linux)
-//      or Seatbelt S-expressions (macOS) that the kernel enforces.
+//      or Apple Container invocations (macOS).
 //
 // Why two layers?
 //
@@ -27,7 +27,7 @@
 //   1. Look up the policy for the tool (exact → glob → default)
 //   2. For file tools: extract the path from input, validate against policy
 //   3. For network tools: check if network capability is granted
-//   4. For bash: generate bwrap/seatbelt wrapper command
+//   4. For bash: generate bwrap/container wrapper command
 //   5. For workspace/memory tools: always allow (internal tools)
 //
 // The after() method truncates oversized tool output to protect the

@@ -62,7 +62,7 @@ User types "list the files"
 
 ```
 Agent
-  ├── client: Box<dyn LlmClient>          ← Anthropic, OpenAI, Claude Code, or Codex
+  ├── client: Box<dyn LlmClient>          ← API provider or CLI-subprocess provider
   ├── sandbox: Box<dyn Sandbox>            ← gates every tool call
   ├── skills: Vec<Box<dyn Skill>>          ← own tools + lifecycle
   │     ├── BuiltinSkill
@@ -95,7 +95,7 @@ interfaces — it never knows the concrete types behind them.
 | `Tool` | `src/tool/mod.rs` | A single callable capability (bash, file read, MCP remote) |
 | `Skill` | `src/skill/mod.rs` | A bundle of tools with lifecycle hooks and prompt fragments |
 | `Sandbox` | `src/sandbox/mod.rs` | Gate tool calls: allow, deny, or redirect |
-| `Output` | `src/controller/mod.rs` | Render agent events to the user (terminal, JSON, etc.) |
+| `Output` | `src/controller/mod.rs` | Render agent events to a controller surface |
 
 ### Trait relationships
 
@@ -199,12 +199,12 @@ enum DysonError {
 ## Key Design Decisions
 
 - **Stream everything** — text tokens go to the user immediately; no buffering
-- **MCP is not special** — `McpSkill` is just another `Skill` impl; Dyson also serves as an MCP server
+- **MCP is not special** — `McpSkill` is just another `Skill` impl; Dyson can also expose workspace tools over MCP
 - **Skills own tools** — `Arc<dyn Tool>` shared via flat HashMap for O(1) dispatch
 - **Sandbox gates everything** — mandatory; `DangerousNoSandbox` is an explicit opt-out
 - **Config is parse-once** — all formats merge into one `Settings` struct
 - **Async all the way down** — tools, skills, sandbox, LLM client all async on tokio
-- **The UI is a trait** — `Output` abstracts rendering (terminal, JSON, TUI, websocket)
+- **The UI is a trait** — `Output` abstracts rendering for terminal, HTTP/SSE, Telegram, and internal sinks
 
 ---
 

@@ -16,9 +16,8 @@
 //   GET  /api/providers             → providers from settings
 //   GET  /api/skills                → tool inventory (from a representative agent)
 //
-// Conversations live in memory for the controller's lifetime.  Persistence
-// to ChatHistory is a future addition; for now the focus is talking to a
-// real agent in a browser.  Bind to 127.0.0.1 by default.
+// Conversations are persisted through ChatHistory and hydrated into in-memory
+// chat handles on demand. Bind to 127.0.0.1 by default.
 //
 // Inbound auth: on a loopback bind the `auth` field is optional and
 // defaults to `DangerousNoAuth` (the loopback threat model is a single
@@ -127,7 +126,7 @@ impl HttpController {
                         bind = %raw.bind,
                         "http controller: non-loopback bind requires an explicit `auth` field \
                          (use {{\"type\":\"dangerous_no_auth\"}} to run unauthenticated, or \
-                         {{\"type\":\"bearer\",\"token\":\"...\"}} to require a token)"
+                         {{\"type\":\"bearer\",\"hash\":\"$argon2id$...\"}} to require a token)"
                     );
                     return None;
                 }
