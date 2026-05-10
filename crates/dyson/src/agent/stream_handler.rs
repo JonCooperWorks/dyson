@@ -26,12 +26,13 @@
 //     ├── TextDelta("Hi")     → output.text_delta("Hi")
 //     │                         → accumulate into current_text
 //     ├── ToolUseStart{...}   → flush text as ContentBlock::Text
-//     │                         → output.tool_use_start(...)
+//     │                         → keep UI quiet until the call is executable
 //     ├── ToolUseInputDelta   → (display only, accumulation in LLM client)
 //     ├── ToolUseComplete{..} → ContentBlock::ToolUse + ToolCall
+//     │                         → output.tool_use_start(...)
 //     │                         → output.tool_use_complete()
 //     ├── MessageComplete{..} → flush remaining text
-//     └── Error(e)            → return Err(e)
+//     └── Error(e)            → execute completed tool calls, otherwise return Err(e)
 //     │
 //     ▼
 //   Returns: (Message::assistant(blocks), Vec<ToolCall>)
@@ -114,9 +115,10 @@ impl ToolCall {
 ///
 /// ## Error handling
 ///
-/// If the stream emits an `Error` event or an `Err` item, this function
-/// returns immediately with that error.  Partial content blocks accumulated
-/// before the error are lost.
+/// If the stream emits an `Error` event or an `Err` item before any complete
+/// tool call is available, this function returns that error so the agent can
+/// retry.  If at least one tool call is already complete, it returns those
+/// executable calls with `StopReason::ToolUse` instead of losing them.
 pub async fn process_stream(
     stream: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>,
     output: &mut dyn Output,
@@ -145,7 +147,29 @@ pub async fn process_stream(
     tokio::pin!(stream);
 
     while let Some(event_result) = stream.next().await {
-        let event = event_result?;
+        let event = match event_result {
+            Ok(event) => event,
+            Err(e) => {
+                if !tool_calls.is_empty() {
+                    tracing::warn!(
+                        error = %e,
+                        tool_calls = tool_calls.len(),
+                        "stream failed after complete tool call; executing completed tool calls"
+                    );
+                    return finish_with_completed_tool_calls(
+                        output,
+                        &mut think_tag_parser,
+                        &mut current_thinking,
+                        &mut current_text,
+                        content_blocks,
+                        tool_calls,
+                        api_output_tokens,
+                        token_count,
+                    );
+                }
+                return Err(e);
+            }
+        };
 
         match event {
             StreamEvent::ThinkingDelta(text) => {
@@ -211,7 +235,11 @@ pub async fn process_stream(
                 flush_thinking(&mut current_thinking, &mut content_blocks);
                 flush_text(&mut current_text, &mut content_blocks);
                 tracing::info!(tool = name, id = id, "tool call started");
-                output.tool_use_start(id, name)?;
+                // A provider can drop the stream while it is still
+                // generating tool input JSON.  Don't surface a running tool
+                // card until the tool call is complete enough to execute;
+                // otherwise the UI can show a tool as "started" even though
+                // Dyson has no valid input to run.
             }
 
             StreamEvent::ToolUseInputDelta(_) => {}
@@ -236,6 +264,9 @@ pub async fn process_stream(
                     input: input.clone(),
                 });
                 tool_calls.push(ToolCall { id, name, input });
+                if let Some(ToolCall { id, name, .. }) = tool_calls.last() {
+                    output.tool_use_start(id, name)?;
+                }
                 output.tool_use_complete()?;
             }
 
@@ -279,6 +310,23 @@ pub async fn process_stream(
             }
 
             StreamEvent::Error(e) => {
+                if !tool_calls.is_empty() {
+                    tracing::warn!(
+                        error = %e,
+                        tool_calls = tool_calls.len(),
+                        "stream error after complete tool call; executing completed tool calls"
+                    );
+                    return finish_with_completed_tool_calls(
+                        output,
+                        &mut think_tag_parser,
+                        &mut current_thinking,
+                        &mut current_text,
+                        content_blocks,
+                        tool_calls,
+                        api_output_tokens,
+                        token_count,
+                    );
+                }
                 return Err(e);
             }
         }
@@ -321,6 +369,31 @@ fn flush_thinking(current_thinking: &mut String, content_blocks: &mut Vec<Conten
             thinking: std::mem::take(current_thinking),
         });
     }
+}
+
+fn finish_with_completed_tool_calls(
+    output: &mut dyn Output,
+    think_tag_parser: &mut ThinkTagParser,
+    current_thinking: &mut String,
+    current_text: &mut String,
+    mut content_blocks: Vec<ContentBlock>,
+    tool_calls: Vec<ToolCall>,
+    api_output_tokens: Option<usize>,
+    token_count: usize,
+) -> Result<(Message, Vec<ToolCall>, usize, StopReason)> {
+    for (is_thinking, segment) in think_tag_parser.flush() {
+        if is_thinking {
+            current_thinking.push_str(&segment);
+        } else {
+            output.text_delta(&segment)?;
+            current_text.push_str(&segment);
+        }
+    }
+    flush_thinking(current_thinking, &mut content_blocks);
+    flush_text(current_text, &mut content_blocks);
+    let message = Message::assistant(content_blocks);
+    let final_token_count = api_output_tokens.unwrap_or(token_count);
+    Ok((message, tool_calls, final_token_count, StopReason::ToolUse))
 }
 
 // ---------------------------------------------------------------------------
@@ -560,6 +633,35 @@ mod tests {
         let mut output = RecordingOutput::new();
         let result = process_stream(stream, &mut output).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn error_after_complete_tool_call_preserves_tool_call() {
+        let stream = events_to_stream(vec![
+            StreamEvent::ToolUseStart {
+                id: "call_1".into(),
+                name: "write_file".into(),
+            },
+            StreamEvent::ToolUseComplete {
+                id: "call_1".into(),
+                name: "write_file".into(),
+                input: serde_json::json!({
+                    "file_path": "report.md",
+                    "content": "ok\n",
+                }),
+            },
+            StreamEvent::Error(DysonError::Llm("upstream reset".into())),
+        ]);
+
+        let mut output = RecordingOutput::new();
+        let (message, tool_calls, _tokens, stop) =
+            process_stream(stream, &mut output).await.unwrap();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "write_file");
+        assert_eq!(tool_calls[0].input["content"], "ok\n");
+        assert_eq!(stop, StopReason::ToolUse);
+        assert_eq!(message.content.len(), 1);
     }
 
     #[tokio::test]

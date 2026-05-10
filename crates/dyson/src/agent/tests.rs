@@ -179,6 +179,83 @@ async fn retries_retryable_error_while_consuming_stream() {
 }
 
 #[tokio::test]
+async fn retries_stream_error_after_tool_start_before_tool_complete() {
+    crate::http::ensure_crypto_provider();
+    let err = reqwest::Client::new()
+        .get("http://127.0.0.1:1")
+        .send()
+        .await
+        .unwrap_err();
+    let tmp = tempfile::tempdir().unwrap();
+    let report = tmp.path().join("report.md");
+    let report_arg = report.to_string_lossy().to_string();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let llm = FallibleMockLlm::new(
+        vec![
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    id: "call_interrupted".into(),
+                    name: "write_file".into(),
+                }),
+                Err(DysonError::Http(err)),
+            ],
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    id: "call_write".into(),
+                    name: "write_file".into(),
+                }),
+                Ok(StreamEvent::ToolUseComplete {
+                    id: "call_write".into(),
+                    name: "write_file".into(),
+                    input: serde_json::json!({
+                        "file_path": report_arg,
+                        "content": "ok\n",
+                    }),
+                }),
+                Ok(StreamEvent::MessageComplete {
+                    stop_reason: StopReason::ToolUse,
+                    output_tokens: None,
+                }),
+            ],
+            vec![
+                Ok(StreamEvent::TextDelta("Done.".into())),
+                Ok(StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: None,
+                }),
+            ],
+        ],
+        Arc::clone(&calls),
+    );
+
+    let settings = AgentSettings {
+        api_key: "test".into(),
+        max_retries: 1,
+        ..Default::default()
+    };
+
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut output = RecordingOutput::new();
+
+    let result = agent.run("write the report", &mut output).await.unwrap();
+    assert_eq!(result, "Done.");
+    assert_eq!(std::fs::read_to_string(report).unwrap(), "ok\n");
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
 async fn tool_call_loop() {
     // First LLM call: request a bash command.
     // Second LLM call: respond with the result.
