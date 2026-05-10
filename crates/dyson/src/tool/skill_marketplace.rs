@@ -371,7 +371,7 @@ async fn remove_skill(ctx: &ToolContext, skill: &str) -> crate::Result<ToolOutpu
         return Ok(ToolOutput::error("'skill' is required for remove"));
     }
     let ws = ctx.workspace("skill_marketplace")?;
-    match remove_skill_from_workspace(&ws, skill).await {
+    match remove_skill_from_workspace(ws, skill).await {
         Ok(_) => Ok(ToolOutput::success(format!(
             "Removed skill '{skill}' from skills/{skill}/SKILL.md."
         ))),

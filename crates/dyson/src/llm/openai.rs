@@ -446,13 +446,13 @@ pub(crate) fn message_to_openai(msg: &Message) -> serde_json::Value {
         });
     }
 
-    // Check if this message contains any image or document blocks.
-    let has_multimodal = msg.content.iter().any(|b| {
-        matches!(
-            b,
-            ContentBlock::Image { .. } | ContentBlock::Document { .. }
-        )
-    });
+    // Check if this message contains image blocks. PDF documents are
+    // represented as extracted text for OpenAI-compatible providers;
+    // OpenRouter text models reject OpenAI file_data payloads.
+    let has_multimodal = msg
+        .content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. }));
 
     if has_multimodal {
         // Multimodal format: content is an array of typed blocks.
@@ -470,12 +470,9 @@ pub(crate) fn message_to_openai(msg: &Message) -> serde_json::Value {
                         "url": format!("data:{media_type};base64,{data}"),
                     }
                 })),
-                ContentBlock::Document { data, .. } => Some(serde_json::json!({
-                    "type": "file",
-                    "file": {
-                        "filename": "document.pdf",
-                        "file_data": format!("data:application/pdf;base64,{data}"),
-                    }
+                ContentBlock::Document { extracted_text, .. } => Some(serde_json::json!({
+                    "type": "text",
+                    "text": extracted_text,
                 })),
                 _ => None,
             })
@@ -762,6 +759,31 @@ mod tests {
         assert_eq!(json["role"], "assistant");
         assert_eq!(json["tool_calls"][0]["id"], "call_1");
         assert_eq!(json["tool_calls"][0]["function"]["name"], "bash");
+    }
+
+    #[test]
+    fn message_to_openai_document_uses_extracted_text() {
+        let msg = Message::user_multimodal(vec![
+            ContentBlock::Text {
+                text: "Summarize this PDF:\n".into(),
+            },
+            ContentBlock::Document {
+                data: "JVBERi0xLjQK".into(),
+                extracted_text: "quarterly revenue increased".into(),
+            },
+        ]);
+
+        let json = message_to_openai(&msg);
+
+        assert_eq!(json["role"], "user");
+        assert_eq!(
+            json["content"],
+            "Summarize this PDF:\nquarterly revenue increased"
+        );
+        assert!(
+            !json.to_string().contains("file_data"),
+            "OpenRouter text models reject OpenAI file_data blocks"
+        );
     }
 
     #[test]
