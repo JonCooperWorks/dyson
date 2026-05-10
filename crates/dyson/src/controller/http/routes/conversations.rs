@@ -21,7 +21,7 @@ use super::super::responses::{
 use super::super::state::{ChatHandle, HttpState};
 use super::super::stores::ArtefactStore;
 use super::super::wire::{
-    BlockDto, ConversationDto, CreateChatBody, MAX_SMALL_BODY, MessageDto, SseEvent,
+    ArtefactDto, BlockDto, ConversationDto, CreateChatBody, MAX_SMALL_BODY, MessageDto, SseEvent,
 };
 
 pub(super) async fn list(state: &HttpState) -> Resp {
@@ -374,18 +374,20 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
     };
     drop(agent_guard);
 
-    // Artefacts are side-channel — they never land in the conversation
-    // history, so a fresh page load from disk shows no chips.  Walk the
-    // ArtefactStore for this chat and append a synthetic assistant
-    // turn with one `Artefact` block per entry so the chat scroll
-    // preserves image / report chips across browser refreshes and
-    // controller restarts.
-    let artefact_blocks: Vec<BlockDto> = super::artefacts::list_for_chat(state, id)
-        .into_iter()
+    // Files / artefacts are side-channel — they never land in the
+    // conversation history, so a fresh page load from disk would show
+    // no delivered-file chips.  Walk the ArtefactStore for this chat
+    // and append a synthetic assistant turn so the chat scroll
+    // preserves sent-file download chips plus image / report artefact
+    // chips across browser refreshes and controller restarts.
+    let mut side_channel_blocks: Vec<BlockDto> = Vec::new();
+    for a in super::artefacts::list_for_chat(state, id).into_iter().rev() {
         // The sidebar wants newest-first, but chat scroll chips should
         // read chronologically inside the synthetic assistant turn.
-        .rev()
-        .map(|a| BlockDto::Artefact {
+        if let Some(file_block) = sent_file_block_for_artefact(&a) {
+            side_channel_blocks.push(file_block);
+        }
+        side_channel_blocks.push(BlockDto::Artefact {
             url: format!("/#/artefacts/{}", a.id),
             id: a.id,
             kind: a.kind,
@@ -393,12 +395,12 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
             bytes: a.bytes,
             tool_use_id: a.tool_use_id,
             metadata: a.metadata,
-        })
-        .collect();
-    if !artefact_blocks.is_empty() {
+        });
+    }
+    if !side_channel_blocks.is_empty() {
         messages.push(MessageDto {
             role: "assistant".to_string(),
-            blocks: artefact_blocks,
+            blocks: side_channel_blocks,
         });
     }
 
@@ -412,6 +414,39 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
         "live": handle.busy.load(std::sync::atomic::Ordering::Relaxed),
         "messages": messages,
     }))
+}
+
+fn sent_file_block_for_artefact(a: &ArtefactDto) -> Option<BlockDto> {
+    if matches!(a.kind, crate::message::ArtefactKind::Image) {
+        return None;
+    }
+    let meta = a.metadata.as_ref()?;
+    let url = meta.get("file_url").and_then(|v| v.as_str())?;
+    if !url.starts_with("/api/files/") {
+        return None;
+    }
+    let name = meta
+        .get("file_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(a.title.as_str())
+        .to_string();
+    let mime = meta
+        .get("mime_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let bytes = meta
+        .get("bytes")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(a.bytes);
+    Some(BlockDto::File {
+        name,
+        mime: mime.clone(),
+        bytes,
+        url: url.to_string(),
+        inline_image: mime.starts_with("image/"),
+    })
 }
 
 /// Pluck the first user-text block from a message list — used as a chat

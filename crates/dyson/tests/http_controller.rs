@@ -3264,6 +3264,60 @@ async fn chat_reload_shows_emitted_images_in_transcript() {
 }
 
 #[tokio::test]
+async fn chat_reload_shows_sent_file_download_in_transcript() {
+    // Regression: `send_file` emits a live `file` event plus an
+    // artefact, but the file event is side-channel and is not stored
+    // in chat history.  A browser refresh must still show a real
+    // download chip in the chat, not only an Artefacts-tab entry.
+    let r = rig().await;
+    let id = create_chat(&r, "sent file reload").await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let report_path = dir.path().join("reload-report.md");
+    std::fs::write(&report_path, b"reload file body").expect("write report");
+
+    test_helpers::emit_agent_file_for_tool(
+        r.state.clone(),
+        &id,
+        &report_path,
+        Some("tool_send_file_42"),
+    )
+    .await
+    .expect("emit report");
+
+    let convo = body_json(get(&format!("{}/api/conversations/{}", r.base, id)).await).await;
+    let messages = convo["messages"].as_array().expect("messages array");
+    let blocks: Vec<&serde_json::Value> = messages
+        .iter()
+        .flat_map(|m| m["blocks"].as_array().into_iter().flatten())
+        .collect();
+
+    let file_chip = blocks
+        .iter()
+        .copied()
+        .find(|b| b["type"] == "file")
+        .expect("refresh transcript must contain a file download chip");
+    assert_eq!(file_chip["name"], "reload-report.md");
+    assert_eq!(file_chip["mime"], "text/markdown");
+    assert_eq!(file_chip["bytes"], 16);
+    let file_url = file_chip["url"].as_str().expect("file url");
+    assert!(
+        file_url.starts_with("/api/files/"),
+        "download chip must point at file endpoint: {file_chip}",
+    );
+    assert_eq!(file_chip["inline_image"], false);
+
+    let artefact_chip = blocks
+        .iter()
+        .copied()
+        .find(|b| b["type"] == "artefact")
+        .expect("refresh transcript must still contain the artefact chip");
+    assert_eq!(artefact_chip["title"], "reload-report.md");
+    assert_eq!(artefact_chip["metadata"]["file_url"], file_url);
+    assert_eq!(artefact_chip["tool_use_id"], "tool_send_file_42");
+}
+
+#[tokio::test]
 async fn chat_reload_shows_evicted_persisted_artefacts_in_transcript() {
     // Regression: the Artefacts tab used the disk-backed list endpoint,
     // but `/api/conversations/:id` rebuilt chat chips only from the
