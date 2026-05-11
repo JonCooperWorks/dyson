@@ -26,8 +26,10 @@
 // network-isolated except via cubeproxy, so "any caller" is in
 // practice "swarm via dyson_proxy".
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -35,7 +37,9 @@ use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
+use tokio::io::AsyncWriteExt;
 
 use super::super::responses::{Resp, bad_request, boxed, json_ok, read_json_capped, unauthorized};
 use super::super::state::HttpState;
@@ -64,6 +68,20 @@ const CONFIGURE_HEADER: &str = "x-swarm-configure";
 /// format (`$argon2id$v=19$...`) so argon2's verifier can re-derive
 /// the salt.
 const CONFIGURE_HASH_FILENAME: &str = "configure_secret_hash";
+const CONFIGURE_VERIFY_CACHE_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct ConfigureVerifyCacheKey {
+    hash_path: PathBuf,
+    secret_digest_prefix: [u8; 16],
+    stored_digest_prefix: [u8; 16],
+}
+
+static CONFIGURE_AUTH_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+static CONFIGURE_VERIFY_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<ConfigureVerifyCacheKey, Instant>>,
+> = std::sync::OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ConfigureBody {
@@ -212,7 +230,7 @@ struct InstallSkillAdminBody {
     package: crate::tool::skill_marketplace::SkillBody,
 }
 
-fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Option<Resp> {
+async fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Option<Resp> {
     let secret = match headers
         .get(CONFIGURE_HEADER)
         .and_then(|v| v.to_str().ok())
@@ -231,44 +249,169 @@ fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> Option<
     let hash_dir = workspace_parent_dir(snapshot.workspace.connection_string.expose());
     let hash_path = hash_dir.join(CONFIGURE_HASH_FILENAME);
 
-    // TOFU: if no hash on disk, this is the first call — argon2id
-    // the inbound plaintext and persist.  Any later call presenting
-    // a different plaintext is rejected.
-    use argon2::Argon2;
-    use argon2::password_hash::{
-        PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
-    };
-    if let Ok(stored) = std::fs::read_to_string(&hash_path) {
-        let parsed = match PasswordHash::new(stored.trim()) {
-            Ok(p) => p,
-            Err(e) => return Some(bad_request(&format!("stored hash unreadable: {e}"))),
-        };
-        if Argon2::default()
-            .verify_password(secret.as_bytes(), &parsed)
-            .is_err()
-        {
-            return Some(unauthorized(state));
+    let _guard = CONFIGURE_AUTH_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
+
+    match tokio::fs::read_to_string(&hash_path).await {
+        Ok(stored) => verify_configure_secret(&hash_path, secret, stored, state).await,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let hash = match hash_configure_secret(secret.clone()).await {
+                ConfigureHashOutcome::Hashed(hash) => hash,
+                ConfigureHashOutcome::Failed(msg) => {
+                    return Some(bad_request(&format!("argon2: {msg}")));
+                }
+            };
+            if let Err(e) = tokio::fs::create_dir_all(&hash_dir).await {
+                return Some(bad_request(&format!("mkdir {}: {e}", hash_dir.display())));
+            }
+
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&hash_path)
+                .await
+            {
+                Ok(mut file) => {
+                    if let Err(e) = file.write_all(hash.as_bytes()).await {
+                        return Some(bad_request(&format!(
+                            "write {}: {e}",
+                            hash_path.display()
+                        )));
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = tokio::fs::set_permissions(
+                            &hash_path,
+                            std::fs::Permissions::from_mode(0o600),
+                        )
+                        .await;
+                    }
+                    remember_configure_verify(&hash_path, &secret, &hash);
+                    None
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    match tokio::fs::read_to_string(&hash_path).await {
+                        Ok(stored) => verify_configure_secret(&hash_path, secret, stored, state).await,
+                        Err(e) => Some(bad_request(&format!("read {}: {e}", hash_path.display()))),
+                    }
+                }
+                Err(e) => Some(bad_request(&format!("create {}: {e}", hash_path.display()))),
+            }
         }
-    } else {
+        Err(e) => Some(bad_request(&format!("read {}: {e}", hash_path.display()))),
+    }
+}
+
+enum ConfigureHashOutcome {
+    Hashed(String),
+    Failed(String),
+}
+
+async fn hash_configure_secret(secret: String) -> ConfigureHashOutcome {
+    tokio::task::spawn_blocking(move || {
+        use argon2::Argon2;
+        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+
         let salt = SaltString::generate(&mut OsRng);
-        let hash = match Argon2::default().hash_password(secret.as_bytes(), &salt) {
-            Ok(h) => h.to_string(),
-            Err(e) => return Some(bad_request(&format!("argon2: {e}"))),
+        match Argon2::default().hash_password(secret.as_bytes(), &salt) {
+            Ok(hash) => ConfigureHashOutcome::Hashed(hash.to_string()),
+            Err(e) => ConfigureHashOutcome::Failed(e.to_string()),
+        }
+    })
+    .await
+    .unwrap_or_else(|e| ConfigureHashOutcome::Failed(format!("worker join failed: {e}")))
+}
+
+enum ConfigureVerifyOutcome {
+    Verified,
+    BadSecret,
+    Unreadable(String),
+}
+
+async fn verify_configure_secret(
+    hash_path: &Path,
+    secret: String,
+    stored: String,
+    state: &HttpState,
+) -> Option<Resp> {
+    let stored = stored.trim().to_owned();
+    if configure_verify_cache_hit(hash_path, &secret, &stored) {
+        return None;
+    }
+
+    let secret_for_worker = secret.clone();
+    let stored_for_worker = stored.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        use argon2::Argon2;
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+
+        let parsed = match PasswordHash::new(&stored_for_worker) {
+            Ok(parsed) => parsed,
+            Err(e) => return ConfigureVerifyOutcome::Unreadable(e.to_string()),
         };
-        if let Err(e) = std::fs::create_dir_all(&hash_dir) {
-            return Some(bad_request(&format!("mkdir {}: {e}", hash_dir.display())));
+        match Argon2::default().verify_password(secret_for_worker.as_bytes(), &parsed) {
+            Ok(()) => ConfigureVerifyOutcome::Verified,
+            Err(_) => ConfigureVerifyOutcome::BadSecret,
         }
-        if let Err(e) = std::fs::write(&hash_path, hash) {
-            return Some(bad_request(&format!("write {}: {e}", hash_path.display())));
+    })
+    .await
+    .unwrap_or_else(|e| ConfigureVerifyOutcome::Unreadable(format!("worker join failed: {e}")));
+
+    match outcome {
+        ConfigureVerifyOutcome::Verified => {
+            remember_configure_verify(hash_path, &secret, &stored);
+            None
         }
-        // Mode 0600 on Unix — only the dyson process should read it.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&hash_path, std::fs::Permissions::from_mode(0o600));
+        ConfigureVerifyOutcome::BadSecret => Some(unauthorized(state)),
+        ConfigureVerifyOutcome::Unreadable(msg) => {
+            Some(bad_request(&format!("stored hash unreadable: {msg}")))
         }
     }
-    None
+}
+
+fn configure_verify_cache_hit(hash_path: &Path, secret: &str, stored: &str) -> bool {
+    let key = configure_verify_cache_key(hash_path, secret, stored);
+    let now = Instant::now();
+    let cache = CONFIGURE_VERIFY_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = match cache.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.retain(|_, expires_at| *expires_at > now);
+    guard.get(&key).is_some_and(|expires_at| *expires_at > now)
+}
+
+fn remember_configure_verify(hash_path: &Path, secret: &str, stored: &str) {
+    let key = configure_verify_cache_key(hash_path, secret, stored);
+    let cache = CONFIGURE_VERIFY_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = match cache.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard.insert(key, Instant::now() + CONFIGURE_VERIFY_CACHE_TTL);
+}
+
+fn configure_verify_cache_key(
+    hash_path: &Path,
+    secret: &str,
+    stored: &str,
+) -> ConfigureVerifyCacheKey {
+    let mut secret_digest_prefix = [0_u8; 16];
+    let secret_digest = Sha256::digest(secret.as_bytes());
+    secret_digest_prefix.copy_from_slice(&secret_digest[..16]);
+
+    let mut stored_digest_prefix = [0_u8; 16];
+    let stored_digest = Sha256::digest(stored.as_bytes());
+    stored_digest_prefix.copy_from_slice(&stored_digest[..16]);
+
+    ConfigureVerifyCacheKey {
+        hash_path: hash_path.to_path_buf(),
+        secret_digest_prefix,
+        stored_digest_prefix,
+    }
 }
 
 fn json_status<T: Serialize>(status: StatusCode, v: &T) -> Resp {
@@ -286,7 +429,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     // Pull the configure secret BEFORE consuming the body — the
     // header check runs first so an unauthenticated caller can't
     // make us read a 64 KiB body just to reject it.
-    if let Some(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state).await {
         return resp;
     }
 
@@ -607,7 +750,7 @@ pub(super) async fn post_state_file(
     req: Request<hyper::body::Incoming>,
     state: &HttpState,
 ) -> Resp {
-    if let Some(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state).await {
         return resp;
     }
     let body: RestoreStateFileBody = match read_json_capped(req, MAX_STATE_FILE_BODY).await {
@@ -699,7 +842,7 @@ pub(super) async fn post_skill_install(
     req: Request<hyper::body::Incoming>,
     state: &HttpState,
 ) -> Resp {
-    if let Some(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state).await {
         return resp;
     }
     let body: InstallSkillAdminBody = match read_json_capped(req, MAX_SKILL_INSTALL_BODY).await {
@@ -742,7 +885,7 @@ pub(super) async fn delete_skill(
     state: &HttpState,
     skill: &str,
 ) -> Resp {
-    if let Some(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state).await {
         return resp;
     }
     let snapshot = state.settings_snapshot();
@@ -769,7 +912,7 @@ pub(super) async fn delete_skill(
 }
 
 pub(super) async fn get_idle(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    if let Some(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state).await {
         return resp;
     }
     let in_flight = state.in_flight_chats().await;
@@ -782,7 +925,7 @@ pub(super) async fn get_idle(req: Request<hyper::body::Incoming>, state: &HttpSt
 }
 
 pub(super) async fn post_quiesce(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    if let Some(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state).await {
         return resp;
     }
     let in_flight = state.try_quiesce().await;
@@ -809,7 +952,7 @@ pub(super) async fn post_quiesce(req: Request<hyper::body::Incoming>, state: &Ht
 }
 
 pub(super) async fn post_unquiesce(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
-    if let Some(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state).await {
         return resp;
     }
     state.unquiesce();
@@ -864,7 +1007,7 @@ fn clean_relative_path(path: &str) -> std::result::Result<PathBuf, String> {
 pub(super) async fn get_skills(req: Request<hyper::body::Incoming>, state: &HttpState) -> Resp {
     use crate::skill::Skill;
 
-    if let Some(resp) = authorize_configure(req.headers(), state) {
+    if let Some(resp) = authorize_configure(req.headers(), state).await {
         return resp;
     }
 
