@@ -164,6 +164,33 @@ async fn rig_with_auth_and_client(auth: Arc<dyn Auth>, client: Box<dyn LlmClient
     }
 }
 
+#[tokio::test]
+async fn readyz_rejects_warmup_placeholder_while_healthz_stays_live() {
+    let r = rig().await;
+
+    let mut warmup_settings = r.state.settings_snapshot();
+    warmup_settings.agent.model = "warmup-placeholder".into();
+    if let Some(provider) = warmup_settings.providers.get_mut("default") {
+        provider.api_key = Credential::new("warmup-placeholder".into());
+        provider.models = vec!["warmup-placeholder".into()];
+    }
+    r.state.replace_settings_for_test(warmup_settings);
+
+    let live = get(&format!("{}/healthz", r.base)).await;
+    assert_eq!(
+        live.status(),
+        StatusCode::OK,
+        "D1 liveness must stay 200 while readiness is false"
+    );
+
+    let ready = get(&format!("{}/readyz", r.base)).await;
+    assert_eq!(
+        ready.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "D1 readyz must reject warmup-placeholder config instead of reporting ready"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // HTTP helpers (bare hyper — no reqwest, matches the rest of the crate)
 // ---------------------------------------------------------------------------
