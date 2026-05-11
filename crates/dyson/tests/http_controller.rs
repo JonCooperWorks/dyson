@@ -164,6 +164,17 @@ async fn rig_with_auth_and_client(auth: Arc<dyn Auth>, client: Box<dyn LlmClient
     }
 }
 
+fn isolate_configure_workspace(r: &Rig) -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("isolated configure root");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("isolated workspace");
+    let mut settings = r.state.settings_snapshot();
+    settings.workspace.connection_string =
+        Credential::new(workspace.to_string_lossy().into_owned());
+    r.state.replace_settings_for_test(settings);
+    root
+}
+
 #[tokio::test]
 async fn readyz_rejects_warmup_placeholder_while_healthz_stays_live() {
     let r = rig().await;
@@ -556,6 +567,91 @@ async fn admin_configure_rejects_identity_doc_in_task_without_explicit_field() {
         std::fs::read_to_string(r.workspace_dir.path().join("IDENTITY.md")).unwrap(),
         full_doc,
         "D2 explicit identity_doc should be written exactly"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_configure_first_boot_allows_only_one_secret_to_win() {
+    let r = rig().await;
+    let _configure_root = isolate_configure_workspace(&r);
+    let url = format!("{}/api/admin/configure", r.base);
+
+    let a = tokio::spawn({
+        let url = url.clone();
+        async move {
+            post_json_with_headers(
+                &url,
+                &serde_json::json!({ "name": "alpha" }),
+                &[("x-swarm-configure", "first-secret-alpha")],
+            )
+            .await
+            .status()
+        }
+    });
+    let b = tokio::spawn(async move {
+        post_json_with_headers(
+            &url,
+            &serde_json::json!({ "name": "bravo" }),
+            &[("x-swarm-configure", "first-secret-bravo")],
+        )
+        .await
+        .status()
+    });
+
+    let (a, b) = tokio::join!(a, b);
+    let statuses = [a.unwrap(), b.unwrap()];
+    let ok_count = statuses.iter().filter(|s| **s == StatusCode::OK).count();
+    assert_eq!(
+        ok_count, 1,
+        "D3 TOFU race must not let two distinct first-boot configure secrets both win: {statuses:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn admin_configure_first_boot_does_not_block_runtime_timer() {
+    let r = rig().await;
+    let _configure_root = isolate_configure_workspace(&r);
+    let after_scheme = r.base.strip_prefix("http://").unwrap();
+    let stream = tokio::net::TcpStream::connect(after_scheme)
+        .await
+        .expect("connect raw configure");
+    let (mut read_half, mut write_half) = stream.into_split();
+    let body = br#"{"name":"timer"}"#;
+    let raw = format!(
+        "POST /api/admin/configure HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {len}\r\n\
+         x-dyson-csrf: 1\r\n\
+         x-swarm-configure: runtime-secret\r\n\
+         Connection: close\r\n\
+         \r\n",
+        host = after_scheme,
+        len = body.len()
+    );
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    write_half.write_all(raw.as_bytes()).await.unwrap();
+    write_half.write_all(body).await.unwrap();
+    let configure = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        read_half.read_to_end(&mut buf).await.unwrap();
+        String::from_utf8(buf).unwrap()
+    });
+
+    tokio::task::yield_now().await;
+    let health = tokio::time::timeout(Duration::from_millis(100), async {
+        get(&format!("{}/healthz", r.base)).await.status()
+    })
+    .await;
+    assert!(
+        matches!(health, Ok(StatusCode::OK)),
+        "D3 configure Argon2 work must not block a peer /healthz request: {health:?}"
+    );
+
+    let resp = configure.await.unwrap();
+    assert!(
+        resp.starts_with("HTTP/1.1 200"),
+        "configure response should be OK: {resp}"
     );
 }
 
