@@ -215,6 +215,29 @@ pub fn client() -> &'static reqwest::Client {
     &CLIENT
 }
 
+#[derive(Debug, Clone)]
+pub struct ValidatedSafeUrl {
+    pub url: reqwest::Url,
+    pub resolved_addrs: Vec<std::net::SocketAddr>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UrlSafetyError {
+    #[error("invalid URL: {0}")]
+    InvalidUrl(String),
+    #[error("URL has no host")]
+    MissingHost,
+    #[error("{0}")]
+    Unsafe(String),
+    #[error("DNS lookup failed for {host}: {source}")]
+    Dns {
+        host: String,
+        source: std::io::Error,
+    },
+    #[error("DNS lookup returned no addresses for {0}")]
+    EmptyDns(String),
+}
+
 /// Verify that every address the URL's hostname resolves to is safe to
 /// connect to.  Closes the DNS-rebinding gap in [`safe_redirect_policy`]
 /// for callers that accept untrusted URLs: a hostname that resolves to
@@ -235,55 +258,78 @@ pub fn client() -> &'static reqwest::Client {
 /// beats the client's own resolver cache.  This check plus the redirect
 /// policy raises the bar significantly over doing nothing.
 pub async fn verify_url_safe(url: &str) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "URL has no host".to_string())?;
+    validate_url_safe(url)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+pub async fn validate_url_safe(url: &str) -> Result<ValidatedSafeUrl, UrlSafetyError> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| UrlSafetyError::InvalidUrl(e.to_string()))?;
+    let host = parsed.host_str().ok_or(UrlSafetyError::MissingHost)?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
 
     // Strip bracket on IPv6 literal.
     let raw = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
-        return match ip {
+        match ip {
             std::net::IpAddr::V4(v4) if is_private_v4(v4) => {
-                Err(format!("refusing to fetch private IPv4 literal: {v4}"))
+                return Err(UrlSafetyError::Unsafe(format!(
+                    "refusing to fetch private IPv4 literal: {v4}"
+                )));
             }
             std::net::IpAddr::V6(v6) if is_private_v6(v6) => {
-                Err(format!("refusing to fetch private IPv6 literal: {v6}"))
+                return Err(UrlSafetyError::Unsafe(format!(
+                    "refusing to fetch private IPv6 literal: {v6}"
+                )));
             }
-            _ => Ok(()),
-        };
+            _ => {}
+        }
+        return Ok(ValidatedSafeUrl {
+            url: parsed,
+            resolved_addrs: vec![std::net::SocketAddr::new(ip, port)],
+        });
     }
 
     if is_metadata_host(host) {
-        return Err(format!("refusing to fetch cloud metadata host: {host}"));
+        return Err(UrlSafetyError::Unsafe(format!(
+            "refusing to fetch cloud metadata host: {host}"
+        )));
     }
 
     // Resolve via the OS.  Port is required by lookup_host but irrelevant
     // to the safety check.
-    let port = parsed.port_or_known_default().unwrap_or(80);
     let addrs = tokio::net::lookup_host((host, port))
         .await
-        .map_err(|e| format!("DNS lookup failed for {host}: {e}"))?;
+        .map_err(|source| UrlSafetyError::Dns {
+            host: host.to_string(),
+            source,
+        })?;
 
-    let mut saw_any = false;
+    let mut resolved_addrs = Vec::new();
     for sa in addrs {
-        saw_any = true;
         match sa.ip() {
             std::net::IpAddr::V4(v4) if is_private_v4(v4) => {
-                return Err(format!(
+                return Err(UrlSafetyError::Unsafe(format!(
                     "refusing to fetch {host}: resolves to private IPv4 {v4}"
-                ));
+                )));
             }
             std::net::IpAddr::V6(v6) if is_private_v6(v6) => {
-                return Err(format!(
+                return Err(UrlSafetyError::Unsafe(format!(
                     "refusing to fetch {host}: resolves to private IPv6 {v6}"
-                ));
+                )));
             }
             _ => {}
         }
+        resolved_addrs.push(sa);
     }
-    if !saw_any {
-        return Err(format!("DNS lookup returned no addresses for {host}"));
+    resolved_addrs.sort();
+    resolved_addrs.dedup();
+    if resolved_addrs.is_empty() {
+        return Err(UrlSafetyError::EmptyDns(host.to_string()));
     }
-    Ok(())
+    Ok(ValidatedSafeUrl {
+        url: parsed,
+        resolved_addrs,
+    })
 }

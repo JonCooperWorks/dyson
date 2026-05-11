@@ -41,19 +41,51 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum URL length to prevent abuse.
 const MAX_URL_LENGTH: usize = 2048;
 
+#[cfg(test)]
+type UrlPreflight = std::sync::Arc<
+    dyn Fn(
+            String,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::result::Result<
+                            crate::http::ValidatedSafeUrl,
+                            crate::http::UrlSafetyError,
+                        >,
+                    > + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
 // ---------------------------------------------------------------------------
 // WebFetchTool
 // ---------------------------------------------------------------------------
 
 pub struct WebFetchTool {
     client: reqwest::Client,
+    #[cfg(test)]
+    preflight: Option<UrlPreflight>,
 }
 
 impl WebFetchTool {
     pub fn new() -> Self {
         Self {
             client: crate::http::client().clone(),
+            #[cfg(test)]
+            preflight: None,
         }
+    }
+
+    async fn validate_url(
+        &self,
+        url: &str,
+    ) -> std::result::Result<crate::http::ValidatedSafeUrl, crate::http::UrlSafetyError> {
+        #[cfg(test)]
+        if let Some(preflight) = &self.preflight {
+            return preflight(url.to_string()).await;
+        }
+        crate::http::validate_url_safe(url).await
     }
 }
 
@@ -117,14 +149,10 @@ impl Tool for WebFetchTool {
             )));
         }
 
-        // SSRF defence-in-depth: the shared client's redirect policy
-        // blocks literal-IP redirects into private space, but the
-        // *initial* URL can still be a hostname that resolves to a
-        // private IP.  Resolve and verify up-front.  Closes the DNS
-        // rebinding gap documented in `crate::http::safe_redirect_policy`.
-        if let Err(e) = crate::http::verify_url_safe(&url).await {
-            return Ok(ToolOutput::error(e));
-        }
+        let verified_url = match self.validate_url(&url).await {
+            Ok(verified_url) => verified_url,
+            Err(e) => return Ok(ToolOutput::error(e.to_string())),
+        };
 
         let max_length = input["max_length"]
             .as_u64()
@@ -135,7 +163,7 @@ impl Tool for WebFetchTool {
 
         // --- Fetch with timeout, race against cancellation ---
         let mut response = tokio::select! {
-            res = self.client.get(&url).timeout(FETCH_TIMEOUT).send() => {
+            res = self.client.get(verified_url.url.clone()).timeout(FETCH_TIMEOUT).send() => {
                 res.map_err(|e| DysonError::tool("web_fetch", format!("request failed: {e}")))?
             }
             _ = ctx.cancellation.cancelled() => {
@@ -225,9 +253,26 @@ impl Tool for WebFetchTool {
 mod tests {
     use super::*;
     use crate::tool::ToolContext;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn tool() -> WebFetchTool {
         WebFetchTool::default()
+    }
+
+    fn preflight_to(addr: SocketAddr) -> UrlPreflight {
+        Arc::new(move |url: String| {
+            Box::pin(async move {
+                let parsed = reqwest::Url::parse(&url)
+                    .map_err(|e| crate::http::UrlSafetyError::InvalidUrl(e.to_string()))?;
+                Ok(crate::http::ValidatedSafeUrl {
+                    url: parsed,
+                    resolved_addrs: vec![addr],
+                })
+            })
+        })
     }
 
     #[tokio::test]
@@ -249,6 +294,64 @@ mod tests {
             .unwrap();
         assert!(result.is_error);
         assert!(result.content.contains("http://"));
+    }
+
+    #[tokio::test]
+    async fn dns_rebind_does_not_dial_second_resolution() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rebound_addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server_hits = hits.clone();
+        let server = tokio::spawn(async move {
+            if let Ok((mut stream, _peer)) = listener.accept().await {
+                server_hits.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\n\
+                          Content-Type: text/plain\r\n\
+                          Content-Length: 7\r\n\
+                          Connection: close\r\n\r\n\
+                          rebound",
+                    )
+                    .await;
+            }
+        });
+
+        crate::http::ensure_crypto_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs("dns.google", &[rebound_addr])
+            .build()
+            .unwrap();
+        let first_resolution =
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), rebound_addr.port());
+        let t = WebFetchTool {
+            client,
+            preflight: Some(preflight_to(first_resolution)),
+        };
+        let ctx = ToolContext::from_cwd().unwrap();
+        let url = format!("http://dns.google:{}/", rebound_addr.port());
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            t.run(&json!({ "url": url }), &ctx),
+        )
+        .await;
+        server.abort();
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "D7 web_fetch must pin the first DNS result and never dial a rebound loopback address"
+        );
+        if let Ok(Ok(output)) = result {
+            assert!(
+                output.is_error,
+                "D7 web_fetch must not return content fetched from the rebound address"
+            );
+        }
     }
 
     #[tokio::test]
