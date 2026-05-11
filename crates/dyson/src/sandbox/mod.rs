@@ -186,8 +186,41 @@ pub fn sandbox_backend_status_for_target(
         "linux" => SandboxBackendStatus::MissingBackend("bwrap"),
         "macos" if has_container => SandboxBackendStatus::Ready,
         "macos" => SandboxBackendStatus::MissingBackend("container"),
-        _ => SandboxBackendStatus::Ready,
+        _ => SandboxBackendStatus::UnsupportedPlatform,
     }
+}
+
+pub fn current_sandbox_backend_status(dangerous_no_sandbox: bool) -> SandboxBackendStatus {
+    sandbox_backend_status_for_target(
+        std::env::consts::OS,
+        dangerous_no_sandbox,
+        binary_on_path("bwrap"),
+        binary_on_path("container"),
+    )
+}
+
+fn binary_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(name);
+        if !candidate.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            candidate
+                .metadata()
+                .map(|meta| meta.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -206,11 +239,6 @@ pub fn create_sandbox(
     config: &crate::config::SandboxConfig,
     dangerous_no_sandbox: bool,
 ) -> std::sync::Arc<dyn Sandbox> {
-    if dangerous_no_sandbox {
-        tracing::warn!("all sandboxes disabled via --dangerous-no-sandbox");
-        return std::sync::Arc::new(no_sandbox::DangerousNoSandbox);
-    }
-
     if config.disabled.iter().any(|s| s == "os") {
         tracing::warn!(
             "ignoring sandbox.disabled config — sandbox can only be disabled \
@@ -218,41 +246,39 @@ pub fn create_sandbox(
         );
     }
 
-    // Verify the OS sandbox binary is available.  Without it, bash commands
-    // would run unsandboxed — too dangerous for an LLM-controlled agent.
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-        let has_container = Command::new("which")
-            .arg("container")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !has_container {
+    match current_sandbox_backend_status(dangerous_no_sandbox) {
+        SandboxBackendStatus::DangerousDisabled => {
+            tracing::warn!("all sandboxes disabled via --dangerous-no-sandbox");
+            return std::sync::Arc::new(no_sandbox::DangerousNoSandbox);
+        }
+        SandboxBackendStatus::Ready => {}
+        SandboxBackendStatus::MissingBackend("bwrap") => {
+            tracing::error!(
+                "Linux sandbox requires bubblewrap (bwrap). \
+                 Install it with: apt install bubblewrap (or: dnf install bubblewrap). \
+                 Refusing to start without OS sandbox — use --dangerous-no-sandbox to override."
+            );
+            std::process::exit(1);
+        }
+        SandboxBackendStatus::MissingBackend("container") => {
             tracing::error!(
                 "macOS sandbox requires the 'container' CLI (Apple Containers). \
                  Install it with: brew install container (or from github.com/apple/container). \
                  Refusing to start without OS sandbox — use --dangerous-no-sandbox to override."
             );
-            // Return DangerousNoSandbox but mark it so callers know it's a failure.
-            // Actually, we should panic/exit since this is a security-critical failure.
             std::process::exit(1);
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        use std::process::Command;
-        let has_bwrap = Command::new("which")
-            .arg("bwrap")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !has_bwrap {
+        SandboxBackendStatus::MissingBackend(binary) => {
             tracing::error!(
-                "Linux sandbox requires bubblewrap (bwrap). \
-                 Install it with: apt install bubblewrap (or: dnf install bubblewrap). \
-                 Refusing to start without OS sandbox — use --dangerous-no-sandbox to override."
+                binary,
+                "OS sandbox backend is missing; refusing to start without --dangerous-no-sandbox"
+            );
+            std::process::exit(1);
+        }
+        SandboxBackendStatus::UnsupportedPlatform => {
+            tracing::error!(
+                os = std::env::consts::OS,
+                "OS sandbox is unsupported on this platform; refusing to start without --dangerous-no-sandbox"
             );
             std::process::exit(1);
         }

@@ -203,10 +203,9 @@ pub(crate) fn redact_secrets(command: &str) -> String {
 ///
 /// NOTE: `network: Deny` for bash is enforced at the OS level only (bwrap
 /// `--unshare-net` on Linux, network entitlement on macOS).  The
-/// application-level check here does not block network access — that would
-/// require inspecting the arbitrary command string, which is infeasible.
-/// On platforms without an OS sandbox, network deny is NOT enforced and a
-/// warning is logged.
+/// application-level check here does not inspect the arbitrary command string.
+/// On platforms without an OS sandbox, bash is denied unless the process was
+/// started with `--dangerous-no-sandbox` and bypassed `PolicySandbox` entirely.
 fn check_bash(
     input: &serde_json::Value,
     policy: &SandboxPolicy,
@@ -253,15 +252,10 @@ fn check_bash(
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        if policy.network == Access::Deny {
-            tracing::warn!(
-                "bash has network: Deny but OS sandbox is unavailable on this platform \
-                 — network access is NOT restricted"
-            );
-        }
-        tracing::warn!("OS sandbox not available on this platform — running unsandboxed");
-        Ok(SandboxDecision::Allow {
-            input: input.clone(),
+        let _ = (command, policy, working_dir);
+        tracing::error!("OS sandbox not available on this platform");
+        Ok(SandboxDecision::Deny {
+            reason: "bash denied: OS sandbox is unsupported on this platform; restart with --dangerous-no-sandbox to opt out".into(),
         })
     }
 }

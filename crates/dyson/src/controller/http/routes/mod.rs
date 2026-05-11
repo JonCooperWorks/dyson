@@ -353,6 +353,23 @@ fn readiness_error(state: &HttpState) -> Option<&'static str> {
         return Some("not ready: warmup-placeholder provider key is still active");
     }
 
+    match crate::sandbox::current_sandbox_backend_status(settings.dangerous_no_sandbox) {
+        crate::sandbox::SandboxBackendStatus::Ready
+        | crate::sandbox::SandboxBackendStatus::DangerousDisabled => {}
+        crate::sandbox::SandboxBackendStatus::MissingBackend("bwrap") => {
+            return Some("not ready: Linux sandbox backend 'bwrap' is missing");
+        }
+        crate::sandbox::SandboxBackendStatus::MissingBackend("container") => {
+            return Some("not ready: macOS sandbox backend 'container' is missing");
+        }
+        crate::sandbox::SandboxBackendStatus::MissingBackend(_) => {
+            return Some("not ready: OS sandbox backend is missing");
+        }
+        crate::sandbox::SandboxBackendStatus::UnsupportedPlatform => {
+            return Some("not ready: OS sandbox is unsupported on this platform");
+        }
+    }
+
     None
 }
 
