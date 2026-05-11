@@ -500,36 +500,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     let want_models = !body.models.is_empty();
     let want_api_key = has_text(body.proxy_token.as_deref());
     let want_base_url = has_text(body.proxy_base.as_deref());
-    let provider_applied = (want_models || want_api_key || want_base_url) && has_config;
-    let provider_changed = if want_models || want_api_key || want_base_url {
-        match config_path {
-            Some(path) => match patch_provider_in_config(
-                path,
-                if want_models {
-                    Some(body.models.as_slice())
-                } else {
-                    None
-                },
-                if want_api_key {
-                    body.proxy_token.as_deref()
-                } else {
-                    None
-                },
-                if want_base_url {
-                    body.proxy_base.as_deref()
-                } else {
-                    None
-                },
-            ) {
-                Ok(()) => true,
-                Err(e) => return bad_request(&format!("config patch failed: {e}")),
-            },
-            None => false,
-        }
-    } else {
-        false
-    };
-    let models_changed = provider_changed && want_models;
+    let provider_requested = want_models || want_api_key || want_base_url;
+    let provider_applied = provider_requested && has_config;
     let models_applied = want_models && provider_applied;
 
     // 3. Image generation: register / replace the dedicated image
@@ -545,37 +517,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         has_text(body.image_provider_name.as_deref()) && body.image_provider_block.is_some();
     let want_image_provider = has_text(body.image_generation_provider.as_deref());
     let want_image_model = has_text(body.image_generation_model.as_deref());
-    let image_applied = (want_image_block || want_image_provider || want_image_model) && has_config;
-    let image_changed = if want_image_block || want_image_provider || want_image_model {
-        match config_path {
-            Some(path) => match patch_image_generation_in_config(
-                path,
-                if want_image_block {
-                    body.image_provider_name
-                        .as_deref()
-                        .zip(body.image_provider_block.as_ref())
-                } else {
-                    None
-                },
-                if want_image_provider {
-                    body.image_generation_provider.as_deref()
-                } else {
-                    None
-                },
-                if want_image_model {
-                    body.image_generation_model.as_deref()
-                } else {
-                    None
-                },
-            ) {
-                Ok(()) => true,
-                Err(e) => return bad_request(&format!("image-gen patch failed: {e}")),
-            },
-            None => false,
-        }
-    } else {
-        false
-    };
+    let image_requested = want_image_block || want_image_provider || want_image_model;
+    let image_applied = image_requested && has_config;
     // 4. Skills: an explicit `tools` list rewrites
     //    `skills.builtin.tools` to that exact set; otherwise
     //    `reset_skills` drops the `skills` key so the loader's
@@ -585,42 +528,65 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //    configure.  `tools` wins if both are set.
     let skills_requested = body.tools.is_some() || body.reset_skills;
     let skills_applied = skills_requested && has_config;
-    let skills_changed = if let Some(allowlist) = body.tools.as_deref() {
-        match config_path {
-            Some(path) => match set_skills_tools_in_config(path, allowlist) {
-                Ok(changed) => changed,
-                Err(e) => return bad_request(&format!("skills tools patch failed: {e}")),
-            },
-            None => false,
-        }
-    } else if body.reset_skills {
-        match config_path {
-            Some(path) => match clear_skills_in_config(path) {
-                Ok(changed) => changed,
-                Err(e) => return bad_request(&format!("skills reset failed: {e}")),
-            },
-            None => false,
-        }
-    } else {
-        false
-    };
 
     // 5. MCP servers: replace the top-level `mcp_servers` block.  None
     //    leaves it alone; an empty map clears it.  Distinct from the
     //    skills block because MCP servers are a sibling key in the
     //    loader's `JsonRoot`, not nested under `skills`.
     let mcp_applied = body.mcp_servers.is_some() && has_config;
-    let mcp_changed = if let Some(servers) = &body.mcp_servers {
-        match config_path {
-            Some(path) => match patch_mcp_servers_in_config(path, servers) {
-                Ok(changed) => changed,
-                Err(e) => return bad_request(&format!("mcp_servers patch failed: {e}")),
+
+    let config_patch = if let Some(path) = config_path {
+        match patch_config_once(
+            path,
+            ConfigureConfigPatch {
+                models: if want_models {
+                    Some(body.models.as_slice())
+                } else {
+                    None
+                },
+                api_key: if want_api_key {
+                    body.proxy_token.as_deref()
+                } else {
+                    None
+                },
+                base_url: if want_base_url {
+                    body.proxy_base.as_deref()
+                } else {
+                    None
+                },
+                image_provider_block: if want_image_block {
+                    body.image_provider_name
+                        .as_deref()
+                        .zip(body.image_provider_block.as_ref())
+                } else {
+                    None
+                },
+                image_provider: if want_image_provider {
+                    body.image_generation_provider.as_deref()
+                } else {
+                    None
+                },
+                image_model: if want_image_model {
+                    body.image_generation_model.as_deref()
+                } else {
+                    None
+                },
+                tools: body.tools.as_deref(),
+                reset_skills: body.reset_skills,
+                mcp_servers: body.mcp_servers.as_ref(),
             },
-            None => false,
+        ) {
+            Ok(patch) => patch,
+            Err(e) => return bad_request(&format!("config patch failed: {e}")),
         }
     } else {
-        false
+        AppliedConfigPatch::default()
     };
+    let provider_changed = config_patch.provider_changed;
+    let models_changed = provider_changed && want_models;
+    let image_changed = config_patch.image_changed;
+    let skills_changed = config_patch.skills_changed;
+    let mcp_changed = config_patch.mcp_changed;
 
     let any_config_changed = provider_changed || image_changed || skills_changed || mcp_changed;
 
@@ -1183,6 +1149,285 @@ fn extract_section(body: &str, name: &str) -> Option<String> {
     }
 }
 
+struct ConfigureConfigPatch<'a> {
+    models: Option<&'a [String]>,
+    api_key: Option<&'a str>,
+    base_url: Option<&'a str>,
+    image_provider_block: Option<(&'a str, &'a Value)>,
+    image_provider: Option<&'a str>,
+    image_model: Option<&'a str>,
+    tools: Option<&'a [String]>,
+    reset_skills: bool,
+    mcp_servers: Option<&'a serde_json::Map<String, Value>>,
+}
+
+#[derive(Default)]
+struct AppliedConfigPatch {
+    provider_changed: bool,
+    image_changed: bool,
+    skills_changed: bool,
+    mcp_changed: bool,
+}
+
+impl AppliedConfigPatch {
+    fn any(&self) -> bool {
+        self.provider_changed || self.image_changed || self.skills_changed || self.mcp_changed
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ConfigureConfigPatchError {
+    #[error("read {path}: {source}")]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("parse {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    #[error("config root is not an object")]
+    RootNotObject,
+    #[error("config has no agent.provider - can't tell which provider's config to patch")]
+    MissingAgentProvider,
+    #[error("config has no providers object")]
+    MissingProvidersObject,
+    #[error("config has no providers.{0}")]
+    MissingProvider(String),
+    #[error("config providers is not an object")]
+    ProvidersNotObject,
+    #[error("config agent is not an object")]
+    AgentNotObject,
+    #[error("skills is not an object")]
+    SkillsNotObject,
+    #[error("skills.builtin is not an object")]
+    SkillsBuiltinNotObject,
+    #[error("serialise: {0}")]
+    Serialize(serde_json::Error),
+    #[error("write tmp: {0}")]
+    WriteTmp(std::io::Error),
+    #[error("rename: {0}")]
+    Rename(std::io::Error),
+}
+
+fn patch_config_once(
+    path: &std::path::Path,
+    patch: ConfigureConfigPatch<'_>,
+) -> std::result::Result<AppliedConfigPatch, ConfigureConfigPatchError> {
+    let raw =
+        std::fs::read_to_string(path).map_err(|source| ConfigureConfigPatchError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let mut doc: Value =
+        serde_json::from_str(&raw).map_err(|source| ConfigureConfigPatchError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let mut applied = AppliedConfigPatch::default();
+
+    if patch.models.is_some() || patch.api_key.is_some() || patch.base_url.is_some() {
+        patch_provider_doc(&mut doc, patch.models, patch.api_key, patch.base_url)?;
+        applied.provider_changed = true;
+    }
+    if patch.image_provider_block.is_some()
+        || patch.image_provider.is_some()
+        || patch.image_model.is_some()
+    {
+        patch_image_generation_doc(
+            &mut doc,
+            patch.image_provider_block,
+            patch.image_provider,
+            patch.image_model,
+        )?;
+        applied.image_changed = true;
+    }
+    if let Some(tools) = patch.tools {
+        applied.skills_changed = set_skills_tools_doc(&mut doc, tools)?;
+    } else if patch.reset_skills {
+        applied.skills_changed = clear_skills_doc(&mut doc)?;
+    }
+    if let Some(servers) = patch.mcp_servers {
+        applied.mcp_changed = patch_mcp_servers_doc(&mut doc, servers)?;
+    }
+
+    if applied.any() {
+        write_config_doc(path, &doc)?;
+    }
+    Ok(applied)
+}
+
+fn patch_provider_doc(
+    doc: &mut Value,
+    models: Option<&[String]>,
+    api_key: Option<&str>,
+    base_url: Option<&str>,
+) -> std::result::Result<(), ConfigureConfigPatchError> {
+    let provider_name = doc
+        .get("agent")
+        .and_then(|a| a.get("provider"))
+        .and_then(|p| p.as_str())
+        .ok_or(ConfigureConfigPatchError::MissingAgentProvider)?
+        .to_owned();
+
+    let providers = doc
+        .get_mut("providers")
+        .and_then(|p| p.as_object_mut())
+        .ok_or(ConfigureConfigPatchError::MissingProvidersObject)?;
+    let prov_entry = providers
+        .get_mut(&provider_name)
+        .and_then(|p| p.as_object_mut())
+        .ok_or_else(|| ConfigureConfigPatchError::MissingProvider(provider_name.clone()))?;
+    if let Some(ms) = models {
+        prov_entry.insert(
+            "models".into(),
+            Value::Array(ms.iter().map(|m| Value::String(m.clone())).collect()),
+        );
+    }
+    if let Some(k) = api_key {
+        prov_entry.insert("api_key".into(), Value::String(k.to_owned()));
+    }
+    if let Some(u) = base_url {
+        prov_entry.insert("base_url".into(), Value::String(u.to_owned()));
+    }
+    Ok(())
+}
+
+fn patch_image_generation_doc(
+    doc: &mut Value,
+    provider_block: Option<(&str, &Value)>,
+    image_provider: Option<&str>,
+    image_model: Option<&str>,
+) -> std::result::Result<(), ConfigureConfigPatchError> {
+    if let Some((name, block)) = provider_block {
+        let providers = doc
+            .as_object_mut()
+            .ok_or(ConfigureConfigPatchError::RootNotObject)?
+            .entry("providers".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .ok_or(ConfigureConfigPatchError::ProvidersNotObject)?;
+        providers.insert(name.to_owned(), block.clone());
+    }
+
+    if image_provider.is_some() || image_model.is_some() {
+        let agent = doc
+            .as_object_mut()
+            .ok_or(ConfigureConfigPatchError::RootNotObject)?
+            .entry("agent".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .ok_or(ConfigureConfigPatchError::AgentNotObject)?;
+        if let Some(p) = image_provider {
+            agent.insert(
+                "image_generation_provider".into(),
+                Value::String(p.to_owned()),
+            );
+        }
+        if let Some(m) = image_model {
+            agent.insert("image_generation_model".into(), Value::String(m.to_owned()));
+        }
+    }
+    Ok(())
+}
+
+fn clear_skills_doc(
+    doc: &mut Value,
+) -> std::result::Result<bool, ConfigureConfigPatchError> {
+    Ok(doc
+        .as_object_mut()
+        .ok_or(ConfigureConfigPatchError::RootNotObject)?
+        .remove("skills")
+        .is_some())
+}
+
+fn set_skills_tools_doc(
+    doc: &mut Value,
+    tools: &[String],
+) -> std::result::Result<bool, ConfigureConfigPatchError> {
+    let root = doc
+        .as_object_mut()
+        .ok_or(ConfigureConfigPatchError::RootNotObject)?;
+    let new_tools = Value::Array(tools.iter().map(|t| Value::String(t.clone())).collect());
+    let skills = root
+        .entry("skills".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or(ConfigureConfigPatchError::SkillsNotObject)?;
+
+    let builtin = skills
+        .entry("builtin".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+        .ok_or(ConfigureConfigPatchError::SkillsBuiltinNotObject)?;
+    let builtin_unchanged = builtin.get("tools") == Some(&new_tools);
+    if !builtin_unchanged {
+        builtin.insert("tools".to_string(), new_tools);
+    }
+
+    let allowed: std::collections::HashSet<&str> = tools.iter().map(String::as_str).collect();
+    let prev = skills.remove("subagents");
+    let subagents_unchanged = match prev {
+        Some(Value::Array(arr)) => {
+            let kept: Vec<Value> = arr
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .as_object()
+                        .and_then(|o| o.get("name"))
+                        .and_then(Value::as_str)
+                        .map(|n| allowed.contains(n))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
+            let unchanged = kept.len() == arr.len() && kept == arr;
+            if !kept.is_empty() {
+                skills.insert("subagents".to_string(), Value::Array(kept));
+            }
+            unchanged
+        }
+        Some(other) => {
+            skills.insert("subagents".to_string(), other);
+            true
+        }
+        None => true,
+    };
+
+    Ok(!(builtin_unchanged && subagents_unchanged))
+}
+
+fn patch_mcp_servers_doc(
+    doc: &mut Value,
+    servers: &serde_json::Map<String, Value>,
+) -> std::result::Result<bool, ConfigureConfigPatchError> {
+    let root = doc
+        .as_object_mut()
+        .ok_or(ConfigureConfigPatchError::RootNotObject)?;
+    let new_block = Value::Object(servers.clone());
+    if root.get("mcp_servers") == Some(&new_block) {
+        return Ok(false);
+    }
+    if servers.is_empty() {
+        root.remove("mcp_servers");
+    } else {
+        root.insert("mcp_servers".to_string(), new_block);
+    }
+    Ok(true)
+}
+
+fn write_config_doc(
+    path: &std::path::Path,
+    doc: &Value,
+) -> std::result::Result<(), ConfigureConfigPatchError> {
+    let tmp = path.with_extension("json.tmp");
+    let pretty = serde_json::to_vec_pretty(doc).map_err(ConfigureConfigPatchError::Serialize)?;
+    std::fs::write(&tmp, &pretty).map_err(ConfigureConfigPatchError::WriteTmp)?;
+    std::fs::rename(&tmp, path).map_err(ConfigureConfigPatchError::Rename)?;
+    Ok(())
+}
+
 /// Read dyson.json, patch any of `providers.<agent.provider>.models`,
 /// `.api_key`, `.base_url` that the caller supplies, write back
 /// atomically.  `None` for a field means "leave alone"; an empty
@@ -1193,6 +1438,7 @@ fn extract_section(body: &str, name: &str) -> Option<String> {
 /// half-written file isn't a real risk, but rename gives us the
 /// belt-and-braces guarantee that a crash mid-write leaves the
 /// previous version in place.
+#[cfg(test)]
 fn patch_provider_in_config(
     path: &std::path::Path,
     models: Option<&[String]>,
@@ -1251,6 +1497,7 @@ fn patch_provider_in_config(
 /// Atomicity matters for the same reason as `patch_provider_in_config`:
 /// a half-written dyson.json is a chat-killer if the HotReloader picks
 /// it up before the second write lands.
+#[cfg(test)]
 fn patch_image_generation_in_config(
     path: &std::path::Path,
     provider_block: Option<(&str, &Value)>,
@@ -1308,6 +1555,7 @@ fn patch_image_generation_in_config(
 /// half-written file is unlikely, but rename gives us the
 /// belt-and-braces guarantee that a crash mid-write leaves the
 /// previous version in place.
+#[cfg(test)]
 fn clear_skills_in_config(path: &std::path::Path) -> Result<bool, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let mut doc: Value =
@@ -1349,6 +1597,7 @@ fn clear_skills_in_config(path: &std::path::Path) -> Result<bool, String> {
 /// helpers.  Returns `Ok(true)` when the file was rewritten,
 /// `Ok(false)` when both blocks already matched and no write was
 /// needed.
+#[cfg(test)]
 fn set_skills_tools_in_config(path: &std::path::Path, tools: &[String]) -> Result<bool, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let mut doc: Value =
@@ -1438,6 +1687,7 @@ fn set_skills_tools_in_config(path: &std::path::Path, tools: &[String]) -> Resul
 /// helpers above.  HotReloader picks the rewritten file up on the
 /// next mtime tick, and the eager-reload at the end of `post()`
 /// closes the window between this write and the next agent build.
+#[cfg(test)]
 fn patch_mcp_servers_in_config(
     path: &std::path::Path,
     servers: &serde_json::Map<String, Value>,
