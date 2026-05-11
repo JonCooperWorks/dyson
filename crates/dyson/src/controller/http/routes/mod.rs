@@ -19,7 +19,8 @@ use hyper::{Method, Request, Response, StatusCode};
 
 use super::responses::{
     Resp, apply_security_headers, boxed, client_accepts_gzip, get_auth_config, maybe_gzip,
-    method_not_allowed, misdirected_request, not_found, safe_store_id, unauthorized,
+    method_not_allowed, misdirected_request, not_found, safe_store_id, service_unavailable,
+    unauthorized,
     url_decode_strict,
 };
 use super::state::HttpState;
@@ -37,6 +38,8 @@ mod providers;
 mod sse;
 mod static_assets;
 mod turns;
+
+const WARMUP_PLACEHOLDER: &str = "warmup-placeholder";
 
 pub(super) async fn dispatch(req: Request<hyper::body::Incoming>, state: Arc<HttpState>) -> Resp {
     // Gzip the response if the client asked for it and the content-type
@@ -68,6 +71,16 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
     // tiny JSON body — clients only check the status code.
     if matches!((&method, segs.as_slice()), (&Method::GET, ["healthz"])) {
         return super::responses::json_ok(&serde_json::json!({"status": "ok"}));
+    }
+
+    // `/readyz` is intentionally unauthenticated for probes, but unlike
+    // `/healthz` it must stay closed while the swarm warmup placeholder
+    // config is still active.
+    if matches!((&method, segs.as_slice()), (&Method::GET, ["readyz"])) {
+        if let Some(reason) = readiness_error(&state) {
+            return service_unavailable(reason);
+        }
+        return super::responses::json_ok(&serde_json::json!({"status": "ready"}));
     }
 
     // `/api/auth/config` is intentionally unauthenticated: the SPA
@@ -310,6 +323,37 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         _ if path.starts_with("/api/") => method_not_allowed(),
         _ => method_not_allowed(),
     }
+}
+
+fn readiness_error(state: &HttpState) -> Option<&'static str> {
+    if state.config_path().is_none() {
+        return Some("not ready: config_path is not resolved");
+    }
+
+    let settings = state.settings_snapshot();
+    let model = settings.agent.model.trim();
+    if model.is_empty() {
+        return Some("not ready: no model is selected");
+    }
+    if model == WARMUP_PLACEHOLDER {
+        return Some("not ready: warmup-placeholder model is still active");
+    }
+
+    let provider_name = crate::controller::active_provider_name(&settings);
+    if provider_name.is_none() && !settings.providers.is_empty() {
+        return Some("not ready: no active provider is selected");
+    }
+    if let Some(provider_name) = provider_name
+        && settings
+            .providers
+            .get(&provider_name)
+            .map(|pc| pc.api_key.expose() == WARMUP_PLACEHOLDER)
+            .unwrap_or(false)
+    {
+        return Some("not ready: warmup-placeholder provider key is still active");
+    }
+
+    None
 }
 
 /// Cookie name for the SSE ticket.  Hard-coded everywhere — the SPA
