@@ -164,6 +164,32 @@ pub trait Sandbox: Send + Sync {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxBackendStatus {
+    Ready,
+    DangerousDisabled,
+    MissingBackend(&'static str),
+    UnsupportedPlatform,
+}
+
+pub fn sandbox_backend_status_for_target(
+    target_os: &str,
+    dangerous_no_sandbox: bool,
+    has_bwrap: bool,
+    has_container: bool,
+) -> SandboxBackendStatus {
+    if dangerous_no_sandbox {
+        return SandboxBackendStatus::DangerousDisabled;
+    }
+    match target_os {
+        "linux" if has_bwrap => SandboxBackendStatus::Ready,
+        "linux" => SandboxBackendStatus::MissingBackend("bwrap"),
+        "macos" if has_container => SandboxBackendStatus::Ready,
+        "macos" => SandboxBackendStatus::MissingBackend("container"),
+        _ => SandboxBackendStatus::Ready,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sandbox factory — build from config + CLI flags.
 // ---------------------------------------------------------------------------
@@ -243,4 +269,23 @@ pub fn create_sandbox(
         &config.tool_policies,
         &working_dir,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_platform_requires_dangerous_no_sandbox() {
+        assert_eq!(
+            sandbox_backend_status_for_target("freebsd", false, false, false),
+            SandboxBackendStatus::UnsupportedPlatform,
+            "D6 unsupported targets must refuse to start unless --dangerous-no-sandbox is set"
+        );
+        assert_eq!(
+            sandbox_backend_status_for_target("freebsd", true, false, false),
+            SandboxBackendStatus::DangerousDisabled,
+            "D6 explicit dangerous opt-out is the only unsupported-target escape hatch"
+        );
+    }
 }
