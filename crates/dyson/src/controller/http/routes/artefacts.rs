@@ -190,21 +190,20 @@ pub(super) async fn list_for_chat(state: &HttpState, chat_id: &str) -> Vec<Artef
             store
                 .items
                 .iter()
-                .filter_map(|(id, entry)| {
-                    (entry.chat_id == chat_id).then(|| {
-                        (
-                            id.clone(),
-                            ArtefactDto {
-                                id: id.clone(),
-                                kind: entry.kind,
-                                title: entry.title.clone(),
-                                bytes: entry.content.len(),
-                                created_at: entry.created_at,
-                                tool_use_id: entry.tool_use_id.clone(),
-                                metadata: entry.metadata.clone(),
-                            },
-                        )
-                    })
+                .filter(|(_id, entry)| entry.chat_id == chat_id)
+                .map(|(id, entry)| {
+                    (
+                        id.clone(),
+                        ArtefactDto {
+                            id: id.clone(),
+                            kind: entry.kind,
+                            title: entry.title.clone(),
+                            bytes: entry.content.len(),
+                            created_at: entry.created_at,
+                            tool_use_id: entry.tool_use_id.clone(),
+                            metadata: entry.metadata.clone(),
+                        },
+                    )
                 })
                 .collect()
         };
