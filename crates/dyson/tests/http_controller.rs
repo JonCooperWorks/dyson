@@ -823,6 +823,72 @@ async fn admin_configure_multi_patch_replaces_config_once() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn artefact_listing_slow_disk_read_does_not_block_runtime() {
+    use std::io::Write as _;
+
+    let r = rig().await;
+    let chat_id = "c-slow-disk";
+    let sub = r.chat_dir.path().join(chat_id).join("artefacts");
+    std::fs::create_dir_all(&sub).unwrap();
+    let fifo = sub.join("a1.meta.json");
+    let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    let rc = unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) };
+    assert_eq!(rc, 0, "mkfifo should create slow metadata fixture");
+    std::fs::write(sub.join("a1.body"), b"slow body").unwrap();
+
+    let after_scheme = r.base.strip_prefix("http://").unwrap();
+    let stream = tokio::net::TcpStream::connect(after_scheme)
+        .await
+        .expect("connect raw artefact list");
+    let (mut read_half, mut write_half) = stream.into_split();
+    let raw = format!(
+        "GET /api/conversations/{chat_id}/artefacts HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         Connection: close\r\n\
+         \r\n",
+        host = after_scheme,
+    );
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    write_half.write_all(raw.as_bytes()).await.unwrap();
+    let list_response = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        read_half.read_to_end(&mut buf).await.unwrap();
+        String::from_utf8(buf).unwrap()
+    });
+
+    let fifo_for_writer = fifo.clone();
+    let unblock = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(fifo_for_writer)
+            .unwrap();
+        writer
+            .write_all(
+                br#"{"chat_id":"c-slow-disk","kind":"other","title":"slow","mime_type":"text/plain","created_at":1,"metadata":{}}"#,
+            )
+            .unwrap();
+    });
+
+    tokio::task::yield_now().await;
+    let health = tokio::time::timeout(Duration::from_millis(100), async {
+        get(&format!("{}/healthz", r.base)).await.status()
+    })
+    .await;
+    unblock.join().unwrap();
+    let response = list_response.await.unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "artefact list response should complete after FIFO unblocks: {response}"
+    );
+    assert!(
+        matches!(health, Ok(StatusCode::OK)),
+        "D5 slow artefact metadata I/O must not block a peer /healthz request: {health:?}"
+    );
+}
+
 #[tokio::test]
 async fn admin_state_file_replay_enforces_durable_allowlist() {
     let r = rig().await;
