@@ -520,6 +520,46 @@ async fn skills_endpoint_is_gone() {
 }
 
 #[tokio::test]
+async fn admin_configure_rejects_identity_doc_in_task_without_explicit_field() {
+    let r = rig().await;
+    let secret = "test-configure-secret";
+
+    let rejected = post_json_with_headers(
+        &format!("{}/api/admin/configure", r.base),
+        &serde_json::json!({ "task": "# Identity\npwned" }),
+        &[("x-swarm-configure", secret)],
+    )
+    .await;
+    assert_eq!(
+        rejected.status(),
+        StatusCode::BAD_REQUEST,
+        "D2 task must not be accepted as a full IDENTITY.md replacement"
+    );
+    assert!(
+        !r.workspace_dir.path().join("IDENTITY.md").exists(),
+        "D2 rejected task must not write a replacement IDENTITY.md"
+    );
+
+    let full_doc = "# Identity\n\nName: explicit\n\n## Mission\n\npwned\n";
+    let accepted = post_json_with_headers(
+        &format!("{}/api/admin/configure", r.base),
+        &serde_json::json!({ "identity_doc": full_doc }),
+        &[("x-swarm-configure", secret)],
+    )
+    .await;
+    assert_eq!(
+        accepted.status(),
+        StatusCode::OK,
+        "D2 explicit identity_doc must remain the only full-doc replacement path"
+    );
+    assert_eq!(
+        std::fs::read_to_string(r.workspace_dir.path().join("IDENTITY.md")).unwrap(),
+        full_doc,
+        "D2 explicit identity_doc should be written exactly"
+    );
+}
+
+#[tokio::test]
 async fn admin_state_file_replay_enforces_durable_allowlist() {
     let r = rig().await;
     let secret = "test-configure-secret";
