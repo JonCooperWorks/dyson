@@ -118,12 +118,7 @@ pub(super) async fn list(state: &HttpState) -> Resp {
                 continue;
             }
             let sub = ArtefactStore::dir_for_chat(dir, id);
-            if std::fs::read_dir(&sub)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .any(|e| e.path().extension().is_some_and(|x| x == "json"))
-            {
+            if has_disk_artefact_meta(&sub).await {
                 with_artefacts.insert(id.clone());
             }
         }
@@ -381,7 +376,7 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
     // preserves sent-file download chips plus image / report artefact
     // chips across browser refreshes and controller restarts.
     let mut side_channel_blocks: Vec<BlockDto> = Vec::new();
-    for a in super::artefacts::list_for_chat(state, id).into_iter().rev() {
+    for a in super::artefacts::list_for_chat(state, id).await.into_iter().rev() {
         // The sidebar wants newest-first, but chat scroll chips should
         // read chronologically inside the synthetic assistant turn.
         if let Some(file_block) = sent_file_block_for_artefact(&a) {
@@ -414,6 +409,23 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
         "live": handle.busy.load(std::sync::atomic::Ordering::Relaxed),
         "messages": messages,
     }))
+}
+
+async fn has_disk_artefact_meta(sub: &std::path::Path) -> bool {
+    let mut rd = match tokio::fs::read_dir(sub).await {
+        Ok(rd) => rd,
+        Err(_) => return false,
+    };
+    loop {
+        match rd.next_entry().await {
+            Ok(Some(entry)) => {
+                if entry.path().extension().is_some_and(|x| x == "json") {
+                    return true;
+                }
+            }
+            Ok(None) | Err(_) => return false,
+        }
+    }
 }
 
 fn sent_file_block_for_artefact(a: &ArtefactDto) -> Option<BlockDto> {

@@ -161,10 +161,10 @@ pub(super) async fn export(state: &HttpState, chat_id: &str) -> Resp {
 }
 
 pub(super) async fn list(state: &HttpState, chat_id: &str) -> Resp {
-    json_ok(&list_for_chat(state, chat_id))
+    json_ok(&list_for_chat(state, chat_id).await)
 }
 
-pub(super) fn list_for_chat(state: &HttpState, chat_id: &str) -> Vec<ArtefactDto> {
+pub(super) async fn list_for_chat(state: &HttpState, chat_id: &str) -> Vec<ArtefactDto> {
     // Disk is the authoritative source — the in-memory FIFO has a hard
     // cap (`MAX_ARTEFACTS`) and a long-running session that emits more
     // than the cap will evict older entries from the cache, even
@@ -182,12 +182,38 @@ pub(super) fn list_for_chat(state: &HttpState, chat_id: &str) -> Vec<ArtefactDto
     let mut items: Vec<ArtefactDto> = Vec::new();
     if let Some(dir) = state.data_dir.as_ref() {
         let sub = ArtefactStore::dir_for_chat(dir, chat_id);
-        let store = match state.artefacts.lock() {
-            Ok(s) => s,
-            Err(p) => p.into_inner(),
+        let cached: std::collections::HashMap<String, ArtefactDto> = {
+            let store = match state.artefacts.lock() {
+                Ok(s) => s,
+                Err(p) => p.into_inner(),
+            };
+            store
+                .items
+                .iter()
+                .filter_map(|(id, entry)| {
+                    (entry.chat_id == chat_id).then(|| {
+                        (
+                            id.clone(),
+                            ArtefactDto {
+                                id: id.clone(),
+                                kind: entry.kind,
+                                title: entry.title.clone(),
+                                bytes: entry.content.len(),
+                                created_at: entry.created_at,
+                                tool_use_id: entry.tool_use_id.clone(),
+                                metadata: entry.metadata.clone(),
+                            },
+                        )
+                    })
+                })
+                .collect()
         };
-        if let Ok(rd) = std::fs::read_dir(&sub) {
-            for e in rd.flatten() {
+        if let Ok(mut rd) = tokio::fs::read_dir(&sub).await {
+            loop {
+                let e = match rd.next_entry().await {
+                    Ok(Some(e)) => e,
+                    Ok(None) | Err(_) => break,
+                };
                 let name = match e.file_name().into_string() {
                     Ok(n) => n,
                     Err(_) => continue,
@@ -196,17 +222,9 @@ pub(super) fn list_for_chat(state: &HttpState, chat_id: &str) -> Vec<ArtefactDto
                     Some(id) => id.to_string(),
                     None => continue,
                 };
-                let dto = match store.items.get(&id) {
-                    Some(entry) if entry.chat_id == chat_id => ArtefactDto {
-                        id: id.clone(),
-                        kind: entry.kind,
-                        title: entry.title.clone(),
-                        bytes: entry.content.len(),
-                        created_at: entry.created_at,
-                        tool_use_id: entry.tool_use_id.clone(),
-                        metadata: entry.metadata.clone(),
-                    },
-                    _ => match read_meta_dto(&sub, &id) {
+                let dto = match cached.get(&id) {
+                    Some(entry) => entry.clone(),
+                    _ => match read_meta_dto(&sub, &id).await {
                         Some(dto) => dto,
                         None => continue,
                     },
@@ -262,14 +280,17 @@ pub(super) fn list_for_chat(state: &HttpState, chat_id: &str) -> Vec<ArtefactDto
 /// `ArtefactStore::load_from_disk` does — `list_artefacts` doesn't
 /// need it, and a chat with hundreds of long reports would otherwise
 /// allocate the lot per list call.
-fn read_meta_dto(sub: &std::path::Path, id: &str) -> Option<ArtefactDto> {
-    let meta_txt = std::fs::read_to_string(sub.join(format!("{id}.meta.json"))).ok()?;
+async fn read_meta_dto(sub: &std::path::Path, id: &str) -> Option<ArtefactDto> {
+    let meta_txt = tokio::fs::read_to_string(sub.join(format!("{id}.meta.json")))
+        .await
+        .ok()?;
     let meta: serde_json::Value = serde_json::from_str(&meta_txt).ok()?;
     let kind: crate::message::ArtefactKind = meta
         .get("kind")
         .and_then(|k| serde_json::from_value(k.clone()).ok())
         .unwrap_or(crate::message::ArtefactKind::Other);
-    let bytes = std::fs::metadata(sub.join(format!("{id}.body")))
+    let bytes = tokio::fs::metadata(sub.join(format!("{id}.body")))
+        .await
         .map(|m| m.len() as usize)
         .unwrap_or(0);
     Some(ArtefactDto {

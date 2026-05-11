@@ -575,7 +575,9 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
                 reset_skills: body.reset_skills,
                 mcp_servers: body.mcp_servers.as_ref(),
             },
-        ) {
+        )
+        .await
+        {
             Ok(patch) => patch,
             Err(e) => return bad_request(&format!("config patch failed: {e}")),
         }
@@ -605,8 +607,11 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //      post-patch, so subsequent turns see no change and never
     //      rebuild.  Eager reload closes the window entirely.
     if any_config_changed && let Some(path) = config_path {
-        match crate::config::loader::load_settings(Some(path)) {
-            Ok(new_settings) => {
+        let path = path.to_path_buf();
+        match tokio::task::spawn_blocking(move || crate::config::loader::load_settings(Some(&path)))
+            .await
+        {
+            Ok(Ok(new_settings)) => {
                 state.registry.reload(&new_settings, None);
                 if let Ok(mut g) = state.settings.write() {
                     *g = new_settings.clone();
@@ -614,10 +619,16 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
                 crate::controller::publish_settings(std::sync::Arc::new(new_settings));
                 tracing::info!("dyson.json patched + registry reloaded by /api/admin/configure");
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(
                     error = %e,
                     "post-patch settings reload failed; falling back to polling HotReloader"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "post-patch settings reload worker failed; falling back to polling HotReloader"
                 );
             }
         }
@@ -746,7 +757,7 @@ pub(super) async fn post_state_file(
     let abs = root.join(&rel);
 
     if body.deleted {
-        match std::fs::remove_file(&abs) {
+        match tokio::fs::remove_file(&abs).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return bad_request(&format!("remove {}: {e}", abs.display())),
@@ -777,16 +788,16 @@ pub(super) async fn post_state_file(
         return bad_request("zero-byte chat transcripts are not durable state");
     }
     if let Some(parent) = abs.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
+        && let Err(e) = tokio::fs::create_dir_all(parent).await
     {
         return bad_request(&format!("mkdir {}: {e}", parent.display()));
     }
     let tmp = abs.with_extension("dyson-state-restore.tmp");
-    if let Err(e) = std::fs::write(&tmp, &bytes) {
+    if let Err(e) = tokio::fs::write(&tmp, &bytes).await {
         return bad_request(&format!("write {}: {e}", tmp.display()));
     }
-    if let Err(e) = std::fs::rename(&tmp, &abs) {
-        let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = tokio::fs::rename(&tmp, &abs).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
         return bad_request(&format!(
             "rename {} -> {}: {e}",
             tmp.display(),
@@ -1211,12 +1222,14 @@ enum ConfigureConfigPatchError {
     Rename(std::io::Error),
 }
 
-fn patch_config_once(
+async fn patch_config_once(
     path: &std::path::Path,
     patch: ConfigureConfigPatch<'_>,
 ) -> std::result::Result<AppliedConfigPatch, ConfigureConfigPatchError> {
     let raw =
-        std::fs::read_to_string(path).map_err(|source| ConfigureConfigPatchError::Read {
+        tokio::fs::read_to_string(path)
+            .await
+            .map_err(|source| ConfigureConfigPatchError::Read {
             path: path.to_path_buf(),
             source,
         })?;
@@ -1253,7 +1266,7 @@ fn patch_config_once(
     }
 
     if applied.any() {
-        write_config_doc(path, &doc)?;
+        write_config_doc(path, &doc).await?;
     }
     Ok(applied)
 }
@@ -1417,14 +1430,18 @@ fn patch_mcp_servers_doc(
     Ok(true)
 }
 
-fn write_config_doc(
+async fn write_config_doc(
     path: &std::path::Path,
     doc: &Value,
 ) -> std::result::Result<(), ConfigureConfigPatchError> {
     let tmp = path.with_extension("json.tmp");
     let pretty = serde_json::to_vec_pretty(doc).map_err(ConfigureConfigPatchError::Serialize)?;
-    std::fs::write(&tmp, &pretty).map_err(ConfigureConfigPatchError::WriteTmp)?;
-    std::fs::rename(&tmp, path).map_err(ConfigureConfigPatchError::Rename)?;
+    tokio::fs::write(&tmp, &pretty)
+        .await
+        .map_err(ConfigureConfigPatchError::WriteTmp)?;
+    tokio::fs::rename(&tmp, path)
+        .await
+        .map_err(ConfigureConfigPatchError::Rename)?;
     Ok(())
 }
 

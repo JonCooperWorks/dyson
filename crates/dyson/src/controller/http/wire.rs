@@ -300,7 +300,7 @@ pub enum AuthMode {
 /// per artefact emitted for this chat, ordered newest first.  The
 /// reader fetches the body separately from `/api/artefacts/<id>` so the
 /// list is cheap to render even when reports are multi-KB.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct ArtefactDto {
     pub(crate) id: String,
     pub(crate) kind: crate::message::ArtefactKind,
