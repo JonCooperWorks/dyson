@@ -106,6 +106,23 @@ async fn rig_with_auth(auth: Arc<dyn Auth>) -> Rig {
 }
 
 async fn rig_with_auth_and_client(auth: Arc<dyn Auth>, client: Box<dyn LlmClient>) -> Rig {
+    rig_with_auth_client_and_config_path(auth, client, None).await
+}
+
+async fn rig_with_config_path(config_path: std::path::PathBuf) -> Rig {
+    rig_with_auth_client_and_config_path(
+        Arc::new(DangerousNoAuth),
+        Box::new(StubLlmClient),
+        Some(config_path),
+    )
+    .await
+}
+
+async fn rig_with_auth_client_and_config_path(
+    auth: Arc<dyn Auth>,
+    client: Box<dyn LlmClient>,
+    config_path: Option<std::path::PathBuf>,
+) -> Rig {
     let chat_dir = tempfile::tempdir().expect("chat tempdir");
     let workspace_dir = tempfile::tempdir().expect("workspace tempdir");
 
@@ -144,7 +161,15 @@ async fn rig_with_auth_and_client(auth: Arc<dyn Auth>, client: Box<dyn LlmClient
         Arc::new(DiskChatHistory::new(chat_dir.path().to_path_buf()).expect("disk history"));
     let feedback = Arc::new(FeedbackStore::new(chat_dir.path().to_path_buf()));
 
-    let state = test_helpers::build_state(settings, registry, Some(history), Some(feedback), auth);
+    let state = test_helpers::build_state_with_auth_mode_and_config_path(
+        settings,
+        registry,
+        Some(history),
+        Some(feedback),
+        auth,
+        test_helpers::AuthMode::None,
+        config_path,
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
@@ -652,6 +677,149 @@ async fn admin_configure_first_boot_does_not_block_runtime_timer() {
     assert!(
         resp.starts_with("HTTP/1.1 200"),
         "configure response should be OK: {resp}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_config_replace_counter(
+    path: &std::path::Path,
+) -> (
+    Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<usize>,
+) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let parent = path.parent().unwrap().to_path_buf();
+    let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = Arc::clone(&stop);
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let mut count = 0_usize;
+        unsafe {
+            let fd = libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC);
+            assert!(fd >= 0, "inotify_init1 failed");
+            let parent_c = CString::new(parent.as_os_str().as_bytes()).unwrap();
+            let wd = libc::inotify_add_watch(fd, parent_c.as_ptr(), libc::IN_MOVED_TO);
+            assert!(wd >= 0, "inotify_add_watch failed");
+            ready_tx.send(()).unwrap();
+
+            let mut buf = [0_u8; 4096];
+            while !stop_for_thread.load(Ordering::SeqCst) {
+                let mut pollfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                if libc::poll(&mut pollfd, 1, 10) > 0 && pollfd.revents & libc::POLLIN != 0 {
+                    loop {
+                        let n = libc::read(fd, buf.as_mut_ptr().cast(), buf.len());
+                        if n <= 0 {
+                            break;
+                        }
+                        count += count_dyson_json_moves(&buf[..n as usize], &file_name);
+                    }
+                }
+            }
+            let n = libc::read(fd, buf.as_mut_ptr().cast(), buf.len());
+            if n > 0 {
+                count += count_dyson_json_moves(&buf[..n as usize], &file_name);
+            }
+            libc::close(fd);
+        }
+        count
+    });
+    ready_rx.recv().unwrap();
+    (stop, handle)
+}
+
+#[cfg(target_os = "linux")]
+fn count_dyson_json_moves(buf: &[u8], file_name: &str) -> usize {
+    let event_size = std::mem::size_of::<libc::inotify_event>();
+    let mut offset = 0_usize;
+    let mut count = 0_usize;
+    while offset + event_size <= buf.len() {
+        let event = unsafe { &*(buf.as_ptr().add(offset).cast::<libc::inotify_event>()) };
+        let name_start = offset + event_size;
+        let name_len = event.len as usize;
+        let name_end = name_start.saturating_add(name_len);
+        if name_end > buf.len() {
+            break;
+        }
+        let raw_name = &buf[name_start..name_end];
+        let nul = raw_name
+            .iter()
+            .position(|b| *b == 0)
+            .unwrap_or(raw_name.len());
+        if event.mask & libc::IN_MOVED_TO != 0
+            && std::str::from_utf8(&raw_name[..nul]).ok() == Some(file_name)
+        {
+            count += 1;
+        }
+        offset = name_end;
+    }
+    count
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn admin_configure_multi_patch_replaces_config_once() {
+    let config_dir = tempfile::tempdir().unwrap();
+    let config_path = config_dir.path().join("dyson.json");
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "agent": { "provider": "openrouter", "model": "warmup-placeholder" },
+            "providers": {
+                "openrouter": {
+                    "type": "openai",
+                    "api_key": "warmup-placeholder",
+                    "models": ["warmup-placeholder"]
+                }
+            },
+            "skills": { "builtin": { "tools": [] } }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let r = rig_with_config_path(config_path.clone()).await;
+    let _configure_root = isolate_configure_workspace(&r);
+    let (stop, handle) = spawn_config_replace_counter(&config_path);
+    let resp = post_json_with_headers(
+        &format!("{}/api/admin/configure", r.base),
+        &serde_json::json!({
+            "name": "multi",
+            "task": "run once",
+            "instance_id": "i-multi",
+            "models": ["openai/gpt-5"],
+            "proxy_token": "pt_real",
+            "proxy_base": "https://swarm.test/llm/openrouter",
+            "image_provider_name": "image",
+            "image_provider_block": {
+                "type": "openrouter",
+                "api_key": "pt_real",
+                "models": ["google/gemini-image"]
+            },
+            "image_generation_provider": "image",
+            "image_generation_model": "google/gemini-image",
+            "tools": ["read_file"],
+            "mcp_servers": {
+                "search": { "url": "https://swarm.test/mcp/i-multi/search" }
+            }
+        }),
+        &[("x-swarm-configure", "test-configure-secret")],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let replace_count = handle.join().unwrap();
+    assert_eq!(
+        replace_count, 1,
+        "D4 configure with identity/provider/image/skills/mcp patches must replace dyson.json once, not thrash hot reload with {replace_count} writes"
     );
 }
 

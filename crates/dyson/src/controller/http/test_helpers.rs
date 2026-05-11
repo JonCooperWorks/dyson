@@ -14,6 +14,7 @@
 // ===========================================================================
 
 use std::sync::Arc;
+use std::path::PathBuf;
 
 use tokio::net::TcpListener;
 
@@ -54,6 +55,20 @@ pub fn build_state_with_auth_mode(
     auth: Arc<dyn Auth>,
     auth_mode: AuthMode,
 ) -> Arc<HttpState> {
+    build_state_with_auth_mode_and_config_path(
+        settings, registry, history, feedback, auth, auth_mode, None,
+    )
+}
+
+pub fn build_state_with_auth_mode_and_config_path(
+    settings: Settings,
+    registry: Arc<ClientRegistry>,
+    history: Option<Arc<dyn ChatHistory>>,
+    feedback: Option<Arc<FeedbackStore>>,
+    auth: Arc<dyn Auth>,
+    auth_mode: AuthMode,
+    config_path: Option<PathBuf>,
+) -> Arc<HttpState> {
     // Mirror the production derivation of the loopback Host-header
     // gate: only on when the operator runs DangerousNoAuth on a
     // loopback bind (every test rig binds 127.0.0.1).  Bearer / OIDC
@@ -67,7 +82,7 @@ pub fn build_state_with_auth_mode(
         feedback,
         auth,
         auth_mode,
-        None,
+        config_path,
         loopback_only_host_check,
         None,
         // Test rigs always run plain HTTP — TLS termination is out of
