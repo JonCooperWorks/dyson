@@ -147,6 +147,14 @@ pub fn is_metadata_host(host: &str) -> bool {
 
 /// Process-wide HTTP client singleton.
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    configured_client_builder()
+        .build()
+        // INVARIANT: TLS crypto provider installed above; builder only fails
+        // on TLS init, which is fatal (no recovery possible).
+        .expect("failed to build HTTP client")
+});
+
+fn configured_client_builder() -> reqwest::ClientBuilder {
     ensure_crypto_provider();
     let mut builder = reqwest::Client::builder()
         .user_agent(USER_AGENT)
@@ -171,11 +179,7 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         builder = builder.proxy(proxy);
     }
     builder
-        .build()
-        // INVARIANT: TLS crypto provider installed above; builder only fails
-        // on TLS init, which is fatal (no recovery possible).
-        .expect("failed to build HTTP client")
-});
+}
 
 /// Read `HTTPS_PROXY` / `HTTP_PROXY` (uppercase or lowercase) from env
 /// and turn them into a single `reqwest::Proxy` that handles both
@@ -236,6 +240,16 @@ pub enum UrlSafetyError {
     },
     #[error("DNS lookup returned no addresses for {0}")]
     EmptyDns(String),
+}
+
+pub fn pinned_client_for_validated_url(
+    validated: &ValidatedSafeUrl,
+) -> Result<reqwest::Client, reqwest::Error> {
+    let mut builder = configured_client_builder();
+    if let Some(host) = validated.url.host_str() {
+        builder = builder.resolve_to_addrs(host, &validated.resolved_addrs);
+    }
+    builder.build()
 }
 
 /// Verify that every address the URL's hostname resolves to is safe to

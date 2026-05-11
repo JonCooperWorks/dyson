@@ -87,6 +87,28 @@ impl WebFetchTool {
         }
         crate::http::validate_url_safe(url).await
     }
+
+    fn fetch_client(
+        &self,
+        verified_url: &crate::http::ValidatedSafeUrl,
+    ) -> Result<reqwest::Client> {
+        if host_is_ip_literal(&verified_url.url) {
+            return Ok(self.client.clone());
+        }
+        crate::http::pinned_client_for_validated_url(verified_url)
+            .map_err(|e| DysonError::tool("web_fetch", format!("build pinned client: {e}")))
+    }
+}
+
+fn host_is_ip_literal(url: &reqwest::Url) -> bool {
+    url.host_str()
+        .map(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok()
+        })
+        .unwrap_or(false)
 }
 
 impl Default for WebFetchTool {
@@ -160,10 +182,11 @@ impl Tool for WebFetchTool {
             .clamp(1000, MAX_MAX_LENGTH as u64) as usize;
 
         tracing::info!(url = url.as_str(), "web_fetch");
+        let fetch_client = self.fetch_client(&verified_url)?;
 
         // --- Fetch with timeout, race against cancellation ---
         let mut response = tokio::select! {
-            res = self.client.get(verified_url.url.clone()).timeout(FETCH_TIMEOUT).send() => {
+            res = fetch_client.get(verified_url.url.clone()).timeout(FETCH_TIMEOUT).send() => {
                 res.map_err(|e| DysonError::tool("web_fetch", format!("request failed: {e}")))?
             }
             _ = ctx.cancellation.cancelled() => {
