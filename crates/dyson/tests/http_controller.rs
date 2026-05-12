@@ -85,10 +85,13 @@ impl LlmClient for BlockingLlmClient {
         while !self.release.load(std::sync::atomic::Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let events = vec![Ok(StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: Some(1),
-        })];
+        let events = vec![
+            Ok(StreamEvent::TextDelta("ok".to_string())),
+            Ok(StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: Some(1),
+            }),
+        ];
         Ok(StreamResponse {
             stream: Box::pin(tokio_stream::iter(events)),
             tool_mode: ToolMode::Execute,
@@ -1153,6 +1156,55 @@ async fn admin_quiesce_returns_conflict_while_a_turn_is_in_flight() {
     release.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_conversation_during_live_turn_returns_checkpoint_without_waiting_for_agent_lock() {
+    // Refresh while a turn is streaming must not blank the chat.  The
+    // turn worker holds the per-chat agent mutex until completion, so
+    // GET /api/conversations/:id has to serve the checkpointed disk
+    // transcript instead of awaiting that mutex.
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let r = rig_with_auth_and_client(
+        Arc::new(DangerousNoAuth),
+        Box::new(BlockingLlmClient {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        }),
+    )
+    .await;
+    let id = create_chat(&r, "visible while busy").await;
+
+    let turn = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "stay visible on refresh" }),
+    )
+    .await;
+    assert_eq!(turn.status(), StatusCode::ACCEPTED);
+    for _ in 0..100 {
+        if started.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(started.load(std::sync::atomic::Ordering::SeqCst));
+
+    let fetched = tokio::time::timeout(
+        Duration::from_millis(200),
+        get(&format!("{}/api/conversations/{id}", r.base)),
+    )
+    .await;
+    release.store(true, std::sync::atomic::Ordering::SeqCst);
+    let resp = fetched.expect("live conversation GET must not wait for turn completion");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["live"], true);
+    assert_eq!(body["messages"][0]["role"], "user");
+    assert_eq!(
+        body["messages"][0]["blocks"][0]["text"],
+        "stay visible on refresh"
+    );
+}
+
 #[tokio::test]
 async fn mind_lists_workspace_files_and_round_trips_an_edit() {
     let r = rig().await;
@@ -1563,6 +1615,48 @@ async fn post_turn_rejects_named_provider_config_without_active_provider() {
             .contains("no active provider"),
         "missing active-provider rejection should be explicit: {body}"
     );
+}
+
+#[tokio::test]
+async fn accepted_turn_checkpoint_does_not_duplicate_first_user_message() {
+    // The admission checkpoint makes the user's prompt durable before
+    // the turn worker runs.  When the worker later hydrates the agent
+    // from disk it must drop that provisional tail before calling
+    // Agent::run(), otherwise the first prompt is persisted twice.
+    let r = rig().await;
+    let id = create_chat(&r, "duplicate guard").await;
+    let prompt = "persist me once";
+
+    let resp = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": prompt }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+    let history = r.state.history_for_test().expect("history");
+    let mut messages = Vec::new();
+    for _ in 0..50 {
+        messages = history.load(&id).expect("load history");
+        if messages
+            .iter()
+            .any(|m| matches!(m.role, dyson::message::Role::Assistant))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let prompt_count = messages
+        .iter()
+        .filter(|m| {
+            matches!(m.role, dyson::message::Role::User)
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { text } if text == prompt))
+        })
+        .count();
+    assert_eq!(prompt_count, 1, "checkpointed prompt must not duplicate");
 }
 
 #[tokio::test]

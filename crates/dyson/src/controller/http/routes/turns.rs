@@ -22,11 +22,12 @@ use crate::agent::rate_limiter::{Priority, RateLimitedHandle};
 use crate::config::Settings;
 use crate::llm::stream::StreamEvent;
 use crate::llm::{CompletionConfig, LlmClient};
-use crate::message::Message;
+use crate::message::{ContentBlock, Message};
 
 use super::super::output::SseOutput;
 use super::super::responses::{
-    Resp, bad_request, boxed, json_ok, not_found, read_json_capped, service_unavailable,
+    Resp, bad_request, boxed, internal_error, json_ok, not_found, read_json_capped,
+    service_unavailable,
 };
 use super::super::state::{ChatHandle, HttpState};
 use super::super::wire::{MAX_TURN_BODY, SseEvent, TurnBody};
@@ -266,15 +267,36 @@ pub(super) async fn post(
     };
     let settings = turn_config.settings;
 
-    // Set up cancellation only after configuration is ready.  A warmup
-    // instance should return 503 without installing per-turn state.
+    let history = state.history.clone();
+    let prompt = body.prompt;
+    let attachments = decoded;
+
+    let checkpoint_message = accepted_turn_checkpoint_message(&prompt, &attachments);
+    let checkpoint_saved = match checkpoint_accepted_turn(
+        &handle,
+        history.as_ref(),
+        id,
+        &checkpoint_message,
+    )
+    .await
+    {
+        Ok(saved) => saved,
+        Err(e) => {
+            tracing::warn!(error = %e, chat_id = %id, "failed to checkpoint accepted user turn");
+            handle
+                .busy
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return internal_error("failed to persist accepted turn");
+        }
+    };
+
+    // Set up cancellation only after configuration and the accepted-turn
+    // checkpoint are ready.  A warmup or persistence failure should return
+    // before installing per-turn state.
     let cancel = CancellationToken::new();
     *handle.cancel.lock().await = Some(cancel.clone());
 
-    let history = state.history.clone();
-    let prompt = body.prompt;
     let should_title = title_needs_generation(&handle.title()) && !prompt.trim().is_empty();
-    let attachments = decoded;
     let chat_handle = Arc::clone(&handle);
     let chat_id = id.to_string();
     let state_for_task = Arc::clone(&state);
@@ -318,6 +340,7 @@ pub(super) async fn post(
         tracing::info!(chat_id = %chat_id, "TURN_WORKER: acquiring agent lock");
         let mut guard = chat_handle.agent.lock().await;
         tracing::info!(chat_id = %chat_id, "TURN_WORKER: agent lock acquired");
+        let mut loaded_checkpoint_tail = false;
         if guard.is_none() {
             tracing::info!(chat_id = %chat_id, "TURN_WORKER: agent is None — calling build_agent");
             match build_agent(
@@ -334,7 +357,13 @@ pub(super) async fn post(
                     tracing::info!(chat_id = %chat_id, "TURN_WORKER: build_agent OK");
                     if let Some(h) = history.as_ref() {
                         match h.load(&chat_id) {
-                            Ok(msgs) if !msgs.is_empty() => a.set_messages(msgs),
+                            Ok(msgs) if !msgs.is_empty() => {
+                                loaded_checkpoint_tail = checkpoint_saved
+                                    && msgs
+                                        .last()
+                                        .is_some_and(|m| same_message(m, &checkpoint_message));
+                                a.set_messages(msgs);
+                            }
                             _ => {}
                         }
                     }
@@ -430,6 +459,9 @@ pub(super) async fn post(
         }
         tracing::info!(chat_id = %chat_id, "TURN_WORKER: agent ready, wiring run");
         let agent = guard.as_mut().expect("agent built or kept above");
+        if loaded_checkpoint_tail {
+            drop_checkpoint_tail(agent, &checkpoint_message);
+        }
         // The agent polls `cancellation.is_cancelled()` at iteration
         // boundaries, which is fine for /stop between tool calls but
         // useless during a long LLM stream or a multi-second tool.
@@ -572,6 +604,90 @@ pub(super) async fn post(
         .header("Content-Type", "application/json")
         .body(boxed(Bytes::from_static(br#"{"ok":true}"#)))
         .unwrap()
+}
+
+async fn checkpoint_accepted_turn(
+    handle: &Arc<ChatHandle>,
+    history: Option<&Arc<dyn crate::chat_history::ChatHistory>>,
+    chat_id: &str,
+    checkpoint: &Message,
+) -> crate::Result<bool> {
+    let Some(history) = history else {
+        return Ok(false);
+    };
+
+    let mut messages = {
+        let guard = handle.agent.lock().await;
+        match guard.as_ref() {
+            Some(agent) => agent.messages().to_vec(),
+            None => history.load(chat_id)?,
+        }
+    };
+    messages.push(checkpoint.clone());
+    history.save(chat_id, &messages)?;
+    Ok(true)
+}
+
+fn accepted_turn_checkpoint_message(
+    prompt: &str,
+    attachments: &[crate::media::Attachment],
+) -> Message {
+    if attachments.is_empty() {
+        return Message::user(prompt);
+    }
+
+    let mut blocks = Vec::new();
+    if !prompt.is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: prompt.to_string(),
+        });
+    }
+    for attachment in attachments {
+        let name = attachment
+            .file_name
+            .as_deref()
+            .map(single_line_label)
+            .unwrap_or_else(|| "attachment".to_string());
+        blocks.push(ContentBlock::Text {
+            text: format!(
+                "[Attachment queued: {name} ({}, {} bytes)]",
+                attachment.mime_type,
+                attachment.data.len()
+            ),
+        });
+    }
+    Message::user_multimodal(blocks)
+}
+
+fn single_line_label(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+fn drop_checkpoint_tail(agent: &mut crate::agent::Agent, checkpoint: &Message) -> bool {
+    let (messages, dropped) =
+        drop_checkpoint_tail_from_messages(agent.messages().to_vec(), checkpoint);
+    if dropped {
+        agent.set_messages(messages);
+    }
+    dropped
+}
+
+fn drop_checkpoint_tail_from_messages(
+    mut messages: Vec<Message>,
+    checkpoint: &Message,
+) -> (Vec<Message>, bool) {
+    if !messages.last().is_some_and(|m| same_message(m, checkpoint)) {
+        return (messages, false);
+    }
+    messages.pop();
+    (messages, true)
+}
+
+fn same_message(a: &Message, b: &Message) -> bool {
+    a.role == b.role && a.content == b.content
 }
 
 fn title_needs_generation(title: &str) -> bool {
@@ -806,6 +922,48 @@ mod tests {
             Some("Investigate Login Failure")
         );
         assert_eq!(clean_generated_title("New conversation"), None);
+    }
+
+    #[test]
+    fn accepted_turn_checkpoint_records_attachment_placeholders() {
+        let msg = accepted_turn_checkpoint_message(
+            "inspect this",
+            &[crate::media::Attachment {
+                data: b"hello".to_vec(),
+                mime_type: "text/plain".into(),
+                file_name: Some("notes\n.txt".into()),
+            }],
+        );
+        assert_eq!(msg.role, crate::message::Role::User);
+        assert_eq!(
+            msg.content,
+            vec![
+                ContentBlock::Text {
+                    text: "inspect this".into()
+                },
+                ContentBlock::Text {
+                    text: "[Attachment queued: notes .txt (text/plain, 5 bytes)]".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn checkpoint_tail_drop_removes_only_the_provisional_tail() {
+        let checkpoint = Message::user("still running");
+        let (messages, dropped) = drop_checkpoint_tail_from_messages(
+            vec![Message::user("before"), checkpoint.clone()],
+            &checkpoint,
+        );
+        assert!(dropped);
+        assert_eq!(messages.len(), 1);
+        assert!(same_message(&messages[0], &Message::user("before")));
+
+        let (messages, dropped) =
+            drop_checkpoint_tail_from_messages(vec![Message::user("before")], &checkpoint);
+        assert!(!dropped);
+        assert_eq!(messages.len(), 1);
+        assert!(same_message(&messages[0], &Message::user("before")));
     }
 
     /// Regression for the chat-stuck-on-warmup-placeholder bug.

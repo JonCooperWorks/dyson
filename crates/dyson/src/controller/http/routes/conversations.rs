@@ -353,21 +353,19 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
         Some(h) => h,
         None => return not_found(),
     };
-    let agent_guard = handle.agent.lock().await;
-    let mut messages: Vec<MessageDto> = match agent_guard.as_ref() {
-        // Agent already loaded for this chat — its messages are the truth.
-        Some(a) => a.messages().iter().map(message_to_dto).collect(),
-        // Agent not built yet — load straight from disk so the transcript
-        // shows even before the user types in this session.
-        None => match state.history.as_ref() {
-            Some(h) => match h.load(id) {
-                Ok(msgs) => msgs.iter().map(message_to_dto).collect(),
-                Err(_) => Vec::new(),
-            },
-            None => Vec::new(),
-        },
+    let live = handle.busy.load(std::sync::atomic::Ordering::Relaxed);
+    let mut messages: Vec<MessageDto> = if live {
+        // A live turn holds the agent mutex for the whole run.  Do not
+        // await it on refresh: serve the checkpointed disk transcript
+        // immediately and let the SSE reattach path fill live deltas.
+        match handle.agent.try_lock() {
+            Ok(agent_guard) => messages_from_agent_or_history(agent_guard.as_ref(), state, id),
+            Err(_) => messages_from_history(state, id),
+        }
+    } else {
+        let agent_guard = handle.agent.lock().await;
+        messages_from_agent_or_history(agent_guard.as_ref(), state, id)
     };
-    drop(agent_guard);
 
     // Files / artefacts are side-channel — they never land in the
     // conversation history, so a fresh page load from disk would show
@@ -376,7 +374,11 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
     // preserves sent-file download chips plus image / report artefact
     // chips across browser refreshes and controller restarts.
     let mut side_channel_blocks: Vec<BlockDto> = Vec::new();
-    for a in super::artefacts::list_for_chat(state, id).await.into_iter().rev() {
+    for a in super::artefacts::list_for_chat(state, id)
+        .await
+        .into_iter()
+        .rev()
+    {
         // The sidebar wants newest-first, but chat scroll chips should
         // read chronologically inside the synthetic assistant turn.
         if let Some(file_block) = sent_file_block_for_artefact(&a) {
@@ -406,9 +408,35 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
         // so a mid-stream reload can decide to re-attach the SSE
         // stream instead of showing the chat blank.  Same Relaxed
         // ordering — this is a UI hint, not a synchronisation point.
-        "live": handle.busy.load(std::sync::atomic::Ordering::Relaxed),
+        "live": live,
         "messages": messages,
     }))
+}
+
+fn messages_from_agent_or_history(
+    agent: Option<&crate::agent::Agent>,
+    state: &HttpState,
+    id: &str,
+) -> Vec<MessageDto> {
+    match agent {
+        // Agent already loaded for this chat — its messages are the truth,
+        // unless a live turn owns the mutex and the caller deliberately
+        // fell back to disk.
+        Some(a) => a.messages().iter().map(message_to_dto).collect(),
+        // Agent not built yet — load straight from disk so the transcript
+        // shows even before the user types in this session.
+        None => messages_from_history(state, id),
+    }
+}
+
+fn messages_from_history(state: &HttpState, id: &str) -> Vec<MessageDto> {
+    match state.history.as_ref() {
+        Some(h) => match h.load(id) {
+            Ok(msgs) => msgs.iter().map(message_to_dto).collect(),
+            Err(_) => Vec::new(),
+        },
+        None => Vec::new(),
+    }
 }
 
 async fn has_disk_artefact_meta(sub: &std::path::Path) -> bool {
