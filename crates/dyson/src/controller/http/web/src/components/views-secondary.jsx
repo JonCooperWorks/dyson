@@ -242,6 +242,7 @@ export function ArtefactsView({ conv, setConv }) {
     if (pendingArtefactId) clearPendingArtefact();
     return pendingArtefactId || null;
   });
+  const [selectedChatId, setSelectedChatId] = useState(() => (pendingArtefactId && conv ? conv : null));
   // Mobile drawer toggle.  On desktop the sidebar is a permanent grid
   // column, so this state is a no-op there.  On mobile the sidebar is
   // an absolutely-positioned overlay that slides in when `.show-side`
@@ -291,9 +292,10 @@ export function ArtefactsView({ conv, setConv }) {
   useEffect(() => {
     if (!pendingArtefactId) return;
     setSelected(pendingArtefactId);
+    setSelectedChatId(conv || null);
     setShowSide(false);
     clearPendingArtefact();
-  }, [pendingArtefactId]);
+  }, [pendingArtefactId, conv]);
 
   // Hamburger on the Artefacts tab toggles the drawer so users can
   // reopen the tree after picking an artefact — without it the mobile
@@ -315,6 +317,7 @@ export function ArtefactsView({ conv, setConv }) {
     if (!activeList.length) return;
     const first = activeList[0].id;
     setSelected(first);
+    setSelectedChatId(conv);
     setShowSide(false);
   }, [conv, activeList.length, selected]);
 
@@ -327,6 +330,7 @@ export function ArtefactsView({ conv, setConv }) {
   const pickArtefact = (chatId, artefactId) => {
     if (chatId && chatId !== conv && setConv) setConv(chatId);
     setSelected(artefactId);
+    setSelectedChatId(chatId || null);
     setShowSide(false);
   };
 
@@ -363,6 +367,7 @@ export function ArtefactsView({ conv, setConv }) {
               return <ChatBranch key={c.id} chat={c} isActive={isActive} open={open}
                                   onToggle={() => toggleChat(c.id)}
                                   selected={selected}
+                                  selectedChatId={selectedChatId}
                                   onPick={(id) => pickArtefact(c.id, id)}/>;
             })}
           </div>
@@ -374,7 +379,7 @@ export function ArtefactsView({ conv, setConv }) {
           </div>
         )}
       </aside>
-      <ArtefactReader id={selected} onShowSide={() => setShowSide(true)} client={client}/>
+      <ArtefactReader id={selected} chatId={selectedChatId} onShowSide={() => setShowSide(true)} client={client}/>
     </div>
   );
 }
@@ -382,7 +387,7 @@ export function ArtefactsView({ conv, setConv }) {
 // One chat row in the tree.  Subscribes to the chat's own session so
 // its artefact list re-renders when the fetch lands, without forcing
 // the parent ArtefactsView to re-render on every sibling update.
-function ChatBranch({ chat, isActive, open, onToggle, selected, onPick }) {
+function ChatBranch({ chat, isActive, open, onToggle, selected, selectedChatId, onPick }) {
   const s = useSession(chat.id);
   const items = (s && s.artefacts) || [];
   return (
@@ -405,7 +410,7 @@ function ChatBranch({ chat, isActive, open, onToggle, selected, onPick }) {
           items.map(a => (
             <div key={a.id}
                  className="artefact-row"
-                 data-selected={selected === a.id ? 'true' : 'false'}
+                 data-selected={selected === a.id && selectedChatId === chat.id ? 'true' : 'false'}
                  onClick={() => onPick(a.id)}>
               <Icon name="file" size={11} style={{color:'var(--mute)'}}/>
               <span className="title">{a.title}</span>
@@ -422,12 +427,17 @@ function ChatBranch({ chat, isActive, open, onToggle, selected, onPick }) {
 // ArtefactReader to surface metadata without a second fetch.  Falls
 // through to null when the id isn't in any cached list (rare but
 // non-fatal; the header simply stays blank).
-function findArtefactMeta(id) {
+function findArtefactMeta(id, chatId = null) {
   const snap = sessions.getSnapshot();
-  for (const chatId of Object.keys(snap)) {
+  if (chatId && snap[chatId]) {
     const arts = snap[chatId].artefacts || [];
     const hit = arts.find(a => a.id === id);
-    if (hit) return hit;
+    if (hit) return { ...hit, chat_id: chatId };
+  }
+  for (const candidateChatId of Object.keys(snap)) {
+    const arts = snap[candidateChatId].artefacts || [];
+    const hit = arts.find(a => a.id === id);
+    if (hit) return { ...hit, chat_id: hit.chat_id || candidateChatId };
   }
   return null;
 }
@@ -439,7 +449,7 @@ function findArtefactMeta(id) {
 // user can re-open the artefact list after picking a report.  `client`
 // (optional) overrides the React context — ArtefactsView passes its
 // own client in so the reader doesn't need a second useApi() lookup.
-export function ArtefactReader({ id, onShowSide, client: clientProp }) {
+export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide, client: clientProp }) {
   const ctxClient = useApi();
   const client = clientProp || ctxClient;
   const [body, setBody] = useState('');
@@ -461,19 +471,23 @@ export function ArtefactReader({ id, onShowSide, client: clientProp }) {
   useEffect(() => {
     if (!id || !client) { setBody(''); setMeta(null); setErr(''); setChatId(null); return; }
     setErr('');
-    const hit = findArtefactMeta(id);
+    setBody('');
+    setShareUrl(null);
+    setShareErr('');
+    const hit = findArtefactMeta(id, requestedChatId);
     setMeta(hit);
-    if (hit && hit.chat_id) setChatId(hit.chat_id);
-    client.loadArtefact(id)
+    const scopedChatId = requestedChatId || (hit && hit.chat_id) || null;
+    setChatId(scopedChatId);
+    client.loadArtefact(id, scopedChatId)
       .then(({ body, chatId: cid }) => {
         setBody(body);
         if (cid) {
           setChatId(cid);
-          requestOpenArtefact(id);
+          if (!requestedChatId) requestOpenArtefact(id);
         }
       })
       .catch(e => setErr(String(e.message || e)));
-  }, [id, client]);
+  }, [id, requestedChatId, client]);
 
   const back = onShowSide
     ? <button className="artefact-back" title="Back to artefact list" onClick={onShowSide}>

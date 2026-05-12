@@ -286,6 +286,20 @@ impl ArtefactStore {
         None
     }
 
+    /// Load a persisted artefact from a known chat.  Prefer this over
+    /// [`Self::load_from_disk`] whenever the caller already has chat
+    /// context: restored/imported histories can contain the same
+    /// artefact id under different chat directories, and the tuple is
+    /// the real identity.
+    pub(crate) fn load_from_disk_for_chat(
+        data_dir: &std::path::Path,
+        chat_id: &str,
+        id: &str,
+    ) -> Option<ArtefactEntry> {
+        let sub = Self::dir_for_chat(data_dir, chat_id);
+        load_artefact_from_subdir(&sub, id)
+    }
+
     /// Walk every `{chat_id}/artefacts/` subdir on startup and populate
     /// the in-memory index so the list endpoint returns everything
     /// immediately.  Returns the largest numeric id seen.
@@ -508,6 +522,21 @@ mod tests {
         let loaded = ArtefactStore::load_from_disk(dir.path(), "a1").unwrap();
         assert_eq!(loaded.chat_id, "c-0042");
         assert!(ArtefactStore::load_from_disk(dir.path(), "a-missing").is_none());
+    }
+
+    #[test]
+    fn artefact_load_from_disk_for_chat_disambiguates_duplicate_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        ArtefactStore::persist_static(dir.path(), "a1", &art_entry("c-tsmc", 1));
+        ArtefactStore::persist_static(dir.path(), "a1", &art_entry("c-ntnx", 2));
+
+        let ntnx = ArtefactStore::load_from_disk_for_chat(dir.path(), "c-ntnx", "a1").unwrap();
+        let tsmc = ArtefactStore::load_from_disk_for_chat(dir.path(), "c-tsmc", "a1").unwrap();
+
+        assert_eq!(ntnx.chat_id, "c-ntnx");
+        assert_eq!(ntnx.title, "title-2");
+        assert_eq!(tsmc.chat_id, "c-tsmc");
+        assert_eq!(tsmc.title, "title-1");
     }
 
     #[test]

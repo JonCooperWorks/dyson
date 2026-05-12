@@ -1,8 +1,9 @@
 // ===========================================================================
 // Artefact endpoints —
-//   GET /api/artefacts/:id                     — body + meta
-//   GET /api/conversations/:id/artefacts        — list per chat
-//   GET /api/conversations/:id/export           — ShareGPT dump
+//   GET /api/artefacts/:id                          — body + meta
+//   GET /api/conversations/:id/artefacts             — list per chat
+//   GET /api/conversations/:id/artefacts/:artefact   — body + meta scoped to chat
+//   GET /api/conversations/:id/export                — ShareGPT dump
 // ===========================================================================
 
 use hyper::{Response, StatusCode};
@@ -78,6 +79,67 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
         // context without a second round-trip.  Sanitised before
         // emission — the chat_id is loaded from disk metadata and a
         // tampered file shouldn't be able to inject sibling headers.
+        .header("X-Dyson-Chat-Id", sanitize_header_value(&chat_id))
+        .header("Cache-Control", "no-cache")
+        .body(boxed(hyper::body::Bytes::from(bytes)))
+        .unwrap()
+}
+
+/// Serve an artefact body scoped by chat id.  This is the duplicate-safe
+/// form used by the SPA reader and swarm's same-origin share mint path:
+/// artefact ids can be reused across restored/imported chat directories, so
+/// the tuple `(chat_id, artefact_id)` is the stable identity.
+pub(super) async fn get_for_chat(state: &HttpState, chat_id: &str, id: &str) -> Resp {
+    if !safe_store_id(chat_id) || !safe_store_id(id) {
+        return not_found();
+    }
+    let loaded = state
+        .data_dir
+        .as_ref()
+        .and_then(|dir| ArtefactStore::load_from_disk_for_chat(dir, chat_id, id));
+    let entry = match loaded {
+        Some(e) => e,
+        None => {
+            let cached = {
+                let store = match state.artefacts.lock() {
+                    Ok(s) => s,
+                    Err(p) => p.into_inner(),
+                };
+                store
+                    .items
+                    .get(id)
+                    .filter(|e| e.chat_id == chat_id)
+                    .map(|e| {
+                        (
+                            e.content.clone().into_bytes(),
+                            e.mime_type.clone(),
+                            e.title.clone(),
+                            e.chat_id.clone(),
+                        )
+                    })
+            };
+            let Some((bytes, mime, title, chat_id)) = cached else {
+                return not_found();
+            };
+            return artefact_body_response(bytes, mime, title, chat_id);
+        }
+    };
+    artefact_body_response(
+        entry.content.into_bytes(),
+        entry.mime_type,
+        entry.title,
+        entry.chat_id,
+    )
+}
+
+fn artefact_body_response(bytes: Vec<u8>, mime: String, title: String, chat_id: String) -> Resp {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", format!("{mime}; charset=utf-8"))
+        .header(
+            "Content-Disposition",
+            format!("inline; filename=\"{}.md\"", sanitize_filename(&title)),
+        )
         .header("X-Dyson-Chat-Id", sanitize_header_value(&chat_id))
         .header("Cache-Control", "no-cache")
         .body(boxed(hyper::body::Bytes::from(bytes)))

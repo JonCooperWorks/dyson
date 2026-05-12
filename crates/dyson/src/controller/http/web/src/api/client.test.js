@@ -118,6 +118,19 @@ describe('DysonClient — GET endpoints', () => {
     expect(args(fetch)[0]).toBe('/api/artefacts/a1');
   });
 
+  it('loadArtefact uses chat-scoped body route when chat id is known', async () => {
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'X-Dyson-Chat-Id': 'c/2' }),
+      text: async () => '# scoped',
+    }));
+    const client = new DysonClient({ fetch });
+    const out = await client.loadArtefact('a/1', 'c/2');
+    expect(out).toEqual({ body: '# scoped', chatId: 'c/2' });
+    expect(args(fetch)[0]).toBe('/api/conversations/c%2F2/artefacts/a%2F1');
+  });
+
   it('exportConversation returns the response blob', async () => {
     const blob = new Blob(['{}'], { type: 'application/json' });
     const fetch = vi.fn(async () => ({ ok: true, status: 200, blob: async () => blob }));

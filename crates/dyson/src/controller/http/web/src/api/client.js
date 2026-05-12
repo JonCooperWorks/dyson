@@ -140,8 +140,11 @@ export class DysonClient {
   // for images (stored verbatim).  The `X-Dyson-Chat-Id` response header
   // lets a cold deep-link (/#/artefacts/<id> pasted into a fresh tab)
   // restore the sidebar context without a second round-trip.
-  async loadArtefact(id) {
-    const r = await this._authedFetch(`/api/artefacts/${encodeURIComponent(id)}`);
+  async loadArtefact(id, scopeChatId = null) {
+    const path = scopeChatId
+      ? `/api/conversations/${encodeURIComponent(scopeChatId)}/artefacts/${encodeURIComponent(id)}`
+      : `/api/artefacts/${encodeURIComponent(id)}`;
+    const r = await this._authedFetch(path);
     if (!r.ok) throw new Error(`artefact load failed: ${r.status}`);
     const body = await r.text();
     const chatId = r.headers.get('X-Dyson-Chat-Id') || null;

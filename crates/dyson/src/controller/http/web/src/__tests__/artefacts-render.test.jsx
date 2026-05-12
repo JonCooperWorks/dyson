@@ -9,7 +9,7 @@
 // engine; a Playwright test would be needed for pixel-level checks).
 
 import React from 'react';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, fireEvent, cleanup, act } from '@testing-library/react';
 import { ArtefactsView, ArtefactReader } from '../components/views-secondary.jsx';
 import { ApiProvider } from '../hooks/useApi.js';
@@ -333,5 +333,59 @@ describe('ArtefactReader — sent files', () => {
     // The download button's anchor target is the file URL — i.e. the
     // reader does not try to feed binary bytes through markdown().
     expect(container.querySelector('.prose')).toBeNull();
+  });
+
+  it('uses chat-scoped identity when sharing duplicate artefact ids', async () => {
+    seedChatArtefacts('c-tsmc', [{
+      id: 'a1',
+      title: 'TSMC report',
+      bytes: 7,
+      kind: 'security_review',
+      created_at: 1,
+    }]);
+    seedChatArtefacts('c-ntnx', [{
+      id: 'a1',
+      title: 'NTNX report',
+      bytes: 7,
+      kind: 'security_review',
+      created_at: 2,
+    }]);
+    const loadArtefact = vi.fn(async (_id, chatId) => ({
+      body: chatId === 'c-ntnx' ? '# NTNX' : '# TSMC',
+      chatId,
+    }));
+    const client = {
+      listArtefacts: async () => [],
+      loadArtefact,
+    };
+    const oldFetch = global.fetch;
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 201,
+      json: async () => ({ url: 'https://share.example.test/ntnx' }),
+    }));
+    try {
+      const { container, getByText } = renderWithApi(
+        <ArtefactReader id="a1" chatId="c-ntnx"/>,
+        client,
+      );
+      await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+      expect(loadArtefact).toHaveBeenCalledWith('a1', 'c-ntnx');
+      expect(container.textContent).toContain('NTNX report');
+
+      fireEvent.click(getByText(/share/i));
+      await act(async () => { fireEvent.click(getByText('7 days')); });
+
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+      expect(body).toMatchObject({
+        artefact_id: 'a1',
+        chat_id: 'c-ntnx',
+        ttl: '7d',
+      });
+    } finally {
+      global.fetch = oldFetch;
+    }
   });
 });

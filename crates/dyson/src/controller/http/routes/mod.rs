@@ -20,8 +20,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use super::responses::{
     Resp, apply_security_headers, boxed, client_accepts_gzip, get_auth_config, maybe_gzip,
     method_not_allowed, misdirected_request, not_found, safe_store_id, service_unavailable,
-    unauthorized,
-    url_decode_strict,
+    unauthorized, url_decode_strict,
 };
 use super::state::HttpState;
 
@@ -242,6 +241,17 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         }
         (&Method::GET, ["api", "conversations", id, "artefacts"]) => {
             artefacts::list(&state, id).await
+        }
+        (&Method::GET, ["api", "conversations", id, "artefacts", artefact_id]) => {
+            let id = match url_decode_strict(id) {
+                Some(id) => id,
+                None => return not_found(),
+            };
+            let artefact_id = match url_decode_strict(artefact_id) {
+                Some(id) => id,
+                None => return not_found(),
+            };
+            artefacts::get_for_chat(&state, &id, &artefact_id).await
         }
         (&Method::GET, ["api", "conversations", id, "export"]) => {
             artefacts::export(&state, id).await
