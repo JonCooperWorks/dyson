@@ -2,6 +2,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Icon, Kbd } from './icons.jsx';
+import { ShareMenu } from './share-menu.jsx';
 // The clipboard dance (modern API → legacy textarea + execCommand
 // fallback → swallow) used to live inline here and was copy-pasted
 // across panels.jsx / views-secondary.jsx.  One implementation now.
@@ -159,6 +160,7 @@ function turnToText(turn) {
 
 
 function Turn({ turn, tools, onOpenTool, expandedTools, turnIndex, rating, onRate,
+                chatId,
                 reactionsOpen, onToggleReactions }) {
   const expandedSet = expandedTools instanceof Set
     ? expandedTools
@@ -241,7 +243,7 @@ function Turn({ turn, tools, onOpenTool, expandedTools, turnIndex, rating, onRat
             return <FileBlock key={i} block={b}/>;
           }
           if (b.type === 'artefact') {
-            return <ArtefactBlock key={i} block={b}/>;
+            return <ArtefactBlock key={i} block={b} chatId={chatId}/>;
           }
           if (b.type === 'error') {
             return <ErrorBlock key={i} block={b}/>;
@@ -330,7 +332,7 @@ function FileBlock({ block }) {
 // the raw bytes endpoint.
 //
 // `block` shape: { type:'artefact', id, kind, title, url, bytes }
-function ArtefactBlock({ block }) {
+function ArtefactBlock({ block, chatId }) {
   const open = (e) => {
     e.preventDefault();
     if (block.id) requestOpenArtefact(block.id);
@@ -339,42 +341,122 @@ function ArtefactBlock({ block }) {
   // always has somewhere sensible to go — never `#` (which would jump
   // the page to the top).
   const reader = block.url || (block.id ? `/#/artefacts/${encodeURIComponent(block.id)}` : '#');
+  const [src, setSrc] = useState('');
+
+  useEffect(() => {
+    if (block.kind !== 'image' || !block.id) {
+      setSrc('');
+      return;
+    }
+    let cancelled = false;
+    fetch(`/api/artefacts/${encodeURIComponent(block.id)}`)
+      .then(r => r.ok ? r.text() : Promise.reject(r.status))
+      .then(text => { if (!cancelled) setSrc(text.trim()); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [block.kind, block.id]);
 
   if (block.kind === 'image') {
     // For a zero-hop preview we fetch the file URL once on mount and
     // swap to <img>.  Until the fetch lands, cmd-click opens the
     // reader (via `reader`); once resolved, cmd-click opens the image
     // itself in a new tab — which is what users reach for on an image.
-    const [src, setSrc] = useState('');
-    useEffect(() => {
-      if (!block.id) return;
-      fetch(`/api/artefacts/${encodeURIComponent(block.id)}`)
-        .then(r => r.ok ? r.text() : Promise.reject(r.status))
-        .then(text => setSrc(text.trim()))
-        .catch(() => {});
-    }, [block.id]);
     return (
-      <a href={src || reader} target="_blank" rel="noopener" onClick={open}
-         className="fileblock image" title={block.title || 'image'}>
-        {src
-          ? <img src={src} alt={block.title || 'image'}/>
-          : <div style={{width:220, height:160, background:'var(--panel)', borderRadius:4}}/>}
-        <span className="cap">{block.title || 'image'}</span>
-      </a>
+      <div className="artefact-chat-block image">
+        <a href={src || reader} target="_blank" rel="noopener" onClick={open}
+           className="fileblock image" title={block.title || 'image'}>
+          {src
+            ? <img src={src} alt={block.title || 'image'}/>
+            : <div style={{width:220, height:160, background:'var(--panel)', borderRadius:4}}/>}
+          <span className="cap">{block.title || 'image'}</span>
+        </a>
+        <ArtefactShareControl block={block} chatId={chatId}/>
+      </div>
     );
   }
 
   const kind = (block.kind || 'other').replace(/_/g, ' ');
   return (
-    <a href={reader} onClick={open} className="fileblock" title="Open artefact">
-      <Icon name="file" size={14}/>
-      <span className="name">{block.title || 'Artefact'}</span>
-      <span className="sz mono" style={{color:'var(--fg-dim)'}}>{kind}</span>
-      {typeof block.bytes === 'number' && (
-        <span className="sz mono">{prettySize(block.bytes)}</span>
+    <div className="artefact-chat-block">
+      <a href={reader} onClick={open} className="fileblock" title="Open artefact">
+        <Icon name="file" size={14}/>
+        <span className="name">{block.title || 'Artefact'}</span>
+        <span className="sz mono" style={{color:'var(--fg-dim)'}}>{kind}</span>
+        {typeof block.bytes === 'number' && (
+          <span className="sz mono">{prettySize(block.bytes)}</span>
+        )}
+        <span className="dl mono">open →</span>
+      </a>
+      <ArtefactShareControl block={block} chatId={chatId}/>
+    </div>
+  );
+}
+
+function ArtefactShareControl({ block, chatId }) {
+  const scopedChatId = chatId || block.chat_id || block.chatId || null;
+  const canShare = Boolean(block.id && scopedChatId);
+  const [busy, setBusy] = useState(false);
+  const [shareUrl, setShareUrl] = useState('');
+  const [shareErr, setShareErr] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  const mintShare = async (ttl) => {
+    if (!canShare) return;
+    setBusy(true);
+    setShareErr('');
+    setShareUrl('');
+    setCopied(false);
+    try {
+      const r = await fetch('/_swarm/share-mint', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artefact_id: block.id,
+          chat_id: scopedChatId,
+          ttl,
+        }),
+      });
+      if (!r.ok) {
+        const text = await r.text().catch(() => '');
+        throw new Error(`HTTP ${r.status}: ${text || 'mint failed'}`);
+      }
+      const minted = await r.json();
+      setShareUrl(minted.url || '');
+    } catch (e) {
+      setShareErr(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyShareUrl = async () => {
+    if (!shareUrl) return;
+    if (await copyToClipboard(shareUrl)) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
+  };
+
+  return (
+    <span className="artefact-share-inline">
+      <ShareMenu canShare={canShare} busy={busy} onMint={mintShare}/>
+      {shareErr && (
+        <span className="artefact-share-status err" role="alert" title={shareErr}>
+          share failed
+        </span>
       )}
-      <span className="dl mono">open →</span>
-    </a>
+      {shareUrl && (
+        <>
+          <a className="artefact-share-link mono" href={shareUrl} target="_blank" rel="noopener">
+            share link
+          </a>
+          <button className="btn xs ghost" onClick={copyShareUrl}>
+            {copied ? 'copied' : 'copy link'}
+          </button>
+        </>
+      )}
+    </span>
   );
 }
 

@@ -493,6 +493,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
           {empty ? <EmptyState/> : session.liveTurns.map((t, i) => (
             <Turn key={i} turn={t} tools={tools}
                   onOpenTool={handleOpenTool} expandedTools={session.panels}
+                  chatId={conv}
                   turnIndex={i} rating={session.ratings[i]} onRate={onRate}
                   reactionsOpen={session.openRating === i}
                   onToggleReactions={() => toggleReactions(i)}/>

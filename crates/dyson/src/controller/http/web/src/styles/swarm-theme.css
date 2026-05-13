@@ -1651,6 +1651,46 @@ textarea {
   color: var(--fg-muted);
   font: 500 11px/1.2 var(--mono);
 }
+.artefact-chat-block {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 100%;
+}
+.artefact-chat-block.image {
+  align-items: flex-start;
+}
+.artefact-chat-block > .fileblock {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.artefact-chat-block.image > .fileblock {
+  flex: 0 1 auto;
+}
+.artefact-share-inline {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.artefact-share-status {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artefact-share-status.err {
+  color: var(--err);
+}
+.artefact-share-link {
+  color: var(--accent);
+  font-size: 11px;
+  text-decoration: none;
+  text-shadow: none;
+}
 .att-card {
   display: flex;
   gap: 12px;

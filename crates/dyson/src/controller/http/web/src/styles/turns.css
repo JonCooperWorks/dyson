@@ -994,6 +994,46 @@
   color: var(--mute-2);
   padding: 8px 4px 2px;
 }
+.artefact-chat-block {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 100%;
+}
+.artefact-chat-block.image {
+  align-items: flex-start;
+}
+.artefact-chat-block > .fileblock {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.artefact-chat-block.image > .fileblock {
+  flex: 0 1 auto;
+}
+.artefact-share-inline {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.artefact-share-status {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--mute);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artefact-share-status.err {
+  color: var(--err);
+}
+.artefact-share-link {
+  color: var(--accent);
+  font-size: 11px;
+  text-decoration: none;
+  text-shadow: 0 0 8px var(--accent-wash);
+}
 
 /* error block — turn-level failures (LLM provider, tool dispatch, …) */
 .errorblock {

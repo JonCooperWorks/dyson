@@ -12,6 +12,7 @@ import React from 'react';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, fireEvent, cleanup, act } from '@testing-library/react';
 import { ArtefactsView, ArtefactReader } from '../components/views-secondary.jsx';
+import { ArtefactBlock } from '../components/turns.jsx';
 import { ApiProvider } from '../hooks/useApi.js';
 import {
   setConversations, requestToggleArtefactsDrawer,
@@ -384,6 +385,45 @@ describe('ArtefactReader — sent files', () => {
         chat_id: 'c-ntnx',
         ttl: '7d',
       });
+    } finally {
+      global.fetch = oldFetch;
+    }
+  });
+
+  it('uses the current chat when sharing an artefact from the transcript chip', async () => {
+    const oldFetch = global.fetch;
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 201,
+      json: async () => ({ url: 'https://share.example.test/ntnx-chat' }),
+    }));
+    try {
+      const { getByText, getByRole } = render(
+        <ArtefactBlock
+          chatId="c-ntnx"
+          block={{
+            type: 'artefact',
+            id: 'a1',
+            title: 'NTNX report',
+            kind: 'security_review',
+            bytes: 7,
+            url: '/#/artefacts/a1',
+          }}
+        />,
+      );
+
+      fireEvent.click(getByRole('button', { name: /share/i }));
+      await act(async () => { fireEvent.click(getByText('7 days')); });
+
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(global.fetch.mock.calls[0][0]).toBe('/_swarm/share-mint');
+      const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+      expect(body).toMatchObject({
+        artefact_id: 'a1',
+        chat_id: 'c-ntnx',
+        ttl: '7d',
+      });
+      expect(getByText('share link')).toBeTruthy();
     } finally {
       global.fetch = oldFetch;
     }
