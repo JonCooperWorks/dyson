@@ -6,12 +6,6 @@ const indexHtml = readFileSync(join(process.cwd(), 'index.html'), 'utf8');
 const swarmThemeCss = readFileSync(join(process.cwd(), 'src/styles/swarm-theme.css'), 'utf8');
 const turnsCss = readFileSync(join(process.cwd(), 'src/styles/turns.css'), 'utf8');
 
-function blockFor(selector, css) {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = css.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`));
-  return match?.[1] || '';
-}
-
 describe('mobile form controls', () => {
   test('keeps viewport zoom accessible', () => {
     expect(indexHtml).toContain('<meta name="viewport" content="width=device-width, initial-scale=1"/>');
@@ -24,7 +18,8 @@ describe('mobile form controls', () => {
   });
 
   test('pins the chat composer textarea at the iOS focus-zoom threshold', () => {
-    expect(blockFor('.composer textarea', turnsCss)).toMatch(/font-size:\s*16px\b/);
+    expect(turnsCss).toMatch(/\.composer textarea,\s*\.composer-input\s*\{[\s\S]*font-size:\s*16px\s*!important/);
+    expect(turnsCss).toMatch(/\.composer textarea,\s*\.composer-input\s*\{[\s\S]*-webkit-text-size-adjust:\s*100%/);
   });
 });
 

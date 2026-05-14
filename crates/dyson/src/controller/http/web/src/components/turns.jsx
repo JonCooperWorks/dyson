@@ -1,6 +1,6 @@
 /* Dyson — turns, subagents, composer */
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { ShareMenu } from './share-menu.jsx';
 // The clipboard dance (modern API → legacy textarea + execCommand
@@ -55,6 +55,15 @@ function clipboardImageFiles(data) {
   }
   for (const file of Array.from(data.files || [])) add(file);
   return out;
+}
+
+function pinComposerFocusGuard(el) {
+  if (!el) return;
+  el.style.setProperty('font-size', '16px', 'important');
+  el.style.setProperty('line-height', '1.5');
+  el.style.setProperty('-webkit-text-size-adjust', '100%');
+  el.style.setProperty('text-size-adjust', '100%');
+  el.style.setProperty('touch-action', 'manipulation');
 }
 
 function ThinkingBlock({ text }) {
@@ -499,6 +508,20 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
   const agentName = useAppState(s => s.agentName) || 'dyson';
   const filtered = slash ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(val.split(/\s/)[0] || '/')) : [];
 
+  const setTextareaRef = useCallback((node) => {
+    taRef.current = node;
+    pinComposerFocusGuard(node);
+  }, []);
+
+  const focusTextarea = useCallback(() => {
+    pinComposerFocusGuard(taRef.current);
+    taRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  useEffect(() => {
+    pinComposerFocusGuard(taRef.current);
+  }, []);
+
   useEffect(() => {
     if (!taRef.current) return;
     taRef.current.style.height = 'auto';
@@ -507,9 +530,9 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
 
   useEffect(() => {
     if (!autoFocusKey) return;
-    const id = setTimeout(() => taRef.current?.focus({ preventScroll: true }), 0);
+    const id = setTimeout(focusTextarea, 0);
     return () => clearTimeout(id);
-  }, [autoFocusKey]);
+  }, [autoFocusKey, focusTextarea]);
 
   const sub = (e) => {
     e?.preventDefault();
@@ -536,7 +559,7 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
       {slash && filtered.length > 0 && (
         <div className="slashmenu">
           {filtered.map((c, i) => (
-            <div key={i} className={`item ${i===0?'focused':''}`} onClick={() => { setVal(c.cmd + ' '); setSlash(false); taRef.current?.focus(); }}>
+            <div key={i} className={`item ${i===0?'focused':''}`} onClick={() => { setVal(c.cmd + ' '); setSlash(false); focusTextarea(); }}>
               <span className="cmd">{c.cmd}</span>
               <span className="desc">{c.desc}</span>
               <span className="src">{c.src}</span>
@@ -557,9 +580,13 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
           </div>
         )}
         <textarea
-          ref={taRef}
+          ref={setTextareaRef}
+          className="composer-input"
           value={val}
           placeholder={running ? `${agentName} is working — this queues` : `Reply to ${agentName}…`}
+          onTouchStart={e => pinComposerFocusGuard(e.currentTarget)}
+          onPointerDown={e => pinComposerFocusGuard(e.currentTarget)}
+          onFocus={e => pinComposerFocusGuard(e.currentTarget)}
           onChange={e => {
             setVal(e.target.value);
             setSlash(e.target.value.startsWith('/'));
@@ -580,7 +607,7 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
           <button className="btn" onClick={() => fileRef.current?.click()} title="Attach files">
             <Icon name="paperclip" size={12}/>
           </button>
-          <button className={`btn ${slash?'' : ''}`} onClick={() => { setVal('/'); setSlash(true); taRef.current?.focus(); }} title="Slash menu">
+          <button className={`btn ${slash?'' : ''}`} onClick={() => { setVal('/'); setSlash(true); focusTextarea(); }} title="Slash menu">
             <Icon name="slash" size={12}/> <span className="btn-label">commands</span>
           </button>
           <span className="sep"/>
@@ -656,4 +683,4 @@ function fileToBase64(file) {
   });
 }
 
-export { Turn, ThinkingBlock, ToolChip, ToolBlock, FileBlock, ArtefactBlock, ErrorBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64, clipboardImageFiles };
+export { Turn, ThinkingBlock, ToolChip, ToolBlock, FileBlock, ArtefactBlock, ErrorBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64, clipboardImageFiles, pinComposerFocusGuard };

@@ -42,6 +42,28 @@ const VIEW_IDS = ['conv', 'mind', 'artefacts', 'activity'];
 
 const MOBILE = '(max-width: 760px)';
 
+function keyboardInsetForVisualViewport({
+  editing,
+  innerHeight,
+  visualViewportHeight,
+  visualViewportOffsetTop = 0,
+  visualViewportScale = 1,
+  appHeight = 0,
+}) {
+  if (!editing) return 0;
+  if (Math.abs((visualViewportScale || 1) - 1) > 0.01) return 0;
+  const raw = Math.max(0, (innerHeight || 0) - (visualViewportHeight || 0) - (visualViewportOffsetTop || 0));
+  if (!raw) return 0;
+
+  // Modern WebKit can resize 100dvh when the software keyboard opens.
+  // In that case .app is already the visual viewport height; adding the
+  // raw visualViewport delta again pushes the composer halfway up the
+  // screen, which reads as the page zooming. Older iOS leaves .app at
+  // the layout viewport height, so those builds still need the offset.
+  if (appHeight > 0 && appHeight <= (visualViewportHeight || 0) + 8) return 0;
+  return raw;
+}
+
 // Hash routing — URLs are shareable across Tailscale nodes and the
 // browser back button steps cleanly through them.  Two extras over
 // the original shape:
@@ -218,7 +240,17 @@ function App() {
       const a = document.activeElement;
       return !!a && (a.tagName === 'TEXTAREA' || a.tagName === 'INPUT' || a.isContentEditable);
     };
-    const sync = () => set(editing() ? Math.max(0, window.innerHeight - vv.height - vv.offsetTop) : 0);
+    const sync = () => {
+      const appHeight = document.querySelector('.app')?.getBoundingClientRect?.().height || 0;
+      set(keyboardInsetForVisualViewport({
+        editing: editing(),
+        innerHeight: window.innerHeight,
+        visualViewportHeight: vv.height,
+        visualViewportOffsetTop: vv.offsetTop,
+        visualViewportScale: vv.scale,
+        appHeight,
+      }));
+    };
     vv.addEventListener('resize', sync);
     vv.addEventListener('scroll', sync);
     window.addEventListener('focusin', sync);
@@ -897,4 +929,4 @@ function applyToolView(t, content, isError, view) {
   return next;
 }
 
-export { App, streamCallbacks, attachLiveStream };
+export { App, streamCallbacks, attachLiveStream, keyboardInsetForVisualViewport };

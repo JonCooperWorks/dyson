@@ -1,11 +1,40 @@
 import React from 'react';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, fireEvent, createEvent, cleanup } from '@testing-library/react';
-import { Composer, clipboardImageFiles } from '../components/turns.jsx';
+import { Composer, clipboardImageFiles, pinComposerFocusGuard } from '../components/turns.jsx';
 
 afterEach(() => cleanup());
 
 describe('Composer image paste', () => {
+  it('pins the composer textarea inline before iOS focus handling samples it', () => {
+    const { container } = render(
+      <Composer onSend={() => {}} onCancel={() => {}} running={false}/>
+    );
+    const textarea = container.querySelector('textarea');
+
+    expect(textarea.className).toContain('composer-input');
+    expect(textarea.style.getPropertyValue('font-size')).toBe('16px');
+    expect(textarea.style.getPropertyPriority('font-size')).toBe('important');
+    expect(textarea.style.getPropertyValue('-webkit-text-size-adjust')).toBe('100%');
+
+    textarea.style.removeProperty('font-size');
+    fireEvent.touchStart(textarea);
+
+    expect(textarea.style.getPropertyValue('font-size')).toBe('16px');
+    expect(textarea.style.getPropertyPriority('font-size')).toBe('important');
+  });
+
+  it('focus guard can be applied idempotently to a textarea', () => {
+    const textarea = document.createElement('textarea');
+
+    pinComposerFocusGuard(textarea);
+    pinComposerFocusGuard(textarea);
+
+    expect(textarea.style.getPropertyValue('font-size')).toBe('16px');
+    expect(textarea.style.getPropertyPriority('font-size')).toBe('important');
+    expect(textarea.style.getPropertyValue('touch-action')).toBe('manipulation');
+  });
+
   it('extracts only image files from clipboard data and dedupes item/file mirrors', () => {
     const image = new File(['png'], 'image.png', { type: 'image/png', lastModified: 1 });
     const text = new File(['hello'], 'note.txt', { type: 'text/plain', lastModified: 1 });

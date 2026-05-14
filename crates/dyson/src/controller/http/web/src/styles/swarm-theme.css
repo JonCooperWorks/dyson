@@ -1467,7 +1467,8 @@ textarea {
   border-color: var(--accent);
   box-shadow: none;
 }
-.composer textarea {
+.composer textarea,
+.composer-input {
   width: 100%;
   min-height: 64px;
   max-height: 240px;
@@ -1478,6 +1479,10 @@ textarea {
   outline: none;
   resize: none;
   font: 400 16px/1.5 var(--sans);
+  font-size: 16px !important;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  touch-action: manipulation;
 }
 .composer textarea::placeholder { color: var(--fg-faint); }
 .composer .row {
@@ -2049,6 +2054,11 @@ textarea {
 }
 
 @media (max-width: 760px) {
+  html, body, #root, .app {
+    width: 100%;
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
   .body { grid-template-columns: 1fr !important; }
   .body .left { display: none; }
   .body.show-left .left {
