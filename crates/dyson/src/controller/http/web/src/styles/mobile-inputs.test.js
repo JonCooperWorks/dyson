@@ -17,9 +17,11 @@ describe('mobile form controls', () => {
     expect(mobileBlock(swarmThemeCss)).not.toContain(':where(');
   });
 
-  test('pins the chat composer textarea at the iOS focus-zoom threshold', () => {
+  test('pins the chat composer textarea above the iOS focus-zoom threshold on mobile', () => {
     expect(turnsCss).toMatch(/\.composer textarea,\s*\.composer-input\s*\{[\s\S]*font-size:\s*16px\s*!important/);
     expect(turnsCss).toMatch(/\.composer textarea,\s*\.composer-input\s*\{[\s\S]*-webkit-text-size-adjust:\s*100%/);
+    expect(turnsCss).toMatch(/@media \(max-width: 760px\)\s*\{[\s\S]*\.composer textarea,\s*\.composer-input\s*\{[\s\S]*font-size:\s*17px\s*!important/);
+    expect(swarmThemeCss).toMatch(/@media \(max-width: 760px\)\s*\{[\s\S]*\.composer textarea,\s*\.composer-input\s*\{[\s\S]*font-size:\s*17px\s*!important/);
   });
 });
 

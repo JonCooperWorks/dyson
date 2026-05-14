@@ -2054,6 +2054,10 @@ textarea {
 }
 
 @media (max-width: 760px) {
+  .composer textarea,
+  .composer-input {
+    font-size: 17px !important;
+  }
   html, body, #root, .app {
     width: 100%;
     max-width: 100vw;

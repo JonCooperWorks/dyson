@@ -326,6 +326,10 @@
   .turn .copy-turn { opacity: 0.7; }
 }
 @media (max-width: 760px) {
+  .composer textarea,
+  .composer-input {
+    font-size: 17px !important;
+  }
   .turn .reactions {
     position: static;
     margin-top: 6px;

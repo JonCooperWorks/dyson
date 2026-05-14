@@ -1,30 +1,65 @@
 import React from 'react';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, fireEvent, createEvent, cleanup } from '@testing-library/react';
-import { Composer, clipboardImageFiles, pinComposerFocusGuard } from '../components/turns.jsx';
+import {
+  Composer,
+  clipboardImageFiles,
+  composerLockedViewportContent,
+  pinComposerFocusGuard,
+} from '../components/turns.jsx';
 
-afterEach(() => cleanup());
+const originalMatchMedia = window.matchMedia;
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  document.head.querySelectorAll('meta[name="viewport"][data-test-composer]').forEach(el => el.remove());
+  if (originalMatchMedia) {
+    window.matchMedia = originalMatchMedia;
+  } else {
+    delete window.matchMedia;
+  }
+});
+
+function mockMobile(matches) {
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    writable: true,
+    value: vi.fn(query => ({
+      matches: query === '(max-width: 760px)' ? matches : false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
 
 describe('Composer image paste', () => {
-  it('pins the composer textarea inline before iOS focus handling samples it', () => {
+  it('pins the mobile composer textarea above the iOS focus-zoom threshold before focus sampling', () => {
+    mockMobile(true);
     const { container } = render(
       <Composer onSend={() => {}} onCancel={() => {}} running={false}/>
     );
     const textarea = container.querySelector('textarea');
 
     expect(textarea.className).toContain('composer-input');
-    expect(textarea.style.getPropertyValue('font-size')).toBe('16px');
+    expect(textarea.style.getPropertyValue('font-size')).toBe('17px');
     expect(textarea.style.getPropertyPriority('font-size')).toBe('important');
     expect(textarea.style.getPropertyValue('-webkit-text-size-adjust')).toBe('100%');
 
     textarea.style.removeProperty('font-size');
     fireEvent.touchStart(textarea);
 
-    expect(textarea.style.getPropertyValue('font-size')).toBe('16px');
+    expect(textarea.style.getPropertyValue('font-size')).toBe('17px');
     expect(textarea.style.getPropertyPriority('font-size')).toBe('important');
   });
 
   it('focus guard can be applied idempotently to a textarea', () => {
+    mockMobile(false);
     const textarea = document.createElement('textarea');
 
     pinComposerFocusGuard(textarea);
@@ -33,6 +68,37 @@ describe('Composer image paste', () => {
     expect(textarea.style.getPropertyValue('font-size')).toBe('16px');
     expect(textarea.style.getPropertyPriority('font-size')).toBe('important');
     expect(textarea.style.getPropertyValue('touch-action')).toBe('manipulation');
+  });
+
+  it('temporarily locks maximum scale while the composer is focused, then restores the page viewport', () => {
+    vi.useFakeTimers();
+    mockMobile(true);
+    const meta = document.createElement('meta');
+    meta.name = 'viewport';
+    meta.content = 'width=device-width, initial-scale=1';
+    meta.dataset.testComposer = 'true';
+    document.head.appendChild(meta);
+
+    const { container } = render(
+      <Composer onSend={() => {}} onCancel={() => {}} running={false}/>
+    );
+    const textarea = container.querySelector('textarea');
+
+    fireEvent.touchStart(textarea);
+
+    expect(meta.getAttribute('content')).toBe('width=device-width, initial-scale=1, maximum-scale=1');
+
+    fireEvent.blur(textarea);
+    vi.advanceTimersByTime(249);
+    expect(meta.getAttribute('content')).toContain('maximum-scale=1');
+
+    vi.advanceTimersByTime(1);
+    expect(meta.getAttribute('content')).toBe('width=device-width, initial-scale=1');
+  });
+
+  it('normalizes the focus-time viewport lock without making zoom permanently inaccessible', () => {
+    expect(composerLockedViewportContent('width=device-width, initial-scale=1, maximum-scale=4, user-scalable=yes'))
+      .toBe('width=device-width, initial-scale=1, maximum-scale=1');
   });
 
   it('extracts only image files from clipboard data and dedupes item/file mirrors', () => {
