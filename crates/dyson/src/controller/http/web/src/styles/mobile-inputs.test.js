@@ -19,10 +19,16 @@ describe('mobile form controls', () => {
   });
 
   test('keeps mobile inputs at 16px or larger so iOS does not zoom on focus', () => {
-    expect(swarmThemeCss).toMatch(/@media \(max-width: 700px\)[\s\S]*select[\s\S]*textarea[\s\S]*font-size:\s*16px\s*!important/);
+    expect(swarmThemeCss).toMatch(/@media \(max-width: 760px\)[\s\S]*input:not\(\[type\]\)[\s\S]*select[\s\S]*textarea[\s\S]*font-size:\s*16px\s*!important/);
+    expect(mobileBlock(swarmThemeCss)).not.toContain(':where(');
   });
 
   test('pins the chat composer textarea at the iOS focus-zoom threshold', () => {
     expect(blockFor('.composer textarea', turnsCss)).toMatch(/font-size:\s*16px\b/);
   });
 });
+
+function mobileBlock(css) {
+  const match = css.match(/@media \(max-width: 760px\)\s*\{([\s\S]*?)\n\}/);
+  return match?.[1] || '';
+}
