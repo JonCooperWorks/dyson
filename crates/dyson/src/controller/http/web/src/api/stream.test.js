@@ -77,6 +77,13 @@ describe('dispatchStreamEvent', () => {
     expect(onArtefact).toHaveBeenCalledWith(msg);
   });
 
+  it('user_message → onUserMessage(full msg)', () => {
+    const onUserMessage = vi.fn();
+    const msg = { type: 'user_message', blocks: [{ type: 'text', text: 'queued follow-up' }] };
+    expect(dispatchStreamEvent(msg, { onUserMessage })).toBe(true);
+    expect(onUserMessage).toHaveBeenCalledWith(msg);
+  });
+
   it('llm_error → onError(message only)', () => {
     const onError = vi.fn();
     dispatchStreamEvent({ type: 'llm_error', message: 'kaput' }, { onError });

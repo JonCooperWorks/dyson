@@ -1,9 +1,12 @@
 use super::*;
+use crate::controller::Output;
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::message::{ContentBlock, Role};
 use crate::sandbox::no_sandbox::DangerousNoSandbox;
 use crate::skill::builtin::BuiltinSkill;
 use crate::tool::ToolOutput;
+use std::path::Path;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 // -----------------------------------------------------------------------
@@ -21,6 +24,11 @@ struct MockLlm {
 struct FallibleMockLlm {
     responses: std::sync::Mutex<Vec<Vec<Result<StreamEvent>>>>,
     calls: Arc<AtomicUsize>,
+}
+
+struct RecordingMessagesLlm {
+    responses: std::sync::Mutex<Vec<Vec<StreamEvent>>>,
+    seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
 }
 
 impl FallibleMockLlm {
@@ -68,6 +76,35 @@ impl MockLlm {
     }
 }
 
+impl RecordingMessagesLlm {
+    fn new(responses: Vec<Vec<StreamEvent>>, seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(responses),
+            seen,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for RecordingMessagesLlm {
+    async fn stream(
+        &self,
+        messages: &[Message],
+        _system: &str,
+        _system_suffix: &str,
+        _tools: &[ToolDefinition],
+        _config: &CompletionConfig,
+    ) -> Result<crate::llm::StreamResponse> {
+        self.seen.lock().unwrap().push(messages.to_vec());
+        let events = self.responses.lock().unwrap().remove(0);
+        Ok(crate::llm::StreamResponse {
+            stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
+            tool_mode: crate::llm::ToolMode::Execute,
+            input_tokens: None,
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl LlmClient for MockLlm {
     async fn stream(
@@ -88,6 +125,92 @@ impl LlmClient for MockLlm {
 }
 
 use crate::controller::recording::RecordingOutput;
+
+struct PendingAdmissionOutput {
+    inner: RecordingOutput,
+    pending: Vec<Message>,
+}
+
+impl PendingAdmissionOutput {
+    fn new(pending: Vec<Message>) -> Self {
+        Self {
+            inner: RecordingOutput::new(),
+            pending,
+        }
+    }
+}
+
+impl Output for PendingAdmissionOutput {
+    fn text_delta(&mut self, text: &str) -> std::result::Result<(), DysonError> {
+        self.inner.text_delta(text)
+    }
+
+    fn thinking_delta(&mut self, text: &str) -> std::result::Result<(), DysonError> {
+        self.inner.thinking_delta(text)
+    }
+
+    fn tool_use_start(&mut self, id: &str, name: &str) -> std::result::Result<(), DysonError> {
+        self.inner.tool_use_start(id, name)
+    }
+
+    fn tool_use_complete(&mut self) -> std::result::Result<(), DysonError> {
+        self.inner.tool_use_complete()
+    }
+
+    fn tool_result(&mut self, output: &ToolOutput) -> std::result::Result<(), DysonError> {
+        self.inner.tool_result(output)
+    }
+
+    fn send_file(&mut self, path: &Path) -> std::result::Result<(), DysonError> {
+        self.inner.send_file(path)
+    }
+
+    fn checkpoint(
+        &mut self,
+        event: &crate::tool::CheckpointEvent,
+    ) -> std::result::Result<(), DysonError> {
+        self.inner.checkpoint(event)
+    }
+
+    fn send_artefact(
+        &mut self,
+        artefact: &crate::message::Artefact,
+    ) -> std::result::Result<(), DysonError> {
+        self.inner.send_artefact(artefact)
+    }
+
+    fn admit_pending_user_messages<'a>(
+        &'a mut self,
+        admit: &'a mut (dyn FnMut(Message) -> std::result::Result<(), DysonError> + Send),
+    ) -> Pin<
+        Box<dyn std::future::Future<Output = std::result::Result<usize, DysonError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let pending = std::mem::take(&mut self.pending);
+            let count = pending.len();
+            for message in pending {
+                admit(message)?;
+            }
+            Ok(count)
+        })
+    }
+
+    fn error(&mut self, error: &DysonError) -> std::result::Result<(), DysonError> {
+        self.inner.error(error)
+    }
+
+    fn on_llm_error(&mut self, error: &DysonError) -> crate::error::LlmRecovery {
+        self.inner.on_llm_error(error)
+    }
+
+    fn typing_indicator(&mut self, visible: bool) -> std::result::Result<(), DysonError> {
+        self.inner.typing_indicator(visible)
+    }
+
+    fn flush(&mut self) -> std::result::Result<(), DysonError> {
+        self.inner.flush()
+    }
+}
 
 // -----------------------------------------------------------------------
 // Tests
@@ -881,6 +1004,98 @@ async fn tool_output_files_dispatched_via_send_file() {
     assert_eq!(sent.len(), 2);
     assert_eq!(sent[0], std::path::Path::new("/tmp/test_report.pdf"));
     assert_eq!(sent[1], std::path::Path::new("/tmp/data.csv"));
+}
+
+#[tokio::test]
+async fn admits_pending_user_message_after_tool_results_before_next_llm_call() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let llm = RecordingMessagesLlm::new(
+        vec![
+            vec![
+                StreamEvent::ToolUseStart {
+                    id: "call_f1".into(),
+                    name: "send_test_file".into(),
+                },
+                StreamEvent::ToolUseComplete {
+                    id: "call_f1".into(),
+                    name: "send_test_file".into(),
+                    input: serde_json::json!({}),
+                },
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::ToolUse,
+                    output_tokens: None,
+                },
+            ],
+            vec![
+                StreamEvent::TextDelta("I saw the follow-up.".into()),
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: None,
+                },
+            ],
+        ],
+        Arc::clone(&seen),
+    );
+
+    let settings = AgentSettings {
+        api_key: "test".into(),
+        max_iterations: 3,
+        ..Default::default()
+    };
+
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(MockFileSkill::new())];
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut output = PendingAdmissionOutput::new(vec![Message::user("second prompt")]);
+
+    let result = agent.run("first prompt", &mut output).await.unwrap();
+    assert_eq!(result, "I saw the follow-up.");
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "tool call should force a second LLM iteration");
+    let second_iteration = &seen[1];
+    assert!(
+        second_iteration.len() >= 4,
+        "second LLM call should include original user, assistant tool_use, tool_result, and admitted user: {second_iteration:?}"
+    );
+    let tail = &second_iteration[second_iteration.len() - 3..];
+
+    assert_eq!(tail[0].role, Role::Assistant);
+    assert!(
+        tail[0]
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == "call_f1")),
+        "assistant tool_use must remain immediately before its tool_result"
+    );
+
+    assert_eq!(tail[1].role, Role::User);
+    assert!(
+        matches!(
+            tail[1].content.first(),
+            Some(ContentBlock::ToolResult { tool_use_id, .. }) if tool_use_id == "call_f1"
+        ),
+        "tool_result user message must immediately follow assistant tool_use"
+    );
+
+    assert_eq!(tail[2].role, Role::User);
+    assert!(
+        matches!(
+            tail[2].content.first(),
+            Some(ContentBlock::Text { text }) if text == "second prompt"
+        ),
+        "queued prompt should be admitted after the tool_result and before the next LLM call"
+    );
 }
 
 #[tokio::test]

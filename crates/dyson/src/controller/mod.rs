@@ -63,10 +63,13 @@ pub use activity::{
     truncate_note,
 };
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use crate::config::Settings;
 use crate::error::DysonError;
+use crate::message::Message;
 use crate::tool::{CheckpointEvent, ToolOutput};
 
 // ---------------------------------------------------------------------------
@@ -1395,6 +1398,24 @@ pub trait Output: Send {
         artefact: &crate::message::Artefact,
     ) -> std::result::Result<(), DysonError> {
         let _ = artefact;
+        Ok(())
+    }
+
+    /// Give the controller a chance to admit user messages that arrived
+    /// while this turn was already running.  The callback is expected to
+    /// append and persist each returned message before the controller
+    /// acknowledges it as drained.
+    fn admit_pending_user_messages<'a>(
+        &'a mut self,
+        _admit: &'a mut (dyn FnMut(Message) -> std::result::Result<(), DysonError> + Send),
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<usize, DysonError>> + Send + 'a>> {
+        Box::pin(async { Ok(0) })
+    }
+
+    /// A user message was admitted into the running transcript.  HTTP
+    /// uses this to reconcile the optimistic queued bubble over SSE;
+    /// non-live controllers can ignore it.
+    fn user_message(&mut self, _message: &Message) -> std::result::Result<(), DysonError> {
         Ok(())
     }
 

@@ -70,6 +70,11 @@ struct BlockingLlmClient {
     release: Arc<std::sync::atomic::AtomicBool>,
 }
 
+struct ToolThenRecordMessagesLlm {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+}
+
 #[async_trait::async_trait]
 impl LlmClient for BlockingLlmClient {
     async fn stream(
@@ -92,6 +97,53 @@ impl LlmClient for BlockingLlmClient {
                 output_tokens: Some(1),
             }),
         ];
+        Ok(StreamResponse {
+            stream: Box::pin(tokio_stream::iter(events)),
+            tool_mode: ToolMode::Execute,
+            input_tokens: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for ToolThenRecordMessagesLlm {
+    async fn stream(
+        &self,
+        messages: &[Message],
+        _system: &str,
+        _system_suffix: &str,
+        _tools: &[ToolDefinition],
+        _config: &CompletionConfig,
+    ) -> dyson::error::Result<StreamResponse> {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.seen.lock().unwrap().push(messages.to_vec());
+        let events = if call == 0 {
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    id: "call_queued_midturn".to_string(),
+                    name: "bash".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseComplete {
+                    id: "call_queued_midturn".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "sleep 1; echo tool done"}),
+                }),
+                Ok(StreamEvent::MessageComplete {
+                    stop_reason: StopReason::ToolUse,
+                    output_tokens: Some(1),
+                }),
+            ]
+        } else {
+            vec![
+                Ok(StreamEvent::TextDelta(format!("done call {call}"))),
+                Ok(StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: Some(1),
+                }),
+            ]
+        };
         Ok(StreamResponse {
             stream: Box::pin(tokio_stream::iter(events)),
             tool_mode: ToolMode::Execute,
@@ -1727,6 +1779,82 @@ async fn post_turn_while_busy_enqueues_instead_of_409() {
         .await
         .expect("queue path resolved");
     assert!(qpath.exists(), "queue file must be persisted to {qpath:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_turn_is_admitted_before_next_llm_iteration_after_tool_batch() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let r = rig_with_auth_and_client(
+        Arc::new(DangerousNoAuth),
+        Box::new(ToolThenRecordMessagesLlm {
+            calls: Arc::clone(&calls),
+            seen: Arc::clone(&seen),
+        }),
+    )
+    .await;
+    let id = create_chat(&r, "mid-turn queue").await;
+
+    let first = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "start a tool" }),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::ACCEPTED);
+
+    for _ in 0..100 {
+        if calls.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let queued = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "user follow-up while tool is running" }),
+    )
+    .await;
+    assert_eq!(queued.status(), StatusCode::OK);
+    let queued_body = body_json(queued).await;
+    assert_eq!(queued_body["queued"], true);
+
+    for _ in 0..200 {
+        if calls.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        calls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "tool batch should complete and trigger the next LLM iteration"
+    );
+
+    let seen = seen.lock().unwrap();
+    let second_iteration = seen
+        .get(1)
+        .expect("second LLM call should have been recorded");
+    let follow_up_pos = second_iteration.iter().position(|message| {
+        message.role == dyson::message::Role::User
+            && message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text } if text == "user follow-up while tool is running"
+                )
+            })
+    });
+    let tool_result_pos = second_iteration.iter().position(|message| {
+        message.role == dyson::message::Role::User
+            && message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "call_queued_midturn"))
+    });
+
+    assert!(
+        matches!((tool_result_pos, follow_up_pos), (Some(tool_pos), Some(follow_pos)) if follow_pos > tool_pos),
+        "queued follow-up must be visible after the tool_result before the second LLM call: {second_iteration:?}"
+    );
 }
 
 #[tokio::test]
