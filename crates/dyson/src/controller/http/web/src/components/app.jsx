@@ -326,6 +326,12 @@ function ConversationView({ conv, toolRef, setToolRef }) {
   const agentName = useAppState(s => s.agentName);
   const mcpServers = useAppState(s => s.skills?.mcp || []);
   const scrollRef = useRef(null);
+  const pinnedToBottomRef = useRef(true);
+
+  const handleTranscriptScroll = useCallback((event) => {
+    const el = event.currentTarget;
+    pinnedToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 32;
+  }, []);
 
   // URL → state: when the hash points at a specific tool ref (deep-
   // link, back-button restore), expand the matching inline tool block
@@ -373,19 +379,22 @@ function ConversationView({ conv, toolRef, setToolRef }) {
   }, [conv, client]);
 
   // Auto-scroll.  Pin to bottom on first entry so chats open at the
-  // latest message; "near-bottom only" for deltas so users scrolled up
-  // to read older context don't get yanked down.  Layout effect because
-  // a paint-then-scroll sequence briefly shows the top of the
-  // transcript and reads as jank.
+  // latest message; after that keep following only while the user has
+  // left the transcript pinned.  The pin is captured from scroll events
+  // so a large tool-result render cannot make one height jump look like
+  // a deliberate scroll-away.  Layout effect because a paint-then-scroll
+  // sequence briefly shows the top of the transcript and reads as jank.
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el || !session) return;
-    if (session.justScrollOnNextRender && session.liveTurns.length > 0) {
+    const shouldForceScroll = session.justScrollOnNextRender && session.liveTurns.length > 0;
+    if (shouldForceScroll || pinnedToBottomRef.current) {
       el.scrollTop = el.scrollHeight;
-      updateSession(conv, s => s.justScrollOnNextRender ? { ...s, justScrollOnNextRender: false } : s);
-      return;
+      pinnedToBottomRef.current = true;
     }
-    if (el.scrollHeight - el.scrollTop - el.clientHeight < 240) el.scrollTop = el.scrollHeight;
+    if (shouldForceScroll) {
+      updateSession(conv, s => s.justScrollOnNextRender ? { ...s, justScrollOnNextRender: false } : s);
+    }
   });
 
   const handleOpenTool = (ref) => {
@@ -520,7 +529,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
           </button>
         </div>
       </div>
-      <div className="transcript" ref={scrollRef}>
+      <div className="transcript" ref={scrollRef} onScroll={handleTranscriptScroll}>
         <div className="inner">
           {empty ? <EmptyState/> : session.liveTurns.map((t, i) => (
             <Turn key={i} turn={t} tools={tools}

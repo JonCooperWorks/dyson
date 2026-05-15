@@ -86,6 +86,19 @@ describe('app.jsx — keyboard + session regressions', () => {
     expect(app).toContain('justScrollOnNextRender');
   });
 
+  it('transcript bottom pin survives large tool-result renders', () => {
+    // A single tool result can add more than a small near-bottom
+    // threshold to scrollHeight.  The transcript must remember whether
+    // the user wanted to follow before that mutation lands.
+    expect(app).toContain('const pinnedToBottomRef = useRef(true)');
+    expect(app).toContain('const handleTranscriptScroll = useCallback');
+    expect(app).toContain('pinnedToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 32');
+    expect(app).toContain('onScroll={handleTranscriptScroll}');
+    expect(app).toContain('if (shouldForceScroll || pinnedToBottomRef.current)');
+    expect(app, 'must not reintroduce the mutation-time 240px near-bottom gate')
+      .not.toMatch(/scrollHeight\s*-\s*el\.scrollTop\s*-\s*el\.clientHeight\s*<\s*240/);
+  });
+
   it('per-chat session state survives conv switch', () => {
     // Regression for "moving from a chat seems to kill it" and "the tool
     // stack is not per conversation".  Sessions now live in a reactive
