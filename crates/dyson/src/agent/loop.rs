@@ -369,6 +369,7 @@ impl Agent {
 
             self.conversation.messages.push(assistant_msg);
             self.execute_tool_calls(&tool_calls, output).await?;
+            self.admit_pending_user_messages(output).await?;
             self.limiter.reset_turn();
 
             self.maybe_inject_budget_warning(iteration, output);
@@ -393,6 +394,27 @@ impl Agent {
 
         output.flush()?;
         Ok(final_text)
+    }
+
+    async fn admit_pending_user_messages(&mut self, output: &mut dyn Output) -> Result<()> {
+        let mut admitted = Vec::new();
+        let count = {
+            let mut admit =
+                |message: Message| -> std::result::Result<(), crate::error::DysonError> {
+                    self.conversation.messages.push(message.clone());
+                    self.persist();
+                    admitted.push(message);
+                    Ok(())
+                };
+            output.admit_pending_user_messages(&mut admit).await?
+        };
+        if count == 0 {
+            return Ok(());
+        }
+        for message in admitted {
+            output.user_message(&message)?;
+        }
+        Ok(())
     }
 
     /// Collect ephemeral per-turn context from all skills.

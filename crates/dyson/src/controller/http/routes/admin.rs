@@ -38,8 +38,8 @@ use hyper::{Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::RwLock;
 
 use super::super::responses::{Resp, bad_request, boxed, json_ok, read_json_capped, unauthorized};
 use super::super::state::HttpState;
@@ -275,10 +275,7 @@ async fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> O
             {
                 Ok(mut file) => {
                     if let Err(e) = file.write_all(hash.as_bytes()).await {
-                        return Some(bad_request(&format!(
-                            "write {}: {e}",
-                            hash_path.display()
-                        )));
+                        return Some(bad_request(&format!("write {}: {e}", hash_path.display())));
                     }
                     #[cfg(unix)]
                     {
@@ -294,7 +291,9 @@ async fn authorize_configure(headers: &hyper::HeaderMap, state: &HttpState) -> O
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     match tokio::fs::read_to_string(&hash_path).await {
-                        Ok(stored) => verify_configure_secret(&hash_path, secret, stored, state).await,
+                        Ok(stored) => {
+                            verify_configure_secret(&hash_path, secret, stored, state).await
+                        }
                         Err(e) => Some(bad_request(&format!("read {}: {e}", hash_path.display()))),
                     }
                 }
@@ -454,36 +453,36 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         || body.instance_id.is_some()
         || body.identity_doc.is_some()
     {
-            let mut ws = match crate::workspace::create_workspace(&snapshot.workspace) {
-                Ok(w) => w,
-                Err(e) => return bad_request(&format!("workspace open failed: {e}")),
-            };
-            if let Some(identity_doc) = body.identity_doc.as_deref() {
-                if !looks_like_full_identity_doc(identity_doc) {
-                    return bad_request("identity_doc must be a full IDENTITY.md document");
-                }
-                ws.set("IDENTITY.md", identity_doc);
-            } else {
-                // Merge: keep the existing IDENTITY.md fields when the new
-                // body omits them, so a partial update doesn't wipe identity.
-                // Extract first into owned Strings so the merge doesn't dangle
-                // references to temporaries.
-                let existing = ws.get("IDENTITY.md").unwrap_or_default();
-                let prior_name = extract_field(&existing, "Name");
-                let prior_instance = extract_field(&existing, "Swarm instance id");
-                let prior_mission = extract_section(&existing, "Mission")
-                    .or_else(|| looks_like_full_identity_doc(&existing).then(|| existing.clone()));
-                let merged = build_identity_md(
-                    body.name.as_deref().or(prior_name.as_deref()),
-                    body.instance_id.as_deref().or(prior_instance.as_deref()),
-                    body.task.as_deref().or(prior_mission.as_deref()),
-                );
-                ws.set("IDENTITY.md", &merged);
+        let mut ws = match crate::workspace::create_workspace(&snapshot.workspace) {
+            Ok(w) => w,
+            Err(e) => return bad_request(&format!("workspace open failed: {e}")),
+        };
+        if let Some(identity_doc) = body.identity_doc.as_deref() {
+            if !looks_like_full_identity_doc(identity_doc) {
+                return bad_request("identity_doc must be a full IDENTITY.md document");
             }
-            if let Err(e) = ws.save() {
-                return bad_request(&format!("workspace save failed: {e}"));
-            }
-            true
+            ws.set("IDENTITY.md", identity_doc);
+        } else {
+            // Merge: keep the existing IDENTITY.md fields when the new
+            // body omits them, so a partial update doesn't wipe identity.
+            // Extract first into owned Strings so the merge doesn't dangle
+            // references to temporaries.
+            let existing = ws.get("IDENTITY.md").unwrap_or_default();
+            let prior_name = extract_field(&existing, "Name");
+            let prior_instance = extract_field(&existing, "Swarm instance id");
+            let prior_mission = extract_section(&existing, "Mission")
+                .or_else(|| looks_like_full_identity_doc(&existing).then(|| existing.clone()));
+            let merged = build_identity_md(
+                body.name.as_deref().or(prior_name.as_deref()),
+                body.instance_id.as_deref().or(prior_instance.as_deref()),
+                body.task.as_deref().or(prior_mission.as_deref()),
+            );
+            ws.set("IDENTITY.md", &merged);
+        }
+        if let Err(e) = ws.save() {
+            return bad_request(&format!("workspace save failed: {e}"));
+        }
+        true
     } else {
         false
     };
@@ -1226,13 +1225,12 @@ async fn patch_config_once(
     path: &std::path::Path,
     patch: ConfigureConfigPatch<'_>,
 ) -> std::result::Result<AppliedConfigPatch, ConfigureConfigPatchError> {
-    let raw =
-        tokio::fs::read_to_string(path)
-            .await
-            .map_err(|source| ConfigureConfigPatchError::Read {
+    let raw = tokio::fs::read_to_string(path).await.map_err(|source| {
+        ConfigureConfigPatchError::Read {
             path: path.to_path_buf(),
             source,
-        })?;
+        }
+    })?;
     let mut doc: Value =
         serde_json::from_str(&raw).map_err(|source| ConfigureConfigPatchError::Parse {
             path: path.to_path_buf(),
@@ -1345,9 +1343,7 @@ fn patch_image_generation_doc(
     Ok(())
 }
 
-fn clear_skills_doc(
-    doc: &mut Value,
-) -> std::result::Result<bool, ConfigureConfigPatchError> {
+fn clear_skills_doc(doc: &mut Value) -> std::result::Result<bool, ConfigureConfigPatchError> {
     Ok(doc
         .as_object_mut()
         .ok_or(ConfigureConfigPatchError::RootNotObject)?

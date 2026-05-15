@@ -13,8 +13,8 @@
 // public docs.
 // ===========================================================================
 
-use std::sync::Arc;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::net::TcpListener;
 
@@ -162,6 +162,7 @@ pub async fn emit_agent_file_for_tool(
         artefacts: state.artefacts.clone(),
         next_artefact_id: state.artefact_id.clone(),
         data_dir: state.data_dir.clone(),
+        pending: None,
         current_tool_use_id: tool_use_id.map(|s| s.to_string()),
         ingest: Arc::clone(&state.ingest),
     };
@@ -208,6 +209,7 @@ pub async fn emit_agent_artefact(
         artefacts: state.artefacts.clone(),
         next_artefact_id: state.artefact_id.clone(),
         data_dir: state.data_dir.clone(),
+        pending: None,
         current_tool_use_id: None,
         ingest: Arc::clone(&state.ingest),
     };

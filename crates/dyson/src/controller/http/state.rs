@@ -51,6 +51,7 @@ use crate::auth::Auth;
 use crate::chat_history::ChatHistory;
 use crate::config::{ActiveProvider, Settings};
 use crate::feedback::FeedbackStore;
+use crate::message::Message;
 use crate::util::resolve_tilde;
 
 use super::ClientRegistry;
@@ -322,6 +323,61 @@ mod ring_tests {
             "next_id must remain monotonic across clear ({next} <= {last_done})"
         );
     }
+
+    #[tokio::test]
+    async fn mid_turn_text_admission_persists_empty_queue_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = ChatHandle::new("c-test".to_string(), "test".to_string(), Some(tmp.path()));
+        handle
+            .enqueue_turn(QueuedTurn {
+                prompt: "while you work".to_string(),
+                attachments: Vec::new(),
+            })
+            .await;
+        let qpath = handle.queue_path.clone().unwrap();
+        assert!(qpath.exists(), "enqueue persists queue file");
+
+        let mut admitted = Vec::new();
+        let count = handle
+            .admit_text_only_queued_turns(|message| {
+                admitted.push(message);
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(admitted.len(), 1);
+        assert!(
+            !qpath.exists(),
+            "admitting the last queued turn removes queue.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_turn_admission_leaves_attachment_turns_for_end_of_turn_drain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = ChatHandle::new("c-test".to_string(), "test".to_string(), Some(tmp.path()));
+        handle
+            .enqueue_turn(QueuedTurn {
+                prompt: "see attached".to_string(),
+                attachments: vec![QueuedAttachment {
+                    mime_type: "text/plain".to_string(),
+                    name: Some("note.txt".to_string()),
+                    data_base64: "aGVsbG8=".to_string(),
+                }],
+            })
+            .await;
+
+        let count = handle
+            .admit_text_only_queued_turns(|_| panic!("attachment turn must not admit mid-turn"))
+            .await
+            .unwrap();
+
+        assert_eq!(count, 0);
+        assert_eq!(handle.queued.lock().unwrap().len(), 1);
+        assert!(handle.queue_path.clone().unwrap().exists());
+    }
 }
 
 impl ChatHandle {
@@ -413,6 +469,51 @@ impl ChatHandle {
             self.persist_queue().await;
         }
         drained
+    }
+
+    /// Admit queued text-only turns while a tool-using agent turn is
+    /// still running.  Attachment turns remain queued for the existing
+    /// end-of-turn path because resolving media belongs to
+    /// `Agent::run_with_attachments`, not this controller-side queue.
+    pub(crate) async fn admit_text_only_queued_turns<F>(
+        &self,
+        mut admit: F,
+    ) -> crate::error::Result<usize>
+    where
+        F: FnMut(Message) -> crate::error::Result<()>,
+    {
+        let candidates: Vec<QueuedTurn> = {
+            let q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
+            q.iter()
+                .take_while(|turn| turn.attachments.is_empty())
+                .cloned()
+                .collect()
+        };
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+
+        for turn in &candidates {
+            admit(Message::user(&turn.prompt))?;
+        }
+
+        let mut removed = 0usize;
+        {
+            let mut q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
+            for _ in 0..candidates.len() {
+                match q.front() {
+                    Some(turn) if turn.attachments.is_empty() => {
+                        q.pop_front();
+                        removed += 1;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        if removed > 0 {
+            self.persist_queue().await;
+        }
+        Ok(removed)
     }
 
     /// Drop every queued turn without acting on them.  Used by `/clear`

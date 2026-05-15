@@ -330,6 +330,7 @@ pub(super) async fn post(
             artefacts,
             next_artefact_id: artefact_id,
             data_dir,
+            pending: Some(Arc::clone(&chat_handle)),
             current_tool_use_id: None,
             ingest,
         };

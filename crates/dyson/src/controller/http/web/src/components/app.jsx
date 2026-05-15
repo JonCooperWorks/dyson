@@ -25,7 +25,7 @@ import {
 import {
   ensureSession, updateSession, getSession, getResources, mintToolRef,
   mapLastTurn, appendBlock, mapAgentTail, appendAgentBlock,
-  pushUserMessage, openPanel, closePanel,
+  pushUserMessage, admitUserMessage, openPanel, closePanel,
 } from '../store/sessions.js';
 
 const MindView = lazy(() =>
@@ -747,6 +747,11 @@ function streamCallbacks(conv) {
           body: { url, name, mime: mime_type, prompt: t.prompt || '' },
         }));
       }
+    },
+
+    onUserMessage: ({ blocks }) => {
+      const ts = new Date().toTimeString().slice(0, 8);
+      updateSession(conv, s => admitUserMessage(s, { ts, blocks: blocks || [] }));
     },
 
     onArtefact: ({ id, kind, title, url, bytes, metadata }) => {

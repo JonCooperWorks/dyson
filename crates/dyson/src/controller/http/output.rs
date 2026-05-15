@@ -16,13 +16,14 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::error::DysonError;
+use crate::message::{ContentBlock, Message};
 use crate::tool::{CheckpointEvent, ToolOutput};
 
 use super::Output;
 use super::responses::mime_for_extension;
-use super::state::IngestConfig;
+use super::state::{ChatHandle, IngestConfig};
 use super::stores::{ArtefactEntry, ArtefactStore, FileEntry, FileStore};
-use super::wire::SseEvent;
+use super::wire::{BlockDto, SseEvent};
 
 pub(crate) struct SseOutput {
     /// Which chat this output is scoped to — stamped onto every
@@ -48,6 +49,10 @@ pub(crate) struct SseOutput {
     pub(crate) next_artefact_id: Arc<std::sync::atomic::AtomicU64>,
     /// Optional write-through disk directory for persistence.
     pub(crate) data_dir: Option<PathBuf>,
+    /// Chat handle used to drain queued user turns between tool-call
+    /// batches.  Test-created outputs and non-chat uses leave this
+    /// unset and inherit the Output trait's no-op behavior.
+    pub(crate) pending: Option<Arc<ChatHandle>>,
     /// Currently-executing tool's id.  Set in `tool_use_start` and
     /// carried across subsequent `send_file` / `send_artefact` calls
     /// that the agent loop triggers from the same `ToolOutput`.  The
@@ -88,6 +93,52 @@ impl SseOutput {
         // emits whether or not anyone is listening, the ring covers
         // late subscribers.
         let _ = self.tx.send(evt);
+    }
+}
+
+fn content_block_to_dto(block: &ContentBlock) -> BlockDto {
+    match block {
+        ContentBlock::Text { text } => BlockDto::Text { text: text.clone() },
+        ContentBlock::Thinking { thinking } => BlockDto::Thinking {
+            thinking: thinking.clone(),
+        },
+        ContentBlock::ToolUse { id, name, input } => BlockDto::ToolUse {
+            id: id.clone(),
+            name: name.clone(),
+            input: input.clone(),
+        },
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => BlockDto::ToolResult {
+            tool_use_id: tool_use_id.clone(),
+            content: content.clone(),
+            is_error: *is_error,
+        },
+        ContentBlock::Artefact { id, kind, title } => BlockDto::Artefact {
+            id: id.clone(),
+            kind: *kind,
+            title: title.clone(),
+            url: format!("/#/artefacts/{id}"),
+            bytes: 0,
+            tool_use_id: None,
+            metadata: None,
+        },
+        ContentBlock::Image { data, media_type } => BlockDto::File {
+            name: "image".to_string(),
+            mime: media_type.clone(),
+            bytes: data.len() * 3 / 4,
+            url: format!("data:{media_type};base64,{data}"),
+            inline_image: true,
+        },
+        ContentBlock::Document { data, .. } => BlockDto::File {
+            name: "document.pdf".to_string(),
+            mime: "application/pdf".to_string(),
+            bytes: data.len() * 3 / 4,
+            url: format!("data:application/pdf;base64,{data}"),
+            inline_image: false,
+        },
     }
 }
 
@@ -431,6 +482,27 @@ impl Output for SseOutput {
         Ok(())
     }
 
+    fn admit_pending_user_messages<'a>(
+        &'a mut self,
+        admit: &'a mut (dyn FnMut(Message) -> std::result::Result<(), DysonError> + Send),
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = std::result::Result<usize, DysonError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let Some(handle) = self.pending.as_ref().cloned() else {
+                return Ok(0);
+            };
+            handle.admit_text_only_queued_turns(&mut *admit).await
+        })
+    }
+
+    fn user_message(&mut self, message: &Message) -> std::result::Result<(), DysonError> {
+        self.send(SseEvent::UserMessage {
+            blocks: message.content.iter().map(content_block_to_dto).collect(),
+        });
+        Ok(())
+    }
+
     fn error(&mut self, error: &DysonError) -> std::result::Result<(), DysonError> {
         // Sanitised message goes over the wire; full Display is written
         // to logs so operators still see the underlying IO/HTTP detail.
@@ -479,6 +551,7 @@ mod tests {
             artefacts: Arc::new(std::sync::Mutex::new(ArtefactStore::default())),
             next_artefact_id: Arc::new(AtomicU64::new(1)),
             data_dir,
+            pending: None,
             current_tool_use_id: None,
             ingest: Arc::new(std::sync::Mutex::new(ingest)),
         };

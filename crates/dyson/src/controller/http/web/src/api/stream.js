@@ -12,6 +12,7 @@
  *   tool_result — { content, is_error, view?, parent_tool_id?, tool_use_id? }
  *   checkpoint  — { text }
  *   file        — { name, mime_type, url, inline_image, parent_tool_id? }
+ *   user_message — { blocks } queued user turn admitted mid-run
  *   artefact    — { id, kind, title, url, bytes, tool_use_id?, metadata?, parent_tool_id? }
  *   title       — { title }
  *   llm_error   — { message }
@@ -44,6 +45,7 @@ export function dispatchStreamEvent(msg, callbacks) {
     case 'tool_result': callbacks.onToolResult && callbacks.onToolResult(msg); return true;
     case 'checkpoint':  callbacks.onCheckpoint && callbacks.onCheckpoint(msg); return true;
     case 'file':        callbacks.onFile && callbacks.onFile(msg); return true;
+    case 'user_message': callbacks.onUserMessage && callbacks.onUserMessage(msg); return true;
     case 'artefact':    callbacks.onArtefact && callbacks.onArtefact(msg); return true;
     case 'title':       callbacks.onTitle && callbacks.onTitle(msg); return true;
     case 'llm_error':   callbacks.onError && callbacks.onError(msg.message); return true;

@@ -12,6 +12,7 @@ import {
   appendBlock,
   mapAgentTail,
   appendAgentBlock,
+  admitUserMessage,
   lastAgentIndex,
   pushUserMessage,
   openPanel,
@@ -359,5 +360,49 @@ describe('pushUserMessage — idle / queue / coalesce', () => {
     expect(next.liveTurns[5].role).toBe('agent');
     expect(next.liveTurns[5].blocks).toEqual([{ type: 'text', text: '' }]);
     expect(next.running).toBe(true);
+  });
+});
+
+describe('admitUserMessage — server-confirmed queued turns', () => {
+  const blocks = (text) => [{ type: 'text', text }];
+
+  it('replaces a singular queued bubble with a delivered user turn', () => {
+    const s = {
+      ...makeSession(),
+      running: true,
+      liveTurns: [
+        { role: 'user', ts: '11:00:00', blocks: blocks('first') },
+        { role: 'agent', ts: '11:00:00', blocks: blocks('working') },
+        { role: 'user', ts: '11:00:05', blocks: blocks('second'), queued: true, queuedCount: 1 },
+      ],
+    };
+    const next = admitUserMessage(s, { ts: '11:00:09', blocks: blocks('second') });
+    const tail = next.liveTurns[next.liveTurns.length - 1];
+    expect(tail.role).toBe('user');
+    expect(tail.queued).toBeUndefined();
+    expect(tail.blocks).toEqual(blocks('second'));
+  });
+
+  it('splits one delivered message out of a merged queued bubble', () => {
+    const s = {
+      ...makeSession(),
+      running: true,
+      liveTurns: [
+        { role: 'agent', ts: '11:00:00', blocks: blocks('working') },
+        {
+          role: 'user',
+          ts: '11:00:05',
+          blocks: [...blocks('second'), ...blocks('third')],
+          queued: true,
+          queuedCount: 2,
+        },
+      ],
+    };
+    const next = admitUserMessage(s, { ts: '11:00:09', blocks: blocks('second') });
+    expect(next.liveTurns).toHaveLength(3);
+    expect(next.liveTurns[1]).toEqual({ role: 'user', ts: '11:00:09', blocks: blocks('second') });
+    expect(next.liveTurns[2].queued).toBe(true);
+    expect(next.liveTurns[2].queuedCount).toBe(1);
+    expect(next.liveTurns[2].blocks).toEqual(blocks('third'));
   });
 });

@@ -115,9 +115,7 @@ impl LlmClient for ToolThenRecordMessagesLlm {
         _tools: &[ToolDefinition],
         _config: &CompletionConfig,
     ) -> dyson::error::Result<StreamResponse> {
-        let call = self
-            .calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.seen.lock().unwrap().push(messages.to_vec());
         let events = if call == 0 {
             vec![

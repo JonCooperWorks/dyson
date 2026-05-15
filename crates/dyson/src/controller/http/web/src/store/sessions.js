@@ -234,6 +234,31 @@ export const pushUserMessage = (s, { ts, blocks }) => {
   };
 };
 
+export const admitUserMessage = (s, { ts, blocks }) => {
+  const delivered = { role: 'user', ts, blocks };
+  const tail = s.liveTurns[s.liveTurns.length - 1];
+  if (!(tail && tail.role === 'user' && tail.queued)) {
+    return { ...s, liveTurns: [...s.liveTurns, delivered] };
+  }
+
+  const before = s.liveTurns.slice(0, -1);
+  const queuedCount = tail.queuedCount || 1;
+  if (queuedCount <= 1) {
+    return { ...s, liveTurns: [...before, delivered] };
+  }
+
+  const remainingBlocks = tail.blocks.slice(blocks.length);
+  const remainingQueued = {
+    ...tail,
+    blocks: remainingBlocks.length ? remainingBlocks : tail.blocks,
+    queuedCount: queuedCount - 1,
+  };
+  return {
+    ...s,
+    liveTurns: [...before, delivered, remainingQueued],
+  };
+};
+
 export const openPanel = (s, ref) => ({
   ...s,
   panels: s.panels.includes(ref) ? s.panels : [...s.panels, ref],

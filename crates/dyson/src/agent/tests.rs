@@ -77,7 +77,10 @@ impl MockLlm {
 }
 
 impl RecordingMessagesLlm {
-    fn new(responses: Vec<Vec<StreamEvent>>, seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>) -> Self {
+    fn new(
+        responses: Vec<Vec<StreamEvent>>,
+        seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+    ) -> Self {
         Self {
             responses: std::sync::Mutex::new(responses),
             seen,
@@ -1062,7 +1065,11 @@ async fn admits_pending_user_message_after_tool_results_before_next_llm_call() {
     assert_eq!(result, "I saw the follow-up.");
 
     let seen = seen.lock().unwrap();
-    assert_eq!(seen.len(), 2, "tool call should force a second LLM iteration");
+    assert_eq!(
+        seen.len(),
+        2,
+        "tool call should force a second LLM iteration"
+    );
     let second_iteration = &seen[1];
     assert!(
         second_iteration.len() >= 4,
