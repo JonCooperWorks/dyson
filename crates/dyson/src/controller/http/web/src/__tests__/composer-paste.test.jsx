@@ -6,9 +6,12 @@ import {
   clipboardImageFiles,
   composerLockedViewportContent,
   pinComposerFocusGuard,
+  prepareComposerFocus,
 } from '../components/turns.jsx';
 
 const originalMatchMedia = window.matchMedia;
+const originalRequestAnimationFrame = window.requestAnimationFrame;
+const originalScrollTo = window.scrollTo;
 
 afterEach(() => {
   cleanup();
@@ -18,6 +21,16 @@ afterEach(() => {
     window.matchMedia = originalMatchMedia;
   } else {
     delete window.matchMedia;
+  }
+  if (originalRequestAnimationFrame) {
+    window.requestAnimationFrame = originalRequestAnimationFrame;
+  } else {
+    delete window.requestAnimationFrame;
+  }
+  if (originalScrollTo) {
+    window.scrollTo = originalScrollTo;
+  } else {
+    delete window.scrollTo;
   }
 });
 
@@ -38,9 +51,18 @@ function mockMobile(matches) {
   });
 }
 
+function mockViewportScrollReset() {
+  window.scrollTo = vi.fn();
+  window.requestAnimationFrame = vi.fn(cb => {
+    cb();
+    return 1;
+  });
+}
+
 describe('Composer image paste', () => {
   it('pins the mobile composer textarea above the iOS focus-zoom threshold before focus sampling', () => {
     mockMobile(true);
+    mockViewportScrollReset();
     const { container } = render(
       <Composer onSend={() => {}} onCancel={() => {}} running={false}/>
     );
@@ -73,6 +95,7 @@ describe('Composer image paste', () => {
   it('temporarily locks maximum scale while the composer is focused, then restores the page viewport', () => {
     vi.useFakeTimers();
     mockMobile(true);
+    mockViewportScrollReset();
     const meta = document.createElement('meta');
     meta.name = 'viewport';
     meta.content = 'width=device-width, initial-scale=1';
@@ -99,6 +122,21 @@ describe('Composer image paste', () => {
   it('normalizes the focus-time viewport lock without making zoom permanently inaccessible', () => {
     expect(composerLockedViewportContent('width=device-width, initial-scale=1, maximum-scale=4, user-scalable=yes'))
       .toBe('width=device-width, initial-scale=1, maximum-scale=1');
+  });
+
+  it('recenters the layout viewport after mobile composer focus settles', () => {
+    mockMobile(true);
+    const textarea = document.createElement('textarea');
+    mockViewportScrollReset();
+    document.documentElement.scrollTop = 123;
+    document.body.scrollTop = 456;
+
+    prepareComposerFocus(textarea);
+
+    expect(window.requestAnimationFrame).toHaveBeenCalledTimes(2);
+    expect(window.scrollTo).toHaveBeenCalledWith(0, 0);
+    expect(document.documentElement.scrollTop).toBe(0);
+    expect(document.body.scrollTop).toBe(0);
   });
 
   it('extracts only image files from clipboard data and dedupes item/file mirrors', () => {

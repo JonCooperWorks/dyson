@@ -10,6 +10,7 @@ const styles = [
 describe('mobile chat scroll containment', () => {
   test.each(styles)('%s locks the root scroller on mobile', (_name, css) => {
     expect(css).toMatch(/@media \(max-width: 760px\)[\s\S]*html,\s*body\s*\{[\s\S]*min-height:\s*0;[\s\S]*overflow:\s*hidden;[\s\S]*overscroll-behavior:\s*none;/);
+    expect(css).toMatch(/@media \(max-width: 760px\)[\s\S]*body\s*\{[\s\S]*position:\s*fixed;[\s\S]*inset:\s*0;/);
     expect(css).toMatch(/@media \(max-width: 760px\)[\s\S]*#root,\s*\.app\s*\{[\s\S]*min-height:\s*0;[\s\S]*overflow:\s*hidden;/);
   });
 });

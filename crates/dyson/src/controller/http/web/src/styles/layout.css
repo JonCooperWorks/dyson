@@ -777,6 +777,10 @@
     overflow: hidden;
     overscroll-behavior: none;
   }
+  body {
+    position: fixed;
+    inset: 0;
+  }
   #root,
   .app {
     width: 100%;

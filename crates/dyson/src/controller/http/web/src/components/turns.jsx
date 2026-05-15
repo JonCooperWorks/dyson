@@ -70,6 +70,12 @@ function composerFocusFontSize() {
     : COMPOSER_DESKTOP_FONT_SIZE;
 }
 
+function composerMobileViewport() {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia(COMPOSER_MOBILE_QUERY).matches;
+}
+
 function viewportMeta() {
   if (typeof document === 'undefined') return null;
   return document.querySelector('meta[name="viewport"]');
@@ -106,9 +112,26 @@ function setComposerViewportLocked(locked) {
   }, 250);
 }
 
+function recenterComposerRootScroll() {
+  if (!composerMobileViewport() || typeof document === 'undefined') return;
+  const schedule = typeof window.requestAnimationFrame === 'function'
+    ? window.requestAnimationFrame.bind(window)
+    : (cb) => setTimeout(cb, 0);
+  schedule(() => {
+    schedule(() => {
+      // WebKit may scroll the layout viewport after focus even with a
+      // fixed app shell.  Put the root back; the transcript owns scroll.
+      if (typeof window.scrollTo === 'function') window.scrollTo(0, 0);
+      document.documentElement.scrollTop = 0;
+      if (document.body) document.body.scrollTop = 0;
+    });
+  });
+}
+
 function prepareComposerFocus(el) {
   pinComposerFocusGuard(el);
   setComposerViewportLocked(true);
+  recenterComposerRootScroll();
 }
 
 function releaseComposerFocus() {
