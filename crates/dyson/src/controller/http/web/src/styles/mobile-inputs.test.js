@@ -1,15 +1,23 @@
 import { describe, expect, test } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { composerLockedViewportContent } from '../components/turns.jsx';
 
 const indexHtml = readFileSync(join(process.cwd(), 'index.html'), 'utf8');
 const swarmThemeCss = readFileSync(join(process.cwd(), 'src/styles/swarm-theme.css'), 'utf8');
 const turnsCss = readFileSync(join(process.cwd(), 'src/styles/turns.css'), 'utf8');
 
 describe('mobile form controls', () => {
-  test('keeps viewport zoom accessible', () => {
-    expect(indexHtml).toContain('<meta name="viewport" content="width=device-width, initial-scale=1"/>');
-    expect(indexHtml).not.toMatch(/maximum-scale|user-scalable/);
+  test('bakes the iOS focus-zoom lock into the base viewport meta', () => {
+    expect(indexHtml).toContain('<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"/>');
+    expect(indexHtml).not.toMatch(/user-scalable/);
+  });
+
+  test('keeps the composer focus-time viewport lock in place', () => {
+    expect(composerLockedViewportContent('width=device-width, initial-scale=1'))
+      .toContain('maximum-scale=1');
+    expect(composerLockedViewportContent('width=device-width, initial-scale=1, maximum-scale=2, user-scalable=no'))
+      .toBe('width=device-width, initial-scale=1, maximum-scale=1');
   });
 
   test('keeps mobile inputs at 16px or larger so iOS does not zoom on focus', () => {
