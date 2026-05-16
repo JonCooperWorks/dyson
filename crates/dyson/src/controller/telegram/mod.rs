@@ -77,6 +77,8 @@ use self::output::TelegramOutput;
 // Constants
 // ---------------------------------------------------------------------------
 
+const WARMUP_PLACEHOLDER: &str = "warmup-placeholder";
+
 /// Per-chat agent state, tracking the active provider and model
 /// so within-provider model switching works.
 ///
@@ -604,6 +606,48 @@ impl super::Controller for TelegramController {
                 }
             };
 
+            // A webhook-mode controller can sit parked on rx.recv()
+            // indefinitely. If swarm reconfigured the warmup cube while
+            // we were waiting, consume that settings update before the
+            // first Telegram update builds a per-chat agent.
+            if let Some(rx) = settings_rx.as_mut()
+                && rx.has_changed().unwrap_or(false)
+            {
+                let fresh = rx.borrow_and_update().clone();
+                current_settings = (*fresh).clone();
+                if let Some(updated) = Self::from_settings(&current_settings) {
+                    active_config = updated;
+                    bot = active_config.build_bot();
+                    allowed_ids = active_config.allowed_chat_ids.clone();
+                    download_limits = Arc::clone(&active_config.download_limits);
+                    match bot.get_me().await {
+                        Ok(me) => {
+                            bot_username = me.username.unwrap_or_default().to_lowercase();
+                            bot_id = me.id;
+                            tracing::info!(
+                                bot_username = bot_username.as_str(),
+                                "telegram bot identity refreshed after settings reload"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "telegram getMe failed after settings reload"
+                            );
+                        }
+                    }
+                }
+                rebuild_agents_on_reload(
+                    &agents,
+                    &current_settings,
+                    controller_prompt.as_deref(),
+                    &chat_store,
+                    &feedback_dir,
+                    registry,
+                )
+                .await;
+            }
+
             for update in &updates {
                 offset = update.update_id + 1;
 
@@ -837,8 +881,8 @@ async fn rebuild_agents_on_reload(
     let old_agents: Vec<(i64, Arc<ChatEntry>)> = agents_map.drain().collect();
     for (chat_id, entry) in old_agents {
         let ca = entry.agent.lock().await;
-        let provider_name = ca.provider_name.clone();
-        let model = ca.model.clone();
+        let previous_provider_name = ca.provider_name.clone();
+        let previous_model = ca.model.clone();
         let messages = ca
             .agent
             .as_ref()
@@ -847,6 +891,8 @@ async fn rebuild_agents_on_reload(
             .to_vec();
         let is_group = entry.is_group;
         drop(ca);
+        let (provider_name, model) =
+            reloaded_provider_model(settings, &previous_provider_name, &previous_model, is_group);
 
         // Both public and private agents are rebuilt from scratch on config
         // reload (cheap — allocation is fine here).  Private agents with a
@@ -925,6 +971,32 @@ async fn rebuild_agents_on_reload(
     }
     drop(agents_map);
     tracing::info!("config/workspace reloaded — agents rebuilt");
+}
+
+fn reloaded_provider_model(
+    settings: &Settings,
+    previous_provider_name: &str,
+    previous_model: &str,
+    is_group: bool,
+) -> (String, String) {
+    let default_provider = super::active_provider_name(settings).unwrap_or_default();
+    let default_model = settings.agent.model.clone();
+    if is_group {
+        return (default_provider, default_model);
+    }
+    let previous_model = previous_model.trim();
+    let can_keep_previous = !previous_provider_name.trim().is_empty()
+        && !previous_model.is_empty()
+        && previous_model != WARMUP_PLACEHOLDER
+        && settings
+            .providers
+            .get(previous_provider_name)
+            .is_some_and(|pc| pc.models.iter().any(|m| m == previous_model));
+    if can_keep_previous {
+        (previous_provider_name.to_owned(), previous_model.to_owned())
+    } else {
+        (default_provider, default_model)
+    }
 }
 
 /// Handle a callback query (inline keyboard button press).
@@ -2560,6 +2632,50 @@ mod tests {
                 "{cmd} should be rejected for non-operators in groups",
             );
         }
+    }
+
+    fn settings_with_models(models: &[&str]) -> Settings {
+        let mut settings = Settings::default();
+        settings.agent.provider = crate::config::LlmProvider::OpenRouter;
+        settings.agent.model = models[0].to_string();
+        settings.active_provider = crate::config::ActiveProvider::new("openrouter", models[0]);
+        settings.providers.insert(
+            "openrouter".into(),
+            crate::config::ProviderConfig {
+                provider_type: crate::config::LlmProvider::OpenRouter,
+                models: models.iter().map(|m| (*m).to_string()).collect(),
+                api_key: crate::auth::Credential::new("token".into()),
+                base_url: Some("https://example.test".into()),
+            },
+        );
+        settings
+    }
+
+    #[test]
+    fn reload_does_not_preserve_warmup_placeholder_model() {
+        let settings = settings_with_models(&["deepseek/deepseek-v4-flash"]);
+        let (provider, model) =
+            reloaded_provider_model(&settings, "openrouter", WARMUP_PLACEHOLDER, false);
+        assert_eq!(provider, "openrouter");
+        assert_eq!(model, "deepseek/deepseek-v4-flash");
+    }
+
+    #[test]
+    fn reload_preserves_valid_private_chat_model_choice() {
+        let settings = settings_with_models(&["deepseek/deepseek-v4-flash", "qwen/qwen3.6-plus"]);
+        let (provider, model) =
+            reloaded_provider_model(&settings, "openrouter", "qwen/qwen3.6-plus", false);
+        assert_eq!(provider, "openrouter");
+        assert_eq!(model, "qwen/qwen3.6-plus");
+    }
+
+    #[test]
+    fn reload_group_chat_uses_default_model() {
+        let settings = settings_with_models(&["deepseek/deepseek-v4-flash"]);
+        let (provider, model) =
+            reloaded_provider_model(&settings, "openrouter", "qwen/qwen3.6-plus", true);
+        assert_eq!(provider, "openrouter");
+        assert_eq!(model, "deepseek/deepseek-v4-flash");
     }
 
     // -------------------------------------------------------------------
