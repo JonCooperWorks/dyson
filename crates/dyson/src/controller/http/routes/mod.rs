@@ -19,8 +19,8 @@ use hyper::{Method, Request, Response, StatusCode};
 
 use super::responses::{
     Resp, apply_security_headers, boxed, client_accepts_gzip, get_auth_config, maybe_gzip,
-    method_not_allowed, misdirected_request, not_found, safe_store_id, service_unavailable,
-    unauthorized, url_decode_strict,
+    method_not_allowed, misdirected_request, not_found, read_json_capped, safe_store_id,
+    service_unavailable, unauthorized, url_decode_strict,
 };
 use super::state::HttpState;
 
@@ -126,6 +126,16 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
             }
             Err(_) => return unauthorized(&state),
         }
+    }
+
+    if matches!(
+        (&method, segs.as_slice()),
+        (&Method::POST, ["webhook", "telegram"])
+    ) {
+        if state.auth.validate_request(req.headers()).await.is_err() {
+            return unauthorized(&state);
+        }
+        return post_telegram_webhook(req).await;
     }
 
     // SSE auth: same-origin EventSource sends `Cookie: dyson_sse=<ticket>`
@@ -381,6 +391,18 @@ fn readiness_error(state: &HttpState) -> Option<&'static str> {
     }
 
     None
+}
+
+async fn post_telegram_webhook(req: Request<hyper::body::Incoming>) -> Resp {
+    let update: crate::controller::telegram::types::Update =
+        match read_json_capped(req, 8 * 1024 * 1024).await {
+            Ok(update) => update,
+            Err(err) => return super::responses::bad_request(&err),
+        };
+    match crate::controller::telegram::enqueue_webhook_update(update).await {
+        Ok(()) => super::responses::json_ok(&serde_json::json!({ "ok": true })),
+        Err(err) => service_unavailable(err),
+    }
 }
 
 /// Cookie name for the SSE ticket.  Hard-coded everywhere — the SPA

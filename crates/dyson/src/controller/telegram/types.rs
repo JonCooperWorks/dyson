@@ -30,6 +30,10 @@ pub struct Update {
     #[serde(default)]
     pub message: Option<Message>,
     #[serde(default)]
+    pub edited_message: Option<Message>,
+    #[serde(default)]
+    pub channel_post: Option<Message>,
+    #[serde(default)]
     pub callback_query: Option<CallbackQuery>,
     #[serde(default)]
     pub message_reaction: Option<MessageReactionUpdated>,

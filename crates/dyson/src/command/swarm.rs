@@ -154,6 +154,7 @@ pub async fn run() -> Result<()> {
         model_id: &model_id,
         workspace_str: &workspace_str,
         chats_str: &chats_str,
+        instance_id: &instance_id,
         auth_block,
         tools: tools.as_deref(),
     });
@@ -212,6 +213,7 @@ struct SwarmConfigInputs<'a> {
     model_id: &'a str,
     workspace_str: &'a str,
     chats_str: &'a str,
+    instance_id: &'a str,
     auth_block: serde_json::Value,
     /// Builtin-tool allowlist parsed from `SWARM_TOOLS`.  `None` ⇒ omit
     /// the `skills` block (loader interprets as "all builtins").
@@ -276,6 +278,17 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
     // shipped every dyson swarm instance toolless — bash, read_file,
     // image_generate, the lot, all silently absent.  Omitting the key
     // is the correct way to say "give me the defaults".
+    let telegram_controller = json!({
+        "type": "telegram",
+        "mode": "webhook",
+        "allow_all_chats": true,
+        "proxy": {
+            "base_url": telegram_proxy_base_url(inputs.proxy_url, inputs.instance_id),
+            "file_base_url": telegram_proxy_file_base_url(inputs.proxy_url, inputs.instance_id),
+            "bearer": inputs.api_key
+        }
+    });
+
     let mut cfg = json!({
         "config_version": dyson::config::migrate::CURRENT_VERSION,
         "providers": providers,
@@ -286,7 +299,8 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
                 "bind": inputs.bind,
                 "auth": inputs.auth_block,
                 "dangerous_no_tls": true
-            }
+            },
+            telegram_controller
         ],
         "workspace": { "connection_string": inputs.workspace_str },
         "chat_history": {
@@ -310,6 +324,27 @@ fn build_swarm_config(inputs: SwarmConfigInputs<'_>) -> serde_json::Value {
 /// `swarm_provider_base_url_has_no_trailing_v1`.
 fn swarm_provider_base_url(proxy_url: &str) -> String {
     format!("{}/openrouter", proxy_url.trim_end_matches('/'))
+}
+
+fn swarm_proxy_origin(proxy_url: &str) -> String {
+    let base = proxy_url.trim_end_matches('/');
+    base.strip_suffix("/llm").unwrap_or(base).to_owned()
+}
+
+fn telegram_proxy_base_url(proxy_url: &str, instance_id: &str) -> String {
+    let origin = swarm_proxy_origin(proxy_url);
+    if origin.is_empty() || instance_id.is_empty() {
+        return String::new();
+    }
+    format!("{origin}/v1/proxy/telegram/{instance_id}")
+}
+
+fn telegram_proxy_file_base_url(proxy_url: &str, instance_id: &str) -> String {
+    let origin = swarm_proxy_origin(proxy_url);
+    if origin.is_empty() || instance_id.is_empty() {
+        return String::new();
+    }
+    format!("{origin}/v1/proxy/telegram/{instance_id}/file")
 }
 
 #[cfg(test)]
@@ -358,6 +393,7 @@ mod tests {
             model_id: "anthropic/claude-sonnet-4-5",
             workspace_str: "/var/lib/dyson/workspace",
             chats_str: "/var/lib/dyson/chats",
+            instance_id: "inst-1",
             auth_block: json!({ "type": "dangerous_no_auth" }),
             tools: None,
         })
@@ -439,6 +475,7 @@ mod tests {
             model_id: "warmup-placeholder",
             workspace_str: "/var/lib/dyson/workspace",
             chats_str: "/var/lib/dyson/chats",
+            instance_id: "",
             auth_block: json!({ "type": "dangerous_no_auth" }),
             tools: None,
         });
@@ -462,6 +499,7 @@ mod tests {
             model_id: "anthropic/claude-sonnet-4-5",
             workspace_str: "/var/lib/dyson/workspace",
             chats_str: "/var/lib/dyson/chats",
+            instance_id: "inst-1",
             auth_block: json!({ "type": "dangerous_no_auth" }),
             tools: Some(&tools),
         });
@@ -484,6 +522,7 @@ mod tests {
             model_id: "anthropic/claude-sonnet-4-5",
             workspace_str: "/var/lib/dyson/workspace",
             chats_str: "/var/lib/dyson/chats",
+            instance_id: "inst-1",
             auth_block: json!({ "type": "dangerous_no_auth" }),
             tools: Some(&[]),
         });

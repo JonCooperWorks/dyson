@@ -17,8 +17,9 @@ use super::types::*;
 /// Lightweight Telegram Bot API client.
 #[derive(Clone)]
 pub struct BotApi {
-    token: String,
     base_url: String,
+    bearer: Option<String>,
+    file_base_url: String,
 }
 
 impl BotApi {
@@ -26,12 +27,31 @@ impl BotApi {
     pub fn new(token: impl Into<String>) -> Self {
         let token = token.into();
         let base_url = format!("https://api.telegram.org/bot{token}");
-        Self { token, base_url }
+        let file_base_url = format!("https://api.telegram.org/file/bot{token}");
+        Self::new_with_base(base_url, None, file_base_url)
     }
 
-    /// The bot token (needed for file download URLs).
-    pub fn token(&self) -> &str {
-        &self.token
+    /// Create a client against an already-authenticated Telegram-shaped
+    /// API base. Swarm mode uses this with URLs like
+    /// `/v1/proxy/telegram/<instance>`; the bot token is supplied by
+    /// swarm server-side and never appears in dyson.
+    pub fn new_with_base(
+        base_url: impl Into<String>,
+        bearer: Option<String>,
+        file_base_url: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            bearer,
+            file_base_url: file_base_url.into().trim_end_matches('/').to_owned(),
+        }
+    }
+
+    fn authed(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.bearer.as_deref() {
+            Some(token) if !token.is_empty() => builder.bearer_auth(token),
+            _ => builder,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -152,9 +172,12 @@ impl BotApi {
             .text("chat_id", chat_id.0.to_string())
             .part("document", part);
 
-        let resp = crate::http::client()
-            .post(format!("{}/sendDocument", self.base_url))
-            .multipart(form)
+        let resp = self
+            .authed(
+                crate::http::client()
+                    .post(format!("{}/sendDocument", self.base_url))
+                    .multipart(form),
+            )
             .send()
             .await
             .map_err(DysonError::Http)?;
@@ -219,13 +242,10 @@ impl BotApi {
             .file_path
             .ok_or_else(|| DysonError::Llm("Telegram getFile returned no file_path".to_string()))?;
 
-        let url = format!(
-            "https://api.telegram.org/file/bot{}/{}",
-            self.token, file_path
-        );
+        let url = format!("{}/{}", self.file_base_url, file_path);
 
-        let mut response = crate::http::client()
-            .get(&url)
+        let mut response = self
+            .authed(crate::http::client().get(&url))
             .send()
             .await
             .map_err(DysonError::Http)?;
@@ -253,9 +273,12 @@ impl BotApi {
         method: &str,
         body: &serde_json::Value,
     ) -> Result<T, DysonError> {
-        let resp = crate::http::client()
-            .post(format!("{}/{method}", self.base_url))
-            .json(body)
+        let resp = self
+            .authed(
+                crate::http::client()
+                    .post(format!("{}/{method}", self.base_url))
+                    .json(body),
+            )
             .send()
             .await
             .map_err(DysonError::Http)?;

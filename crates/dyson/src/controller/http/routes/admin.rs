@@ -207,6 +207,23 @@ pub(super) struct ConfigureBody {
     /// Per-instance `st_<32hex>` bearer for the state-file endpoint.
     #[serde(default)]
     state_sync_token: Option<String>,
+    /// Token-isolated Telegram proxy settings supplied by swarm.
+    /// Patches/creates the Telegram controller in webhook mode.
+    #[serde(default)]
+    telegram_proxy: Option<TelegramProxyConfigure>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramProxyConfigure {
+    base_url: String,
+    file_base_url: String,
+    bearer: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -533,6 +550,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     //    skills block because MCP servers are a sibling key in the
     //    loader's `JsonRoot`, not nested under `skills`.
     let mcp_applied = body.mcp_servers.is_some() && has_config;
+    let telegram_applied = body.telegram_proxy.is_some() && has_config;
 
     let config_patch = if let Some(path) = config_path {
         match patch_config_once(
@@ -573,6 +591,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
                 tools: body.tools.as_deref(),
                 reset_skills: body.reset_skills,
                 mcp_servers: body.mcp_servers.as_ref(),
+                telegram_proxy: body.telegram_proxy.as_ref(),
             },
         )
         .await
@@ -588,8 +607,10 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     let image_changed = config_patch.image_changed;
     let skills_changed = config_patch.skills_changed;
     let mcp_changed = config_patch.mcp_changed;
+    let telegram_changed = config_patch.telegram_changed;
 
-    let any_config_changed = provider_changed || image_changed || skills_changed || mcp_changed;
+    let any_config_changed =
+        provider_changed || image_changed || skills_changed || mcp_changed || telegram_changed;
 
     // Eagerly reload the settings + ClientRegistry instead of waiting
     // for the 2s polling HotReloader to notice the mtime change.  Two
@@ -692,6 +713,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "skills_applied": skills_applied,
         "mcp_servers_updated": mcp_changed,
         "mcp_servers_applied": mcp_applied,
+        "telegram_updated": telegram_changed,
+        "telegram_applied": telegram_applied,
         "ingest_updated": ingest_changed,
         "ingest_applied": ingest_applied,
         "state_sync_updated": state_sync_changed,
@@ -1169,6 +1192,7 @@ struct ConfigureConfigPatch<'a> {
     tools: Option<&'a [String]>,
     reset_skills: bool,
     mcp_servers: Option<&'a serde_json::Map<String, Value>>,
+    telegram_proxy: Option<&'a TelegramProxyConfigure>,
 }
 
 #[derive(Default)]
@@ -1177,11 +1201,16 @@ struct AppliedConfigPatch {
     image_changed: bool,
     skills_changed: bool,
     mcp_changed: bool,
+    telegram_changed: bool,
 }
 
 impl AppliedConfigPatch {
     fn any(&self) -> bool {
-        self.provider_changed || self.image_changed || self.skills_changed || self.mcp_changed
+        self.provider_changed
+            || self.image_changed
+            || self.skills_changed
+            || self.mcp_changed
+            || self.telegram_changed
     }
 }
 
@@ -1261,6 +1290,9 @@ async fn patch_config_once(
     }
     if let Some(servers) = patch.mcp_servers {
         applied.mcp_changed = patch_mcp_servers_doc(&mut doc, servers)?;
+    }
+    if let Some(proxy) = patch.telegram_proxy {
+        applied.telegram_changed = patch_telegram_controller_doc(&mut doc, proxy)?;
     }
 
     if applied.any() {
@@ -1423,6 +1455,48 @@ fn patch_mcp_servers_doc(
     } else {
         root.insert("mcp_servers".to_string(), new_block);
     }
+    Ok(true)
+}
+
+fn patch_telegram_controller_doc(
+    doc: &mut Value,
+    proxy: &TelegramProxyConfigure,
+) -> std::result::Result<bool, ConfigureConfigPatchError> {
+    let root = doc
+        .as_object_mut()
+        .ok_or(ConfigureConfigPatchError::RootNotObject)?;
+    let controllers = root
+        .entry("controllers".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or(ConfigureConfigPatchError::RootNotObject)?;
+
+    let desired = serde_json::json!({
+        "type": "telegram",
+        "mode": "webhook",
+        "allow_all_chats": true,
+        "enabled": proxy.enabled,
+        "proxy": {
+            "base_url": proxy.base_url.clone(),
+            "file_base_url": proxy.file_base_url.clone(),
+            "bearer": proxy.bearer.clone(),
+        }
+    });
+
+    if let Some(existing) = controllers.iter_mut().find(|entry| {
+        entry
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == "telegram")
+    }) {
+        if existing == &desired {
+            return Ok(false);
+        }
+        *existing = desired;
+        return Ok(true);
+    }
+
+    controllers.push(desired);
     Ok(true)
 }
 

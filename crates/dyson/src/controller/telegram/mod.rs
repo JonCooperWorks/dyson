@@ -56,11 +56,11 @@ pub mod output;
 pub mod types;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use self::api::BotApi;
-use self::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup};
-use tokio::sync::Mutex;
+use self::types::{ChatId, InlineKeyboardButton, InlineKeyboardMarkup, Update};
+use tokio::sync::{Mutex, mpsc};
 
 use serde::Deserialize;
 
@@ -142,6 +142,34 @@ const MAX_CHAT_ENTRIES: usize = 200;
 /// instead of the number of messages received.
 const MAX_IN_FLIGHT_PER_CHAT: usize = 3;
 
+static TELEGRAM_WEBHOOK_SENDER: OnceLock<RwLock<Option<mpsc::Sender<Update>>>> = OnceLock::new();
+
+pub async fn enqueue_webhook_update(update: Update) -> Result<(), &'static str> {
+    let sender = TELEGRAM_WEBHOOK_SENDER
+        .get()
+        .and_then(|slot| slot.read().ok().and_then(|guard| guard.clone()))
+        .ok_or("telegram webhook receiver is not running")?;
+    sender
+        .send(update)
+        .await
+        .map_err(|_| "telegram webhook receiver is closed")
+}
+
+fn install_webhook_sender(sender: mpsc::Sender<Update>) {
+    let slot = TELEGRAM_WEBHOOK_SENDER.get_or_init(|| RwLock::new(None));
+    if let Ok(mut guard) = slot.write() {
+        *guard = Some(sender);
+    }
+}
+
+fn clear_webhook_sender() {
+    if let Some(slot) = TELEGRAM_WEBHOOK_SENDER.get()
+        && let Ok(mut guard) = slot.write()
+    {
+        *guard = None;
+    }
+}
+
 /// Current Unix timestamp in seconds (for `last_active` bookkeeping).
 fn epoch_secs() -> i64 {
     std::time::SystemTime::now()
@@ -206,7 +234,16 @@ impl Default for DownloadLimits {
 #[derive(Debug, Deserialize)]
 struct TelegramControllerConfig {
     /// Bot API token (already resolved from secret reference by the config loader).
-    bot_token: String,
+    #[serde(default)]
+    bot_token: Option<String>,
+    /// Swarm-owned Telegram proxy config. Mutually exclusive with
+    /// `bot_token`; dyson never sees the BotFather token in this mode.
+    #[serde(default)]
+    proxy: Option<TelegramProxyConfig>,
+    /// Update delivery mode. Standalone bots default to polling;
+    /// swarm-managed bots run webhook mode.
+    #[serde(default)]
+    mode: TelegramMode,
     /// Chat IDs allowed to interact.  Empty or absent = allow all.
     ///
     /// Accepts both numbers and strings (strings are parsed to i64).
@@ -223,6 +260,26 @@ struct TelegramControllerConfig {
     /// Per-filetype download size limits.
     #[serde(default)]
     download_limits: DownloadLimits,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct TelegramProxyConfig {
+    base_url: String,
+    file_base_url: String,
+    bearer: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum TelegramMode {
+    Polling,
+    Webhook,
+}
+
+impl Default for TelegramMode {
+    fn default() -> Self {
+        Self::Polling
+    }
 }
 
 /// Deserialize chat IDs from a mix of numbers and strings.
@@ -262,7 +319,9 @@ where
 /// Telegram bot controller.
 pub struct TelegramController {
     /// Bot API token.  Uses `Credential` for zeroize-on-drop.
-    bot_token: crate::auth::Credential,
+    bot_token: Option<crate::auth::Credential>,
+    proxy: Option<TelegramProxyConfig>,
+    mode: TelegramMode,
     allowed_chat_ids: Vec<i64>,
     download_limits: Arc<DownloadLimits>,
 }
@@ -289,6 +348,20 @@ impl TelegramController {
                 }
             };
 
+        match (&tg_config.bot_token, &tg_config.proxy) {
+            (Some(_), Some(_)) => {
+                tracing::error!(
+                    "Telegram controller config must set either bot_token or proxy, not both"
+                );
+                return None;
+            }
+            (None, None) => {
+                tracing::error!("Telegram controller config requires either bot_token or proxy");
+                return None;
+            }
+            _ => {}
+        }
+
         if tg_config.allowed_chat_ids.is_empty() && !tg_config.allow_all_chats {
             tracing::error!(
                 "Telegram controller has no allowed_chat_ids and allow_all_chats is not set. \
@@ -305,10 +378,31 @@ impl TelegramController {
         }
 
         Some(Self {
-            bot_token: crate::auth::Credential::new(tg_config.bot_token),
+            bot_token: tg_config.bot_token.map(crate::auth::Credential::new),
+            proxy: tg_config.proxy,
+            mode: tg_config.mode,
             allowed_chat_ids: tg_config.allowed_chat_ids,
             download_limits: Arc::new(tg_config.download_limits),
         })
+    }
+
+    fn from_settings(settings: &Settings) -> Option<Self> {
+        settings.controllers.iter().find_map(Self::from_config)
+    }
+
+    fn build_bot(&self) -> BotApi {
+        if let Some(proxy) = &self.proxy {
+            return BotApi::new_with_base(
+                proxy.base_url.clone(),
+                Some(proxy.bearer.clone()),
+                proxy.file_base_url.clone(),
+            );
+        }
+        let token = self
+            .bot_token
+            .as_ref()
+            .expect("telegram config validation requires bot_token or proxy");
+        BotApi::new(token.expose())
     }
 }
 
@@ -339,21 +433,43 @@ impl super::Controller for TelegramController {
             env!("CARGO_PKG_VERSION")
         );
 
-        let bot = BotApi::new(self.bot_token.expose());
+        let mut active_config = Self {
+            bot_token: self
+                .bot_token
+                .as_ref()
+                .map(|token| crate::auth::Credential::new(token.expose().to_owned())),
+            proxy: self.proxy.clone(),
+            mode: self.mode,
+            allowed_chat_ids: self.allowed_chat_ids.clone(),
+            download_limits: Arc::clone(&self.download_limits),
+        };
+        let mut bot = active_config.build_bot();
 
         // Fetch the bot's own identity so we can filter group messages
         // to only those that @mention or reply to the bot.
-        let me = bot.get_me().await?;
-        let bot_username = me.username.unwrap_or_default().to_lowercase();
-        let bot_id = me.id;
+        let mut bot_username = String::new();
+        let mut bot_id = 0;
+        match bot.get_me().await {
+            Ok(me) => {
+                bot_username = me.username.unwrap_or_default().to_lowercase();
+                bot_id = me.id;
+            }
+            Err(err) if active_config.mode == TelegramMode::Webhook => {
+                tracing::warn!(
+                    error = %err,
+                    "Telegram webhook mode started before proxy is ready; will retry after configure"
+                );
+            }
+            Err(err) => return Err(err),
+        }
         if bot_username.is_empty() {
             tracing::warn!("getMe returned no username — group mention filtering will not work");
         } else {
             tracing::info!(bot_username = bot_username.as_str(), "bot identity fetched");
         }
 
-        let allowed_ids = self.allowed_chat_ids.clone();
-        let download_limits = Arc::clone(&self.download_limits);
+        let mut allowed_ids = self.allowed_chat_ids.clone();
+        let mut download_limits = Arc::clone(&self.download_limits);
         let mut current_settings = settings.clone();
         let controller_prompt = self.system_prompt().map(std::string::ToString::to_string);
 
@@ -384,6 +500,13 @@ impl super::Controller for TelegramController {
         let mut offset: i64 = 0;
         let mut consecutive_failures: u64 = 0;
         let mut backoff_secs: u64 = 1;
+        let mut webhook_rx = if active_config.mode == TelegramMode::Webhook {
+            let (tx, rx) = mpsc::channel(256);
+            install_webhook_sender(tx);
+            Some(rx)
+        } else {
+            None
+        };
 
         loop {
             // Pull any published settings change since the last
@@ -397,6 +520,28 @@ impl super::Controller for TelegramController {
             {
                 let fresh = rx.borrow_and_update().clone();
                 current_settings = (*fresh).clone();
+                if let Some(updated) = Self::from_settings(&current_settings) {
+                    active_config = updated;
+                    bot = active_config.build_bot();
+                    allowed_ids = active_config.allowed_chat_ids.clone();
+                    download_limits = Arc::clone(&active_config.download_limits);
+                    match bot.get_me().await {
+                        Ok(me) => {
+                            bot_username = me.username.unwrap_or_default().to_lowercase();
+                            bot_id = me.id;
+                            tracing::info!(
+                                bot_username = bot_username.as_str(),
+                                "telegram bot identity refreshed after settings reload"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                "telegram getMe failed after settings reload"
+                            );
+                        }
+                    }
+                }
                 rebuild_agents_on_reload(
                     &agents,
                     &current_settings,
@@ -408,41 +553,54 @@ impl super::Controller for TelegramController {
                 .await;
             }
 
-            // Poll for updates with a timeout, racing against Ctrl-C.
-            let updates = tokio::select! {
-                result = bot.get_updates(offset, 30) => {
-                    match result {
-                        Ok(updates) => {
-                            if consecutive_failures > 0 {
-                                tracing::info!(
-                                    consecutive_failures,
-                                    "getUpdates recovered after network errors",
-                                );
-                            }
-                            consecutive_failures = 0;
-                            backoff_secs = 1;
-                            updates
-                        }
-                        Err(e) => {
-                            consecutive_failures += 1;
-                            if consecutive_failures.is_multiple_of(30) {
-                                tracing::warn!(
-                                    error = %e,
-                                    consecutive_failures,
-                                    "getUpdates has been failing for a while",
-                                );
-                            } else {
-                                tracing::debug!(error = %e, consecutive_failures, "getUpdates failed — retrying");
-                            }
-                            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-                            backoff_secs = (backoff_secs * 2).min(60);
-                            continue;
-                        }
+            let updates = if let Some(rx) = webhook_rx.as_mut() {
+                tokio::select! {
+                    update = rx.recv() => match update {
+                        Some(update) => vec![update],
+                        None => break,
+                    },
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("\nshutting down");
+                        break;
                     }
                 }
-                _ = tokio::signal::ctrl_c() => {
-                    eprintln!("\nshutting down");
-                    break;
+            } else {
+                // Poll for updates with a timeout, racing against Ctrl-C.
+                tokio::select! {
+                    result = bot.get_updates(offset, 30) => {
+                        match result {
+                            Ok(updates) => {
+                                if consecutive_failures > 0 {
+                                    tracing::info!(
+                                        consecutive_failures,
+                                        "getUpdates recovered after network errors",
+                                    );
+                                }
+                                consecutive_failures = 0;
+                                backoff_secs = 1;
+                                updates
+                            }
+                            Err(e) => {
+                                consecutive_failures += 1;
+                                if consecutive_failures.is_multiple_of(30) {
+                                    tracing::warn!(
+                                        error = %e,
+                                        consecutive_failures,
+                                        "getUpdates has been failing for a while",
+                                    );
+                                } else {
+                                    tracing::debug!(error = %e, consecutive_failures, "getUpdates failed — retrying");
+                                }
+                                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                                backoff_secs = (backoff_secs * 2).min(60);
+                                continue;
+                            }
+                        }
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("\nshutting down");
+                        break;
+                    }
                 }
             };
 
@@ -484,7 +642,12 @@ impl super::Controller for TelegramController {
                     continue;
                 }
 
-                let msg = match &update.message {
+                let msg = match update
+                    .message
+                    .as_ref()
+                    .or(update.edited_message.as_ref())
+                    .or(update.channel_post.as_ref())
+                {
                     Some(m) => m.clone(),
                     None => continue,
                 };
@@ -655,6 +818,7 @@ impl super::Controller for TelegramController {
             }
         }
 
+        clear_webhook_sender();
         Ok(())
     }
 }
@@ -2528,7 +2692,9 @@ mod tests {
         // Verify the TelegramController always provides a system prompt
         // that will be appended to both private and public agents.
         let ctrl = TelegramController {
-            bot_token: crate::auth::Credential::new("test".into()),
+            bot_token: Some(crate::auth::Credential::new("test".into())),
+            proxy: None,
+            mode: TelegramMode::Polling,
             allowed_chat_ids: vec![],
             download_limits: Arc::new(DownloadLimits::default()),
         };
