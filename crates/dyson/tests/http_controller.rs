@@ -733,6 +733,48 @@ async fn admin_configure_first_boot_does_not_block_runtime_timer() {
     );
 }
 
+#[tokio::test]
+async fn admin_configure_pins_first_secret_and_rejects_wrong_secret() {
+    let r = rig().await;
+    let _configure_root = isolate_configure_workspace(&r);
+    let url = format!("{}/api/admin/configure", r.base);
+
+    let missing = post_json(&url, &serde_json::json!({ "name": "missing" })).await;
+    assert_eq!(
+        missing.status(),
+        StatusCode::UNAUTHORIZED,
+        "configure must require X-Swarm-Configure even before first boot pins a secret",
+    );
+
+    let first = post_json_with_headers(
+        &url,
+        &serde_json::json!({ "name": "alpha" }),
+        &[("x-swarm-configure", "first-secret")],
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let wrong = post_json_with_headers(
+        &url,
+        &serde_json::json!({ "name": "wrong" }),
+        &[("x-swarm-configure", "wrong-secret")],
+    )
+    .await;
+    assert_eq!(
+        wrong.status(),
+        StatusCode::UNAUTHORIZED,
+        "after first configure, a different secret must not reconfigure the instance",
+    );
+
+    let correct = post_json_with_headers(
+        &url,
+        &serde_json::json!({ "name": "bravo" }),
+        &[("x-swarm-configure", "first-secret")],
+    )
+    .await;
+    assert_eq!(correct.status(), StatusCode::OK);
+}
+
 #[cfg(target_os = "linux")]
 fn spawn_config_replace_counter(
     path: &std::path::Path,
@@ -2164,6 +2206,9 @@ async fn static_path_traversal_is_blocked() {
         "/%2e%2e%2f%2e%2e%2fetc/passwd",
         "/assets/%2e%2e/%2e%2e/etc/hosts",
         "/%2E%2E%2Fetc/hosts",
+        "/assets\\secret",
+        "/assets/%5csecret",
+        "/assets/%00secret",
     ] {
         let resp = get(&format!("{}{}", r.base, evil)).await;
         assert!(
