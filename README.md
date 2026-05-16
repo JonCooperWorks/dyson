@@ -23,6 +23,56 @@ sandboxes. This repo is the agent process itself.
 - Runs in a Swarm-owned mode where config, tokens, proxy URLs, and durable
   state are supplied by `dyson-swarm`.
 
+## Architecture
+
+```mermaid
+flowchart TB
+    user["User / operator"] --> controllers
+
+    subgraph controllers["Controller surfaces"]
+        terminal["Terminal"]
+        web["HTTP + embedded React UI"]
+        telegram["Telegram"]
+        background["Background tasks"]
+        mcp_server["MCP server for CLI providers"]
+    end
+
+    controllers --> stores["Controller stores<br/>chat history, feedback, files, artefacts"]
+    controllers --> agent["Agent loop"]
+
+    subgraph runtime["Agent runtime"]
+        agent --> prompt["System prompt<br/>base + workspace + skill fragments"]
+        agent --> llm["LlmClient stream"]
+        llm --> events["StreamEvent text, thinking, tool_use"]
+        events --> policy["Tool limiter, dependency analyzer, sandbox"]
+        policy --> tools["Built-in tools, local skills, MCP tools, subagents"]
+        tools --> workspace["Workspace + memory + knowledge base"]
+        tools --> media["Media and artefacts<br/>images, PDFs, audio, files"]
+        tools --> mcp_client["External MCP servers"]
+        policy --> agent
+    end
+
+    subgraph providers["LLM providers"]
+        anthropic["Anthropic"]
+        openai["OpenAI / compatible"]
+        openrouter["OpenRouter"]
+        gemini["Gemini"]
+        ollama["Ollama Cloud"]
+        claude_code["Claude Code CLI"]
+        codex["Codex CLI"]
+    end
+
+    llm --> providers
+    claude_code -.->|"structured tools over local MCP"| mcp_server
+    codex -.->|"structured tools over local MCP"| mcp_server
+    mcp_server -.->|"Tool::run"| tools
+
+    workspace --> stores
+    media --> stores
+    stores --> web
+    stores --> telegram
+```
+
 ## Request Flow
 
 ```text

@@ -27,26 +27,35 @@ pub trait LlmClient: Send + Sync {
         &self,
         messages: &[Message],
         system: &str,
+        system_suffix: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>>;
+    ) -> Result<StreamResponse>;
 
-    /// Whether this provider runs its own internal tool-use loop.
-    /// Default: false.  Claude Code and Codex override to true.
-    fn handles_tools_internally(&self) -> bool { false }
+    /// API clients ignore this. CLI providers use it to expose Dyson tools
+    /// through a loopback MCP server.
+    fn set_mcp_tools(&self, tools: HashMap<String, Arc<dyn Tool>>) {}
 }
 ```
 
 | Parameter | Purpose |
 |-----------|---------|
 | `messages` | Conversation history (user, assistant, tool results) |
-| `system` | System prompt (passed separately, not as a message) |
+| `system` | Stable system prompt prefix (passed separately, not as a message) |
+| `system_suffix` | Per-turn ephemeral system context such as time and skill fragments |
 | `tools` | Available tools — the LLM decides which to call |
 | `config` | Model name, max_tokens, temperature |
 
-Returns a `Stream` of `StreamEvent`s.  The stream ends with
-`MessageComplete`.  Errors are either `Err` items in the stream or
-`StreamEvent::Error` events.
+Returns a `StreamResponse` containing the event stream, optional input-token
+metadata, and `ToolMode`.
+
+| ToolMode | Meaning |
+|---|---|
+| `Execute` | Dyson owns tool execution: sandbox, run tools, feed `tool_result` blocks back to the model |
+| `Observe` | The provider already executed tools internally; Dyson displays events and stops after the provider turn |
+
+The stream ends with `MessageComplete`. Errors are either `Err` items in the
+stream or `StreamEvent::Error` events.
 
 ---
 
@@ -54,19 +63,20 @@ Returns a `Stream` of `StreamEvent`s.  The stream ends with
 
 All providers implement the same `LlmClient` trait.
 
-| Provider | Transport | Auth | Tool execution |
+| Provider | Transport | Auth | Tool mode |
 |---|---|---|---|
-| Anthropic | HTTP API | `x-api-key` | Dyson |
-| OpenAI | HTTP API | `Bearer` | Dyson |
-| OpenRouter | HTTP API | `Bearer` | Dyson |
-| Gemini | HTTP API | `x-goog-api-key` | Dyson |
-| Ollama Cloud | HTTP API | `Bearer` | Dyson |
-| Claude Code | CLI subprocess | CLI stored auth | Internal |
-| Codex | CLI subprocess | CLI stored auth | Internal |
+| Anthropic | HTTP API | `x-api-key` | `Execute` |
+| OpenAI | HTTP API | `Bearer` | `Execute` |
+| OpenRouter | HTTP API | `Bearer` | `Execute` |
+| Gemini | HTTP API | `x-goog-api-key` | `Execute` |
+| Ollama Cloud | HTTP API | `Bearer` | `Execute` |
+| Claude Code | CLI subprocess | CLI stored auth | `Observe` |
+| Codex | CLI subprocess | CLI stored auth | `Observe` |
 
-`handles_tools_internally()` is `true` only for Claude Code and Codex. For
-those providers, Dyson displays streamed tool events but does not send its own
-tool definitions or execute the returned tool calls.
+For `Observe` providers, Dyson displays streamed tool events but does not
+re-execute returned tool calls. When a workspace is available, Dyson exposes its
+tools to Claude Code and Codex through a per-turn loopback MCP server instead
+of putting duplicate tool descriptions in the text prompt.
 
 ### API Clients
 
@@ -158,9 +168,15 @@ from the streamed part.
 
 `ClaudeCodeClient` in `src/llm/claude_code.rs`.
 
-A full agent, not a raw API. Dyson spawns `claude -p --output-format stream-json` as a subprocess. Claude Code has built-in tools (Bash, Read, Write, Edit, etc.) and executes them internally — Dyson displays ToolUse events but does not re-execute them (`handles_tools_internally() = true`).
+A full agent, not a raw API. Dyson spawns
+`claude -p --output-format stream-json` as a subprocess. Claude Code has
+built-in tools and executes tool calls internally. Dyson returns
+`ToolMode::Observe`, displays streamed tool events, and does not re-execute
+them.
 
-**Workspace via MCP:** Dyson starts an in-process MCP server with bearer token auth and passes it to Claude Code via `--mcp-config`, giving it access to workspace tools. See [Tool Forwarding over MCP](tool-forwarding-over-mcp.md).
+**Tools via MCP:** Dyson starts an in-process MCP server with bearer token auth
+and passes it to Claude Code via `--mcp-config`, giving it access to the loaded
+Dyson tool registry. See [Tool Forwarding over MCP](tool-forwarding-over-mcp.md).
 
 **History:** `claude -p` is stateless — Dyson formats conversation history into a single prompt via `format_prompt()`.
 
@@ -178,7 +194,11 @@ Thin wrapper around `OpenAiCompatClient` for [Ollama Cloud](https://ollama.com) 
 
 `CodexClient` in `src/llm/codex.rs`.
 
-Same pattern as Claude Code — spawns `codex exec --json` as a subprocess with `handles_tools_internally() = true`. Uses `--full-auto` by default; `--dangerously-bypass-approvals-and-sandbox` only when Dyson's `--dangerous-no-sandbox` is set. Workspace MCP and stateless history work the same way.
+Same pattern as Claude Code — spawns `codex exec --json` as a subprocess with
+`ToolMode::Observe`. Uses `--full-auto` by default;
+`--dangerously-bypass-approvals-and-sandbox` only when Dyson's
+`--dangerous-no-sandbox` is set. Workspace MCP and stateless history work the
+same way.
 
 ---
 

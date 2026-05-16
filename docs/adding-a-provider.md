@@ -17,6 +17,7 @@ pub enum LlmProvider {
     ClaudeCode,
     Codex,
     OllamaCloud,
+    Gemini,
     YourProvider,  // ← add here
 }
 ```
@@ -32,6 +33,7 @@ impl LlmClient for YourProviderClient {
         &self,
         messages: &[Message],
         system: &str,
+        system_suffix: &str,
         tools: &[ToolDefinition],
         config: &CompletionConfig,
     ) -> Result<StreamResponse> {
@@ -54,7 +56,6 @@ ProviderEntry {
     provider: LlmProvider::YourProvider,
     canonical_name: "your-provider",
     aliases: &["your-provider", "yp"],
-    default_model: "your-default-model",
     env_var: Some("YOUR_PROVIDER_API_KEY"),  // or None for CLI providers
     requires_api_key: true,                   // false for CLI providers
     create_client: |c| Box::new(
@@ -73,7 +74,6 @@ CLI interrogate it generically — they never match on `LlmProvider` variants.
 | Field | What it drives |
 |-------|---------------|
 | `aliases` | Loose string parsing (`--provider openai`, `"type": "gpt"`) |
-| `default_model` | Fallback when user doesn't specify a model |
 | `env_var` | Environment variable for API key fallback |
 | `requires_api_key` | Whether to attempt key resolution at all |
 | `create_client` | Factory function called by `ClientRegistry` to build the provider's `LlmClient` |
@@ -82,6 +82,10 @@ CLI interrogate it generically — they never match on `LlmProvider` variants.
 The `resolve_api_key()` method on `ProviderEntry` encapsulates the full
 API key resolution flow (env var fallback, custom base_url security check),
 so the config loader calls one method without knowing provider details.
+
+Models are intentionally not stored in the registry. Every configured provider
+entry must carry a non-empty `models` array in `dyson.json`; the first entry is
+the default for that named provider, and `agent.model` can override it.
 
 ## Testing
 

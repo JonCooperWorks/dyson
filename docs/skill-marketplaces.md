@@ -1,14 +1,19 @@
 # Skill Marketplaces And Dream-Learned Skills
 
-Status: draft spec.
+Status: implementation notes plus remaining design notes.
 
-This spec defines a Swarm-hosted skill marketplace system and the mechanism
-that lets agents learn durable skills through dreaming. Swarm owns the shared
-marketplace catalog and fleet inventory; Dyson owns installed workspace skills
-and runtime loading. The design keeps one source of truth for active skills:
-installed skills are still ordinary workspace files under
-`skills/<name>/SKILL.md`, and the existing `load_skill` path remains the runtime
-loading mechanism.
+Dyson now ships a Swarm-backed `skill_marketplace` built-in tool. The tool
+can list configured Swarm marketplace sources, list catalog skills, inspect a
+skill, install/update it into `skills/<name>/`, and remove an installed
+marketplace skill. Swarm owns the shared marketplace catalog and fleet
+inventory; Dyson owns installed workspace skills and runtime loading. The
+source of truth for active skills remains ordinary workspace files under
+`skills/<name>/SKILL.md`, and `load_skill` remains the runtime loading
+mechanism.
+
+The sections below also preserve design notes for future marketplace and
+dream-learned skill work. Treat wording that says "should" or "future" as
+design guidance, not already-shipped behavior.
 
 ## Goals
 

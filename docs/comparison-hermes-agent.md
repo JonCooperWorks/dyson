@@ -189,7 +189,7 @@ stronger infrastructure-level isolation via containers.
 |--------|-------|--------------|
 | **Built-in tools** | bash, file I/O, web search, memory search, workspace tools | 40+ skills (MLOps, GitHub, research, etc.) |
 | **Skill format** | Trait impl (Rust) or workspace `.md` files | Python files, agentskills.io format |
-| **Auto-creation** | No — skills are defined by developers | Yes — agent creates skills from experience |
+| **Auto-creation** | Limited — self-improvement paths can write workspace skills, but marketplace publication requires review | Yes — agent creates skills from experience |
 | **Ecosystem** | MCP servers | ClawHub, LobeHub, GitHub, agentskills.io |
 | **MCP support** | Full (MCP servers are just another Skill) | Plugin-based |
 | **Lifecycle hooks** | `on_load`, `after_tool`, `on_unload` | Similar lifecycle hooks |
@@ -200,7 +200,7 @@ stronger infrastructure-level isolation via containers.
 Dyson treats MCP as a first-class but not special citizen — MCP tools are
 wrapped in `McpSkill` and appear in the flat tool lookup just like `bash` or
 `read_file`. The agent loop has zero awareness of MCP. Dyson can also act as
-an MCP *server* to expose workspace tools to Claude Code.
+an MCP *server* to expose loaded Dyson tools to Claude Code and Codex.
 
 ---
 

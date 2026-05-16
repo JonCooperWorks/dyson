@@ -22,15 +22,23 @@ calls, execute them through the sandbox, feed results back, repeat.
 ```rust
 pub struct Agent {
     client: RateLimitedHandle<Box<dyn LlmClient>>,
-    sandbox: Box<dyn Sandbox>,
+    sandbox: Arc<dyn Sandbox>,
     skills: Vec<Box<dyn Skill>>,
-    tools: HashMap<String, Arc<dyn Tool>>,
-    tool_definitions: Vec<ToolDefinition>,
-    system_prompt: String,
+    tool_registry: ToolRegistry,
+    system_prompt: Arc<str>,
     config: CompletionConfig,
     max_iterations: usize,
-    messages: Vec<Message>,
+    max_retries: usize,
+    conversation: Conversation,
     tool_context: ToolContext,
+    compaction_config: CompactionConfig,
+    limiter: ToolLimiter,
+    formatter: ResultFormatter,
+    tool_hooks: Vec<Box<dyn ToolHook>>,
+    dream_handle: DreamHandle,
+    history_backend: Option<HistoryBackend>,
+    feedback_store: Option<FeedbackStore>,
+    transcriber: Option<Arc<dyn Transcriber>>,
 }
 ```
 
@@ -39,22 +47,28 @@ pub struct Agent {
 | `client` | Handle to the shared, rate-limited LLM client (from `ClientRegistry`) |
 | `sandbox` | Gates every tool call (Allow/Deny/Redirect) |
 | `skills` | Retained for lifecycle management (`on_unload` on shutdown) |
-| `tools` | Flat lookup by tool name — `Arc` shared with skills |
-| `tool_definitions` | Sent to the LLM so it knows available tools |
+| `tool_registry` | Flat lookup, tool definitions, and token-cache view of loaded tools |
 | `system_prompt` | Base prompt + all skill prompt fragments, composed at construction |
 | `config` | Model name, max_tokens, temperature |
 | `max_iterations` | Hard limit on LLM turns per `run()` call (default: 40) |
-| `messages` | Conversation history — persists across `run()` calls |
+| `max_retries` | Transient LLM retry budget |
+| `conversation` | Messages, turn count, and token budget — persists across `run()` calls |
 | `tool_context` | Working directory, env vars, cancellation token |
+| `compaction_config` | Context-window compaction thresholds and behaviour |
 | `limiter` | Per-turn tool call rate limiter (`ToolLimiter`) |
 | `formatter` | Structured result formatter for LLM-optimized output (`ResultFormatter`) |
+| `tool_hooks` | Pre/post tool execution hooks |
+| `dream_handle` | Background memory, learning, and self-improvement task trigger |
+| `history_backend` | Optional rotating snapshot persistence for pre-compaction history |
+| `feedback_store` | Optional user-rating store used by dream tasks |
+| `transcriber` | Optional audio transcriber for media attachments |
 
 ### Construction
 
 `Agent::new()` does three things:
 
-1. **Flatten tools** — iterates all skills, clones `Arc<dyn Tool>` pointers
-   into the `tools` HashMap and builds `tool_definitions` from each tool's
+1. **Build the tool registry** — iterates all skills, clones `Arc<dyn Tool>`
+   pointers into a flat lookup, and builds tool definitions from each tool's
    name, description, and input schema.
 
 2. **Compose system prompt** — starts with the base prompt from
@@ -77,8 +91,9 @@ then loops:
 
 ```
 1. STREAM
-     stream = client.stream(messages, system_prompt, tools, config)
-     (assistant_msg, tool_calls) = process_stream(stream, output)
+     response = client.stream(messages, system_prompt, system_suffix, tools, config)
+     (assistant_msg, tool_calls, output_tokens, stop_reason) =
+       process_stream(response.stream, output)
      messages.push(assistant_msg)
 
 2. CHECK
@@ -119,12 +134,16 @@ then loops:
      Back to step 1 — LLM sees tool results on next iteration
 ```
 
-### Internal-tools providers (Claude Code, Codex)
+### CLI-subprocess providers (Claude Code, Codex)
 
-Some providers run their own agent loop with built-in tools. When `handles_tools_internally()` returns `true`:
+Some providers run their own agent loop with built-in tools. When the
+`StreamResponse` returns `ToolMode::Observe`:
 
-1. Dyson's tool definitions are **not** sent (provider has its own)
-2. The loop **breaks after one iteration** — tool events are displayed but not re-executed
+1. Dyson exposes its loaded tools to the subprocess over a per-turn loopback
+   MCP server when a workspace is available.
+2. Tool events in the provider stream are displayed but not re-executed by
+   Dyson.
+3. The loop breaks after the observed provider turn.
 
 ### Iteration limit
 
@@ -132,7 +151,8 @@ Some providers run their own agent loop with built-in tools. When `handles_tools
 
 ### Conversation persistence
 
-`messages` persists across `run()` calls — multi-turn conversations accumulate naturally.
+Conversation messages persist across `run()` calls — multi-turn conversations
+accumulate naturally.
 
 ---
 
@@ -142,7 +162,7 @@ Some providers run their own agent loop with built-in tools. When `handles_tools
 pub async fn process_stream(
     stream: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>,
     output: &mut dyn Output,
-) -> Result<(Message, Vec<ToolCall>)>
+) -> Result<(Message, Vec<ToolCall>, usize, StopReason)>
 ```
 
 Bridges raw `StreamEvent`s to structured data:
@@ -150,6 +170,7 @@ Bridges raw `StreamEvent`s to structured data:
 1. Renders events to `Output` (text deltas, tool markers)
 2. Accumulates content blocks (`Text`, `ToolUse`)
 3. Collects `ToolCall { id, name, input }` structs from `ToolUseComplete` events
+4. Returns output-token count and the final stop reason for budgeting/retry decisions
 
 Text deltas are buffered and flushed as a `ContentBlock::Text` when a non-text event arrives, preserving interleaving order.
 

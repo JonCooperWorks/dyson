@@ -45,14 +45,17 @@ crates/dyson/src/
   config/                 Settings, loader, migrations, hot reload
   llm/                    Provider registry, API clients, CLI-subprocess clients, SSE parsers
   agent/                  Agent loop, stream handler, compaction, rate limits, dependency analysis
-  tool/                   Built-in tools, AST helpers, web/search/file/workspace tools
+  tool/                   Built-in tools, web/search/file/workspace tools
+  ast/                    Tree-sitter language registry and AST query helpers
   skill/                  Builtin, local, MCP, subagent, marketplace-loaded skills
+  media/                  Attachments, generated artefacts, PDF/image/audio handling
   sandbox/                Policy sandbox, OS command builders, no-sandbox bypass
   controller/             Terminal, HTTP/web, Telegram, background controllers
   chat_history/           Disk and in-memory chat stores
   workspace/              Filesystem/in-memory workspace, memory store, migrations
   auth/                   Bearer, hashed bearer, OIDC/no-auth shared auth traits
   secret/                 Secret resolver registry
+  swarm_state_sync.rs     Swarm-mode state mirror worker
 ```
 
 When a behaviour changes, update the doc closest to that code seam rather than

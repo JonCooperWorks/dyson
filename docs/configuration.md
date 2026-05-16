@@ -16,7 +16,7 @@ Key files:
 
 ```text
 dyson listen [--config PATH] [--provider NAME] [--base-url URL] [--workspace DIR]
-dyson init [--noinput] [--daemonize] [--path DIR]
+dyson init [--noinput] [--daemonize] [--path DIR] [--import-filesystem DIR] [--env KEY=VALUE]
 dyson hash-bearer <plaintext>
 dyson swarm
 dyson run [OPTIONS] <prompt>
@@ -30,9 +30,14 @@ config, and starts the HTTP controller inside the sandbox.
 
 Without `--config`, Dyson searches:
 
-1. `./dyson.json`
-2. `~/.config/dyson/dyson.json`
-3. built-in defaults
+1. `~/.dyson/dyson.json`
+2. `./dyson.json`
+3. `~/.config/dyson/dyson.json`
+4. built-in defaults
+
+The first two entries are resolved by the `listen` and `run` commands before
+calling the loader. The XDG-style `~/.config/dyson/dyson.json` path remains as a
+loader fallback for callers that invoke `load_settings(None)` directly.
 
 The built-in defaults do not select a billable model. A usable interactive or
 one-shot config must resolve an active provider with at least one model.
@@ -219,6 +224,63 @@ The `skills` object can configure:
 
 Workspace-managed skills are also discovered from the workspace `skills/`
 directory. See [Tools & Skills](tools-and-skills.md).
+
+## Workspace And Chat History
+
+The supported workspace backend is `filesystem`; the supported chat-history
+backend is `disk`.
+
+```json
+{
+  "workspace": {
+    "backend": "filesystem",
+    "connection_string": "~/.dyson"
+  },
+  "chat_history": {
+    "backend": "disk",
+    "connection_string": "~/.dyson/chats"
+  }
+}
+```
+
+`workspace.path` is still accepted as a legacy alias when
+`workspace.connection_string` is absent.
+
+## Web Search And Transcription
+
+The `web_search` tool is absent unless `web_search` is configured. Supported
+providers are Brave Search and SearXNG:
+
+```json
+{
+  "web_search": {
+    "provider": "brave",
+    "api_key": { "resolver": "insecure_env", "name": "BRAVE_API_KEY" }
+  }
+}
+```
+
+```json
+{
+  "web_search": {
+    "provider": "searxng",
+    "base_url": "https://searx.example.com"
+  }
+}
+```
+
+Audio attachments use the local Whisper CLI transcriber. If the `transcriber`
+block is omitted, Dyson still builds the default `whisper-cli` transcriber when
+a controller needs audio support.
+
+```json
+{
+  "transcriber": {
+    "provider": "whisper-cli",
+    "model": "small"
+  }
+}
+```
 
 ## Secret Values
 

@@ -25,9 +25,10 @@ User types "list the files"
   │  for iteration in 0..max_iterations:             │
   │    ┌─────────────────────────────────┐           │
   │    │  LlmClient.stream(messages,     │           │
-  │    │    system_prompt, tools, config) │           │
+  │    │    system_prompt, system_suffix, │           │
+  │    │    tools, config)               │           │
   │    └───────────────┬─────────────────┘           │
-  │                    │ Stream<StreamEvent>          │
+  │                    │ StreamResponse               │
   │                    ▼                             │
   │    ┌─────────────────────────────────┐           │
   │    │  stream_handler::process_stream │           │
@@ -62,23 +63,21 @@ User types "list the files"
 
 ```
 Agent
-  ├── client: Box<dyn LlmClient>          ← API provider or CLI-subprocess provider
-  ├── sandbox: Box<dyn Sandbox>            ← gates every tool call
+  ├── client: RateLimitedHandle<Box<dyn LlmClient>> ← API provider or CLI-subprocess provider
+  ├── sandbox: Arc<dyn Sandbox>            ← gates every tool call
   ├── skills: Vec<Box<dyn Skill>>          ← own tools + lifecycle
   │     ├── BuiltinSkill
   │     │     └── tools: Vec<Arc<dyn Tool>>
   │     │           └── BashTool
   │     ├── McpSkill                       ← tools discovered from MCP servers
   │     └── LocalSkill                     ← prompt-only, from workspace skills/
-  ├── tools: HashMap<name, Arc<dyn Tool>>  ← flat lookup (shared Arcs)
-  ├── tool_definitions: Vec<ToolDefinition> ← sent to the LLM
-  ├── system_prompt: String                ← base + skill fragments
+  ├── tool_registry: ToolRegistry          ← flat lookup + definitions + cache view
+  ├── system_prompt: Arc<str>              ← base + skill fragments
   ├── config: CompletionConfig             ← model, max_tokens, temp
-  ├── messages: Vec<Message>               ← conversation history
+  ├── conversation: Conversation           ← messages, turn count, token budget
   ├── tool_context: ToolContext            ← working dir, env, cancel
   ├── limiter: ToolLimiter                 ← per-turn rate limiting
   ├── formatter: ResultFormatter           ← structured output formatting
-  ├── token_budget: TokenBudget            ← cumulative token usage tracking
   └── compaction_config: CompactionConfig  ← context window management
 ```
 
@@ -101,7 +100,7 @@ interfaces — it never knows the concrete types behind them.
 
 ```
 Skill owns → Arc<dyn Tool>
-Agent borrows → Arc<dyn Tool> (cloned into flat HashMap)
+Agent borrows → Arc<dyn Tool> (cloned into ToolRegistry)
 Agent calls → Sandbox.check() before every Tool.run()
 Agent calls → LlmClient.stream() each iteration
 Agent calls → Output methods for display
@@ -150,6 +149,9 @@ Streaming is not optional — it's the foundation of Dyson's UX and architecture
 LlmClient.stream()
        │
        ▼
+  StreamResponse { stream, tool_mode, input_tokens }
+       │
+       ▼
   Pin<Box<dyn Stream<Item = Result<StreamEvent>>>>
        │
        ├── TextDelta("Hello")        → print immediately
@@ -172,6 +174,13 @@ LlmClient.stream()
 | `Error(DysonError)` | SSE parser | stream_handler → return Err |
 
 `ToolUseComplete` is synthetic — the LLM client accumulates `ToolUseInputDelta` fragments and emits `ToolUseComplete` when the block finishes, keeping the stream handler stateless.
+
+`StreamResponse.tool_mode` tells the agent whether Dyson should execute tool
+requests itself. API providers use `ToolMode::Execute`, so streamed tool calls
+go through the sandbox and local tool registry. CLI-subprocess providers such
+as `claude-code` and `codex` use `ToolMode::Observe`; they receive the loaded
+Dyson tools over a temporary loopback MCP server and the agent only displays
+the provider's tool events instead of running them a second time.
 
 ---
 
@@ -199,7 +208,7 @@ enum DysonError {
 ## Key Design Decisions
 
 - **Stream everything** — text tokens go to the user immediately; no buffering
-- **MCP is not special** — `McpSkill` is just another `Skill` impl; Dyson can also expose workspace tools over MCP
+- **MCP is not special** — `McpSkill` is just another `Skill` impl; Dyson can also expose loaded Dyson tools over MCP
 - **Skills own tools** — `Arc<dyn Tool>` shared via flat HashMap for O(1) dispatch
 - **Sandbox gates everything** — mandatory; `DangerousNoSandbox` is an explicit opt-out
 - **Config is parse-once** — all formats merge into one `Settings` struct

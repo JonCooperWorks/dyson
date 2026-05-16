@@ -9,7 +9,7 @@ There are three kinds of subagent:
 
 | Kind | Examples | Description |
 |------|----------|-------------|
-| **Config-driven** | `planner`, `researcher`, `verifier` | Simple single-purpose agents defined by a `SubagentAgentConfig`.  Each gets a filtered set of parent tools and runs a task to completion. |
+| **Config-driven** | `planner`, `researcher`, `verifier`, `dependency_review` | Simple single-purpose agents defined by a `SubagentAgentConfig`.  Each gets a filtered set of parent tools and runs a task to completion. |
 | **Coder** | `coder` | A built-in subagent that scopes a coding task to a specific directory.  Takes `{ path, task }` input — the path becomes the child's `working_dir`. |
 | **Orchestrator** | `security_engineer` | A composable subagent that gets direct tools *and* inner subagent dispatch.  Can run 5+ tool calls in parallel, including dispatching other subagents. |
 
@@ -36,6 +36,7 @@ provider (the parent's own model), so they work with zero extra configuration.
 | `planner` | Breaks down complex tasks into ordered implementation steps.  Read-only — plans but doesn't execute. | `read_file`, `search_files`, `list_files` | 15 | 4096 |
 | `researcher` | Deep research with broad access.  Can read code, run commands, and search the web. | `bash`, `read_file`, `search_files`, `list_files`, `web_search` | 20 | 4096 |
 | `verifier` | Adversarial validation.  Runs tests, checks edge cases, returns PASS/FAIL/PARTIAL verdict.  Injects a protocol fragment telling the parent when to invoke it. | `bash`, `read_file`, `search_files`, `list_files` | 25 | 8192 |
+| `dependency_review` | Supply-chain review.  Finds manifests/lockfiles, queries OSV, and reports prioritized dependency risk. | `dependency_scan`, `read_file`, `search_files`, `list_files`, `bash` | 15 | 6144 |
 
 ### Built-in Tools
 
@@ -72,11 +73,11 @@ Parent Agent (depth 0)
   └── security_engineer (OrchestratorTool)
         └── Child Agent (depth 1)
               ├── [direct tools]
-              │     ast_query, attack_surface_analyzer, exploit_builder,
-              │     taint_trace, dependency_scan,
+              │     ast_describe, ast_query, attack_surface_analyzer,
+              │     exploit_builder, taint_trace, dependency_scan,
               │     bash, read_file, search_files, list_files
               └── [inner subagents → depth 2, run in parallel]
-                    planner, researcher, coder, verifier
+                    planner, researcher, coder, verifier, dependency_review
                     └── Inner Child Agents (depth 2, no further subagents)
 ```
 
@@ -113,7 +114,7 @@ pub struct OrchestratorConfig {
 ### How Orchestrators Work
 
 1. **Direct tools** are filtered from the parent's tool set by the allowlist
-2. **Inner subagents** (planner, researcher, coder, verifier) are pre-built as
+2. **Inner subagents** (planner, researcher, coder, verifier, dependency_review) are pre-built as
    `SubagentTool`/`CoderTool` instances and passed to the child
 3. The child agent gets all of these as a flat tool list
 4. Because inner subagents are regular tools with no resource conflicts, the
@@ -153,7 +154,7 @@ pub fn builtin_orchestrator_configs() -> Vec<OrchestratorConfig> {
 4. Declare the module in `mod.rs` and `pub use` the config function.
 
 The orchestrator automatically gets inner subagent tools (planner, researcher,
-coder, verifier) — no extra wiring needed.
+coder, verifier, dependency_review) — no extra wiring needed.
 
 ### Security Engineer
 
@@ -289,7 +290,7 @@ The fragment is appended after the subagent listing in the parent's prompt.
 | `OrchestratorConfig` | `subagent/orchestrator.rs` | Data struct defining an orchestrator's identity, tools, and limits |
 | `SubagentSkill` | `subagent/mod.rs` | Bundles all subagent tools into a `Skill` with system prompt |
 | `FilteredSkill` | `subagent/mod.rs` | Lightweight `Skill` wrapper around pre-loaded parent tools |
-| `CaptureOutput` | `subagent/mod.rs` | Collects child's `text_delta` events; tool events logged but discarded |
+| `CaptureOutput` | `subagent/mod.rs` | Collects child text for the parent LLM and, when HTTP wires a `SubagentEventBus`, tees nested tool start/result events to the browser UI |
 | `spawn_child()` | `subagent/mod.rs` | Shared lifecycle: depth check → build agent → run → capture → return |
 
 ---

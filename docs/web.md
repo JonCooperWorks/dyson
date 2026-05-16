@@ -20,6 +20,25 @@ through `BrowserArtefactSink`.
 
 ---
 
+## Route Tiers
+
+- `GET /healthz` — unauthenticated liveness probe.
+- `GET /readyz` — unauthenticated readiness probe; returns 503 while swarm
+  warmup placeholders, missing model/provider state, or missing sandbox backend
+  would make real turns fail.
+- `GET /api/auth/config` — unauthenticated auth descriptor for the SPA.
+- `POST /api/auth/sse-ticket` — exchanges an authenticated bearer for a
+  one-shot, 30-second, HttpOnly SSE cookie.
+- `/api/*` — authenticated JSON/SSE API; state-changing methods require
+  `X-Dyson-CSRF`.
+- `/webhook/telegram` — authenticated Telegram webhook ingress.
+- `/`, `/assets/*`, and other non-API document paths — embedded SPA bundle.
+
+When loopback `dangerous_no_auth` is active, `/api/*` requests also pass a
+DNS-rebinding host check and only accept loopback Host values.
+
+---
+
 ## Overall architecture
 
 ```mermaid
@@ -44,7 +63,7 @@ flowchart LR
 
   UI -- "GET /, /assets/*" --> HC
   UI -- "JSON /api/*" --> HC
-  HC -. "SSE /events" .-> UI
+  HC -.->|"SSE /api/conversations/:id/events"| UI
 
   TGUser <-- "chat messages" --> TGAPI
   TGAPI <-- "long-poll getUpdates<br>sendMessage" --> TG
@@ -607,6 +626,25 @@ GET /api/mind/file?path=…        # one workspace file
 POST /api/mind/file              # write — same channel as the workspace tool
 
 GET /api/activity[?chat=<id>]    # ActivityRegistry snapshot
+
+GET /api/agent                   # running agent metadata and MCP inventory
+```
+
+### Swarm Admin Hooks
+
+These routes are ordinary `/api/*` routes from Dyson's perspective, so they use
+the same controller auth. They exist for `dyson-swarm` to reconfigure or drain a
+running sandbox after Cube restore:
+
+```
+POST /api/admin/configure          # patch generated dyson.json, model, tools, MCP, Telegram proxy
+POST /api/admin/state/file         # apply restored swarm-owned state file
+POST /api/admin/skills/install     # install a swarm-published skill package
+DELETE /api/admin/skills/:skill    # remove installed skill package
+GET /api/admin/skills              # diagnostic skill/MCP inventory
+GET /api/admin/idle                # idle/readiness signal for snapshot/restore
+POST /api/admin/quiesce            # pause new turns before snapshot
+POST /api/admin/unquiesce          # resume turns after snapshot
 ```
 
 ### Files & artefacts

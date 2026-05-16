@@ -19,11 +19,11 @@ extract one function out of a 5k-line file or audit every usage of a symbol
 without scanning the wrong things.
 
 **Key files:**
-- `src/tool/ast/mod.rs` -- shared AST primitives (`find_identifier_positions`,
+- `src/ast/mod.rs` -- shared AST primitives (`find_identifier_positions`,
   `find_word_boundary_matches`, `find_definitions_by_name`); consumed by
   `bulk_edit`, `read_file`, and `search_files`
-- `src/tool/ast/languages.rs` -- language registry and file parsing
-- `src/tool/ast/nodes.rs` -- node-info helpers (definition name extraction,
+- `src/ast/languages.rs` -- language registry and file parsing
+- `src/ast/nodes.rs` -- node-info helpers (definition name extraction,
   container detection, kind cleanup)
 - `src/tool/bulk_edit/mod.rs` -- `BulkEditTool` (agent-only), dispatches ops
 - `src/tool/bulk_edit/rename.rs` -- `rename_symbol` (AST + text fallback)

@@ -12,7 +12,7 @@ extensibility layer that lets you plug arbitrary capabilities into the agent.
 - `src/skill/mod.rs` — `Skill` trait, `create_skills()` factory
 - `src/skill/builtin.rs` — `BuiltinSkill` (wraps built-in tools)
 - `src/skill/local.rs` — `LocalSkill` (SKILL.md parser, workspace discovery)
-- `src/tool/ast/` — shared tree-sitter grammars and walking helpers; consumed by `bulk_edit`, `read_file`, and `search_files` (see [AST docs](ast.md))
+- `src/ast/` — shared tree-sitter grammars and walking helpers; consumed by `bulk_edit`, `read_file`, `search_files`, and security tools (see [AST docs](ast.md))
 - `src/tool/bulk_edit/` — `BulkEditTool` (unified multi-file edit: AST rename, find_replace, list_definitions)
 - `src/tool/read_file.rs` — `ReadFileTool`; supports `symbol` extraction for AST-aware single-definition reads
 - `src/tool/search_files.rs` — `SearchFilesTool`; supports `ast: true` for identifier-only searches
@@ -102,20 +102,32 @@ Skills add what tools alone lack: grouping, setup/teardown lifecycle, prompt con
 ## BuiltinSkill
 
 The default skill wrapping Dyson's built-in tools:
-- `BashTool` — shell command execution with timeout
-- `ReadFileTool` — read workspace files with optional line range
-- `WriteFileTool` — create or overwrite files
-- `EditFileTool` — pattern-based find-and-replace editing
-- `ListFilesTool` — glob-based file discovery
-- `SearchFilesTool` — regex content search across files
-- `MemorySearchTool` — full-text search over memory files
-- `WorkspaceTool` — unified view/list/search/update for workspace files
-- `LoadSkillTool` — on-demand skill loading
-- `SkillCreateTool` — create, update, or improve skills
-- `SendFileTool` — send file to user via controller
-- `ExportConversationTool` — export chat history in ShareGPT format
-- `WebFetchTool` — fetch a URL and return clean extracted text (always available)
-- `WebSearchTool` — web search via pluggable provider (conditional — see below)
+
+| Tool | Availability | Purpose |
+|---|---|---|
+| `bash` | default | Shell command execution with timeout |
+| `read_file` | default | Read workspace files with optional line or symbol selection |
+| `write_file` | default | Create or overwrite files |
+| `edit_file` | default | Pattern-based single-file edits |
+| `bulk_edit` | default | Multi-file AST rename, find/replace, and definition listing |
+| `list_files` | default | Glob-based file discovery |
+| `search_files` | default | Regex or AST-aware content search |
+| `send_file` | default | Send a file through the active controller |
+| `memory_search` | default | Full-text search over memory files |
+| `workspace` | default | Unified view/list/search/update for workspace files |
+| `load_skill` | default | Load full instructions for a discovered local skill |
+| `skill_marketplace` | default | List, inspect, install, update, and remove marketplace skills |
+| `kb_search` | default | Search the workspace knowledge base |
+| `kb_status` | default | Report knowledge-base status and index coverage |
+| `web_fetch` | default | Fetch a URL and return extracted text |
+| `dependency_scan` | default | Detect dependency manifests and query vulnerability data |
+| `ast_describe` | default | Describe AST structure for supported source files |
+| `ast_query` | default | Query AST nodes by language and pattern |
+| `attack_surface_analyzer` | default | Summarize security-relevant entrypoints and flows |
+| `exploit_builder` | default | Build evidence-oriented exploit sketches for review work |
+| `taint_trace` | default | Trace selected source-to-sink flows across supported languages |
+| `web_search` | conditional | Web search via configured Brave or SearXNG provider |
+| `image_generate` | conditional | Image generation via configured image-capable provider |
 
 The system prompt is generated dynamically from the loaded tools — each
 tool's name and description are listed so the LLM knows what's available.
@@ -126,7 +138,7 @@ tool's name and description are listed so the LLM knows what's available.
 
 Fetches a URL and returns clean extracted text. HTML pages are stripped of tags, scripts, and styles via `nanohtml2text`. Also handles `text/plain` and `application/json` (pretty-printed). Always available — no configuration needed.
 
-Input: `{ "url": "https://...", "max_length": 50000 }`. See [Configuration](configuration.md#web-browsing) for details and MCP alternatives for full browser automation.
+Input: `{ "url": "https://...", "max_length": 50000 }`.
 
 ---
 
@@ -139,7 +151,15 @@ Pluggable web search via the `SearchProvider` trait. Only appears when `web_sear
 | Brave Search | `"brave"` | `api_key` |
 | SearXNG | `"searxng"` | `base_url` |
 
-Input: `{ "query": "string", "num_results": 1-10 }`. See [Configuration](configuration.md#web-search) for setup.
+Input: `{ "query": "string", "num_results": 1-10 }`. See
+[Configuration](configuration.md#web-search-and-transcription) for setup.
+
+## ImageGenerateTool
+
+`image_generate` is registered only when
+`agent.image_generation_provider` points at a provider that supports image
+generation. Today that is Gemini directly, or OpenRouter in swarm-managed mode.
+Generated files are emitted through the active controller as artefacts.
 
 ---
 
@@ -157,7 +177,7 @@ See `src/tool/bash.rs` as a template. The agent discovers tools automatically vi
 
 | Skill | Status | Tools | Source |
 |-------|--------|-------|--------|
-| `BuiltinSkill` | Implemented | bash, read/write/edit_file, list/search_files, workspace_*, memory_search, web_fetch, web_search, load_skill, skill_create, send_file, export_conversation | Compiled into Dyson |
+| `BuiltinSkill` | Implemented | bash, file/search/edit tools, workspace, memory, KB, web fetch/search, dependency and AST/security tools, marketplace tools, optional image generation | Compiled into Dyson |
 | `McpSkill` | Implemented | Discovered via `tools/list` | MCP server (stdio/HTTP) |
 | `LocalSkill` | Implemented | None (system prompt list only) | skills/*/SKILL.md |
 | `SubagentSkill` | Implemented | Subagent tools (planner, researcher, user-defined) | Config + parent tools |
@@ -198,7 +218,8 @@ Frontmatter requires `name`; `description` is optional. Body is loaded on demand
 - **Auto-scan**: `~/.dyson/skills/*/SKILL.md`
 - **Config**: `skills.local` in `dyson.json` with explicit paths
 - **`load_skill`**: fetch full instructions by name
-- **`skill_create`**: create/update/improve skills (modes: `create`, `update`, `improve`)
+- **Background learning**: self-improvement paths can call `skill_create` to
+  create, update, or improve workspace skills.
 
 Failed skills are logged and skipped — they never stop the agent.
 
@@ -212,7 +233,7 @@ is rebuilt with fresh skills.  Conversation messages are preserved across
 the rebuild.
 
 This means skills created by the `SelfImprovementDream` (or by the agent
-itself via `skill_create`) are active by the next turn — no restart
+the self-improvement path via `skill_create`) are active by the next turn — no restart
 needed.  See [Dreaming](dreaming.md#skill-creation-and-hot-reload) for
 the full lifecycle.
 

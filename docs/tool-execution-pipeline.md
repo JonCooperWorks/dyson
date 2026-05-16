@@ -90,10 +90,15 @@ Each tool call is analyzed for the resources it accesses:
 
 | Tool | Resource | Access kind |
 |------|----------|-------------|
-| `file_read` | `File(path)` | Read |
-| `file_write` | `File(path)` | Write |
+| legacy `file_read` | `File(path)` | Read |
+| legacy `file_write` | `File(path)` | Write |
 | `bash` (git commands) | `Git` | Read or Write (classified per subcommand) |
 | Other bash / unknown | (none) | Treated as independent |
+
+Current built-in file tools are named `read_file`, `write_file`, `edit_file`,
+and `bulk_edit`. As of this codebase state, the dependency analyzer does not
+classify those names as file resources, so it only serializes git conflicts and
+the legacy file-tool names above.
 
 Git commands are classified by subcommand:
 - **Write**: `git add`, `git commit`, `git push`, `git checkout`, `git reset`,
@@ -164,8 +169,8 @@ pub struct FormattedResult {
 | Tool | Summary format | Key lines | Exit code |
 |------|---------------|-----------|-----------|
 | `bash` | `` bash: `<cmd>` completed/failed in Nms (exit X) `` | Error/warning markers | Inferred (0, 1, or 127) |
-| `file_read` | `file_read: <path> (N bytes, Nms)` | (none) | (none) |
-| `file_write` | `file_write: <path> — <status> (Nms)` | (none) | (none) |
+| legacy `file_read` | `file_read: <path> (N bytes, Nms)` | (none) | (none) |
+| legacy `file_write` | `file_write: <path> — <status> (Nms)` | (none) | (none) |
 | Other | `<name>: ok/error (Nms)` | Error/warning markers | (none) |
 
 ### Key line extraction
@@ -183,7 +188,7 @@ Every tool output flows through `sanitize_tool_output` before reaching the model
 - **Tokenizer-exact** (case-sensitive): ChatML / Llama delimiters such as `<|im_start|>`, `<|im_end|>`, `<|start_header_id|>`, `<|end_header_id|>`, `<|eot_id|>`, `<|endoftext|>`. Case matters because these are literal byte sequences in the tokenizer.
 - **Semantic** (case-insensitive): `<system-reminder>` / `</system-reminder>` — some models honour these even with mixed case, so we probe with `eq_ignore_ascii_case`.
 
-Defanging inserts a U+200B zero-width space after the opening `<` / `|` so the token no longer parses as a role delimiter while remaining readable for humans inspecting raw output. The formatter funnels every tool (including `file_write`, whose summary interpolates the output string) through a shared builder so no bypass path exists.
+Defanging inserts a U+200B zero-width space after the opening `<` / `|` so the token no longer parses as a role delimiter while remaining readable for humans inspecting raw output. The formatter funnels every tool (including the legacy `file_write` formatter, whose summary interpolates the output string) through a shared builder so no bypass path exists.
 
 ---
 

@@ -123,7 +123,7 @@ All in `src/agent/reflection.rs`.
 |----------------------------|--------------------------------|--------------------------------------------------------|
 | `LearningSynthesisDream`   | `AfterCompaction`              | Single LLM call that curates `MEMORY.md` (Keep / Refine / Discard) and folds in new signal |
 | `MemoryMaintenanceDream`   | `EveryNTurns(nudge_interval)`  | Mini agent loop (5 iters) curating memory files and writing an audit log to `improvement/{epoch}.json` |
-| `SelfImprovementDream`     | `EveryNTurns(nudge_interval*2)`| Mini agent loop (3 iters) creating skills / exporting |
+| `SelfImprovementDream`     | `EveryNTurns(nudge_interval*2)`| Mini agent loop (3 iters) creating or improving workspace skills |
 
 Curation (not merging) is the verb for dreams 1 and 2: they walk the
 existing file and actively **delete** low-value entries rather than only

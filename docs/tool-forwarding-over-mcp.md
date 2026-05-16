@@ -1,19 +1,20 @@
 # Tool Forwarding over MCP
 
-When Dyson uses the Claude Code CLI as its LLM backend (`provider: "claude_code"`),
-there's a fundamental challenge: Claude Code runs its own agent loop with its own
-tools (Bash, Read, Write, Edit, etc.), and Dyson can't inject custom tools into
-that loop directly.
+When Dyson uses a CLI provider as its LLM backend (`claude-code` or `codex`),
+there's a fundamental challenge: the subprocess runs its own agent loop with its
+own tools, and Dyson must not re-execute tool events it merely observes.
 
-Tool forwarding over MCP solves this by making Dyson an MCP server.  Dyson starts
-an HTTP server that exposes workspace tools, and passes the connection config to
-Claude Code via `--mcp-config`.  Claude Code connects back, discovers the tools,
-and uses them natively in its agent loop — all transparently, with no special
-configuration needed.
+Tool forwarding over MCP solves the structured-tool side by making Dyson an MCP
+server. Dyson starts a loopback HTTP server that exposes the loaded Dyson tools,
+then passes the connection config to the CLI provider. Claude Code uses
+`--mcp-config`; Codex receives equivalent `mcp_servers.*` `-c` settings. The
+subprocess connects back, discovers the tools, and uses them natively in its
+own agent loop.
 
 **Key files:**
-- `src/skill/mcp/serve.rs` — HTTP MCP server (Dyson as MCP server)
+- `src/skill/mcp/serve/mod.rs` — HTTP MCP server (Dyson as MCP server)
 - `src/llm/claude_code.rs` — Client that starts the server + spawns Claude Code
+- `src/llm/codex.rs` — Client that starts the server + spawns Codex
 - `src/skill/mcp/protocol.rs` — Shared JSON-RPC types (client + server)
 - `src/skill/mcp/mod.rs` — Module that also contains the MCP client
 - `src/llm/mod.rs` — `create_client()` factory that wires everything together
@@ -32,33 +33,33 @@ With the Anthropic or OpenAI backends, this tool goes through Dyson's own agent
 loop — the LLM emits `tool_use` blocks, Dyson executes them, and sends back
 `tool_result`.  Simple.
 
-But with the Claude Code backend, Claude Code **is** the agent.  Dyson just
-streams its output.  Claude Code has no concept of Dyson's workspace tool.
-We can't shove it into Claude Code's tool list — it manages its own tools
-internally.
+But with CLI backends, the subprocess **is** the agent. Dyson streams its output
+in `ToolMode::Observe` and does not run its returned tool calls again. Without
+MCP, the subprocess would have no structured access to Dyson's workspace,
+memory, KB, MCP-wrapped, or controller-facing tools.
 
 ---
 
 ## The Solution: MCP Server
 
-MCP (Model Context Protocol) is a JSON-RPC 2.0 protocol that Claude Code natively
-supports for extending its tool set.  Dyson exploits this by becoming an MCP server:
+MCP (Model Context Protocol) is a JSON-RPC 2.0 protocol that CLI providers can
+use for structured tools. Dyson exploits this by becoming an MCP server:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │ Dyson process                                                │
 │                                                              │
 │  ┌─────────────────────┐     ┌──────────────────────────┐   │
-│  │ ClaudeCodeClient    │     │ McpHttpServer            │   │
+│  │ CLI LLM client      │     │ McpHttpServer            │   │
 │  │                     │     │ (tokio task)             │   │
 │  │ 1. Starts server ───┼────▶│ 127.0.0.1:{random_port} │   │
-│  │ 2. Spawns claude -p │     │                          │   │
-│  │    --mcp-config     │     │ POST /mcp                │   │
+│  │ 2. Spawns CLI with  │     │                          │   │
+│  │    MCP config       │     │ POST /mcp                │   │
 │  │    '{"mcpServers":  │     │   ├─ initialize          │   │
 │  │     {"dyson-        │     │   ├─ notifications/      │   │
 │  │      workspace":    │     │   │  initialized         │   │
 │  │      {"type":"url", │     │   ├─ tools/list          │   │
-│  │       "url":        │     │   │  → workspace         │   │
+│  │       "url":        │     │   │  → loaded tools      │   │
 │  │       "http://...   │     │   │                      │   │
 │  │       /mcp"}}}'     │     │   │                      │   │
 │  │                     │     │   └─ tools/call          │   │
@@ -66,15 +67,17 @@ supports for extending its tool set.  Dyson exploits this by becoming an MCP ser
 │         │ stdin/stdout        └─────────────┬────────────┘   │
 │         ▼                                   │               │
 │  ┌──────────────┐                 ┌─────────▼───────┐       │
-│  │ claude -p    │───HTTP/MCP────▶│ Arc<RwLock<     │       │
+│  │ cli process  │───HTTP/MCP────▶│ Arc<RwLock<     │       │
 │  │ subprocess   │                 │   Box<dyn       │       │
 │  │              │◀───responses────│   Workspace>>>  │       │
 │  └──────────────┘                 └─────────────────┘       │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-This is completely transparent — when a user configures `provider: "claude_code"`
-and has a workspace, the MCP server starts automatically.  No extra config needed.
+This is transparent when a user configures `provider: "claude-code"` or
+`provider: "codex"` and a workspace is available. The MCP server starts
+automatically for the duration of each provider turn and exposes the same
+loaded tool registry the agent would use for API providers.
 
 ---
 
@@ -82,7 +85,8 @@ and has a workspace, the MCP server starts automatically.  No extra config neede
 
 ### Startup Sequence
 
-Each time `ClaudeCodeClient::stream()` is called (once per LLM turn):
+Each time `ClaudeCodeClient::stream()` or `CodexClient::stream()` is called
+(once per LLM turn):
 
 1. **Start MCP server**: `McpHttpServer::start()` binds to `127.0.0.1:0`
    (loopback-only, OS-assigned port), generates a bearer token, and spawns a
@@ -104,20 +108,20 @@ Each time `ClaudeCodeClient::stream()` is called (once per LLM turn):
    }
    ```
 
-3. **Pass to Claude Code**: The config (including the bearer token) is passed as
-   a CLI argument via `--mcp-config`.
+3. **Pass to the CLI provider**: Claude Code receives the config as
+   `--mcp-config`; Codex receives the same URL/token as `mcp_servers.*` config
+   values.
 
-4. **Claude Code connects**: During startup, Claude Code reads the MCP config,
-   connects to our HTTP server, and runs the MCP handshake.
+4. **The subprocess connects**: During startup, it reads the MCP config,
+   connects to Dyson's HTTP server, and runs the MCP handshake.
 
-5. **Tools available**: Claude Code now has the unified `workspace` tool as a
-   first-class structured tool with a proper JSON schema.  The LLM can call
-   it just like Bash, Read, or Write.
+5. **Tools available**: The subprocess now has Dyson tools as first-class
+   structured tools with proper JSON schemas.
 
 ### MCP Handshake (Server Perspective)
 
 ```
-Claude Code                    McpHttpServer
+CLI provider                   McpHttpServer
     │                              │
     │── POST /mcp ────────────────▶│  {"method": "initialize", ...}
     │◀─ 200 OK ───────────────────│  {"result": {"protocolVersion": "2024-11-05", ...}}
@@ -126,7 +130,7 @@ Claude Code                    McpHttpServer
     │◀─ 200 OK ───────────────────│  {"result": {}}
     │                              │
     │── POST /mcp ────────────────▶│  {"method": "tools/list"}
-    │◀─ 200 OK ───────────────────│  {"result": {"tools": [workspace]}}
+    │◀─ 200 OK ───────────────────│  {"result": {"tools": [workspace, read_file, ...]}}
     │                              │
     │   ... during agent loop ...  │
     │                              │
@@ -137,18 +141,17 @@ Claude Code                    McpHttpServer
 
 ### Tool Execution
 
-When Claude Code calls a workspace tool:
+When the CLI provider calls a Dyson tool:
 
 1. The request arrives as a JSON-RPC `tools/call` to `POST /mcp`
 2. `McpHttpServer` looks up the tool by name in its HashMap
-3. Builds a `ToolContext` with the shared `Arc<RwLock<Box<dyn Workspace>>>`
+3. Builds a `ToolContext` with the shared workspace, cwd, env, and cancellation token
 4. Calls `tool.run(arguments, &ctx)` — the **same** `Tool` trait implementation
    used everywhere in Dyson
 5. Wraps the `ToolOutput` in MCP content blocks and returns
 
-The tool is not duplicated.  `McpHttpServer` uses the exact same
-`WorkspaceTool` that Dyson's own agent loop would use with the Anthropic
-or OpenAI backends.
+The tool is not duplicated. `McpHttpServer` calls the exact same `Tool`
+implementations that Dyson's own agent loop would use with API providers.
 
 ### Lifecycle
 
@@ -167,7 +170,10 @@ A new MCP server is created per LLM turn and cleaned up when the stream drops. P
 
 ## Sandbox Plumbing
 
-The `dangerous_no_sandbox` flag flows from CLI → Settings → ClaudeCodeClient → McpHttpServer. Currently a no-op for MCP tool calls (workspace tools are in-memory), but plumbed for future tools that need sandboxing.
+The `dangerous_no_sandbox` flag still controls Dyson's own sandbox posture. For
+CLI providers, tool calls observed in the provider stream are not re-executed by
+Dyson; structured calls that come back through the MCP server execute the shared
+Dyson `Tool` implementations with their normal `ToolContext`.
 
 ---
 
@@ -187,17 +193,16 @@ Dyson agent loop → McpRemoteTool.run() → StdioTransport → external MCP ser
 
 Configured via `mcp_servers` in `dyson.json`.  Used with all LLM backends.
 
-### Dyson as MCP Server (serve.rs)
+### Dyson as MCP Server (serve/mod.rs)
 
-Dyson **serves** the unified workspace tool to Claude Code via an HTTP MCP server.
+Dyson **serves** loaded Dyson tools to CLI providers via an HTTP MCP server.
 
 ```
-Claude Code agent loop → HTTP → McpHttpServer → WorkspaceTool.run() → workspace
+CLI provider agent loop → HTTP → McpHttpServer → Tool.run() → workspace and loaded tools
 ```
 
-Automatic when `provider: "claude_code"` + workspace is configured.  Only used
-with the Claude Code backend (Anthropic/OpenAI backends use Dyson's own tool
-execution).
+Automatic when a CLI provider has a workspace configured. Anthropic/OpenAI-style
+API backends use Dyson's own tool execution instead.
 
 ### Both at once
 
@@ -205,9 +210,10 @@ Both directions can be active simultaneously.  For example, with a Claude Code
 backend and MCP servers configured:
 
 - Dyson connects to the GitHub MCP server as a client (McpSkill)
-- Dyson serves workspace tools to Claude Code as a server (McpHttpServer)
-- Claude Code has Bash, Read, Write (built-in) + GitHub tools (MCP client-side,
-  forwarded via McpSkill's system prompt) + workspace tools (MCP server-side)
+- Dyson serves loaded Dyson tools to Claude Code and Codex as a server (McpHttpServer)
+- Claude Code or Codex has its own native tools plus Dyson-loaded tools exposed
+  through the loopback MCP server, including external MCP tools that Dyson
+  wrapped as `McpRemoteTool`
 
 ---
 
