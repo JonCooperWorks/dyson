@@ -479,7 +479,7 @@ on chat reload.
 
 `FileStore` and `ArtefactStore` are FIFO-evicted in-memory caches with
 write-through to `{chat_history.connection_string}/files/` and
-`{chat}/artefacts/` respectively.  Memory cap keeps long-running
+`{chat_history.connection_string}/{chat_id}/artefacts/` respectively.  Memory cap keeps long-running
 sessions bounded; bytes stay reachable from disk on cache miss.
 
 `BrowserArtefactSink` is the cross-controller hook: when a Telegram
@@ -508,6 +508,7 @@ All endpoints return JSON unless noted.  Errors are
 | `GET` | `/api/conversations/:id/feedback` | — | `[FeedbackEntry]` |
 | `POST` | `/api/conversations/:id/feedback` | `{ turn_index, emoji }` | `{ ok, rating? }` (empty `emoji` removes) |
 | `GET` | `/api/conversations/:id/artefacts` | — | `[ArtefactSummary]` |
+| `GET` | `/api/conversations/:id/artefacts/:artefact_id` | — | artefact body scoped to chat |
 | `GET` | `/api/conversations/:id/export` | — | ShareGPT JSON blob |
 
 `ConversationDto` carries `{ id, title, live, has_artefacts, source }`
@@ -529,7 +530,8 @@ cross-controller chats.
 ### Server-Sent Events
 
 `GET /api/conversations/:id/events` is a long-lived SSE stream backed
-by the chat's `broadcast::Sender`.  Frames are `data: <json>\n\n`.
+by the chat's `broadcast::Sender` plus a per-chat replay ring. Frames
+include monotonic SSE ids and are formatted as `data: <json>\n\n`.
 Discriminator is `type`:
 
 | `type` | Payload |
@@ -552,9 +554,11 @@ inner call's own `tool_use_id` is also included so the frontend can
 update the right child even when the subagent dispatched calls in
 parallel — relying on "most recent ToolStart" is unsafe there.
 
-**Subscribe before posting the turn.**  `broadcast` drops events with
-no receivers; `client.send()` opens the EventSource first, then POSTs
-to `/turn`.
+**Subscribe before posting the turn.**  `client.send()` opens the
+EventSource first, then POSTs to `/turn`. If the connection drops mid-turn,
+the browser reconnects with `Last-Event-ID` and the replay ring sends newer
+events. At turn end the ring is cleared so a fresh subscriber does not replay
+stale events from the previous turn.
 
 #### Subagent UI tee
 
@@ -671,7 +675,7 @@ POST /api/conversations/:id/feedback
 Emoji set is verbatim from
 [`controller/telegram/feedback.rs`](../crates/dyson/src/controller/telegram/feedback.rs)
 — Telegram and the web write to the same
-`{chat_dir}/{chat_id}_feedback.json`:
+`{chat_history.connection_string}/{chat_id}/feedback.json`:
 
 | rating | emojis |
 |---|---|
@@ -845,6 +849,11 @@ sequenceDiagram
 persist hook has already checkpointed everything the agent committed,
 so the dropped future is safe.
 
+**Queued turns.**  If a browser posts another turn while the same chat is
+busy, the controller queues it instead of returning a conflict. Queued user
+messages are persisted immediately and admitted after the current tool/LLM
+work reaches a safe boundary; the per-chat queue is bounded.
+
 **`/clear`.**  Intercepted before the busy-latch path: the controller
 clears the agent's in-memory messages, rotates the transcript,
 re-seeds an empty current file (so `DiskChatHistory::list` keeps
@@ -856,11 +865,12 @@ showing the chat across restarts), and emits `done`.  No LLM call.
 
 | Data | Where | When |
 |---|---|---|
-| Chat transcript | `{chat_history.connection_string}/{chat_id}.json` | Persist hook on every message push + canonical save at end of turn |
-| Feedback | `{chat_history.connection_string}/{chat_id}_feedback.json` | `POST /feedback` |
+| Chat transcript | `{chat_history.connection_string}/{chat_id}/transcript.json` | Persist hook on every message push + canonical save at end of turn |
+| Chat title | `{chat_history.connection_string}/{chat_id}/title.txt` | background title generation and conversation create |
+| Feedback | `{chat_history.connection_string}/{chat_id}/feedback.json` | `POST /feedback` |
 | Workspace files | `{workspace.path}/{file}` | `POST /api/mind/file` or via the agent's `workspace` tool |
-| Files | `{chat_dir}/files/{id}.bin` + `.meta.json` | Write-through on `Output::send_file` and `BrowserArtefactSink::publish_file_as_artefact` |
-| Artefacts | `{chat_dir}/{chat_id}/artefacts/{id}.body` + `.meta.json` | Write-through on `Output::send_artefact` |
+| Files | `{chat_history.connection_string}/files/{id}.bin` + `.meta.json` | Write-through on `Output::send_file` and `BrowserArtefactSink::publish_file_as_artefact` |
+| Artefacts | `{chat_history.connection_string}/{chat_id}/artefacts/{id}.body` + `.meta.json` | Write-through on `Output::send_artefact` |
 | Provider/model | `dyson.json` + in-memory runtime override | `POST /api/model` writes through `persist_model_selection` |
 
 Stores hydrate in-memory indexes from disk on startup so the chat

@@ -51,7 +51,7 @@ crates/dyson/src/
   media/                  Attachments, generated artefacts, PDF/image/audio handling
   sandbox/                Policy sandbox, OS command builders, no-sandbox bypass
   controller/             Terminal, HTTP/web, Telegram, background controllers
-  chat_history/           Disk and in-memory chat stores
+  chat_history/           Disk chat store and flat-layout migrations
   workspace/              Filesystem/in-memory workspace, memory store, migrations
   auth/                   Bearer, hashed bearer, OIDC/no-auth shared auth traits
   secret/                 Secret resolver registry

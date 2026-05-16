@@ -10,7 +10,6 @@ to alternative implementations, or audit everything the agent does.
 - `src/sandbox/policy.rs` — `SandboxPolicy`, `Access`, `PathAccess`, `PolicyTable` (intent abstraction)
 - `src/sandbox/policy_sandbox.rs` — `PolicySandbox` (application + OS-level enforcement)
 - `src/sandbox/os.rs` — `OsSandbox` (macOS Apple Containers / Linux bubblewrap), policy-based command builders
-- `src/sandbox/composite.rs` — `CompositeSandbox` (chain multiple sandboxes)
 - `src/sandbox/no_sandbox.rs` — `DangerousNoSandbox` (CLI-only bypass)
 
 ---
@@ -31,7 +30,7 @@ the 95% case — accidental or naive prompt injection attacks:
 | `rm -rf /` via bash | Yes | Read-only root mount, writable paths restricted |
 | Write to `~/.ssh/authorized_keys` | Yes | Write restricted to cwd + /tmp |
 | Symlink inside cwd pointing to `/etc` | Yes | `canonicalize()` resolves symlinks before check |
-| MCP server reads arbitrary files | **No** | MCP servers run as external processes (see [Known Limitations](#known-limitations)) |
+| MCP server reads arbitrary files | **Only when opted in** | Stdio MCP servers must set `sandbox: true`; otherwise they run as external processes (see [Known Limitations](#known-limitations)) |
 | Bash reads `/etc/hostname` | **No** | Essential system dirs (`/etc`, `/usr`, `/bin`) are always mounted (bash needs them) |
 | Bash spawns child processes | **No** | `--unshare-pid` only hides host PIDs, doesn't block `fork`/`execve` |
 
@@ -91,12 +90,14 @@ sensible default policy:
 |------|---------|-----------|------------|--------------|
 | `bash` | **Deny** | RestrictTo(cwd) | RestrictTo(cwd, /tmp) | Allow |
 | `web_search` | Allow | Deny | Deny | Deny |
+| `web_fetch` | Allow | Deny | Deny | Deny |
 | `read_file` | Deny | RestrictTo(cwd) | Deny | Deny |
 | `write_file` | Deny | Deny | RestrictTo(cwd) | Deny |
 | `edit_file` | Deny | RestrictTo(cwd) | RestrictTo(cwd) | Deny |
 | `list_files` | Deny | RestrictTo(cwd) | Deny | Deny |
 | `search_files` | Deny | RestrictTo(cwd) | Deny | Deny |
-| Workspace tools | Deny | Allow | Allow | Deny |
+| `send_file` | Deny | RestrictTo(cwd) | Deny | Deny |
+| Workspace and memory tools | Deny | Allow | Allow | Deny |
 | MCP tools (`*`) | Allow | Deny | Deny | Deny |
 | Unknown tools | Allow | Deny | Deny | Deny |
 
@@ -117,11 +118,13 @@ cargo run -- run --dangerous-no-sandbox "do something"
 
 The `PolicySandbox` inspects tool name and input JSON in `check()`:
 
-- **File tools** (`read_file`, `write_file`, `edit_file`): extracts the
+- **File tools** (`read_file`, `write_file`, `edit_file`, `list_files`,
+  `search_files`, `send_file`): extracts the
   file path from input, resolves symlinks via `canonicalize()`, validates
   against the policy's `file_read`/`file_write` path restrictions. Missing
   path fields are denied (not silently allowed).
-- **Network tools** (`web_search`): checks if `network: Allow`
+- **Network tools** (`web_search`, `web_fetch`): checks if `network: Allow`;
+  `web_fetch` also runs URL safety checks before fetching.
 - **MCP tools**: checks `network` capability (MCP tools need network)
 - **Workspace tools**: always allowed (internal tools)
 
@@ -201,7 +204,6 @@ pub trait Sandbox: Send + Sync {
 ```json
 {
   "sandbox": {
-    "disabled": [],
     "tool_policies": {
       "web_search": {
         "network": "allow",
@@ -270,28 +272,16 @@ Unspecified fields in a policy inherit from the tool's default.
 
 | Field | Default | Purpose |
 |-------|---------|---------|
-| `disabled` | `[]` | List of sandbox names to disable: `"os"` |
 | `os_profile` | `"default"` | Legacy fallback: `"default"`, `"strict"`, `"permissive"` |
 | `tool_policies` | `{}` | Per-tool policy overrides (recommended) |
+
+Old configs may still contain `sandbox.disabled`; current Dyson ignores that
+field. Use `--dangerous-no-sandbox` when you intentionally want the bypass.
 
 CLI override (disables everything):
 ```bash
 cargo run -- run --dangerous-no-sandbox "prompt"
 ```
-
----
-
-## Composition Rules
-
-`CompositeSandbox` chains sandboxes in sequence:
-
-| Event | Behavior |
-|-------|----------|
-| `Deny` | Stop immediately, return denial |
-| `Redirect` | Stop immediately, return redirect |
-| `Allow { input }` | Pass (possibly rewritten) input to next sandbox |
-| All allow | Return final Allow with accumulated rewrites |
-| `after()` | All sandboxes run in order, each can mutate output |
 
 ---
 
@@ -314,10 +304,10 @@ Use glob patterns to configure MCP tools by server:
 }
 ```
 
-**Important:** The sandbox only controls whether the agent can *invoke* an
-MCP tool — it does not restrict what the MCP server process does on disk or
-network. A compromised or misconfigured MCP server has full access to the
-host. See [Known Limitations](#known-limitations).
+**Important:** The tool-call sandbox only controls whether the agent can
+*invoke* an MCP tool. Stdio MCP servers run as external child processes unless
+the server config opts into `sandbox: true`; unsandboxed servers have the same
+host access as the Dyson process. See [Known Limitations](#known-limitations).
 
 ---
 
@@ -337,11 +327,6 @@ The original bash-only sandbox. Still available for direct use, but
 functions. The profile-based API (`"default"`, `"strict"`, `"permissive"`)
 is preserved for backward compatibility.
 
-### CompositeSandbox (the pipeline)
-
-Chains multiple sandboxes in sequence. `create_sandbox()` builds this
-automatically from config.
-
 ### DangerousNoSandbox (CLI-only bypass)
 
 Disables all sandboxes. Only available via `--dangerous-no-sandbox` CLI
@@ -353,7 +338,7 @@ flag. Cannot be set from config.
 
 - **`process_exec: Deny` is weak** — `--unshare-pid` hides host PIDs but doesn't block `fork`/`execve`. True prevention needs seccomp-bpf.
 - **System dirs always readable (Linux)** — `/etc`, `/usr`, `/bin` are mounted for bash to function. Protects user data, not system files.
-- **MCP servers not sandboxed** — they run as external processes with full host access. The sandbox only gates whether the agent can *invoke* them.
+- **MCP servers are opt-in sandboxed** — stdio MCP servers run as normal child processes unless their config sets `sandbox: true`. The default tool-call sandbox only gates whether the agent can *invoke* them.
 - **Apple Containers require Apple Silicon** — the `container` CLI uses the Apple Virtualization framework, which is only available on ARM Macs.
 - **No syscall filtering** — without seccomp-bpf, arbitrary syscalls are possible. Run Dyson in a container for defense in depth.
 

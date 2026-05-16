@@ -15,8 +15,8 @@ Key files:
 ## CLI Shape
 
 ```text
-dyson listen [--config PATH] [--provider NAME] [--base-url URL] [--workspace DIR]
-dyson init [--noinput] [--daemonize] [--path DIR] [--import-filesystem DIR] [--env KEY=VALUE]
+dyson listen [--config PATH] [--provider NAME] [--base-url URL] [--workspace DIR] [--dangerous-no-sandbox]
+dyson init [--noinput] [--daemonize] [--path DIR] [--import-filesystem DIR] [--env KEY=VALUE] [--dangerous-no-sandbox]
 dyson hash-bearer <plaintext>
 dyson swarm
 dyson run [OPTIONS] <prompt>
@@ -25,6 +25,15 @@ dyson run [OPTIONS] <prompt>
 `dyson swarm` is not a normal user config path. It is started by
 `dyson-swarm`, reads `SWARM_*` environment variables, renders a generated
 config, and starts the HTTP controller inside the sandbox.
+
+Important swarm env values include `SWARM_BEARER_TOKEN`, `SWARM_PROXY_URL`,
+`SWARM_PROXY_TOKEN`, `SWARM_MODEL`, `SWARM_NAME`,
+`SWARM_TASK`, `SWARM_INSTANCE_ID`, `SWARM_STATE_SYNC_URL`,
+`SWARM_STATE_SYNC_TOKEN`, and `SWARM_TOOLS`. When `SWARM_TOOLS` is absent,
+all default builtin tools are enabled; when it is present, Dyson uses it as an
+exact comma-separated allowlist, so an empty value enables no builtin tools.
+Image generation in swarm-managed instances is normally patched after boot by
+`dyson-swarm` through Dyson's admin configure route.
 
 ## File Discovery
 
@@ -49,11 +58,15 @@ The current `config_version` is **3**.
 | Migration | Behaviour |
 |---|---|
 | v0 -> v1 | Moves inline `agent.provider`, `agent.api_key`, and `agent.base_url` into `providers.default` |
-| v1 -> v2 | Renames each provider's `model` string to a `models` array and removes `agent.model` |
+| v1 -> v2 | Renames each provider's `model` string to a `models` array and removes the migrated copy of `agent.model` |
 | v2 -> v3 | Marker migration for OIDC controller `allowed_sub`; no structural rewrite |
 
 The loader writes migrated configs back to disk so later starts skip the same
 work. A config with a version newer than the binary refuses to load.
+
+`agent.model` is still accepted as an explicit active-model override and is
+what the HTTP model switch writes back to `dyson.json`. The v1 -> v2 migration
+only removed the stale model value copied from legacy provider config.
 
 ## Minimal Config
 
@@ -114,6 +127,10 @@ If an API-key provider has `base_url`, env-var fallback is disabled. Put the
 intended key in that provider entry so a default provider key is not silently
 sent to a third-party endpoint.
 
+For the same reason, the loader rejects plaintext API keys on non-local
+`http://` provider URLs. Use HTTPS for remote upstreams, or a loopback/local
+HTTP endpoint for local models.
+
 Example with multiple providers:
 
 ```json
@@ -147,6 +164,7 @@ Common `agent` keys:
 | Field | Default | Notes |
 |---|---|---|
 | `provider` | required for useful config | Name in `providers` |
+| `model` | first model on active provider | Optional active-model override |
 | `max_iterations` | `40` | Maximum LLM turns per `run()` call |
 | `max_retries` | `6` | Transient LLM retry budget |
 | `max_concurrent_llm_calls` | `4` | Shared provider concurrency cap; `0` disables |
@@ -200,6 +218,25 @@ Stdio:
 }
 ```
 
+Stdio servers can also opt into Dyson's OS sandbox wrapper:
+
+```json
+{
+  "mcp_servers": {
+    "local": {
+      "command": "node",
+      "args": ["server.js"],
+      "sandbox": true,
+      "sandbox_deny_network": true
+    }
+  }
+}
+```
+
+When omitted, MCP server processes are regular child processes. The tool-call
+sandbox still gates whether the agent may invoke each MCP tool, but it does not
+confine an unsandboxed MCP server's own filesystem or network access.
+
 HTTP:
 
 ```json
@@ -245,6 +282,9 @@ backend is `disk`.
 
 `workspace.path` is still accepted as a legacy alias when
 `workspace.connection_string` is absent.
+
+The filesystem workspace also creates `programs/`; agents use it as their
+working directory for coding and shell tools.
 
 ## Web Search And Transcription
 

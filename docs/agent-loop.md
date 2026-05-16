@@ -147,7 +147,10 @@ Some providers run their own agent loop with built-in tools. When the
 
 ### Iteration limit
 
-`max_iterations` (default 40) prevents infinite loops. Each "turn" = one LLM call + tool execution.
+`max_iterations` (default 40) prevents infinite loops. Each "turn" = one LLM
+call + tool execution. If the limit is reached while tools are still being
+requested, Dyson asks the model for one final tool-free summary before
+returning.
 
 ### Conversation persistence
 
@@ -167,8 +170,8 @@ pub async fn process_stream(
 
 Bridges raw `StreamEvent`s to structured data:
 
-1. Renders events to `Output` (text deltas, tool markers)
-2. Accumulates content blocks (`Text`, `ToolUse`)
+1. Renders events to `Output` (text and thinking deltas, tool markers)
+2. Accumulates content blocks (`Text`, `Thinking`, `ToolUse`)
 3. Collects `ToolCall { id, name, input }` structs from `ToolUseComplete` events
 4. Returns output-token count and the final stop reason for budgeting/retry decisions
 
@@ -197,7 +200,7 @@ sandbox.check(name, input, ctx)
 | `StreamEvent::Error` in stream | `process_stream` returns `Err` immediately |
 | `tool.run()` returns `Err(DysonError)` | Converted to `ToolOutput::error(e.to_string())` — LLM sees it |
 | `sandbox.check()` returns `Err` | `Err` propagates up (infrastructure failure) |
-| Max iterations reached | Warning emitted, loop exits, last text returned |
+| Max iterations reached | Warning emitted, one final tool-free summary is requested, summary text returned |
 
 Tool-level errors are **not** fatal — they're reported to the LLM as error `tool_result` blocks, and the LLM can retry or adjust.
 

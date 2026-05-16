@@ -158,7 +158,9 @@ Input: `{ "query": "string", "num_results": 1-10 }`. See
 
 `image_generate` is registered only when
 `agent.image_generation_provider` points at a provider that supports image
-generation. Today that is Gemini directly, or OpenRouter in swarm-managed mode.
+generation. Today that is Gemini or OpenRouter; swarm-managed instances
+automatically receive a dedicated OpenRouter image provider when swarm pushes
+runtime config.
 Generated files are emitted through the active controller as artefacts.
 
 ---
@@ -179,7 +181,7 @@ See `src/tool/bash.rs` as a template. The agent discovers tools automatically vi
 |-------|--------|-------|--------|
 | `BuiltinSkill` | Implemented | bash, file/search/edit tools, workspace, memory, KB, web fetch/search, dependency and AST/security tools, marketplace tools, optional image generation | Compiled into Dyson |
 | `McpSkill` | Implemented | Discovered via `tools/list` | MCP server (stdio/HTTP) |
-| `LocalSkill` | Implemented | None (system prompt list only) | skills/*/SKILL.md |
+| `LocalSkill` | Implemented | None (listed in prompt; loaded through `load_skill`) | skills/*/SKILL.md |
 | `SubagentSkill` | Implemented | Subagent tools (planner, researcher, user-defined) | Config + parent tools |
 | `SkillListSkill` | Implemented | None (system prompt only) | Generated from discovered skills |
 
@@ -194,7 +196,7 @@ Skills live in `~/.dyson/skills/<name>/SKILL.md` and are auto-discovered at star
 
 ### Two-Phase Loading
 
-1. **Startup**: Scan frontmatter (name + description) → build `<available_skills>` list in system prompt. Full body is NOT injected.
+1. **Startup**: Scan `skills/<name>/SKILL.md`; the directory name is the skill name and optional frontmatter supplies the description. Full body is NOT injected.
 2. **Runtime**: LLM calls `load_skill("name")` to fetch full instructions on demand.
 
 ### SKILL.md Format
@@ -211,7 +213,8 @@ You are a code review expert. When asked to review code:
 3. Provide actionable feedback
 ```
 
-Frontmatter requires `name`; `description` is optional. Body is loaded on demand.
+The directory name is authoritative for the skill name. `description` is
+optional frontmatter. Body is loaded on demand.
 
 ### Discovery & Tools
 

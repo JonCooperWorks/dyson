@@ -156,7 +156,8 @@ LlmClient.stream()
        │
        ├── TextDelta("Hello")        → print immediately
        ├── TextDelta(" world")       → print immediately
-       ├── ToolUseStart { id, name } → display tool marker
+       ├── ThinkingDelta("...")      → stream and store reasoning block
+       ├── ToolUseStart { id, name } → remember active tool for output association
        ├── ToolUseInputDelta(json)   → (accumulated in LLM client)
        ├── ToolUseComplete { ... }   → ready for execution
        └── MessageComplete { stop }  → end of this LLM turn
@@ -167,7 +168,8 @@ LlmClient.stream()
 | Variant | Produced by | Consumed by |
 |---------|-------------|-------------|
 | `TextDelta(String)` | SSE parser | stream_handler → Output.text_delta() |
-| `ToolUseStart { id, name }` | SSE parser | stream_handler → Output.tool_use_start() |
+| `ThinkingDelta(String)` | SSE parser | stream_handler → Output.thinking_delta() + `ContentBlock::Thinking` |
+| `ToolUseStart { id, name }` | SSE parser | stream_handler tracks active tool; controller output can defer visible tool rows until completion |
 | `ToolUseInputDelta(String)` | SSE parser | (logging only — accumulation in LLM client) |
 | `ToolUseComplete { id, name, input }` | SSE parser (on block stop) | stream_handler → ToolCall |
 | `MessageComplete { stop_reason }` | SSE parser | stream_handler → flush text |

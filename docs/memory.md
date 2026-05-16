@@ -59,8 +59,9 @@ included in the system prompt for session continuity.
 │   ├── INDEX.md         navigation index         (in system prompt)
 │   ├── raw/             source material           (FTS5 indexed)
 │   └── wiki/            curated articles           (FTS5 indexed)
-├── skills/              local skill files (auto-discovered)
-│   └── *.md             SKILL.md format with frontmatter
+├── skills/              local skills (auto-discovered)
+│   └── <name>/SKILL.md  skill body plus optional frontmatter
+├── programs/            agent working directory for code/shell tools
 └── memory.db            SQLite FTS5 index
 ```
 
@@ -76,11 +77,12 @@ Workspaces are versioned via `.workspace_version` (missing = version 0). Migrati
 | Version | Description |
 |---------|-------------|
 | 0 → 1 | Create `memory/notes/` directory for Tier 2 overflow |
+| 1 → 2 | Promote legacy `skills/*.md` files to `skills/<name>/SKILL.md` |
 | 2 → 3 | Create `kb/` directory structure for knowledge base |
 
 To add a migration: bump `CURRENT_WORKSPACE_VERSION` in `src/workspace/migrate.rs` and add a `Migration` to `migrations()`.
 
-`dyson init` auto-detects existing filesystem workspaces (presence of `SOUL.md` + `IDENTITY.md`) and migrates in place, or use `--import_filesystem <path>` to import from another directory.
+`dyson init` auto-detects existing filesystem workspaces (presence of `SOUL.md` + `IDENTITY.md`) and migrates in place, or use `--import-filesystem <path>` to import from another directory.
 
 ---
 
@@ -124,7 +126,7 @@ The `memory_search` tool queries FTS5 (top 20 results with highlighted snippets)
 
 ## Memory Nudges
 
-Every N turns (default: 5), the agent loop injects a maintenance nudge reporting character usage and suggesting the agent save important details. Set `nudge_interval: 0` to disable.
+Every N turns (default: 7), the agent loop injects a maintenance nudge reporting character usage and suggesting the agent save important details. Set `nudge_interval: 0` to disable.
 
 ---
 
@@ -149,7 +151,7 @@ Memory settings live in `dyson.json` under `workspace.memory`:
         "USER.md": 1375
       },
       "overflow_factor": 1.35,
-      "nudge_interval": 5
+      "nudge_interval": 7
     }
   }
 }
@@ -159,7 +161,7 @@ Memory settings live in `dyson.json` under `workspace.memory`:
 |-------|------|---------|-------------|
 | `limits` | `{string: number}` | See above | Per-file **soft** character targets. Files not listed have no limit. |
 | `overflow_factor` | `number` | `1.35` | Multiplier that turns a soft target into a hard ceiling. Writes between the two succeed with a warning. |
-| `nudge_interval` | `number` | `5` | Inject nudge every N turns. `0` disables nudges. |
+| `nudge_interval` | `number` | `7` | Inject nudge every N turns. `0` disables nudges. |
 
 ---
 
@@ -199,7 +201,9 @@ Configuration lives in `dyson.json` under `agent.compaction`:
 | `summary_target_ratio` | `number` | `0.20` | Summary size as a fraction of the middle section. |
 
 Shorthand: `"compaction": 200000` sets `context_window` with all other fields
-defaulting.  Omit the key entirely to disable automatic compaction.
+defaulting. Omit the key to use the built-in defaults. There is currently no
+boolean disable flag; set a very high `context_window` or `threshold_ratio` if
+you need to avoid automatic compaction.
 
 The algorithm uses five phases: tool output pruning, region identification,
 structured LLM summarisation (Goal / Progress / Decisions / Files / Next Steps),

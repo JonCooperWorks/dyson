@@ -204,7 +204,10 @@ same way.
 
 ## Thinking / Reasoning Tokens
 
-Some models emit reasoning tokens (Anthropic's extended thinking, OpenAI's o-series). Captured as `StreamEvent::ThinkingDelta`, logged at `debug` level, **not** sent to output or included in conversation history. Inspect with `RUST_LOG=debug`.
+Some models emit reasoning tokens (Anthropic's extended thinking, OpenAI's
+o-series). Dyson captures them as `StreamEvent::ThinkingDelta`, streams them
+through `Output::thinking_delta`, and stores them as `ContentBlock::Thinking`
+so controllers with a thinking UI can replay them with the transcript.
 
 ---
 

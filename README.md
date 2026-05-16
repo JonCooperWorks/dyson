@@ -200,8 +200,8 @@ controller beyond loopback.
 ## Image Generation
 
 Set `agent.image_generation_provider` to a configured provider that supports
-image generation. The built-in `image_generate` tool is absent when no image
-provider is configured.
+image generation. Gemini and OpenRouter image providers are supported. The
+built-in `image_generate` tool is absent when no image provider is configured.
 
 ```json
 {
@@ -218,6 +218,9 @@ provider is configured.
   }
 }
 ```
+
+In `dyson swarm` mode, `dyson-swarm` normally pushes a dedicated
+`openrouter-image` provider and image model through `/api/admin/configure`.
 
 ## Documentation
 

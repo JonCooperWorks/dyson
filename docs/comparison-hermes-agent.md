@@ -155,7 +155,6 @@ LLM says: tool_use("bash", {"command": "rm -rf /"})
 Sandbox implementations:
 - **PolicySandbox** — app-level JSON policy (network, file_write, path restrictions)
 - **PolicySandbox OS wrapper** — bubblewrap (Linux) / Apple Containers (macOS)
-- **CompositeSandbox** — chain multiple sandboxes
 - **DangerousNoSandbox** — passthrough (development only, requires CLI flag)
 
 The `Redirect` capability is unique — you can transparently route file reads

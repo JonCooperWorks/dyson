@@ -39,7 +39,9 @@ forms work:
 ```
 
 Environment variables are also resolved automatically for API-based providers
-when no explicit key is set (falls back to `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`).
+when no explicit key is set and no custom `base_url` is configured. Current
+fallback names are `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`OPENROUTER_API_KEY`, `GEMINI_API_KEY`, and `OLLAMA_API_KEY`.
 
 ### Parsing rules
 
@@ -133,7 +135,7 @@ Implement `SecretResolver` (two methods: `resolve(key)` and `scheme()`), then re
 
 ## Config Loading Flow
 
-At load time, `build_settings()` walks the JSON tree and resolves each `{ "resolver": ..., "name": ... }` object via the `SecretRegistry`. For API-based providers, missing keys fall back to the provider-specific env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+At load time, `build_settings()` walks the JSON tree and resolves each `{ "resolver": ..., "name": ... }` object via the `SecretRegistry`. For API-based providers, missing keys fall back to the provider-specific env var when no custom `base_url` is set. A custom `base_url` disables env fallback so a default key is not silently sent to a third-party endpoint.
 
 ---
 
