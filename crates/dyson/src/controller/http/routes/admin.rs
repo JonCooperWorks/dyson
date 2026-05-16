@@ -1313,6 +1313,17 @@ fn patch_provider_doc(
         .and_then(|p| p.as_str())
         .ok_or(ConfigureConfigPatchError::MissingAgentProvider)?
         .to_owned();
+    let primary_model = models.and_then(|ms| ms.first().filter(|m| !m.trim().is_empty()).cloned());
+    if let Some(primary) = primary_model.as_ref() {
+        let agent = doc
+            .as_object_mut()
+            .ok_or(ConfigureConfigPatchError::RootNotObject)?
+            .entry("agent".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .ok_or(ConfigureConfigPatchError::AgentNotObject)?;
+        agent.insert("model".into(), Value::String(primary.clone()));
+    }
 
     let providers = doc
         .get_mut("providers")
@@ -1544,6 +1555,17 @@ fn patch_provider_in_config(
             "config has no agent.provider — can't tell which provider's config to patch".to_string()
         })?
         .to_owned();
+    let primary_model = models.and_then(|ms| ms.first().filter(|m| !m.trim().is_empty()).cloned());
+    if let Some(primary) = primary_model.as_ref() {
+        let agent = doc
+            .as_object_mut()
+            .ok_or_else(|| "config root is not an object".to_string())?
+            .entry("agent".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| "config agent is not an object".to_string())?;
+        agent.insert("model".into(), Value::String(primary.clone()));
+    }
 
     let providers = doc
         .get_mut("providers")
@@ -1918,7 +1940,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dyson.json");
         let initial = serde_json::json!({
-            "agent": { "provider": "openrouter" },
+            "agent": {
+                "provider": "openrouter",
+                "model": "warmup-placeholder"
+            },
             "providers": {
                 "openrouter": {
                     "type": "openai",
@@ -1946,6 +1971,10 @@ mod tests {
         .unwrap();
         let after: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            after["agent"]["model"], "anthropic/claude-sonnet-4-5",
+            "reconfigure must clear the boot-time agent.model override"
+        );
         let prov = &after["providers"]["openrouter"];
         assert_eq!(prov["api_key"], "dy-real-token");
         assert_eq!(prov["base_url"], "https://dyson.example/llm/openrouter");
