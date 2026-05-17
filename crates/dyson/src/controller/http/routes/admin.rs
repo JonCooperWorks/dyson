@@ -612,6 +612,29 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     let any_config_changed =
         provider_changed || image_changed || skills_changed || mcp_changed || telegram_changed;
 
+    let agent_secrets_patch =
+        agent_secrets_runtime_patch(&body.proxy_base, &body.proxy_token, &body.instance_id);
+    let agent_secrets_applied = agent_secrets_patch.is_some();
+    let agent_secrets_changed = match &agent_secrets_patch {
+        Some(AgentSecretsRuntimePatch::Set {
+            proxy_url,
+            proxy_token,
+            instance_id,
+        }) => {
+            crate::tool::agent_secrets::set_runtime_config_from_parts(
+                proxy_url,
+                proxy_token,
+                instance_id,
+            );
+            true
+        }
+        Some(AgentSecretsRuntimePatch::Clear) => {
+            crate::tool::agent_secrets::set_runtime_config(None);
+            true
+        }
+        _ => false,
+    };
+
     // Eagerly reload the settings + ClientRegistry instead of waiting
     // for the 2s polling HotReloader to notice the mtime change.  Two
     // reasons this matters:
@@ -699,7 +722,6 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         }
         _ => false,
     };
-
     json_ok(&serde_json::json!({
         "ok": true,
         "identity_updated": identity_changed,
@@ -719,12 +741,24 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "ingest_applied": ingest_applied,
         "state_sync_updated": state_sync_changed,
         "state_sync_applied": state_sync_applied,
+        "agent_secrets_updated": agent_secrets_changed,
+        "agent_secrets_applied": agent_secrets_applied,
     }))
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum RuntimePatch<'a> {
     Set { url: &'a str, token: &'a str },
+    Clear,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AgentSecretsRuntimePatch<'a> {
+    Set {
+        proxy_url: &'a str,
+        proxy_token: &'a str,
+        instance_id: &'a str,
+    },
     Clear,
 }
 
@@ -741,6 +775,30 @@ fn runtime_patch<'a>(
             Some(RuntimePatch::Set { url, token })
         }
         (Some(""), Some("")) => Some(RuntimePatch::Clear),
+        _ => None,
+    }
+}
+
+fn agent_secrets_runtime_patch<'a>(
+    proxy_url: &'a Option<String>,
+    proxy_token: &'a Option<String>,
+    instance_id: &'a Option<String>,
+) -> Option<AgentSecretsRuntimePatch<'a>> {
+    match (
+        proxy_url.as_deref(),
+        proxy_token.as_deref(),
+        instance_id.as_deref(),
+    ) {
+        (Some(proxy_url), Some(proxy_token), Some(instance_id))
+            if !proxy_url.is_empty() && !proxy_token.is_empty() && !instance_id.is_empty() =>
+        {
+            Some(AgentSecretsRuntimePatch::Set {
+                proxy_url,
+                proxy_token,
+                instance_id,
+            })
+        }
+        (Some(""), Some(""), Some("")) => Some(AgentSecretsRuntimePatch::Clear),
         _ => None,
     }
 }

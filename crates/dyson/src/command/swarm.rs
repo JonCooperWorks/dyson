@@ -79,6 +79,11 @@ pub async fn run() -> Result<()> {
     let instance_id = std::env::var("SWARM_INSTANCE_ID").unwrap_or_default();
     let model = std::env::var("SWARM_MODEL").unwrap_or_default();
     let state_sync = dyson::swarm_state_sync::config_from_env();
+    dyson::tool::agent_secrets::set_runtime_config_from_parts(
+        &proxy_url,
+        &proxy_token,
+        &instance_id,
+    );
     // Optional builtin-tool allowlist.  Swarm only stamps this on the
     // env envelope when the operator picked a strict subset (or asked
     // for zero tools); when unset, dyson registers every builtin.

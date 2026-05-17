@@ -48,6 +48,7 @@
 //   trivial compared to the I/O itself.
 // ===========================================================================
 
+pub mod agent_secrets;
 pub mod bash;
 pub mod bulk_edit;
 pub mod dependency_scan;
