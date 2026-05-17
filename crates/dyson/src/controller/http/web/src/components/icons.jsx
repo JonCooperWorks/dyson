@@ -8,7 +8,6 @@ function Icon({ name, size = 14, style, className }) {
   switch (name) {
     case 'chat':      return <svg {...common}><path d="M3 4h10v7H6.5L3 13.5V4z"/></svg>;
     case 'brain':     return <svg {...common}><path d="M8 2.5c-1.3 0-2.5.7-3 2-1.3.2-2 1.2-2 2.5 0 1 .5 1.7 1 2 0 1.4 1.2 2.5 2.5 2.5.8 0 1.5-.4 1.5-.4v-8.6z"/><path d="M8 2.5c1.3 0 2.5.7 3 2 1.3.2 2 1.2 2 2.5 0 1-.5 1.7-1 2 0 1.4-1.2 2.5-2.5 2.5-.8 0-1.5-.4-1.5-.4"/></svg>;
-    case 'activity':  return <svg {...common}><path d="M1.5 8h3l2-5 3 10 2-5h3"/></svg>;
     case 'plug':      return <svg {...common}><path d="M10 1.5v3M6 1.5v3M5 4.5h6v3a3 3 0 0 1-6 0v-3z"/><path d="M8 10.5v4"/></svg>;
     case 'shield':    return <svg {...common}><path d="M8 1.5 3 3.5v4c0 3 2.5 5.5 5 6.5 2.5-1 5-3.5 5-6.5v-4L8 1.5z"/></svg>;
     case 'plus':      return <svg {...common}><path d="M8 3v10M3 8h10"/></svg>;

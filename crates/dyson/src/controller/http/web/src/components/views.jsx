@@ -1,6 +1,6 @@
 /* Dyson — primary views: TopBar, LeftRail.
  *
- * Secondary views (Mind / Activity / Artefacts) live in
+ * Secondary views (Mind / Artefacts) live in
  * views-secondary.jsx so they can be code-split and lazy-loaded — the
  * cold-paint bundle carries only the conversation shell. */
 
@@ -17,7 +17,6 @@ const NAVS = [
   { id: 'conv',      name: 'Conversations', k: '1', icon: 'chat' },
   { id: 'mind',      name: 'Mind',          k: '2', icon: 'brain' },
   { id: 'artefacts', name: 'Artefacts',     k: '3', icon: 'file' },
-  { id: 'activity',  name: 'Activity',      k: '4', icon: 'activity' },
 ];
 
 // Brand label + initial pulled from the swarm-set agent name (lives in

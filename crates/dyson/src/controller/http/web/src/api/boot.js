@@ -8,7 +8,7 @@
  */
 
 import {
-  setLive, setConversations, setProviders, setMind, setActivity, setAgentInfo,
+  setLive, setConversations, setProviders, setMind, setAgentInfo,
 } from '../store/app.js';
 
 const toConvRow = (c) => ({
@@ -64,10 +64,6 @@ export function boot(client, { pollMs = 10_000, doc = (typeof document !== 'unde
     Promise.resolve().then(() => client.getAgent()).then(a => {
       if (disposed) return;
       setAgentInfo(a || {});
-    }).catch(() => {});
-
-    client.getActivity().then(act => {
-      if (!disposed) setActivity(act.lanes || []);
     }).catch(() => {});
 
     intervalId = setInterval(() => {

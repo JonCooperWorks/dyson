@@ -79,4 +79,18 @@ describe('boot — first-login auto-create', () => {
     expect(snapshot.skills.mcp.map(s => s.name)).toEqual(['mcp_massive', 'brave-search']);
     dispose();
   });
+
+  it('does not fetch removed Activity lanes during boot', async () => {
+    let activityCalled = 0;
+    const dispose = boot(
+      noopClient({
+        listConversations: async () => [{ id: 'c-existing', title: 't', live: false }],
+        getActivity: async () => { activityCalled += 1; return { lanes: [] }; },
+      }),
+      { pollMs: 1_000_000 },
+    );
+    await flush();
+    expect(activityCalled).toBe(0);
+    dispose();
+  });
 });

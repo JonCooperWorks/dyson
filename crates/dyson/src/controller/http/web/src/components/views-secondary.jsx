@@ -1,4 +1,4 @@
-/* Dyson — secondary views (Mind, Activity, Artefacts).
+/* Dyson — secondary views (Mind, Artefacts).
  *
  * Split out of views.jsx so the initial-paint bundle only contains the
  * Conversation shell (TopBar + LeftRail + RightRail + ConversationView).
@@ -16,7 +16,6 @@ import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession } from '../hooks/useSession.js';
 import {
-  setActivity,
   requestOpenArtefact, clearPendingArtefact,
 } from '../store/app.js';
 import {
@@ -116,92 +115,6 @@ export function MindView({ showSide, onHideSide, path, setPath }) {
           spellCheck={false}
           disabled={!selected}/>
       </section>
-    </div>
-  );
-}
-
-export function ActivityView() {
-  // Poll /api/activity so the Subagents lane updates live while a
-  // security_engineer run streams.  The registry is authoritative
-  // (disk-backed, per chat) — re-fetching is cheap and keeps the
-  // tab honest even across tab switches.
-  const client = useApi();
-  const lanes = useAppState(s => s.activity);
-  useEffect(() => {
-    const refresh = () => {
-      client.getActivity().then(act => {
-        if (act && Array.isArray(act.lanes)) setActivity(act.lanes);
-      }).catch(() => {});
-    };
-    refresh();
-    const id = setInterval(() => { if (!document.hidden) refresh(); }, 3000);
-    return () => clearInterval(id);
-  }, [client]);
-  const running = lanes.filter(a => a.status === 'running').length;
-  const grouped = ['subagent','loop','dream']
-    .map(lane => ({ lane, items: lanes.filter(a => a.lane === lane) }))
-    .filter(g => g.items.length > 0);
-  const fmtDuration = (a) => {
-    if (a.status === 'running') return 'running';
-    const start = a.started_at || 0;
-    const end = a.finished_at || 0;
-    if (!start || !end) return '';
-    const secs = Math.max(0, end - start);
-    if (secs < 60) return `${secs}s`;
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${m}m${s.toString().padStart(2,'0')}s`;
-  };
-  return (
-    <div style={{flex:1, overflowY:'auto', padding:'22px 32px', background:'var(--bg-1)'}}>
-      <div style={{maxWidth: 980, margin:'0 auto'}}>
-        <div className="eyebrow" style={{marginBottom:12}}>
-          Background lanes{running > 0 && ` · ${running} running`}
-        </div>
-        {grouped.length === 0 && (
-          <div style={{color:'var(--mute)', fontSize:13, padding:'18px 0'}}>
-            No background agents or dreams running.
-          </div>
-        )}
-        {grouped.map(({ lane, items }) => {
-          const label = lane === 'subagent' ? 'Subagents · orchestrators'
-                     : lane === 'loop' ? 'Loops · recurring'
-                     : 'Dreams · background compaction';
-          const runningItems = items.filter(a => a.status === 'running');
-          const finishedItems = items.filter(a => a.status !== 'running');
-          const row = (a, i, dim) => (
-            <div key={i} style={{display:'flex', alignItems:'center', gap:14, padding:'10px 14px', background:'var(--bg)', border:'1px solid var(--line)', borderRadius:6, opacity: dim ? 0.72 : 1}}>
-              <span style={{width:6, height:6, borderRadius:'50%',
-                            background: a.status === 'running' ? 'var(--accent)' : a.status === 'ok' ? 'var(--ok)' : 'var(--err)',
-                            animation: a.status === 'running' ? 'pulse 1.4s infinite' : ''}}/>
-              <span className="mono" style={{fontSize:12.5, color:'var(--fg)', minWidth:200}}>{a.name}</span>
-              <span style={{fontSize:12.5, color:'var(--fg-dim)', flex:1}}>{a.note}</span>
-              {a.chat_id && <span className="mono" style={{fontSize:10.5, color:'var(--mute-2)', opacity:0.75}}>{a.chat_id}</span>}
-              <span className="mono" style={{fontSize:11, color:'var(--mute-2)'}}>{fmtDuration(a)}</span>
-            </div>
-          );
-          return (
-            <div key={lane} style={{marginBottom:22}}>
-              <h4 className="eyebrow" style={{margin:'0 0 8px'}}>{label}</h4>
-              {runningItems.length > 0 && (
-                <div style={{display:'flex', flexDirection:'column', gap:6}}>
-                  {runningItems.map((a, i) => row(a, i, false))}
-                </div>
-              )}
-              {finishedItems.length > 0 && (
-                <div style={{marginTop: runningItems.length > 0 ? 14 : 0}}>
-                  <div className="eyebrow" style={{margin:'0 0 6px', fontSize:10.5, color:'var(--mute-2)'}}>
-                    Finished · {finishedItems.length}
-                  </div>
-                  <div style={{display:'flex', flexDirection:'column', gap:6}}>
-                    {finishedItems.map((a, i) => row(a, i, true))}
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
     </div>
   );
 }

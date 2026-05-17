@@ -30,15 +30,13 @@ import {
 
 const MindView = lazy(() =>
   import('./views-secondary.jsx').then(m => ({ default: m.MindView })));
-const ActivityView = lazy(() =>
-  import('./views-secondary.jsx').then(m => ({ default: m.ActivityView })));
 const ArtefactsView = lazy(() =>
   import('./views-secondary.jsx').then(m => ({ default: m.ArtefactsView })));
 
 // Single source of truth for the views that exist.  TopBar's nav and
 // the ⌘1..N keyboard handler both key off this list so adding/removing
 // a view is a one-place change.
-const VIEW_IDS = ['conv', 'mind', 'artefacts', 'activity'];
+const VIEW_IDS = ['conv', 'mind', 'artefacts'];
 
 const MOBILE = '(max-width: 760px)';
 
@@ -81,7 +79,6 @@ function keyboardInsetForVisualViewport({
 //   #/mind/<encoded path>           mind view, specific file open
 //   #/artefacts                     artefacts list
 //   #/artefacts/<id>                reader open on that id
-//   #/activity                      activity view
 export function parseHash(rawArg) {
   const raw =
     rawArg !== undefined
@@ -122,7 +119,7 @@ export function buildHash(state) {
     return artefactId ? `#/artefacts/${encodeURIComponent(artefactId)}` : '#/artefacts';
   if (view === 'mind')
     return mindPath ? `#/mind/${encodeURIComponent(mindPath)}` : '#/mind';
-  return `#/${view}`;
+  return '#/';
 }
 
 function App() {
@@ -303,11 +300,6 @@ function App() {
       {view === 'artefacts' && (
         <main className="body no-left no-right">
           <Suspense fallback={<div/>}><ArtefactsView conv={conv} setConv={setConv}/></Suspense>
-        </main>
-      )}
-      {view === 'activity' && (
-        <main style={{display:'flex', flex:1, minHeight:0}}>
-          <Suspense fallback={<div/>}><ActivityView/></Suspense>
         </main>
       )}
     </div>

@@ -66,6 +66,12 @@ describe('parseHash', () => {
       view: 'artefacts', conv: null, artefactId: 'a1', toolRef: null, mindPath: null,
     });
   });
+
+  it('#/activity is no longer a routed view', () => {
+    expect(parseHash('#/activity')).toEqual({
+      view: 'conv', conv: null, artefactId: null, toolRef: null, mindPath: null,
+    });
+  });
 });
 
 describe('buildHash', () => {
@@ -89,6 +95,10 @@ describe('buildHash', () => {
     expect(buildHash({ view: 'artefacts' })).toBe('#/artefacts');
     expect(buildHash({ view: 'artefacts', artefactId: 'a1' }))
       .toBe('#/artefacts/a1');
+  });
+
+  it('does not build stale activity hashes', () => {
+    expect(buildHash({ view: 'activity' })).toBe('#/');
   });
 });
 

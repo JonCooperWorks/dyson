@@ -39,9 +39,11 @@ describe('module exports', () => {
   it('views-secondary.jsx exports the lazy-loaded views', () => {
     // These were split out of views.jsx so the cold-load bundle only
     // carries the conversation shell; app.jsx React.lazy()s them.
-    for (const name of ['MindView', 'ActivityView', 'ArtefactsView', 'ArtefactReader']) {
+    for (const name of ['MindView', 'ArtefactsView', 'ArtefactReader']) {
       expect(viewsSecondary[name], `views-secondary.jsx must export ${name}`).toBeTypeOf('function');
     }
+    expect(viewsSecondary.ActivityView, 'ActivityView must stay removed from the UI bundle')
+      .toBeUndefined();
   });
 
   it('turns.jsx exports only live components', () => {
@@ -79,6 +81,18 @@ describe('app.jsx — keyboard + session regressions', () => {
     expect(app).toContain('idx < VIEW_IDS.length');
     expect(app, 'app.jsx still references deleted Providers/Sandbox views')
       .not.toContain("['conv','mind','activity','providers','sandbox']");
+  });
+
+  it('Activity tab is not rendered or routed', () => {
+    const app = src('components/app.jsx');
+    const viewsSrc = src('components/views.jsx');
+    const bootSrc = src('api/boot.js');
+    expect(app).toContain("const VIEW_IDS = ['conv', 'mind', 'artefacts']");
+    expect(app).not.toContain('ActivityView');
+    expect(app).not.toContain("view === 'activity'");
+    expect(viewsSrc).not.toContain("id: 'activity'");
+    expect(viewsSrc).not.toContain('Activity');
+    expect(bootSrc).not.toContain('getActivity');
   });
 
   it('transcript force-scrolls to bottom on load', () => {
