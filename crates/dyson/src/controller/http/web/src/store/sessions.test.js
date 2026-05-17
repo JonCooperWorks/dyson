@@ -17,6 +17,9 @@ import {
   pushUserMessage,
   openPanel,
   closePanel,
+  setComposerDraft,
+  setQueueMode,
+  setNextRunModel,
   __resetSessionsForTests,
 } from './sessions.js';
 
@@ -315,6 +318,31 @@ describe('pushUserMessage — idle / queue / coalesce', () => {
     expect(next.liveTurns[2].blocks).toHaveLength(3);
   });
 
+  it('keeps separate queued bubbles when queue mode or next model differs', () => {
+    const s = {
+      ...makeSession(),
+      running: true,
+      liveTurns: [
+        { role: 'agent', ts: '11:00:00', blocks: blocks('working') },
+      ],
+    };
+    let next = pushUserMessage(s, {
+      ts: '11:00:05',
+      blocks: blocks('normal'),
+      queueMode: 'normal',
+    });
+    next = pushUserMessage(next, {
+      ts: '11:00:06',
+      blocks: blocks('tool'),
+      queueMode: 'next_tool_call',
+      nextRunModel: { provider: 'p', model: 'm2' },
+    });
+    expect(next.liveTurns).toHaveLength(3);
+    expect(next.liveTurns[1].queueMode).toBe('normal');
+    expect(next.liveTurns[2].queueMode).toBe('next_tool_call');
+    expect(next.liveTurns[2].nextRunModel).toEqual({ provider: 'p', model: 'm2' });
+  });
+
   it('attachment blocks merge into the same queued bubble', () => {
     const s = {
       ...makeSession(),
@@ -360,6 +388,31 @@ describe('pushUserMessage — idle / queue / coalesce', () => {
     expect(next.liveTurns[5].role).toBe('agent');
     expect(next.liveTurns[5].blocks).toEqual([{ type: 'text', text: '' }]);
     expect(next.running).toBe(true);
+  });
+});
+
+describe('composer draft, queue mode, and next-run model session state', () => {
+  it('stores drafts per session without touching sibling conversations', () => {
+    ensureSession('c1');
+    ensureSession('c2');
+    updateSession('c1', s => setComposerDraft(s, { text: 'draft one', attachments: [{ name: 'a.txt' }] }));
+    updateSession('c2', s => setComposerDraft(s, { text: 'draft two' }));
+    expect(getSession('c1').draftText).toBe('draft one');
+    expect(getSession('c1').draftAttachments).toEqual([{ name: 'a.txt' }]);
+    expect(getSession('c2').draftText).toBe('draft two');
+    expect(getSession('c2').draftAttachments).toEqual([]);
+  });
+
+  it('normalizes queue mode and next-run model selection', () => {
+    let s = makeSession();
+    s = setQueueMode(s, 'next_tool_call');
+    expect(s.queueMode).toBe('next_tool_call');
+    s = setQueueMode(s, 'anything-else');
+    expect(s.queueMode).toBe('normal');
+    s = setNextRunModel(s, { provider: 'p', model: 'm' });
+    expect(s.nextRunModel).toEqual({ provider: 'p', model: 'm' });
+    s = setNextRunModel(s, null);
+    expect(s.nextRunModel).toBeNull();
   });
 });
 

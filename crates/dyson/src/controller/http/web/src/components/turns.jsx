@@ -10,7 +10,7 @@ import { copyToClipboard } from '../lib/clipboard.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { requestOpenArtefact } from '../store/app.js';
 import { SLASH_COMMANDS } from '../store/constants.js';
-import { ToolBody, copyTextForTool } from './panels.jsx';
+import { ToolBody, copyTextForTool, copyInputForTool } from './panels.jsx';
 import MarkdownIt from 'markdown-it';
 
 const CLIPBOARD_IMAGE_EXT = {
@@ -198,12 +198,33 @@ function ToolChip({ tool, onToggle, expanded }) {
 // session.panels reducer so the URL deep-link path is the same too.
 function ToolBlock({ tool, toolRef, expanded, onToggle }) {
   const running = tool.status === 'running';
+  const [copied, setCopied] = useState('');
+  const copyToolPart = async (kind, text) => {
+    if (!text) return;
+    if (await copyToClipboard(text)) {
+      setCopied(kind);
+      setTimeout(() => setCopied(''), 1200);
+    }
+  };
+  const inputText = copyInputForTool(tool);
   return (
     <div className={`toolblock${expanded ? ' expanded' : ''}${running ? ' live' : ''}`}
          data-tool-ref={toolRef || undefined}>
       <ToolChip tool={tool} onToggle={onToggle} expanded={expanded}/>
       {expanded && (
         <div className="toolblock-body">
+          <div className="toolblock-actions">
+            {inputText && (
+              <button className={copied === 'input' ? 'on' : ''} onClick={() => copyToolPart('input', inputText)}>
+                <Icon name={copied === 'input' ? 'rate' : 'copy'} size={11}/> input
+              </button>
+            )}
+            <button className={copied === 'output' ? 'on' : ''} onClick={() => copyToolPart('output', copyTextForTool(tool))}>
+              <Icon name={copied === 'output' ? 'rate' : 'copy'} size={11}/> output
+            </button>
+            <span className="sep"/>
+            <button onClick={onToggle}><Icon name="chev" size={10}/> collapse</button>
+          </div>
           <ToolBody tool={tool}/>
         </div>
       )}
@@ -308,8 +329,15 @@ function Turn({ turn, tools, onOpenTool, expandedTools, turnIndex, rating, onRat
               className="queued-badge"
               title={turn.queuedCount > 1
                 ? `${turn.queuedCount} messages queued — ${agentName} will answer them in one reply`
-                : 'Queued behind the in-flight turn'}>
-              queued{turn.queuedCount > 1 ? ` ×${turn.queuedCount}` : ''}
+                : turn.queueMode === 'next_tool_call'
+                  ? 'Queued for the next tool-call opportunity'
+                  : 'Queued behind the in-flight turn'}>
+              queued{turn.queueMode === 'next_tool_call' ? ' · next tool' : ''}{turn.queuedCount > 1 ? ` ×${turn.queuedCount}` : ''}
+            </span>
+          )}
+          {turn.nextRunModel?.model && (
+            <span className="queued-badge next-model" title="Model selected for this queued run">
+              next {turn.nextRunModel.model}
             </span>
           )}
           <span className="when">{turn.ts}</span>
@@ -563,6 +591,38 @@ function ErrorBlock({ block }) {
   );
 }
 
+function RunStatusStrip({ phase, tname, startedAt, onCancel, onJump, onCollapseAll }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const elapsed = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0;
+  const phaseLabel = phase === 'tool' ? 'running tool'
+    : phase === 'streaming' ? 'streaming'
+    : 'thinking';
+  const mm = Math.floor(elapsed / 60).toString();
+  const ss = (elapsed % 60).toString().padStart(2, '0');
+  return (
+    <div className="run-status" role="status" aria-label="Run status">
+      <span className="dots"><span/><span/><span/></span>
+      <span className="phase">{phaseLabel}</span>
+      {phase === 'tool' && tname && <span className="tname mono">{tname}</span>}
+      <span className="elapsed mono">{mm}:{ss}</span>
+      <span className="sep"/>
+      <button className="btn ghost xs" onClick={onJump} title="Jump to latest">
+        <Icon name="arr-down" size={11}/> latest
+      </button>
+      <button className="btn ghost xs" onClick={onCollapseAll} title="Collapse all tool blocks">
+        <Icon name="chev" size={10}/> collapse
+      </button>
+      <button className="btn ghost xs danger" onClick={onCancel} title="Cancel run">
+        <Icon name="stop" size={11}/> cancel
+      </button>
+    </div>
+  );
+}
+
 function TypingIndicator({ phase, tname, onJump }) {
   if (phase === 'thinking') {
     return <div className="typing"><span className="dots"><span/><span/><span/></span> thinking…</div>;
@@ -576,18 +636,41 @@ function TypingIndicator({ phase, tname, onJump }) {
   );
 }
 
-function Composer({ onSend, onCancel, running, autoFocusKey }) {
-  const [val, setVal] = useState('');
+function Composer({
+  onSend,
+  onCancel,
+  running,
+  autoFocusKey,
+  draftText = '',
+  draftAttachments = [],
+  onDraftChange,
+  queueMode = 'normal',
+  nextRunModel = null,
+  onQueueModeChange,
+}) {
+  const controlled = typeof onDraftChange === 'function';
+  const [localVal, setLocalVal] = useState('');
   const [slash, setSlash] = useState(false);
   // Real File objects from <input type="file"> or drag-drop.  Sent as
   // base64 attachments through DysonClient.send → /api/.../turn → agent
   // run_with_attachments (same path Telegram takes for media).
-  const [atts, setAtts] = useState([]);
+  const [localAtts, setLocalAtts] = useState([]);
   const taRef = useRef();
   const fileRef = useRef();
   const activeModel = useAppState(s => s.activeModel);
   const agentName = useAppState(s => s.agentName) || 'dyson';
+  const val = controlled ? draftText : localVal;
+  const atts = controlled ? draftAttachments : localAtts;
   const filtered = slash ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(val.split(/\s/)[0] || '/')) : [];
+  const setDraft = useCallback((text, attachments = atts) => {
+    if (controlled) onDraftChange({ text, attachments });
+    else setLocalVal(text);
+  }, [atts, controlled, onDraftChange]);
+  const setAttachments = useCallback((next) => {
+    const attachments = typeof next === 'function' ? next(atts) : next;
+    if (controlled) onDraftChange({ text: val, attachments });
+    else setLocalAtts(attachments);
+  }, [atts, controlled, onDraftChange, val]);
 
   const setTextareaRef = useCallback((node) => {
     taRef.current = node;
@@ -620,12 +703,14 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
     e?.preventDefault();
     if (!val.trim() && !atts.length) return;
     onSend(val, atts);
-    setVal(''); setAtts([]); setSlash(false);
+    if (controlled) onDraftChange({ text: '', attachments: [] });
+    else { setLocalVal(''); setLocalAtts([]); }
+    setSlash(false);
   };
 
   const onPickFiles = (e) => {
     const list = Array.from(e.target.files || []);
-    if (list.length) setAtts(a => [...a, ...list]);
+    if (list.length) setAttachments(a => [...a, ...list]);
     e.target.value = '';  // allow re-picking the same file
   };
 
@@ -633,7 +718,7 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
     const images = clipboardImageFiles(e.clipboardData);
     if (!images.length) return;
     e.preventDefault();
-    setAtts(a => [...a, ...images]);
+    setAttachments(a => [...a, ...images]);
   };
 
   return (
@@ -641,7 +726,7 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
       {slash && filtered.length > 0 && (
         <div className="slashmenu">
           {filtered.map((c, i) => (
-            <div key={i} className={`item ${i===0?'focused':''}`} onClick={() => { setVal(c.cmd + ' '); setSlash(false); focusTextarea(); }}>
+            <div key={i} className={`item ${i===0?'focused':''}`} onClick={() => { setDraft(c.cmd + ' '); setSlash(false); focusTextarea(); }}>
               <span className="cmd">{c.cmd}</span>
               <span className="desc">{c.desc}</span>
               <span className="src">{c.src}</span>
@@ -656,7 +741,7 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
             {atts.map((a, i) => (
               <span key={i} className="att">
                 <Icon name="paperclip" size={10}/> {a.name} <span className="sz">{prettySize(a.size)}</span>
-                <span className="x" onClick={() => setAtts(atts.filter((_, j) => j !== i))}>×</span>
+                <span className="x" onClick={() => setAttachments(atts.filter((_, j) => j !== i))}>×</span>
               </span>
             ))}
           </div>
@@ -671,7 +756,7 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
           onFocus={e => prepareComposerFocus(e.currentTarget)}
           onBlur={releaseComposerFocus}
           onChange={e => {
-            setVal(e.target.value);
+            setDraft(e.target.value);
             setSlash(e.target.value.startsWith('/'));
           }}
           onPaste={onPaste}
@@ -690,22 +775,27 @@ function Composer({ onSend, onCancel, running, autoFocusKey }) {
           <button className="btn" onClick={() => fileRef.current?.click()} title="Attach files">
             <Icon name="paperclip" size={12}/>
           </button>
-          <button className={`btn ${slash?'' : ''}`} onClick={() => { setVal('/'); setSlash(true); focusTextarea(); }} title="Slash menu">
+          <button className={`btn ${slash?'' : ''}`} onClick={() => { setDraft('/'); setSlash(true); focusTextarea(); }} title="Slash menu">
             <Icon name="slash" size={12}/> <span className="btn-label">commands</span>
           </button>
+          {running && (
+            <button
+              className={`btn queue-toggle ${queueMode === 'next_tool_call' ? 'on' : ''}`}
+              onClick={() => onQueueModeChange?.(queueMode === 'next_tool_call' ? 'normal' : 'next_tool_call')}
+              title="Queue with next tool call">
+              <Icon name="arr-right" size={11}/> next tool
+            </button>
+          )}
           <span className="sep"/>
+          {running && nextRunModel?.model && (
+            <span className="model-label next-run-label">next {nextRunModel.model}</span>
+          )}
           {activeModel && (
             <span className="model-label" style={{fontFamily:'var(--font-mono)', fontSize:10.5, color:'var(--mute)'}}>{activeModel}</span>
           )}
-          {running ? (
-            <button className="btn sm" onClick={onCancel} style={{color:'var(--err)', borderColor:'oklch(0.70 0.21 25 / 0.3)'}}>
-              <Icon name="stop" size={11}/> cancel
-            </button>
-          ) : (
-            <button className="btn send sm" onClick={sub} disabled={!val.trim() && !atts.length}>
-              send <Kbd>↵</Kbd>
-            </button>
-          )}
+          <button className="btn send sm" onClick={sub} disabled={!val.trim() && !atts.length}>
+            {running ? 'queue' : 'send'} <Kbd>↵</Kbd>
+          </button>
         </div>
       </div>
     </div>
@@ -766,4 +856,4 @@ function fileToBase64(file) {
   });
 }
 
-export { Turn, ThinkingBlock, ToolChip, ToolBlock, FileBlock, ArtefactBlock, ErrorBlock, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64, clipboardImageFiles, composerFocusFontSize, composerLockedViewportContent, pinComposerFocusGuard, prepareComposerFocus, releaseComposerFocus };
+export { Turn, ThinkingBlock, ToolChip, ToolBlock, FileBlock, ArtefactBlock, ErrorBlock, RunStatusStrip, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64, clipboardImageFiles, composerFocusFontSize, composerLockedViewportContent, pinComposerFocusGuard, prepareComposerFocus, releaseComposerFocus };

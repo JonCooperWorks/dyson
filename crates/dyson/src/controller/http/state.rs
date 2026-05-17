@@ -68,6 +68,12 @@ pub(crate) struct QueuedTurn {
     pub(crate) prompt: String,
     #[serde(default)]
     pub(crate) attachments: Vec<QueuedAttachment>,
+    #[serde(default)]
+    pub(crate) provider: Option<String>,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    #[serde(default)]
+    pub(crate) queue_mode: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -332,6 +338,9 @@ mod ring_tests {
             .enqueue_turn(QueuedTurn {
                 prompt: "while you work".to_string(),
                 attachments: Vec::new(),
+                provider: None,
+                model: None,
+                queue_mode: Some("next_tool_call".to_string()),
             })
             .await;
         let qpath = handle.queue_path.clone().unwrap();
@@ -355,6 +364,30 @@ mod ring_tests {
     }
 
     #[tokio::test]
+    async fn normal_queued_turns_wait_for_end_of_turn_drain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = ChatHandle::new("c-test".to_string(), "test".to_string(), Some(tmp.path()));
+        handle
+            .enqueue_turn(QueuedTurn {
+                prompt: "later".to_string(),
+                attachments: Vec::new(),
+                provider: None,
+                model: None,
+                queue_mode: Some("normal".to_string()),
+            })
+            .await;
+
+        let count = handle
+            .admit_text_only_queued_turns(|_| panic!("normal queue must not admit mid-turn"))
+            .await
+            .unwrap();
+
+        assert_eq!(count, 0);
+        assert_eq!(handle.queued.lock().unwrap().len(), 1);
+        assert!(handle.queue_path.clone().unwrap().exists());
+    }
+
+    #[tokio::test]
     async fn mid_turn_admission_leaves_attachment_turns_for_end_of_turn_drain() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = ChatHandle::new("c-test".to_string(), "test".to_string(), Some(tmp.path()));
@@ -366,6 +399,9 @@ mod ring_tests {
                     name: Some("note.txt".to_string()),
                     data_base64: "aGVsbG8=".to_string(),
                 }],
+                provider: None,
+                model: None,
+                queue_mode: Some("next_tool_call".to_string()),
             })
             .await;
 
@@ -485,7 +521,10 @@ impl ChatHandle {
         let candidates: Vec<QueuedTurn> = {
             let q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
             q.iter()
-                .take_while(|turn| turn.attachments.is_empty())
+                .take_while(|turn| {
+                    turn.attachments.is_empty()
+                        && turn.queue_mode.as_deref() == Some("next_tool_call")
+                })
                 .cloned()
                 .collect()
         };
@@ -502,7 +541,10 @@ impl ChatHandle {
             let mut q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
             for _ in 0..candidates.len() {
                 match q.front() {
-                    Some(turn) if turn.attachments.is_empty() => {
+                    Some(turn)
+                        if turn.attachments.is_empty()
+                            && turn.queue_mode.as_deref() == Some("next_tool_call") =>
+                    {
                         q.pop_front();
                         removed += 1;
                     }

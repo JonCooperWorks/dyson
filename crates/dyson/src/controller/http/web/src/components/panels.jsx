@@ -73,6 +73,21 @@ function copyTextForTool(tool) {
   }
 }
 
+function copyInputForTool(tool) {
+  const body = tool.body || {};
+  if (tool.kind === 'bash') {
+    const lines = Array.isArray(body.lines) ? body.lines : [];
+    return lines
+      .filter(l => l.c === 'p' && l.t)
+      .map(l => String(l.t).replace(/^\$\s?/, ''))
+      .join('\n');
+  }
+  if (tool.kind === 'read') return body.path || tool.sig || '';
+  if (tool.kind === 'image') return body.prompt || tool.prompt || '';
+  if (tool.prompt) return tool.prompt;
+  return tool.sig || '';
+}
+
 function BashPanel({ running, body }) {
   // body shape (from ToolView::Bash): { lines: [{c,t}], exit_code, duration_ms }.
   // Falls back to seed lines so the static prototype still looks plausible.
@@ -354,4 +369,4 @@ function ToolPanel({ tool, onClose, toolRef }) {
   );
 }
 
-export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, SubagentPanel, ToolBody, ToolPanel, copyTextForTool };
+export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, SubagentPanel, ToolBody, ToolPanel, copyTextForTool, copyInputForTool };

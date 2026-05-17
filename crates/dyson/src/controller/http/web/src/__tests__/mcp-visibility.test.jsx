@@ -1,6 +1,6 @@
 import React from 'react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 
 import { TopBar } from '../components/views.jsx';
 import { EmptyState } from '../components/turns.jsx';
@@ -55,5 +55,43 @@ describe('MCP visibility', () => {
 
     expect(container.querySelector('.mcp-count')).toBeNull();
     expect(screen.getByText('deepseek/v4')).toBeTruthy();
+  });
+});
+
+describe('TopBar model steering', () => {
+  it('idle model pick posts the current model switch', async () => {
+    setProviders([{ id: 'p', name: 'Provider', active: true, activeModel: 'm1', models: ['m1', 'm2'] }], 'm1');
+    const postModel = vi.fn(async () => ({}));
+    render(
+      <ApiProvider client={{ postModel }}>
+        <TopBar view="conv" setView={() => {}} onToggleLeft={() => {}}/>
+      </ApiProvider>
+    );
+
+    fireEvent.click(screen.getByTitle('Switch model'));
+    fireEvent.click(screen.getByText('m2'));
+    await vi.waitFor(() => expect(postModel).toHaveBeenCalledWith('p', 'm2'));
+  });
+
+  it('running model pick is surfaced as next-run steering', async () => {
+    setProviders([{ id: 'p', name: 'Provider', active: true, activeModel: 'm1', models: ['m1', 'm2'] }], 'm1');
+    const onPickModel = vi.fn(async () => {});
+    render(
+      <ApiProvider client={{ postModel: async () => ({}) }}>
+        <TopBar
+          view="conv"
+          setView={() => {}}
+          onToggleLeft={() => {}}
+          running={true}
+          nextRunModel={{ provider: 'p', model: 'm2' }}
+          onPickModel={onPickModel}/>
+      </ApiProvider>
+    );
+
+    expect(screen.getByText('next')).toBeTruthy();
+    expect(screen.getByText('m2')).toBeTruthy();
+    fireEvent.click(screen.getByTitle('Switch model'));
+    fireEvent.click(screen.getByText('m1'));
+    await vi.waitFor(() => expect(onPickModel).toHaveBeenCalledWith('p', 'm1'));
   });
 });

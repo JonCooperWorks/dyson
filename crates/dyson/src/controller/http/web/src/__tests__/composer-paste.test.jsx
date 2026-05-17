@@ -182,4 +182,39 @@ describe('Composer image paste', () => {
     expect(onSend.mock.calls[0][1][0].name).toBe('pasted-image-1.jpg');
     expect(onSend.mock.calls[0][1][0].type).toBe('image/jpeg');
   });
+
+  it('uses controlled per-conversation draft text and clears it after send', () => {
+    const onDraftChange = vi.fn();
+    const onSend = vi.fn();
+    const { container, getByRole } = render(
+      <Composer
+        onSend={onSend}
+        onCancel={() => {}}
+        running={false}
+        draftText="saved draft"
+        draftAttachments={[]}
+        onDraftChange={onDraftChange}/>
+    );
+    expect(container.querySelector('textarea').value).toBe('saved draft');
+    fireEvent.click(getByRole('button', { name: /send/i }));
+    expect(onSend).toHaveBeenCalledWith('saved draft', []);
+    expect(onDraftChange).toHaveBeenLastCalledWith({ text: '', attachments: [] });
+  });
+
+  it('shows queued controls while running and toggles next-tool mode', () => {
+    const onQueueModeChange = vi.fn();
+    const { getByRole, getByText } = render(
+      <Composer
+        onSend={() => {}}
+        onCancel={() => {}}
+        running={true}
+        queueMode="normal"
+        nextRunModel={{ provider: 'p', model: 'next-model' }}
+        onQueueModeChange={onQueueModeChange}/>
+    );
+    fireEvent.click(getByRole('button', { name: /next tool/i }));
+    expect(onQueueModeChange).toHaveBeenCalledWith('next_tool_call');
+    expect(getByRole('button', { name: /queue/i })).toBeTruthy();
+    expect(getByText('next next-model')).toBeTruthy();
+  });
 });

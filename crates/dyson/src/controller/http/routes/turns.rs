@@ -29,7 +29,7 @@ use super::super::responses::{
     Resp, bad_request, boxed, internal_error, json_ok, not_found, read_json_capped,
     service_unavailable,
 };
-use super::super::state::{ChatHandle, HttpState};
+use super::super::state::{ChatHandle, HttpState, RuntimeModelSelection};
 use super::super::wire::{MAX_TURN_BODY, SseEvent, TurnBody};
 use super::super::{AgentMode, ClientRegistry, build_agent};
 use super::conversations::bump_to_front;
@@ -44,13 +44,22 @@ struct ReadyTurnConfig {
 }
 
 impl ReadyTurnConfig {
-    fn resolve(state: &HttpState) -> Result<Self, String> {
+    fn resolve_with_selection(
+        state: &HttpState,
+        selection: Option<&RuntimeModelSelection>,
+    ) -> Result<Self, String> {
         let mut settings = state.settings_snapshot();
-        let runtime = match state.runtime_model.lock() {
-            Ok(g) => g.clone(),
-            Err(p) => p.into_inner().clone(),
+        let runtime;
+        let selected = if let Some(selection) = selection {
+            Some(selection.clone())
+        } else {
+            runtime = match state.runtime_model.lock() {
+                Ok(g) => g.clone(),
+                Err(p) => p.into_inner().clone(),
+            };
+            runtime
         };
-        let provider_name = if let Some(selection) = runtime {
+        let provider_name = if let Some(selection) = selected {
             selection.apply_to_settings(&mut settings)?;
             Some(selection.provider().to_string())
         } else {
@@ -105,6 +114,49 @@ fn reject_unready_agent_config(
     Ok(())
 }
 
+fn turn_model_selection(
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<Option<RuntimeModelSelection>, String> {
+    match (provider, model) {
+        (Some(provider), Some(model)) => RuntimeModelSelection::new(provider, model).map(Some),
+        (None, None) => Ok(None),
+        _ => Err("provider and model must be supplied together".to_string()),
+    }
+}
+
+fn queued_model_selection(
+    turns: &[super::super::state::QueuedTurn],
+) -> Option<RuntimeModelSelection> {
+    turns.iter().rev().find_map(|t| {
+        turn_model_selection(t.provider.as_deref(), t.model.as_deref())
+            .ok()
+            .flatten()
+    })
+}
+
+fn apply_model_selection_to_agent(
+    agent: &mut crate::agent::Agent,
+    state: &HttpState,
+    registry: &ClientRegistry,
+    selection: &RuntimeModelSelection,
+) -> Result<(), String> {
+    let snapshot = state.settings_snapshot();
+    let provider_cfg = snapshot
+        .providers
+        .get(selection.provider())
+        .ok_or_else(|| format!("unknown provider '{}'", selection.provider()))?;
+    let client = registry.get(selection.provider()).map_err(|e| {
+        format!(
+            "provider '{}' is not ready: {}",
+            selection.provider(),
+            e.sanitized_message()
+        )
+    })?;
+    agent.swap_client(client, selection.model(), &provider_cfg.provider_type);
+    Ok(())
+}
+
 pub(super) async fn post(
     req: Request<hyper::body::Incoming>,
     state: Arc<HttpState>,
@@ -124,6 +176,11 @@ pub(super) async fn post(
         Ok(b) => b,
         Err(e) => return bad_request(&e),
     };
+    let requested_model =
+        match turn_model_selection(body.provider.as_deref(), body.model.as_deref()) {
+            Ok(selection) => selection,
+            Err(e) => return bad_request(&e),
+        };
 
     // Decode attachments up front so a malformed base64 fails the
     // request before we kick off the agent (clean rejection > orphan
@@ -212,6 +269,9 @@ pub(super) async fn post(
         // restart mid-turn doesn't drop messages the user typed.
         let queued = super::super::state::QueuedTurn {
             prompt: body.prompt,
+            provider: body.provider,
+            model: body.model,
+            queue_mode: body.queue_mode,
             attachments: body
                 .attachments
                 .into_iter()
@@ -243,15 +303,16 @@ pub(super) async fn post(
     }
 
     let registry = Arc::clone(&state.registry);
-    let turn_config = match ReadyTurnConfig::resolve(&state) {
-        Ok(config) => config,
-        Err(e) => {
-            handle
-                .busy
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-            return service_unavailable(&e);
-        }
-    };
+    let turn_config =
+        match ReadyTurnConfig::resolve_with_selection(&state, requested_model.as_ref()) {
+            Ok(config) => config,
+            Err(e) => {
+                handle
+                    .busy
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                return service_unavailable(&e);
+            }
+        };
     let client = match turn_config.client(&registry) {
         Ok(client) => client,
         Err(e) => {
@@ -586,6 +647,14 @@ pub(super) async fn post(
             if drained.is_empty() {
                 break;
             }
+            if let Some(selection) = queued_model_selection(&drained) {
+                if let Err(e) =
+                    apply_model_selection_to_agent(agent, &state_for_task, &registry, &selection)
+                {
+                    tracing::warn!(error = %e, chat_id = %chat_id, "queued model switch failed");
+                    chat_handle.emit(SseEvent::LlmError { message: e });
+                }
+            }
             let (combined_prompt, combined_attachments) = coalesce_queued(drained);
             next_prompt = combined_prompt;
             next_attachments = combined_attachments;
@@ -844,6 +913,9 @@ mod tests {
         let (prompt, atts) = coalesce_queued(vec![QueuedTurn {
             prompt: "hello".into(),
             attachments: vec![],
+            provider: None,
+            model: None,
+            queue_mode: None,
         }]);
         assert_eq!(prompt, "hello");
         assert!(atts.is_empty());
@@ -855,14 +927,23 @@ mod tests {
             QueuedTurn {
                 prompt: "first".into(),
                 attachments: vec![],
+                provider: None,
+                model: None,
+                queue_mode: None,
             },
             QueuedTurn {
                 prompt: "second".into(),
                 attachments: vec![],
+                provider: None,
+                model: None,
+                queue_mode: None,
             },
             QueuedTurn {
                 prompt: "third".into(),
                 attachments: vec![],
+                provider: None,
+                model: None,
+                queue_mode: None,
             },
         ]);
         assert!(prompt.starts_with("I sent 3 more messages while you were working:"));
@@ -883,6 +964,9 @@ mod tests {
                     name: Some("one.png".into()),
                     data_base64: b64(b"\x89PNG one"),
                 }],
+                provider: None,
+                model: None,
+                queue_mode: None,
             },
             QueuedTurn {
                 prompt: "b".into(),
@@ -891,6 +975,9 @@ mod tests {
                     name: Some("two.png".into()),
                     data_base64: b64(b"\x89PNG two"),
                 }],
+                provider: None,
+                model: None,
+                queue_mode: None,
             },
         ]);
         assert_eq!(atts.len(), 2);
@@ -909,6 +996,9 @@ mod tests {
                 name: Some("bad.png".into()),
                 data_base64: "not!!!base64".into(),
             }],
+            provider: None,
+            model: None,
+            queue_mode: None,
         }]);
         assert!(
             atts.is_empty(),

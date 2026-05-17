@@ -374,6 +374,29 @@ describe('DysonClient — send (SSE + POST turn)', () => {
     expect(JSON.parse(turnCall[1].body)).toEqual({ prompt: 'hello', attachments: [] });
   });
 
+  it('send includes queued mode and next-run model options when supplied', async () => {
+    const fetch = vi.fn(async () => ({ ok: true, status: 200 }));
+    class FakeES {
+      constructor() { this.onmessage = null; }
+      close() {}
+    }
+    const client = new DysonClient({ fetch, EventSource: FakeES });
+    client.send('c1', 'queued', {}, [], {
+      queueMode: 'next_tool_call',
+      model: { provider: 'anthropic', model: 'claude-next' },
+    });
+    await new Promise(r => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 0));
+    const turnCall = fetch.mock.calls.find(c => c[0] === '/api/conversations/c1/turn');
+    expect(JSON.parse(turnCall[1].body)).toEqual({
+      prompt: 'queued',
+      attachments: [],
+      provider: 'anthropic',
+      model: 'claude-next',
+      queue_mode: 'next_tool_call',
+    });
+  });
+
   it('incoming events dispatch through stream.js callbacks', async () => {
     const fetch = vi.fn(async () => ({ ok: true, status: 200 }));
     let instance;

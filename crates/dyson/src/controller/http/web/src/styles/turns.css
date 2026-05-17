@@ -347,6 +347,18 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .composer .row .queue-toggle {
+    max-width: 38px;
+    overflow: hidden;
+    padding: 0 8px;
+  }
+  .run-status {
+    gap: 6px;
+    padding-left: 9px;
+  }
+  .run-status .tname { max-width: 96px; }
+  .run-status .btn { padding: 0 6px; }
+  .run-status .btn:not(.danger) { max-width: 30px; overflow: hidden; }
   .fileblock.image {
     max-width: 100%;
     width: 100%;
@@ -548,6 +560,34 @@
     0 6px 18px -10px oklch(0 0 0 / 0.55);
 }
 .toolblock.live > .toolblock-body { border-color: var(--accent-ln); }
+.toolblock-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  background: oklch(0.170 0.014 262 / 0.92);
+}
+.toolblock-actions .sep { flex: 1; }
+.toolblock-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--mute);
+  font: 600 11px/1 var(--font-ui);
+  cursor: pointer;
+}
+.toolblock-actions button:hover,
+.toolblock-actions button.on {
+  background: var(--bg-1);
+  border-color: var(--line);
+  color: var(--fg);
+}
 /* The body content reuses the kind-specific renderers from panels.jsx
    (BashPanel / DiffPanel / SbomPanel / …).  Their max-height was tuned
    for the 388px right-rail; in the chat the transcript itself scrolls,
@@ -752,6 +792,57 @@
 .typing .tname { color: var(--accent); font-weight: 600; text-shadow: 0 0 10px var(--accent-glow); }
 .typing .jump { color: var(--mute); margin-left: 4px; padding-left: 12px; border-left: 1px solid var(--line); }
 
+.run-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 5px 8px 5px 12px;
+  margin-bottom: 8px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--accent-ln);
+  border-radius: 8px;
+  color: var(--fg-dim);
+  box-shadow:
+    0 0 0 3px var(--accent-wash),
+    0 8px 18px -10px oklch(0 0 0 / 0.62);
+}
+.run-status .dots {
+  display: inline-flex;
+  gap: 4px;
+}
+.run-status .dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.2s infinite ease-in-out;
+}
+.run-status .dots span:nth-child(2) { animation-delay: 0.15s; }
+.run-status .dots span:nth-child(3) { animation-delay: 0.3s; }
+.run-status .phase,
+.run-status .tname,
+.run-status .elapsed {
+  font-size: 11.5px;
+}
+.run-status .phase { font-weight: 650; color: var(--fg); }
+.run-status .tname {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent);
+}
+.run-status .elapsed { color: var(--mute); }
+.run-status .sep { flex: 1; }
+.run-status .btn {
+  height: 24px;
+  padding: 0 7px;
+  gap: 5px;
+  font-size: 11px;
+}
+.run-status .btn.danger { color: var(--err); }
+
 /* ---------- composer ---------- */
 .composer {
   width: 100%;
@@ -834,6 +925,18 @@
   box-shadow: none;
 }
 .composer .row .btn:hover { background: var(--bg); color: var(--fg); }
+.composer .row .queue-toggle.on {
+  background: var(--accent-wash);
+  color: var(--accent);
+  border-color: var(--accent-ln);
+}
+.composer .row .next-run-label {
+  color: var(--accent);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* The send button — its own world.  Conic gradient backdrop, bright
    highlight on top, shadow underneath.  Hover lifts; press settles.

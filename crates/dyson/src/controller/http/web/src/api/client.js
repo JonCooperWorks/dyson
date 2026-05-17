@@ -235,7 +235,7 @@ export class DysonClient {
     };
   }
 
-  send(id, prompt, callbacks, files) {
+  send(id, prompt, callbacks, files, options = {}) {
     const cb = callbacks || {};
     const handle = this._openEvents(id, cb);
 
@@ -248,7 +248,13 @@ export class DysonClient {
           data_base64: await fileToBase64(f),
         });
       }
-      return JSON.stringify({ prompt, attachments });
+      const body = { prompt, attachments };
+      if (options?.model?.provider && options?.model?.model) {
+        body.provider = options.model.provider;
+        body.model = options.model.model;
+      }
+      if (options?.queueMode) body.queue_mode = options.queueMode;
+      return JSON.stringify(body);
     };
 
     buildBody()

@@ -125,6 +125,18 @@ pub(crate) struct TurnBody {
     /// the same path Telegram uses for photos / voice notes / docs.
     #[serde(default)]
     pub(crate) attachments: Vec<AttachmentDto>,
+    /// Optional per-turn model selection.  The web UI uses this only
+    /// for queued "next run" steering; idle model switches still go
+    /// through `/api/model` so existing controller behavior stays put.
+    #[serde(default)]
+    pub(crate) provider: Option<String>,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    /// How a prompt submitted while the agent is busy should be queued.
+    /// `next_tool_call` lets the HTTP output hook admit the message
+    /// between tool batches; anything else drains as a normal queued run.
+    #[serde(default)]
+    pub(crate) queue_mode: Option<String>,
 }
 
 #[derive(Deserialize)]

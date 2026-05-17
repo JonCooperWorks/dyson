@@ -32,7 +32,7 @@ export function brandMark(agentName) {
   return name.replace(/\s+/g, '').slice(0, 1).toUpperCase() || 'D';
 }
 
-function TopBar({ view, setView, onToggleLeft }) {
+function TopBar({ view, setView, onToggleLeft, running, nextRunModel, onPickModel }) {
   const client = useApi();
   const model = useAppState(s => s.activeModel);
   const providers = useAppState(s => s.providers);
@@ -54,8 +54,12 @@ function TopBar({ view, setView, onToggleLeft }) {
   const switchTo = async (provider, modelName) => {
     setBusy(true);
     try {
-      await client.postModel(provider, modelName);
-      switchProviderModel(provider, modelName);
+      if (typeof onPickModel === 'function') {
+        await onPickModel(provider, modelName);
+      } else {
+        await client.postModel(provider, modelName);
+        switchProviderModel(provider, modelName);
+      }
     } catch (e) { console.error(e); }
     setBusy(false);
     setMenuOpen(false);
@@ -81,12 +85,14 @@ function TopBar({ view, setView, onToggleLeft }) {
           <span className="select" onClick={() => totalModels > 0 && setMenuOpen(o => !o)}
                 style={{cursor: totalModels > 0 ? 'pointer' : 'default', opacity: busy ? 0.5 : 1}}
                 title={totalModels > 0 ? 'Switch model' : 'Active model'}>
-            <span className="label">model</span> <span className="mono">{model}</span>
+            <span className="label">{nextRunModel ? 'next' : 'model'}</span>
+            <span className="mono">{nextRunModel ? nextRunModel.model : model}</span>
             {totalModels > 0 && <Icon name="chevd" size={10}/>}
           </span>
         )}
         {menuOpen && totalModels > 0 && (
           <ModelMenu providers={providers} model={model} expanded={expanded}
+                     nextRunModel={nextRunModel}
                      onToggleGroup={id => setExpanded(e => ({ ...e, [id]: !e[id] }))}
                      onPick={switchTo} onDismiss={() => setMenuOpen(false)}/>
         )}
@@ -95,7 +101,7 @@ function TopBar({ view, setView, onToggleLeft }) {
   );
 }
 
-function ModelMenu({ providers, model, expanded, onToggleGroup, onPick, onDismiss }) {
+function ModelMenu({ providers, model, expanded, nextRunModel, onToggleGroup, onPick, onDismiss }) {
   return (
     <>
       <div className="modelmenu-scrim" onClick={onDismiss}/>
@@ -115,14 +121,19 @@ function ModelMenu({ providers, model, expanded, onToggleGroup, onPick, onDismis
               </div>
               {open && models.length > 0 && (
                 <div className="g-body">
-                  {models.map(m => (
+                  {models.map(m => {
+                    const next = nextRunModel?.provider === p.id && nextRunModel?.model === m;
+                    const current = p.active && m === model;
+                    return (
                     <div key={m}
-                         className={`item ${(p.active && m === model) ? 'on' : ''}`}
+                         className={`item ${current ? 'on' : ''} ${next ? 'next' : ''}`}
                          onClick={() => onPick(p.id, m)}>
                       <span className="dot"/>
                       <span className="model mono">{m}</span>
+                      {next && <span className="badge">next run</span>}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -227,4 +238,4 @@ function ConvRow({ c, active, onOpen, onDelete }) {
   );
 }
 
-export { TopBar, LeftRail };
+export { TopBar, LeftRail, NAVS };

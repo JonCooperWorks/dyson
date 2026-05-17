@@ -11,13 +11,15 @@
 
 import React, { useState, useEffect, useRef, useCallback, useLayoutEffect, Suspense, lazy } from 'react';
 import { Icon } from './icons.jsx';
-import { Turn, Composer, TypingIndicator, EmptyState } from './turns.jsx';
+import { Turn, Composer, RunStatusStrip, EmptyState } from './turns.jsx';
 import { TopBar, LeftRail } from './views.jsx';
+import { CommandPalette } from './command-palette.jsx';
 import { useApi } from '../hooks/useApi.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { useSession, useSessionMutator } from '../hooks/useSession.js';
 import {
   setTool, updateTool, mergeTools, upsertConversation,
+  switchProviderModel,
   markConversationHasArtefacts,
   requestOpenArtefact, clearPendingArtefact,
   requestToggleArtefactsDrawer,
@@ -26,6 +28,7 @@ import {
   ensureSession, updateSession, getSession, getResources, mintToolRef,
   mapLastTurn, appendBlock, mapAgentTail, appendAgentBlock,
   pushUserMessage, admitUserMessage, openPanel, closePanel,
+  closeAllPanels, setComposerDraft, setQueueMode, setNextRunModel,
 } from '../store/sessions.js';
 
 const MindView = lazy(() =>
@@ -139,6 +142,7 @@ function App() {
   const [artefactId, setArtefactId] = useState(initialRoute.artefactId);
   const [toolRef, setToolRef] = useState(initialRoute.toolRef);
   const [mindPath, setMindPath] = useState(initialRoute.mindPath);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const selectView = useCallback((v) => {
     setView(v);
     setArtefactId(null);
@@ -148,8 +152,33 @@ function App() {
   const [showLeft, setShowLeft] = useState(false);
 
   const conversations = useAppState(s => s.conversations);
+  const providers = useAppState(s => s.providers);
+  const mind = useAppState(s => s.mind);
   const pendingArtefactId = useAppState(s => s.ui.pendingArtefactId);
   const agentName = useAppState(s => s.agentName);
+  const activeSession = useSession(conv);
+
+  const pickModel = useCallback(async (provider, modelName) => {
+    if (conv && activeSession?.running) {
+      updateSession(conv, s => setNextRunModel(s, { provider, model: modelName }));
+      return;
+    }
+    await client.postModel(provider, modelName);
+    switchProviderModel(provider, modelName);
+    if (conv) updateSession(conv, s => setNextRunModel(s, null));
+  }, [client, conv, activeSession?.running]);
+
+  const insertSlashCommand = useCallback((cmd) => {
+    let activeConv = conv;
+    if (!activeConv && conversations[0]?.id) {
+      activeConv = conversations[0].id;
+      setConv(activeConv);
+    }
+    if (!activeConv) return;
+    selectView('conv');
+    ensureSession(activeConv);
+    updateSession(activeConv, s => setComposerDraft(s, { text: `${cmd} ` }));
+  }, [conv, conversations, selectView]);
 
   // Sync the document title with the swarm-set agent name so the
   // browser tab reads as the agent — replaces the static "Dyson —
@@ -219,6 +248,9 @@ function App() {
           upsertConversation({ id: c.id, title: c.title, live: false, source: 'http' });
           setConv(c.id);
         }).catch(() => {});
+      } else if (e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        setPaletteOpen(true);
       }
     };
     window.addEventListener('keydown', h);
@@ -280,7 +312,24 @@ function App() {
 
   return (
     <div className="app">
-      <TopBar view={view} setView={selectView} onToggleLeft={onToggleLeft}/>
+      <TopBar
+        view={view}
+        setView={selectView}
+        onToggleLeft={onToggleLeft}
+        running={!!activeSession?.running}
+        nextRunModel={activeSession?.nextRunModel || null}
+        onPickModel={pickModel}/>
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        conversations={conversations}
+        providers={providers}
+        mindFiles={mind.files || []}
+        onSelectConversation={(id) => { setConv(id); setToolRef(null); selectView('conv'); }}
+        onSelectView={selectView}
+        onSelectModel={pickModel}
+        onOpenMindFile={(path) => { setMindPath(path); selectView('mind'); }}
+        onInsertSlash={insertSlashCommand}/>
       {view === 'conv' && (
         <main className={bodyClass}>
           {showLeft && <div className="scrim" onClick={closeRails}/>}
@@ -477,15 +526,32 @@ function ConversationView({ conv, toolRef, setToolRef }) {
     // be unit-tested as a pure reducer.  The server coalesces every
     // drained queued turn into one `agent.run()`; the SPA mirrors
     // that by merging consecutive queued sends into one bubble.
-    mutate(s => pushUserMessage(s, { ts, blocks: userBlocks }));
-    getResources(activeConv).es = client.send(activeConv, val, streamCallbacks(activeConv), files);
+    const snapshot = getSession(activeConv);
+    const queued = !!snapshot?.running;
+    const queueMode = queued ? (snapshot.queueMode || 'normal') : 'normal';
+    const nextRunModel = snapshot?.nextRunModel || null;
+    mutate(s => {
+      const pushed = pushUserMessage(s, { ts, blocks: userBlocks, queueMode, nextRunModel });
+      return nextRunModel ? setNextRunModel(pushed, null) : pushed;
+    });
+    const sendOptions = {
+      ...(queued ? { queueMode } : {}),
+      ...(nextRunModel ? { model: nextRunModel } : {}),
+    };
+    getResources(activeConv).es = client.send(
+      activeConv,
+      val,
+      streamCallbacks(activeConv),
+      files,
+      sendOptions,
+    );
   };
 
   const onCancel = () => {
     if (conv) client.cancel(conv).catch(() => {});
     const r = getResources(conv);
     if (r.es) { try { r.es.close(); } catch { /* already closed */ } r.es = null; }
-    mutate(s => s.running ? { ...s, running: false } : s);
+    mutate(s => s.running ? { ...s, running: false, runStartedAt: null } : s);
   };
 
   const onRate = (turnIndex, emoji) => {
@@ -542,6 +608,14 @@ function ConversationView({ conv, toolRef, setToolRef }) {
         </div>
       </div>
       <ComposerDock running={session.running} phase={session.phase} tname={session.tname}
+                    runStartedAt={session.runStartedAt}
+                    draftText={session.draftText}
+                    draftAttachments={session.draftAttachments}
+                    queueMode={session.queueMode}
+                    nextRunModel={session.nextRunModel}
+                    onDraftChange={(draft) => mutate(s => setComposerDraft(s, draft))}
+                    onQueueModeChange={(mode) => mutate(s => setQueueMode(s, mode))}
+                    onCollapseAll={() => { mutate(closeAllPanels); if (typeof setToolRef === 'function') setToolRef(null); }}
                     onJump={() => session.liveToolRef && handleOpenTool(session.liveToolRef)}
                     onSend={sendMsg} onCancel={onCancel} autoFocusKey={empty ? conv : null}/>
     </div>
@@ -581,12 +655,46 @@ function ConversationShell({ onSend, onCancel, children }) {
   );
 }
 
-function ComposerDock({ running, phase, tname, onJump, onSend, onCancel, autoFocusKey }) {
+function ComposerDock({
+  running,
+  phase,
+  tname,
+  runStartedAt,
+  draftText,
+  draftAttachments,
+  queueMode,
+  nextRunModel,
+  onDraftChange,
+  onQueueModeChange,
+  onCollapseAll,
+  onJump,
+  onSend,
+  onCancel,
+  autoFocusKey,
+}) {
   return (
     <div className="composer-dock">
       <div style={{width:'100%',maxWidth:820,display:'flex',flexDirection:'column',alignItems:'stretch'}}>
-        {running && <TypingIndicator phase={phase} tname={tname} onJump={onJump}/>}
-        <Composer onSend={onSend} onCancel={onCancel} running={!!running} autoFocusKey={autoFocusKey}/>
+        {running && (
+          <RunStatusStrip
+            phase={phase}
+            tname={tname}
+            startedAt={runStartedAt}
+            onCancel={onCancel}
+            onJump={onJump}
+            onCollapseAll={onCollapseAll}/>
+        )}
+        <Composer
+          onSend={onSend}
+          onCancel={onCancel}
+          running={!!running}
+          autoFocusKey={autoFocusKey}
+          draftText={draftText}
+          draftAttachments={draftAttachments}
+          onDraftChange={onDraftChange}
+          queueMode={queueMode}
+          nextRunModel={nextRunModel}
+          onQueueModeChange={onQueueModeChange}/>
       </div>
     </div>
   );
@@ -623,11 +731,14 @@ function streamCallbacks(conv) {
     t => ({ ...t, body: { ...t.body, text: (t.body.text || '') + extra } }));
 
   return {
-    onText: (delta) => updateSession(conv, s => mapAgentTail(s, t => {
-      const tail = t.blocks[t.blocks.length - 1];
-      return tail?.type === 'text'
-        ? { ...t, blocks: [...t.blocks.slice(0, -1), { ...tail, text: tail.text + delta }] }
-        : { ...t, blocks: [...t.blocks, { type: 'text', text: delta }] };
+    onText: (delta) => updateSession(conv, s => ({
+      ...mapAgentTail(s, t => {
+        const tail = t.blocks[t.blocks.length - 1];
+        return tail?.type === 'text'
+          ? { ...t, blocks: [...t.blocks.slice(0, -1), { ...tail, text: tail.text + delta }] }
+          : { ...t, blocks: [...t.blocks, { type: 'text', text: delta }] };
+      }),
+      phase: 'streaming',
     })),
 
     onThinking: (delta) => {
@@ -792,7 +903,7 @@ function streamCallbacks(conv) {
       // mints a fresh agent turn when it sees `nextAgentNew`, so the
       // drain reply doesn't graft onto the just-finished turn.
       updateSession(conv, s => s.running
-        ? { ...s, running: false, thinkingRef: null, nextAgentNew: true }
+        ? { ...s, running: false, runStartedAt: null, thinkingRef: null, nextAgentNew: true }
         : s);
       getResources(conv).es = null;
     },
@@ -898,7 +1009,7 @@ function attachLiveStream(conv, client) {
     const liveTurns = last && last.role === 'agent'
       ? s.liveTurns
       : [...s.liveTurns, { role: 'agent', ts: '', blocks: [{ type: 'text', text: '' }] }];
-    return { ...s, liveTurns, running: true, phase: 'thinking' };
+    return { ...s, liveTurns, running: true, phase: 'thinking', runStartedAt: Date.now() };
   });
   return client.attach(conv, streamCallbacks(conv));
 }

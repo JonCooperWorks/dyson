@@ -754,8 +754,100 @@
   word-break: break-all;
 }
 .modelmenu .item.on .model { color: var(--fg); }
+.modelmenu .item.next .badge {
+  margin-left: auto;
+  color: var(--accent);
+}
 
 .topbar .menu-toggle.active { color: var(--accent); filter: drop-shadow(0 0 6px var(--accent-glow)); }
+
+/* ---------- command palette ---------- */
+.cmdpal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: oklch(0 0 0 / 0.42);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 78px 18px 18px;
+}
+.cmdpal {
+  width: min(680px, 100%);
+  max-height: min(620px, calc(100dvh - 112px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  box-shadow: var(--lift-3);
+}
+.cmdpal-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.cmdpal-input input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  font: 500 16px/1.3 var(--font-ui);
+}
+.cmdpal-list {
+  overflow-y: auto;
+  padding: 6px;
+}
+.cmdpal-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-dim);
+  text-align: left;
+  cursor: pointer;
+}
+.cmdpal-item.active,
+.cmdpal-item:hover {
+  background: var(--bg-1);
+  color: var(--fg);
+}
+.cmdpal-item .main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+.cmdpal-item .label,
+.cmdpal-item .hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cmdpal-item .label { color: var(--fg); font-size: 13px; }
+.cmdpal-item .hint { color: var(--mute); font-size: 11.5px; }
+.cmdpal-item .kind {
+  flex: 0 0 auto;
+  font: 650 10px/1 var(--font-mono);
+  color: var(--mute);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.cmdpal-empty {
+  padding: 16px 12px;
+  color: var(--mute);
+  font-size: 12px;
+}
 
 /* ---------- mobile ---------- */
 @media (max-width: 760px) {

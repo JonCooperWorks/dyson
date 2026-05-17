@@ -29,8 +29,13 @@ export function makeSession() {
     running: false,
     phase: 'thinking',
     tname: '',
+    runStartedAt: null,
     liveToolRef: null,
     thinkingRef: null,
+    draftText: '',
+    draftAttachments: [],
+    queueMode: 'normal',
+    nextRunModel: null,
     loaded: false,
     justScrollOnNextRender: false,
     // Per-chat artefact list (populated from GET /artefacts + live SSE).
@@ -156,6 +161,7 @@ export const mapAgentTail = (s, fn) => {
       nextAgentNew: false,
       running: true,
       phase: 'thinking',
+      runStartedAt: Date.now(),
       thinkingRef: null,
       liveTurns: [...s.liveTurns, fresh],
     };
@@ -166,6 +172,7 @@ export const mapAgentTail = (s, fn) => {
       ...s,
       running: true,
       phase: 'thinking',
+      runStartedAt: Date.now(),
       thinkingRef: null,
       liveTurns: [...s.liveTurns, fn({ role: 'agent', ts: '', blocks: [] })],
     };
@@ -196,12 +203,13 @@ export const appendAgentBlock = (s, block) =>
 //      so the SPA shows them as one growing bubble.
 //
 // Returns the new session snapshot.  Pure — no side effects.
-export const pushUserMessage = (s, { ts, blocks }) => {
+export const pushUserMessage = (s, { ts, blocks, queueMode = 'normal', nextRunModel = null }) => {
   if (!s.running) {
     return {
       ...s,
       running: true,
       phase: 'thinking',
+      runStartedAt: Date.now(),
       thinkingRef: null,
       liveTurns: [
         ...s.liveTurns,
@@ -211,7 +219,9 @@ export const pushUserMessage = (s, { ts, blocks }) => {
     };
   }
   const tail = s.liveTurns[s.liveTurns.length - 1];
-  if (tail && tail.role === 'user' && tail.queued) {
+  if (tail && tail.role === 'user' && tail.queued
+      && (tail.queueMode || 'normal') === queueMode
+      && sameModelSelection(tail.nextRunModel, nextRunModel)) {
     const merged = {
       ...tail,
       ts,
@@ -229,10 +239,16 @@ export const pushUserMessage = (s, { ts, blocks }) => {
     running: true,
     liveTurns: [
       ...s.liveTurns,
-      { role: 'user', ts, blocks, queued: true, queuedCount: 1 },
+      { role: 'user', ts, blocks, queued: true, queuedCount: 1, queueMode, nextRunModel },
     ],
   };
 };
+
+function sameModelSelection(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return a.provider === b.provider && a.model === b.model;
+}
 
 export const admitUserMessage = (s, { ts, blocks }) => {
   const delivered = { role: 'user', ts, blocks };
@@ -268,3 +284,32 @@ export const openPanel = (s, ref) => ({
 export const closePanel = (s, ref) => s.panels.includes(ref)
   ? { ...s, panels: s.panels.filter(x => x !== ref), openTool: s.openTool === ref ? null : s.openTool }
   : s;
+
+export const closeAllPanels = (s) => s.panels.length || s.openTool
+  ? { ...s, panels: [], openTool: null }
+  : s;
+
+export const setComposerDraft = (s, { text, attachments } = {}) => {
+  const nextText = typeof text === 'string' ? text : s.draftText;
+  const nextAttachments = Array.isArray(attachments) ? attachments : s.draftAttachments;
+  if (nextText === s.draftText && nextAttachments === s.draftAttachments) return s;
+  return { ...s, draftText: nextText, draftAttachments: nextAttachments };
+};
+
+export const clearComposerDraft = (s) => {
+  if (!s.draftText && (!s.draftAttachments || s.draftAttachments.length === 0)) return s;
+  return { ...s, draftText: '', draftAttachments: [] };
+};
+
+export const setQueueMode = (s, queueMode) => {
+  const next = queueMode === 'next_tool_call' ? 'next_tool_call' : 'normal';
+  return s.queueMode === next ? s : { ...s, queueMode: next };
+};
+
+export const setNextRunModel = (s, selection) => {
+  const next = selection && selection.provider && selection.model
+    ? { provider: selection.provider, model: selection.model }
+    : null;
+  if (sameModelSelection(s.nextRunModel, next)) return s;
+  return { ...s, nextRunModel: next };
+};
