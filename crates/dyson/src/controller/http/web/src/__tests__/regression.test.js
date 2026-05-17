@@ -327,6 +327,49 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
   });
 });
 
+describe('MindView mobile file list regressions', () => {
+  const viewsSrc = src('components/views-secondary.jsx');
+  const layoutCss = src('styles/layout.css');
+  const swarmCss = src('styles/swarm-theme.css');
+  const mobileSwarmCss = () => swarmCss.split('@media (max-width: 760px)').pop() || '';
+
+  it('renders mind files with dedicated row and name classes', () => {
+    expect(viewsSrc).toContain('className="mind-file-list"');
+    expect(viewsSrc).toContain('className="mind-file-row"');
+    expect(viewsSrc).toContain('className="mind-file-name mono"');
+    expect(viewsSrc).toContain('title={f.path}');
+    expect(viewsSrc).toContain('data-selected={selected === f.path}');
+  });
+
+  it('mind filenames can shrink and ellipsize instead of clipping', () => {
+    const nameRule = layoutCss.match(/\.mind-file-name\s*\{([^}]*)\}/);
+    expect(nameRule, '.mind-file-name rule must exist').toBeTruthy();
+    expect(nameRule[1]).toMatch(/min-width:\s*0/);
+    expect(nameRule[1]).toMatch(/overflow:\s*hidden/);
+    expect(nameRule[1]).toMatch(/text-overflow:\s*ellipsis/);
+    expect(nameRule[1]).toMatch(/white-space:\s*nowrap/);
+  });
+
+  it('mobile mind file rows keep readable text and touch targets', () => {
+    const mobileBlock = mobileSwarmCss();
+    const rowRule = mobileBlock.match(/\.mind-file-row\s*\{([^}]*)\}/);
+    const nameRule = mobileBlock.match(/\.mind-file-name\s*\{([^}]*)\}/);
+    expect(rowRule, 'mobile .mind-file-row rule must exist').toBeTruthy();
+    expect(nameRule, 'mobile .mind-file-name rule must exist').toBeTruthy();
+    expect(rowRule[1]).toMatch(/min-height:\s*44px/);
+    expect(nameRule[1]).toMatch(/color:\s*var\(--fg\)/);
+    expect(nameRule[1]).toMatch(/font-size:\s*13px/);
+    expect(mobileBlock, 'mobile should hide file sizes so long names have room')
+      .toMatch(/\.mind-file-size\s*\{[^}]*display:\s*none/);
+  });
+
+  it('open mobile mind drawer does not keep a transform layer over text', () => {
+    const mobileBlock = mobileSwarmCss();
+    expect(mobileBlock)
+      .toMatch(/\.mind\.show-side\s+\.mind-side\s*\{\s*transform:\s*none;\s*\}/);
+  });
+});
+
 describe('turns.jsx — markdown + composer regressions', () => {
   const turnsSrc = src('components/turns.jsx');
 

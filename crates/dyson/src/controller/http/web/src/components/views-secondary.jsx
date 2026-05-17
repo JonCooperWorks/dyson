@@ -84,17 +84,17 @@ export function MindView({ showSide, onHideSide, path, setPath }) {
           <div className="eyebrow">workspace</div>
           {m.backend && <div style={{fontSize:13, color:'var(--fg)', marginTop:4}}><span className="mono">{m.backend}</span> backend</div>}
         </div>
-        <div style={{overflowY:'auto', flex:1, padding:'6px 0'}}>
-          {(m.files.length === 0) && <div style={{padding:'14px', color:'var(--mute)', fontSize:12}}>No workspace files.</div>}
+        <div className="mind-file-list">
+          {(m.files.length === 0) && <div className="mind-empty">No workspace files.</div>}
           {m.files.map(f => (
-            <div key={f.path} onClick={() => { setSelected(f.path); onHideSide && onHideSide(); }}
-                 style={{display:'flex', alignItems:'center', gap:8, padding:'6px 14px', cursor:'pointer',
-                         background: selected === f.path ? 'var(--panel)' : 'transparent',
-                         borderLeft: selected === f.path ? '2px solid var(--accent)' : '2px solid transparent'}}>
-              <Icon name="file" size={11} style={{color:'var(--mute)'}}/>
-              <span className="mono" style={{fontSize:12, color:'var(--fg-dim)', flex:1, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis'}}>{f.path}</span>
-              {f.size && <span className="mono" style={{fontSize:10, color:'var(--mute)'}}>{f.size}</span>}
-            </div>
+            <button key={f.path} type="button" title={f.path}
+                    className="mind-file-row"
+                    data-selected={selected === f.path}
+                    onClick={() => { setSelected(f.path); onHideSide && onHideSide(); }}>
+              <Icon name="file" size={12} className="mind-file-icon"/>
+              <span className="mind-file-name mono">{f.path}</span>
+              {f.size && <span className="mind-file-size mono">{f.size}</span>}
+            </button>
           ))}
         </div>
       </aside>
