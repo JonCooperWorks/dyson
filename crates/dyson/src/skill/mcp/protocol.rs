@@ -194,6 +194,12 @@ impl JsonRpcResponse {
 pub enum McpContent {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "image")]
+    Image {
+        data: String,
+        #[serde(rename = "mimeType", default)]
+        mime_type: Option<String>,
+    },
     #[serde(other)]
     Unknown,
 }

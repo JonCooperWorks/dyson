@@ -8,10 +8,14 @@ pub mod protocol;
 pub mod serve;
 pub mod transport;
 
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use base64::Engine;
+use tokio::io::AsyncWriteExt;
 
 use crate::auth::oauth;
 use crate::config::{McpAuthConfig, McpConfig};
@@ -21,6 +25,8 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 
 use self::protocol::{McpContent, McpToolDef, McpToolResult};
 use self::transport::{HttpTransport, McpTransport, StdioTransport};
+
+static MCP_ATTACHMENT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Shared state for an in-progress OAuth flow.  Both the background
 /// callback task and the oauth_submit tool hold a reference.
@@ -483,25 +489,123 @@ impl Tool for McpRemoteTool {
                 server: self.server_name.clone(),
                 message: format!("failed to parse tools/call result: {e}"),
             })?;
-        let content: String = tool_result
-            .content
-            .iter()
-            .filter_map(|c| match c {
-                McpContent::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        Ok(ToolOutput {
-            content,
-            is_error: tool_result.is_error,
-            view: None,
-            metadata: None,
-            files: vec![],
-            checkpoints: vec![],
-            artefacts: vec![],
-        })
+        mcp_tool_output_from_result(&self.server_name, &self.tool_name, tool_result).await
     }
+}
+
+async fn mcp_tool_output_from_result(
+    server_name: &str,
+    tool_name: &str,
+    tool_result: McpToolResult,
+) -> Result<ToolOutput> {
+    let mut text_parts = Vec::new();
+    let mut files = Vec::new();
+
+    for content in tool_result.content {
+        match content {
+            McpContent::Text { text } => text_parts.push(text),
+            McpContent::Image { data, mime_type } => {
+                let path = write_mcp_image_attachment(
+                    server_name,
+                    tool_name,
+                    files.len(),
+                    &data,
+                    mime_type.as_deref(),
+                )
+                .await?;
+                files.push(path);
+            }
+            McpContent::Unknown => {}
+        }
+    }
+
+    let image_note = match files.len() {
+        0 => None,
+        1 => Some("Attached 1 image file.".to_string()),
+        n => Some(format!("Attached {n} image files.")),
+    };
+    let content = match (text_parts.is_empty(), image_note) {
+        (true, Some(note)) => note,
+        (false, Some(note)) => format!("{}\n{note}", text_parts.join("\n")),
+        (false, None) => text_parts.join("\n"),
+        (true, None) => String::new(),
+    };
+
+    Ok(ToolOutput {
+        content,
+        is_error: tool_result.is_error,
+        view: None,
+        metadata: None,
+        files,
+        checkpoints: vec![],
+        artefacts: vec![],
+    })
+}
+
+async fn write_mcp_image_attachment(
+    server_name: &str,
+    tool_name: &str,
+    index: usize,
+    data: &str,
+    mime_type: Option<&str>,
+) -> Result<PathBuf> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .map_err(|e| DysonError::mcp(server_name, format!("invalid MCP image base64: {e}")))?;
+    let dir = std::env::temp_dir().join("dyson-mcp-attachments");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(DysonError::Io)?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let serial = MCP_ATTACHMENT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let ext = mcp_image_extension(mime_type);
+    let filename = format!(
+        "{}-{}-{now}-{serial}-{index}.{ext}",
+        safe_attachment_component(server_name),
+        safe_attachment_component(tool_name),
+    );
+    let path = dir.join(filename);
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .await
+        .map_err(DysonError::Io)?;
+    file.write_all(&bytes).await.map_err(DysonError::Io)?;
+    file.sync_all().await.map_err(DysonError::Io)?;
+    Ok(path)
+}
+
+fn mcp_image_extension(mime_type: Option<&str>) -> &'static str {
+    match mime_type.unwrap_or("").to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/png" => "png",
+        _ => "bin",
+    }
+}
+
+fn safe_attachment_component(value: &str) -> String {
+    let mut out: String = value
+        .chars()
+        .take(80)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() { "mcp".into() } else { out }
 }
 
 #[cfg(test)]
@@ -534,5 +638,40 @@ mod tests {
     fn extract_code_url_encoded() {
         let url = "http://localhost/callback?code=a%20b&state=s";
         assert_eq!(extract_code(url).as_deref(), Some("a b"));
+    }
+
+    #[tokio::test]
+    async fn mcp_image_content_becomes_attached_file() {
+        let data = base64::engine::general_purpose::STANDARD.encode(b"fake-png");
+        let result = McpToolResult {
+            content: vec![
+                McpContent::Text {
+                    text: "Screenshot captured.".into(),
+                },
+                McpContent::Image {
+                    data,
+                    mime_type: Some("image/png".into()),
+                },
+            ],
+            is_error: false,
+        };
+
+        let output = mcp_tool_output_from_result("playwright", "browser_take_screenshot", result)
+            .await
+            .unwrap();
+        assert!(!output.is_error);
+        assert!(output.content.contains("Screenshot captured."));
+        assert!(output.content.contains("Attached 1 image file."));
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(
+            output.files[0].extension().and_then(|ext| ext.to_str()),
+            Some("png")
+        );
+        assert_eq!(
+            tokio::fs::read(&output.files[0]).await.unwrap(),
+            b"fake-png"
+        );
+
+        let _ = tokio::fs::remove_file(&output.files[0]).await;
     }
 }
