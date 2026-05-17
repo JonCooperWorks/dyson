@@ -271,17 +271,12 @@ struct TelegramProxyConfig {
     bearer: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum TelegramMode {
+    #[default]
     Polling,
     Webhook,
-}
-
-impl Default for TelegramMode {
-    fn default() -> Self {
-        Self::Polling
-    }
 }
 
 /// Deserialize chat IDs from a mix of numbers and strings.
