@@ -1566,6 +1566,12 @@ async fn security_engineer_resumes_checkpoint_and_does_not_rerun_completed_tasks
         .unwrap();
     assert!(!resumed.is_error, "{}", resumed.content);
     assert!(resumed.content.contains("# Security Harness Report"));
+    assert!(resumed.content.contains("## Findings"));
+    assert!(resumed.content.contains("candidate"));
+    assert!(!resumed.content.contains("```json"));
+    assert_eq!(resumed.artefacts.len(), 1);
+    assert!(resumed.artefacts[0].content.contains("## Findings"));
+    assert!(!resumed.artefacts[0].content.contains("```json"));
 
     let guard = workspace.read().await;
     let path = guard

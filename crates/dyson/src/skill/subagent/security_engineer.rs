@@ -601,12 +601,8 @@ async fn run_security_harness_inner(
         .report_draft
         .clone()
         .unwrap_or_else(|| report_from_checkpoint(&checkpoint));
-    let report_json = serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".into());
     let elapsed = checkpoint.updated_at.saturating_sub(started_epoch);
-    out.content = format!(
-        "# Security Harness Report: {}\n\n```json\n{}\n```\n",
-        report.target.repo_path, report_json
-    );
+    out.content = render_report_markdown(&report, &checkpoint);
     out.checkpoints.push(CheckpointEvent {
         message: format!(
             "security_engineer: completed {} in {}s",
@@ -635,6 +631,255 @@ async fn run_security_harness_inner(
     }
 
     Ok(out)
+}
+
+fn render_report_markdown(
+    report: &SecurityHarnessReport,
+    checkpoint: &SecurityCheckpoint,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# Security Harness Report: {}\n\n",
+        report.target.repo_path
+    ));
+    out.push_str(&format!("- Run ID: `{}`\n", report.run_id));
+    out.push_str(&format!("- Target: `{}`\n", report.target.repo_path));
+    if let Some(git_ref) = &report.target.git_ref {
+        out.push_str(&format!("- Git ref: `{git_ref}`\n"));
+    }
+    out.push_str(&format!(
+        "- Checkpoint: `{}`\n",
+        checkpoint.checkpoint_path()
+    ));
+    out.push_str(&format!(
+        "- Report schema: `{}`\n\n",
+        checkpoint.report_validation_state.status
+    ));
+
+    out.push_str("## Scope\n\n");
+    out.push_str(&plain_block(&report.scope));
+    out.push('\n');
+
+    let confirmed = checkpoint
+        .validation_decisions_so_far
+        .iter()
+        .filter(|d| d.decision == ValidationDecisionKind::Confirmed)
+        .count();
+    let rejected = report.rejected_candidates.len();
+    let reachable = report
+        .trace_evidence
+        .iter()
+        .filter(|trace| trace.reachable)
+        .count();
+    out.push_str("## Summary\n\n");
+    out.push_str(&format!("- Findings: {}\n", report.findings.len()));
+    out.push_str(&format!("- Confirmed findings: {confirmed}\n"));
+    out.push_str(&format!("- Rejected candidates: {rejected}\n"));
+    out.push_str(&format!(
+        "- Dedupe groups: {}\n",
+        report.dedupe_groups.len()
+    ));
+    out.push_str(&format!(
+        "- Reachable traces: {reachable}/{}\n",
+        report.trace_evidence.len()
+    ));
+    out.push_str(&format!("- Coverage gaps: {}\n\n", report.gaps.len()));
+
+    out.push_str("## Findings\n\n");
+    if report.findings.is_empty() {
+        out.push_str("No confirmed findings were reported.\n\n");
+    } else {
+        for finding in &report.findings {
+            render_finding_markdown(&mut out, report, checkpoint, finding);
+        }
+    }
+
+    out.push_str("## Rejected Candidates\n\n");
+    if report.rejected_candidates.is_empty() {
+        out.push_str("No rejected candidates were recorded.\n\n");
+    } else {
+        for decision in &report.rejected_candidates {
+            out.push_str(&format!(
+                "### {}\n\n- Decision: `{}`\n- Evidence: {}\n\n",
+                decision.finding_id,
+                validation_decision_label(decision.decision),
+                clean_inline(&decision.evidence)
+            ));
+        }
+    }
+
+    out.push_str("## Coverage And Gaps\n\n");
+    if report.gaps.is_empty() {
+        out.push_str("No coverage gaps were recorded.\n\n");
+    } else {
+        for gap in &report.gaps {
+            out.push_str(&format!(
+                "- **{}** (`{}`): {}\n",
+                clean_inline(&gap.area),
+                if gap.risk.is_empty() {
+                    "unknown"
+                } else {
+                    gap.risk.as_str()
+                },
+                clean_inline(&gap.reason)
+            ));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Dedupe Groups\n\n");
+    if report.dedupe_groups.is_empty() {
+        out.push_str("No dedupe groups were recorded.\n\n");
+    } else {
+        for group in &report.dedupe_groups {
+            out.push_str(&format!(
+                "### {}\n\n- Primary finding: `{}`\n- Findings: {}\n- Root cause: {}\n",
+                group.id,
+                group.primary_finding_id,
+                inline_code_list(&group.finding_ids),
+                clean_inline(&group.root_cause)
+            ));
+            append_list(&mut out, "Affected paths", &group.affected_paths);
+            out.push('\n');
+        }
+    }
+
+    out.push_str("## Stage History\n\n");
+    if report.stage_history.is_empty() {
+        out.push_str("No stage history was recorded.\n");
+    } else {
+        for entry in &report.stage_history {
+            out.push_str(&format!(
+                "- `{}`: {} in {}s",
+                entry.stage,
+                entry.status,
+                entry.finished_at.saturating_sub(entry.started_at)
+            ));
+            if !entry.summary.is_empty() {
+                out.push_str(&format!(" - {}", clean_inline(&entry.summary)));
+            }
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
+fn render_finding_markdown(
+    out: &mut String,
+    report: &SecurityHarnessReport,
+    checkpoint: &SecurityCheckpoint,
+    finding: &SecurityFinding,
+) {
+    out.push_str(&format!("### {}: {}\n\n", finding.id, finding.title));
+    out.push_str(&format!("- Severity: `{}`\n", finding.severity));
+    if !finding.reachability.is_empty() {
+        out.push_str(&format!(
+            "- Reachability: `{}`\n",
+            clean_inline(&finding.reachability)
+        ));
+    }
+    out.push_str(&format!(
+        "- Root cause: {}\n",
+        clean_inline(&finding.root_cause)
+    ));
+
+    if let Some(decision) = checkpoint
+        .validation_decisions_so_far
+        .iter()
+        .find(|d| d.finding_id == finding.id)
+    {
+        out.push_str(&format!(
+            "- Validation: `{}`",
+            validation_decision_label(decision.decision)
+        ));
+        if let Some(severity) = &decision.severity {
+            out.push_str(&format!(" as `{severity}`"));
+        }
+        out.push_str(&format!(" - {}\n", clean_inline(&decision.evidence)));
+    }
+
+    if let Some(trace) = report
+        .trace_evidence
+        .iter()
+        .find(|trace| trace.finding_id == finding.id)
+    {
+        out.push_str(&format!(
+            "- Trace: `{}`",
+            if trace.reachable {
+                "reachable"
+            } else {
+                "not reachable"
+            }
+        ));
+        if !trace.severity_effect.is_empty() {
+            out.push_str(&format!("; severity `{}`", trace.severity_effect));
+        }
+        out.push('\n');
+        append_list(out, "Trace evidence", &trace.evidence);
+    }
+
+    if let Some(group) = report
+        .dedupe_groups
+        .iter()
+        .find(|group| group.finding_ids.iter().any(|id| id == &finding.id))
+    {
+        out.push_str(&format!("- Dedupe group: `{}`\n", group.id));
+    }
+
+    append_list(out, "Affected paths", &finding.affected_paths);
+    append_list(out, "Evidence", &finding.evidence);
+    out.push('\n');
+}
+
+fn append_list(out: &mut String, title: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    out.push_str(&format!("\n{title}:\n"));
+    for item in items {
+        out.push_str(&format!("- {}\n", clean_inline(item)));
+    }
+}
+
+fn plain_block(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return "No explicit scope was recorded.\n".into();
+    }
+    trimmed
+        .lines()
+        .map(|line| format!("> {}\n", line.trim()))
+        .collect()
+}
+
+fn clean_inline(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
+}
+
+fn inline_code_list(values: &[String]) -> String {
+    if values.is_empty() {
+        return "`none`".into();
+    }
+    values
+        .iter()
+        .map(|value| format!("`{}`", value))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn validation_decision_label(decision: ValidationDecisionKind) -> &'static str {
+    match decision {
+        ValidationDecisionKind::Confirmed => "confirmed",
+        ValidationDecisionKind::Rejected => "rejected",
+        ValidationDecisionKind::NeedsMoreEvidence => "needs_more_evidence",
+        ValidationDecisionKind::Downgrade => "downgrade",
+    }
 }
 
 async fn run_recon_stage(
