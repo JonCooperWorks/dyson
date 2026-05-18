@@ -1566,6 +1566,154 @@ async fn security_engineer_resumes_checkpoint_and_does_not_rerun_completed_tasks
 }
 
 #[tokio::test]
+async fn security_engineer_resumes_json_checkpoint_after_filesystem_workspace_reload() {
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(
+            crate::workspace::FilesystemWorkspace::load(
+                workspace_dir.path(),
+                crate::config::MemoryConfig::default(),
+            )
+            .unwrap(),
+        ) as Box<dyn crate::workspace::Workspace>,
+    ));
+    let first_llm = MockLlm::new(vec![
+        mock_text_response(
+            r#"{
+              "architecture_context": "runtime socket boundary",
+              "tasks": [
+                {"id":"hunt-001","attack_class":"auth_bypass","scope_hint":"runtime","rationale":"socket auth"}
+              ],
+              "coverage_gaps": []
+            }"#,
+        ),
+        mock_text_response(
+            r#"{
+              "completed_task_ids": ["hunt-001"],
+              "findings": [
+                {
+                  "id":"finding-001",
+                  "title":"socket identity missing",
+                  "severity":"high",
+                  "root_cause":"missing caller identity",
+                  "affected_paths":["crates/mcp-runtime/src/main.rs:1"],
+                  "evidence":["runtime socket evidence"],
+                  "reachability":"not traced"
+                }
+              ],
+              "gaps": [],
+              "follow_up_tasks": []
+            }"#,
+        ),
+    ]);
+    let first_tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(first_llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let mut ctx = ToolContext::for_test(workspace_dir.path());
+    ctx.workspace = Some(Arc::clone(&workspace));
+    let first = first_tool
+        .run(
+            &serde_json::json!({
+                "task": "review runtime boundary",
+                "stop_after_stage": "hunt"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(!first.is_error, "{}", first.content);
+    let run_id = {
+        let guard = workspace.read().await;
+        let path = guard
+            .list_files()
+            .into_iter()
+            .find(|name| name.starts_with("kb/security-harness/checkpoints/"))
+            .unwrap();
+        let body = guard.get(&path).unwrap();
+        let checkpoint: security_engineer::SecurityCheckpoint =
+            serde_json::from_str(&body).unwrap();
+        checkpoint.run_id
+    };
+    let checkpoint_rel = format!("kb/security-harness/checkpoints/{run_id}.json");
+    assert!(
+        workspace_dir.path().join(&checkpoint_rel).is_file(),
+        "checkpoint must be persisted to the filesystem"
+    );
+
+    let reloaded_workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(
+            crate::workspace::FilesystemWorkspace::load(
+                workspace_dir.path(),
+                crate::config::MemoryConfig::default(),
+            )
+            .unwrap(),
+        ) as Box<dyn crate::workspace::Workspace>,
+    ));
+    {
+        let guard = reloaded_workspace.read().await;
+        assert!(
+            guard.get(&checkpoint_rel).is_none(),
+            "filesystem workspace indexes markdown kb files, not checkpoint JSON"
+        );
+    }
+
+    let report_json = r#"{
+      "schema_version": 1,
+      "run_id": "resumed",
+      "target": {"repo_path": "placeholder", "git_ref": null},
+      "scope": "placeholder",
+      "findings": [],
+      "rejected_candidates": [],
+      "coverage": [],
+      "gaps": [],
+      "dedupe_groups": [],
+      "trace_evidence": [],
+      "stage_history": []
+    }"#;
+    let resume_llm = MockLlm::new(vec![
+        mock_text_response(
+            r#"{"decisions":[{"finding_id":"finding-001","decision":"confirmed","evidence":"checkpoint loaded","severity":"high"}]}"#,
+        ),
+        mock_text_response(
+            r#"{"traces":[{"finding_id":"finding-001","reachable":true,"severity_effect":"keeps","evidence":["trace evidence"]}]}"#,
+        ),
+        mock_text_response(report_json),
+    ]);
+    let resume_tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(resume_llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Some(Arc::clone(&reloaded_workspace)),
+        &[],
+        vec![],
+    );
+    let mut resume_ctx = ToolContext::for_test(workspace_dir.path());
+    resume_ctx.workspace = Some(Arc::clone(&reloaded_workspace));
+    let resumed = resume_tool
+        .run(
+            &serde_json::json!({
+                "task": "resume security review",
+                "resume": true,
+                "run_id": run_id
+            }),
+            &resume_ctx,
+        )
+        .await
+        .unwrap();
+    assert!(!resumed.is_error, "{}", resumed.content);
+    assert!(resumed.content.contains("# Security Harness Report"));
+}
+
+#[tokio::test]
 async fn security_engineer_old_checkpoint_fails_safely() {
     let mut checkpoint = security_engineer::SecurityCheckpoint::new(
         "bad".into(),

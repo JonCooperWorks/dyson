@@ -1247,6 +1247,17 @@ impl CheckpointStore {
             let guard = workspace.read().await;
             let path = checkpoint_path(run_id);
             let Some(body) = guard.get(&path) else {
+                let disk_root = guard
+                    .programs_dir()
+                    .and_then(|programs| programs.parent().map(std::path::Path::to_path_buf));
+                drop(guard);
+                if let Some(root) = disk_root {
+                    let path = root.join(checkpoint_path(run_id));
+                    let body = std::fs::read_to_string(&path).map_err(|_| {
+                        format!("checkpoint {run_id} not found at {}", path.display())
+                    })?;
+                    return parse_checkpoint(&body);
+                }
                 return Err(format!("checkpoint {run_id} not found"));
             };
             return parse_checkpoint(&body);
@@ -1260,28 +1271,42 @@ impl CheckpointStore {
     async fn list(&self) -> Vec<SecurityCheckpoint> {
         if let Some(workspace) = &self.workspace {
             let guard = workspace.read().await;
-            return guard
+            let mut checkpoints: Vec<SecurityCheckpoint> = guard
                 .list_files()
                 .into_iter()
                 .filter(|p| p.starts_with(CHECKPOINT_PREFIX) && p.ends_with(".json"))
                 .filter_map(|p| guard.get(&p).and_then(|body| parse_checkpoint(&body).ok()))
                 .collect();
+            let disk_root = guard
+                .programs_dir()
+                .and_then(|programs| programs.parent().map(std::path::Path::to_path_buf));
+            drop(guard);
+            if let Some(root) = disk_root {
+                checkpoints.extend(read_checkpoint_dir(root.join(CHECKPOINT_PREFIX)));
+                checkpoints.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+                checkpoints.dedup_by(|a, b| a.run_id == b.run_id);
+            }
+            return checkpoints;
         }
-        let Ok(entries) = std::fs::read_dir(&self.fallback_dir) else {
-            return Vec::new();
-        };
-        entries
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                    return None;
-                }
-                let body = std::fs::read_to_string(path).ok()?;
-                parse_checkpoint(&body).ok()
-            })
-            .collect()
+        read_checkpoint_dir(self.fallback_dir.clone())
     }
+}
+
+fn read_checkpoint_dir(path: PathBuf) -> Vec<SecurityCheckpoint> {
+    let Ok(entries) = std::fs::read_dir(&path) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                return None;
+            }
+            let body = std::fs::read_to_string(path).ok()?;
+            parse_checkpoint(&body).ok()
+        })
+        .collect()
 }
 
 fn parse_checkpoint(body: &str) -> std::result::Result<SecurityCheckpoint, String> {
