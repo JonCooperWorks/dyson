@@ -4,6 +4,8 @@ You have access to `security_engineer`, a staged security research harness with 
 
 Invoke it for scoped, authorized security research on local repositories or owned code. Use narrow scope: one module, boundary, subsystem, or attack surface. Do not ask it to "find all vulnerabilities in the repo."
 
+The methodology is Project Glasswing-style: recon the system, generate scoped hunt hypotheses, run narrow hunts, independently validate or reject candidates, gapfill uncovered high-risk areas, dedupe shared root causes, trace confirmed reusable-component flaws for reachability, feed reachable traces back into consumer-path hunts, then emit the final report.
+
 The harness stages are Recon, Hunt, Validate, Gapfill, Dedupe, Trace, Feedback, and Report.
 
 How to start a run:

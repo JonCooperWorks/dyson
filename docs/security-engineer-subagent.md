@@ -4,6 +4,10 @@ The `security_engineer` orchestrator is dyson's staged security research harness
 
 The harness writes durable checkpoint JSON under `kb/security-harness/checkpoints/<run_id>.json` in the Dyson workspace. In Swarm mode that path is mirrored by the existing state-file sync worker, so a security review can resume after interruption, instance recreate, or template rollout without adding a security-specific Swarm API.
 
+## Methodology
+
+The harness follows a Project Glasswing-style security research loop. It does not ask one model to audit the whole repo in one pass. Recon builds the architecture and trust-boundary map, Hunt runs scoped attack-class hypotheses, Validate tries to disprove only existing candidates, Gapfill converts uncovered high-risk areas into more hunts, Dedupe collapses shared root causes, Trace establishes reachability from real entry points, Feedback turns reachable traces into consumer-path hunts, and Report emits the evidence-backed result.
+
 Code pointers:
 
 - [security_engineer.rs](../crates/dyson/src/skill/subagent/security_engineer.rs) — staged harness structs, checkpoint store, resume, and `security_engineer_config()`
