@@ -1,11 +1,14 @@
 # Security Engineer Subagent
 
-The `security_engineer` orchestrator is dyson's flagship subagent — a composable child agent that hunts reachable vulnerabilities in a target codebase using AST-aware tools, taint analysis, and parallel subagent dispatch.  This doc covers its architecture, the prompt techniques that make it work against production-scale (and production-weak) models, and the tuning loop for adapting it to new models.
+The `security_engineer` orchestrator is dyson's staged security research harness. The parent-facing tool name stayed stable for allowlists and UI configuration, but the internals now run a checkpointed pipeline: Recon, Hunt, Validate, Gapfill, Dedupe, Trace, Feedback, and Report.
+
+The harness writes durable checkpoint JSON under `kb/security-harness/checkpoints/<run_id>.json` in the Dyson workspace. In Swarm mode that path is mirrored by the existing state-file sync worker, so a security review can resume after interruption, instance recreate, or template rollout without adding a security-specific Swarm API.
 
 Code pointers:
 
-- [security_engineer.rs](../crates/dyson/src/skill/subagent/security_engineer.rs) — `security_engineer_config()` returns the `OrchestratorConfig`
-- [security_engineer.md](../crates/dyson/src/skill/subagent/prompts/security_engineer.md) — the system prompt
+- [security_engineer.rs](../crates/dyson/src/skill/subagent/security_engineer.rs) — staged harness structs, checkpoint store, resume, and `security_engineer_config()`
+- [security_engineer.md](../crates/dyson/src/skill/subagent/prompts/security_engineer.md) — shared harness guardrails
+- [security_engineer_recon.md](../crates/dyson/src/skill/subagent/prompts/security_engineer_recon.md), `*_hunt.md`, `*_validate.md`, `*_trace.md`, `*_report.md` — stage-specific prompts and JSON contracts
 - [security_engineer_protocol.md](../crates/dyson/src/skill/subagent/prompts/security_engineer_protocol.md) — the fragment injected into the parent's prompt (when-to-invoke guidance)
 - [repo_detect.rs](../crates/dyson/src/skill/subagent/repo_detect.rs) — runtime cheatsheet detection
 - [prompts/cheatsheets/](../crates/dyson/src/skill/subagent/prompts/cheatsheets/) — language + framework sheets
@@ -15,13 +18,13 @@ Related:
 - [Subagents overview](subagents.md) — orchestrator framework + composition model
 - [Testing](testing.md) — smoke/regression/live-review infrastructure
 
-## Composition
+## Staged Harness
 
 ```mermaid
 flowchart TB
     Parent["Parent agent (depth 0)"]
-    Orch["security_engineer (OrchestratorTool, depth 1)"]
-    Parent -->|invokes with task + optional path| Orch
+    Orch["security_engineer (staged harness under OrchestratorTool)"]
+    Parent -->|invokes with task/context/path or resume/run_id| Orch
 
     subgraph direct["Direct tools (filtered from parent)"]
       AstDescribe[ast_describe]
@@ -34,7 +37,23 @@ flowchart TB
     end
     Orch --> direct
 
-    subgraph inner["Inner subagents (depth 2; can't recurse)"]
+    subgraph stages["Harness stages"]
+      Recon[Recon]
+      Hunt[Hunt batches]
+      Validate[Validate]
+      Gapfill[Gapfill]
+      Dedupe[Dedupe]
+      Trace[Trace]
+      Feedback[Feedback]
+      Report[Report]
+    end
+    Orch --> stages
+
+    Checkpoint["workspace kb/security-harness/checkpoints/*.json<br/>mirrored by Swarm state-file sync"]
+    stages --> Checkpoint
+    Checkpoint -->|resume| stages
+
+    subgraph inner["Inner subagents available to stage workers (depth 2; can't recurse)"]
       Planner[planner]
       Researcher[researcher]
       Coder[coder]
@@ -47,13 +66,20 @@ flowchart TB
     Orch -.->|detected at call time<br/>appended to system_prompt| Sheets
 ```
 
-On invocation:
+On a new invocation:
 
 1. Parent calls `security_engineer({ task, context?, path? })`.
 2. `OrchestratorTool::run` canonicalises `path` to a scoped review root.
 3. `repo_detect::detect_and_compose` shallow-parses manifests, returns cheatsheet markdown + the list of included sheet names (logged at INFO).
-4. Cheatsheet body is concatenated onto the base `security_engineer.md` prompt; the child agent is spawned with the composed prompt.
-5. Child runs up to 150 iterations / 8192 tokens per turn.  Inner subagents execute at depth 2, inheriting the orchestrator child's scoped `working_dir` (propagation fix in [`SubagentTool::run`](../crates/dyson/src/skill/subagent/mod.rs) — without it, `dependency_review` fell back to the process cwd and scanned stale checkouts from prior runs).  Only the child's final assistant text returns to the parent.
+4. The harness creates a checkpoint with run id, target path/ref, scope, stage, completed/pending tasks, findings, validation decisions, dedupe groups, trace results, gapfill tasks, report validation state, timestamps, provider/model metadata, harness version, and schema version.
+5. Each stage worker receives the current checkpoint JSON and a stage-specific prompt. Recon creates narrow hunt tasks; Hunt completes one bounded task batch; Validate can only decide on existing findings; Dedupe and Feedback are deterministic; Report must pass schema validation and gets one repair attempt.
+6. After every major stage and completed hunt batch, the harness saves the checkpoint before continuing.
+
+On resume:
+
+1. Parent calls `security_engineer({ "task": "resume security review", "resume": true, "run_id": "sec-..." })`.
+2. If `run_id` is omitted and exactly one incomplete checkpoint exists for the current target, the harness resumes it; if multiple exist, it returns a concise run-id list.
+3. Completed tasks and completed stages are skipped. Malformed or unsupported checkpoint schema versions fail safely with an error.
 
 ## Cheatsheet injection
 

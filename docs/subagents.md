@@ -43,7 +43,7 @@ provider (the parent's own model), so they work with zero extra configuration.
 | Name | Input | Description |
 |------|-------|-------------|
 | `coder` | `{ path, task }` | Spawns a focused coding agent scoped to a directory.  Gets `bash`, `read_file`, `edit_file`, `search_files`, `list_files`, `bulk_edit`. |
-| `security_engineer` | `{ task, context? }` | Orchestrator for security analysis.  Gets AST-aware security tools plus inner subagent dispatch.  See [Orchestrators](#orchestrators) below. |
+| `security_engineer` | `{ task, context?, path?, resume?, run_id?, stop_after_stage? }` | Staged security research harness with durable checkpoint/resume.  Runs Recon, Hunt, Validate, Gapfill, Dedupe, Trace, Feedback, and Report using AST-aware tools plus inner subagent dispatch. |
 
 User-defined subagents in `dyson.json` are prepended before built-ins.
 

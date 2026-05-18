@@ -1,25 +1,31 @@
-
-
 ## Security Engineer Protocol
 
-You have access to a **security_engineer** subagent — an orchestrator that can perform comprehensive security reviews using AST-aware tools and parallel subagent dispatch.
+You have access to `security_engineer`, a staged security research harness with durable checkpoint/resume support.
 
-**When to invoke security_engineer:**
-- When asked to review code for security vulnerabilities
-- When making changes to authentication, authorization, or access control
-- When modifying code that handles user input, database queries, or external commands
-- When working with cryptographic operations or secret management
-- When changes affect HTTP endpoints, API handlers, or network-facing code
-- After completing security-sensitive changes (as a validation step)
+Invoke it for scoped, authorized security research on local repositories or owned code. Use narrow scope: one module, boundary, subsystem, or attack surface. Do not ask it to "find all vulnerabilities in the repo."
 
-**How to invoke:**
+The harness stages are Recon, Hunt, Validate, Gapfill, Dedupe, Trace, Feedback, and Report.
+
+How to start a run:
 ```json
 {
-  "task": "Review the authentication module for vulnerabilities",
-  "context": "We recently added OAuth2 support in src/auth/.  Scope to src/auth/ and src/http/ only — do not review the entire codebase."
+  "task": "Review MCP/runtime/proxy security-boundary code for auth bypass and confused-deputy flaws",
+  "context": "Scope to crates that handle MCP server configuration, runtime launch, proxy auth, and instance boundaries.",
+  "path": "dyson-swarm"
 }
 ```
 
-The security_engineer has a ~200k token context window.  For repos with >50 source files, scope the task to a single module or concern (auth, sandbox, network, etc.).  For full-repo reviews, invoke multiple times with scoped paths.
+How to resume:
+```json
+{
+  "task": "resume security review",
+  "resume": true,
+  "run_id": "sec-..."
+}
+```
 
-The security_engineer will map the attack surface, write targeted AST queries to trace vulnerability patterns, dispatch `dependency_review` against Google's OSV database for known-CVE findings, and return a structured report with severity ratings and remediation advice.
+If the user asks to resume and gives no run id, call with `"resume": true`. The harness resumes automatically when exactly one incomplete checkpoint exists for the current repo/scope; if multiple exist, it returns a concise run-id list.
+
+For bounded smoke testing or deliberate interruption, use `stop_after_stage` with one of: `recon`, `hunt`, `validate`, `gapfill`, `dedupe`, `trace`, `feedback`, `report`. Resume the returned `run_id` afterward.
+
+Checkpoints are durable JSON under the Dyson workspace state mirror and include run id, target repo/path/ref, scope, current stage, completed tasks, pending tasks, findings, validation decisions, dedupe groups, trace results, gapfill tasks, report validation state, timestamps, model/provider metadata, harness version, and schema version.

@@ -364,7 +364,7 @@ mod ring_tests {
     }
 
     #[tokio::test]
-    async fn normal_queued_turns_wait_for_end_of_turn_drain() {
+    async fn normal_text_queued_turns_keep_legacy_mid_turn_admission() {
         let tmp = tempfile::tempdir().unwrap();
         let handle = ChatHandle::new("c-test".to_string(), "test".to_string(), Some(tmp.path()));
         handle
@@ -377,14 +377,19 @@ mod ring_tests {
             })
             .await;
 
+        let mut admitted = Vec::new();
         let count = handle
-            .admit_text_only_queued_turns(|_| panic!("normal queue must not admit mid-turn"))
+            .admit_text_only_queued_turns(|message| {
+                admitted.push(message);
+                Ok(())
+            })
             .await
             .unwrap();
 
-        assert_eq!(count, 0);
-        assert_eq!(handle.queued.lock().unwrap().len(), 1);
-        assert!(handle.queue_path.clone().unwrap().exists());
+        assert_eq!(count, 1);
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(handle.queued.lock().unwrap().len(), 0);
+        assert!(!handle.queue_path.clone().unwrap().exists());
     }
 
     #[tokio::test]
@@ -508,9 +513,12 @@ impl ChatHandle {
     }
 
     /// Admit queued text-only turns while a tool-using agent turn is
-    /// still running.  Attachment turns remain queued for the existing
-    /// end-of-turn path because resolving media belongs to
-    /// `Agent::run_with_attachments`, not this controller-side queue.
+    /// still running.  This preserves the pre-existing default queue
+    /// behavior: plain text queued during a run is visible to the next
+    /// LLM iteration after the current tool batch.  Attachment turns
+    /// remain queued for the existing end-of-turn path because resolving
+    /// media belongs to `Agent::run_with_attachments`, not this
+    /// controller-side queue.
     pub(crate) async fn admit_text_only_queued_turns<F>(
         &self,
         mut admit: F,
@@ -522,8 +530,7 @@ impl ChatHandle {
             let q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
             q.iter()
                 .take_while(|turn| {
-                    turn.attachments.is_empty()
-                        && turn.queue_mode.as_deref() == Some("next_tool_call")
+                    turn.attachments.is_empty() && Self::admits_mid_turn(turn.queue_mode.as_deref())
                 })
                 .cloned()
                 .collect()
@@ -543,7 +550,7 @@ impl ChatHandle {
                 match q.front() {
                     Some(turn)
                         if turn.attachments.is_empty()
-                            && turn.queue_mode.as_deref() == Some("next_tool_call") =>
+                            && Self::admits_mid_turn(turn.queue_mode.as_deref()) =>
                     {
                         q.pop_front();
                         removed += 1;
@@ -556,6 +563,10 @@ impl ChatHandle {
             self.persist_queue().await;
         }
         Ok(removed)
+    }
+
+    fn admits_mid_turn(queue_mode: Option<&str>) -> bool {
+        matches!(queue_mode, None | Some("normal") | Some("next_tool_call"))
     }
 
     /// Drop every queued turn without acting on them.  Used by `/clear`

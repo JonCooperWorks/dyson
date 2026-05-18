@@ -74,6 +74,13 @@ pub struct OrchestratorConfig {
     /// `None` (the default) keeps the orchestrator chat-only.  The
     /// security engineer opts in; devops/architect/… remain opt-out.
     pub emit_artefact: Option<ArtefactKind>,
+    /// Optional first-party harness behavior layered under this tool name.
+    pub harness: Option<OrchestratorHarness>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrchestratorHarness {
+    SecurityResearch,
 }
 
 /// A composable `Tool` that spawns an orchestrator child agent.
@@ -170,6 +177,22 @@ impl Tool for OrchestratorTool {
                         this path — relative tool paths resolve against it and `bash` \
                         starts here.  Falls back to the parent's working directory \
                         when omitted."
+                },
+                "resume": {
+                    "type": "boolean",
+                    "description": "For durable staged harnesses, resume an incomplete \
+                        checkpoint instead of starting a new run."
+                },
+                "run_id": {
+                    "type": "string",
+                    "description": "Optional durable staged harness run id to resume."
+                },
+                "stop_after_stage": {
+                    "type": "string",
+                    "enum": ["recon", "hunt", "validate", "gapfill", "dedupe", "trace", "feedback", "report"],
+                    "description": "Optional bounded-run control for smoke tests or operator-driven \
+                        checkpoint creation. The harness saves the stage checkpoint and returns \
+                        before later stages."
                 }
             },
             "required": ["task"]
@@ -210,7 +233,7 @@ impl Tool for OrchestratorTool {
         };
 
         let user_message = if parsed.context.is_empty() {
-            parsed.task
+            parsed.task.clone()
         } else {
             format!("Context:\n{}\n\nTask:\n{}", parsed.context, parsed.task)
         };
@@ -285,6 +308,33 @@ impl Tool for OrchestratorTool {
                 ),
                 progress: Some(0.1),
             });
+        }
+
+        if self.config.harness == Some(OrchestratorHarness::SecurityResearch) {
+            return super::security_engineer::run_security_harness(
+                super::security_engineer::SecurityHarnessRuntime {
+                    config_name: self.config.name,
+                    provider: self.provider.clone(),
+                    model: self.model.clone(),
+                    client: self.client.clone(),
+                    sandbox: Arc::clone(&self.sandbox),
+                    workspace: self.workspace.clone(),
+                    parent_depth: ctx.depth,
+                    scoped_dir,
+                    parent_working_dir: ctx.working_dir.clone(),
+                    all_tools,
+                    system_prompt,
+                    user_message,
+                    parsed,
+                    activity: ctx.activity.clone(),
+                    events: ctx.subagent_events.clone(),
+                    parent_tool_id: ctx.tool_use_id.clone(),
+                    emit_artefact: self.config.emit_artefact,
+                    active_sheets,
+                    max_tokens: self.config.max_tokens,
+                },
+            )
+            .await;
         }
 
         let settings = AgentSettings {
@@ -544,12 +594,21 @@ fn cheatsheets_enabled_via_env() -> bool {
 }
 
 /// Parsed input for `OrchestratorTool`.
-#[derive(Debug, Deserialize)]
-struct OrchestratorInput {
-    task: String,
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct OrchestratorInput {
+    pub(crate) task: String,
     #[serde(default)]
-    context: String,
+    pub(crate) context: String,
     /// Optional directory to scope the child agent to.  See `input_schema`.
     #[serde(default)]
-    path: String,
+    pub(crate) path: String,
+    /// Resume a prior durable harness checkpoint instead of starting a new run.
+    #[serde(default)]
+    pub(crate) resume: bool,
+    /// Optional durable harness run id to resume.
+    #[serde(default)]
+    pub(crate) run_id: Option<String>,
+    /// Optional bounded-run stage used by smoke tests and operator check-pointing.
+    #[serde(default)]
+    pub(crate) stop_after_stage: Option<String>,
 }

@@ -302,6 +302,16 @@ impl MockLlm {
     }
 }
 
+fn mock_text_response(text: impl Into<String>) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::TextDelta(text.into()),
+        StreamEvent::MessageComplete {
+            stop_reason: StopReason::EndTurn,
+            output_tokens: None,
+        },
+    ]
+}
+
 #[async_trait]
 impl crate::llm::LlmClient for MockLlm {
     async fn stream(
@@ -1007,8 +1017,20 @@ async fn orchestrator_uses_parent_model() {
     ]]);
     let seen = llm.models_seen_handle();
 
+    let config = OrchestratorConfig {
+        name: "test_orchestrator",
+        description: "test",
+        system_prompt: "test",
+        direct_tool_names: &[],
+        max_iterations: 5,
+        max_tokens: 1024,
+        injects_protocol: None,
+        inject_cheatsheets: false,
+        emit_artefact: None,
+        harness: None,
+    };
     let tool = OrchestratorTool::new(
-        security_engineer_config(),
+        config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
@@ -1231,6 +1253,7 @@ fn orchestrator_tool_uses_config_name_and_description() {
         injects_protocol: None,
         inject_cheatsheets: false,
         emit_artefact: None,
+        harness: None,
     };
     let tool = OrchestratorTool::new(
         config,
@@ -1255,10 +1278,15 @@ fn security_engineer_config_produces_correct_values() {
     let config = security_engineer_config();
     assert_eq!(config.name, "security_engineer");
     assert!(config.description.contains("security"));
+    assert!(config.description.contains("staged"));
     assert!(config.system_prompt.contains("ast_query"));
     assert_eq!(config.max_iterations, 80);
     assert_eq!(config.max_tokens, 8192);
     assert!(config.injects_protocol.is_some());
+    assert_eq!(
+        config.harness,
+        Some(orchestrator::OrchestratorHarness::SecurityResearch)
+    );
     assert!(config.direct_tool_names.contains(&"ast_query"));
     assert!(
         config
@@ -1266,6 +1294,331 @@ fn security_engineer_config_produces_correct_values() {
             .contains(&"attack_surface_analyzer")
     );
     assert!(config.direct_tool_names.contains(&"exploit_builder"));
+}
+
+#[test]
+fn security_engineer_config_describes_staged_harness() {
+    let stages: Vec<&str> = security_engineer::harness_stages()
+        .iter()
+        .map(|stage| stage.as_str())
+        .collect();
+    assert_eq!(
+        stages,
+        vec![
+            "recon", "hunt", "validate", "gapfill", "dedupe", "trace", "feedback", "report"
+        ]
+    );
+}
+
+#[test]
+fn security_engineer_prompts_include_all_harness_stages() {
+    let config = security_engineer_config();
+    let protocol = config.injects_protocol.unwrap();
+    for stage in [
+        "Recon", "Hunt", "Validate", "Gapfill", "Dedupe", "Trace", "Feedback", "Report",
+    ] {
+        assert!(
+            config.system_prompt.contains(stage),
+            "system prompt missing {stage}"
+        );
+        assert!(protocol.contains(stage), "protocol prompt missing {stage}");
+    }
+    assert!(protocol.contains("resume"));
+    assert!(protocol.contains("checkpoint"));
+}
+
+#[test]
+fn security_engineer_validator_output_cannot_emit_new_findings() {
+    let findings = vec![security_engineer::SecurityFinding {
+        id: "finding-001".into(),
+        title: "title".into(),
+        severity: "medium".into(),
+        root_cause: "root".into(),
+        affected_paths: vec!["src/lib.rs:1".into()],
+        evidence: vec!["evidence".into()],
+        reachability: "not traced".into(),
+    }];
+    let raw = r#"{
+      "findings": [{"id": "finding-002"}],
+      "decisions": [{"finding_id":"finding-001","decision":"confirmed","evidence":"ok"}]
+    }"#;
+    let err = security_engineer::parse_validate_output(raw, &findings).unwrap_err();
+    assert!(err.contains("must not include new findings"));
+}
+
+#[test]
+fn security_engineer_validator_rejects_unknown_finding_id() {
+    let findings = vec![security_engineer::SecurityFinding {
+        id: "finding-001".into(),
+        title: "title".into(),
+        severity: "medium".into(),
+        root_cause: "root".into(),
+        affected_paths: vec![],
+        evidence: vec![],
+        reachability: "not traced".into(),
+    }];
+    let raw =
+        r#"{"decisions":[{"finding_id":"finding-999","decision":"confirmed","evidence":"no"}]}"#;
+    let err = security_engineer::parse_validate_output(raw, &findings).unwrap_err();
+    assert!(err.contains("unknown finding_id"));
+}
+
+#[test]
+fn security_engineer_report_schema_rejects_malformed_reports() {
+    let malformed = serde_json::json!({
+        "schema_version": 1,
+        "run_id": "",
+        "target": {"repo_path": ""},
+        "scope": "auth",
+        "findings": []
+    });
+    let err = security_engineer::validate_report_json(&malformed).unwrap_err();
+    assert!(err.contains("run_id"));
+}
+
+#[tokio::test]
+async fn security_engineer_writes_checkpoint_after_recon() {
+    let llm = MockLlm::new(vec![mock_text_response(
+        r#"{
+          "architecture_context": "Rust HTTP boundary",
+          "tasks": [
+            {"id":"hunt-001","attack_class":"auth_bypass","scope_hint":"src/http","rationale":"proxy auth"}
+          ],
+          "coverage_gaps": []
+        }"#,
+    )]);
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(crate::workspace::InMemoryWorkspace::new())
+            as Box<dyn crate::workspace::Workspace>,
+    ));
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ToolContext::for_test(dir.path());
+    ctx.workspace = Some(Arc::clone(&workspace));
+    let result = tool
+        .run(
+            &serde_json::json!({
+                "task": "review auth boundary",
+                "stop_after_stage": "recon"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("checkpoint saved after recon"));
+
+    let guard = workspace.read().await;
+    let names = guard.list_files();
+    let path = names
+        .iter()
+        .find(|name| name.starts_with("kb/security-harness/checkpoints/"))
+        .expect("checkpoint file not written");
+    let body = guard.get(path).unwrap();
+    let checkpoint: security_engineer::SecurityCheckpoint = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        checkpoint.current_stage,
+        security_engineer::SecurityHarnessStage::Recon
+    );
+    assert_eq!(checkpoint.pending_tasks.len(), 1);
+    assert_eq!(
+        checkpoint.stage_history[0].stage,
+        security_engineer::SecurityHarnessStage::Recon
+    );
+}
+
+#[tokio::test]
+async fn security_engineer_resumes_checkpoint_and_does_not_rerun_completed_tasks() {
+    let report_json = r#"{
+      "schema_version": 1,
+      "run_id": "placeholder",
+      "target": {"repo_path": "placeholder", "git_ref": null},
+      "scope": "placeholder",
+      "findings": [],
+      "rejected_candidates": [],
+      "coverage": [],
+      "gaps": [],
+      "dedupe_groups": [],
+      "trace_evidence": [],
+      "stage_history": []
+    }"#;
+    let llm = MockLlm::new(vec![
+        mock_text_response(
+            r#"{
+              "architecture_context": "proxy boundary",
+              "tasks": [
+                {"id":"hunt-001","attack_class":"auth_bypass","scope_hint":"proxy","rationale":"bearer token"}
+              ],
+              "coverage_gaps": []
+            }"#,
+        ),
+        mock_text_response(
+            r#"{
+              "completed_task_ids": ["hunt-001"],
+              "findings": [
+                {
+                  "id":"finding-001",
+                  "title":"candidate",
+                  "severity":"medium",
+                  "root_cause":"boundary confusion",
+                  "affected_paths":["src/proxy.rs:10"],
+                  "evidence":["read_file evidence"],
+                  "reachability":"not traced"
+                }
+              ],
+              "gaps": [],
+              "follow_up_tasks": []
+            }"#,
+        ),
+        // Resume starts here. If completed hunt tasks are rerun, this
+        // validate-shaped JSON is consumed by the hunt parser and the test fails.
+        mock_text_response(
+            r#"{"decisions":[{"finding_id":"finding-001","decision":"confirmed","evidence":"still reachable","severity":"medium"}]}"#,
+        ),
+        mock_text_response(
+            r#"{"traces":[{"finding_id":"finding-001","reachable":true,"severity_effect":"keeps","evidence":["trace evidence"]}]}"#,
+        ),
+        mock_text_response(report_json),
+    ]);
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(crate::workspace::InMemoryWorkspace::new())
+            as Box<dyn crate::workspace::Workspace>,
+    ));
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ToolContext::for_test(dir.path());
+    ctx.workspace = Some(Arc::clone(&workspace));
+
+    let first = tool
+        .run(
+            &serde_json::json!({
+                "task": "review proxy boundary",
+                "stop_after_stage": "hunt"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(!first.is_error, "{}", first.content);
+    let run_id = {
+        let guard = workspace.read().await;
+        let path = guard
+            .list_files()
+            .into_iter()
+            .find(|name| name.starts_with("kb/security-harness/checkpoints/"))
+            .unwrap();
+        let body = guard.get(&path).unwrap();
+        let checkpoint: security_engineer::SecurityCheckpoint =
+            serde_json::from_str(&body).unwrap();
+        assert_eq!(checkpoint.completed_tasks.len(), 1);
+        checkpoint.run_id
+    };
+
+    let resumed = tool
+        .run(
+            &serde_json::json!({
+                "task": "resume security review",
+                "resume": true,
+                "run_id": run_id
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(!resumed.is_error, "{}", resumed.content);
+    assert!(resumed.content.contains("# Security Harness Report"));
+
+    let guard = workspace.read().await;
+    let path = guard
+        .list_files()
+        .into_iter()
+        .find(|name| name.starts_with("kb/security-harness/checkpoints/"))
+        .unwrap();
+    let body = guard.get(&path).unwrap();
+    let checkpoint: security_engineer::SecurityCheckpoint = serde_json::from_str(&body).unwrap();
+    assert!(checkpoint.completed);
+    assert_eq!(checkpoint.completed_tasks.len(), 1);
+    assert_eq!(checkpoint.validation_decisions_so_far.len(), 1);
+    assert!(
+        checkpoint
+            .stage_history
+            .iter()
+            .any(|entry| entry.stage == security_engineer::SecurityHarnessStage::Validate)
+    );
+}
+
+#[tokio::test]
+async fn security_engineer_old_checkpoint_fails_safely() {
+    let mut checkpoint = security_engineer::SecurityCheckpoint::new(
+        "bad".into(),
+        security_engineer::TargetRef {
+            repo_path: std::env::temp_dir().display().to_string(),
+            git_ref: None,
+        },
+        "scope".into(),
+        security_engineer::ModelMetadata {
+            provider: "test".into(),
+            model: "test-model".into(),
+            active_cheatsheets: vec![],
+        },
+        1,
+    );
+    checkpoint.schema_version = 0;
+    let body = serde_json::to_string(&checkpoint).unwrap();
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(
+            crate::workspace::InMemoryWorkspace::new()
+                .with_file("kb/security-harness/checkpoints/bad.json", &body),
+        ) as Box<dyn crate::workspace::Workspace>,
+    ));
+    let llm = MockLlm::new(vec![]);
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let mut ctx = ToolContext::for_test(std::path::Path::new(&checkpoint.target.repo_path));
+    ctx.workspace = Some(workspace);
+    let result = tool
+        .run(
+            &serde_json::json!({
+                "task": "resume security review",
+                "resume": true,
+                "run_id": "bad"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(result.is_error);
+    assert!(
+        result
+            .content
+            .contains("unsupported checkpoint schema_version")
+    );
 }
 
 #[test]
@@ -1322,8 +1675,20 @@ fn orchestrator_filters_to_config_tool_names() {
 
 #[tokio::test]
 async fn orchestrator_depth_limit_prevents_recursion() {
+    let config = OrchestratorConfig {
+        name: "test_orchestrator",
+        description: "test",
+        system_prompt: "test",
+        direct_tool_names: &[],
+        max_iterations: 5,
+        max_tokens: 1024,
+        injects_protocol: None,
+        inject_cheatsheets: false,
+        emit_artefact: None,
+        harness: None,
+    };
     let tool = OrchestratorTool::new(
-        security_engineer_config(),
+        config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
@@ -1366,8 +1731,20 @@ async fn orchestrator_runs_child_and_returns_result() {
         },
     ]]);
 
+    let config = OrchestratorConfig {
+        name: "test_orchestrator",
+        description: "test",
+        system_prompt: "test",
+        direct_tool_names: &[],
+        max_iterations: 5,
+        max_tokens: 1024,
+        injects_protocol: None,
+        inject_cheatsheets: false,
+        emit_artefact: None,
+        harness: None,
+    };
     let tool = OrchestratorTool::new(
-        security_engineer_config(),
+        config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
@@ -1410,8 +1787,20 @@ async fn orchestrator_emits_artefact_for_non_report_shaped_output() {
         },
     ]]);
 
+    let config = OrchestratorConfig {
+        name: "security_engineer",
+        description: "test",
+        system_prompt: "test",
+        direct_tool_names: &[],
+        max_iterations: 5,
+        max_tokens: 1024,
+        injects_protocol: None,
+        inject_cheatsheets: false,
+        emit_artefact: Some(crate::message::ArtefactKind::SecurityReview),
+        harness: None,
+    };
     let tool = OrchestratorTool::new(
-        security_engineer_config(),
+        config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
@@ -1457,8 +1846,20 @@ async fn orchestrator_suppresses_artefact_when_output_is_whitespace_only() {
         },
     ]]);
 
+    let config = OrchestratorConfig {
+        name: "security_engineer",
+        description: "test",
+        system_prompt: "test",
+        direct_tool_names: &[],
+        max_iterations: 5,
+        max_tokens: 1024,
+        injects_protocol: None,
+        inject_cheatsheets: false,
+        emit_artefact: Some(crate::message::ArtefactKind::SecurityReview),
+        harness: None,
+    };
     let tool = OrchestratorTool::new(
-        security_engineer_config(),
+        config,
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
@@ -1490,6 +1891,7 @@ fn orchestrator_with_custom_config() {
         injects_protocol: Some("\n## DevOps Protocol\nUse for infra changes."),
         inject_cheatsheets: false,
         emit_artefact: None,
+        harness: None,
     };
 
     let parent_tools: Vec<Arc<dyn Tool>> = vec![
@@ -1678,6 +2080,7 @@ async fn orchestrator_propagates_path_to_child_working_dir() {
         injects_protocol: None,
         inject_cheatsheets: false,
         emit_artefact: None,
+        harness: None,
     };
 
     let tool = OrchestratorTool::new(
@@ -1864,6 +2267,7 @@ async fn orchestrator_without_path_keeps_process_cwd() {
         injects_protocol: None,
         inject_cheatsheets: false,
         emit_artefact: None,
+        harness: None,
     };
     let tool = OrchestratorTool::new(
         config,
@@ -1911,14 +2315,18 @@ async fn security_engineer_injects_express_cheatsheet_for_js_repo() {
     .unwrap();
     let target = tmp.path().canonicalize().unwrap();
 
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("# Security Review: demo\n\nNo findings.".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![mock_text_response(
+        r#"{
+          "architecture_context": "Express app",
+          "tasks": [{"id":"hunt-001","attack_class":"route_auth","scope_hint":"routes","rationale":"routes"}],
+          "coverage_gaps": []
+        }"#,
+    )]);
     let systems = llm.systems_seen_handle();
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(crate::workspace::InMemoryWorkspace::new())
+            as Box<dyn crate::workspace::Workspace>,
+    ));
 
     let tool = OrchestratorTool::new(
         security_engineer_config(),
@@ -1926,15 +2334,17 @@ async fn security_engineer_injects_express_cheatsheet_for_js_repo() {
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
-        None,
+        Some(Arc::clone(&workspace)),
         &[],
         vec![],
     );
 
-    let ctx = ToolContext::from_cwd().unwrap();
+    let mut ctx = ToolContext::from_cwd().unwrap();
+    ctx.workspace = Some(Arc::clone(&workspace));
     let input = serde_json::json!({
         "task": "Audit",
         "path": target.display().to_string(),
+        "stop_after_stage": "recon",
     });
     let result = tool.run(&input, &ctx).await.unwrap();
     assert!(!result.is_error, "orch error: {}", result.content);
@@ -1943,10 +2353,7 @@ async fn security_engineer_injects_express_cheatsheet_for_js_repo() {
     assert_eq!(seen.len(), 1, "expected one child LLM turn");
     let system = &seen[0];
     // The base security_engineer.md content is still present.
-    assert!(
-        system.contains("Response shape"),
-        "base security_engineer prompt missing"
-    );
+    assert!(system.contains("Security Engineer Staged Harness"));
     // The JS lang sheet and Express framework sheet were appended.
     assert!(
         system.contains("Cheatsheet: lang/javascript"),
@@ -1964,14 +2371,18 @@ async fn security_engineer_injects_nothing_for_repo_without_manifests() {
     std::fs::write(tmp.path().join("README.md"), "# demo").unwrap();
     let target = tmp.path().canonicalize().unwrap();
 
-    let llm = MockLlm::new(vec![vec![
-        StreamEvent::TextDelta("# done".into()),
-        StreamEvent::MessageComplete {
-            stop_reason: StopReason::EndTurn,
-            output_tokens: None,
-        },
-    ]]);
+    let llm = MockLlm::new(vec![mock_text_response(
+        r#"{
+          "architecture_context": "plain repo",
+          "tasks": [{"id":"hunt-001","attack_class":"boundary","scope_hint":"src","rationale":"baseline"}],
+          "coverage_gaps": []
+        }"#,
+    )]);
     let systems = llm.systems_seen_handle();
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(crate::workspace::InMemoryWorkspace::new())
+            as Box<dyn crate::workspace::Workspace>,
+    ));
 
     let tool = OrchestratorTool::new(
         security_engineer_config(),
@@ -1979,15 +2390,17 @@ async fn security_engineer_injects_nothing_for_repo_without_manifests() {
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
-        None,
+        Some(Arc::clone(&workspace)),
         &[],
         vec![],
     );
 
-    let ctx = ToolContext::from_cwd().unwrap();
+    let mut ctx = ToolContext::from_cwd().unwrap();
+    ctx.workspace = Some(Arc::clone(&workspace));
     let input = serde_json::json!({
         "task": "Audit",
         "path": target.display().to_string(),
+        "stop_after_stage": "recon",
     });
     let _ = tool.run(&input, &ctx).await.unwrap();
 
@@ -1996,7 +2409,7 @@ async fn security_engineer_injects_nothing_for_repo_without_manifests() {
     let system = &seen[0];
     // Base prompt present; no cheatsheet section added when no langs
     // were detected — that's the "no manifests" invariant.
-    assert!(system.contains("Response shape"));
+    assert!(system.contains("Security Engineer Staged Harness"));
     assert!(
         !system.contains("Language and framework cheatsheets"),
         "unexpected cheatsheet header on manifest-free repo"
@@ -2035,6 +2448,7 @@ async fn orchestrator_without_inject_cheatsheets_flag_skips_detection() {
         injects_protocol: None,
         inject_cheatsheets: false,
         emit_artefact: None,
+        harness: None,
     };
     let tool = OrchestratorTool::new(
         config,
