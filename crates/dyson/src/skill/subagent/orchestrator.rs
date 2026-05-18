@@ -158,6 +158,14 @@ impl Tool for OrchestratorTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
+        let required = if matches!(
+            self.config.harness,
+            Some(OrchestratorHarness::SecurityResearch)
+        ) {
+            Vec::<&str>::new()
+        } else {
+            vec!["task"]
+        };
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -195,13 +203,25 @@ impl Tool for OrchestratorTool {
                         before later stages."
                 }
             },
-            "required": ["task"]
+            "required": required
         })
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let parsed: OrchestratorInput = serde_json::from_value(input.clone())
+        let mut parsed: OrchestratorInput = serde_json::from_value(input.clone())
             .map_err(|e| DysonError::tool(self.config.name, format!("invalid input: {e}")))?;
+        let security_resume = matches!(
+            self.config.harness,
+            Some(OrchestratorHarness::SecurityResearch)
+        ) && (parsed.resume
+            || parsed.run_id.as_ref().is_some_and(|s| !s.trim().is_empty()));
+        if parsed.task.trim().is_empty() {
+            if security_resume {
+                parsed.task = "resume security review".into();
+            } else {
+                return Ok(ToolOutput::error("task is required"));
+            }
+        }
 
         // Validate + canonicalize the optional scope path before handing it
         // to the child.  `canonicalize` also implicitly checks existence.
@@ -596,6 +616,7 @@ fn cheatsheets_enabled_via_env() -> bool {
 /// Parsed input for `OrchestratorTool`.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct OrchestratorInput {
+    #[serde(default)]
     pub(crate) task: String,
     #[serde(default)]
     pub(crate) context: String,

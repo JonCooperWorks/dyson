@@ -768,8 +768,24 @@ async fn run_trace_stage(
     let prompt = include_str!("prompts/security_engineer_trace.md");
     let (raw, stage_out) =
         spawn_stage(rt, SecurityHarnessStage::Trace, prompt, checkpoint, 16).await?;
-    let traces: TraceStageOutput = parse_stage_json(&raw)?;
-    checkpoint.trace_results_so_far.extend(traces.traces);
+    match parse_stage_json::<TraceStageOutput>(&raw) {
+        Ok(traces) => {
+            checkpoint.trace_results_so_far.extend(traces.traces);
+        }
+        Err(err) => {
+            checkpoint.coverage_gaps.push(CoverageGap {
+                area: "Trace stage".into(),
+                reason: format!(
+                    "Trace stage output was not parseable JSON; continuing with existing reachability evidence: {err}"
+                ),
+                risk: "unknown".into(),
+            });
+            checkpoint.report_validation_state = ReportValidationState {
+                status: "trace_unparsed".into(),
+                errors: vec![err],
+            };
+        }
+    }
     Ok(Some(stage_out))
 }
 

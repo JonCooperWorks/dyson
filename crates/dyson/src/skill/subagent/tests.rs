@@ -1297,6 +1297,27 @@ fn security_engineer_config_produces_correct_values() {
 }
 
 #[test]
+fn security_engineer_resume_schema_does_not_require_task() {
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
+            &crate::config::AgentSettings::default(),
+            None,
+            false,
+        )),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        None,
+        &[],
+        vec![],
+    );
+    let schema = tool.input_schema();
+    assert_eq!(schema["properties"]["task"]["type"], "string");
+    assert!(schema["required"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn security_engineer_config_describes_staged_harness() {
     let stages: Vec<&str> = security_engineer::harness_stages()
         .iter()
@@ -1714,6 +1735,142 @@ async fn security_engineer_resumes_json_checkpoint_after_filesystem_workspace_re
 }
 
 #[tokio::test]
+async fn security_engineer_trace_parse_failure_records_gap_and_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut checkpoint = security_engineer::SecurityCheckpoint::new(
+        "trace-nonjson".into(),
+        security_engineer::TargetRef {
+            repo_path: dir.path().display().to_string(),
+            git_ref: None,
+        },
+        "scope".into(),
+        security_engineer::ModelMetadata {
+            provider: "test".into(),
+            model: "test-model".into(),
+            active_cheatsheets: vec![],
+        },
+        1,
+    );
+    checkpoint.current_stage = security_engineer::SecurityHarnessStage::Trace;
+    checkpoint
+        .completed_tasks
+        .push(security_engineer::SecurityTask {
+            id: "hunt-001".into(),
+            attack_class: "auth_bypass".into(),
+            scope_hint: "runtime".into(),
+            status: security_engineer::TaskStatus::Completed,
+            rationale: "done".into(),
+        });
+    checkpoint
+        .findings_so_far
+        .push(security_engineer::SecurityFinding {
+            id: "finding-001".into(),
+            title: "missing auth".into(),
+            severity: "high".into(),
+            root_cause: "root".into(),
+            affected_paths: vec!["src/main.rs:1".into()],
+            evidence: vec!["evidence".into()],
+            reachability: "not traced".into(),
+        });
+    checkpoint
+        .validation_decisions_so_far
+        .push(security_engineer::ValidationDecision {
+            finding_id: "finding-001".into(),
+            decision: security_engineer::ValidationDecisionKind::Confirmed,
+            evidence: "confirmed".into(),
+            severity: Some("high".into()),
+        });
+    checkpoint
+        .dedupe_groups_so_far
+        .push(security_engineer::DedupeGroup {
+            id: "dedupe-001".into(),
+            root_cause: "root".into(),
+            primary_finding_id: "finding-001".into(),
+            finding_ids: vec!["finding-001".into()],
+            affected_paths: vec!["src/main.rs:1".into()],
+        });
+    for stage in [
+        security_engineer::SecurityHarnessStage::Recon,
+        security_engineer::SecurityHarnessStage::Hunt,
+        security_engineer::SecurityHarnessStage::Validate,
+        security_engineer::SecurityHarnessStage::Gapfill,
+        security_engineer::SecurityHarnessStage::Dedupe,
+    ] {
+        checkpoint
+            .stage_history
+            .push(security_engineer::StageHistoryEntry {
+                stage,
+                status: "completed".into(),
+                started_at: 1,
+                finished_at: 2,
+                summary: "done".into(),
+            });
+    }
+
+    let body = serde_json::to_string_pretty(&checkpoint).unwrap();
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(
+            crate::workspace::InMemoryWorkspace::new()
+                .with_file("kb/security-harness/checkpoints/trace-nonjson.json", &body),
+        ) as Box<dyn crate::workspace::Workspace>,
+    ));
+    let report_json = r#"{
+      "schema_version": 1,
+      "run_id": "trace-nonjson",
+      "target": {"repo_path": "repo", "git_ref": null},
+      "scope": "scope",
+      "findings": [],
+      "rejected_candidates": [],
+      "coverage": [],
+      "gaps": [],
+      "dedupe_groups": [],
+      "trace_evidence": [],
+      "stage_history": []
+    }"#;
+    let llm = MockLlm::new(vec![
+        mock_text_response("Trace could not produce machine-readable JSON."),
+        mock_text_response(report_json),
+    ]);
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let mut ctx = ToolContext::for_test(dir.path());
+    ctx.workspace = Some(Arc::clone(&workspace));
+    let result = tool
+        .run(
+            &serde_json::json!({
+                "resume": true,
+                "run_id": "trace-nonjson"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error, "{}", result.content);
+    assert!(result.content.contains("# Security Harness Report"));
+
+    let guard = workspace.read().await;
+    let body = guard
+        .get("kb/security-harness/checkpoints/trace-nonjson.json")
+        .unwrap();
+    let checkpoint: security_engineer::SecurityCheckpoint = serde_json::from_str(&body).unwrap();
+    assert!(
+        checkpoint
+            .coverage_gaps
+            .iter()
+            .any(|gap| gap.area == "Trace stage")
+    );
+    assert!(checkpoint.completed);
+}
+
+#[tokio::test]
 async fn security_engineer_old_checkpoint_fails_safely() {
     let mut checkpoint = security_engineer::SecurityCheckpoint::new(
         "bad".into(),
@@ -1753,7 +1910,6 @@ async fn security_engineer_old_checkpoint_fails_safely() {
     let result = tool
         .run(
             &serde_json::json!({
-                "task": "resume security review",
                 "resume": true,
                 "run_id": "bad"
             }),
