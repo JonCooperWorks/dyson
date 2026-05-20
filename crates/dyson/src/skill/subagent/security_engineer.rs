@@ -521,6 +521,166 @@ const VULNERABILITY_TAXONOMY: &[VulnerabilityClassDefinition] = &[
             "redirect",
         ],
     },
+    VulnerabilityClassDefinition {
+        id: "agent_tool_boundary",
+        name: "Agent, MCP, and tool boundary",
+        description: "Tool allowlist bypass, MCP server trust confusion, untrusted content steering privileged tools, synthetic tool-output injection, approval bypass, and agent identity confused-deputy paths.",
+        examples: &[
+            "tool allowlist bypass",
+            "MCP trust confusion",
+            "untrusted content steering tools",
+            "synthetic tool-output injection",
+            "approval bypass",
+            "agent identity confused deputy",
+        ],
+        evidence_requirements: &[
+            "agent/tool entry point",
+            "tool authorization or allowlist decision",
+            "untrusted instruction/data source",
+            "privileged tool sink or identity boundary",
+        ],
+        detector_keywords: &[
+            "agent",
+            "tool",
+            "mcp",
+            "allowlist",
+            "approval",
+            "prompt",
+            "instruction",
+            "subagent",
+            "identity",
+        ],
+    },
+    VulnerabilityClassDefinition {
+        id: "api_contract_input_validation",
+        name: "API contract and input validation",
+        description: "Schema drift, permissive defaults, enum fallthrough, partial update confusion, version downgrade behavior, malformed JSON/body handling, and inconsistent validation between clients, handlers, and workers.",
+        examples: &[
+            "schema drift",
+            "default-permit input",
+            "enum fallthrough",
+            "partial update confusion",
+            "version downgrade",
+            "malformed JSON handling",
+            "client/server validation mismatch",
+        ],
+        evidence_requirements: &[
+            "request or message schema",
+            "parser/deserializer behavior",
+            "default or fallback branch",
+            "security decision affected by invalid input",
+        ],
+        detector_keywords: &[
+            "api",
+            "mcp",
+            "json-rpc",
+            "request",
+            "body",
+            "schema",
+            "json",
+            "serde",
+            "deserialize",
+            "enum",
+            "version",
+            "validation",
+            "fallback",
+            "patch",
+        ],
+    },
+    VulnerabilityClassDefinition {
+        id: "audit_observability_forensics",
+        name: "Audit, observability, and forensics",
+        description: "Missing audit events for sensitive actions, audit identity spoofing, log integrity gaps, cross-tenant log disclosure, insufficient failure telemetry, and alert gaps that hide security-relevant state changes.",
+        examples: &[
+            "missing audit event",
+            "audit identity spoofing",
+            "log integrity gap",
+            "cross-tenant log disclosure",
+            "missing failure telemetry",
+            "security alert gap",
+        ],
+        evidence_requirements: &[
+            "sensitive action or failure path",
+            "audit/log emission point",
+            "actor and tenant attribution",
+            "read access to audit/log record",
+        ],
+        detector_keywords: &[
+            "audit",
+            "log",
+            "tracing",
+            "telemetry",
+            "event",
+            "forensic",
+            "alert",
+            "actor",
+            "history",
+        ],
+    },
+    VulnerabilityClassDefinition {
+        id: "ci_cd_release_integrity",
+        name: "CI/CD and release integrity",
+        description: "CI secret exposure, overbroad deploy tokens, unpinned build actions/images, unsigned artifacts, provenance gaps, branch protection bypass, release drift, and deployment script trust-boundary mistakes.",
+        examples: &[
+            "CI secret exposure",
+            "overbroad deploy token",
+            "unpinned action",
+            "unsigned artifact",
+            "missing provenance",
+            "branch protection bypass",
+            "release drift",
+            "deployment script trust mistake",
+        ],
+        evidence_requirements: &[
+            "workflow/build/deploy entry point",
+            "secret or signing material scope",
+            "artifact/image provenance",
+            "promotion or deployment authorization decision",
+        ],
+        detector_keywords: &[
+            "github action",
+            "workflow",
+            "ci",
+            "deploy",
+            "release",
+            "artifact",
+            "provenance",
+            "signature",
+            "token",
+            "registry",
+        ],
+    },
+    VulnerabilityClassDefinition {
+        id: "data_retention_privacy",
+        name: "Data retention and privacy",
+        description: "PII exposure, retention/deletion mismatch, backup or export privacy leaks, stale shares after deletion, overbroad analytics capture, and privacy boundary drift between live state, snapshots, and logs.",
+        examples: &[
+            "PII exposure",
+            "retention mismatch",
+            "delete does not purge",
+            "backup privacy leak",
+            "export privacy leak",
+            "stale share after deletion",
+            "analytics overcapture",
+        ],
+        evidence_requirements: &[
+            "sensitive data source",
+            "retention/deletion/export path",
+            "backup/snapshot/log copy behavior",
+            "authorization or privacy boundary",
+        ],
+        detector_keywords: &[
+            "pii",
+            "privacy",
+            "retention",
+            "delete",
+            "backup",
+            "export",
+            "snapshot",
+            "share",
+            "analytics",
+        ],
+    },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1524,6 +1684,19 @@ fn canonical_vulnerability_class(value: &str) -> Option<&'static str> {
             Some("resource_exhaustion_dos")
         }
         "frontend" | "security_ux" | "markdown" | "share_link" => Some("frontend_security_ux"),
+        "agent" | "agentic" | "mcp" | "tool_boundary" | "tool_allowlist" | "approval_bypass"
+        | "subagent" => Some("agent_tool_boundary"),
+        "api_contract" | "input_validation" | "schema_validation" | "schema_drift"
+        | "enum_fallthrough" | "malformed_json" => Some("api_contract_input_validation"),
+        "audit" | "logging" | "observability" | "forensics" | "telemetry" => {
+            Some("audit_observability_forensics")
+        }
+        "ci" | "cd" | "cicd" | "release_integrity" | "build_integrity" | "provenance" => {
+            Some("ci_cd_release_integrity")
+        }
+        "privacy" | "data_retention" | "pii" | "retention" | "deletion" => {
+            Some("data_retention_privacy")
+        }
         _ => None,
     }
 }

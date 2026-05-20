@@ -46,5 +46,10 @@ Canonical vulnerability classes:
 - `multi_tenant_isolation` — owner_id/instance_id mismatch, admin/list leakage, audit/log cross-tenant reads, cache-key tenant misses, shared helper confused deputy.
 - `resource_exhaustion_dos` — unbounded bodies/JSON/streams, cache growth, rate-limit bypass, exposed expensive queries, process/container cleanup failure.
 - `frontend_security_ux` — unsafe links, markdown/html handling, secret reveal UX, share revocation, clipboard/export leaks, OAuth/login redirect abuse.
+- `agent_tool_boundary` — tool allowlist bypass, MCP trust confusion, untrusted content steering privileged tools, synthetic tool-output injection, approval bypass, agent identity confused deputy.
+- `api_contract_input_validation` — schema drift, default-permit input, enum fallthrough, partial update confusion, version downgrade, malformed JSON/body handling, client/server validation mismatch.
+- `audit_observability_forensics` — missing audit for sensitive actions, audit identity spoofing, log integrity gaps, cross-tenant log disclosure, insufficient failure telemetry, alert gaps.
+- `ci_cd_release_integrity` — CI secret exposure, overbroad deploy tokens, unpinned build actions/images, unsigned artifacts, provenance gaps, branch protection bypass, release drift.
+- `data_retention_privacy` — PII exposure, retention/deletion mismatch, backup/export privacy leaks, stale shares after deletion, analytics overcapture, privacy drift across live state/snapshots/logs.
 
 Return exactly the JSON shape requested by the stage prompt. No Markdown unless that stage explicitly asks for it.

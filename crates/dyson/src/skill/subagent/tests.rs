@@ -1353,6 +1353,11 @@ fn security_engineer_taxonomy_includes_expanded_vulnerability_classes() {
         "multi_tenant_isolation",
         "resource_exhaustion_dos",
         "frontend_security_ux",
+        "agent_tool_boundary",
+        "api_contract_input_validation",
+        "audit_observability_forensics",
+        "ci_cd_release_integrity",
+        "data_retention_privacy",
     ] {
         assert!(class_ids.contains(&expected), "missing {expected}");
     }
@@ -1648,6 +1653,8 @@ async fn security_engineer_recon_generates_taxonomy_driven_tasks() {
         "multi_tenant_isolation",
         "resource_exhaustion_dos",
         "frontend_security_ux",
+        "agent_tool_boundary",
+        "api_contract_input_validation",
     ] {
         assert!(
             task_classes.contains(expected),
