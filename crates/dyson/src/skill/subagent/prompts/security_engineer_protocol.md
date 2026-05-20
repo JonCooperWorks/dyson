@@ -4,7 +4,7 @@ You have access to `security_engineer`, a staged security research harness with 
 
 Invoke it for scoped, authorized security research on local repositories or owned code. Use narrow scope: one module, boundary, subsystem, or attack surface. Do not ask it to "find all vulnerabilities in the repo."
 
-The methodology is Project Glasswing-style: recon the system, generate scoped hunt hypotheses, run narrow hunts, independently validate or reject candidates, gapfill uncovered high-risk areas, dedupe shared root causes, trace confirmed reusable-component flaws for reachability, feed reachable traces back into consumer-path hunts, then emit the final report.
+The methodology is Project Glasswing-style and vulnerability-class driven: recon the system, map which canonical classes apply, generate scoped hunt hypotheses from that taxonomy, run narrow hunts, independently validate or reject candidates, gapfill uncovered high-risk areas, dedupe shared root causes, trace confirmed reusable-component flaws for reachability, feed reachable traces back into consumer-path hunts, then emit the final report.
 
 The harness stages are Recon, Hunt, Validate, Gapfill, Dedupe, Trace, Feedback, and Report.
 
@@ -31,3 +31,5 @@ If the user asks to resume and gives no run id, call with `"resume": true`. The 
 For bounded smoke testing or deliberate interruption, use `stop_after_stage` with one of: `recon`, `hunt`, `validate`, `gapfill`, `dedupe`, `trace`, `feedback`, `report`. Resume the returned `run_id` afterward.
 
 Checkpoints are durable JSON under the Dyson workspace state mirror and include run id, target repo/path/ref, scope, current stage, completed tasks, pending tasks, findings, validation decisions, dedupe groups, trace results, gapfill tasks, report validation state, timestamps, model/provider metadata, harness version, and schema version.
+
+The canonical coverage taxonomy includes auth/authorization, session/OAuth/CSRF, SSRF/outbound policy, proxy/HTTP boundaries, container/sandbox/runtime escape, secrets, lifecycle/restore/clone, webhooks/inbound integrations, file/archive/path handling, injection/unsafe execution, dependency/supply chain, crypto/randomness, multi-tenant isolation, resource exhaustion/DoS, and frontend/security UX. The report should show which classes were considered, applicable, hunted, skipped, cleared, or need follow-up.

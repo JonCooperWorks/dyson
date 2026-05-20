@@ -6,7 +6,9 @@ The harness writes durable checkpoint JSON under `kb/security-harness/checkpoint
 
 ## Methodology
 
-The harness follows a Project Glasswing-style security research loop. It does not ask one model to audit the whole repo in one pass. Recon builds the architecture and trust-boundary map, Hunt runs scoped attack-class hypotheses, Validate tries to disprove only existing candidates, Gapfill converts uncovered high-risk areas into more hunts, Dedupe collapses shared root causes, Trace establishes reachability from real entry points, Feedback turns reachable traces into consumer-path hunts, and Report emits the evidence-backed result.
+The harness follows a Project Glasswing-style security research loop. It does not ask one model to audit the whole repo in one pass. Recon builds the architecture and trust-boundary map, maps the canonical vulnerability taxonomy to the detected app shape, Hunt runs scoped class-specific hypotheses, Validate tries to disprove only existing candidates, Gapfill converts uncovered high-risk areas into more hunts, Dedupe collapses shared root causes, Trace establishes reachability from real entry points, Feedback turns reachable traces into consumer-path hunts, and Report emits the evidence-backed result.
+
+The canonical taxonomy is first-class in `security_engineer.rs` and covers auth/authorization, session/OAuth/CSRF, SSRF/outbound policy, proxy/HTTP boundaries, container/sandbox/runtime escape, secrets, lifecycle/restore/clone, webhooks/inbound integrations, file/archive/path handling, injection/unsafe execution, dependency/supply chain, crypto/randomness, multi-tenant isolation, resource exhaustion/DoS, and frontend/security UX. Checkpoints and reports track which classes were considered, applicable, hunted, skipped, checked and cleared, or left for follow-up.
 
 Code pointers:
 
@@ -75,8 +77,8 @@ On a new invocation:
 1. Parent calls `security_engineer({ task, context?, path? })`.
 2. `OrchestratorTool::run` canonicalises `path` to a scoped review root.
 3. `repo_detect::detect_and_compose` shallow-parses manifests, returns cheatsheet markdown + the list of included sheet names (logged at INFO).
-4. The harness creates a checkpoint with run id, target path/ref, scope, stage, completed/pending tasks, findings, validation decisions, dedupe groups, trace results, gapfill tasks, report validation state, timestamps, provider/model metadata, harness version, and schema version.
-5. Each stage worker receives the current checkpoint JSON and a stage-specific prompt. Recon creates narrow hunt tasks; Hunt completes one bounded task batch; Validate can only decide on existing findings; Dedupe and Feedback are deterministic; Report must pass schema validation and gets one repair attempt.
+4. The harness creates a checkpoint with run id, target path/ref, scope, stage, vulnerability-class coverage, completed/pending tasks, findings, validation decisions, dedupe groups, trace results, gapfill tasks, report validation state, timestamps, provider/model metadata, harness version, and schema version.
+5. Each stage worker receives the current checkpoint JSON and a stage-specific prompt. Recon creates narrow taxonomy-driven hunt tasks; Hunt completes bounded task batches; Validate can only decide on existing findings and cannot confirm findings missing class/trust-boundary evidence; Dedupe and Feedback are deterministic; Report must pass schema validation and gets one repair attempt.
 6. After every major stage and completed hunt batch, the harness saves the checkpoint before continuing.
 
 On resume:

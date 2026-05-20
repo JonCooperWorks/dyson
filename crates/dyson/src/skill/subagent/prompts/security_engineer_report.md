@@ -1,6 +1,6 @@
 # Report Stage
 
-Emit the final structured security harness report. Use only checkpoint facts: findings, rejected candidates, coverage, gaps, dedupe groups, trace evidence, and stage history.
+Emit the final structured security harness report. Use only checkpoint facts: findings, rejected candidates, vulnerability-class coverage, gaps, dedupe groups, trace evidence, and stage history.
 
 Return exactly one JSON object matching this schema:
 
@@ -19,8 +19,11 @@ Return exactly one JSON object matching this schema:
   "gaps": [],
   "dedupe_groups": [],
   "trace_evidence": [],
-  "stage_history": []
+  "stage_history": [],
+  "class_coverage": []
 }
 ```
 
-Do not add findings that are not already in the checkpoint. If there are no confirmed findings, `findings` is an empty array and the useful output is coverage, rejected candidates, gaps, and stage history.
+Every finding must include `vulnerability_class`, `trust_boundary`, `entry_point`, `sink_or_decision`, `reachability`, `tenant_or_instance_impact`, `evidence`, `severity_rationale`, and `fix_recommendation`.
+
+Do not add findings that are not already in the checkpoint. If there are no confirmed findings, `findings` is an empty array and the useful output is class coverage, checked-and-cleared classes, rejected candidates, gaps, and stage history.

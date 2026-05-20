@@ -1332,6 +1332,33 @@ fn security_engineer_config_describes_staged_harness() {
 }
 
 #[test]
+fn security_engineer_taxonomy_includes_expanded_vulnerability_classes() {
+    let class_ids: Vec<&str> = security_engineer::vulnerability_taxonomy()
+        .iter()
+        .map(|class| class.id)
+        .collect();
+    for expected in [
+        "auth_authorization",
+        "session_oauth_csrf",
+        "ssrf_outbound_network",
+        "proxy_http_boundary",
+        "container_sandbox_runtime",
+        "secrets_credentials",
+        "persistence_lifecycle",
+        "webhooks_inbound_integrations",
+        "file_archive_path",
+        "injection_unsafe_execution",
+        "dependency_supply_chain",
+        "crypto_randomness",
+        "multi_tenant_isolation",
+        "resource_exhaustion_dos",
+        "frontend_security_ux",
+    ] {
+        assert!(class_ids.contains(&expected), "missing {expected}");
+    }
+}
+
+#[test]
 fn security_engineer_prompts_include_all_harness_stages() {
     let config = security_engineer_config();
     let protocol = config.injects_protocol.unwrap();
@@ -1346,6 +1373,18 @@ fn security_engineer_prompts_include_all_harness_stages() {
     }
     assert!(protocol.contains("resume"));
     assert!(protocol.contains("checkpoint"));
+    for phrase in [
+        "vulnerability-class",
+        "auth/authorization",
+        "SSRF/outbound",
+        "container/sandbox/runtime",
+        "multi-tenant isolation",
+    ] {
+        assert!(
+            protocol.contains(phrase) || config.system_prompt.contains(phrase),
+            "security prompts missing taxonomy phrase {phrase}"
+        );
+    }
 }
 
 #[test]
@@ -1354,10 +1393,17 @@ fn security_engineer_validator_output_cannot_emit_new_findings() {
         id: "finding-001".into(),
         title: "title".into(),
         severity: "medium".into(),
+        vulnerability_class: "auth_authorization".into(),
+        trust_boundary: "HTTP auth boundary".into(),
+        entry_point: "src/lib.rs:1".into(),
+        sink_or_decision: "authorization decision".into(),
         root_cause: "root".into(),
         affected_paths: vec!["src/lib.rs:1".into()],
         evidence: vec!["evidence".into()],
         reachability: "not traced".into(),
+        tenant_or_instance_impact: "none".into(),
+        severity_rationale: "medium because reachability is not traced".into(),
+        fix_recommendation: "add explicit authorization check".into(),
     }];
     let raw = r#"{
       "findings": [{"id": "finding-002"}],
@@ -1373,10 +1419,17 @@ fn security_engineer_validator_rejects_unknown_finding_id() {
         id: "finding-001".into(),
         title: "title".into(),
         severity: "medium".into(),
+        vulnerability_class: "auth_authorization".into(),
+        trust_boundary: "HTTP auth boundary".into(),
+        entry_point: "src/lib.rs:1".into(),
+        sink_or_decision: "authorization decision".into(),
         root_cause: "root".into(),
         affected_paths: vec![],
         evidence: vec![],
         reachability: "not traced".into(),
+        tenant_or_instance_impact: "none".into(),
+        severity_rationale: "medium because reachability is not traced".into(),
+        fix_recommendation: "add explicit authorization check".into(),
     }];
     let raw =
         r#"{"decisions":[{"finding_id":"finding-999","decision":"confirmed","evidence":"no"}]}"#;
@@ -1397,6 +1450,69 @@ fn security_engineer_report_schema_rejects_malformed_reports() {
     assert!(err.contains("run_id"));
 }
 
+#[test]
+fn security_engineer_report_schema_requires_class_and_trust_boundary() {
+    let malformed = serde_json::json!({
+        "schema_version": 1,
+        "run_id": "sec-test",
+        "target": {"repo_path": "/repo", "git_ref": null},
+        "scope": "auth",
+        "findings": [{
+            "id": "finding-001",
+            "title": "missing owner check",
+            "severity": "high",
+            "root_cause": "owner predicate absent",
+            "affected_paths": ["src/proxy.rs:10"],
+            "evidence": ["read_file src/proxy.rs:10"],
+            "reachability": "known reachable",
+            "severity_rationale": "reachable auth boundary",
+            "fix_recommendation": "add owner check"
+        }],
+        "rejected_candidates": [],
+        "coverage": [],
+        "gaps": [],
+        "dedupe_groups": [],
+        "trace_evidence": [],
+        "stage_history": [],
+        "class_coverage": [{
+            "class_id": "auth_authorization",
+            "class_name": "Authentication and authorization",
+            "considered": true,
+            "applicable": true,
+            "hunted": true
+        }]
+    });
+    let err = security_engineer::validate_report_json(&malformed).unwrap_err();
+    assert!(err.contains("vulnerability_class"));
+    assert!(err.contains("trust_boundary"));
+}
+
+#[test]
+fn security_engineer_validator_cannot_confirm_without_required_evidence_fields() {
+    let findings = vec![security_engineer::SecurityFinding {
+        id: "finding-001".into(),
+        title: "thin candidate".into(),
+        severity: "high".into(),
+        vulnerability_class: String::new(),
+        trust_boundary: String::new(),
+        entry_point: String::new(),
+        sink_or_decision: String::new(),
+        root_cause: "missing predicate".into(),
+        affected_paths: vec!["src/proxy.rs:10".into()],
+        evidence: vec!["read_file evidence".into()],
+        reachability: "not traced".into(),
+        tenant_or_instance_impact: String::new(),
+        severity_rationale: String::new(),
+        fix_recommendation: String::new(),
+    }];
+    let raw =
+        r#"{"decisions":[{"finding_id":"finding-001","decision":"confirmed","evidence":"ok"}]}"#;
+    let err = security_engineer::parse_validate_output(raw, &findings).unwrap_err();
+    assert!(err.contains("cannot confirm"));
+    assert!(err.contains("vulnerability_class"));
+    assert!(err.contains("trust_boundary"));
+}
+
 #[tokio::test]
 async fn security_engineer_writes_checkpoint_after_recon() {
     let llm = MockLlm::new(vec![mock_text_response(
@@ -1405,7 +1521,10 @@ async fn security_engineer_writes_checkpoint_after_recon() {
           "tasks": [
             {"id":"hunt-001","attack_class":"auth_bypass","scope_hint":"src/http","rationale":"proxy auth"}
           ],
-          "coverage_gaps": []
+	          "coverage_gaps": [],
+	          "class_coverage": [
+	            {"class_id":"auth_authorization","class_name":"Authentication and authorization","considered":true,"applicable":true,"hunted":false,"task_ids":["hunt-001"]}
+	          ]
         }"#,
     )]);
     let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
@@ -1451,9 +1570,97 @@ async fn security_engineer_writes_checkpoint_after_recon() {
         security_engineer::SecurityHarnessStage::Recon
     );
     assert_eq!(checkpoint.pending_tasks.len(), 1);
+    assert!(
+        checkpoint
+            .class_coverage
+            .iter()
+            .any(|class| class.class_id == "auth_authorization"
+                && class.considered
+                && class.applicable
+                && class.task_ids.iter().any(|id| id == "hunt-001")),
+        "checkpoint should record taxonomy coverage"
+    );
     assert_eq!(
         checkpoint.stage_history[0].stage,
         security_engineer::SecurityHarnessStage::Recon
+    );
+}
+
+#[tokio::test]
+async fn security_engineer_recon_generates_taxonomy_driven_tasks() {
+    let llm = MockLlm::new(vec![mock_text_response(
+        r#"{
+          "architecture_context": "MCP proxy runtime with Docker containers, bearer tokens, OAuth callback, owner instance checks, outbound URL policy, JSON body caps, and frontend secret reveal UI",
+          "tasks": [],
+          "coverage_gaps": [],
+          "class_coverage": []
+        }"#,
+    )]);
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(crate::workspace::InMemoryWorkspace::new())
+            as Box<dyn crate::workspace::Workspace>,
+    ));
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ToolContext::for_test(dir.path());
+    ctx.workspace = Some(Arc::clone(&workspace));
+    let result = tool
+        .run(
+            &serde_json::json!({
+                "task": "review MCP runtime proxy boundary",
+                "stop_after_stage": "recon"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error, "{}", result.content);
+
+    let guard = workspace.read().await;
+    let path = guard
+        .list_files()
+        .into_iter()
+        .find(|name| name.starts_with("kb/security-harness/checkpoints/"))
+        .expect("checkpoint file not written");
+    let body = guard.get(&path).unwrap();
+    let checkpoint: security_engineer::SecurityCheckpoint = serde_json::from_str(&body).unwrap();
+    let task_classes: std::collections::BTreeSet<_> = checkpoint
+        .pending_tasks
+        .iter()
+        .map(|task| task.attack_class.as_str())
+        .collect();
+    for expected in [
+        "auth_authorization",
+        "session_oauth_csrf",
+        "ssrf_outbound_network",
+        "proxy_http_boundary",
+        "container_sandbox_runtime",
+        "secrets_credentials",
+        "multi_tenant_isolation",
+        "resource_exhaustion_dos",
+        "frontend_security_ux",
+    ] {
+        assert!(
+            task_classes.contains(expected),
+            "missing generated task for {expected}"
+        );
+    }
+    assert!(
+        checkpoint
+            .class_coverage
+            .iter()
+            .filter(|class| class.considered)
+            .count()
+            >= security_engineer::vulnerability_taxonomy().len()
     );
 }
 
@@ -1470,7 +1677,10 @@ async fn security_engineer_resumes_checkpoint_and_does_not_rerun_completed_tasks
       "gaps": [],
       "dedupe_groups": [],
       "trace_evidence": [],
-      "stage_history": []
+      "stage_history": [],
+      "class_coverage": [
+        {"class_id":"auth_authorization","class_name":"Authentication and authorization","considered":true,"applicable":true,"hunted":true,"checked_and_cleared":false,"task_ids":["hunt-001"]}
+      ]
     }"#;
     let llm = MockLlm::new(vec![
         mock_text_response(
@@ -1479,7 +1689,12 @@ async fn security_engineer_resumes_checkpoint_and_does_not_rerun_completed_tasks
               "tasks": [
                 {"id":"hunt-001","attack_class":"auth_bypass","scope_hint":"proxy","rationale":"bearer token"}
               ],
-              "coverage_gaps": []
+	              "coverage_gaps": [],
+	              "class_coverage": [
+	                {"class_id":"auth_authorization","class_name":"Authentication and authorization","considered":true,"applicable":true,"hunted":false,"task_ids":["hunt-001"]},
+	                {"class_id":"proxy_http_boundary","class_name":"Proxy and HTTP boundary issues","considered":true,"applicable":false,"hunted":false,"skipped_reason":"not part of this resume regression"},
+	                {"class_id":"ssrf_outbound_network","class_name":"SSRF and outbound network policy","considered":true,"applicable":false,"hunted":false,"skipped_reason":"not part of this resume regression"}
+	              ]
             }"#,
         ),
         mock_text_response(
@@ -1487,13 +1702,20 @@ async fn security_engineer_resumes_checkpoint_and_does_not_rerun_completed_tasks
               "completed_task_ids": ["hunt-001"],
               "findings": [
                 {
-                  "id":"finding-001",
-                  "title":"candidate",
-                  "severity":"medium",
-                  "root_cause":"boundary confusion",
-                  "affected_paths":["src/proxy.rs:10"],
-                  "evidence":["read_file evidence"],
-                  "reachability":"not traced"
+	                  "id":"finding-001",
+	                  "title":"candidate",
+	                  "severity":"medium",
+	                  "vulnerability_class":"auth_authorization",
+	                  "trust_boundary":"proxy bearer boundary",
+	                  "entry_point":"src/proxy.rs:10",
+	                  "sink_or_decision":"proxy authorization decision",
+	                  "root_cause":"boundary confusion",
+	                  "affected_paths":["src/proxy.rs:10"],
+	                  "evidence":["read_file evidence"],
+	                  "reachability":"not traced",
+	                  "tenant_or_instance_impact":"possible cross-instance access",
+	                  "severity_rationale":"medium until reachability is traced",
+	                  "fix_recommendation":"resolve instance ownership before proxying"
                 }
               ],
               "gaps": [],
@@ -1609,9 +1831,12 @@ async fn security_engineer_resumes_json_checkpoint_after_filesystem_workspace_re
             r#"{
               "architecture_context": "runtime socket boundary",
               "tasks": [
-                {"id":"hunt-001","attack_class":"auth_bypass","scope_hint":"runtime","rationale":"socket auth"}
+	                {"id":"hunt-001","attack_class":"container_sandbox_runtime","scope_hint":"runtime","rationale":"socket auth"}
               ],
-              "coverage_gaps": []
+	              "coverage_gaps": [],
+	              "class_coverage": [
+	                {"class_id":"container_sandbox_runtime","class_name":"Container, sandbox, and runtime escape","considered":true,"applicable":true,"hunted":false,"task_ids":["hunt-001"]}
+	              ]
             }"#,
         ),
         mock_text_response(
@@ -1619,13 +1844,20 @@ async fn security_engineer_resumes_json_checkpoint_after_filesystem_workspace_re
               "completed_task_ids": ["hunt-001"],
               "findings": [
                 {
-                  "id":"finding-001",
-                  "title":"socket identity missing",
-                  "severity":"high",
-                  "root_cause":"missing caller identity",
-                  "affected_paths":["crates/mcp-runtime/src/main.rs:1"],
-                  "evidence":["runtime socket evidence"],
-                  "reachability":"not traced"
+	                  "id":"finding-001",
+	                  "title":"socket identity missing",
+	                  "severity":"high",
+	                  "vulnerability_class":"container_sandbox_runtime",
+	                  "trust_boundary":"runtime Unix socket boundary",
+	                  "entry_point":"crates/mcp-runtime/src/main.rs:1",
+	                  "sink_or_decision":"runtime forward decision",
+	                  "root_cause":"missing caller identity",
+	                  "affected_paths":["crates/mcp-runtime/src/main.rs:1"],
+	                  "evidence":["runtime socket evidence"],
+	                  "reachability":"not traced",
+	                  "tenant_or_instance_impact":"one instance could affect another runtime server",
+	                  "severity_rationale":"high because runtime forwarding crosses the sandbox boundary",
+	                  "fix_recommendation":"authenticate runtime socket requests with instance identity"
                 }
               ],
               "gaps": [],
@@ -1702,7 +1934,10 @@ async fn security_engineer_resumes_json_checkpoint_after_filesystem_workspace_re
       "gaps": [],
       "dedupe_groups": [],
       "trace_evidence": [],
-      "stage_history": []
+      "stage_history": [],
+      "class_coverage": [
+        {"class_id":"container_sandbox_runtime","class_name":"Container, sandbox, and runtime escape","considered":true,"applicable":true,"hunted":true,"checked_and_cleared":false,"task_ids":["hunt-001"]}
+      ]
     }"#;
     let resume_llm = MockLlm::new(vec![
         mock_text_response(
@@ -1773,10 +2008,17 @@ async fn security_engineer_trace_parse_failure_records_gap_and_reports() {
             id: "finding-001".into(),
             title: "missing auth".into(),
             severity: "high".into(),
+            vulnerability_class: "auth_authorization".into(),
+            trust_boundary: "runtime socket boundary".into(),
+            entry_point: "src/main.rs:1".into(),
+            sink_or_decision: "authorization decision".into(),
             root_cause: "root".into(),
             affected_paths: vec!["src/main.rs:1".into()],
             evidence: vec!["evidence".into()],
             reachability: "not traced".into(),
+            tenant_or_instance_impact: "instance crossover possible".into(),
+            severity_rationale: "high because a reachable boundary lacks caller identity".into(),
+            fix_recommendation: "bind runtime socket calls to resolved instance identity".into(),
         });
     checkpoint
         .validation_decisions_so_far
@@ -1831,7 +2073,10 @@ async fn security_engineer_trace_parse_failure_records_gap_and_reports() {
       "gaps": [],
       "dedupe_groups": [],
       "trace_evidence": [],
-      "stage_history": []
+      "stage_history": [],
+      "class_coverage": [
+        {"class_id":"auth_authorization","class_name":"Authentication and authorization","considered":true,"applicable":true,"hunted":true,"checked_and_cleared":false,"task_ids":["hunt-001"]}
+      ]
     }"#;
     let llm = MockLlm::new(vec![
         mock_text_response("Trace could not produce machine-readable JSON."),
@@ -2629,7 +2874,10 @@ async fn security_engineer_injects_express_cheatsheet_for_js_repo() {
         r#"{
           "architecture_context": "Express app",
           "tasks": [{"id":"hunt-001","attack_class":"route_auth","scope_hint":"routes","rationale":"routes"}],
-          "coverage_gaps": []
+	          "coverage_gaps": [],
+	          "class_coverage": [
+	            {"class_id":"auth_authorization","class_name":"Authentication and authorization","considered":true,"applicable":true,"hunted":false,"task_ids":["hunt-001"]}
+	          ]
         }"#,
     )]);
     let systems = llm.systems_seen_handle();
@@ -2684,8 +2932,11 @@ async fn security_engineer_injects_nothing_for_repo_without_manifests() {
     let llm = MockLlm::new(vec![mock_text_response(
         r#"{
           "architecture_context": "plain repo",
-          "tasks": [{"id":"hunt-001","attack_class":"boundary","scope_hint":"src","rationale":"baseline"}],
-          "coverage_gaps": []
+	          "tasks": [{"id":"hunt-001","attack_class":"dependency_supply_chain","scope_hint":"src","rationale":"baseline"}],
+	          "coverage_gaps": [],
+	          "class_coverage": [
+	            {"class_id":"dependency_supply_chain","class_name":"Dependency and supply chain","considered":true,"applicable":true,"hunted":false,"task_ids":["hunt-001"]}
+	          ]
         }"#,
     )]);
     let systems = llm.systems_seen_handle();
