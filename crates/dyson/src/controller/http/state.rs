@@ -363,6 +363,127 @@ mod ring_tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn next_tool_call_admission_consumes_before_callback_so_it_cannot_repeat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = Arc::new(ChatHandle::new(
+            "c-test".to_string(),
+            "test".to_string(),
+            Some(tmp.path()),
+        ));
+        handle
+            .enqueue_turn(QueuedTurn {
+                prompt: "only once".to_string(),
+                attachments: Vec::new(),
+                provider: None,
+                model: None,
+                queue_mode: Some("next_tool_call".to_string()),
+            })
+            .await;
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let release_gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+
+        let first_handle = Arc::clone(&handle);
+        let first_release_gate = Arc::clone(&release_gate);
+        let first = tokio::spawn(async move {
+            let mut admitted = Vec::new();
+            let count = first_handle
+                .admit_text_only_queued_turns(|message| {
+                    admitted.push(message);
+                    started_tx.send(()).unwrap();
+                    let (lock, cvar) = &*first_release_gate;
+                    let released = lock.lock().unwrap();
+                    let (_released, timeout) = cvar
+                        .wait_timeout_while(
+                            released,
+                            std::time::Duration::from_secs(2),
+                            |released| !*released,
+                        )
+                        .unwrap();
+                    assert!(
+                        !timeout.timed_out(),
+                        "test timed out waiting to release first admit"
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            (count, admitted.len())
+        });
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+
+        let mut second_admitted = Vec::new();
+        let second_count = handle
+            .admit_text_only_queued_turns(|message| {
+                second_admitted.push(message);
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let (lock, cvar) = &*release_gate;
+        *lock.lock().unwrap() = true;
+        cvar.notify_one();
+        let (first_count, first_admitted) = first.await.unwrap();
+
+        assert_eq!(first_count, 1);
+        assert_eq!(first_admitted, 1);
+        assert_eq!(
+            second_count, 0,
+            "a next-tool queued turn must be invisible to later admission callbacks once admitted"
+        );
+        assert!(second_admitted.is_empty());
+        assert_eq!(handle.queued.lock().unwrap().len(), 0);
+        assert!(!handle.queue_path.clone().unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn multiple_next_tool_call_turns_admit_fifo_and_only_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = ChatHandle::new("c-test".to_string(), "test".to_string(), Some(tmp.path()));
+        for prompt in ["first", "second"] {
+            handle
+                .enqueue_turn(QueuedTurn {
+                    prompt: prompt.to_string(),
+                    attachments: Vec::new(),
+                    provider: None,
+                    model: None,
+                    queue_mode: Some("next_tool_call".to_string()),
+                })
+                .await;
+        }
+
+        let mut admitted = Vec::new();
+        let count = handle
+            .admit_text_only_queued_turns(|message| {
+                if let Some(crate::message::ContentBlock::Text { text }) = message.content.first() {
+                    admitted.push(text.clone());
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut repeated = Vec::new();
+        let repeated_count = handle
+            .admit_text_only_queued_turns(|message| {
+                repeated.push(message);
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(admitted, vec!["first", "second"]);
+        assert_eq!(repeated_count, 0);
+        assert!(repeated.is_empty());
+        assert_eq!(handle.queued.lock().unwrap().len(), 0);
+    }
+
     #[tokio::test]
     async fn normal_text_queued_turns_keep_legacy_mid_turn_admission() {
         let tmp = tempfile::tempdir().unwrap();
@@ -526,43 +647,48 @@ impl ChatHandle {
     where
         F: FnMut(Message) -> crate::error::Result<()>,
     {
-        let candidates: Vec<QueuedTurn> = {
-            let q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
-            q.iter()
-                .take_while(|turn| {
-                    turn.attachments.is_empty() && Self::admits_mid_turn(turn.queue_mode.as_deref())
-                })
-                .cloned()
-                .collect()
+        let candidates = {
+            let mut q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
+            let mut candidates = Vec::new();
+            while q.front().is_some_and(|turn| {
+                turn.attachments.is_empty() && Self::admits_mid_turn(turn.queue_mode.as_deref())
+            }) {
+                if let Some(turn) = q.pop_front() {
+                    candidates.push(turn);
+                }
+            }
+            candidates
         };
         if candidates.is_empty() {
             return Ok(0);
         }
+        self.persist_queue().await;
 
+        let mut admitted = 0usize;
         for turn in &candidates {
-            admit(Message::user(&turn.prompt))?;
+            if let Err(err) = admit(Message::user(&turn.prompt)) {
+                if admitted < candidates.len() {
+                    self.requeue_front(candidates[admitted..].iter().cloned().collect())
+                        .await;
+                }
+                return Err(err);
+            }
+            admitted += 1;
         }
+        Ok(admitted)
+    }
 
-        let mut removed = 0usize;
+    async fn requeue_front(&self, mut turns: Vec<QueuedTurn>) {
+        if turns.is_empty() {
+            return;
+        }
         {
             let mut q = self.queued.lock().unwrap_or_else(|p| p.into_inner());
-            for _ in 0..candidates.len() {
-                match q.front() {
-                    Some(turn)
-                        if turn.attachments.is_empty()
-                            && Self::admits_mid_turn(turn.queue_mode.as_deref()) =>
-                    {
-                        q.pop_front();
-                        removed += 1;
-                    }
-                    _ => break,
-                }
+            while let Some(turn) = turns.pop() {
+                q.push_front(turn);
             }
         }
-        if removed > 0 {
-            self.persist_queue().await;
-        }
-        Ok(removed)
+        self.persist_queue().await;
     }
 
     fn admits_mid_turn(queue_mode: Option<&str>) -> bool {
