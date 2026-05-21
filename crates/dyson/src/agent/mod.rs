@@ -90,6 +90,7 @@ mod silent_output;
 pub use silent_output::SilentOutput;
 mod r#loop;
 mod persistence;
+mod sliding_window;
 mod state;
 pub mod stream_handler;
 pub mod token_budget;

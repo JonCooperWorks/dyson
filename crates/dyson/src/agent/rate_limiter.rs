@@ -22,12 +22,13 @@
 // the only way to get a reference is through access() or a handle.
 // ===========================================================================
 
-use std::collections::VecDeque;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::error::{DysonError, Result};
+
+use super::sliding_window::SlidingWindow;
 
 // ---------------------------------------------------------------------------
 // Priority
@@ -70,7 +71,7 @@ impl Priority {
 struct RateLimiterState {
     max_calls: usize,
     window: Duration,
-    timestamps: Mutex<VecDeque<Instant>>,
+    window_state: SlidingWindow,
 }
 
 impl RateLimiterState {
@@ -81,31 +82,12 @@ impl RateLimiterState {
         }
 
         let effective_limit = priority.effective_limit(self.max_calls);
-        let now = Instant::now();
-        let mut timestamps = self
-            .timestamps
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        // Prune expired timestamps from the front (O(k) where k = expired,
-        // instead of O(n) retain over the entire vec).  Timestamps are always
-        // pushed in chronological order, so the front is the oldest.
-        while let Some(&front) = timestamps.front() {
-            if now.duration_since(front) >= self.window {
-                timestamps.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        if timestamps.len() >= effective_limit {
+        if !self.window_state.observe(effective_limit) {
             return Err(DysonError::RateLimit {
                 limit: self.max_calls,
                 window_secs: self.window.as_secs(),
             });
         }
-
-        timestamps.push_back(now);
         Ok(())
     }
 }
@@ -150,7 +132,7 @@ impl<T> RateLimited<T> {
             state: Arc::new(RateLimiterState {
                 max_calls,
                 window,
-                timestamps: Mutex::new(VecDeque::new()),
+                window_state: SlidingWindow::new(max_calls, window),
             }),
         }
     }
@@ -162,7 +144,7 @@ impl<T> RateLimited<T> {
             state: Arc::new(RateLimiterState {
                 max_calls: usize::MAX,
                 window: Duration::ZERO,
-                timestamps: Mutex::new(VecDeque::new()),
+                window_state: SlidingWindow::unlimited(),
             }),
         }
     }
