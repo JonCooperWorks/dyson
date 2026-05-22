@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Once;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -61,6 +62,8 @@ impl Tool for LocalScriptSkillTool {
     }
 
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        ignore_sigpipe_for_parent();
+
         let raw = input
             .get("raw")
             .or_else(|| input.get("input"))
@@ -96,6 +99,13 @@ impl Tool for LocalScriptSkillTool {
                 cmd.env(key, value);
             }
         }
+        #[cfg(unix)]
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                Ok(())
+            });
+        }
 
         let mut child = cmd.spawn().map_err(|e| {
             DysonError::tool(
@@ -110,10 +120,21 @@ impl Tool for LocalScriptSkillTool {
         if let Some(mut stdin) = child.stdin.take() {
             let bytes = serde_json::to_vec(&payload)
                 .map_err(|e| DysonError::tool(&self.name, format!("input encode failed: {e}")))?;
-            stdin
-                .write_all(&bytes)
-                .await
-                .map_err(|e| DysonError::tool(&self.name, format!("stdin write failed: {e}")))?;
+            match stdin.write_all(&bytes).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                    tracing::debug!(
+                        skill = self.skill_name,
+                        "skill script closed stdin before reading input"
+                    );
+                }
+                Err(e) => {
+                    return Err(DysonError::tool(
+                        &self.name,
+                        format!("stdin write failed: {e}"),
+                    ));
+                }
+            }
             let _ = stdin.shutdown().await;
         }
 
@@ -173,6 +194,16 @@ impl Tool for LocalScriptSkillTool {
                 content
             }))
         }
+    }
+}
+
+fn ignore_sigpipe_for_parent() {
+    #[cfg(unix)]
+    {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        });
     }
 }
 

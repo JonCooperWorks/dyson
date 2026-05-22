@@ -412,6 +412,47 @@ async fn manifest_v2_script_registers_and_executes_tool() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn script_that_ignores_stdin_still_returns_stdout() {
+    use crate::tool::ToolContext;
+
+    let dir = std::env::temp_dir().join(format!("dyson-skill-no-stdin-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "Echoes input\n\nInstructions only.\n").unwrap();
+    std::fs::write(
+        dir.join("bin/run.sh"),
+        "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'ignored stdin ok\\n'\n",
+    )
+    .unwrap();
+    let name = dir.file_name().unwrap().to_str().unwrap();
+    std::fs::write(
+        dir.join("dyson-skill.json"),
+        format!(
+            r#"{{
+              "schema_version":2,
+              "name":"{name}",
+              "description":"Echoes input",
+              "slash_command":"/skill-echo",
+              "execution":{{"kind":"script","entrypoint":"bin/run.sh","argument_mode":"raw","timeout_ms":5000}}
+            }}"#
+        ),
+    )
+    .unwrap();
+
+    let skill = LocalSkill::from_dir(&dir).unwrap();
+    let out = skill.tools()[0]
+        .run(
+            &serde_json::json!({"raw": "hello"}),
+            &ToolContext::from_cwd().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(!out.is_error, "{}", out.content);
+    assert_eq!(out.content, "ignored stdin ok");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn invalid_manifest_entrypoint_rejected() {
     let dir = std::env::temp_dir().join(format!("dyson-skill-bad-entry-{}", std::process::id()));
