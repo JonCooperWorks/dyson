@@ -41,6 +41,8 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 
+use crate::config::Settings;
+
 use super::super::responses::{Resp, bad_request, boxed, json_ok, read_json_capped, unauthorized};
 use super::super::state::HttpState;
 
@@ -654,7 +656,8 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         match tokio::task::spawn_blocking(move || crate::config::loader::load_settings(Some(&path)))
             .await
         {
-            Ok(Ok(new_settings)) => {
+            Ok(Ok(mut new_settings)) => {
+                preserve_runtime_only_settings(&mut new_settings, &snapshot);
                 state.registry.reload(&new_settings, None);
                 if let Ok(mut g) = state.settings.write() {
                     *g = new_settings.clone();
@@ -744,6 +747,14 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         "agent_secrets_updated": agent_secrets_changed,
         "agent_secrets_applied": agent_secrets_applied,
     }))
+}
+
+fn preserve_runtime_only_settings(new_settings: &mut Settings, snapshot: &Settings) {
+    // `dangerous_no_sandbox` is deliberately CLI-only and never serialized
+    // into dyson.json. Eager runtime reloads must carry it forward or swarm
+    // instances inside Cube will try to build an OS sandbox and exit because
+    // bwrap is not installed there.
+    new_settings.dangerous_no_sandbox = snapshot.dangerous_no_sandbox;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1943,6 +1954,18 @@ mod tests {
             None
         );
         assert_eq!(runtime_patch(&None, &Some("it_123".into())), None);
+    }
+
+    #[test]
+    fn eager_config_reload_preserves_cli_only_sandbox_flag() {
+        let mut snapshot = Settings::default();
+        snapshot.dangerous_no_sandbox = true;
+        let mut reloaded = Settings::default();
+        assert!(!reloaded.dangerous_no_sandbox);
+
+        preserve_runtime_only_settings(&mut reloaded, &snapshot);
+
+        assert!(reloaded.dangerous_no_sandbox);
     }
 
     #[test]
