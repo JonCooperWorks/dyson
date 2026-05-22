@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use dyson::auth::{Auth, Credential, DangerousNoAuth, HashedBearerAuth};
 use dyson::chat_history::{ChatHistory, DiskChatHistory};
-use dyson::config::{ChatHistoryConfig, LlmProvider, ProviderConfig, Settings};
+use dyson::config::{
+    BuiltinSkillConfig, ChatHistoryConfig, LlmProvider, ProviderConfig, Settings, SkillConfig,
+};
 use dyson::controller::ClientRegistry;
 use dyson::controller::http::{HttpState, test_helpers};
 use dyson::feedback::FeedbackStore;
@@ -73,6 +75,10 @@ struct BlockingLlmClient {
 struct ToolThenRecordMessagesLlm {
     calls: Arc<std::sync::atomic::AtomicUsize>,
     seen: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+}
+
+struct CaptureToolsLlm {
+    calls: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
 }
 
 #[async_trait::async_trait]
@@ -150,6 +156,57 @@ impl LlmClient for ToolThenRecordMessagesLlm {
     }
 }
 
+#[async_trait::async_trait]
+impl LlmClient for CaptureToolsLlm {
+    async fn stream(
+        &self,
+        _messages: &[Message],
+        _system: &str,
+        _system_suffix: &str,
+        tools: &[ToolDefinition],
+        _config: &CompletionConfig,
+    ) -> dyson::error::Result<StreamResponse> {
+        self.calls.lock().unwrap().push(
+            tools
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect::<Vec<_>>(),
+        );
+        let events = vec![
+            Ok(StreamEvent::TextDelta("ok".to_string())),
+            Ok(StreamEvent::MessageComplete {
+                stop_reason: StopReason::EndTurn,
+                output_tokens: Some(1),
+            }),
+        ];
+        Ok(StreamResponse {
+            stream: Box::pin(tokio_stream::iter(events)),
+            tool_mode: ToolMode::Execute,
+            input_tokens: None,
+        })
+    }
+}
+
+async fn wait_for_nonempty_tool_capture(
+    calls: &Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    index: usize,
+) -> Vec<String> {
+    for _ in 0..100 {
+        if let Some(names) = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|names| !names.is_empty())
+            .nth(index)
+            .cloned()
+        {
+            return names;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for non-empty tool capture #{index}");
+}
+
 async fn rig() -> Rig {
     rig_with_auth(Arc::new(DangerousNoAuth)).await
 }
@@ -171,7 +228,12 @@ async fn rig_with_config_path(config_path: std::path::PathBuf) -> Rig {
     .await
 }
 
-async fn rig_with_auth_client_and_config_path(
+async fn rig_with_settings_and_client(settings: Settings, client: Box<dyn LlmClient>) -> Rig {
+    spawn_rig_with_settings(settings, Arc::new(DangerousNoAuth), client, None).await
+}
+
+async fn spawn_rig_with_settings(
+    mut settings: Settings,
     auth: Arc<dyn Auth>,
     client: Box<dyn LlmClient>,
     config_path: Option<std::path::PathBuf>,
@@ -179,27 +241,6 @@ async fn rig_with_auth_client_and_config_path(
     let chat_dir = tempfile::tempdir().expect("chat tempdir");
     let workspace_dir = tempfile::tempdir().expect("workspace tempdir");
 
-    let mut providers = std::collections::HashMap::new();
-    providers.insert(
-        "default".to_string(),
-        ProviderConfig {
-            provider_type: LlmProvider::OpenRouter,
-            api_key: Credential::new("sk-test".into()),
-            base_url: None,
-            models: vec![
-                "qwen/qwen3.6-plus".to_string(),
-                "minimax/minimax-m2.5".to_string(),
-            ],
-        },
-    );
-
-    let mut settings = Settings {
-        dangerous_no_sandbox: true,
-        ..Settings::default()
-    };
-    settings.agent.provider = LlmProvider::OpenRouter;
-    settings.agent.model = "qwen/qwen3.6-plus".into();
-    settings.providers = providers;
     settings.workspace.connection_string =
         Credential::new(workspace_dir.path().to_string_lossy().into_owned());
     settings.chat_history = ChatHistoryConfig {
@@ -229,8 +270,6 @@ async fn rig_with_auth_client_and_config_path(
     let base = format!("http://{}", addr);
     let handle = tokio::spawn(test_helpers::serve(state.clone(), listener));
 
-    // Tiny settle so the spawn is in the accept loop before the first
-    // request races it.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     Rig {
@@ -240,6 +279,60 @@ async fn rig_with_auth_client_and_config_path(
         workspace_dir,
         _handle: handle,
     }
+}
+
+fn settings_with_builtin_tools(tools: &[&str]) -> Settings {
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        "default".to_string(),
+        ProviderConfig {
+            provider_type: LlmProvider::OpenRouter,
+            api_key: Credential::new("sk-test".into()),
+            base_url: None,
+            models: vec!["qwen/qwen3.6-plus".to_string()],
+        },
+    );
+
+    let mut settings = Settings {
+        dangerous_no_sandbox: true,
+        ..Settings::default()
+    };
+    settings.agent.provider = LlmProvider::OpenRouter;
+    settings.agent.model = "qwen/qwen3.6-plus".into();
+    settings.providers = providers;
+    settings.skills = vec![SkillConfig::Builtin(BuiltinSkillConfig {
+        tools: tools.iter().map(|tool| (*tool).to_string()).collect(),
+    })];
+    settings
+}
+
+async fn rig_with_auth_client_and_config_path(
+    auth: Arc<dyn Auth>,
+    client: Box<dyn LlmClient>,
+    config_path: Option<std::path::PathBuf>,
+) -> Rig {
+    let mut providers = std::collections::HashMap::new();
+    providers.insert(
+        "default".to_string(),
+        ProviderConfig {
+            provider_type: LlmProvider::OpenRouter,
+            api_key: Credential::new("sk-test".into()),
+            base_url: None,
+            models: vec![
+                "qwen/qwen3.6-plus".to_string(),
+                "minimax/minimax-m2.5".to_string(),
+            ],
+        },
+    );
+
+    let mut settings = Settings {
+        dangerous_no_sandbox: true,
+        ..Settings::default()
+    };
+    settings.agent.provider = LlmProvider::OpenRouter;
+    settings.agent.model = "qwen/qwen3.6-plus".into();
+    settings.providers = providers;
+    spawn_rig_with_settings(settings, auth, client, config_path).await
 }
 
 fn isolate_configure_workspace(r: &Rig) -> tempfile::TempDir {
@@ -915,6 +1008,55 @@ async fn admin_configure_multi_patch_replaces_config_once() {
     assert_eq!(
         replace_count, 1,
         "D4 configure with identity/provider/image/skills/mcp patches must replace dyson.json once, not thrash hot reload with {replace_count} writes"
+    );
+}
+
+#[tokio::test]
+async fn runtime_tool_definitions_follow_builtin_tool_allowlist() {
+    let without_artifacts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let r = rig_with_settings_and_client(
+        settings_with_builtin_tools(&["read_file"]),
+        Box::new(CaptureToolsLlm {
+            calls: Arc::clone(&without_artifacts),
+        }),
+    )
+    .await;
+    let id = create_chat(&r, "without artifacts").await;
+    let resp = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "record tools" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let names = wait_for_nonempty_tool_capture(&without_artifacts, 0).await;
+    assert!(
+        names.contains(&"read_file".to_string()),
+        "sanity check: allowlisted read_file should be sent to the LLM, got {names:?}"
+    );
+    assert!(
+        !names.contains(&"artifacts".to_string()),
+        "artifacts must not be sent when it is absent from the builtin allowlist: {names:?}"
+    );
+
+    let with_artifacts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let r = rig_with_settings_and_client(
+        settings_with_builtin_tools(&["read_file", "artifacts"]),
+        Box::new(CaptureToolsLlm {
+            calls: Arc::clone(&with_artifacts),
+        }),
+    )
+    .await;
+    let id = create_chat(&r, "with artifacts").await;
+    let resp = post_json(
+        &format!("{}/api/conversations/{id}/turn", r.base),
+        &serde_json::json!({ "prompt": "record tools" }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let names = wait_for_nonempty_tool_capture(&with_artifacts, 0).await;
+    assert!(
+        names.contains(&"artifacts".to_string()),
+        "artifacts must be sent once Swarm passes it through the builtin allowlist: {names:?}"
     );
 }
 
