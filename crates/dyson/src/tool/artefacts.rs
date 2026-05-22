@@ -34,9 +34,16 @@ pub struct ArtefactRecord {
     pub metadata: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtefactLookup {
+    Missing,
+    Found(ArtefactRecord),
+    Ambiguous(Vec<ArtefactSummary>),
+}
+
 pub trait ArtefactReader: Send + Sync {
-    fn list(&self, chat_id: &str, limit: usize) -> Result<Vec<ArtefactSummary>>;
-    fn read(&self, chat_id: &str, id: &str) -> Result<Option<ArtefactRecord>>;
+    fn list(&self, chat_id: Option<&str>, limit: usize) -> Result<Vec<ArtefactSummary>>;
+    fn read(&self, chat_id: Option<&str>, id: &str) -> Result<ArtefactLookup>;
 }
 
 pub struct ArtefactsTool;
@@ -48,7 +55,7 @@ impl Tool for ArtefactsTool {
     }
 
     fn description(&self) -> &str {
-        "List or read artifacts produced in the current chat. Use this when the user \
+        "List or read artifacts produced anywhere in this Dyson instance. Use this when the user \
          asks to inspect an artifact, report, generated image record, or document-shaped \
          output that was emitted as an artifact instead of regular chat text."
     }
@@ -60,11 +67,15 @@ impl Tool for ArtefactsTool {
                 "operation": {
                     "type": "string",
                     "enum": ["list", "read"],
-                    "description": "Use 'list' to discover artifacts in the current chat, or 'read' to load one artifact body. Defaults to 'read' when id is present, otherwise 'list'."
+                    "description": "Use 'list' to discover artifacts across the instance, or 'read' to load one artifact body. Defaults to 'read' when id is present, otherwise 'list'."
                 },
                 "id": {
                     "type": "string",
                     "description": "Artifact id to read, such as 'a1'. Required for operation='read'."
+                },
+                "chat_id": {
+                    "type": "string",
+                    "description": "Optional chat id to filter list results or disambiguate a read when the same artifact id appears in multiple chats."
                 },
                 "limit": {
                     "type": "integer",
@@ -74,7 +85,8 @@ impl Tool for ArtefactsTool {
                     "type": "integer",
                     "description": "For read: 1-based content line to start at. Defaults to 1."
                 }
-            }
+            },
+            "additionalProperties": false
         })
     }
 
@@ -84,11 +96,15 @@ impl Tool for ArtefactsTool {
                 "artifact access is not configured for this controller",
             ));
         };
-        let Some(chat_id) = ctx.current_chat_id.as_deref() else {
-            return Ok(ToolOutput::error(
-                "artifact access is missing the current chat id",
-            ));
-        };
+        let chat_id = input["chat_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(chat_id) = chat_id
+            && !safe_store_id(chat_id)
+        {
+            return Ok(ToolOutput::error("invalid chat_id"));
+        }
 
         let operation = input["operation"].as_str().unwrap_or_else(|| {
             if input.get("id").and_then(|v| v.as_str()).is_some() {
@@ -111,10 +127,19 @@ impl Tool for ArtefactsTool {
                 if !safe_store_id(id) {
                     return Ok(ToolOutput::error("invalid artifact id"));
                 }
-                let Some(record) = reader.read(chat_id, id)? else {
-                    return Ok(ToolOutput::error(format!(
-                        "artifact '{id}' was not found in the current chat"
-                    )));
+                let record = match reader.read(chat_id, id)? {
+                    ArtefactLookup::Found(record) => record,
+                    ArtefactLookup::Missing => {
+                        let scope = chat_id
+                            .map(|chat_id| format!(" in chat {chat_id}"))
+                            .unwrap_or_else(|| " in this instance".to_string());
+                        return Ok(ToolOutput::error(format!(
+                            "artifact '{id}' was not found{scope}"
+                        )));
+                    }
+                    ArtefactLookup::Ambiguous(matches) => {
+                        return Ok(ToolOutput::error(render_ambiguous(id, &matches)));
+                    }
                 };
                 let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize;
                 let limit = input["limit"].as_u64().map(|n| n as usize);
@@ -141,12 +166,18 @@ pub fn safe_store_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-fn render_list(chat_id: &str, artefacts: &[ArtefactSummary]) -> String {
+fn render_list(chat_id: Option<&str>, artefacts: &[ArtefactSummary]) -> String {
     if artefacts.is_empty() {
-        return format!("No artifacts found for chat {chat_id}.");
+        return match chat_id {
+            Some(chat_id) => format!("No artifacts found for chat {chat_id}."),
+            None => "No artifacts found in this instance.".to_string(),
+        };
     }
 
-    let mut out = format!("Artifacts for chat {chat_id}:\n");
+    let mut out = match chat_id {
+        Some(chat_id) => format!("Artifacts for chat {chat_id}:\n"),
+        None => "Artifacts in this instance:\n".to_string(),
+    };
     for artefact in artefacts {
         let tool = artefact
             .tool_use_id
@@ -155,8 +186,28 @@ fn render_list(chat_id: &str, artefacts: &[ArtefactSummary]) -> String {
             .unwrap_or_default();
         let _ = writeln!(
             out,
-            "- {} [{}] {} ({} bytes, created_at: {}{})",
-            artefact.id, artefact.kind, artefact.title, artefact.bytes, artefact.created_at, tool
+            "- {} chat:{} [{}] {} ({} bytes, created_at: {}{})",
+            artefact.id,
+            artefact.chat_id,
+            artefact.kind,
+            artefact.title,
+            artefact.bytes,
+            artefact.created_at,
+            tool
+        );
+    }
+    out
+}
+
+fn render_ambiguous(id: &str, matches: &[ArtefactSummary]) -> String {
+    let mut out = format!(
+        "artifact '{id}' exists in multiple chats; retry with both id and chat_id. Matches:\n"
+    );
+    for artefact in matches {
+        let _ = writeln!(
+            out,
+            "- chat:{} {} [{}] {} (created_at: {})",
+            artefact.chat_id, artefact.id, artefact.kind, artefact.title, artefact.created_at
         );
     }
     out
@@ -224,11 +275,11 @@ mod tests {
     }
 
     impl ArtefactReader for FakeReader {
-        fn list(&self, chat_id: &str, limit: usize) -> Result<Vec<ArtefactSummary>> {
+        fn list(&self, chat_id: Option<&str>, limit: usize) -> Result<Vec<ArtefactSummary>> {
             Ok(self
                 .items
                 .iter()
-                .filter(|item| item.chat_id == chat_id)
+                .filter(|item| chat_id.is_none_or(|chat_id| item.chat_id == chat_id))
                 .take(limit)
                 .map(|item| ArtefactSummary {
                     id: item.id.clone(),
@@ -243,12 +294,34 @@ mod tests {
                 .collect())
         }
 
-        fn read(&self, chat_id: &str, id: &str) -> Result<Option<ArtefactRecord>> {
-            Ok(self
+        fn read(&self, chat_id: Option<&str>, id: &str) -> Result<ArtefactLookup> {
+            let matches: Vec<ArtefactRecord> = self
                 .items
                 .iter()
-                .find(|item| item.chat_id == chat_id && item.id == id)
-                .cloned())
+                .filter(|item| {
+                    item.id == id && chat_id.is_none_or(|chat_id| item.chat_id == chat_id)
+                })
+                .cloned()
+                .collect();
+            Ok(match matches.as_slice() {
+                [] => ArtefactLookup::Missing,
+                [record] => ArtefactLookup::Found(record.clone()),
+                _ => ArtefactLookup::Ambiguous(
+                    matches
+                        .iter()
+                        .map(|item| ArtefactSummary {
+                            id: item.id.clone(),
+                            chat_id: item.chat_id.clone(),
+                            kind: item.kind.clone(),
+                            title: item.title.clone(),
+                            bytes: item.bytes,
+                            created_at: item.created_at,
+                            tool_use_id: item.tool_use_id.clone(),
+                            metadata: item.metadata.clone(),
+                        })
+                        .collect(),
+                ),
+            })
         }
     }
 
@@ -275,15 +348,30 @@ mod tests {
             items: vec![
                 record("c1", "a1", "Current chat report"),
                 record("c2", "a1", "Other chat report"),
+                record("c2", "a2", "Unique other chat report"),
             ],
         }));
         ctx
     }
 
     #[tokio::test]
-    async fn lists_only_current_chat_artefacts() {
+    async fn lists_whole_instance_by_default() {
         let out = ArtefactsTool
             .run(&json!({"operation": "list"}), &ctx())
+            .await
+            .unwrap();
+
+        assert!(!out.is_error);
+        assert!(out.content.contains("Current chat report"));
+        assert!(out.content.contains("Other chat report"));
+        assert!(out.content.contains("chat:c1"));
+        assert!(out.content.contains("chat:c2"));
+    }
+
+    #[tokio::test]
+    async fn list_can_filter_by_chat_id() {
+        let out = ArtefactsTool
+            .run(&json!({"operation": "list", "chat_id": "c1"}), &ctx())
             .await
             .unwrap();
 
@@ -293,10 +381,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_current_chat_artefact_by_id() {
+    async fn read_ambiguous_instance_id_explains_chat_id_disambiguation() {
+        let out = ArtefactsTool
+            .run(&json!({"operation": "read", "id": "a1"}), &ctx())
+            .await
+            .unwrap();
+
+        assert!(out.is_error);
+        assert!(out.content.contains("exists in multiple chats"));
+        assert!(out.content.contains("chat:c1"));
+        assert!(out.content.contains("chat:c2"));
+    }
+
+    #[tokio::test]
+    async fn reads_chat_scoped_artefact_by_id_when_requested() {
         let out = ArtefactsTool
             .run(
-                &json!({"operation": "read", "id": "a1", "offset": 2, "limit": 1}),
+                &json!({"operation": "read", "id": "a1", "chat_id": "c1", "offset": 2, "limit": 1}),
                 &ctx(),
             )
             .await
@@ -310,6 +411,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reads_unique_artefact_across_instance_without_chat_id() {
+        let out = ArtefactsTool
+            .run(&json!({"operation": "read", "id": "a2"}), &ctx())
+            .await
+            .unwrap();
+
+        assert!(!out.is_error);
+        assert!(out.content.contains("# Unique other chat report"));
+        assert!(out.content.contains("Chat: c2"));
+    }
+
+    #[tokio::test]
     async fn rejects_unsafe_ids_before_reader_lookup() {
         let out = ArtefactsTool
             .run(&json!({"operation": "read", "id": "../a1"}), &ctx())
@@ -318,5 +431,16 @@ mod tests {
 
         assert!(out.is_error);
         assert!(out.content.contains("invalid artifact id"));
+    }
+
+    #[tokio::test]
+    async fn rejects_unsafe_chat_ids_before_reader_lookup() {
+        let out = ArtefactsTool
+            .run(&json!({"operation": "list", "chat_id": "../c1"}), &ctx())
+            .await
+            .unwrap();
+
+        assert!(out.is_error);
+        assert!(out.content.contains("invalid chat_id"));
     }
 }

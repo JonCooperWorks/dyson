@@ -577,11 +577,13 @@ impl Agent {
         self.tool_context.subagent_events = Some(bus);
     }
 
-    /// Bind current-chat artefact access for controller-scoped runs.
+    /// Bind instance-wide artefact access for controller-scoped runs.
     ///
     /// Artefact bodies are intentionally not serialized back into model history.
-    /// Controllers that own an artefact store can install this scoped reader so
-    /// the `artefacts` tool can list/read documents from the active chat only.
+    /// Controllers that own an artefact store can install this reader so the
+    /// `artifacts` tool can list/read documents across the whole instance.
+    /// `chat_id` is still stored as ambient context for scripts and for explicit
+    /// `artifacts` calls that filter/disambiguate by chat.
     pub fn set_artefact_reader(
         &mut self,
         reader: Arc<dyn crate::tool::artefacts::ArtefactReader>,

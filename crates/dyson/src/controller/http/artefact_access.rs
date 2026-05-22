@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::Result;
 use crate::message::ArtefactKind;
-use crate::tool::artefacts::{ArtefactReader, ArtefactRecord, ArtefactSummary, safe_store_id};
+use crate::tool::artefacts::{
+    ArtefactLookup, ArtefactReader, ArtefactRecord, ArtefactSummary, safe_store_id,
+};
 
 use super::stores::{ArtefactEntry, ArtefactStore};
 
@@ -20,8 +22,10 @@ impl HttpArtefactReader {
 }
 
 impl ArtefactReader for HttpArtefactReader {
-    fn list(&self, chat_id: &str, limit: usize) -> Result<Vec<ArtefactSummary>> {
-        if !safe_store_id(chat_id) {
+    fn list(&self, chat_id: Option<&str>, limit: usize) -> Result<Vec<ArtefactSummary>> {
+        if let Some(chat_id) = chat_id
+            && !safe_store_id(chat_id)
+        {
             return Ok(Vec::new());
         }
 
@@ -40,33 +44,53 @@ impl ArtefactReader for HttpArtefactReader {
         Ok(items)
     }
 
-    fn read(&self, chat_id: &str, id: &str) -> Result<Option<ArtefactRecord>> {
-        if !safe_store_id(chat_id) || !safe_store_id(id) {
-            return Ok(None);
-        }
-
-        if let Some(dir) = self.data_dir.as_ref()
-            && let Some(entry) = ArtefactStore::load_from_disk_for_chat(dir, chat_id, id)
+    fn read(&self, chat_id: Option<&str>, id: &str) -> Result<ArtefactLookup> {
+        if let Some(chat_id) = chat_id
+            && !safe_store_id(chat_id)
         {
-            return Ok(Some(record_from_entry(id, &entry)));
+            return Ok(ArtefactLookup::Missing);
+        }
+        if !safe_store_id(id) {
+            return Ok(ArtefactLookup::Missing);
         }
 
-        let cached = {
+        if let Some(dir) = self.data_dir.as_ref() {
+            if let Some(chat_id) = chat_id {
+                if let Some(entry) = ArtefactStore::load_from_disk_for_chat(dir, chat_id, id) {
+                    return Ok(ArtefactLookup::Found(record_from_entry(id, &entry)));
+                }
+            } else {
+                let records = records_from_disk(dir, id);
+                match records.as_slice() {
+                    [] => {}
+                    [record] => return Ok(ArtefactLookup::Found(record.clone())),
+                    _ => {
+                        let summaries = records.iter().map(summary_from_record).collect();
+                        return Ok(ArtefactLookup::Ambiguous(summaries));
+                    }
+                }
+            }
+        }
+
+        let records = {
             let store = match self.store.lock() {
                 Ok(s) => s,
                 Err(p) => p.into_inner(),
             };
-            store
-                .items
-                .get(id)
-                .filter(|entry| entry.chat_id == chat_id)
-                .map(|entry| record_from_entry(id, entry))
+            records_from_memory(&store, chat_id, id)
         };
-        Ok(cached)
+        Ok(match records.as_slice() {
+            [] => ArtefactLookup::Missing,
+            [record] => ArtefactLookup::Found(record.clone()),
+            _ => ArtefactLookup::Ambiguous(records.iter().map(summary_from_record).collect()),
+        })
     }
 }
 
-fn list_from_memory(store: &Arc<Mutex<ArtefactStore>>, chat_id: &str) -> Vec<ArtefactSummary> {
+fn list_from_memory(
+    store: &Arc<Mutex<ArtefactStore>>,
+    chat_id: Option<&str>,
+) -> Vec<ArtefactSummary> {
     let store = match store.lock() {
         Ok(s) => s,
         Err(p) => p.into_inner(),
@@ -78,18 +102,37 @@ fn list_from_memory(store: &Arc<Mutex<ArtefactStore>>, chat_id: &str) -> Vec<Art
             store
                 .items
                 .get(id)
-                .filter(|entry| entry.chat_id == chat_id)
+                .filter(|entry| chat_id.is_none_or(|chat_id| entry.chat_id == chat_id))
                 .map(|entry| summary_from_entry(id, entry))
         })
         .collect()
 }
 
-fn list_from_disk(data_dir: &Path, chat_id: &str) -> Vec<ArtefactSummary> {
-    let sub = ArtefactStore::dir_for_chat(data_dir, chat_id);
-    let Ok(read_dir) = std::fs::read_dir(&sub) else {
+fn list_from_disk(data_dir: &Path, chat_id: Option<&str>) -> Vec<ArtefactSummary> {
+    if let Some(chat_id) = chat_id {
+        return list_from_disk_subdir(&ArtefactStore::dir_for_chat(data_dir, chat_id));
+    }
+
+    let Ok(read_dir) = std::fs::read_dir(data_dir) else {
         return Vec::new();
     };
+    read_dir
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            Some(list_from_disk_subdir(&path.join("artefacts")))
+        })
+        .flatten()
+        .collect()
+}
 
+fn list_from_disk_subdir(sub: &Path) -> Vec<ArtefactSummary> {
+    let Ok(read_dir) = std::fs::read_dir(sub) else {
+        return Vec::new();
+    };
     read_dir
         .flatten()
         .filter_map(|entry| {
@@ -101,6 +144,41 @@ fn list_from_disk(data_dir: &Path, chat_id: &str) -> Vec<ArtefactSummary> {
             summary_from_meta(&sub, id)
         })
         .collect()
+}
+
+fn records_from_disk(data_dir: &Path, id: &str) -> Vec<ArtefactRecord> {
+    let Ok(read_dir) = std::fs::read_dir(data_dir) else {
+        return Vec::new();
+    };
+    read_dir
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let sub = path.join("artefacts");
+            if !sub.join(format!("{id}.meta.json")).exists() {
+                return None;
+            }
+            let chat_id = path.file_name()?.to_str()?;
+            ArtefactStore::load_from_disk_for_chat(data_dir, chat_id, id)
+                .map(|entry| record_from_entry(id, &entry))
+        })
+        .collect()
+}
+
+fn records_from_memory(
+    store: &ArtefactStore,
+    chat_id: Option<&str>,
+    id: &str,
+) -> Vec<ArtefactRecord> {
+    store
+        .items
+        .get(id)
+        .filter(|entry| chat_id.is_none_or(|chat_id| entry.chat_id == chat_id))
+        .map(|entry| vec![record_from_entry(id, entry)])
+        .unwrap_or_default()
 }
 
 fn summary_from_meta(sub: &Path, id: &str) -> Option<ArtefactSummary> {
@@ -164,6 +242,19 @@ fn record_from_entry(id: &str, entry: &ArtefactEntry) -> ArtefactRecord {
     }
 }
 
+fn summary_from_record(record: &ArtefactRecord) -> ArtefactSummary {
+    ArtefactSummary {
+        id: record.id.clone(),
+        chat_id: record.chat_id.clone(),
+        kind: record.kind.clone(),
+        title: record.title.clone(),
+        bytes: record.bytes,
+        created_at: record.created_at,
+        tool_use_id: record.tool_use_id.clone(),
+        metadata: record.metadata.clone(),
+    }
+}
+
 fn kind_name(kind: ArtefactKind) -> &'static str {
     match kind {
         ArtefactKind::SecurityReview => "security_review",
@@ -196,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_reader_scopes_duplicate_ids_to_current_chat() {
+    fn disk_reader_lists_whole_instance_and_scopes_when_requested() {
         let dir = tempfile::tempdir().unwrap();
         ArtefactStore::persist_static(dir.path(), "a1", &entry("c-alpha", 1));
         ArtefactStore::persist_static(dir.path(), "a1", &entry("c-beta", 2));
@@ -205,26 +296,63 @@ mod tests {
             Some(dir.path().to_path_buf()),
         );
 
-        let beta = reader.read("c-beta", "a1").unwrap().unwrap();
-        assert_eq!(beta.chat_id, "c-beta");
-        assert_eq!(beta.content, "body-c-beta-2");
+        let all = reader.list(None, 10).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().any(|a| a.chat_id == "c-alpha"));
+        assert!(all.iter().any(|a| a.chat_id == "c-beta"));
 
-        let alpha_list = reader.list("c-alpha", 10).unwrap();
+        let alpha_list = reader.list(Some("c-alpha"), 10).unwrap();
         assert_eq!(alpha_list.len(), 1);
         assert_eq!(alpha_list[0].chat_id, "c-alpha");
         assert_eq!(alpha_list[0].title, "report-c-alpha");
     }
 
     #[test]
-    fn memory_reader_scopes_to_current_chat() {
+    fn disk_reader_reports_ambiguous_read_without_chat_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        ArtefactStore::persist_static(dir.path(), "a1", &entry("c-alpha", 1));
+        ArtefactStore::persist_static(dir.path(), "a1", &entry("c-beta", 2));
+        let reader = HttpArtefactReader::new(
+            Arc::new(Mutex::new(ArtefactStore::default())),
+            Some(dir.path().to_path_buf()),
+        );
+
+        let lookup = reader.read(None, "a1").unwrap();
+        let ArtefactLookup::Ambiguous(matches) = lookup else {
+            panic!("expected ambiguous lookup");
+        };
+        assert_eq!(matches.len(), 2);
+        assert!(matches.iter().any(|a| a.chat_id == "c-alpha"));
+        assert!(matches.iter().any(|a| a.chat_id == "c-beta"));
+
+        let scoped = reader.read(Some("c-beta"), "a1").unwrap();
+        let ArtefactLookup::Found(beta) = scoped else {
+            panic!("expected scoped hit");
+        };
+        assert_eq!(beta.chat_id, "c-beta");
+        assert_eq!(beta.content, "body-c-beta-2");
+    }
+
+    #[test]
+    fn memory_reader_lists_instance_and_scopes_when_requested() {
         let mut store = ArtefactStore::default();
         store.put("a1".to_string(), entry("c-alpha", 1));
         store.put("a2".to_string(), entry("c-beta", 2));
         let reader = HttpArtefactReader::new(Arc::new(Mutex::new(store)), None);
 
-        let items = reader.list("c-alpha", 10).unwrap();
+        let all = reader.list(None, 10).unwrap();
+        assert_eq!(all.len(), 2);
+
+        let items = reader.list(Some("c-alpha"), 10).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "a1");
-        assert!(reader.read("c-alpha", "a2").unwrap().is_none());
+        assert!(matches!(
+            reader.read(Some("c-alpha"), "a2").unwrap(),
+            ArtefactLookup::Missing
+        ));
+        assert!(matches!(
+            reader.read(None, "a2").unwrap(),
+            ArtefactLookup::Found(record) if record.chat_id == "c-beta"
+        ));
     }
 }
