@@ -376,6 +376,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
   const conversations = useAppState(s => s.conversations);
   const agentName = useAppState(s => s.agentName);
   const mcpServers = useAppState(s => s.skills?.mcp || []);
+  const slashCommands = useAppState(s => s.commands);
   const scrollRef = useRef(null);
   const pinnedToBottomRef = useRef(true);
 
