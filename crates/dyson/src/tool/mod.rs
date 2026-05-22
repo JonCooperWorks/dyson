@@ -268,13 +268,13 @@ pub struct ToolContext {
     /// rationale and LLM-boundary invariant.
     pub subagent_events: Option<crate::controller::http::SubagentEventBus>,
 
-    /// Agent-readable artefact access for the current conversation.
+    /// Agent-readable artifact access for the current conversation.
     ///
     /// Artefacts are normally a controller/UI side-channel: tools emit them,
     /// the HTTP controller stores them, and the LLM sees only a compact chip
     /// or nothing at all.  When a controller can safely scope access to the
     /// current chat, it installs an [`artefacts::ArtefactReader`] here so the
-    /// `artefacts` tool can list/read those stored documents on demand.
+    /// `artifacts` tool can list/read those stored documents on demand.
     pub artefacts: Option<Arc<dyn artefacts::ArtefactReader>>,
 
     /// Current conversation id used to scope artefact reads.

@@ -176,7 +176,11 @@ impl BuiltinSkill {
 
         // Apply tool filter if specified.
         if !filter.is_empty() {
-            tools.retain(|t| filter.iter().any(|name| name == t.name()));
+            tools.retain(|t| {
+                filter
+                    .iter()
+                    .any(|name| builtin_tool_filter_matches(t.name(), name))
+            });
         }
 
         // Build the system prompt dynamically from the loaded tools.
@@ -198,6 +202,10 @@ impl BuiltinSkill {
             system_prompt,
         }
     }
+}
+
+fn builtin_tool_filter_matches(tool_name: &str, requested_name: &str) -> bool {
+    tool_name == requested_name || (tool_name == "artifacts" && requested_name == "artefacts")
 }
 
 impl BuiltinSkill {
@@ -300,7 +308,7 @@ mod tests {
         assert_eq!(tools[8].name(), "memory_search");
         assert_eq!(tools[9].name(), "workspace");
         assert_eq!(tools[10].name(), "load_skill");
-        assert_eq!(tools[11].name(), "artefacts");
+        assert_eq!(tools[11].name(), "artifacts");
         assert_eq!(tools[12].name(), "skill_create");
         assert_eq!(tools[13].name(), "skill_marketplace");
         assert_eq!(tools[14].name(), "kb_search");
@@ -346,6 +354,19 @@ mod tests {
         );
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert_eq!(names, vec!["bash", "read_file"]);
+    }
+
+    #[test]
+    fn filter_accepts_artefact_spelling_for_artifacts_tool() {
+        let skill = BuiltinSkill::new_filtered_with_agent_secrets(
+            None,
+            None,
+            None,
+            &["artefacts".to_string()],
+            None,
+        );
+        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
+        assert_eq!(names, vec!["artifacts"]);
     }
 
     #[test]

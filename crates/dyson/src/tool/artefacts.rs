@@ -44,13 +44,13 @@ pub struct ArtefactsTool;
 #[async_trait]
 impl Tool for ArtefactsTool {
     fn name(&self) -> &str {
-        "artefacts"
+        "artifacts"
     }
 
     fn description(&self) -> &str {
-        "List or read artefacts/artifacts produced in the current chat. Use this when the user \
-         asks to inspect an artefact, artifact, report, generated image record, or \
-         document-shaped output that was emitted as an artefact instead of regular chat text."
+        "List or read artifacts produced in the current chat. Use this when the user \
+         asks to inspect an artifact, report, generated image record, or document-shaped \
+         output that was emitted as an artifact instead of regular chat text."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -60,15 +60,15 @@ impl Tool for ArtefactsTool {
                 "operation": {
                     "type": "string",
                     "enum": ["list", "read"],
-                    "description": "Use 'list' to discover artefacts in the current chat, or 'read' to load one artefact body. Defaults to 'read' when id is present, otherwise 'list'."
+                    "description": "Use 'list' to discover artifacts in the current chat, or 'read' to load one artifact body. Defaults to 'read' when id is present, otherwise 'list'."
                 },
                 "id": {
                     "type": "string",
-                    "description": "Artefact id to read, such as 'a1'. Required for operation='read'."
+                    "description": "Artifact id to read, such as 'a1'. Required for operation='read'."
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "For list: maximum artefacts to return, default 20, max 100. For read: maximum content lines to include."
+                    "description": "For list: maximum artifacts to return, default 20, max 100. For read: maximum content lines to include."
                 },
                 "offset": {
                     "type": "integer",
@@ -81,12 +81,12 @@ impl Tool for ArtefactsTool {
     async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let Some(reader) = ctx.artefacts.as_ref() else {
             return Ok(ToolOutput::error(
-                "artefact access is not configured for this controller",
+                "artifact access is not configured for this controller",
             ));
         };
         let Some(chat_id) = ctx.current_chat_id.as_deref() else {
             return Ok(ToolOutput::error(
-                "artefact access is missing the current chat id",
+                "artifact access is missing the current chat id",
             ));
         };
 
@@ -107,13 +107,13 @@ impl Tool for ArtefactsTool {
             "read" => {
                 let id = input["id"]
                     .as_str()
-                    .ok_or_else(|| DysonError::tool("artefacts", "missing or invalid 'id'"))?;
+                    .ok_or_else(|| DysonError::tool("artifacts", "missing or invalid 'id'"))?;
                 if !safe_store_id(id) {
-                    return Ok(ToolOutput::error("invalid artefact id"));
+                    return Ok(ToolOutput::error("invalid artifact id"));
                 }
                 let Some(record) = reader.read(chat_id, id)? else {
                     return Ok(ToolOutput::error(format!(
-                        "artefact '{id}' was not found in the current chat"
+                        "artifact '{id}' was not found in the current chat"
                     )));
                 };
                 let offset = input["offset"].as_u64().unwrap_or(1).max(1) as usize;
@@ -121,7 +121,7 @@ impl Tool for ArtefactsTool {
                 Ok(ToolOutput::success(render_record(&record, offset, limit)))
             }
             other => Ok(ToolOutput::error(format!(
-                "unknown artefacts operation '{other}'"
+                "unknown artifacts operation '{other}'"
             ))),
         }
     }
@@ -143,10 +143,10 @@ pub fn safe_store_id(id: &str) -> bool {
 
 fn render_list(chat_id: &str, artefacts: &[ArtefactSummary]) -> String {
     if artefacts.is_empty() {
-        return format!("No artefacts found for chat {chat_id}.");
+        return format!("No artifacts found for chat {chat_id}.");
     }
 
-    let mut out = format!("Artefacts for chat {chat_id}:\n");
+    let mut out = format!("Artifacts for chat {chat_id}:\n");
     for artefact in artefacts {
         let tool = artefact
             .tool_use_id
@@ -166,7 +166,7 @@ fn render_record(record: &ArtefactRecord, offset: usize, limit: Option<usize>) -
     let mut out = String::new();
     let _ = writeln!(out, "# {}", record.title);
     let _ = writeln!(out);
-    let _ = writeln!(out, "Artefact: {}", record.id);
+    let _ = writeln!(out, "Artifact: {}", record.id);
     let _ = writeln!(out, "Chat: {}", record.chat_id);
     let _ = writeln!(out, "Kind: {}", record.kind);
     let _ = writeln!(out, "MIME: {}", record.mime_type);
@@ -199,7 +199,7 @@ fn slice_content(content: &str, offset: usize, limit: Option<usize>) -> (String,
         selected.push('\n');
     }
     if selected.is_empty() && content.is_empty() {
-        return ("(empty artefact)\n".to_string(), None);
+        return ("(empty artifact)\n".to_string(), None);
     }
     let shown = selected.lines().count();
     let note = if offset > 1 || limit.is_some() || start + shown < total {
@@ -317,6 +317,6 @@ mod tests {
             .unwrap();
 
         assert!(out.is_error);
-        assert!(out.content.contains("invalid artefact id"));
+        assert!(out.content.contains("invalid artifact id"));
     }
 }
