@@ -1,4 +1,5 @@
 use super::*;
+use crate::skill::Skill;
 use std::path::PathBuf;
 
 fn test_path() -> PathBuf {
@@ -344,6 +345,107 @@ fn from_dir_errors_on_missing_dir() {
     assert!(err.to_string().contains("failed to read skill file"));
 }
 
+#[test]
+fn manifest_v1_instruction_only_has_no_tools() {
+    let dir = std::env::temp_dir().join(format!("dyson-skill-v1-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "V1 skill\n\nInstructions.\n").unwrap();
+    std::fs::write(
+        dir.join("dyson-skill.json"),
+        r#"{"schema_version":1,"name":"dyson-skill-v1-PLACEHOLDER","description":"from manifest"}"#,
+    )
+    .unwrap();
+    let manifest = dir.join("dyson-skill.json");
+    let name = dir.file_name().unwrap().to_str().unwrap();
+    std::fs::write(
+        manifest,
+        format!(r#"{{"schema_version":1,"name":"{name}","description":"from manifest"}}"#),
+    )
+    .unwrap();
+
+    let skill = LocalSkill::from_dir(&dir).unwrap();
+    assert_eq!(skill.skill_description(), "from manifest");
+    assert!(skill.tools().is_empty());
+    assert_eq!(skill.slash_command(), None);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn manifest_v2_script_registers_and_executes_tool() {
+    use crate::tool::ToolContext;
+
+    let dir = std::env::temp_dir().join(format!("dyson-skill-echo-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "Echoes input\n\nInstructions only.\n").unwrap();
+    std::fs::write(dir.join("bin/run.sh"), "cat\n").unwrap();
+    let name = dir.file_name().unwrap().to_str().unwrap();
+    std::fs::write(
+        dir.join("dyson-skill.json"),
+        format!(
+            r#"{{
+              "schema_version":2,
+              "name":"{name}",
+              "description":"Echoes input",
+              "slash_command":"/skill-echo",
+              "execution":{{"kind":"script","entrypoint":"bin/run.sh","argument_mode":"raw","timeout_ms":5000}}
+            }}"#
+        ),
+    )
+    .unwrap();
+
+    let skill = LocalSkill::from_dir(&dir).unwrap();
+    assert_eq!(skill.slash_command(), Some("/skill-echo"));
+    assert_eq!(skill.tools().len(), 1);
+    assert_eq!(skill.tools()[0].name(), manifest::tool_name_for_skill(name));
+
+    let out = skill.tools()[0]
+        .run(
+            &serde_json::json!({"raw": "hello"}),
+            &ToolContext::from_cwd().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("\"raw\":\"hello\""));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn invalid_manifest_entrypoint_rejected() {
+    let dir = std::env::temp_dir().join(format!("dyson-skill-bad-entry-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), "Bad\n\nBody.\n").unwrap();
+    let name = dir.file_name().unwrap().to_str().unwrap();
+    std::fs::write(
+        dir.join("dyson-skill.json"),
+        format!(
+            r#"{{
+              "schema_version":2,
+              "name":"{name}",
+              "slash_command":"/bad-entry",
+              "execution":{{"kind":"script","entrypoint":"../run.sh"}}
+            }}"#
+        ),
+    )
+    .unwrap();
+
+    let err = LocalSkill::from_dir(&dir).unwrap_err();
+    assert!(err.to_string().contains("traversal"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn load_skill_body_remains_instructions_only() {
+    let content = "---\nname: hybrid\ndescription: d\n---\n\nOnly instructions.\n";
+    assert_eq!(
+        LocalSkill::parse_body(content),
+        Some("Only instructions.".to_string())
+    );
+}
+
 // -------------------------------------------------------------------
 // parse_body
 // -------------------------------------------------------------------
@@ -460,22 +562,30 @@ Instructions here.
 
 #[test]
 fn skill_list_empty_returns_none() {
-    use crate::skill::Skill;
     let skill = SkillListSkill::new(&[]);
     assert!(skill.system_prompt().is_none());
 }
 
 #[test]
 fn skill_list_builds_prompt() {
-    use crate::skill::Skill;
     let skills = vec![
-        ("code-review".into(), "Reviews code".into()),
-        ("deploy".into(), "Deploys things".into()),
+        SkillListEntry {
+            name: "code-review".into(),
+            description: "Reviews code".into(),
+            slash_command: Some("/review".into()),
+            executable: true,
+        },
+        SkillListEntry {
+            name: "deploy".into(),
+            description: "Deploys things".into(),
+            slash_command: None,
+            executable: false,
+        },
     ];
     let skill = SkillListSkill::new(&skills);
     let prompt = skill.system_prompt().unwrap();
     assert!(prompt.contains("<available_skills>"));
-    assert!(prompt.contains("- code-review: Reviews code"));
+    assert!(prompt.contains("- code-review: Reviews code (slash command: /review)"));
     assert!(prompt.contains("- deploy: Deploys things"));
     assert!(prompt.contains("</available_skills>"));
     assert!(prompt.contains("load_skill"));

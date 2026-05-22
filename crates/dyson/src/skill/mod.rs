@@ -254,7 +254,7 @@ pub async fn create_skills(
     //
     // The full skill body is NOT loaded into the system prompt — it's
     // fetched on-demand via the load_skill tool.
-    let mut skill_list: Vec<(String, String)> = Vec::new();
+    let mut skill_list: Vec<local::SkillListEntry> = Vec::new();
 
     if let Some(ws) = workspace {
         for dir in ws.skill_dirs() {
@@ -265,10 +265,12 @@ pub async fn create_skills(
                         path = %dir.display(),
                         "workspace skill discovered"
                     );
-                    skill_list.push((
-                        skill.name().to_string(),
-                        skill.skill_description().to_string(),
-                    ));
+                    skill_list.push(local::SkillListEntry {
+                        name: skill.name().to_string(),
+                        description: skill.skill_description().to_string(),
+                        slash_command: skill.slash_command().map(ToString::to_string),
+                        executable: skill.executable_tool_name().is_some(),
+                    });
                     skills.push(Box::new(skill));
                 }
                 Err(e) => {

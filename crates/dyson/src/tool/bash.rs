@@ -315,7 +315,7 @@ impl Tool for BashTool {
 /// that isn't here, they can run `export VAR=…` in-line in the bash
 /// command — the var then lives in the spawned shell, not in Dyson's
 /// parent environment.
-fn is_safe_env_var(name: &str) -> bool {
+pub(crate) fn is_safe_env_var(name: &str) -> bool {
     // Exact matches — standard user/shell/locale/tooling vars.
     const SAFE_EXACT: &[&str] = &[
         "PATH",

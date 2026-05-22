@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon, Kbd } from './icons.jsx';
 import { NAVS } from './views.jsx';
-import { SLASH_COMMANDS } from '../store/constants.js';
+import { FALLBACK_SLASH_COMMANDS } from '../store/constants.js';
 
 export function buildCommandItems({
   conversations = [],
@@ -12,8 +12,12 @@ export function buildCommandItems({
   onSelectModel,
   onOpenMindFile,
   onInsertSlash,
+  slashCommands = FALLBACK_SLASH_COMMANDS,
 } = {}) {
   const items = [];
+  const commands = Array.isArray(slashCommands) && slashCommands.length
+    ? slashCommands
+    : FALLBACK_SLASH_COMMANDS;
   for (const nav of NAVS) {
     items.push({
       id: `view:${nav.id}`,
@@ -56,7 +60,7 @@ export function buildCommandItems({
       run: () => onOpenMindFile?.(f.path),
     });
   }
-  for (const c of SLASH_COMMANDS) {
+  for (const c of commands) {
     items.push({
       id: `slash:${c.cmd}`,
       kind: 'Command',

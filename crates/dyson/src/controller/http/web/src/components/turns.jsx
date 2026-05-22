@@ -9,7 +9,7 @@ import { ShareMenu } from './share-menu.jsx';
 import { copyToClipboard } from '../lib/clipboard.js';
 import { useAppState } from '../hooks/useAppState.js';
 import { requestOpenArtefact } from '../store/app.js';
-import { SLASH_COMMANDS } from '../store/constants.js';
+import { FALLBACK_SLASH_COMMANDS } from '../store/constants.js';
 import { ToolBody, copyTextForTool, copyInputForTool } from './panels.jsx';
 import MarkdownIt from 'markdown-it';
 
@@ -647,6 +647,7 @@ function Composer({
   queueMode = 'normal',
   nextRunModel = null,
   onQueueModeChange,
+  slashCommands = FALLBACK_SLASH_COMMANDS,
 }) {
   const controlled = typeof onDraftChange === 'function';
   const [localVal, setLocalVal] = useState('');
@@ -661,7 +662,10 @@ function Composer({
   const agentName = useAppState(s => s.agentName) || 'dyson';
   const val = controlled ? draftText : localVal;
   const atts = controlled ? draftAttachments : localAtts;
-  const filtered = slash ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(val.split(/\s/)[0] || '/')) : [];
+  const availableSlashCommands = Array.isArray(slashCommands) && slashCommands.length
+    ? slashCommands
+    : FALLBACK_SLASH_COMMANDS;
+  const filtered = slash ? availableSlashCommands.filter(c => c.cmd.startsWith(val.split(/\s/)[0] || '/')) : [];
   const setDraft = useCallback((text, attachments = atts) => {
     if (controlled) onDraftChange({ text, attachments });
     else setLocalVal(text);

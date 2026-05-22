@@ -845,6 +845,7 @@ impl super::Controller for TelegramController {
                 let store_clone = chat_store.clone();
                 let client_for_task = registry.get_default();
                 let limits_clone = Arc::clone(&download_limits);
+                let settings_for_task = current_settings.clone();
                 tokio::spawn(async move {
                     run_agent_for_message(
                         bot_clone,
@@ -855,6 +856,7 @@ impl super::Controller for TelegramController {
                         store_clone,
                         client_for_task,
                         limits_clone,
+                        settings_for_task,
                     )
                     .await;
                     drop(permit);
@@ -1301,6 +1303,7 @@ async fn run_agent_for_message(
     chat_store: Arc<dyn crate::chat_history::ChatHistory>,
     client: crate::agent::rate_limiter::RateLimitedHandle<Box<dyn crate::llm::LlmClient>>,
     download_limits: Arc<DownloadLimits>,
+    settings: Settings,
 ) {
     let chat_key = chat_id.0.to_string();
 
@@ -1351,12 +1354,28 @@ async fn run_agent_for_message(
 
     let mut output = TelegramOutput::new(bot.clone(), chat_id, !text.is_empty());
 
-    let result = if attachments.is_empty() {
-        agent.run(&text, &mut output).await
-    } else {
-        agent
-            .run_with_attachments(&text, attachments, &mut output)
-            .await
+    let result = match super::slash::dispatch_executable(
+        agent,
+        &mut output,
+        &settings,
+        &text,
+        !attachments.is_empty(),
+    )
+    .await
+    {
+        Ok(super::slash::SlashDispatch::Handled(_)) => Ok(String::new()),
+        Ok(
+            super::slash::SlashDispatch::NotSlash | super::slash::SlashDispatch::BuiltinOrUnhandled,
+        ) => {
+            if attachments.is_empty() {
+                agent.run(&text, &mut output).await
+            } else {
+                agent
+                    .run_with_attachments(&text, attachments, &mut output)
+                    .await
+            }
+        }
+        Err(e) => Err(e),
     };
 
     if let Err(e) = result {

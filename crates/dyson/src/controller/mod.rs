@@ -55,6 +55,7 @@ pub mod activity;
 pub mod background;
 pub mod http;
 pub mod recording;
+pub mod slash;
 pub mod telegram;
 pub mod terminal;
 

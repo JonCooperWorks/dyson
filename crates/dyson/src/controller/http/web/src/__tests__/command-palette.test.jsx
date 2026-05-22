@@ -28,6 +28,16 @@ describe('CommandPalette', () => {
     expect(items.some(i => i.id === 'slash:/clear')).toBe(true);
   });
 
+  it('uses dynamic slash commands when provided', () => {
+    const p = props();
+    const items = buildCommandItems({
+      ...p,
+      slashCommands: [{ cmd: '/skill-echo', desc: 'Echo skill', src: 'skill' }],
+    });
+    expect(items.some(i => i.id === 'slash:/skill-echo')).toBe(true);
+    expect(items.some(i => i.id === 'slash:/clear')).toBe(false);
+  });
+
   it('filters and selects an item with Enter', () => {
     const p = props();
     render(<CommandPalette {...p}/>);

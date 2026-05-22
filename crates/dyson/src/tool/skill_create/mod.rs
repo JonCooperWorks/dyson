@@ -39,6 +39,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use serde_json::json;
 
+use crate::skill::local::{
+    normalize_timeout_ms, validate_entrypoint, validate_skill_name, validate_slash_command,
+};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 pub struct SkillCreateTool;
@@ -52,9 +55,10 @@ impl Tool for SkillCreateTool {
     fn description(&self) -> &str {
         "Create or update a skill in the workspace's skills/ directory. \
          Skills are SKILL.md files with YAML frontmatter (name, description) and a body \
-         containing instructions that get injected into the system prompt on next startup. \
+         containing instructions that are listed and loaded on demand with load_skill. \
+         Skills may also include optional script code and a slash command for direct chat execution. \
          Use this after solving a complex task to distill your approach into a reusable skill, \
-         or to improve an existing skill based on experience. Skills auto-load on next startup."
+         or to improve an existing skill based on experience. Skills auto-load after reload."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -83,6 +87,27 @@ impl Tool for SkillCreateTool {
                                     'update': overwrite existing skill. \
                                     'improve': read existing skill, append improvement notes. \
                                     Defaults to 'create'."
+                },
+                "slash_command": {
+                    "type": "string",
+                    "description": "Optional slash command for an executable hybrid skill, e.g. /review."
+                },
+                "execution": {
+                    "type": "object",
+                    "description": "Optional executable half of a hybrid skill. Omit or set kind=none for instruction-only skills.",
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["none", "script"] },
+                        "entrypoint": {
+                            "type": "string",
+                            "description": "Relative script path inside the skill directory, e.g. bin/run.sh."
+                        },
+                        "code": {
+                            "type": "string",
+                            "description": "Shell script source to write to the entrypoint. In improve mode, omitted code preserves existing files."
+                        },
+                        "timeout_ms": { "type": "integer", "minimum": 1 },
+                        "input_schema": { "type": "object" }
+                    }
                 }
             },
             "required": ["name", "description", "instructions"]
@@ -109,11 +134,8 @@ impl Tool for SkillCreateTool {
         if name.is_empty() {
             return Ok(ToolOutput::error("'name' is required"));
         }
-        if !is_valid_skill_name(&name) {
-            return Ok(ToolOutput::error(
-                "Invalid skill name. Use lowercase letters, numbers, and hyphens only \
-                 (e.g., 'code-review', 'deploy-helper').",
-            ));
+        if let Err(e) = validate_skill_name(&name) {
+            return Ok(ToolOutput::error(e.sanitized_message()));
         }
         if description.is_empty() {
             return Ok(ToolOutput::error("'description' is required"));
@@ -128,6 +150,32 @@ impl Tool for SkillCreateTool {
         let mut ws = ws.write().await;
 
         let existing = ws.get(&file_key);
+        let existing_metadata = ws
+            .get(&metadata_key)
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+        let execution = match parse_execution_request(input, mode, existing_metadata.as_ref()) {
+            Ok(req) => req,
+            Err(e) => return Ok(ToolOutput::error(e)),
+        };
+        if let Some(cmd) = execution.slash_command.as_deref()
+            && let Err(e) = validate_slash_command(cmd)
+        {
+            return Ok(ToolOutput::error(e.sanitized_message()));
+        }
+        if let Some(entrypoint) = execution.entrypoint.as_deref()
+            && let Err(e) = validate_entrypoint(entrypoint)
+        {
+            return Ok(ToolOutput::error(e.sanitized_message()));
+        }
+        if execution.kind == ExecutionKind::Script && execution.slash_command.is_none() {
+            return Ok(ToolOutput::error(
+                "script skills require a slash_command so users can execute them directly",
+            ));
+        }
+        let script_key = execution
+            .entrypoint
+            .as_ref()
+            .map(|entrypoint| format!("skills/{name}/{entrypoint}"));
 
         match mode {
             "create" => {
@@ -139,7 +187,18 @@ impl Tool for SkillCreateTool {
                 }
                 let content = format_skill_md(&name, &description, &instructions);
                 ws.set(&file_key, &content);
-                ws.set(&metadata_key, &learned_metadata(&name, &description));
+                if let Some(script_key) = script_key.as_ref() {
+                    let Some(code) = execution.code.as_ref() else {
+                        return Ok(ToolOutput::error(
+                            "script execution requires execution.code when creating a skill",
+                        ));
+                    };
+                    ws.set(script_key, code);
+                }
+                ws.set(
+                    &metadata_key,
+                    &learned_metadata(&name, &description, &execution),
+                );
                 ws.save()?;
 
                 // Journal the creation for memory.
@@ -159,7 +218,18 @@ impl Tool for SkillCreateTool {
                     "Created"
                 };
                 ws.set(&file_key, &content);
-                ws.set(&metadata_key, &learned_metadata(&name, &description));
+                if let Some(script_key) = script_key.as_ref() {
+                    let Some(code) = execution.code.as_ref() else {
+                        return Ok(ToolOutput::error(
+                            "script execution requires execution.code when updating or creating a script skill",
+                        ));
+                    };
+                    ws.set(script_key, code);
+                }
+                ws.set(
+                    &metadata_key,
+                    &learned_metadata(&name, &description, &execution),
+                );
                 ws.save()?;
 
                 ws.journal(&format!("{verb} skill '{name}': {description}"));
@@ -185,7 +255,15 @@ impl Tool for SkillCreateTool {
                 let improved = append_improvements(&existing_content, &description, &instructions);
 
                 ws.set(&file_key, &improved);
-                ws.set(&metadata_key, &learned_metadata(&name, &description));
+                if let Some(script_key) = script_key.as_ref()
+                    && let Some(code) = execution.code.as_ref()
+                {
+                    ws.set(script_key, code);
+                }
+                ws.set(
+                    &metadata_key,
+                    &learned_metadata(&name, &description, &execution),
+                );
                 ws.save()?;
 
                 ws.journal(&format!("Improved skill '{name}': {description}"));
@@ -203,24 +281,35 @@ impl Tool for SkillCreateTool {
     }
 }
 
-/// Validate a skill name: lowercase alphanumeric + hyphens, no spaces.
-fn is_valid_skill_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        && !name.starts_with('-')
-        && !name.ends_with('-')
-}
-
 /// Format a complete SKILL.md file.
 fn format_skill_md(name: &str, description: &str, instructions: &str) -> String {
     format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n")
 }
 
-fn learned_metadata(name: &str, description: &str) -> String {
-    let metadata = json!({
-        "schema_version": 1,
+#[cfg(test)]
+fn is_valid_skill_name(name: &str) -> bool {
+    validate_skill_name(name).is_ok()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionKind {
+    None,
+    Script,
+}
+
+#[derive(Debug, Clone)]
+struct ExecutionRequest {
+    slash_command: Option<String>,
+    kind: ExecutionKind,
+    entrypoint: Option<String>,
+    code: Option<String>,
+    input_schema: Option<serde_json::Value>,
+    timeout_ms: u64,
+}
+
+fn learned_metadata(name: &str, description: &str, execution: &ExecutionRequest) -> String {
+    let mut metadata = json!({
+        "schema_version": 2,
         "name": name,
         "version": "0.0.0-learned",
         "description": description,
@@ -230,10 +319,125 @@ fn learned_metadata(name: &str, description: &str) -> String {
         },
         "installed_at": now_unix_string(),
     });
+    if let Some(cmd) = &execution.slash_command {
+        metadata["slash_command"] = json!(cmd);
+    }
+    metadata["execution"] = match execution.kind {
+        ExecutionKind::None => json!({ "kind": "none" }),
+        ExecutionKind::Script => json!({
+            "kind": "script",
+            "entrypoint": execution.entrypoint.as_deref().unwrap_or("bin/run.sh"),
+            "argument_mode": "raw",
+            "input_schema": execution.input_schema.clone().unwrap_or_else(|| json!({
+                "type": "object",
+                "properties": {
+                    "raw": { "type": "string" }
+                }
+            })),
+            "timeout_ms": execution.timeout_ms,
+        }),
+    };
     format!(
         "{}\n",
         serde_json::to_string_pretty(&metadata).unwrap_or_else(|_| "{}".into())
     )
+}
+
+fn parse_execution_request(
+    input: &serde_json::Value,
+    mode: &str,
+    existing: Option<&serde_json::Value>,
+) -> std::result::Result<ExecutionRequest, String> {
+    let execution = input.get("execution").and_then(|v| v.as_object());
+    let existing_execution = existing
+        .and_then(|m| m.get("execution"))
+        .and_then(|v| v.as_object());
+    let inherit = mode == "improve";
+
+    let slash_command = input
+        .get("slash_command")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            inherit.then(|| {
+                existing
+                    .and_then(|m| m.get("slash_command"))
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string)
+            })?
+        });
+
+    let kind_str = execution
+        .and_then(|m| m.get("kind"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            inherit.then(|| {
+                existing_execution
+                    .and_then(|m| m.get("kind"))
+                    .and_then(|v| v.as_str())
+            })?
+        })
+        .unwrap_or("none");
+
+    let kind = match kind_str {
+        "none" => ExecutionKind::None,
+        "script" => ExecutionKind::Script,
+        other => return Err(format!("unknown execution.kind '{other}'")),
+    };
+
+    let entrypoint = execution
+        .and_then(|m| m.get("entrypoint"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            inherit.then(|| {
+                existing_execution
+                    .and_then(|m| m.get("entrypoint"))
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string)
+            })?
+        })
+        .or_else(|| (kind == ExecutionKind::Script).then(|| "bin/run.sh".to_string()));
+
+    let code = execution
+        .and_then(|m| m.get("code"))
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+    let input_schema = execution
+        .and_then(|m| m.get("input_schema"))
+        .cloned()
+        .or_else(|| {
+            inherit.then(|| {
+                existing_execution
+                    .and_then(|m| m.get("input_schema"))
+                    .cloned()
+            })?
+        });
+    let timeout_ms = normalize_timeout_ms(
+        execution
+            .and_then(|m| m.get("timeout_ms"))
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                inherit.then(|| {
+                    existing_execution
+                        .and_then(|m| m.get("timeout_ms"))
+                        .and_then(|v| v.as_u64())
+                })?
+            }),
+    );
+
+    Ok(ExecutionRequest {
+        slash_command,
+        kind,
+        entrypoint,
+        code,
+        input_schema,
+        timeout_ms,
+    })
 }
 
 fn now_unix_string() -> String {

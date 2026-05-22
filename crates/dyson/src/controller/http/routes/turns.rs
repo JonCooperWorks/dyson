@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::rate_limiter::{Priority, RateLimitedHandle};
 use crate::config::Settings;
+use crate::controller::Output;
 use crate::llm::stream::StreamEvent;
 use crate::llm::{CompletionConfig, LlmClient};
 use crate::message::{ContentBlock, Message};
@@ -366,6 +367,10 @@ pub(super) async fn post(
     let artefacts = Arc::clone(&state.artefacts);
     let artefact_id = Arc::clone(&state.artefact_id);
     let data_dir = state.data_dir.clone();
+    let artefact_reader = super::super::artefact_access::HttpArtefactReader::new(
+        Arc::clone(&artefacts),
+        data_dir.clone(),
+    );
     let ingest = Arc::clone(&state.ingest);
 
     if should_title {
@@ -521,6 +526,7 @@ pub(super) async fn post(
         }
         tracing::info!(chat_id = %chat_id, "TURN_WORKER: agent ready, wiring run");
         let agent = guard.as_mut().expect("agent built or kept above");
+        agent.set_artefact_reader(Arc::new(artefact_reader), chat_id.clone());
         if loaded_checkpoint_tail {
             drop_checkpoint_tail(agent, &checkpoint_message);
         }
@@ -595,15 +601,25 @@ pub(super) async fn post(
                     Ok(String::new())
                 }
                 r = async {
-                    tracing::info!(chat_id = %chat_id, prompt_len = next_prompt.len(), atts = next_attachments.len(), "TURN_WORKER: calling agent.run");
-                    let r = if next_attachments.is_empty() {
-                        agent.run(&next_prompt, &mut output).await
+                    if let Some(text) = maybe_execute_slash_turn(
+                        agent,
+                        &mut output,
+                        &settings,
+                        &next_prompt,
+                        &next_attachments,
+                    ).await? {
+                        Ok(text)
                     } else {
-                        let atts = std::mem::take(&mut next_attachments);
-                        agent.run_with_attachments(&next_prompt, atts, &mut output).await
-                    };
-                    tracing::info!(chat_id = %chat_id, ok = r.is_ok(), "TURN_WORKER: agent.run returned");
-                    r
+                        tracing::info!(chat_id = %chat_id, prompt_len = next_prompt.len(), atts = next_attachments.len(), "TURN_WORKER: calling agent.run");
+                        let r = if next_attachments.is_empty() {
+                            agent.run(&next_prompt, &mut output).await
+                        } else {
+                            let atts = std::mem::take(&mut next_attachments);
+                            agent.run_with_attachments(&next_prompt, atts, &mut output).await
+                        };
+                        tracing::info!(chat_id = %chat_id, ok = r.is_ok(), "TURN_WORKER: agent.run returned");
+                        r
+                    }
                 } => r,
             };
             match result {
@@ -754,6 +770,28 @@ fn drop_checkpoint_tail_from_messages(
     }
     messages.pop();
     (messages, true)
+}
+
+async fn maybe_execute_slash_turn(
+    agent: &mut crate::agent::Agent,
+    output: &mut dyn Output,
+    settings: &Settings,
+    prompt: &str,
+    attachments: &[crate::media::Attachment],
+) -> crate::Result<Option<String>> {
+    match crate::controller::slash::dispatch_executable(
+        agent,
+        output,
+        settings,
+        prompt,
+        !attachments.is_empty(),
+    )
+    .await?
+    {
+        crate::controller::slash::SlashDispatch::Handled(text) => Ok(Some(text)),
+        crate::controller::slash::SlashDispatch::NotSlash
+        | crate::controller::slash::SlashDispatch::BuiltinOrUnhandled => Ok(None),
+    }
 }
 
 fn same_message(a: &Message, b: &Message) -> bool {
@@ -907,6 +945,28 @@ pub(crate) fn coalesce_queued(
 mod tests {
     use super::super::super::state::{QueuedAttachment, QueuedTurn};
     use super::*;
+    use crate::agent::rate_limiter::RateLimitedHandle;
+    use crate::auth::Credential;
+    use crate::llm::{LlmClient, ToolDefinition};
+    use crate::sandbox::Sandbox;
+    use crate::sandbox::no_sandbox::DangerousNoSandbox;
+    use crate::skill::Skill;
+
+    struct PanicLlm;
+
+    #[async_trait::async_trait]
+    impl LlmClient for PanicLlm {
+        async fn stream(
+            &self,
+            _messages: &[Message],
+            _system: &str,
+            _system_suffix: &str,
+            _tools: &[ToolDefinition],
+            _config: &CompletionConfig,
+        ) -> crate::Result<crate::llm::StreamResponse> {
+            panic!("slash skill dispatch must not call the LLM");
+        }
+    }
 
     #[test]
     fn coalesce_single_turn_passes_through() {
@@ -919,6 +979,94 @@ mod tests {
         }]);
         assert_eq!(prompt, "hello");
         assert!(atts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn slash_dispatch_executes_skill_without_llm_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("skills/skill-echo");
+        std::fs::create_dir_all(skill_dir.join("bin")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "Echoes input\n\nInstructions.\n",
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("bin/run.sh"), "cat\n").unwrap();
+        std::fs::write(
+            skill_dir.join("dyson-skill.json"),
+            r#"{
+              "schema_version": 2,
+              "name": "skill-echo",
+              "description": "Echoes input",
+              "slash_command": "/skill-echo",
+              "execution": { "kind": "script", "entrypoint": "bin/run.sh", "timeout_ms": 5000 }
+            }"#,
+        )
+        .unwrap();
+
+        let mut settings = Settings::default();
+        settings.workspace.connection_string =
+            Credential::new(tmp.path().to_string_lossy().to_string());
+        let skills: Vec<Box<dyn Skill>> = vec![Box::new(
+            crate::skill::local::LocalSkill::from_dir(&skill_dir).unwrap(),
+        )];
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+        let mut agent = crate::agent::Agent::new(
+            RateLimitedHandle::unlimited(Box::new(PanicLlm)),
+            sandbox,
+            skills,
+            &settings.agent,
+            None,
+            0,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut output = crate::controller::recording::RecordingOutput::new();
+
+        let handled =
+            maybe_execute_slash_turn(&mut agent, &mut output, &settings, "/skill-echo hello", &[])
+                .await
+                .unwrap();
+
+        let text = handled.expect("slash command handled");
+        assert!(text.contains("\"raw\":\"hello\""), "{text}");
+        assert!(output.text().contains("\"raw\":\"hello\""));
+        assert_eq!(agent.messages().len(), 2);
+        assert!(matches!(
+            agent.messages()[0].content.first(),
+            Some(ContentBlock::Text { text }) if text == "/skill-echo hello"
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_slash_command_is_not_sent_to_llm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.workspace.connection_string =
+            Credential::new(tmp.path().to_string_lossy().to_string());
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+        let mut agent = crate::agent::Agent::new(
+            RateLimitedHandle::unlimited(Box::new(PanicLlm)),
+            sandbox,
+            Vec::new(),
+            &settings.agent,
+            None,
+            0,
+            None,
+            None,
+        )
+        .unwrap();
+        let mut output = crate::controller::recording::RecordingOutput::new();
+
+        let handled = maybe_execute_slash_turn(&mut agent, &mut output, &settings, "/wat", &[])
+            .await
+            .unwrap();
+
+        let text = handled.expect("unknown slash command handled");
+        assert!(text.contains("Unknown slash command '/wat'"));
+        assert!(output.text().contains("Unknown slash command"));
+        assert_eq!(agent.messages().len(), 2);
     }
 
     #[test]

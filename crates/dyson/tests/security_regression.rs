@@ -811,6 +811,8 @@ async fn list_files_rejects_path_traversal() {
         activity: None,
         tool_use_id: None,
         subagent_events: None,
+        artefacts: None,
+        current_chat_id: None,
     };
 
     let tool = dyson::tool::list_files::ListFilesTool;
@@ -840,6 +842,8 @@ async fn search_files_rejects_path_traversal() {
         activity: None,
         tool_use_id: None,
         subagent_events: None,
+        artefacts: None,
+        current_chat_id: None,
     };
 
     let tool = dyson::tool::search_files::SearchFilesTool;

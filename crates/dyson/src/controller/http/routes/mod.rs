@@ -28,6 +28,7 @@ mod activity;
 mod admin;
 mod agent;
 mod artefacts;
+mod commands;
 pub(super) mod conversations;
 mod feedback;
 mod files;
@@ -269,6 +270,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
 
         // ─── providers / model / mind / activity ───────────────────────
         (&Method::GET, ["api", "providers"]) => providers::list(&state),
+        (&Method::GET, ["api", "commands"]) => commands::get(&state).await,
         (&Method::POST, ["api", "model"]) => model::post(req, Arc::clone(&state)).await,
         (&Method::GET, ["api", "agent"]) => agent::get(&state).await,
         (&Method::GET, ["api", "mind"]) => mind::get(&state).await,
