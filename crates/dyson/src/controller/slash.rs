@@ -1,8 +1,14 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::Serialize;
+use tokio::sync::RwLock;
 
+use crate::agent::rate_limiter::RateLimitedHandle;
 use crate::config::Settings;
+use crate::llm::{CompletionConfig, LlmClient, StreamResponse, ToolDefinition};
+use crate::message::{ContentBlock, Message};
 use crate::skill::local::{LocalSkill, RESERVED_SLASH_COMMANDS};
 use crate::tool::ToolOutput;
 
@@ -29,6 +35,24 @@ pub enum SlashDispatch {
     NotSlash,
     BuiltinOrUnhandled,
     Handled(String),
+}
+
+struct DirectSlashLlm;
+
+#[async_trait]
+impl LlmClient for DirectSlashLlm {
+    async fn stream(
+        &self,
+        _messages: &[Message],
+        _system: &str,
+        _system_suffix: &str,
+        _tools: &[ToolDefinition],
+        _config: &CompletionConfig,
+    ) -> crate::Result<StreamResponse> {
+        Err(crate::error::DysonError::Config(
+            "direct slash command attempted to call the LLM".to_string(),
+        ))
+    }
 }
 
 pub fn builtin_commands() -> Vec<SlashCommandInfo> {
@@ -110,6 +134,72 @@ pub fn parse_command(prompt: &str) -> Option<(&str, &str)> {
     Some((command, raw))
 }
 
+pub fn should_handle_without_llm(settings: &Settings, prompt: &str) -> bool {
+    let Some((command, _)) = parse_command(prompt) else {
+        return false;
+    };
+    find_executable(settings, prompt).is_some() || !known_command(settings, command)
+}
+
+pub async fn dispatch_without_llm(
+    output: &mut dyn Output,
+    settings: &Settings,
+    prompt: &str,
+    attachments_present: bool,
+    initial_messages: Vec<Message>,
+) -> crate::Result<Option<Vec<Message>>> {
+    let Some((command, _)) = parse_command(prompt) else {
+        return Ok(None);
+    };
+
+    if let Some(exec) = find_executable(settings, prompt) {
+        let response = if attachments_present {
+            format!(
+                "{} does not accept file attachments yet. Send the command with text only.",
+                exec.command
+            )
+        } else {
+            let mut agent = match build_direct_agent_for_skill(settings, command)? {
+                Some(agent) => agent,
+                None => {
+                    let response = unknown_command_response(settings, command);
+                    output.text_delta(&response)?;
+                    let messages = append_direct_messages(initial_messages, prompt, &response);
+                    return Ok(Some(messages));
+                }
+            };
+            agent.set_messages(initial_messages);
+            let tool_output = agent
+                .execute_tool_direct(
+                    &exec.tool_name,
+                    serde_json::json!({
+                        "raw": exec.raw,
+                        "command": exec.command,
+                        "args": exec.raw.split_whitespace().collect::<Vec<_>>(),
+                    }),
+                )
+                .await?;
+            emit_side_channels(output, &tool_output)?;
+            let response = tool_output.content;
+            output.text_delta(&response)?;
+            agent.append_direct_turn(prompt, &response);
+            return Ok(Some(agent.messages().to_vec()));
+        };
+        output.text_delta(&response)?;
+        let messages = append_direct_messages(initial_messages, prompt, &response);
+        return Ok(Some(messages));
+    }
+
+    if known_command(settings, command) {
+        return Ok(None);
+    }
+
+    let response = unknown_command_response(settings, command);
+    output.text_delta(&response)?;
+    let messages = append_direct_messages(initial_messages, prompt, &response);
+    Ok(Some(messages))
+}
+
 pub async fn dispatch_executable(
     agent: &mut crate::agent::Agent,
     output: &mut dyn Output,
@@ -151,16 +241,7 @@ pub async fn dispatch_executable(
     }
 
     let suggestions = suggestions(settings, command);
-    let response = if suggestions.is_empty() {
-        format!(
-            "Unknown slash command '{command}'. Open the command palette to see available commands."
-        )
-    } else {
-        format!(
-            "Unknown slash command '{command}'. Did you mean {}?",
-            suggestions.join(", ")
-        )
-    };
+    let response = unknown_command_response_from_suggestions(command, suggestions);
     output.text_delta(&response)?;
     agent.append_direct_turn(prompt, &response);
     Ok(SlashDispatch::Handled(response))
@@ -177,6 +258,72 @@ fn emit_side_channels(output: &mut dyn Output, tool_output: &ToolOutput) -> crat
         output.send_artefact(artefact)?;
     }
     Ok(())
+}
+
+fn build_direct_agent_for_skill(
+    settings: &Settings,
+    command: &str,
+) -> crate::Result<Option<crate::agent::Agent>> {
+    let workspace = crate::workspace::create_workspace(&settings.workspace)?;
+    let mut selected: Option<LocalSkill> = None;
+    for dir in workspace.skill_dirs() {
+        match LocalSkill::from_dir(&dir) {
+            Ok(skill)
+                if skill.slash_command() == Some(command)
+                    && skill.executable_tool_name().is_some() =>
+            {
+                selected = Some(skill);
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(path = %dir.display(), error = %e, "failed to inspect local skill slash command");
+            }
+        }
+    }
+
+    let Some(skill) = selected else {
+        return Ok(None);
+    };
+
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(RwLock::new(workspace));
+    let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, settings.dangerous_no_sandbox);
+    let client = RateLimitedHandle::unlimited(Box::new(DirectSlashLlm) as Box<dyn LlmClient>);
+    let agent = crate::agent::Agent::builder(client, sandbox)
+        .skills(vec![Box::new(skill)])
+        .settings(&settings.agent)
+        .workspace(workspace)
+        .build()?;
+    Ok(Some(agent))
+}
+
+fn append_direct_messages(
+    mut messages: Vec<Message>,
+    user_input: &str,
+    assistant_output: &str,
+) -> Vec<Message> {
+    messages.push(Message::user(user_input));
+    messages.push(Message::assistant(vec![ContentBlock::Text {
+        text: assistant_output.to_string(),
+    }]));
+    messages
+}
+
+fn unknown_command_response(settings: &Settings, command: &str) -> String {
+    unknown_command_response_from_suggestions(command, suggestions(settings, command))
+}
+
+fn unknown_command_response_from_suggestions(command: &str, suggestions: Vec<String>) -> String {
+    if suggestions.is_empty() {
+        format!(
+            "Unknown slash command '{command}'. Open the command palette to see available commands."
+        )
+    } else {
+        format!(
+            "Unknown slash command '{command}'. Did you mean {}?",
+            suggestions.join(", ")
+        )
+    }
 }
 
 fn local_skill_commands(settings: &Settings) -> Vec<SlashCommandInfo> {
@@ -217,6 +364,7 @@ fn command(cmd: &str, desc: &str, src: &str) -> SlashCommandInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::Credential;
 
     #[test]
     fn parse_command_splits_raw_tail() {
@@ -226,5 +374,70 @@ mod tests {
         );
         assert_eq!(parse_command("  /skill"), Some(("/skill", "")));
         assert_eq!(parse_command("not /skill"), None);
+    }
+
+    #[test]
+    fn initial_slash_fast_path_only_handles_executable_or_unknown() {
+        let mut settings = Settings::default();
+        settings.workspace.connection_string = Credential::new(
+            tempfile::tempdir()
+                .unwrap()
+                .path()
+                .to_string_lossy()
+                .to_string(),
+        );
+
+        assert!(!should_handle_without_llm(&settings, "/clear"));
+        assert!(should_handle_without_llm(&settings, "/not-a-command"));
+        assert!(!should_handle_without_llm(&settings, "plain chat"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_without_llm_executes_local_skill_with_no_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("skills/skill-echo");
+        std::fs::create_dir_all(skill_dir.join("bin")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "Echoes input\n\nInstructions.\n",
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("bin/run.sh"), "cat\n").unwrap();
+        std::fs::write(
+            skill_dir.join("dyson-skill.json"),
+            r#"{
+              "schema_version": 2,
+              "name": "skill-echo",
+              "description": "Echoes input",
+              "slash_command": "/skill-echo",
+              "execution": { "kind": "script", "entrypoint": "bin/run.sh", "timeout_ms": 5000 }
+            }"#,
+        )
+        .unwrap();
+
+        let mut settings = Settings::default();
+        settings.dangerous_no_sandbox = true;
+        settings.agent.model = "warmup-placeholder".into();
+        settings.workspace.connection_string =
+            Credential::new(tmp.path().to_string_lossy().to_string());
+        let mut output = crate::controller::recording::RecordingOutput::new();
+
+        let messages = dispatch_without_llm(
+            &mut output,
+            &settings,
+            "/skill-echo hello",
+            false,
+            Vec::new(),
+        )
+        .await
+        .unwrap()
+        .expect("slash handled");
+
+        assert!(output.text().contains("\"raw\":\"hello\""));
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(
+            messages[0].content.first(),
+            Some(ContentBlock::Text { text }) if text == "/skill-echo hello"
+        ));
     }
 }

@@ -303,6 +303,22 @@ pub(super) async fn post(
         return service_unavailable("instance is quiesced for maintenance");
     }
 
+    let prompt = body.prompt;
+    let attachments = decoded;
+
+    let direct_settings = state.settings_snapshot();
+    if crate::controller::slash::should_handle_without_llm(&direct_settings, &prompt) {
+        spawn_direct_slash_turn(
+            Arc::clone(&state),
+            Arc::clone(&handle),
+            id.to_string(),
+            direct_settings,
+            prompt,
+            !attachments.is_empty(),
+        );
+        return accepted_turn_response();
+    }
+
     let registry = Arc::clone(&state.registry);
     let turn_config =
         match ReadyTurnConfig::resolve_with_selection(&state, requested_model.as_ref()) {
@@ -330,8 +346,6 @@ pub(super) async fn post(
     let settings = turn_config.settings;
 
     let history = state.history.clone();
-    let prompt = body.prompt;
-    let attachments = decoded;
 
     let checkpoint_message = accepted_turn_checkpoint_message(&prompt, &attachments);
     let checkpoint_saved = match checkpoint_accepted_turn(
@@ -685,11 +699,90 @@ pub(super) async fn post(
         bump_to_front(&state_for_task, &chat_id).await;
     });
 
+    accepted_turn_response()
+}
+
+fn accepted_turn_response() -> Resp {
     Response::builder()
         .status(StatusCode::ACCEPTED)
         .header("Content-Type", "application/json")
         .body(boxed(Bytes::from_static(br#"{"ok":true}"#)))
         .unwrap()
+}
+
+fn spawn_direct_slash_turn(
+    state: Arc<HttpState>,
+    handle: Arc<ChatHandle>,
+    chat_id: String,
+    settings: Settings,
+    prompt: String,
+    attachments_present: bool,
+) {
+    let history = state.history.clone();
+    let files = Arc::clone(&state.files);
+    let file_id = Arc::clone(&state.file_id);
+    let artefacts = Arc::clone(&state.artefacts);
+    let artefact_id = Arc::clone(&state.artefact_id);
+    let data_dir = state.data_dir.clone();
+    let ingest = Arc::clone(&state.ingest);
+
+    tokio::spawn(async move {
+        let mut output = SseOutput {
+            chat_id: chat_id.clone(),
+            tx: handle.events.clone(),
+            replay: Arc::clone(&handle.replay),
+            files,
+            next_file_id: file_id,
+            artefacts,
+            next_artefact_id: artefact_id,
+            data_dir,
+            pending: Some(Arc::clone(&handle)),
+            current_tool_use_id: None,
+            ingest,
+        };
+
+        let initial_messages = history
+            .as_ref()
+            .and_then(|h| h.load(&chat_id).ok())
+            .unwrap_or_default();
+
+        match crate::controller::slash::dispatch_without_llm(
+            &mut output,
+            &settings,
+            &prompt,
+            attachments_present,
+            initial_messages,
+        )
+        .await
+        {
+            Ok(Some(messages)) => {
+                if let Some(h) = history.as_ref()
+                    && let Err(e) = h.save(&chat_id, &messages)
+                {
+                    tracing::warn!(error = %e, chat_id = %chat_id, "failed to save direct slash turn");
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(chat_id = %chat_id, prompt = %prompt, "direct slash fast path had nothing to handle");
+                handle.emit(SseEvent::LlmError {
+                    message: "slash command was not handled".to_string(),
+                });
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, chat_id = %chat_id, "direct slash turn failed");
+                handle.emit(SseEvent::LlmError {
+                    message: e.sanitized_message(),
+                });
+            }
+        }
+
+        handle.emit(SseEvent::Done);
+        handle.reset_replay();
+        handle
+            .busy
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        bump_to_front(&state, &chat_id).await;
+    });
 }
 
 async fn checkpoint_accepted_turn(
