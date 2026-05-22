@@ -57,6 +57,69 @@ function clipboardImageFiles(data) {
   return out;
 }
 
+function commandList(slashCommands) {
+  return Array.isArray(slashCommands) && slashCommands.length
+    ? slashCommands
+    : FALLBACK_SLASH_COMMANDS;
+}
+
+function slashCommandPreview(draft, slashCommands = FALLBACK_SLASH_COMMANDS) {
+  const text = String(draft || '').trimStart();
+  if (!text.startsWith('/')) return null;
+  const token = text.split(/\s/)[0];
+  if (!token || token === '/') return null;
+
+  const commands = commandList(slashCommands);
+  const exact = commands.find(c => c.cmd === token);
+  if (exact) {
+    const raw = text.slice(token.length).trimStart();
+    return {
+      state: 'exact',
+      cmd: exact.cmd,
+      desc: exact.desc || '',
+      src: exact.src || 'command',
+      tool: exact.tool || null,
+      meta: exact.tool ? `direct tool: ${exact.tool}` : `${exact.src || 'controller'} command`,
+      raw,
+    };
+  }
+
+  const matches = commands.filter(c => c.cmd.startsWith(token));
+  if (matches.length === 1) {
+    const match = matches[0];
+    return {
+      state: 'partial',
+      cmd: match.cmd,
+      desc: match.desc || '',
+      src: match.src || 'command',
+      tool: match.tool || null,
+      meta: match.tool ? `direct tool: ${match.tool}` : `${match.src || 'controller'} command`,
+      raw: '',
+    };
+  }
+  if (matches.length > 1) {
+    return {
+      state: 'partial',
+      cmd: token,
+      desc: matches.slice(0, 4).map(c => c.cmd).join(', '),
+      src: 'matches',
+      tool: null,
+      meta: `${matches.length} matches`,
+      raw: '',
+    };
+  }
+
+  return {
+    state: 'unknown',
+    cmd: token,
+    desc: 'No registered slash command matches this name.',
+    src: 'unknown',
+    tool: null,
+    meta: 'not registered',
+    raw: '',
+  };
+}
+
 const COMPOSER_MOBILE_QUERY = '(max-width: 760px)';
 const COMPOSER_DESKTOP_FONT_SIZE = '16px';
 const COMPOSER_MOBILE_FONT_SIZE = '17px';
@@ -662,10 +725,12 @@ function Composer({
   const agentName = useAppState(s => s.agentName) || 'dyson';
   const val = controlled ? draftText : localVal;
   const atts = controlled ? draftAttachments : localAtts;
-  const availableSlashCommands = Array.isArray(slashCommands) && slashCommands.length
-    ? slashCommands
-    : FALLBACK_SLASH_COMMANDS;
-  const filtered = slash ? availableSlashCommands.filter(c => c.cmd.startsWith(val.split(/\s/)[0] || '/')) : [];
+  const availableSlashCommands = commandList(slashCommands);
+  const trimmedDraft = val.trimStart();
+  const commandToken = trimmedDraft.split(/\s/)[0] || '/';
+  const commandTokenOnly = trimmedDraft.startsWith('/') && !/\s/.test(trimmedDraft);
+  const filtered = slash && commandTokenOnly ? availableSlashCommands.filter(c => c.cmd.startsWith(commandToken)) : [];
+  const preview = slashCommandPreview(val, availableSlashCommands);
   const setDraft = useCallback((text, attachments = atts) => {
     if (controlled) onDraftChange({ text, attachments });
     else setLocalVal(text);
@@ -750,6 +815,20 @@ function Composer({
             ))}
           </div>
         )}
+        {preview && (
+          <div className={`slash-preview ${preview.state}`} data-testid="slash-preview">
+            <div className="slash-preview-head">
+              <span className="cmd">{preview.cmd}</span>
+              <span className="src">{preview.src}</span>
+              {preview.tool && <span className="tool">{preview.tool}</span>}
+            </div>
+            <div className="desc">{preview.desc}</div>
+            <div className="meta">
+              <span>{preview.meta}</span>
+              {preview.raw && <span className="raw">{preview.raw}</span>}
+            </div>
+          </div>
+        )}
         <textarea
           ref={setTextareaRef}
           className="composer-input"
@@ -761,7 +840,7 @@ function Composer({
           onBlur={releaseComposerFocus}
           onChange={e => {
             setDraft(e.target.value);
-            setSlash(e.target.value.startsWith('/'));
+            setSlash(e.target.value.trimStart().startsWith('/'));
           }}
           onPaste={onPaste}
           onKeyDown={e => {
@@ -860,4 +939,4 @@ function fileToBase64(file) {
   });
 }
 
-export { Turn, ThinkingBlock, ToolChip, ToolBlock, FileBlock, ArtefactBlock, ErrorBlock, RunStatusStrip, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64, clipboardImageFiles, composerFocusFontSize, composerLockedViewportContent, pinComposerFocusGuard, prepareComposerFocus, releaseComposerFocus };
+export { Turn, ThinkingBlock, ToolChip, ToolBlock, FileBlock, ArtefactBlock, ErrorBlock, RunStatusStrip, TypingIndicator, Composer, EmptyState, markdown, prettySize, fileToBase64, clipboardImageFiles, slashCommandPreview, composerFocusFontSize, composerLockedViewportContent, pinComposerFocusGuard, prepareComposerFocus, releaseComposerFocus };

@@ -48,9 +48,9 @@ impl Tool for ArtefactsTool {
     }
 
     fn description(&self) -> &str {
-        "List or read artefacts produced in the current chat. Use this when the user asks \
-         to inspect an artefact, report, generated image record, or document-shaped output \
-         that was emitted as an artefact instead of regular chat text."
+        "List or read artefacts/artifacts produced in the current chat. Use this when the user \
+         asks to inspect an artefact, artifact, report, generated image record, or \
+         document-shaped output that was emitted as an artefact instead of regular chat text."
     }
 
     fn input_schema(&self) -> serde_json::Value {

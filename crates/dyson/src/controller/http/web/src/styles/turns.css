@@ -1048,6 +1048,57 @@
 .slashmenu .item .desc { flex: 1; font: 400 12px/1.3 var(--font-ui); color: var(--fg-dim); }
 .slashmenu .item .src { font: 500 10px/1 var(--font-mono); color: var(--mute); text-transform: uppercase; letter-spacing: 0.10em; }
 
+.slash-preview {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-1);
+  color: var(--fg-dim);
+}
+.slash-preview.partial { border-color: var(--accent-ln); }
+.slash-preview.unknown { border-color: color-mix(in oklab, var(--err), var(--line) 55%); }
+.slash-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.slash-preview .cmd {
+  font: 650 12px/1 var(--font-mono);
+  color: var(--accent);
+}
+.slash-preview .src,
+.slash-preview .tool {
+  font: 550 10px/1 var(--font-mono);
+  color: var(--mute);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.slash-preview .tool {
+  text-transform: none;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slash-preview .desc {
+  margin-top: 5px;
+  font: 400 12px/1.35 var(--font-ui);
+}
+.slash-preview .meta {
+  display: flex;
+  gap: 8px;
+  margin-top: 5px;
+  font: 500 10.5px/1.2 var(--font-mono);
+  color: var(--mute);
+}
+.slash-preview .raw {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .composer-wrap { position: relative; width: 100%; max-width: 840px; }
 
 /* ---------- divider & misc ---------- */
