@@ -230,6 +230,29 @@ impl super::Controller for TerminalController {
                 }
             }
 
+            match super::slash::dispatch_executable(
+                &mut agent,
+                &mut output,
+                &current_settings,
+                input,
+                false,
+            )
+            .await
+            {
+                Ok(super::slash::SlashDispatch::Handled(_)) => {
+                    println!();
+                    continue;
+                }
+                Ok(
+                    super::slash::SlashDispatch::NotSlash
+                    | super::slash::SlashDispatch::BuiltinOrUnhandled,
+                ) => {}
+                Err(e) => {
+                    eprintln!("\n[Error]: {e}");
+                    continue;
+                }
+            }
+
             match agent.run(input, &mut output).await {
                 Ok(_) => println!(),
                 Err(e) => eprintln!("\n[Error]: {e}"),

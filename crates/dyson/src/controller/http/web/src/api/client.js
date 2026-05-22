@@ -69,6 +69,7 @@ export class DysonClient {
   }
 
   listProviders() { return this._json('/api/providers'); }
+  listCommands()  { return this._json('/api/commands'); }
   getMind()       { return this._json('/api/mind'); }
   getAgent()      { return this._json('/api/agent'); }
 

@@ -1596,6 +1596,56 @@ textarea {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+.slash-preview {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--fg-muted);
+}
+.slash-preview.partial { border-color: var(--accent); }
+.slash-preview.unknown { border-color: var(--danger); }
+.slash-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.slash-preview .cmd {
+  color: var(--accent);
+  font: 650 12px/1 var(--mono);
+}
+.slash-preview .src,
+.slash-preview .tool {
+  color: var(--fg-muted);
+  font: 600 10px/1 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.slash-preview .tool {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.slash-preview .desc {
+  margin-top: 5px;
+  font: 400 12px/1.35 var(--sans);
+}
+.slash-preview .meta {
+  display: flex;
+  gap: 8px;
+  margin-top: 5px;
+  color: var(--fg-muted);
+  font: 500 10.5px/1.2 var(--mono);
+}
+.slash-preview .raw {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .turn-divider {
   height: 1px;

@@ -153,6 +153,7 @@ function App() {
 
   const conversations = useAppState(s => s.conversations);
   const providers = useAppState(s => s.providers);
+  const slashCommands = useAppState(s => s.commands);
   const mind = useAppState(s => s.mind);
   const pendingArtefactId = useAppState(s => s.ui.pendingArtefactId);
   const agentName = useAppState(s => s.agentName);
@@ -329,7 +330,8 @@ function App() {
         onSelectView={selectView}
         onSelectModel={pickModel}
         onOpenMindFile={(path) => { setMindPath(path); selectView('mind'); }}
-        onInsertSlash={insertSlashCommand}/>
+        onInsertSlash={insertSlashCommand}
+        slashCommands={slashCommands}/>
       {view === 'conv' && (
         <main className={bodyClass}>
           {showLeft && <div className="scrim" onClick={closeRails}/>}
@@ -374,6 +376,7 @@ function ConversationView({ conv, toolRef, setToolRef }) {
   const conversations = useAppState(s => s.conversations);
   const agentName = useAppState(s => s.agentName);
   const mcpServers = useAppState(s => s.skills?.mcp || []);
+  const slashCommands = useAppState(s => s.commands);
   const scrollRef = useRef(null);
   const pinnedToBottomRef = useRef(true);
 
@@ -617,7 +620,8 @@ function ConversationView({ conv, toolRef, setToolRef }) {
                     onQueueModeChange={(mode) => mutate(s => setQueueMode(s, mode))}
                     onCollapseAll={() => { mutate(closeAllPanels); if (typeof setToolRef === 'function') setToolRef(null); }}
                     onJump={() => session.liveToolRef && handleOpenTool(session.liveToolRef)}
-                    onSend={sendMsg} onCancel={onCancel} autoFocusKey={empty ? conv : null}/>
+                    onSend={sendMsg} onCancel={onCancel} autoFocusKey={empty ? conv : null}
+                    slashCommands={slashCommands}/>
     </div>
   );
 }
@@ -671,6 +675,7 @@ function ComposerDock({
   onSend,
   onCancel,
   autoFocusKey,
+  slashCommands,
 }) {
   return (
     <div className="composer-dock">
@@ -694,7 +699,8 @@ function ComposerDock({
           onDraftChange={onDraftChange}
           queueMode={queueMode}
           nextRunModel={nextRunModel}
-          onQueueModeChange={onQueueModeChange}/>
+          onQueueModeChange={onQueueModeChange}
+          slashCommands={slashCommands}/>
       </div>
     </div>
   );

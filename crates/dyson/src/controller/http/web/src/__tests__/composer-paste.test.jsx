@@ -7,6 +7,7 @@ import {
   composerLockedViewportContent,
   pinComposerFocusGuard,
   prepareComposerFocus,
+  slashCommandPreview,
 } from '../components/turns.jsx';
 
 const originalMatchMedia = window.matchMedia;
@@ -60,6 +61,55 @@ function mockViewportScrollReset() {
 }
 
 describe('Composer image paste', () => {
+  it('builds previews for exact, partial, and unknown slash commands', () => {
+    const commands = [
+      { cmd: '/skill-echo', desc: 'Echo skill', src: 'skill', tool: 'skill_echo' },
+      { cmd: '/model', desc: 'Switch model', src: 'controller' },
+      { cmd: '/models', desc: 'List models', src: 'controller' },
+    ];
+
+    expect(slashCommandPreview('/skill-echo hello', commands)).toMatchObject({
+      state: 'exact',
+      cmd: '/skill-echo',
+      tool: 'skill_echo',
+      raw: 'hello',
+    });
+    expect(slashCommandPreview('/skill-e', commands)).toMatchObject({
+      state: 'partial',
+      cmd: '/skill-echo',
+    });
+    expect(slashCommandPreview('/mo', commands)).toMatchObject({
+      state: 'partial',
+      meta: '2 matches',
+    });
+    expect(slashCommandPreview('/missing', commands)).toMatchObject({
+      state: 'unknown',
+      cmd: '/missing',
+    });
+  });
+
+  it('shows a persistent slash command preview once arguments are being typed', () => {
+    const { container, getByTestId, queryByText } = render(
+      <Composer
+        onSend={() => {}}
+        onCancel={() => {}}
+        running={false}
+        slashCommands={[
+          { cmd: '/skill-echo', desc: 'Echo skill', src: 'skill', tool: 'skill_echo' },
+        ]}/>
+    );
+    const textarea = container.querySelector('textarea');
+
+    fireEvent.change(textarea, { target: { value: '/skill-echo hello there' } });
+
+    const preview = getByTestId('slash-preview');
+    expect(preview.textContent).toContain('/skill-echo');
+    expect(preview.textContent).toContain('Echo skill');
+    expect(preview.textContent).toContain('direct tool: skill_echo');
+    expect(preview.textContent).toContain('hello there');
+    expect(queryByText('skill')).toBeTruthy();
+  });
+
   it('pins the mobile composer textarea above the iOS focus-zoom threshold before focus sampling', () => {
     mockMobile(true);
     mockViewportScrollReset();

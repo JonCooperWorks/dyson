@@ -49,6 +49,7 @@
 // ===========================================================================
 
 pub mod agent_secrets;
+pub mod artefacts;
 pub mod bash;
 pub mod bulk_edit;
 pub mod dependency_scan;
@@ -266,6 +267,18 @@ pub struct ToolContext {
     /// See `controller::http::SubagentEventBus` for the threading
     /// rationale and LLM-boundary invariant.
     pub subagent_events: Option<crate::controller::http::SubagentEventBus>,
+
+    /// Agent-readable artifact access for the current conversation.
+    ///
+    /// Artefacts are normally a controller/UI side-channel: tools emit them,
+    /// the HTTP controller stores them, and the LLM sees only a compact chip
+    /// or nothing at all.  When a controller can safely scope access to the
+    /// current chat, it installs an [`artefacts::ArtefactReader`] here so the
+    /// `artifacts` tool can list/read those stored documents on demand.
+    pub artefacts: Option<Arc<dyn artefacts::ArtefactReader>>,
+
+    /// Current conversation id used to scope artefact reads.
+    pub current_chat_id: Option<String>,
 }
 
 impl Clone for ToolContext {
@@ -281,6 +294,8 @@ impl Clone for ToolContext {
             activity: self.activity.clone(),
             tool_use_id: self.tool_use_id.clone(),
             subagent_events: self.subagent_events.clone(),
+            artefacts: self.artefacts.as_ref().map(Arc::clone),
+            current_chat_id: self.current_chat_id.clone(),
         }
     }
 }
@@ -302,6 +317,8 @@ impl ToolContext {
             activity: None,
             tool_use_id: None,
             subagent_events: None,
+            artefacts: None,
+            current_chat_id: None,
         })
     }
 
@@ -322,6 +339,8 @@ impl ToolContext {
             activity: None,
             tool_use_id: None,
             subagent_events: None,
+            artefacts: None,
+            current_chat_id: None,
         }
     }
 
@@ -343,6 +362,8 @@ impl ToolContext {
             activity: None,
             tool_use_id: None,
             subagent_events: None,
+            artefacts: None,
+            current_chat_id: None,
         }
     }
 

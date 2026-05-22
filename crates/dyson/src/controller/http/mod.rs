@@ -44,6 +44,7 @@ use crate::util::resolve_tilde;
 
 use super::{AgentMode, ClientRegistry, Controller, Output, build_agent};
 
+mod artefact_access;
 mod assets;
 mod config;
 mod output;

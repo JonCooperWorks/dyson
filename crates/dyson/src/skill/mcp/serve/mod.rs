@@ -685,6 +685,8 @@ impl McpHttpServer {
             activity: None,
             tool_use_id: None,
             subagent_events: None,
+            artefacts: None,
+            current_chat_id: None,
         };
 
         // -- Execute the tool and format the response --

@@ -50,6 +50,9 @@
 // ===========================================================================
 
 use std::fmt::Write;
+pub mod manifest;
+mod script;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -57,6 +60,13 @@ use async_trait::async_trait;
 
 use crate::error::{DysonError, Result};
 use crate::tool::Tool;
+
+pub use manifest::{
+    ArgumentMode, LocalSkillManifest, RESERVED_SLASH_COMMANDS, ScriptExecution, SkillExecution,
+    normalize_timeout_ms, tool_name_for_skill, validate_entrypoint, validate_skill_name,
+    validate_slash_command,
+};
+use script::LocalScriptSkillTool;
 
 /// Maximum allowed SKILL.md content size (64 KB by default).
 ///
@@ -74,11 +84,24 @@ const MAX_SKILL_CONTENT_SIZE: usize = 64 * 1024;
 /// Instead, their name and description are collected into a compact
 /// `<available_skills>` list, and the full instructions are loaded on
 /// demand via the `load_skill` tool.
-#[derive(Debug)]
 pub struct LocalSkill {
     name: String,
     description: String,
     body: String,
+    manifest: LocalSkillManifest,
+    tools: Vec<Arc<dyn Tool>>,
+}
+
+impl std::fmt::Debug for LocalSkill {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalSkill")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("body_len", &self.body.len())
+            .field("manifest", &self.manifest)
+            .field("tool_count", &self.tools.len())
+            .finish()
+    }
 }
 
 impl LocalSkill {
@@ -105,12 +128,21 @@ impl LocalSkill {
             .unwrap_or("unknown")
             .to_string();
 
-        Self::parse(&content, &dir_name, &skill_md)
+        Self::parse_from_dir(&content, &dir_name, &skill_md, dir)
     }
 
     /// The skill's description (from frontmatter or first line).
     pub fn skill_description(&self) -> &str {
         &self.description
+    }
+
+    pub fn slash_command(&self) -> Option<&str> {
+        self.manifest.slash_command.as_deref()
+    }
+
+    pub fn executable_tool_name(&self) -> Option<String> {
+        matches!(self.manifest.execution, SkillExecution::Script(_))
+            .then(|| self.manifest.tool_name())
     }
 
     /// The skill's full instruction body (the system prompt text).
@@ -163,7 +195,13 @@ impl LocalSkill {
     /// and splits out a body; if any of that fails it falls back to using
     /// the entire file as the body.  The only failure case is an empty /
     /// whitespace-only file, which genuinely has nothing to load.
+    #[cfg(test)]
     fn parse(content: &str, dir_name: &str, path: &Path) -> Result<Self> {
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        Self::parse_from_dir(content, dir_name, path, dir)
+    }
+
+    fn parse_from_dir(content: &str, dir_name: &str, path: &Path, dir: &Path) -> Result<Self> {
         let trimmed = content.trim();
 
         if trimmed.is_empty() {
@@ -174,11 +212,42 @@ impl LocalSkill {
         }
 
         let (description, body) = extract_description_and_body(trimmed);
+        let manifest_path = dir.join("dyson-skill.json");
+        let manifest = if manifest_path.is_file() {
+            let manifest_content = std::fs::read_to_string(&manifest_path).map_err(|e| {
+                DysonError::Config(format!(
+                    "failed to read skill manifest {}: {e}",
+                    manifest_path.display()
+                ))
+            })?;
+            LocalSkillManifest::from_json(&manifest_content, dir_name, &description, dir)?
+        } else {
+            LocalSkillManifest::instruction_only(dir_name, &description)?
+        };
+
+        let description = if manifest.description.trim().is_empty() {
+            description
+        } else {
+            manifest.description.clone()
+        };
+        let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+        if let SkillExecution::Script(ref execution) = manifest.execution {
+            let tool = LocalScriptSkillTool::new(
+                manifest.tool_name(),
+                manifest.name.clone(),
+                description.clone(),
+                dir.to_path_buf(),
+                execution,
+            )?;
+            tools.push(Arc::new(tool));
+        }
 
         Ok(Self {
             name: dir_name.to_string(),
             description,
             body,
+            manifest,
+            tools,
         })
     }
 }
@@ -387,7 +456,7 @@ impl super::Skill for LocalSkill {
     }
 
     fn tools(&self) -> &[Arc<dyn Tool>] {
-        &[]
+        &self.tools
     }
 
     fn system_prompt(&self) -> Option<&str> {
@@ -408,19 +477,40 @@ pub struct SkillListSkill {
     prompt: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillListEntry {
+    pub name: String,
+    pub description: String,
+    pub slash_command: Option<String>,
+    pub executable: bool,
+}
+
 impl SkillListSkill {
-    /// Build from a list of (name, description) pairs.
-    pub fn new(skills: &[(String, String)]) -> Self {
+    /// Build from compact skill metadata.
+    pub fn new(skills: &[SkillListEntry]) -> Self {
         let prompt = if skills.is_empty() {
             String::new()
         } else {
             let mut lines = String::from("<available_skills>\n");
-            for (name, desc) in skills {
-                writeln!(&mut lines, "- {name}: {desc}").unwrap();
+            for skill in skills {
+                let mut detail = skill.description.clone();
+                if let Some(cmd) = &skill.slash_command {
+                    if skill.executable {
+                        write!(&mut detail, " (slash command: {cmd})").unwrap();
+                    } else {
+                        write!(
+                            &mut detail,
+                            " (slash command listed but not executable: {cmd})"
+                        )
+                        .unwrap();
+                    }
+                }
+                writeln!(&mut lines, "- {}: {}", skill.name, detail).unwrap();
             }
             lines.push_str(
                 "</available_skills>\n\n\
-                Use the load_skill tool to load a skill's full instructions before applying it.",
+                Use the load_skill tool to load a skill's full instructions before applying it. \
+                Executable slash commands can be called directly by the user from chat.",
             );
             lines
         };

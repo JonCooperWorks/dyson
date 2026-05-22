@@ -486,6 +486,8 @@ impl Agent {
             activity: None,
             tool_use_id: None,
             subagent_events: None,
+            artefacts: None,
+            current_chat_id: None,
         };
         tool_context.workspace = workspace;
         tool_context
@@ -575,6 +577,20 @@ impl Agent {
         self.tool_context.subagent_events = Some(bus);
     }
 
+    /// Bind current-chat artefact access for controller-scoped runs.
+    ///
+    /// Artefact bodies are intentionally not serialized back into model history.
+    /// Controllers that own an artefact store can install this scoped reader so
+    /// the `artefacts` tool can list/read documents from the active chat only.
+    pub fn set_artefact_reader(
+        &mut self,
+        reader: Arc<dyn crate::tool::artefacts::ArtefactReader>,
+        chat_id: impl Into<String>,
+    ) {
+        self.tool_context.artefacts = Some(reader);
+        self.tool_context.current_chat_id = Some(chat_id.into());
+    }
+
     /// Send a dream event to the persistent dream thread.
     ///
     /// Pre-checks triggers on the main thread so the expensive message
@@ -647,6 +663,19 @@ impl Agent {
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.conversation.turn_count = restored_turn_count(&messages);
         self.conversation.messages = messages;
+    }
+
+    /// Append a direct controller-handled turn, such as an executable
+    /// local-skill slash command that bypassed the LLM.
+    pub fn append_direct_turn(&mut self, user_input: &str, assistant_output: &str) {
+        self.conversation.messages.push(Message::user(user_input));
+        self.conversation
+            .messages
+            .push(Message::assistant(vec![ContentBlock::Text {
+                text: assistant_output.to_string(),
+            }]));
+        self.conversation.turn_count += 1;
+        self.persist();
     }
 
     /// Attach a feedback store so dreams can incorporate user ratings.

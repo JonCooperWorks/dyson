@@ -23,6 +23,26 @@ use super::dependency_analyzer::{DependencyAnalyzer, ExecutionPhase};
 use super::stream_handler::ToolCall;
 
 impl Agent {
+    /// Execute one registered tool directly, without an LLM turn.
+    ///
+    /// Used by controller-owned slash commands for executable local skills.
+    /// The call still flows through the normal sandbox, hooks, timeout/cancel
+    /// context, and skill after_tool hook; the caller decides how to render
+    /// and persist the user-visible response.
+    pub async fn execute_tool_direct(
+        &mut self,
+        tool_name: &str,
+        input: serde_json::Value,
+    ) -> Result<ToolOutput> {
+        if let Err(e) = self.limiter.check(tool_name) {
+            return Ok(ToolOutput::error(e.to_string()));
+        }
+        let call = ToolCall::new(tool_name, input);
+        self.execute_tool_call_timed(&call)
+            .await
+            .map(|(output, _)| output)
+    }
+
     /// Check rate limits, analyze dependencies, and execute tool calls in phases.
     pub(super) async fn execute_tool_calls(
         &mut self,

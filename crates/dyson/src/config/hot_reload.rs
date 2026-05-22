@@ -285,7 +285,8 @@ impl HotReloader {
         }
 
         // Watch skills/ directory (mtime changes when dirs are added/removed)
-        // and each skill's SKILL.md for content changes.
+        // and each skill directory recursively. Executable local skills keep
+        // code next to SKILL.md, so script edits must trigger the same reload.
         let skills_dir = ws_path.join("skills");
         if skills_dir.is_dir() {
             let mtime = Self::get_mtime(&skills_dir);
@@ -293,17 +294,26 @@ impl HotReloader {
 
             if let Ok(entries) = std::fs::read_dir(&skills_dir) {
                 for entry in entries.flatten() {
-                    let skill_md = entry.path().join("SKILL.md");
-                    if skill_md.is_file() {
-                        let mtime = Self::get_mtime(&skill_md);
-                        watched.insert(skill_md, mtime);
-                    }
-                    let metadata = entry.path().join("dyson-skill.json");
-                    if metadata.is_file() {
-                        let mtime = Self::get_mtime(&metadata);
-                        watched.insert(metadata, mtime);
-                    }
+                    Self::scan_skill_dir(&entry.path(), watched);
                 }
+            }
+        }
+    }
+
+    fn scan_skill_dir(path: &Path, watched: &mut HashMap<PathBuf, Option<SystemTime>>) {
+        if !path.is_dir() {
+            return;
+        }
+        watched.insert(path.to_path_buf(), Self::get_mtime(path));
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                Self::scan_skill_dir(&p, watched);
+            } else if p.is_file() {
+                watched.insert(p.clone(), Self::get_mtime(&p));
             }
         }
     }

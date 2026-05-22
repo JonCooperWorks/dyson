@@ -267,6 +267,8 @@ mod tests {
             activity: None,
             tool_use_id: None,
             subagent_events: None,
+            artefacts: None,
+            current_chat_id: None,
         };
 
         (ctx, tmp)
@@ -367,6 +369,8 @@ mod tests {
             activity: None,
             tool_use_id: None,
             subagent_events: None,
+            artefacts: None,
+            current_chat_id: None,
         };
 
         let tool = ExportConversationTool;

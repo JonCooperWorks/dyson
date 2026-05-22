@@ -3,10 +3,11 @@ use crate::workspace::InMemoryWorkspace;
 
 fn assert_learned_metadata(content: &str, name: &str, description: &str) {
     let metadata: serde_json::Value = serde_json::from_str(content).unwrap();
-    assert_eq!(metadata["schema_version"], 1);
+    assert_eq!(metadata["schema_version"], 2);
     assert_eq!(metadata["name"], name);
     assert_eq!(metadata["version"], "0.0.0-learned");
     assert_eq!(metadata["description"], description);
+    assert_eq!(metadata["execution"]["kind"], "none");
     assert_eq!(metadata["origin"]["kind"], "learned");
     assert_eq!(metadata["origin"]["dream"], "self-improvement");
     assert!(
@@ -14,6 +15,16 @@ fn assert_learned_metadata(content: &str, name: &str, description: &str) {
             .as_str()
             .is_some_and(|s| !s.is_empty())
     );
+}
+
+fn assert_hybrid_metadata(content: &str, name: &str, command: &str, entrypoint: &str) {
+    let metadata: serde_json::Value = serde_json::from_str(content).unwrap();
+    assert_eq!(metadata["schema_version"], 2);
+    assert_eq!(metadata["name"], name);
+    assert_eq!(metadata["slash_command"], command);
+    assert_eq!(metadata["execution"]["kind"], "script");
+    assert_eq!(metadata["execution"]["entrypoint"], entrypoint);
+    assert_eq!(metadata["execution"]["argument_mode"], "raw");
 }
 
 #[test]
@@ -117,6 +128,140 @@ async fn create_skill() {
     assert!(content.contains("Read the code"));
     let metadata = ws.get("skills/code-review/dyson-skill.json").unwrap();
     assert_learned_metadata(&metadata, "code-review", "Reviews code for quality");
+}
+
+#[tokio::test]
+async fn create_hybrid_skill_writes_manifest_and_script() {
+    let ws = InMemoryWorkspace::new();
+    let ctx = ToolContext::for_test_with_workspace(ws);
+    let tool = SkillCreateTool;
+
+    let result = tool
+        .run(
+            &json!({
+                "name": "skill-echo",
+                "description": "Echo slash input",
+                "instructions": "Use /skill-echo for direct echo checks.",
+                "slash_command": "/skill-echo",
+                "execution": {
+                    "kind": "script",
+                    "entrypoint": "bin/run.sh",
+                    "code": "jq -r .raw\n",
+                    "timeout_ms": 1000
+                }
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    assert!(!result.is_error, "Error: {}", result.content);
+    let ws = ctx.workspace.unwrap();
+    let ws = ws.read().await;
+    assert_eq!(
+        ws.get("skills/skill-echo/bin/run.sh").unwrap(),
+        "jq -r .raw\n"
+    );
+    let metadata = ws.get("skills/skill-echo/dyson-skill.json").unwrap();
+    assert_hybrid_metadata(&metadata, "skill-echo", "/skill-echo", "bin/run.sh");
+}
+
+#[tokio::test]
+async fn invalid_slash_command_rejected() {
+    let ws = InMemoryWorkspace::new();
+    let ctx = ToolContext::for_test_with_workspace(ws);
+    let tool = SkillCreateTool;
+
+    let result = tool
+        .run(
+            &json!({
+                "name": "bad-slash",
+                "description": "desc",
+                "instructions": "inst",
+                "slash_command": "/clear",
+                "execution": { "kind": "script", "code": "echo no\n" }
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    assert!(result.is_error);
+    assert!(result.content.contains("collides"));
+}
+
+#[tokio::test]
+async fn traversal_entrypoint_rejected() {
+    let ws = InMemoryWorkspace::new();
+    let ctx = ToolContext::for_test_with_workspace(ws);
+    let tool = SkillCreateTool;
+
+    let result = tool
+        .run(
+            &json!({
+                "name": "bad-entry",
+                "description": "desc",
+                "instructions": "inst",
+                "slash_command": "/bad-entry",
+                "execution": {
+                    "kind": "script",
+                    "entrypoint": "../run.sh",
+                    "code": "echo no\n"
+                }
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    assert!(result.is_error);
+    assert!(result.content.contains("traversal"));
+}
+
+#[tokio::test]
+async fn improve_preserves_existing_script_when_code_omitted() {
+    let metadata = serde_json::json!({
+        "schema_version": 2,
+        "name": "review",
+        "description": "old",
+        "slash_command": "/review",
+        "execution": {
+            "kind": "script",
+            "entrypoint": "bin/run.sh",
+            "argument_mode": "raw",
+            "timeout_ms": 1000
+        }
+    })
+    .to_string();
+    let ws = InMemoryWorkspace::new()
+        .with_file(
+            "skills/review/SKILL.md",
+            "---\nname: review\ndescription: old\n---\n\nOriginal.",
+        )
+        .with_file("skills/review/dyson-skill.json", &metadata)
+        .with_file("skills/review/bin/run.sh", "echo old\n");
+    let ctx = ToolContext::for_test_with_workspace(ws);
+    let tool = SkillCreateTool;
+
+    let result = tool
+        .run(
+            &json!({
+                "name": "review",
+                "description": "new",
+                "instructions": "More.",
+                "mode": "improve"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+    assert!(!result.is_error, "Error: {}", result.content);
+    let ws = ctx.workspace.unwrap();
+    let ws = ws.read().await;
+    assert_eq!(ws.get("skills/review/bin/run.sh").unwrap(), "echo old\n");
+    let metadata = ws.get("skills/review/dyson-skill.json").unwrap();
+    assert_hybrid_metadata(&metadata, "review", "/review", "bin/run.sh");
 }
 
 #[tokio::test]
@@ -256,7 +401,7 @@ async fn invalid_name_rejected() {
         .unwrap();
 
     assert!(result.is_error);
-    assert!(result.content.contains("Invalid skill name"));
+    assert!(result.content.contains("invalid skill name"));
 }
 
 #[tokio::test]

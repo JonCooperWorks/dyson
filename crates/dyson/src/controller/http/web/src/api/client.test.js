@@ -46,6 +46,14 @@ describe('DysonClient — GET endpoints', () => {
     expect(args(fetch)[0]).toBe('/api/providers');
   });
 
+  it('listCommands → GET /api/commands', async () => {
+    const fetch = mockFetch(() => ({ body: [{ cmd: '/clear' }] }));
+    const client = new DysonClient({ fetch });
+    const out = await client.listCommands();
+    expect(args(fetch)[0]).toBe('/api/commands');
+    expect(out).toEqual([{ cmd: '/clear' }]);
+  });
+
   it('getMind → GET /api/mind', async () => {
     const fetch = mockFetch(() => ({ body: { files: [] } }));
     const client = new DysonClient({ fetch });

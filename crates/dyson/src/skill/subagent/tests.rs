@@ -484,6 +484,8 @@ async fn subagent_depth_limit_prevents_recursion() {
         activity: None,
         tool_use_id: None,
         subagent_events: None,
+        artefacts: None,
+        current_chat_id: None,
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -1104,6 +1106,8 @@ async fn coder_depth_limit_prevents_recursion() {
         activity: None,
         tool_use_id: None,
         subagent_events: None,
+        artefacts: None,
+        current_chat_id: None,
     };
 
     let input = serde_json::json!({"path": ".", "task": "should fail"});
@@ -2275,6 +2279,8 @@ async fn orchestrator_depth_limit_prevents_recursion() {
         activity: None,
         tool_use_id: None,
         subagent_events: None,
+        artefacts: None,
+        current_chat_id: None,
     };
 
     let input = serde_json::json!({"task": "should fail"});
@@ -2764,6 +2770,8 @@ async fn subagent_inherits_parents_working_dir() {
         activity: None,
         tool_use_id: None,
         subagent_events: None,
+        artefacts: None,
+        current_chat_id: None,
     };
 
     let input = serde_json::json!({ "task": "call the spy" });

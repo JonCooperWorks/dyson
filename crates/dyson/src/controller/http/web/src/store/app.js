@@ -25,6 +25,7 @@ const INITIAL = {
   // so the group object was pure ceremony.
   conversations: [],
   providers: [],
+  commands: [],
   activity: [],
   mind: { backend: '', files: [], open: { path: '', content: '' } },
   // Tool views by ref.  Refs are chat-id-prefixed on mint (`${chatId}-live-N`)
@@ -92,6 +93,11 @@ export function markConversationHasArtefacts(id) {
 
 export function setProviders(providers, activeModel) {
   app.dispatch(s => ({ ...s, providers, activeModel }));
+}
+
+export function setCommands(commands) {
+  const list = Array.isArray(commands) ? commands : [];
+  app.dispatch(s => ({ ...s, commands: list }));
 }
 
 export function switchProviderModel(provider, modelName) {

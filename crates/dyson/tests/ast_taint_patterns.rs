@@ -23,6 +23,8 @@ fn test_ctx(dir: &Path) -> ToolContext {
         activity: None,
         tool_use_id: None,
         subagent_events: None,
+        artefacts: None,
+        current_chat_id: None,
     }
 }
 

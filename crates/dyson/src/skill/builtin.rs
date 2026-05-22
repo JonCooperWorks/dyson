@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use crate::skill::Skill;
 use crate::tool::Tool;
 use crate::tool::agent_secrets::AgentSecretsTool;
+use crate::tool::artefacts::ArtefactsTool;
 use crate::tool::bash::BashTool;
 use crate::tool::bulk_edit::BulkEditTool;
 use crate::tool::dependency_scan::DependencyScanTool;
@@ -43,6 +44,7 @@ use crate::tool::security::{
     AstDescribeTool, AstQueryTool, AttackSurfaceAnalyzerTool, ExploitBuilderTool, TaintTraceTool,
 };
 use crate::tool::send_file::SendFileTool;
+use crate::tool::skill_create::SkillCreateTool;
 use crate::tool::skill_marketplace::SkillMarketplaceTool;
 use crate::tool::web_fetch::WebFetchTool;
 use crate::tool::web_search;
@@ -120,6 +122,8 @@ impl BuiltinSkill {
             Arc::new(MemorySearchTool),
             Arc::new(WorkspaceTool),
             Arc::new(LoadSkillTool),
+            Arc::new(ArtefactsTool),
+            Arc::new(SkillCreateTool),
             Arc::new(SkillMarketplaceTool),
             Arc::new(KbSearchTool),
             Arc::new(KbStatusTool),
@@ -172,7 +176,11 @@ impl BuiltinSkill {
 
         // Apply tool filter if specified.
         if !filter.is_empty() {
-            tools.retain(|t| filter.iter().any(|name| name == t.name()));
+            tools.retain(|t| {
+                filter
+                    .iter()
+                    .any(|name| builtin_tool_filter_matches(t.name(), name))
+            });
         }
 
         // Build the system prompt dynamically from the loaded tools.
@@ -194,6 +202,10 @@ impl BuiltinSkill {
             system_prompt,
         }
     }
+}
+
+fn builtin_tool_filter_matches(tool_name: &str, requested_name: &str) -> bool {
+    tool_name == requested_name || (tool_name == "artifacts" && requested_name == "artefacts")
 }
 
 impl BuiltinSkill {
@@ -284,7 +296,7 @@ mod tests {
     fn has_builtin_tools() {
         let skill = skill_without_agent_secrets();
         let tools = skill.tools();
-        assert_eq!(tools.len(), 21);
+        assert_eq!(tools.len(), 23);
         assert_eq!(tools[0].name(), "bash");
         assert_eq!(tools[1].name(), "read_file");
         assert_eq!(tools[2].name(), "write_file");
@@ -296,16 +308,18 @@ mod tests {
         assert_eq!(tools[8].name(), "memory_search");
         assert_eq!(tools[9].name(), "workspace");
         assert_eq!(tools[10].name(), "load_skill");
-        assert_eq!(tools[11].name(), "skill_marketplace");
-        assert_eq!(tools[12].name(), "kb_search");
-        assert_eq!(tools[13].name(), "kb_status");
-        assert_eq!(tools[14].name(), "web_fetch");
-        assert_eq!(tools[15].name(), "dependency_scan");
-        assert_eq!(tools[16].name(), "ast_describe");
-        assert_eq!(tools[17].name(), "ast_query");
-        assert_eq!(tools[18].name(), "attack_surface_analyzer");
-        assert_eq!(tools[19].name(), "exploit_builder");
-        assert_eq!(tools[20].name(), "taint_trace");
+        assert_eq!(tools[11].name(), "artifacts");
+        assert_eq!(tools[12].name(), "skill_create");
+        assert_eq!(tools[13].name(), "skill_marketplace");
+        assert_eq!(tools[14].name(), "kb_search");
+        assert_eq!(tools[15].name(), "kb_status");
+        assert_eq!(tools[16].name(), "web_fetch");
+        assert_eq!(tools[17].name(), "dependency_scan");
+        assert_eq!(tools[18].name(), "ast_describe");
+        assert_eq!(tools[19].name(), "ast_query");
+        assert_eq!(tools[20].name(), "attack_surface_analyzer");
+        assert_eq!(tools[21].name(), "exploit_builder");
+        assert_eq!(tools[22].name(), "taint_trace");
     }
 
     /// The five AST/security tools used to be subagent-only — now they live
@@ -340,6 +354,19 @@ mod tests {
         );
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert_eq!(names, vec!["bash", "read_file"]);
+    }
+
+    #[test]
+    fn filter_accepts_artefact_spelling_for_artifacts_tool() {
+        let skill = BuiltinSkill::new_filtered_with_agent_secrets(
+            None,
+            None,
+            None,
+            &["artefacts".to_string()],
+            None,
+        );
+        let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
+        assert_eq!(names, vec!["artifacts"]);
     }
 
     #[test]
@@ -418,7 +445,7 @@ mod tests {
             BuiltinSkill::new_filtered_with_agent_secrets(None, Some(&config), None, &[], None);
         let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
         assert!(names.contains(&"image_generate"));
-        assert_eq!(skill.tools().len(), 22);
+        assert_eq!(skill.tools().len(), 24);
     }
 
     #[test]
