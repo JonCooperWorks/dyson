@@ -84,6 +84,7 @@ pub async fn run() -> Result<()> {
         &proxy_token,
         &instance_id,
     );
+    dyson::swarm_cost::set_runtime_config_from_parts(&proxy_url, &proxy_token);
     // Optional builtin-tool allowlist.  Swarm only stamps this on the
     // env envelope when the operator picked a strict subset (or asked
     // for zero tools); when unset, dyson registers every builtin.

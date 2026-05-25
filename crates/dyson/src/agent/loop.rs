@@ -285,7 +285,7 @@ impl Agent {
             };
 
             if let Some(cost_metadata) = cost_metadata {
-                assistant_msg.cost = Some(cost_metadata);
+                assistant_msg.cost = Some(finalize_cost_metadata(cost_metadata).await);
             }
 
             if let Some(input_tokens) = input_tokens {
@@ -626,4 +626,20 @@ impl Agent {
             );
         }
     }
+}
+
+async fn finalize_cost_metadata(mut metadata: MessageCostMetadata) -> MessageCostMetadata {
+    let Some(audit_id) = metadata.swarm_llm_audit_id else {
+        return metadata;
+    };
+    match crate::swarm_cost::lookup_runtime_display_metadata(audit_id).await {
+        Ok(Some(finalized)) => {
+            crate::message_cost_backfill::merge_cost(&mut metadata, finalized);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::debug!(audit_id, error = %err, "Swarm cost lookup failed");
+        }
+    }
+    metadata
 }

@@ -925,4 +925,51 @@ mod tests {
         let body = r#"{"error":{"type":"unknown"}}"#;
         assert_eq!(parse_error_body(body), body);
     }
+
+    #[tokio::test]
+    async fn stream_captures_swarm_audit_id_header() {
+        use tokio_stream::StreamExt as _;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(SWARM_LLM_AUDIT_ID_HEADER, "42")
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n\
+                         data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                         data: [DONE]\n\n",
+                    ),
+            )
+            .mount(&server)
+            .await;
+
+        let client = OpenAiClient::with_base_url(
+            Box::new(crate::auth::BearerTokenAuth::new("test-key".into())),
+            &server.uri(),
+        );
+        let config = CompletionConfig {
+            model: "test-model".into(),
+            max_tokens: 64,
+            temperature: None,
+            api_tool_injections: vec![],
+        };
+
+        let response = client
+            .stream(&[Message::user("hello")], "system", "", &[], &config)
+            .await
+            .unwrap();
+
+        assert_eq!(response.swarm_llm_audit_id, Some(42));
+        let events: Vec<_> = response.stream.collect().await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Ok(StreamEvent::TextDelta(t)) if t == "hi"))
+        );
+    }
 }

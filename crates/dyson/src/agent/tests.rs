@@ -19,6 +19,10 @@ struct MockLlm {
     responses: std::sync::Mutex<Vec<Vec<StreamEvent>>>,
     /// Simulate a provider that handles tools internally (like Claude Code).
     tool_mode: crate::llm::ToolMode,
+    swarm_llm_audit_id: Option<i64>,
+    input_tokens: Option<usize>,
+    provider: Option<String>,
+    model: Option<String>,
 }
 
 struct FallibleMockLlm {
@@ -68,6 +72,10 @@ impl MockLlm {
         Self {
             responses: std::sync::Mutex::new(responses),
             tool_mode: crate::llm::ToolMode::Execute,
+            swarm_llm_audit_id: None,
+            input_tokens: None,
+            provider: None,
+            model: None,
         }
     }
 
@@ -75,7 +83,19 @@ impl MockLlm {
         Self {
             responses: std::sync::Mutex::new(responses),
             tool_mode: crate::llm::ToolMode::Observe,
+            swarm_llm_audit_id: None,
+            input_tokens: None,
+            provider: None,
+            model: None,
         }
+    }
+
+    fn with_swarm_audit(mut self, audit_id: i64, provider: &str, model: &str) -> Self {
+        self.swarm_llm_audit_id = Some(audit_id);
+        self.input_tokens = Some(1200);
+        self.provider = Some(provider.to_owned());
+        self.model = Some(model.to_owned());
+        self
     }
 }
 
@@ -128,10 +148,10 @@ impl LlmClient for MockLlm {
         Ok(crate::llm::StreamResponse {
             stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
             tool_mode: self.tool_mode,
-            input_tokens: None,
-            swarm_llm_audit_id: None,
-            provider: None,
-            model: None,
+            input_tokens: self.input_tokens,
+            swarm_llm_audit_id: self.swarm_llm_audit_id,
+            provider: self.provider.clone(),
+            model: self.model.clone(),
         })
     }
 }
@@ -261,6 +281,122 @@ async fn simple_text_response() {
     let result = agent.run("hi", &mut output).await.unwrap();
     assert_eq!(result, "Hello!");
     assert_eq!(output.text(), "Hello!");
+}
+
+#[tokio::test]
+async fn assistant_message_stores_swarm_cost_when_lookup_succeeds_and_keeps_turn_on_failure() {
+    struct ResetCostConfig;
+    impl Drop for ResetCostConfig {
+        fn drop(&mut self) {
+            crate::swarm_cost::set_runtime_config(None);
+        }
+    }
+    let _reset = ResetCostConfig;
+
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/v1/costs/calls/42"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "audit_id": 42,
+                "provider": "openrouter",
+                "instance_id": "inst-1",
+                "model": "openai/gpt-4.1-mini",
+                "key_source": "platform",
+                "status_code": 200,
+                "occurred_at": 1,
+                "input_tokens": 1200,
+                "output_tokens": 340,
+                "total_tokens": 1540,
+                "cost_usd": 0.0031,
+                "cost_source": "provider_reported"
+            })),
+        )
+        .mount(&server)
+        .await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/v1/costs/calls/43"))
+        .respond_with(wiremock::ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    crate::swarm_cost::set_runtime_config(crate::swarm_cost::CostLookupConfig::public_api(
+        &server.uri(),
+        None,
+    ));
+
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let settings = AgentSettings {
+        api_key: "test".into(),
+        ..Default::default()
+    };
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(
+            MockLlm::new(vec![vec![
+                StreamEvent::TextDelta("priced".into()),
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: Some(340),
+                },
+            ]])
+            .with_swarm_audit(42, "openrouter", "openai/gpt-4.1-mini"),
+        )),
+        sandbox.clone(),
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut output = RecordingOutput::new();
+    assert_eq!(agent.run("hi", &mut output).await.unwrap(), "priced");
+    let cost = agent
+        .messages()
+        .last()
+        .and_then(|m| m.cost.as_ref())
+        .unwrap();
+    assert_eq!(cost.swarm_llm_audit_id, Some(42));
+    assert_eq!(cost.display_cost_usd, Some(0.0031));
+    assert_eq!(cost.provider.as_deref(), Some("openrouter"));
+    assert_eq!(cost.model.as_deref(), Some("openai/gpt-4.1-mini"));
+    assert_eq!(cost.input_tokens, Some(1200));
+    assert_eq!(cost.output_tokens, Some(340));
+
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
+    let mut failure_agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(
+            MockLlm::new(vec![vec![
+                StreamEvent::TextDelta("still works".into()),
+                StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: Some(12),
+                },
+            ]])
+            .with_swarm_audit(43, "openrouter", "openai/gpt-4.1-mini"),
+        )),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut output = RecordingOutput::new();
+    assert_eq!(
+        failure_agent.run("hi", &mut output).await.unwrap(),
+        "still works"
+    );
+    let cost = failure_agent
+        .messages()
+        .last()
+        .and_then(|m| m.cost.as_ref())
+        .unwrap();
+    assert_eq!(cost.swarm_llm_audit_id, Some(43));
+    assert_eq!(cost.display_cost_usd, None);
 }
 
 #[tokio::test]

@@ -306,6 +306,9 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         // operator can verify which MCP servers actually loaded.
         // Same configure-secret auth as the POST sibling.
         (&Method::GET, ["api", "admin", "skills"]) => admin::get_skills(req, &state).await,
+        (&Method::POST, ["api", "admin", "cost-backfill"]) => {
+            admin::post_cost_backfill(req, &state).await
+        }
 
         // ─── files & artefacts ─────────────────────────────────────────
         // Strict decode here — these ids feed `safe_store_id` which

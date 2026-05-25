@@ -58,6 +58,7 @@ const MAX_STATE_FILE_BODY: usize = 8 * 1024 * 1024;
 /// Package install payload is a validated SKILL.md body plus metadata.
 /// Keep it above the swarm-side skill body cap to leave JSON overhead.
 const MAX_SKILL_INSTALL_BODY: usize = 96 * 1024;
+const MAX_COST_BACKFILL_BODY: usize = 1024;
 
 /// Header swarm sends with the per-instance configure secret
 /// (32-hex plaintext from `Uuid::new_v4().simple()`).  Dyson hashes
@@ -628,10 +629,12 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
                 proxy_token,
                 instance_id,
             );
+            crate::swarm_cost::set_runtime_config_from_parts(proxy_url, proxy_token);
             true
         }
         Some(AgentSecretsRuntimePatch::Clear) => {
             crate::tool::agent_secrets::set_runtime_config(None);
+            crate::swarm_cost::set_runtime_config(None);
             true
         }
         _ => false,
@@ -1168,6 +1171,77 @@ pub(super) async fn get_skills(req: Request<hyper::body::Incoming>, state: &Http
         "mcp_servers": mcp_listed,
         "mcp_probes": mcp_probes,
     }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct CostBackfillBody {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Fleet operation hook used by swarmctl after Dyson rollouts.
+///
+/// This route is still protected by the controller's normal `/api/*` bearer
+/// gate and CSRF header. It intentionally does not require the configure
+/// secret because swarmctl discovers live instances from Swarm's DB and calls
+/// them with their per-instance bearer token.
+pub(super) async fn post_cost_backfill(
+    req: Request<hyper::body::Incoming>,
+    state: &HttpState,
+) -> Resp {
+    let body: CostBackfillBody = match read_json_capped(req, MAX_COST_BACKFILL_BODY).await {
+        Ok(body) => body,
+        Err(err) => return bad_request(&err),
+    };
+    let Some(history) = state.history.as_ref() else {
+        return bad_request("chat history backend is not configured");
+    };
+    let Some(costs) = crate::swarm_cost::config_snapshot_or_env() else {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("Content-Type", "application/json")
+            .body(boxed(Bytes::from(
+                serde_json::json!({
+                    "ok": false,
+                    "error": "Swarm cost lookup is not configured"
+                })
+                .to_string(),
+            )))
+            .unwrap();
+    };
+    match crate::message_cost_backfill::backfill_history(
+        history.as_ref(),
+        &costs,
+        crate::message_cost_backfill::CostBackfillOptions {
+            dry_run: body.dry_run,
+        },
+    )
+    .await
+    {
+        Ok(report) => json_ok(&serde_json::json!({
+            "ok": true,
+            "dry_run": body.dry_run,
+            "messages_scanned": report.messages_scanned,
+            "messages_linked": report.messages_linked,
+            "messages_priced": report.messages_priced,
+            "messages_skipped": report.messages_skipped,
+            "skip_reasons": report.skip_reasons,
+        })),
+        Err(err) => {
+            tracing::warn!(error = %err, "cost backfill failed");
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header("Content-Type", "application/json")
+                .body(boxed(Bytes::from(
+                    serde_json::json!({
+                        "ok": false,
+                        "error": "cost backfill failed"
+                    })
+                    .to_string(),
+                )))
+                .unwrap()
+        }
+    }
 }
 
 /// Resolve the directory the configure-secret hash lives in.  We

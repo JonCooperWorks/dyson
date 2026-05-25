@@ -335,8 +335,9 @@ function turnToText(turn) {
 function CostPill({ cost }) {
   if (!cost) return null;
   const hasCost = cost.display_cost_usd !== undefined && cost.display_cost_usd !== null;
-  if (!hasCost && !cost.swarm_llm_audit_id) return null;
-  const label = hasCost ? formatMessageCost(cost.display_cost_usd) : 'cost pending';
+  if (!hasCost) return null;
+  const label = formatMessageCost(cost.display_cost_usd);
+  if (!label) return null;
   const title = [
     cost.provider && `provider: ${cost.provider}`,
     cost.model && `model: ${cost.model}`,
@@ -344,12 +345,12 @@ function CostPill({ cost }) {
     cost.output_tokens != null && `output: ${formatCompactNumber(cost.output_tokens)} tokens`,
     cost.cost_source && `source: ${cost.cost_source}`,
   ].filter(Boolean).join('\n');
-  return <span className={`cost-pill ${hasCost ? '' : 'pending'}`.trim()} title={title || undefined}>{label}</span>;
+  return <span className="cost-pill" title={title || undefined}>{label}</span>;
 }
 
 function formatMessageCost(value) {
   const n = Number(value);
-  if (!Number.isFinite(n)) return 'cost pending';
+  if (!Number.isFinite(n)) return '';
   if (n > 0 && n < 0.01) return `$${n.toFixed(n < 0.0001 ? 6 : 4).replace(/0+$/u, '').replace(/\.$/u, '')}`;
   return `$${n.toFixed(2)}`;
 }
