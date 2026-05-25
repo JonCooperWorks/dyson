@@ -106,6 +106,7 @@ impl super::Agent {
             .iter()
             .map(|msg| Message {
                 role: msg.role.clone(),
+                cost: msg.cost.clone(),
                 content: msg
                     .content
                     .iter()

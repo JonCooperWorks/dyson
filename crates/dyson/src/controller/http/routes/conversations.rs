@@ -398,6 +398,7 @@ pub(super) async fn get(state: &HttpState, id: &str) -> Resp {
         messages.push(MessageDto {
             role: "assistant".to_string(),
             blocks: side_channel_blocks,
+            cost: None,
         });
     }
 
@@ -517,7 +518,11 @@ pub(crate) fn message_to_dto(m: &Message) -> MessageDto {
     }
     .to_string();
     let blocks = m.content.iter().map(block_to_dto).collect();
-    MessageDto { role, blocks }
+    MessageDto {
+        role,
+        blocks,
+        cost: m.cost.clone(),
+    }
 }
 
 fn block_to_dto(b: &ContentBlock) -> BlockDto {

@@ -124,6 +124,25 @@ enum Commands {
         plaintext: String,
     },
 
+    /// Backfill assistant-message display costs from Swarm audit rows.
+    CostBackfill {
+        /// Path to dyson.json config file.
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Swarm base URL, e.g. https://swarm.example.com.
+        #[arg(long)]
+        swarm_url: String,
+
+        /// Bearer token accepted by Swarm for this user's cost API.
+        #[arg(long)]
+        bearer: Option<String>,
+
+        /// Scan and print counts without rewriting transcripts.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+
     /// Boot inside a CubeSandbox under the dyson-orchestrator.
     /// Reads SWARM_BEARER_TOKEN, SWARM_PROXY_URL, SWARM_PROXY_TOKEN,
     /// SWARM_TASK, SWARM_NAME, SWARM_INSTANCE_ID from the env, then
@@ -228,6 +247,12 @@ async fn main() -> dyson::error::Result<()> {
             command::listen::run(config, dangerous_no_sandbox, provider, base_url, workspace).await
         }
         Commands::HashBearer { plaintext } => command::hash_bearer::run(plaintext),
+        Commands::CostBackfill {
+            config,
+            swarm_url,
+            bearer,
+            dry_run,
+        } => command::cost_backfill::run(config, swarm_url, bearer, dry_run).await,
         Commands::Swarm => command::swarm::run().await,
         Commands::Run {
             prompt,

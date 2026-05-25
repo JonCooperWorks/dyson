@@ -963,7 +963,12 @@ function hydrateTranscript(conv, data) {
   };
 
   const liveTurns = (data.messages || [])
-    .map(m => ({ role: m.role === 'user' ? 'user' : 'agent', ts: '', blocks: m.blocks.map(blockOf).filter(Boolean) }))
+    .map(m => ({
+      role: m.role === 'user' ? 'user' : 'agent',
+      ts: '',
+      blocks: m.blocks.map(blockOf).filter(Boolean),
+      cost: m.cost || null,
+    }))
     .filter(t => t.blocks.length > 0);
 
   // Retroactive pairing: pre-tool_use_id chats have orphan image

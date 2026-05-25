@@ -58,7 +58,8 @@ use crate::error::{DysonError, Result};
 use crate::llm::sse_parser::{BaseSseParser, SseJsonParser, ToolBufferContext};
 use crate::llm::stream::{StopReason, StreamEvent};
 use crate::llm::{
-    CompletionConfig, LlmClient, StreamResponse, ToolDefinition, concat_system_prompt,
+    CompletionConfig, LlmClient, SWARM_LLM_AUDIT_ID_HEADER, StreamResponse, ToolDefinition,
+    concat_system_prompt,
 };
 use crate::message::{ContentBlock, Message, Role};
 
@@ -238,11 +239,19 @@ impl OpenAiClient {
             ));
         }
 
+        let audit_id = response
+            .headers()
+            .get(SWARM_LLM_AUDIT_ID_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<i64>().ok());
+        let provider = provider_label(&self.base_url);
+        let model = config.model.clone();
+        let mut response = crate::llm::build_stream_response(response, parser);
+        response.swarm_llm_audit_id = audit_id;
+        response.provider = Some(provider.clone());
+        response.model = Some(model.clone());
         Ok(wrap_stream_error_logging(
-            crate::llm::build_stream_response(response, parser),
-            provider_label(&self.base_url),
-            config.model.clone(),
-            "stream",
+            response, provider, model, "stream",
         ))
     }
 }

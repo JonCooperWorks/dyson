@@ -65,6 +65,23 @@
   border: 1px solid var(--line);
   font-size: 10.5px;
 }
+.turn .cost-pill {
+  color: var(--fg-2);
+  text-transform: none;
+  font-weight: 500;
+  letter-spacing: 0;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  font-size: 10.5px;
+  white-space: nowrap;
+  cursor: help;
+}
+.turn .cost-pill.pending {
+  color: var(--mute-2);
+  border-style: dashed;
+}
 
 /* overflow-wrap: anywhere lets long unbreakable tokens (URLs, hashes)
    wrap inside the viewport on narrow screens, instead of forcing the

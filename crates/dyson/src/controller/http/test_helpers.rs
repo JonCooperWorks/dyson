@@ -324,6 +324,7 @@ pub async fn seed_transcript(
                 content: vec![ContentBlock::Text {
                     text: (*text).to_string(),
                 }],
+                cost: None,
             }
         })
         .collect();

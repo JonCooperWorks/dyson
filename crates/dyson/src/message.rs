@@ -243,6 +243,34 @@ impl Artefact {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<MessageCostMetadata>,
+}
+
+/// Display-only LLM cost metadata mirrored from Swarm's canonical audit row.
+///
+/// Dyson stores this on messages so historical chats can render known prices,
+/// but Swarm remains the source of truth for accounting and backfills.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageCostMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_llm_audit_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_finalized_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_source: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +359,7 @@ impl Message {
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
+            cost: None,
         }
     }
 
@@ -343,6 +372,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content,
+            cost: None,
         }
     }
 
@@ -359,6 +389,7 @@ impl Message {
         Self {
             role: Role::User,
             content,
+            cost: None,
         }
     }
 
@@ -387,6 +418,7 @@ impl Message {
                 content: content.to_string(),
                 is_error,
             }],
+            cost: None,
         }
     }
 }

@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::message::MessageCostMetadata;
 use crate::tool::view::ToolView;
 
 #[derive(Serialize)]
@@ -34,6 +35,8 @@ pub(crate) struct ConversationDto {
 pub(crate) struct MessageDto {
     pub(crate) role: String,
     pub(crate) blocks: Vec<BlockDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cost: Option<MessageCostMetadata>,
 }
 
 #[derive(Clone, Serialize)]

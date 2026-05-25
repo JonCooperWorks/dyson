@@ -20,6 +20,7 @@
 //   This keeps main.rs short — just CLI parsing and dispatch.
 // ===========================================================================
 
+pub mod cost_backfill;
 pub mod hash_bearer;
 pub mod init;
 pub mod listen;

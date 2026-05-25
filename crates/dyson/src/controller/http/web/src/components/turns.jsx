@@ -332,6 +332,34 @@ function turnToText(turn) {
   return parts.join('\n\n');
 }
 
+function CostPill({ cost }) {
+  if (!cost) return null;
+  const hasCost = cost.display_cost_usd !== undefined && cost.display_cost_usd !== null;
+  if (!hasCost && !cost.swarm_llm_audit_id) return null;
+  const label = hasCost ? formatMessageCost(cost.display_cost_usd) : 'cost pending';
+  const title = [
+    cost.provider && `provider: ${cost.provider}`,
+    cost.model && `model: ${cost.model}`,
+    cost.input_tokens != null && `input: ${formatCompactNumber(cost.input_tokens)} tokens`,
+    cost.output_tokens != null && `output: ${formatCompactNumber(cost.output_tokens)} tokens`,
+    cost.cost_source && `source: ${cost.cost_source}`,
+  ].filter(Boolean).join('\n');
+  return <span className={`cost-pill ${hasCost ? '' : 'pending'}`.trim()} title={title || undefined}>{label}</span>;
+}
+
+function formatMessageCost(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 'cost pending';
+  if (n > 0 && n < 0.01) return `$${n.toFixed(n < 0.0001 ? 6 : 4).replace(/0+$/u, '').replace(/\.$/u, '')}`;
+  return `$${n.toFixed(2)}`;
+}
+
+function formatCompactNumber(value) {
+  const n = Number(value || 0);
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/u, '')}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/u, '')}k`;
+  return String(Math.max(0, Math.round(n)));
+}
 
 function Turn({ turn, tools, onOpenTool, expandedTools, turnIndex, rating, onRate,
                 chatId,
@@ -387,6 +415,7 @@ function Turn({ turn, tools, onOpenTool, expandedTools, turnIndex, rating, onRat
         <div className="who">
           <span className="name">{isUser ? 'you' : agentName}</span>
           {turn.model && <span className="model">{turn.model}</span>}
+          {!isUser ? <CostPill cost={turn.cost}/> : null}
           {turn.queued && (
             <span
               className="queued-badge"

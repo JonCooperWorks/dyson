@@ -63,6 +63,9 @@ impl LlmClient for StubLlmClient {
             stream: Box::pin(tokio_stream::iter(events)),
             tool_mode: ToolMode::Execute,
             input_tokens: None,
+            swarm_llm_audit_id: None,
+            provider: None,
+            model: None,
         })
     }
 }
@@ -107,6 +110,9 @@ impl LlmClient for BlockingLlmClient {
             stream: Box::pin(tokio_stream::iter(events)),
             tool_mode: ToolMode::Execute,
             input_tokens: None,
+            swarm_llm_audit_id: None,
+            provider: None,
+            model: None,
         })
     }
 }
@@ -152,6 +158,9 @@ impl LlmClient for ToolThenRecordMessagesLlm {
             stream: Box::pin(tokio_stream::iter(events)),
             tool_mode: ToolMode::Execute,
             input_tokens: None,
+            swarm_llm_audit_id: None,
+            provider: None,
+            model: None,
         })
     }
 }
@@ -183,6 +192,9 @@ impl LlmClient for CaptureToolsLlm {
             stream: Box::pin(tokio_stream::iter(events)),
             tool_mode: ToolMode::Execute,
             input_tokens: None,
+            swarm_llm_audit_id: None,
+            provider: None,
+            model: None,
         })
     }
 }
@@ -3624,6 +3636,7 @@ async fn chat_reload_rehydrates_user_uploaded_images_as_file_blocks() {
                     media_type: "image/gif".into(),
                 },
             ],
+            cost: None,
         }];
         history.save(&id, &msgs).expect("save seeded transcript");
     }

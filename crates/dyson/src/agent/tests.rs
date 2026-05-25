@@ -56,6 +56,9 @@ impl LlmClient for FallibleMockLlm {
             stream: Box::pin(tokio_stream::iter(events)),
             tool_mode: crate::llm::ToolMode::Execute,
             input_tokens: None,
+            swarm_llm_audit_id: None,
+            provider: None,
+            model: None,
         })
     }
 }
@@ -104,6 +107,9 @@ impl LlmClient for RecordingMessagesLlm {
             stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
             tool_mode: crate::llm::ToolMode::Execute,
             input_tokens: None,
+            swarm_llm_audit_id: None,
+            provider: None,
+            model: None,
         })
     }
 }
@@ -123,6 +129,9 @@ impl LlmClient for MockLlm {
             stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
             tool_mode: self.tool_mode,
             input_tokens: None,
+            swarm_llm_audit_id: None,
+            provider: None,
+            model: None,
         })
     }
 }
@@ -2001,6 +2010,9 @@ async fn quick_response_caps_max_tokens() {
                 stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
                 tool_mode: crate::llm::ToolMode::Execute,
                 input_tokens: None,
+                swarm_llm_audit_id: None,
+                provider: None,
+                model: None,
             })
         }
     }
@@ -2053,6 +2065,9 @@ async fn quick_response_sends_no_tools() {
                 stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
                 tool_mode: crate::llm::ToolMode::Execute,
                 input_tokens: None,
+                swarm_llm_audit_id: None,
+                provider: None,
+                model: None,
             })
         }
     }
@@ -2301,6 +2316,7 @@ mod test_tool_calling_integration {
                 content: vec![ContentBlock::Text {
                     text: "I see a cat".into(),
                 }],
+                cost: None,
             },
             Message::user("thanks"),
         ]);
@@ -2352,6 +2368,7 @@ mod test_tool_calling_integration {
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::Text { text: "hi".into() }],
+                cost: None,
             },
         ]);
 

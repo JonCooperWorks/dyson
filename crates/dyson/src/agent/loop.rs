@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::controller::Output;
 use crate::error::{LlmRecovery, Result};
-use crate::message::{Artefact, Message};
+use crate::message::{Artefact, Message, MessageCostMetadata};
 use crate::tool::{CheckpointEvent, ToolOutput};
 
 use super::dream::DreamEvent;
@@ -165,7 +165,15 @@ impl Agent {
             // without advancing the iteration counter.
             let mut empty_attempts: usize = 0;
             let mut stream_error_attempts: usize = 0;
-            let (tool_mode, input_tokens, assistant_msg, tool_calls, output_tokens, stop_reason) = loop {
+            let (
+                tool_mode,
+                input_tokens,
+                mut assistant_msg,
+                tool_calls,
+                output_tokens,
+                stop_reason,
+                cost_metadata,
+            ) = loop {
                 let response = match self
                     .stream_with_retry(&skill_fragments, &mut recovered_this_turn, output)
                     .await
@@ -177,6 +185,9 @@ impl Agent {
 
                 let tool_mode = response.tool_mode;
                 let input_tokens = response.input_tokens;
+                let audit_id = response.swarm_llm_audit_id;
+                let provider = response.provider.clone();
+                let model = response.model.clone();
 
                 tracing::info!(
                     tool_mode = ?tool_mode,
@@ -250,6 +261,18 @@ impl Agent {
                     continue;
                 }
 
+                let cost_metadata = audit_id.map(|swarm_llm_audit_id| MessageCostMetadata {
+                    swarm_llm_audit_id: Some(swarm_llm_audit_id),
+                    display_cost_usd: None,
+                    cost_source: None,
+                    cost_finalized_at: None,
+                    provider,
+                    model,
+                    input_tokens: input_tokens.and_then(|n| i64::try_from(n).ok()),
+                    output_tokens: i64::try_from(output_tokens).ok(),
+                    key_source: None,
+                });
+
                 break (
                     tool_mode,
                     input_tokens,
@@ -257,8 +280,13 @@ impl Agent {
                     tool_calls,
                     output_tokens,
                     stop_reason,
+                    cost_metadata,
                 );
             };
+
+            if let Some(cost_metadata) = cost_metadata {
+                assistant_msg.cost = Some(cost_metadata);
+            }
 
             if let Some(input_tokens) = input_tokens {
                 self.conversation.token_budget.record_input(input_tokens);

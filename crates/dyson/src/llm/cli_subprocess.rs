@@ -96,6 +96,9 @@ pub fn build_observe_response(
         stream,
         tool_mode: ToolMode::Observe,
         input_tokens: None,
+        swarm_llm_audit_id: None,
+        provider: None,
+        model: None,
     }
 }
 

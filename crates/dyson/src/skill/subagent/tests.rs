@@ -329,6 +329,9 @@ impl crate::llm::LlmClient for MockLlm {
             stream: Box::pin(tokio_stream::iter(events.into_iter().map(Ok))),
             tool_mode: crate::llm::ToolMode::Execute,
             input_tokens: None,
+            swarm_llm_audit_id: None,
+            provider: None,
+            model: None,
         })
     }
 }

@@ -315,6 +315,7 @@ fn externalize_images(messages: &[Message], media_dir: &PathBuf) -> Result<Vec<M
             Message {
                 role: msg.role.clone(),
                 content,
+                cost: msg.cost.clone(),
             }
         })
         .collect();

@@ -248,6 +248,7 @@ mod tests {
             content: vec![ContentBlock::Thinking {
                 thinking: "nope".into(),
             }],
+            cost: None,
         }];
         let mut json = vec![
             serde_json::json!({"role": "system", "content": "sys"}),

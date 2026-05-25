@@ -61,6 +61,8 @@ use crate::llm::stream::StreamEvent;
 use crate::message::{ContentBlock, Message, Role};
 use crate::tool::Tool;
 
+pub const SWARM_LLM_AUDIT_ID_HEADER: &str = "x-swarm-llm-audit-id";
+
 // ---------------------------------------------------------------------------
 // CompletionConfig
 // ---------------------------------------------------------------------------
@@ -162,6 +164,14 @@ pub struct StreamResponse {
     /// Some providers report input tokens in the response headers or
     /// initial event.  `None` if not available until the stream completes.
     pub input_tokens: Option<usize>,
+
+    /// Swarm LLM audit row id, passed as a side-channel response header by
+    /// the Swarm proxy. It is display/accounting metadata only.
+    pub swarm_llm_audit_id: Option<i64>,
+
+    /// Provider/model metadata associated with the stream for message display.
+    pub provider: Option<String>,
+    pub model: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +725,9 @@ pub(crate) fn build_stream_response<P: SseStreamParser + Send + 'static>(
         stream: sse_event_stream(response, parser),
         tool_mode: ToolMode::Execute,
         input_tokens: None,
+        swarm_llm_audit_id: None,
+        provider: None,
+        model: None,
     }
 }
 
@@ -1176,6 +1189,9 @@ mod tests {
                 stream: Box::pin(tokio_stream::iter(std::iter::empty())),
                 tool_mode: ToolMode::Execute,
                 input_tokens: None,
+                swarm_llm_audit_id: None,
+                provider: None,
+                model: None,
             })
         }
     }
@@ -1473,6 +1489,9 @@ mod tests {
                 stream: Box::pin(tokio_stream::iter(std::iter::empty())),
                 tool_mode: ToolMode::Execute,
                 input_tokens: None,
+                swarm_llm_audit_id: None,
+                provider: None,
+                model: None,
             })
         }
 
