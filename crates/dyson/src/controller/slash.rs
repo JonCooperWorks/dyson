@@ -415,8 +415,10 @@ mod tests {
         )
         .unwrap();
 
-        let mut settings = Settings::default();
-        settings.dangerous_no_sandbox = true;
+        let mut settings = Settings {
+            dangerous_no_sandbox: true,
+            ..Default::default()
+        };
         settings.agent.model = "warmup-placeholder".into();
         settings.workspace.connection_string =
             Credential::new(tmp.path().to_string_lossy().to_string());

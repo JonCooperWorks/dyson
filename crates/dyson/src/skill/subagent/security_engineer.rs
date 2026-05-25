@@ -806,6 +806,7 @@ pub struct SecurityFinding {
     pub entry_point: String,
     #[serde(default)]
     pub sink_or_decision: String,
+    #[serde(default)]
     pub root_cause: String,
     #[serde(default)]
     pub affected_paths: Vec<String>,
@@ -869,6 +870,7 @@ pub struct VulnerabilityClassCoverage {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DedupeGroup {
     pub id: String,
+    #[serde(default)]
     pub root_cause: String,
     pub primary_finding_id: String,
     #[serde(default)]
@@ -1334,11 +1336,7 @@ fn render_report_markdown(
     out.push_str(&plain_block(&report.scope));
     out.push('\n');
 
-    let confirmed = checkpoint
-        .validation_decisions_so_far
-        .iter()
-        .filter(|d| d.decision == ValidationDecisionKind::Confirmed)
-        .count();
+    let confirmed = report.findings.len();
     let rejected = report.rejected_candidates.len();
     let reachable = report
         .trace_evidence
@@ -1873,6 +1871,9 @@ fn missing_finding_evidence_fields(finding: &SecurityFinding) -> Vec<&'static st
     if finding.sink_or_decision.trim().is_empty() {
         missing.push("sink_or_decision");
     }
+    if finding.root_cause.trim().is_empty() {
+        missing.push("root_cause");
+    }
     if finding.evidence.is_empty() {
         missing.push("evidence");
     }
@@ -1883,6 +1884,66 @@ fn missing_finding_evidence_fields(finding: &SecurityFinding) -> Vec<&'static st
         missing.push("fix_recommendation");
     }
     missing
+}
+
+fn is_no_vulnerability_note(finding: &SecurityFinding) -> bool {
+    let title = finding.title.to_ascii_lowercase();
+    let root_cause = finding.root_cause.to_ascii_lowercase();
+    let rationale = finding.severity_rationale.to_ascii_lowercase();
+    let haystack = format!("{title}\n{root_cause}\n{rationale}");
+
+    title.trim_start().starts_with("n/a")
+        || haystack.contains("no vulnerability found")
+        || haystack.contains("no bypass found")
+        || haystack.contains("verified secure")
+        || haystack.contains("verified safe")
+        || haystack.contains("checked and cleared")
+        || (title.contains("verified") && root_cause.contains("no vulnerability"))
+        || (title.contains("verified") && rationale.contains("no vulnerability"))
+}
+
+pub(crate) fn reportable_confirmed_findings(
+    checkpoint: &SecurityCheckpoint,
+) -> Vec<&SecurityFinding> {
+    let confirmed_ids: BTreeSet<&str> = checkpoint
+        .validation_decisions_so_far
+        .iter()
+        .filter(|decision| decision.decision == ValidationDecisionKind::Confirmed)
+        .map(|decision| decision.finding_id.as_str())
+        .collect();
+    checkpoint
+        .findings_so_far
+        .iter()
+        .filter(|finding| confirmed_ids.contains(finding.id.as_str()))
+        .filter(|finding| missing_finding_evidence_fields(finding).is_empty())
+        .filter(|finding| !is_no_vulnerability_note(finding))
+        .collect()
+}
+
+fn reportable_finding_ids(checkpoint: &SecurityCheckpoint) -> BTreeSet<String> {
+    reportable_confirmed_findings(checkpoint)
+        .into_iter()
+        .map(|finding| finding.id.clone())
+        .collect()
+}
+
+fn report_checkpoint_for_prompt(checkpoint: &SecurityCheckpoint) -> SecurityCheckpoint {
+    let mut filtered = checkpoint.clone();
+    let reportable_ids = reportable_finding_ids(checkpoint);
+    filtered.findings_so_far = checkpoint
+        .findings_so_far
+        .iter()
+        .filter(|finding| reportable_ids.contains(&finding.id))
+        .cloned()
+        .collect();
+    filtered.dedupe_groups_so_far = dedupe_findings(&filtered.findings_so_far);
+    filtered.trace_results_so_far = checkpoint
+        .trace_results_so_far
+        .iter()
+        .filter(|trace| reportable_ids.contains(&trace.finding_id))
+        .cloned()
+        .collect();
+    filtered
 }
 
 async fn run_recon_stage(
@@ -2045,8 +2106,12 @@ fn run_gapfill_stage(checkpoint: &mut SecurityCheckpoint) {
     checkpoint.pending_tasks.extend(additions);
 }
 
-fn run_dedupe_stage(checkpoint: &mut SecurityCheckpoint) {
-    checkpoint.dedupe_groups_so_far = dedupe_findings(&checkpoint.findings_so_far);
+pub(crate) fn run_dedupe_stage(checkpoint: &mut SecurityCheckpoint) {
+    let findings = reportable_confirmed_findings(checkpoint)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    checkpoint.dedupe_groups_so_far = dedupe_findings(&findings);
 }
 
 async fn run_trace_stage(
@@ -2133,36 +2198,79 @@ async fn run_report_stage(
     checkpoint: &mut SecurityCheckpoint,
 ) -> std::result::Result<Option<ToolOutput>, String> {
     let prompt = include_str!("prompts/security_engineer_report.md");
-    let (raw, mut stage_out) =
-        spawn_stage(rt, SecurityHarnessStage::Report, prompt, checkpoint, 10).await?;
-    let parsed = match parse_report_output(&raw) {
-        Ok(report) => report,
+    let checkpoint_for_prompt = report_checkpoint_for_prompt(checkpoint);
+    let (raw, mut stage_out) = spawn_stage(
+        rt,
+        SecurityHarnessStage::Report,
+        prompt,
+        &checkpoint_for_prompt,
+        10,
+    )
+    .await?;
+    let (parsed, validation_state) = match parse_report_output(&raw) {
+        Ok(report) => (
+            report,
+            ReportValidationState {
+                status: "valid".into(),
+                errors: Vec::new(),
+            },
+        ),
         Err(first_err) => {
             checkpoint.report_validation_state = ReportValidationState {
                 status: "repairing".into(),
                 errors: vec![first_err.clone()],
             };
             let repair_prompt = include_str!("prompts/security_engineer_report_repair.md");
+            let mut repair_checkpoint = checkpoint_for_prompt.clone();
+            repair_checkpoint.report_validation_state = checkpoint.report_validation_state.clone();
             let (repair_raw, repair_out) = spawn_stage(
                 rt,
                 SecurityHarnessStage::Report,
                 repair_prompt,
-                checkpoint,
+                &repair_checkpoint,
                 6,
             )
             .await?;
             merge_stage_tool_output(&mut stage_out, repair_out);
-            parse_report_output(&repair_raw).map_err(|second_err| {
-                format!("report schema validation failed after repair: {first_err}; {second_err}")
-            })?
+            resolve_repaired_or_fallback_report(checkpoint, &first_err, &repair_raw)?
         }
     };
-    checkpoint.report_validation_state = ReportValidationState {
-        status: "valid".into(),
-        errors: Vec::new(),
-    };
+    checkpoint.report_validation_state = validation_state;
     checkpoint.report_draft = Some(parsed);
     Ok(Some(stage_out))
+}
+
+pub(crate) fn resolve_repaired_or_fallback_report(
+    checkpoint: &SecurityCheckpoint,
+    first_err: &str,
+    repair_raw: &str,
+) -> std::result::Result<(SecurityHarnessReport, ReportValidationState), String> {
+    match parse_report_output(repair_raw) {
+        Ok(report) => Ok((
+            report,
+            ReportValidationState {
+                status: "valid".into(),
+                errors: Vec::new(),
+            },
+        )),
+        Err(second_err) => {
+            let fallback = report_from_checkpoint(checkpoint);
+            let fallback_value = serde_json::to_value(&fallback)
+                .map_err(|e| format!("serialize deterministic report fallback: {e}"))?;
+            match validate_report_json(&fallback_value) {
+                Ok(report) => Ok((
+                    report,
+                    ReportValidationState {
+                        status: "deterministic_fallback".into(),
+                        errors: vec![first_err.to_string(), second_err],
+                    },
+                )),
+                Err(fallback_err) => Err(format!(
+                    "report schema validation failed after repair: {first_err}; {second_err}; deterministic fallback failed: {fallback_err}"
+                )),
+            }
+        }
+    }
 }
 
 async fn spawn_stage(
@@ -2243,8 +2351,15 @@ fn merge_stage_tool_output(target: &mut ToolOutput, mut stage: ToolOutput) {
 pub fn validate_report_json(
     value: &serde_json::Value,
 ) -> std::result::Result<SecurityHarnessReport, String> {
+    prevalidate_report_value(value)?;
     let report: SecurityHarnessReport =
         serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+    validate_report_struct(report)
+}
+
+fn validate_report_struct(
+    report: SecurityHarnessReport,
+) -> std::result::Result<SecurityHarnessReport, String> {
     if report.schema_version != SECURITY_HARNESS_SCHEMA_VERSION {
         return Err(format!(
             "unsupported schema_version {}; expected {}",
@@ -2276,7 +2391,82 @@ pub fn validate_report_json(
             ));
         }
     }
+    for (idx, group) in report.dedupe_groups.iter().enumerate() {
+        if group.id.trim().is_empty()
+            || group.primary_finding_id.trim().is_empty()
+            || group.finding_ids.is_empty()
+            || group.root_cause.trim().is_empty()
+        {
+            return Err(format!(
+                "dedupe_groups[{idx}] {} requires id, primary_finding_id, finding_ids, and root_cause",
+                describe_dedupe_group(group)
+            ));
+        }
+    }
     Ok(report)
+}
+
+fn prevalidate_report_value(value: &serde_json::Value) -> std::result::Result<(), String> {
+    if let Some(findings) = value.get("findings").and_then(|v| v.as_array()) {
+        for (idx, finding) in findings.iter().enumerate() {
+            if missing_or_empty_string(finding.get("root_cause")) {
+                return Err(format!(
+                    "findings[{idx}] {} missing required field root_cause",
+                    describe_value_item(finding, &["id", "title"])
+                ));
+            }
+        }
+    }
+    if let Some(groups) = value.get("dedupe_groups").and_then(|v| v.as_array()) {
+        for (idx, group) in groups.iter().enumerate() {
+            if missing_or_empty_string(group.get("root_cause")) {
+                return Err(format!(
+                    "dedupe_groups[{idx}] {} missing required field root_cause",
+                    describe_value_item(group, &["id", "primary_finding_id"])
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn missing_or_empty_string(value: Option<&serde_json::Value>) -> bool {
+    match value.and_then(|v| v.as_str()) {
+        Some(s) => s.trim().is_empty(),
+        None => true,
+    }
+}
+
+fn describe_value_item(value: &serde_json::Value, keys: &[&str]) -> String {
+    let details = keys
+        .iter()
+        .filter_map(|key| value.get(*key).and_then(|v| v.as_str()).map(|v| (*key, v)))
+        .filter(|(_, value)| !value.trim().is_empty())
+        .map(|(key, value)| format!("{key}={}", clean_inline(value)))
+        .collect::<Vec<_>>();
+    if details.is_empty() {
+        "(unidentified item)".into()
+    } else {
+        format!("({})", details.join(" "))
+    }
+}
+
+fn describe_dedupe_group(group: &DedupeGroup) -> String {
+    let mut details = Vec::new();
+    if !group.id.trim().is_empty() {
+        details.push(format!("id={}", clean_inline(&group.id)));
+    }
+    if !group.primary_finding_id.trim().is_empty() {
+        details.push(format!(
+            "primary_finding_id={}",
+            clean_inline(&group.primary_finding_id)
+        ));
+    }
+    if details.is_empty() {
+        "(unidentified item)".into()
+    } else {
+        format!("({})", details.join(" "))
+    }
 }
 
 pub(crate) fn parse_report_output(raw: &str) -> std::result::Result<SecurityHarnessReport, String> {
@@ -2315,6 +2505,12 @@ pub(crate) fn parse_validate_output(
                         "validator cannot confirm {} without required finding fields: {}",
                         decision.finding_id,
                         missing.join(", ")
+                    ));
+                }
+                if is_no_vulnerability_note(finding) {
+                    return Err(format!(
+                        "validator cannot confirm {} because it is a no-vulnerability verification note, not a reportable finding",
+                        decision.finding_id
                     ));
                 }
             }
@@ -2411,11 +2607,24 @@ pub fn dedupe_findings(findings: &[SecurityFinding]) -> Vec<DedupeGroup> {
         .collect()
 }
 
-fn report_from_checkpoint(checkpoint: &SecurityCheckpoint) -> SecurityHarnessReport {
+pub(crate) fn report_from_checkpoint(checkpoint: &SecurityCheckpoint) -> SecurityHarnessReport {
+    let reportable_ids = reportable_finding_ids(checkpoint);
+    let findings = checkpoint
+        .findings_so_far
+        .iter()
+        .filter(|finding| reportable_ids.contains(&finding.id))
+        .cloned()
+        .collect::<Vec<_>>();
     let rejected_candidates = checkpoint
         .validation_decisions_so_far
         .iter()
         .filter(|d| d.decision == ValidationDecisionKind::Rejected)
+        .cloned()
+        .collect();
+    let trace_evidence = checkpoint
+        .trace_results_so_far
+        .iter()
+        .filter(|trace| reportable_ids.contains(&trace.finding_id))
         .cloned()
         .collect();
     SecurityHarnessReport {
@@ -2423,12 +2632,12 @@ fn report_from_checkpoint(checkpoint: &SecurityCheckpoint) -> SecurityHarnessRep
         run_id: checkpoint.run_id.clone(),
         target: checkpoint.target.clone(),
         scope: checkpoint.scope.clone(),
-        findings: checkpoint.findings_so_far.clone(),
+        findings: findings.clone(),
         rejected_candidates,
         coverage: checkpoint.coverage_gaps.clone(),
         gaps: checkpoint.coverage_gaps.clone(),
-        dedupe_groups: checkpoint.dedupe_groups_so_far.clone(),
-        trace_evidence: checkpoint.trace_results_so_far.clone(),
+        dedupe_groups: dedupe_findings(&findings),
+        trace_evidence,
         stage_history: checkpoint.stage_history.clone(),
         class_coverage: checkpoint.class_coverage.clone(),
     }

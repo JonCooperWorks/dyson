@@ -270,6 +270,7 @@ async fn send_text(request: reqwest::RequestBuilder) -> crate::Result<String> {
     Ok(text)
 }
 
+#[allow(clippy::result_large_err)]
 fn required_name<'a>(name: Option<&'a str>, op: &str) -> Result<&'a str, ToolOutput> {
     let name = name.unwrap_or("").trim();
     if name.is_empty() {

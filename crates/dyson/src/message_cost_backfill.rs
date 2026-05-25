@@ -48,7 +48,7 @@ pub async fn backfill_history(
     let mut report = CostBackfillReport::default();
 
     for chat_id in history.list()? {
-        let chat_report = backfill_chat(history, &client, config, options, &chat_id).await?;
+        let chat_report = backfill_chat(history, client, config, options, &chat_id).await?;
         report.add(chat_report);
     }
 
@@ -96,7 +96,7 @@ async fn backfill_chat(
             continue;
         };
         merge_cost(
-            msg.cost.get_or_insert_with(|| MessageCostMetadata {
+            msg.cost.get_or_insert(MessageCostMetadata {
                 swarm_llm_audit_id: Some(audit_id),
                 display_cost_usd: None,
                 cost_source: None,

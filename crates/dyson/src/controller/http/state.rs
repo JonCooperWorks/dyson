@@ -668,8 +668,7 @@ impl ChatHandle {
         for turn in &candidates {
             if let Err(err) = admit(Message::user(&turn.prompt)) {
                 if admitted < candidates.len() {
-                    self.requeue_front(candidates[admitted..].iter().cloned().collect())
-                        .await;
+                    self.requeue_front(candidates[admitted..].to_vec()).await;
                 }
                 return Err(err);
             }

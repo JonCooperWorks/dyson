@@ -1399,6 +1399,78 @@ fn security_engineer_prompts_include_all_harness_stages() {
     }
 }
 
+fn security_test_finding(
+    id: &str,
+    title: &str,
+    root_cause: &str,
+) -> security_engineer::SecurityFinding {
+    security_engineer::SecurityFinding {
+        id: id.into(),
+        title: title.into(),
+        severity: "medium".into(),
+        vulnerability_class: "auth_authorization".into(),
+        trust_boundary: "HTTP auth boundary".into(),
+        entry_point: "src/lib.rs:1".into(),
+        sink_or_decision: "authorization decision".into(),
+        root_cause: root_cause.into(),
+        affected_paths: vec!["src/lib.rs:1".into()],
+        evidence: vec!["read_file src/lib.rs:1".into()],
+        reachability: "known reachable".into(),
+        tenant_or_instance_impact: "cross-tenant access possible".into(),
+        severity_rationale: "medium because the route crosses an auth boundary".into(),
+        fix_recommendation: "add an owner-scoped authorization check".into(),
+    }
+}
+
+fn security_test_checkpoint() -> security_engineer::SecurityCheckpoint {
+    let mut checkpoint = security_engineer::SecurityCheckpoint::new(
+        "sec-test".into(),
+        security_engineer::TargetRef {
+            repo_path: "/repo".into(),
+            git_ref: None,
+        },
+        "scope".into(),
+        security_engineer::ModelMetadata {
+            provider: "test".into(),
+            model: "test-model".into(),
+            active_cheatsheets: vec![],
+        },
+        1,
+    );
+    checkpoint
+        .class_coverage
+        .push(security_engineer::VulnerabilityClassCoverage {
+            class_id: "auth_authorization".into(),
+            class_name: "Authentication and authorization".into(),
+            considered: true,
+            applicable: true,
+            hunted: true,
+            ..Default::default()
+        });
+    checkpoint
+}
+
+fn confirmed_decision(id: &str) -> security_engineer::ValidationDecision {
+    security_engineer::ValidationDecision {
+        finding_id: id.into(),
+        decision: security_engineer::ValidationDecisionKind::Confirmed,
+        evidence: "validator reproduced the issue".into(),
+        severity: Some("medium".into()),
+    }
+}
+
+#[test]
+fn security_engineer_report_prompts_require_root_cause() {
+    let report = include_str!("prompts/security_engineer_report.md");
+    let repair = include_str!("prompts/security_engineer_report_repair.md");
+    for prompt in [report, repair] {
+        let lower = prompt.to_ascii_lowercase();
+        assert!(prompt.contains("root_cause"));
+        assert!(lower.contains("every finding"));
+        assert!(lower.contains("dedupe group"));
+    }
+}
+
 #[test]
 fn security_engineer_validator_output_cannot_emit_new_findings() {
     let findings = vec![security_engineer::SecurityFinding {
@@ -1450,6 +1522,33 @@ fn security_engineer_validator_rejects_unknown_finding_id() {
 }
 
 #[test]
+fn security_engineer_validator_cannot_confirm_without_root_cause() {
+    let findings = vec![security_test_finding(
+        "finding-001",
+        "missing owner check",
+        "",
+    )];
+    let raw =
+        r#"{"decisions":[{"finding_id":"finding-001","decision":"confirmed","evidence":"ok"}]}"#;
+    let err = security_engineer::parse_validate_output(raw, &findings).unwrap_err();
+    assert!(err.contains("cannot confirm"));
+    assert!(err.contains("root_cause"));
+}
+
+#[test]
+fn security_engineer_validator_cannot_confirm_no_vulnerability_notes() {
+    let findings = vec![security_test_finding(
+        "finding-001",
+        "Login redirect and CSRF protections verified -- no bypass found",
+        "no vulnerability found in the tested redirect and CSRF boundary",
+    )];
+    let raw =
+        r#"{"decisions":[{"finding_id":"finding-001","decision":"confirmed","evidence":"ok"}]}"#;
+    let err = security_engineer::parse_validate_output(raw, &findings).unwrap_err();
+    assert!(err.contains("no-vulnerability verification note"));
+}
+
+#[test]
 fn security_engineer_report_schema_rejects_malformed_reports() {
     let malformed = serde_json::json!({
         "schema_version": 1,
@@ -1460,6 +1559,154 @@ fn security_engineer_report_schema_rejects_malformed_reports() {
     });
     let err = security_engineer::validate_report_json(&malformed).unwrap_err();
     assert!(err.contains("run_id"));
+}
+
+#[test]
+fn security_engineer_report_error_identifies_missing_root_cause_item() {
+    let mut checkpoint = security_test_checkpoint();
+    checkpoint.findings_so_far.push(security_test_finding(
+        "finding-001",
+        "missing owner check",
+        "owner predicate absent",
+    ));
+    checkpoint
+        .validation_decisions_so_far
+        .push(confirmed_decision("finding-001"));
+    let mut value = serde_json::to_value(security_engineer::report_from_checkpoint(&checkpoint))
+        .expect("report serializes");
+    value["findings"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("root_cause");
+    let err = security_engineer::validate_report_json(&value).unwrap_err();
+    assert!(err.contains("findings[0]"));
+    assert!(err.contains("finding-001"));
+    assert!(err.contains("missing required field root_cause"));
+
+    let mut value = serde_json::to_value(security_engineer::report_from_checkpoint(&checkpoint))
+        .expect("report serializes");
+    value["dedupe_groups"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("root_cause");
+    let err = security_engineer::validate_report_json(&value).unwrap_err();
+    assert!(err.contains("dedupe_groups[0]"));
+    assert!(err.contains("dedupe-001"));
+    assert!(err.contains("missing required field root_cause"));
+}
+
+#[test]
+fn security_engineer_report_repair_succeeds_after_truncated_report() {
+    let mut checkpoint = security_test_checkpoint();
+    checkpoint.findings_so_far.push(security_test_finding(
+        "finding-001",
+        "missing owner check",
+        "owner predicate absent",
+    ));
+    checkpoint
+        .validation_decisions_so_far
+        .push(confirmed_decision("finding-001"));
+    let first_err = security_engineer::parse_report_output("{").unwrap_err();
+    let repair_raw =
+        serde_json::to_string(&security_engineer::report_from_checkpoint(&checkpoint)).unwrap();
+    let (report, state) = security_engineer::resolve_repaired_or_fallback_report(
+        &checkpoint,
+        &first_err,
+        &repair_raw,
+    )
+    .unwrap();
+    assert_eq!(state.status, "valid");
+    assert!(state.errors.is_empty());
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].root_cause, "owner predicate absent");
+}
+
+#[test]
+fn security_engineer_deterministic_fallback_succeeds_when_report_and_repair_are_malformed() {
+    let mut checkpoint = security_test_checkpoint();
+    checkpoint.findings_so_far.push(security_test_finding(
+        "finding-001",
+        "missing owner check",
+        "owner predicate absent",
+    ));
+    checkpoint
+        .validation_decisions_so_far
+        .push(confirmed_decision("finding-001"));
+    let first_err = security_engineer::parse_report_output("{").unwrap_err();
+    let (report, state) =
+        security_engineer::resolve_repaired_or_fallback_report(&checkpoint, &first_err, "{")
+            .unwrap();
+    assert_eq!(state.status, "deterministic_fallback");
+    assert_eq!(state.errors.len(), 2);
+    assert_eq!(report.findings.len(), 1);
+}
+
+#[test]
+fn security_engineer_report_from_checkpoint_includes_only_reportable_confirmed_findings() {
+    let mut checkpoint = security_test_checkpoint();
+    checkpoint.findings_so_far.push(security_test_finding(
+        "finding-001",
+        "missing owner check",
+        "owner predicate absent",
+    ));
+    checkpoint.findings_so_far.push(security_test_finding(
+        "finding-002",
+        "Login redirect and CSRF protections verified -- no bypass found",
+        "no vulnerability found in the tested redirect and CSRF boundary",
+    ));
+    checkpoint.findings_so_far.push(security_test_finding(
+        "finding-003",
+        "missing root cause",
+        "",
+    ));
+    checkpoint
+        .validation_decisions_so_far
+        .push(confirmed_decision("finding-001"));
+    checkpoint
+        .validation_decisions_so_far
+        .push(confirmed_decision("finding-002"));
+    checkpoint
+        .validation_decisions_so_far
+        .push(confirmed_decision("finding-003"));
+
+    let report = security_engineer::report_from_checkpoint(&checkpoint);
+    assert_eq!(report.findings.len(), 1);
+    assert_eq!(report.findings[0].id, "finding-001");
+    assert_eq!(report.dedupe_groups.len(), 1);
+    assert_eq!(report.dedupe_groups[0].finding_ids, vec!["finding-001"]);
+}
+
+#[test]
+fn security_engineer_dedupe_stage_uses_only_reportable_confirmed_findings() {
+    let mut checkpoint = security_test_checkpoint();
+    checkpoint.findings_so_far.push(security_test_finding(
+        "finding-001",
+        "missing owner check",
+        "shared root cause",
+    ));
+    checkpoint.findings_so_far.push(security_test_finding(
+        "finding-002",
+        "Provider adapter registry has no unknown-provider fallback -- verified safe",
+        "no vulnerability found in provider fallback handling",
+    ));
+    checkpoint.findings_so_far.push(security_test_finding(
+        "finding-003",
+        "unconfirmed matching root",
+        "shared root cause",
+    ));
+    checkpoint
+        .validation_decisions_so_far
+        .push(confirmed_decision("finding-001"));
+    checkpoint
+        .validation_decisions_so_far
+        .push(confirmed_decision("finding-002"));
+
+    security_engineer::run_dedupe_stage(&mut checkpoint);
+    assert_eq!(checkpoint.dedupe_groups_so_far.len(), 1);
+    assert_eq!(
+        checkpoint.dedupe_groups_so_far[0].finding_ids,
+        vec!["finding-001"]
+    );
 }
 
 #[test]

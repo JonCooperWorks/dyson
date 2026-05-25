@@ -2032,8 +2032,10 @@ mod tests {
 
     #[test]
     fn eager_config_reload_preserves_cli_only_sandbox_flag() {
-        let mut snapshot = Settings::default();
-        snapshot.dangerous_no_sandbox = true;
+        let snapshot = Settings {
+            dangerous_no_sandbox: true,
+            ..Default::default()
+        };
         let mut reloaded = Settings::default();
         assert!(!reloaded.dangerous_no_sandbox);
 

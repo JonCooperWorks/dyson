@@ -141,7 +141,7 @@ fn list_from_disk_subdir(sub: &Path) -> Vec<ArtefactSummary> {
             if !safe_store_id(id) {
                 return None;
             }
-            summary_from_meta(&sub, id)
+            summary_from_meta(sub, id)
         })
         .collect()
 }

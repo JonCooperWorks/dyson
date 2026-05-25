@@ -677,13 +677,12 @@ pub(super) async fn post(
             if drained.is_empty() {
                 break;
             }
-            if let Some(selection) = queued_model_selection(&drained) {
-                if let Err(e) =
+            if let Some(selection) = queued_model_selection(&drained)
+                && let Err(e) =
                     apply_model_selection_to_agent(agent, &state_for_task, &registry, &selection)
-                {
-                    tracing::warn!(error = %e, chat_id = %chat_id, "queued model switch failed");
-                    chat_handle.emit(SseEvent::LlmError { message: e });
-                }
+            {
+                tracing::warn!(error = %e, chat_id = %chat_id, "queued model switch failed");
+                chat_handle.emit(SseEvent::LlmError { message: e });
             }
             let (combined_prompt, combined_attachments) = coalesce_queued(drained);
             next_prompt = combined_prompt;
