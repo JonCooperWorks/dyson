@@ -8,10 +8,12 @@ pub mod protocol;
 pub mod serve;
 pub mod transport;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
 
 use crate::auth::oauth;
 use crate::config::{McpAuthConfig, McpConfig};
@@ -483,30 +485,193 @@ impl Tool for McpRemoteTool {
                 server: self.server_name.clone(),
                 message: format!("failed to parse tools/call result: {e}"),
             })?;
-        let content: String = tool_result
-            .content
-            .iter()
-            .filter_map(|c| match c {
-                McpContent::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut content_parts = Vec::new();
+        let mut files = Vec::new();
+        for (idx, block) in tool_result.content.iter().enumerate() {
+            match block {
+                McpContent::Text { text } => content_parts.push(text.clone()),
+                McpContent::Image { data, mime_type } => {
+                    let (path, bytes) =
+                        save_mcp_image(&self.server_name, &self.tool_name, idx, mime_type, data)?;
+                    files.push(path);
+                    content_parts.push(format!("[image: {mime_type}, {bytes} bytes]"));
+                }
+                McpContent::Unknown => {
+                    content_parts.push("[unsupported MCP content block]".to_string());
+                }
+            }
+        }
+        let content = content_parts.join("\n");
         Ok(ToolOutput {
             content,
             is_error: tool_result.is_error,
             view: None,
-            metadata: None,
-            files: vec![],
+            metadata: Some(serde_json::json!({
+                "dyson_output_kind": "mcp",
+                "mcp_server": self.server_name,
+                "mcp_tool": self.tool_name,
+            })),
+            files,
             checkpoints: vec![],
             artefacts: vec![],
         })
     }
 }
 
+fn save_mcp_image(
+    server_name: &str,
+    tool_name: &str,
+    idx: usize,
+    mime_type: &str,
+    data: &str,
+) -> Result<(PathBuf, usize)> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|e| DysonError::Mcp {
+            server: server_name.to_string(),
+            message: format!("invalid base64 image content from '{tool_name}': {e}"),
+        })?;
+    let extension = image_extension(mime_type);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let filename = format!(
+        "dyson_mcp_{}_{}_{}_{}.{}",
+        safe_filename_part(server_name),
+        safe_filename_part(tool_name),
+        stamp,
+        idx,
+        extension
+    );
+    let path = std::env::temp_dir().join(filename);
+    std::fs::write(&path, &bytes).map_err(|e| DysonError::Mcp {
+        server: server_name.to_string(),
+        message: format!("failed to save MCP image content from '{tool_name}': {e}"),
+    })?;
+    Ok((path, bytes.len()))
+}
+
+fn image_extension(mime_type: &str) -> &'static str {
+    match mime_type {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        _ => "png",
+    }
+}
+
+fn safe_filename_part(value: &str) -> String {
+    let mut out: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    if out.is_empty() {
+        out.push_str("mcp");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct StaticTransport {
+        result: serde_json::Value,
+    }
+
+    #[async_trait]
+    impl McpTransport for StaticTransport {
+        async fn send_request(
+            &self,
+            method: &str,
+            _params: Option<serde_json::Value>,
+        ) -> Result<serde_json::Value> {
+            assert_eq!(method, "tools/call");
+            Ok(self.result.clone())
+        }
+
+        async fn send_notification(
+            &self,
+            _method: &str,
+            _params: Option<serde_json::Value>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn remote_tool(result: serde_json::Value) -> McpRemoteTool {
+        McpRemoteTool {
+            tool_name: "browser_screenshot".to_string(),
+            description: "Take a screenshot".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            transport: Arc::new(StaticTransport { result }),
+            server_name: "browser".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_mcp_text_result_over_100_kib_survives() {
+        let payload = "x".repeat(128 * 1024);
+        let tool = remote_tool(serde_json::json!({
+            "content": [{ "type": "text", "text": payload.clone() }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+
+        let output = tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+
+        assert_eq!(output.content, payload);
+        assert_eq!(output.content.len(), 128 * 1024);
+        assert_eq!(
+            output
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("dyson_output_kind"))
+                .and_then(|v| v.as_str()),
+            Some("mcp")
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_image_content_block_is_not_dropped() {
+        let image_bytes = b"fake png bytes for side channel".to_vec();
+        let image_b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+        let tool = remote_tool(serde_json::json!({
+            "content": [{
+                "type": "image",
+                "mimeType": "image/png",
+                "data": image_b64.clone()
+            }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+
+        let output = tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.content,
+            format!("[image: image/png, {} bytes]", image_bytes.len())
+        );
+        assert!(!output.content.contains(&image_b64));
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(std::fs::read(&output.files[0]).unwrap(), image_bytes);
+        let _ = std::fs::remove_file(&output.files[0]);
+    }
 
     #[test]
     fn extract_code_from_redirect_url() {

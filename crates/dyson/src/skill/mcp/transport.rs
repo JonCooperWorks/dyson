@@ -41,18 +41,131 @@
 // ===========================================================================
 
 use std::collections::HashMap;
+use std::io;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, oneshot};
 
 use crate::error::{DysonError, Result};
 
 use super::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+
+// ---------------------------------------------------------------------------
+// MCP payload caps
+// ---------------------------------------------------------------------------
+
+/// One mebibyte.
+pub(crate) const MIB: usize = 1024 * 1024;
+
+/// Outbound MCP request JSON cap.
+pub(crate) const MAX_MCP_REQUEST_BYTES: usize = 16 * MIB;
+
+/// Inbound MCP result cap, matched to Swarm's MCP runtime/proxy default.
+pub(crate) const MAX_MCP_RESULT_BYTES: usize = 64 * MIB;
+
+pub(crate) const MCP_RESULT_TOO_LARGE_MESSAGE: &str =
+    "MCP result too large: MAX_MCP_RESULT_BYTES exceeded 64 MiB cap";
+
+const MCP_REQUEST_TOO_LARGE_MESSAGE: &str =
+    "MCP request too large: MAX_MCP_REQUEST_BYTES exceeded 16 MiB cap";
+
+type PendingResponse = std::result::Result<JsonRpcResponse, String>;
+
+fn enforce_mcp_request_cap(server: &str, json: &str) -> Result<()> {
+    if json.len() > MAX_MCP_REQUEST_BYTES {
+        return Err(DysonError::Mcp {
+            server: server.to_string(),
+            message: MCP_REQUEST_TOO_LARGE_MESSAGE.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn mcp_result_too_large(server: &str) -> DysonError {
+    DysonError::Mcp {
+        server: server.to_string(),
+        message: MCP_RESULT_TOO_LARGE_MESSAGE.to_string(),
+    }
+}
+
+fn result_too_large_io_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        MCP_RESULT_TOO_LARGE_MESSAGE.to_string(),
+    )
+}
+
+async fn read_line_capped<R>(reader: &mut R, max_bytes: usize) -> io::Result<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            return String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+        }
+
+        if let Some(newline) = available.iter().position(|b| *b == b'\n') {
+            if bytes.len().saturating_add(newline) > max_bytes {
+                return Err(result_too_large_io_error());
+            }
+            bytes.extend_from_slice(&available[..newline]);
+            reader.consume(newline + 1);
+            if bytes.last().is_some_and(|b| *b == b'\r') {
+                bytes.pop();
+            }
+            return String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+        }
+
+        if bytes.len().saturating_add(available.len()) > max_bytes {
+            return Err(result_too_large_io_error());
+        }
+        let consumed = available.len();
+        bytes.extend_from_slice(available);
+        reader.consume(consumed);
+    }
+}
+
+async fn read_response_text_capped(
+    mut response: reqwest::Response,
+    server: &str,
+) -> Result<String> {
+    if response
+        .content_length()
+        .is_some_and(|len| usize::try_from(len).map_or(true, |len| len > MAX_MCP_RESULT_BYTES))
+    {
+        return Err(mcp_result_too_large(server));
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| DysonError::Mcp {
+        server: server.to_string(),
+        message: format!("failed to read response: {e}"),
+    })? {
+        if body.len().saturating_add(chunk.len()) > MAX_MCP_RESULT_BYTES {
+            return Err(mcp_result_too_large(server));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    String::from_utf8(body).map_err(|e| DysonError::Mcp {
+        server: server.to_string(),
+        message: format!("failed to decode response as UTF-8: {e}"),
+    })
+}
 
 // ---------------------------------------------------------------------------
 // McpTransport trait
@@ -89,7 +202,7 @@ pub trait McpTransport: Send + Sync {
 pub struct StdioTransport {
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
     next_id: AtomicU64,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<PendingResponse>>>>,
     _child: Arc<Mutex<Child>>,
     /// Background task handles — aborted on drop to prevent orphaned tasks.
     _reader_handle: tokio::task::JoinHandle<()>,
@@ -137,17 +250,33 @@ impl StdioTransport {
         })?;
 
         let stdin = Arc::new(Mutex::new(stdin));
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<PendingResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         // Background reader task.
         let pending_clone = Arc::clone(&pending);
         let command_name = command.to_string();
         let reader_handle = tokio::spawn(async move {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
+            let mut reader = BufReader::new(stdout);
 
-            while let Ok(Some(line)) = lines.next_line().await {
+            loop {
+                let line = match read_line_capped(&mut reader, MAX_MCP_RESULT_BYTES).await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(e) => {
+                        let message = e.to_string();
+                        tracing::warn!(
+                            server = command_name,
+                            error = %message,
+                            "failed to read MCP server output"
+                        );
+                        let mut pending = pending_clone.lock().await;
+                        for (_, tx) in pending.drain() {
+                            let _ = tx.send(Err(message.clone()));
+                        }
+                        break;
+                    }
+                };
                 if line.is_empty() {
                     continue;
                 }
@@ -167,7 +296,7 @@ impl StdioTransport {
                 if let Some(id) = response.id {
                     let mut pending = pending_clone.lock().await;
                     if let Some(tx) = pending.remove(&id) {
-                        let _ = tx.send(response);
+                        let _ = tx.send(Ok(response));
                     }
                 }
             }
@@ -255,6 +384,7 @@ impl McpTransport for StdioTransport {
         }
 
         let json = serde_json::to_string(&request)?;
+        enforce_mcp_request_cap(method, &json)?;
         {
             let mut stdin = self.stdin.lock().await;
             stdin
@@ -278,7 +408,14 @@ impl McpTransport for StdioTransport {
         const MCP_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
         let response = match tokio::time::timeout(MCP_RESPONSE_TIMEOUT, rx).await {
-            Ok(Ok(resp)) => resp,
+            Ok(Ok(Ok(resp))) => resp,
+            Ok(Ok(Err(message))) => {
+                self.pending.lock().await.remove(&id);
+                return Err(DysonError::Mcp {
+                    server: method.to_string(),
+                    message,
+                });
+            }
             Ok(Err(_)) => {
                 // Channel closed — server died. Clean up the pending entry.
                 self.pending.lock().await.remove(&id);
@@ -320,6 +457,7 @@ impl McpTransport for StdioTransport {
     ) -> Result<()> {
         let notification = JsonRpcNotification::new(method, params);
         let json = serde_json::to_string(&notification)?;
+        enforce_mcp_request_cap(method, &json)?;
 
         let mut stdin = self.stdin.lock().await;
         stdin
@@ -456,10 +594,11 @@ impl HttpTransport {
     ) -> crate::error::Result<serde_json::Value> {
         if !response.status().is_success() {
             let status = response.status();
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "failed to read body".into());
+            let body = match read_response_text_capped(response, &self.url).await {
+                Ok(body) => body,
+                Err(e) if e.to_string().contains(MCP_RESULT_TOO_LARGE_MESSAGE) => return Err(e),
+                Err(_) => "failed to read body".into(),
+            };
             return Err(DysonError::Mcp {
                 server: self.url.clone(),
                 message: format!("HTTP {status}: {body}"),
@@ -476,10 +615,7 @@ impl HttpTransport {
                     .is_some_and(|m| m.trim().eq_ignore_ascii_case("text/event-stream"))
             });
 
-        let body = response.text().await.map_err(|e| DysonError::Mcp {
-            server: self.url.clone(),
-            message: format!("failed to read response: {e}"),
-        })?;
+        let body = read_response_text_capped(response, &self.url).await?;
 
         let rpc_body: std::borrow::Cow<'_, str> = if is_sse {
             match extract_last_sse_data(&body) {
@@ -562,6 +698,7 @@ impl McpTransport for HttpTransport {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let request = JsonRpcRequest::new(id, method, params);
         let json = serde_json::to_string(&request)?;
+        enforce_mcp_request_cap(&self.url, &json)?;
 
         let response = self.send_http(&json).await?;
 
@@ -578,10 +715,11 @@ impl McpTransport for HttpTransport {
                 return self.parse_rpc_response(retry_response).await;
             }
 
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "failed to read body".into());
+            let body = match read_response_text_capped(response, &self.url).await {
+                Ok(body) => body,
+                Err(e) if e.to_string().contains(MCP_RESULT_TOO_LARGE_MESSAGE) => return Err(e),
+                Err(_) => "failed to read body".into(),
+            };
             return Err(DysonError::Mcp {
                 server: self.url.clone(),
                 message: format!("HTTP 401 Unauthorized: {body}"),
@@ -598,6 +736,7 @@ impl McpTransport for HttpTransport {
     ) -> Result<()> {
         let notification = JsonRpcNotification::new(method, params);
         let json = serde_json::to_string(&notification)?;
+        enforce_mcp_request_cap(&self.url, &json)?;
 
         let mut req = self.build_request(&json).await?;
 
@@ -652,6 +791,68 @@ mod tests {
         let transport = spawn_echo_server().await;
         let result = transport.send_request("test/method", None).await.unwrap();
         assert_eq!(result, serde_json::json!({"ok": true}));
+    }
+
+    #[tokio::test]
+    async fn stdio_stdout_frame_above_result_cap_fails_explicitly() {
+        let mut reader = BufReader::new(tokio::io::repeat(b'a'));
+        let err = read_line_capped(&mut reader, MAX_MCP_RESULT_BYTES)
+            .await
+            .expect_err("line above cap should fail");
+
+        assert_eq!(err.to_string(), MCP_RESULT_TOO_LARGE_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn http_response_above_result_cap_fails_explicitly() {
+        use std::convert::Infallible;
+
+        use http_body_util::StreamBody;
+        use hyper::body::{Bytes, Frame, Incoming};
+        use hyper::service::service_fn;
+        use hyper::{Request, Response};
+        use hyper_util::rt::TokioIo;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept connection");
+            let io = TokioIo::new(stream);
+            let service = service_fn(|_req: Request<Incoming>| async move {
+                let body_stream = async_stream::stream! {
+                    for _ in 0..=MAX_MCP_RESULT_BYTES / MIB {
+                        yield Ok::<_, Infallible>(Frame::data(Bytes::from(vec![b'a'; MIB])));
+                    }
+                };
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(StreamBody::new(body_stream))
+                        .expect("response"),
+                )
+            });
+
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
+        });
+
+        let transport = HttpTransport::new(
+            &format!("http://{addr}/mcp"),
+            Box::new(crate::auth::DangerousNoAuth),
+        );
+        let err = transport
+            .send_request("tools/call", Some(serde_json::json!({})))
+            .await
+            .expect_err("oversized HTTP MCP response should fail");
+        server.abort();
+
+        assert!(
+            err.to_string().contains(MCP_RESULT_TOO_LARGE_MESSAGE),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

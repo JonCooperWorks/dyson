@@ -91,15 +91,15 @@ impl ResultFormatter {
             "file_write" => file_write_summary(call, output, duration),
             _ => generic_summary(call, output, duration),
         };
-        self.build(summary, &output.content)
+        self.build(summary, &output.content, !is_mcp_output(output))
     }
 
     /// Shared builder: sanitizes output and computes `truncated` after
     /// sanitization so the flag reflects what the LLM actually sees.
     /// Every tool output flows through here — no bypass path.
-    fn build(&self, summary: String, content: &str) -> FormattedResult {
+    fn build(&self, summary: String, content: &str, mark_truncated: bool) -> FormattedResult {
         let sanitized = sanitize_tool_output(content).into_owned();
-        let truncated = sanitized.len() > self.truncation_threshold;
+        let truncated = mark_truncated && sanitized.len() > self.truncation_threshold;
         FormattedResult {
             summary,
             output: sanitized,
@@ -168,6 +168,15 @@ fn generic_summary(call: &ToolCall, output: &ToolOutput, duration: Duration) -> 
     let ms = duration.as_millis();
     let status = if output.is_error { "error" } else { "ok" };
     format!("{}: {} ({}ms)", call.name, status, ms)
+}
+
+fn is_mcp_output(output: &ToolOutput) -> bool {
+    output
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("dyson_output_kind"))
+        .and_then(|v| v.as_str())
+        == Some("mcp")
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +385,38 @@ mod test_result_formatter {
             Duration::from_millis(50),
         );
         assert!(fmt.truncated);
+    }
+
+    #[test]
+    fn mcp_outputs_above_formatter_threshold_are_not_labeled_truncated() {
+        let f = ResultFormatter::default();
+        let payload = format!("{}tail", "x".repeat(50_000));
+        let mut output = ToolOutput::success(payload.clone());
+        output.metadata = Some(json!({"dyson_output_kind": "mcp"}));
+
+        let fmt = f.format(
+            &ToolCall::new("browser_screenshot", json!({})),
+            &output,
+            Duration::from_millis(50),
+        );
+        let llm_message = fmt.to_llm_message();
+
+        assert!(!fmt.truncated);
+        assert!(!llm_message.contains("[output truncated]"));
+        assert!(llm_message.ends_with("tail"));
+    }
+
+    #[test]
+    fn native_outputs_still_get_truncation_marker() {
+        let f = ResultFormatter::default();
+        let output = ToolOutput::success("x".repeat(50_000));
+        let fmt = f.format(
+            &ToolCall::new("bash", json!({"command": "cat big"})),
+            &output,
+            Duration::from_millis(50),
+        );
+
+        assert!(fmt.to_llm_message().contains("[output truncated]"));
     }
 
     #[test]
