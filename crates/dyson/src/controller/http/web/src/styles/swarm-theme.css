@@ -398,11 +398,14 @@ textarea {
   height: auto;
   margin: 0;
   padding: 0;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 .topbar .brand .mark { display: none; }
 .topbar .brand .name {
   display: block;
+  min-width: 0;
+  overflow: hidden;
   background: none;
   color: var(--fg);
   font-family: var(--mono);
@@ -410,6 +413,8 @@ textarea {
   font-size: 16px;
   line-height: 1.5;
   letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .topbar nav {
   display: flex;
@@ -422,6 +427,7 @@ textarea {
   display: inline-flex;
   align-items: center;
   gap: 0;
+  min-width: 0;
   min-height: 0;
   height: auto;
   padding: 4px 8px;
@@ -458,6 +464,8 @@ textarea {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  max-width: min(38vw, 360px);
+  min-width: 0;
   min-height: 0;
   height: auto;
   padding: 4px 8px;
@@ -475,10 +483,17 @@ textarea {
   box-shadow: none;
 }
 .topbar .meta .select .label {
+  flex: 0 0 auto;
   color: var(--fg-faint);
   font-size: 11px;
   letter-spacing: 0;
   text-transform: none;
+}
+.topbar .meta .select .mono {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .topbar .menu-toggle {
   width: 32px;
@@ -705,6 +720,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   min-height: 46px;
   padding: 10px 24px;
   border-bottom: 1px solid var(--border);
@@ -714,8 +730,13 @@ textarea {
 }
 .centre .context::after { display: none; }
 .centre .context .crumbs {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: var(--fg-muted);
   font: 500 12px/1.35 var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .centre .context .crumbs .c-leaf { color: var(--fg); }
 .centre .context .crumbs .c-sep,
@@ -724,6 +745,9 @@ textarea {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
 }
 .mcp-summary {
   display: inline-flex;
@@ -756,11 +780,13 @@ textarea {
 
 .transcript {
   flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
   padding: 28px 0 220px;
 }
 .transcript .inner {
+  min-width: 0;
   max-width: 840px;
   margin: 0 auto;
   padding: 0 36px;
@@ -773,6 +799,7 @@ textarea {
   left: 0;
   right: 0;
   bottom: 0;
+  min-width: 0;
   z-index: 5;
   display: flex;
   justify-content: center;
@@ -992,21 +1019,28 @@ textarea {
   display: flex;
   align-items: baseline;
   gap: 10px;
+  min-width: 0;
   color: var(--fg-muted);
   font: 500 11px/1.35 var(--mono);
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
 .turn .who .name {
+  min-width: 0;
+  overflow: hidden;
   color: var(--fg);
   font-weight: 600;
   letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .turn .who .when {
   margin-left: auto;
   color: var(--fg-muted);
 }
 .turn .who .model {
+  min-width: 0;
+  overflow: hidden;
   padding: 1px 6px;
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -1015,6 +1049,8 @@ textarea {
   font-size: 10.5px;
   letter-spacing: 0;
   text-transform: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .prose {
   min-width: 0;
@@ -1181,6 +1217,8 @@ textarea {
 }
 .turn .rating-badge,
 .turn .queued-badge {
+  max-width: 100%;
+  overflow: hidden;
   margin-left: 8px;
   padding: 3px 7px;
   border: 1px solid var(--border);
@@ -1189,6 +1227,8 @@ textarea {
   color: var(--fg-muted);
   font-size: 11px;
   line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .turn .copy-turn {
   position: sticky;
@@ -1236,6 +1276,7 @@ textarea {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
   max-width: 100%;
   padding: 10px 14px;
   border: 1px solid var(--border);
@@ -1260,6 +1301,7 @@ textarea {
 .toolchip .icon {
   display: grid;
   place-items: center;
+  flex: 0 0 auto;
   width: 22px;
   height: 22px;
   border: 1px solid var(--border);
@@ -1295,6 +1337,7 @@ textarea {
   display: inline-flex;
   gap: 12px;
   flex: 0 0 auto;
+  min-width: 0;
   color: var(--fg-muted);
   font-size: 11px;
 }
@@ -1414,6 +1457,8 @@ textarea {
   align-items: center;
   gap: 12px;
   width: max-content;
+  max-width: 100%;
+  min-width: 0;
   min-height: 32px;
   margin-bottom: 8px;
   padding: 0 14px;
@@ -1436,8 +1481,12 @@ textarea {
   box-shadow: none;
 }
 .typing .tname {
+  min-width: 0;
+  overflow: hidden;
   color: var(--accent);
   text-shadow: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .typing .jump {
   margin-left: 4px;
@@ -1450,12 +1499,14 @@ textarea {
   position: relative;
   width: 100%;
   max-width: 840px;
+  min-width: 0;
 }
 .composer {
   display: flex;
   flex-direction: column;
   width: 100%;
   max-width: 840px;
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-1);
@@ -1489,11 +1540,13 @@ textarea {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 0;
   padding: 8px 10px 10px;
   border-top: 1px solid var(--border);
 }
 .composer .row .sep { flex: 1; }
 .composer .row .btn {
+  flex: 0 0 auto;
   min-height: 30px;
   padding: 5px 10px;
   border-color: transparent;
@@ -1507,6 +1560,7 @@ textarea {
   color: var(--fg);
 }
 .composer .send {
+  flex: 0 0 auto;
   min-height: 30px;
   padding: 5px 14px;
   border-color: transparent;
@@ -1536,18 +1590,27 @@ textarea {
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
+  min-width: 0;
   padding: 8px 14px 2px;
 }
 .composer .att {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  max-width: 100%;
+  min-width: 0;
   padding: 4px 9px 4px 7px;
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg-2);
   color: var(--fg-muted);
   font: 500 11px/1 var(--mono);
+}
+.composer .att span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .composer .att .sz { color: var(--fg-faint); }
 .composer .att .x:hover { color: var(--danger); }
@@ -1658,6 +1721,7 @@ textarea {
   display: inline-flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   max-width: 100%;
   padding: 10px 14px;
   color: var(--fg-muted);
@@ -1668,14 +1732,20 @@ textarea {
   box-shadow: none;
 }
 .fileblock .name {
+  min-width: 0;
+  overflow: hidden;
   color: var(--fg);
   font: 500 13px/1.3 var(--sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .fileblock .sz {
+  flex: 0 0 auto;
   color: var(--fg-muted);
   font-size: 11px;
 }
 .fileblock .dl {
+  flex: 0 0 auto;
   margin-left: 8px;
   padding-left: 10px;
   border-left: 1px solid var(--border);
@@ -1688,6 +1758,7 @@ textarea {
   flex-direction: column;
   width: max-content;
   max-width: 480px;
+  min-width: 0;
   padding: 8px;
 }
 .fileblock.image img {
@@ -1706,6 +1777,7 @@ textarea {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
   max-width: 100%;
 }
 .artefact-chat-block.image {
@@ -1723,6 +1795,8 @@ textarea {
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
 }
 .artefact-share-status {
   max-width: 220px;
@@ -1736,14 +1810,19 @@ textarea {
   color: var(--err);
 }
 .artefact-share-link {
+  max-width: 100%;
+  overflow: hidden;
   color: var(--accent);
   font-size: 11px;
   text-decoration: none;
   text-shadow: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .att-card {
   display: flex;
   gap: 12px;
+  min-width: 0;
   max-width: 420px;
   padding: 10px 12px;
 }
@@ -1759,9 +1838,16 @@ textarea {
   color: var(--fg-muted);
   font: 700 10px/1 var(--mono);
 }
+.att-card .info {
+  min-width: 0;
+}
 .att-card .info .fn {
+  min-width: 0;
+  overflow: hidden;
   color: var(--fg);
   font: 500 13px/1.3 var(--sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .att-card .info .sz {
   color: var(--fg-muted);
@@ -2152,9 +2238,28 @@ textarea {
   .topbar {
     padding: 6px 10px;
     gap: 8px;
+    min-width: 0;
+  }
+  .topbar .menu-toggle {
+    flex: 0 0 32px;
+  }
+  .topbar .brand {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .topbar .brand .name {
+    max-width: 100%;
+  }
+  .topbar nav {
+    flex: 0 0 auto;
+    gap: 2px;
   }
   .topbar nav button {
-    padding: 4px 6px;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 30px;
+    height: 30px;
+    padding: 4px;
     font-size: 12px;
   }
   .topbar .meta .cmdk { display: none; }
@@ -2163,10 +2268,35 @@ textarea {
   .topbar nav button svg { display: block; }
   .topbar .meta .select .label,
   .topbar .meta .select .mono { display: none; }
-  .topbar .meta .select { padding: 4px 6px; }
-  .mcp-summary { max-width: 46vw; }
+  .topbar .meta {
+    flex: 0 0 auto;
+    gap: 4px;
+  }
+  .topbar .meta .select {
+    justify-content: center;
+    width: 30px;
+    padding: 4px;
+  }
+  .centre .context {
+    gap: 8px;
+    min-width: 0;
+    padding: 8px 12px;
+  }
+  .centre .context .crumbs {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .centre .context .right {
+    flex: 0 1 auto;
+    gap: 4px;
+    max-width: 46%;
+    min-width: 0;
+  }
+  .mcp-summary { max-width: 100%; }
+  .mcp-summary-label { display: none; }
   .mcp-summary-chip { max-width: 92px; }
   .mcp-summary-chip:nth-of-type(n+4) { display: none; }
+  .mcp-summary-more { max-width: 52px; }
   .transcript {
     padding: 18px 0 200px;
     overflow-x: hidden;
@@ -2179,7 +2309,8 @@ textarea {
   }
   .composer-dock {
     bottom: var(--kb-inset, 0px);
-    padding: 70px 14px 16px;
+    max-width: 100vw;
+    padding: 64px 10px max(12px, env(safe-area-inset-bottom));
   }
   .empty-state {
     padding: 44px 4px 0;
@@ -2223,22 +2354,114 @@ textarea {
     min-width: 0;
     max-width: 100%;
   }
+  .turn .who {
+    flex-wrap: wrap;
+    gap: 6px 8px;
+    min-width: 0;
+  }
+  .turn .who .name {
+    max-width: 100%;
+  }
+  .turn .who .when {
+    margin-left: 0;
+  }
+  .turn .who .model,
+  .turn .queued-badge,
+  .turn .rating-badge {
+    max-width: 100%;
+  }
+  .turn .copy-turn {
+    margin-bottom: -20px;
+  }
   .prose,
   .prose p {
     max-width: 100%;
     word-break: break-word;
   }
-  .composer .row {
-    flex-wrap: nowrap;
+  .toolchip {
+    gap: 8px;
+    padding: 8px 10px;
+  }
+  .toolchip .icon {
+    width: 20px;
+    height: 20px;
+  }
+  .toolchip .meta {
+    gap: 6px;
+    max-width: 72px;
+    overflow: hidden;
+  }
+  .toolchip .meta .dur { display: none; }
+  .toolchip .open {
+    padding-left: 6px;
+  }
+  .toolchip .open .lbl { display: none; }
+  .toolblock-actions {
+    flex-wrap: wrap;
     min-width: 0;
   }
+  .typing {
+    width: auto;
+    max-width: 100%;
+  }
+  .typing .tname {
+    max-width: 44vw;
+  }
+  .run-status {
+    min-width: 0;
+    flex-wrap: wrap;
+  }
+  .run-status .sep { display: none; }
+  .run-status .tname {
+    min-width: 0;
+    max-width: 42vw;
+  }
+  .composer-wrap {
+    max-width: 100%;
+  }
+  .composer .row {
+    gap: 3px;
+    flex-wrap: nowrap;
+    min-width: 0;
+    padding: 7px 8px 9px;
+  }
+  .composer .row .btn {
+    min-width: 30px;
+    padding: 5px 8px;
+  }
   .composer .row .btn-label { display: none; }
+  .composer .row .queue-toggle {
+    max-width: 32px;
+    overflow: hidden;
+    padding: 5px 8px;
+  }
   .composer .row .model-label {
     min-width: 0;
-    max-width: 120px;
+    max-width: 72px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .composer .send {
+    padding: 5px 10px;
+  }
+  .composer .atts {
+    padding: 7px 8px 0;
+  }
+  .composer .att {
+    max-width: 100%;
+    overflow: hidden;
+  }
+  .fileblock {
+    width: 100%;
+  }
+  .fileblock .dl {
+    margin-left: 0;
+    padding-left: 8px;
+  }
+  .artefact-chat-block,
+  .artefact-share-inline {
+    width: 100%;
   }
   .fileblock.image,
   .att-card {
