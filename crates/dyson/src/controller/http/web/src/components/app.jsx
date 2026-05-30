@@ -302,8 +302,7 @@ function App() {
 
   const onToggleLeft = () => {
     // Artefacts tab has no LeftRail — hamburger drives the tree drawer
-    // instead, otherwise mobile readers are a one-way door until users
-    // find the back button inside the title bar.
+    // instead. Mind uses the same topbar control for its workspace list.
     if (view === 'artefacts') { requestToggleArtefactsDrawer(); return; }
     setShowLeft(s => !s);
   };
@@ -346,7 +345,6 @@ function App() {
             <MindView
               showSide={showLeft}
               onHideSide={() => setShowLeft(false)}
-              onShowSide={() => setShowLeft(true)}
               path={mindPath}
               setPath={setMindPath}/>
           </Suspense>

@@ -201,19 +201,23 @@ describe('ArtefactsView — tree sidebar', () => {
 });
 
 describe('ArtefactReader — empty-id branch stays reachable', () => {
-  it('renders the back button even when id is null', () => {
+  it('renders reader chrome without a duplicate menu button when id is null', () => {
     const { container, queryByText } = renderWithApi(
-      <ArtefactReader id={null} onShowSide={() => {}}/>
+      <ArtefactReader id={null}/>
     );
-    expect(container.querySelector('.artefact-back')).toBeTruthy();
+    expect(container.querySelector('.artefact-reader-head')).toBeTruthy();
+    expect(container.querySelector('.artefact-back')).toBeNull();
     expect(queryByText(/Select an artefact to read/)).toBeTruthy();
   });
 
-  it('does not render the back button when onShowSide is undefined (desktop embed)', () => {
-    // onShowSide omitted → back button hidden at the source level, not
-    // just via CSS.  Guards against a future refactor that always wires
-    // the prop and leaves a dead button next to the title on desktop.
-    const { container } = renderWithApi(<ArtefactReader id={null}/>);
+  it('keeps the loaded reader header to one drawer opener: the topbar', async () => {
+    const client = {
+      listArtefacts: async () => [],
+      loadArtefact: async () => ({ body: '# Report', chatId: 'c1' }),
+    };
+    const { container } = renderWithApi(<ArtefactReader id="a1" chatId="c1"/>, client);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(container.querySelector('.artefact-reader-head')).toBeTruthy();
     expect(container.querySelector('.artefact-back')).toBeNull();
   });
 });

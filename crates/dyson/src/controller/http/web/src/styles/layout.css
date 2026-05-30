@@ -588,26 +588,8 @@
 .mind-editor:focus { background: oklch(0.15 0.014 262 / 0.3); }
 .mind-editor:disabled { color: var(--mute); }
 
-/* Mobile-only back button in the artefact reader's title bar.  On
-   desktop the artefact list is a permanent grid column, so the
-   button is hidden — there's nothing to go "back" to.  On mobile the
-   list collapses when an artefact is picked and this is how the user
-   re-opens it. */
-.artefact-back {
-  display: none;
-  background: transparent; border: 0;
-  color: var(--fg-dim);
-  width: 28px; height: 28px;
-  align-items: center; justify-content: center;
-  cursor: pointer; border-radius: 4px;
-  flex: 0 0 auto;
-}
-.artefact-back:hover { background: var(--panel); color: var(--fg); }
-
-/* Tap-to-close target for the mobile artefact drawer.  Sits inside
-   .mind under .mind-side so the visible 20vw strip of .mind-pane to
-   the right of the drawer actually does something when tapped.
-   Hidden on desktop, where the sidebar is a permanent grid column. */
+/* Tap-to-close target for the mobile drawers.  Sits inside .mind under
+   .mind-side, hidden on desktop where sidebars are permanent columns. */
 .mind-scrim { display: none; }
 
 /* ---------- artefact tree (mind-side) ---------- */
@@ -994,7 +976,6 @@
   }
   .artefact-text-reader { padding: 18px 20px 28px; }
   .artefact-text-preview { font-size: 12.5px; line-height: 1.6; }
-  .artefact-back { display: inline-flex; }
   .body.no-left.no-right .left { display: none; }
   .kbd { display: none; }
 }

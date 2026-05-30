@@ -201,8 +201,10 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
   // views-secondary.jsx when we code-split the non-initial tabs.  The
   // grep-based regressions below follow them.
   const appSrc = src('components/app.jsx');
+  const primaryViews = src('components/views.jsx');
   const viewsSrc = src('components/views-secondary.jsx');
   const layoutCss = src('styles/layout.css');
+  const swarmThemeCss = src('styles/swarm-theme.css');
 
   it('ArtefactsView drives .show-side from state, not hardcoded', () => {
     // Regression for "the artefacts sidebar just darkens the screen on
@@ -221,25 +223,26 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
     expect(viewsSrc).toContain('useState(!initialPending)');
   });
 
-  it('ArtefactReader exposes a mobile back button', () => {
-    // Reader is now injectable for tests (client prop) but still takes
-    // the back-button handler.
-    expect(viewsSrc, 'ArtefactReader must accept onShowSide').toMatch(/function ArtefactReader\(\{[^}]*\bonShowSide\b/);
-    expect(viewsSrc, 'reader chrome must render the back button').toContain('artefact-back');
-    // ArtefactsView must wire the back button up to its setShowSide.
-    expect(viewsSrc).toContain('onShowSide={() => setShowSide(true)}');
-  });
-
-  it('artefact-back is hidden on desktop, visible on mobile', () => {
-    // Desktop: display:none in the base rule so the button doesn't
-    // sit next to the title at full width.
-    expect(layoutCss).toMatch(/\.artefact-back\s*\{[^}]*display:\s*none/);
-    // Mobile: flipped to inline-flex inside the @media (max-width: 760px)
-    // block.  Looser regex — just assert the rule exists somewhere
-    // after the mobile breakpoint opens.
-    const mobileBlock = layoutCss.split('@media (max-width: 760px)')[1] || '';
-    expect(mobileBlock, 'mobile media query must show .artefact-back')
-      .toMatch(/\.artefact-back\s*\{[^}]*display:\s*inline-flex/);
+  it('topbar hamburger is the only mobile drawer opener in secondary views', () => {
+    // The reader/editor chrome used to add its own menu button, so
+    // mobile showed two identical hamburgers. The topbar already names
+    // and owns the active drawer; keep the secondary panes clean.
+    expect(appSrc, 'Artefacts tab hamburger must still toggle the tree drawer')
+      .toContain("if (view === 'artefacts') { requestToggleArtefactsDrawer(); return; }");
+    expect(primaryViews, 'TopBar must label the drawer for Mind')
+      .toContain("? 'Workspace files'");
+    expect(primaryViews, 'TopBar must label the drawer for Artefacts')
+      .toContain("? 'Artefacts'");
+    expect(primaryViews, 'TopBar hamburger must expose the dynamic label')
+      .toContain('aria-label={drawerTitle}');
+    expect(viewsSrc, 'secondary panes must not accept private drawer opener props')
+      .not.toContain('onShowSide');
+    expect(viewsSrc, 'reader/editor chrome must not render a second hamburger')
+      .not.toContain('artefact-back');
+    expect(layoutCss, 'dead secondary hamburger styles must be gone')
+      .not.toContain('.artefact-back');
+    expect(swarmThemeCss, 'alternate theme must not preserve dead secondary hamburger styles')
+      .not.toContain('.artefact-back');
   });
 
   it('.mind is a positioning context so the mobile drawer stays below the topbar', () => {
@@ -257,22 +260,16 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
       .toMatch(/position:\s*relative/);
   });
 
-  it('empty ArtefactReader still exposes the mobile back button', () => {
-    // Regression for "the empty reader is a one-way door".  The
-    // `if (!id)` branch used to early-return a centered <section>
-    // with no title bar at all — so when showSide was false and
-    // selected was null (chip pointing at a deleted artefact, race
-    // on first paint, etc.), there was no back button to re-open
-    // the drawer.  The empty branch must now render the title bar
-    // including the back button.
+  it('empty ArtefactReader keeps chrome without a duplicate drawer button', () => {
+    // Regression guard for the empty reader branch: it still needs the
+    // same title bar as loaded artefacts, but drawer access belongs to
+    // the topbar hamburger.
     const emptyBranch = viewsSrc.match(/if\s*\(\s*!id\s*\)\s*\{[\s\S]*?return\s*\([\s\S]*?\);\s*\}/);
     expect(emptyBranch, 'ArtefactReader must have an if (!id) branch').toBeTruthy();
-    // The empty branch renders `{back}` — the same JSX handle that the
-    // non-empty branch uses, which is the `.artefact-back` button.  The
-    // variable indirection is intentional: one definition, reused in
-    // both branches of the reader.
-    expect(emptyBranch[0], 'empty reader branch must render the back handle')
-      .toContain('{back}');
+    expect(emptyBranch[0], 'empty reader branch must render the title bar')
+      .toContain('artefact-reader-head');
+    expect(emptyBranch[0], 'empty reader branch must not render a second menu button')
+      .not.toContain('artefact-back');
   });
 
   it('mobile drawer has a tap-to-close scrim', () => {
@@ -303,12 +300,12 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
     expect(mindBranch, 'App must still have a Mind branch').toBeTruthy();
     expect(mindBranch[0], 'Mind branch must not render the generic fixed app scrim')
       .not.toContain('className="scrim"');
-    expect(viewsSrc, 'MindView must accept an in-pane drawer opener')
-      .toMatch(/export function MindView\(\{[^}]*\bonShowSide\b/);
+    expect(viewsSrc, 'MindView must use the topbar drawer opener, not an in-pane duplicate')
+      .toMatch(/export function MindView\(\{[^}]*\bshowSide\b[^}]*\bonHideSide\b/);
+    expect(viewsSrc, 'Mind editor chrome must not render its own hamburger')
+      .not.toContain('title="Back to file list"');
     expect(viewsSrc, 'MindView must render the drawer scrim below .mind-side')
       .toContain('{showSide && <div className="mind-scrim" onClick={onHideSide}/>}');
-    expect(viewsSrc, 'Mind editor chrome must expose the mobile file-list button')
-      .toContain('title="Back to file list"');
   });
 
   it('mobile drawer is full-width so no dead pane strip shows through', () => {

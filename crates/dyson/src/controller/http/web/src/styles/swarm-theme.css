@@ -909,19 +909,6 @@ textarea {
 }
 .mind-editor:focus { background: var(--bg); }
 .mind-editor:disabled { color: var(--fg-muted); }
-.artefact-back {
-  display: none;
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--fg-muted);
-}
-.artefact-back:hover {
-  background: var(--bg-2);
-  color: var(--fg);
-}
 .mind-scrim { display: none; }
 .artefact-tree-head {
   padding: 12px 16px;
@@ -2337,7 +2324,6 @@ textarea {
     z-index: 4;
   }
   .mind-editor { padding: 16px 20px; }
-  .artefact-back { display: inline-flex; }
   .body.no-left.no-right .left { display: none; }
   .kbd { display: none; }
   .turn {

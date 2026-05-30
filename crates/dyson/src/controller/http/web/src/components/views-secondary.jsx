@@ -23,7 +23,7 @@ import {
   sessions, updateSession, ensureSession,
 } from '../store/sessions.js';
 
-export function MindView({ showSide, onHideSide, onShowSide, path, setPath }) {
+export function MindView({ showSide, onHideSide, path, setPath }) {
   const client = useApi();
   const m = useAppState(s => s.mind);
   // Selection is owned by the URL hash so the back button moves
@@ -101,11 +101,6 @@ export function MindView({ showSide, onHideSide, onShowSide, path, setPath }) {
       </aside>
       <section className="mind-pane">
         <div style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px', borderBottom:'1px solid var(--line)', background:'var(--bg)', flexWrap:'wrap'}}>
-          {onShowSide && (
-            <button className="artefact-back" title="Back to file list" onClick={onShowSide}>
-              <Icon name="menu" size={14}/>
-            </button>
-          )}
           <span className="mono" style={{fontSize:13, color:'var(--fg)'}}>{selected || '—'}</span>
           {dirty && <span className="chip" style={{color:'var(--warn)'}}>unsaved</span>}
           {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
@@ -305,9 +300,8 @@ export function ArtefactsView({ conv, setConv }) {
   }, [pendingArtefactId, conv]);
 
   // Hamburger on the Artefacts tab toggles the drawer so users can
-  // reopen the tree after picking an artefact — without it the mobile
-  // reader is a one-way door until they find the `.artefact-back`
-  // button inside the title bar.
+  // reopen the tree after picking an artefact. Keeping drawer access
+  // in the topbar avoids duplicate menu buttons inside the reader.
   useEffect(() => {
     if (toggleNonce === 0) return;
     setShowSide(s => !s);
@@ -386,7 +380,7 @@ export function ArtefactsView({ conv, setConv }) {
           </div>
         )}
       </aside>
-      <ArtefactReader id={selected} chatId={selectedChatId} onShowSide={() => setShowSide(true)} client={client}/>
+      <ArtefactReader id={selected} chatId={selectedChatId} client={client}/>
     </div>
   );
 }
@@ -452,11 +446,10 @@ function findArtefactMeta(id, chatId = null) {
 // Full-page markdown reader.  Fetches the body from /api/artefacts/:id,
 // renders it through the shared `markdown()` helper, and surfaces the
 // metadata header (model, target, tokens, cost) in a sticky top bar.
-// `onShowSide` (optional) wires up the mobile-only back button so the
-// user can re-open the artefact list after picking a report.  `client`
-// (optional) overrides the React context — ArtefactsView passes its
-// own client in so the reader doesn't need a second useApi() lookup.
-export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide, client: clientProp }) {
+// `client` (optional) overrides the React context — ArtefactsView
+// passes its own client in so the reader doesn't need a second useApi()
+// lookup.
+export function ArtefactReader({ id, chatId: requestedChatId = null, client: clientProp }) {
   const ctxClient = useApi();
   const client = clientProp || ctxClient;
   const [body, setBody] = useState('');
@@ -526,22 +519,15 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide,
     return () => { cancelled = true; };
   }, [id, isTextLikeFile, shouldFetchFilePreview, metaFileUrl, client]);
 
-  const back = onShowSide
-    ? <button className="artefact-back" title="Back to artefact list" onClick={onShowSide}>
-        <Icon name="menu" size={14}/>
-      </button>
-    : null;
-
   if (!id) {
-    // Render the title bar even in the empty state so the mobile back
-    // button is reachable — without it the reader is a one-way door
-    // when `showSide` is false and `selected` is null.
+    // Render the title bar even in the empty state so the reader
+    // preserves the same chrome as loaded artefacts. The topbar
+    // hamburger owns drawer access on mobile.
     return (
       <section className="mind-pane">
         <div className="artefact-reader-head"
              style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
                      borderBottom:'1px solid var(--line)', background:'var(--bg)'}}>
-          {back}
           <span className="artefact-reader-title" style={{fontSize:13, color:'var(--fg-dim)'}}>Artefacts</span>
         </div>
         <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center',
@@ -661,7 +647,6 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide,
       <div className="artefact-reader-head"
            style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
                    borderBottom:'1px solid var(--line)', background:'var(--bg)', flexWrap:'wrap'}}>
-        {back}
         <span className="artefact-reader-title" style={{fontSize:13, color:'var(--fg)', fontWeight:500}}>{(meta && meta.title) || 'Artefact'}</span>
         {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
         {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
