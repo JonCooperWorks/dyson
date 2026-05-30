@@ -23,7 +23,7 @@
 # are today's defaults):
 #   cubemastercli tpl create-from-image \
 #       --image 127.0.0.1:5000/dyson:swarm \
-#       --writable-layer-size 5G \
+#       --writable-layer-size 8G \
 #       --cpu 2000 \
 #       --memory 2000 \
 #       --expose-port 80 \
@@ -58,7 +58,6 @@ RUN apt-get update \
         rustc \
         cargo \
         jq \
-        vim \
         less \
         tree \
         unzip \
@@ -85,7 +84,12 @@ RUN apt-get update \
         iperf3 \
         sysstat \
         strace \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf \
+        /var/lib/apt/lists/* \
+        /usr/share/doc \
+        /usr/share/man \
+        /usr/share/locale \
+    && find /usr -type d -name __pycache__ -prune -exec rm -rf {} +
 
 # `--chmod=0755` folds the COPY + chmod into one layer.  Without it
 # the chmod RUN copies the 48 MB binary again into a fresh layer, so
