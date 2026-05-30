@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Icon } from './icons.jsx';
 
 // TTL picker for the share-mint affordance.  Inline dropdown rather
 // than a modal: minting a share is a one-decision flow and the
@@ -23,7 +24,8 @@ export function ShareMenu({ canShare, busy, onMint }) {
         disabled={!canShare || busy}
         title="anonymous shareable link"
       >
-        {busy ? 'minting…' : 'share…'}
+        <Icon name="share" size={12}/>
+        <span className="btn-label">{busy ? 'minting…' : 'share…'}</span>
       </button>
       {open && (
         <div role="menu" style={{

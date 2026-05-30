@@ -152,6 +152,16 @@ export class DysonClient {
     return { body, chatId };
   }
 
+  async loadFileText(url) {
+    const target = String(url || '');
+    if (!target.startsWith('/')) throw new Error('file preview requires a same-origin URL');
+    const r = await this._authedFetch(target, {
+      headers: { Accept: 'text/*, application/json, application/xml, */*;q=0.1' },
+    });
+    if (!r.ok) throw new Error(`file preview failed: ${r.status}`);
+    return r.text();
+  }
+
   // ShareGPT export — controller returns a JSON blob.  Returning the
   // Blob instead of triggering the save lets the caller choose between
   // an anchor-click download (browser) or a file-write (future desktop

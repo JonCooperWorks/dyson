@@ -674,6 +674,47 @@
   flex: 0 0 auto;
 }
 
+.artefact-reader-head {
+  min-width: 0;
+}
+
+.artefact-reader-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artefact-text-reader {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 22px 28px 36px;
+  background: var(--bg);
+}
+
+.artefact-text-preview {
+  margin: 0;
+  max-width: 920px;
+  min-height: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--fg);
+  font: 400 13px/1.65 var(--font-mono);
+}
+
+.artefact-preview-empty,
+.artefact-preview-error {
+  color: var(--mute);
+  font-size: 13px;
+  padding: 28px 0;
+  text-align: center;
+}
+
+.artefact-preview-error {
+  color: var(--err);
+}
+
 /* ---------- model menu (top bar) ---------- */
 .modelmenu-scrim { position: fixed; inset: 0; z-index: 19; }
 .modelmenu {
@@ -918,6 +959,7 @@
     position: absolute;
     top: 0; left: 0; bottom: 0;
     width: 100%; max-width: none;
+    background: linear-gradient(180deg, var(--bg-1), var(--bg));
     z-index: 5;
     transform: translateX(-100%);
     transition: transform 0.18s ease;
@@ -931,6 +973,27 @@
     z-index: 4;
   }
   .mind-editor { padding: 16px 20px; }
+  .artefact-reader-head {
+    gap: 6px !important;
+    padding: 8px 12px !important;
+  }
+  .artefact-reader-head .artefact-reader-title {
+    flex: 1 1 auto;
+  }
+  .artefact-reader-head .artefact-reader-spacer {
+    display: none;
+  }
+  .artefact-reader-head .btn {
+    width: 30px;
+    min-width: 30px;
+    justify-content: center;
+    padding: 0;
+  }
+  .artefact-reader-head .btn .btn-label {
+    display: none;
+  }
+  .artefact-text-reader { padding: 18px 20px 28px; }
+  .artefact-text-preview { font-size: 12.5px; line-height: 1.6; }
   .artefact-back { display: inline-flex; }
   .body.no-left.no-right .left { display: none; }
   .kbd { display: none; }

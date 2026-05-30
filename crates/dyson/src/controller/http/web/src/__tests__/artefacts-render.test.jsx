@@ -265,6 +265,40 @@ describe('ArtefactReader — sent files', () => {
     expect(container.textContent).not.toMatch(/^Download$/m);
   });
 
+  it('renders a text/plain file artefact as an inline preview, not a download-only card', async () => {
+    const report = 'Page loaded\nURL: https://targetpractice.network/\nStatus: ok';
+    setConversations([
+      { id: 'c1', title: 'Live chat', live: false, hasArtefacts: true, source: 'http' },
+    ]);
+    const art = {
+      id: 'a-text',
+      title: 'screenshot_result.txt',
+      bytes: 13,
+      kind: 'other',
+      created_at: 0,
+      metadata: {
+        file_url: '/api/files/f2',
+        file_name: 'screenshot_result.txt',
+        mime_type: 'text/plain; charset=utf-8',
+        bytes: report.length,
+      },
+    };
+    seedChatArtefacts('c1', [art]);
+    const client = {
+      listArtefacts: async () => [art],
+      loadArtefact: async () => ({ body: '/api/files/f2', chatId: 'c1' }),
+      loadFileText: vi.fn(async () => report),
+    };
+    const { container } = renderWithApi(<ArtefactReader id={art.id} chatId="c1"/>, client);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+
+    const preview = container.querySelector('.artefact-text-preview');
+    expect(preview, 'text files must render in the inline preview reader').toBeTruthy();
+    expect(preview.textContent).toContain('targetpractice.network');
+    expect(container.querySelector('.artefact-file-card')).toBeNull();
+    expect(client.loadFileText).toHaveBeenCalledWith('/api/files/f2');
+  });
+
   it('renders an image artefact as <img>, not as "image no longer available"', async () => {
     // The image branch was previously gated on a `fileUrl` that was
     // explicitly nulled out for kind:image, so every image reader fell

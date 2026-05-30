@@ -96,6 +96,54 @@ const ACTIVITY = {
   'sec-audit': { lanes: [] },
 };
 
+const ARTEFACTS = {
+  'sec-audit': [
+    {
+      id: 'mock-screenshot-result',
+      kind: 'other',
+      title: 'screenshot_result.txt',
+      bytes: 13,
+      metadata: {
+        file_url: '/api/files/mock-screenshot-result',
+        file_name: 'screenshot_result.txt',
+        mime_type: 'text/plain; charset=utf-8',
+        bytes: 172,
+      },
+    },
+  ],
+};
+
+const FILES = {
+  'mock-screenshot-result': [
+    'Page loaded',
+    '',
+    'Title: TargetPractice - Sharpen your hacking skills',
+    'URL: https://targetpractice.network/',
+    'Status: Loaded and rendered successfully',
+    '',
+    'Screenshot taken.',
+  ].join('\n'),
+};
+
+const MIND_FILES = {
+  'AGENTS.md': [
+    '# AGENTS.md - Operating Procedures',
+    '',
+    '## Every Session',
+    '',
+    'Before doing anything else:',
+    '1. Read SOUL.md - this is who you are',
+    '2. Read IDENTITY.md - this is your context',
+    "3. Read today's journal for recent context",
+    '4. Read MEMORY.md for long-term context',
+  ].join('\n'),
+  'IDENTITY.md': '# IDENTITY.md\\n\\nName: Dyson\\n',
+  'HEARTBEAT.md': '# HEARTBEAT.md\\n\\nStill here.\\n',
+  'MEMORY.md': '# MEMORY.md\\n\\nUseful operator context lives here.\\n',
+  'USER.md': '# USER.md\\n\\nThe operator likes direct answers.\\n',
+  'memory/projects.md': '# Projects\\n\\n- Dyson UI polish\\n',
+};
+
 function json(res, body, status = 200) {
   res.statusCode = status;
   res.setHeader('content-type', 'application/json');
@@ -137,6 +185,8 @@ export function dysonMock() {
           return json(res, row);
         }
         if (url === '/api/providers') return json(res, PROVIDERS);
+        if (url === '/api/agent') return json(res, { name: 'Dyson' });
+        if (url === '/api/commands') return json(res, []);
         if (url === '/api/mind') {
           return json(res, {
             backend: 'filesystem',
@@ -149,6 +199,16 @@ export function dysonMock() {
               { path: 'memory/projects.md', size: 2_010 },
             ],
           });
+        }
+        const mindFileMatch = url.match(/^\/api\/mind\/file\?path=(.+)$/);
+        if (mindFileMatch && req.method === 'GET') {
+          const filePath = decodeURIComponent(mindFileMatch[1]);
+          return json(res, { path: filePath, content: MIND_FILES[filePath] || '' });
+        }
+        if (url === '/api/mind/file' && req.method === 'POST') {
+          const body = await readBody(req);
+          if (body.path) MIND_FILES[body.path] = body.content || '';
+          return json(res, { ok: true });
         }
         const actMatch = url.match(/^\/api\/activity(?:\?chat=(.+))?$/);
         if (actMatch) {
@@ -166,7 +226,45 @@ export function dysonMock() {
         const fbGet = url.match(/^\/api\/conversations\/([^/?]+)\/feedback$/);
         if (fbGet && req.method === 'GET') return json(res, []);
         const artListMatch = url.match(/^\/api\/conversations\/([^/?]+)\/artefacts$/);
-        if (artListMatch) return json(res, []);
+        if (artListMatch) {
+          const id = decodeURIComponent(artListMatch[1]);
+          return json(res, ARTEFACTS[id] || []);
+        }
+        const scopedArtMatch = url.match(/^\/api\/conversations\/([^/?]+)\/artefacts\/([^/?]+)$/);
+        if (scopedArtMatch && req.method === 'GET') {
+          const chat = decodeURIComponent(scopedArtMatch[1]);
+          const id = decodeURIComponent(scopedArtMatch[2]);
+          const art = (ARTEFACTS[chat] || []).find(a => a.id === id);
+          if (!art) return json(res, { error: 'not found' }, 404);
+          res.statusCode = 200;
+          res.setHeader('content-type', 'text/plain; charset=utf-8');
+          res.setHeader('X-Dyson-Chat-Id', chat);
+          res.end(art.metadata?.file_url || '');
+          return;
+        }
+        const globalArtMatch = url.match(/^\/api\/artefacts\/([^/?]+)$/);
+        if (globalArtMatch && req.method === 'GET') {
+          const id = decodeURIComponent(globalArtMatch[1]);
+          for (const [chat, list] of Object.entries(ARTEFACTS)) {
+            const art = list.find(a => a.id === id);
+            if (!art) continue;
+            res.statusCode = 200;
+            res.setHeader('content-type', 'text/plain; charset=utf-8');
+            res.setHeader('X-Dyson-Chat-Id', chat);
+            res.end(art.metadata?.file_url || '');
+            return;
+          }
+          return json(res, { error: 'not found' }, 404);
+        }
+        const fileMatch = url.match(/^\/api\/files\/([^/?]+)$/);
+        if (fileMatch && req.method === 'GET') {
+          const id = decodeURIComponent(fileMatch[1]);
+          if (!(id in FILES)) return json(res, { error: 'not found' }, 404);
+          res.statusCode = 200;
+          res.setHeader('content-type', 'text/plain; charset=utf-8');
+          res.end(FILES[id]);
+          return;
+        }
         const evMatch = url.match(/^\/api\/conversations\/([^/?]+)\/events/);
         if (evMatch) {
           res.setHeader('content-type', 'text/event-stream');

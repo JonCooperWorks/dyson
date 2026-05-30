@@ -200,6 +200,7 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
   // ArtefactsView / ArtefactReader moved out of views.jsx into
   // views-secondary.jsx when we code-split the non-initial tabs.  The
   // grep-based regressions below follow them.
+  const appSrc = src('components/app.jsx');
   const viewsSrc = src('components/views-secondary.jsx');
   const layoutCss = src('styles/layout.css');
 
@@ -292,6 +293,24 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
       .toMatch(/\.mind\.show-side\s+\.mind-scrim\s*\{[^}]*display:\s*block/);
   });
 
+  it('Mind drawer uses the same internal mobile scrim pattern as Artefacts', () => {
+    // Regression for Mind's mobile sidebar: App rendered the generic
+    // fixed `.scrim` above the drawer while `.mind-side` lived at a
+    // lower z-index, so tapping the hamburger could produce a dim
+    // overlay instead of a usable workspace list.  Mind now owns the
+    // same `.mind-scrim` layer as Artefacts, under the drawer.
+    const mindBranch = appSrc.match(/\{view === 'mind'[\s\S]*?\{view === 'artefacts'/);
+    expect(mindBranch, 'App must still have a Mind branch').toBeTruthy();
+    expect(mindBranch[0], 'Mind branch must not render the generic fixed app scrim')
+      .not.toContain('className="scrim"');
+    expect(viewsSrc, 'MindView must accept an in-pane drawer opener')
+      .toMatch(/export function MindView\(\{[^}]*\bonShowSide\b/);
+    expect(viewsSrc, 'MindView must render the drawer scrim below .mind-side')
+      .toContain('{showSide && <div className="mind-scrim" onClick={onHideSide}/>}');
+    expect(viewsSrc, 'Mind editor chrome must expose the mobile file-list button')
+      .toContain('title="Back to file list"');
+  });
+
   it('mobile drawer is full-width so no dead pane strip shows through', () => {
     // Regression for the "dim broken sidebar" bug visible on iOS.  The
     // drawer used to be `width: 80vw; max-width: 320px`, which left a
@@ -303,6 +322,8 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
     expect(sideRule, 'mobile .mind-side rule must exist').toBeTruthy();
     expect(sideRule[1], 'drawer must be full-width on mobile')
       .toMatch(/width:\s*100%/);
+    expect(sideRule[1], 'drawer must be opaque on mobile so pane content cannot bleed through')
+      .toMatch(/background:\s*linear-gradient\(180deg,\s*var\(--bg-1\),\s*var\(--bg\)\)/);
     expect(sideRule[1], 'drawer must not re-clamp to 80vw / 320px')
       .not.toMatch(/80vw|320px/);
   });

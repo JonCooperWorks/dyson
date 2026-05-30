@@ -139,6 +139,26 @@ describe('DysonClient — GET endpoints', () => {
     expect(args(fetch)[0]).toBe('/api/conversations/c%2F2/artefacts/a%2F1');
   });
 
+  it('loadFileText fetches a same-origin file URL as text', async () => {
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => 'plain report',
+    }));
+    const client = new DysonClient({ fetch });
+    const out = await client.loadFileText('/api/files/f2');
+    expect(out).toBe('plain report');
+    expect(args(fetch)[0]).toBe('/api/files/f2');
+    expect(new Headers(args(fetch)[1].headers).get('accept')).toContain('text/*');
+  });
+
+  it('loadFileText refuses cross-origin preview URLs', async () => {
+    const fetch = vi.fn();
+    const client = new DysonClient({ fetch });
+    await expect(client.loadFileText('https://example.test/file.txt')).rejects.toThrow(/same-origin/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('exportConversation returns the response blob', async () => {
     const blob = new Blob(['{}'], { type: 'application/json' });
     const fetch = vi.fn(async () => ({ ok: true, status: 200, blob: async () => blob }));

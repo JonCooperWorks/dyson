@@ -143,13 +143,14 @@ function App() {
   const [toolRef, setToolRef] = useState(initialRoute.toolRef);
   const [mindPath, setMindPath] = useState(initialRoute.mindPath);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [showLeft, setShowLeft] = useState(false);
   const selectView = useCallback((v) => {
     setView(v);
     setArtefactId(null);
     setToolRef(null);
+    setShowLeft(false);
     clearPendingArtefact();
   }, []);
-  const [showLeft, setShowLeft] = useState(false);
 
   const conversations = useAppState(s => s.conversations);
   const providers = useAppState(s => s.providers);
@@ -341,11 +342,11 @@ function App() {
       )}
       {view === 'mind' && (
         <main className="body no-left no-right">
-          {showLeft && <div className="scrim" onClick={closeRails}/>}
           <Suspense fallback={<div/>}>
             <MindView
               showSide={showLeft}
               onHideSide={() => setShowLeft(false)}
+              onShowSide={() => setShowLeft(true)}
               path={mindPath}
               setPath={setMindPath}/>
           </Suspense>

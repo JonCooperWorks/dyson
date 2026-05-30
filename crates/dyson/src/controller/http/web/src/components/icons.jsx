@@ -30,6 +30,7 @@ function Icon({ name, size = 14, style, className }) {
     case 'dot':       return <svg {...common}><circle cx="8" cy="8" r="2" fill="currentColor"/></svg>;
     case 'arr-down':  return <svg {...common}><path d="M8 3v10M4 9l4 4 4-4"/></svg>;
     case 'download':  return <svg {...common}><path d="M8 2v8M4 7l4 4 4-4"/><path d="M3 12v1.5h10V12"/></svg>;
+    case 'share':     return <svg {...common}><circle cx="5" cy="8" r="2"/><circle cx="11.5" cy="4" r="2"/><circle cx="11.5" cy="12" r="2"/><path d="M6.8 7 9.8 5M6.8 9l3 2"/></svg>;
     case 'arr-right': return <svg {...common}><path d="M3 8h10M9 4l4 4-4 4"/></svg>;
     case 'refresh':   return <svg {...common}><path d="M2 8a6 6 0 0 1 10-4.5L14 5M14 8a6 6 0 0 1-10 4.5L2 11"/><path d="M14 2v3h-3M2 14v-3h3"/></svg>;
     case 'rate':      return <svg {...common}><path d="M3 9l2.5 2.5L13 4"/></svg>;

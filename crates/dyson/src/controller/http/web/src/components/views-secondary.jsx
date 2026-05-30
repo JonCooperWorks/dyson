@@ -23,7 +23,7 @@ import {
   sessions, updateSession, ensureSession,
 } from '../store/sessions.js';
 
-export function MindView({ showSide, onHideSide, path, setPath }) {
+export function MindView({ showSide, onHideSide, onShowSide, path, setPath }) {
   const client = useApi();
   const m = useAppState(s => s.mind);
   // Selection is owned by the URL hash so the back button moves
@@ -79,6 +79,7 @@ export function MindView({ showSide, onHideSide, path, setPath }) {
 
   return (
     <div className={`mind${showSide ? ' show-side' : ''}`}>
+      {showSide && <div className="mind-scrim" onClick={onHideSide}/>}
       <aside className="mind-side">
         <div style={{padding:'10px 14px', borderBottom:'1px solid var(--line)'}}>
           <div className="eyebrow">workspace</div>
@@ -100,6 +101,11 @@ export function MindView({ showSide, onHideSide, path, setPath }) {
       </aside>
       <section className="mind-pane">
         <div style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px', borderBottom:'1px solid var(--line)', background:'var(--bg)', flexWrap:'wrap'}}>
+          {onShowSide && (
+            <button className="artefact-back" title="Back to file list" onClick={onShowSide}>
+              <Icon name="menu" size={14}/>
+            </button>
+          )}
           <span className="mono" style={{fontSize:13, color:'var(--fg)'}}>{selected || '—'}</span>
           {dirty && <span className="chip" style={{color:'var(--warn)'}}>unsaved</span>}
           {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
@@ -454,6 +460,8 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide,
   const ctxClient = useApi();
   const client = clientProp || ctxClient;
   const [body, setBody] = useState('');
+  const [filePreview, setFilePreview] = useState('');
+  const [filePreviewErr, setFilePreviewErr] = useState('');
   const [meta, setMeta] = useState(null);
   const [err, setErr]  = useState('');
   const [copied, setCopied] = useState(false);
@@ -473,6 +481,8 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide,
     if (!id || !client) { setBody(''); setMeta(null); setErr(''); setChatId(null); return; }
     setErr('');
     setBody('');
+    setFilePreview('');
+    setFilePreviewErr('');
     setShareUrl(null);
     setShareErr('');
     const hit = findArtefactMeta(id, requestedChatId);
@@ -490,6 +500,32 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide,
       .catch(e => setErr(String(e.message || e)));
   }, [id, requestedChatId, client]);
 
+  const metaData = (meta && meta.metadata) || {};
+  const metaFileUrl = metaData.file_url || '';
+  const metaFileMime = metaData.mime_type || '';
+  const metaFileName = metaData.file_name || (meta && meta.title) || '';
+  const metaFileBytes = typeof metaData.bytes === 'number' ? metaData.bytes : null;
+  const isTextLikeFile = Boolean(metaFileUrl) && previewableTextFile(metaFileMime, metaFileName);
+  const shouldFetchFilePreview = isTextLikeFile && bodyLooksLikeFileUrl(body, metaFileUrl);
+
+  useEffect(() => {
+    if (!id || !isTextLikeFile || !shouldFetchFilePreview || !metaFileUrl || !client) {
+      setFilePreview('');
+      setFilePreviewErr('');
+      return;
+    }
+    let cancelled = false;
+    setFilePreview('');
+    setFilePreviewErr('');
+    const loader = typeof client.loadFileText === 'function'
+      ? client.loadFileText(metaFileUrl)
+      : Promise.reject(new Error('text preview unavailable'));
+    loader
+      .then(text => { if (!cancelled) setFilePreview(text || ''); })
+      .catch(e => { if (!cancelled) setFilePreviewErr(String(e.message || e)); });
+    return () => { cancelled = true; };
+  }, [id, isTextLikeFile, shouldFetchFilePreview, metaFileUrl, client]);
+
   const back = onShowSide
     ? <button className="artefact-back" title="Back to artefact list" onClick={onShowSide}>
         <Icon name="menu" size={14}/>
@@ -502,10 +538,11 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide,
     // when `showSide` is false and `selected` is null.
     return (
       <section className="mind-pane">
-        <div style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
+        <div className="artefact-reader-head"
+             style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
                      borderBottom:'1px solid var(--line)', background:'var(--bg)'}}>
           {back}
-          <span style={{fontSize:13, color:'var(--fg-dim)'}}>Artefacts</span>
+          <span className="artefact-reader-title" style={{fontSize:13, color:'var(--fg-dim)'}}>Artefacts</span>
         </div>
         <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center',
                      color:'var(--fg-dim)', fontSize:13}}>
@@ -534,16 +571,19 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide,
   const fileUrl = !isImage && meta && meta.metadata && meta.metadata.file_url
     ? meta.metadata.file_url
     : '';
-  const fileMime = (meta && meta.metadata && meta.metadata.mime_type) || '';
-  const fileName = (meta && meta.metadata && meta.metadata.file_name) || (meta && meta.title) || '';
-  const fileBytes = meta && meta.metadata && typeof meta.metadata.bytes === 'number'
-    ? meta.metadata.bytes : null;
+  const fileMime = metaFileMime;
+  const fileName = metaFileName;
+  const fileBytes = metaFileBytes;
   const isFile = Boolean(fileUrl);
-  const isMarkdownFile = isFile && (fileMime === 'text/markdown' || /\.(md|markdown)$/i.test(fileName));
-  // Markdown files use the existing markdown(body) path — body is the
-  // file text already.  Other files (binary, JSON, scripts, …) get a
-  // download-only card; opening them in-browser is the user's call.
-  const isBinaryFile = isFile && !isMarkdownFile;
+  const isMarkdownFile = isFile && previewableMarkdownFile(fileMime, fileName);
+  const isPreviewableFile = isFile && previewableTextFile(fileMime, fileName);
+  const previewBody = isPreviewableFile
+    ? (bodyLooksLikeFileUrl(body, fileUrl) ? filePreview : body)
+    : '';
+  const previewLoading = isPreviewableFile && bodyLooksLikeFileUrl(body, fileUrl) && !filePreview && !filePreviewErr;
+  // Markdown/text files use an inline reader. Other files (binary,
+  // archives, images handled above) get a download-only card.
+  const isBinaryFile = isFile && !isPreviewableFile;
 
   const download = () => {
     const url = isImage ? imageUrl : fileUrl;
@@ -563,7 +603,7 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide,
     URL.revokeObjectURL(u);
   };
   const copy = async () => {
-    const text = isImage ? imageUrl : (isBinaryFile ? fileUrl : body);
+    const text = isImage ? imageUrl : (isBinaryFile ? fileUrl : isPreviewableFile ? previewBody : body);
     if (await copyToClipboard(text)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
@@ -618,23 +658,26 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide,
 
   return (
     <section className="mind-pane">
-      <div style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
+      <div className="artefact-reader-head"
+           style={{display:'flex', alignItems:'center', gap:10, padding:'10px 18px',
                    borderBottom:'1px solid var(--line)', background:'var(--bg)', flexWrap:'wrap'}}>
         {back}
-        <span style={{fontSize:13, color:'var(--fg)', fontWeight:500}}>{(meta && meta.title) || 'Artefact'}</span>
+        <span className="artefact-reader-title" style={{fontSize:13, color:'var(--fg)', fontWeight:500}}>{(meta && meta.title) || 'Artefact'}</span>
         {meta && meta.kind && <span className="chip mono">{meta.kind.replace(/_/g, ' ')}</span>}
         {err && <span className="chip" style={{color:'var(--err)'}}>{err}</span>}
-        <span style={{flex:1}}/>
+        <span className="artefact-reader-spacer" style={{flex:1}}/>
         <ShareMenu
           canShare={canShare}
           busy={shareBusy}
           onMint={mintShare}
         />
-        <button className="btn sm ghost" onClick={copy} disabled={isImage ? !imageUrl : isBinaryFile ? !fileUrl : !body}>
-          {copied ? 'copied' : (isImage || isBinaryFile ? 'copy url' : 'copy')}
+        <button className="btn sm ghost" onClick={copy} disabled={isImage ? !imageUrl : isBinaryFile ? !fileUrl : isPreviewableFile ? !previewBody : !body}>
+          <Icon name="copy" size={12}/>
+          <span className="btn-label">{copied ? 'copied' : (isImage || isBinaryFile ? 'copy url' : 'copy')}</span>
         </button>
         <button className="btn sm primary" onClick={download} disabled={isImage ? !imageUrl : isFile ? !fileUrl : !body}>
-          {downloadLabel}
+          <Icon name="download" size={12}/>
+          <span className="btn-label">{downloadLabel}</span>
         </button>
       </div>
       {(shareUrl || shareErr) && (
@@ -694,7 +737,8 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide,
             : <div style={{color:'var(--mute)', fontSize:13}}>Image no longer available.</div>}
         </div>
       ) : isBinaryFile ? (
-        <div style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center',
+        <div className="artefact-file-card"
+             style={{flex:1, display:'flex', alignItems:'center', justifyContent:'center',
                      padding:'40px 24px', textAlign:'center', color:'var(--fg-dim)', fontSize:13}}>
           <div>
             <div style={{fontSize:14, color:'var(--fg)', marginBottom:6}}>{fileName}</div>
@@ -707,6 +751,22 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide,
             </button>
           </div>
         </div>
+      ) : isMarkdownFile ? (
+        <div className="prose"
+             style={{overflowY:'auto', flex:1, padding:'18px 28px', lineHeight:1.6}}
+             dangerouslySetInnerHTML={{__html: markdown(previewBody || (previewLoading ? 'Loading preview…' : ''))}}/>
+      ) : isPreviewableFile ? (
+        <div className="artefact-text-reader">
+          {filePreviewErr ? (
+            <div className="artefact-preview-error">
+              Preview failed: {filePreviewErr}
+            </div>
+          ) : previewLoading ? (
+            <div className="artefact-preview-empty">Loading preview…</div>
+          ) : (
+            <pre className="artefact-text-preview">{previewBody}</pre>
+          )}
+        </div>
       ) : (
         <div className="prose"
              style={{overflowY:'auto', flex:1, padding:'18px 28px', lineHeight:1.6}}
@@ -714,6 +774,38 @@ export function ArtefactReader({ id, chatId: requestedChatId = null, onShowSide,
       )}
     </section>
   );
+}
+
+function normalMime(mime) {
+  return String(mime || '').split(';', 1)[0].trim().toLowerCase();
+}
+
+function previewableMarkdownFile(mime, name) {
+  const m = normalMime(mime);
+  return m === 'text/markdown' || m === 'text/x-markdown' || /\.(md|markdown)$/i.test(name || '');
+}
+
+function previewableTextFile(mime, name) {
+  const m = normalMime(mime);
+  if (previewableMarkdownFile(mime, name)) return true;
+  if (m.startsWith('text/')) return true;
+  if ([
+    'application/json',
+    'application/ld+json',
+    'application/xml',
+    'application/xhtml+xml',
+    'application/javascript',
+    'application/x-javascript',
+    'application/x-sh',
+    'application/x-yaml',
+    'application/toml',
+  ].includes(m)) return true;
+  return /\.(txt|log|json|jsonl|csv|tsv|ya?ml|toml|ini|env|css|html?|xml|js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|java|c|cc|cpp|h|hpp|sh|bash|zsh|sql)$/i.test(name || '');
+}
+
+function bodyLooksLikeFileUrl(body, fileUrl) {
+  const text = String(body || '').trim();
+  return Boolean(text && fileUrl && text === String(fileUrl).trim());
 }
 
 function metaRow(label, value, fmt) {

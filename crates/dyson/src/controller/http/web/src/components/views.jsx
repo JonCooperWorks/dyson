@@ -41,6 +41,11 @@ function TopBar({ view, setView, onToggleLeft, running, nextRunModel, onPickMode
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const drawerTitle = view === 'mind'
+    ? 'Workspace files'
+    : view === 'artefacts'
+      ? 'Artefacts'
+      : 'Conversations';
   // Active provider starts open, others collapsed.  Resets on menu open
   // so the initial render always matches the current active provider.
   const [expanded, setExpanded] = useState({});
@@ -67,7 +72,7 @@ function TopBar({ view, setView, onToggleLeft, running, nextRunModel, onPickMode
 
   return (
     <div className="topbar">
-      <button className="menu-toggle" title="Conversations" onClick={onToggleLeft}>
+      <button className="menu-toggle" title={drawerTitle} aria-label={drawerTitle} onClick={onToggleLeft}>
         <Icon name="menu" size={14}/>
       </button>
       <div className="brand"><div className="mark">{brandMark(agentName)}</div><div className="name">{brandLabel(agentName)}</div></div>
