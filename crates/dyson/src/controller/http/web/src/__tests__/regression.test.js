@@ -245,6 +245,21 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
       .not.toContain('.artefact-back');
   });
 
+  it('mobile artefact headers stay single-row with long filenames', () => {
+    // Screenshot/file artefacts can have machine-generated names long
+    // enough to shove the action buttons onto a second row. The mobile
+    // header should keep the title ellipsized and the actions stable.
+    const mobileBlock = layoutCss.split('@media (max-width: 760px)')[1] || '';
+    expect(mobileBlock, 'mobile reader header must not wrap')
+      .toMatch(/\.artefact-reader-head\s*\{[^}]*flex-wrap:\s*nowrap\s*!important/);
+    expect(mobileBlock, 'title must shrink before actions wrap')
+      .toMatch(/\.artefact-reader-head\s+\.artefact-reader-title\s*\{[^}]*flex:\s*1 1 0\s*!important/);
+    expect(mobileBlock, 'kind chip must be bounded')
+      .toMatch(/\.artefact-reader-head\s+\.chip\s*\{[^}]*max-width:\s*82px/);
+    expect(swarmThemeCss, 'alternate theme must carry the same nowrap rule')
+      .toMatch(/\.artefact-reader-head\s*\{[^}]*flex-wrap:\s*nowrap\s*!important/);
+  });
+
   it('.mind is a positioning context so the mobile drawer stays below the topbar', () => {
     // Regression for the "Artefacts tab renders as a black screen on
     // mobile" bug.  `.mind-side` is position: absolute on mobile; if

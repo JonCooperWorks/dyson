@@ -2324,6 +2324,33 @@ textarea {
     z-index: 4;
   }
   .mind-editor { padding: 16px 20px; }
+  .artefact-reader-head {
+    gap: 6px !important;
+    padding: 8px 12px !important;
+    flex-wrap: nowrap !important;
+  }
+  .artefact-reader-head .artefact-reader-title {
+    flex: 1 1 0 !important;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .artefact-reader-head .chip {
+    flex: 0 0 auto;
+    max-width: 82px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .artefact-reader-head .artefact-reader-spacer { display: none; }
+  .artefact-reader-head .btn {
+    width: 30px;
+    min-width: 30px;
+    justify-content: center;
+    padding: 0;
+  }
+  .artefact-reader-head .btn .btn-label { display: none; }
   .body.no-left.no-right .left { display: none; }
   .kbd { display: none; }
   .turn {

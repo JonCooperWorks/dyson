@@ -958,9 +958,17 @@
   .artefact-reader-head {
     gap: 6px !important;
     padding: 8px 12px !important;
+    flex-wrap: nowrap !important;
   }
   .artefact-reader-head .artefact-reader-title {
-    flex: 1 1 auto;
+    flex: 1 1 0 !important;
+  }
+  .artefact-reader-head .chip {
+    flex: 0 0 auto;
+    max-width: 82px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .artefact-reader-head .artefact-reader-spacer {
     display: none;
