@@ -346,6 +346,21 @@ describe('views-secondary.jsx — artefacts mobile drawer regressions', () => {
     expect(mobileBlock, 'old over-broad .body.no-right .left rule must be gone')
       .not.toMatch(/^\s*\.body\.no-right\s+\.left\s*\{/m);
   });
+
+  it('ArtefactsView lazily hydrates sibling chat branches', () => {
+    // Regression for large agents: pre-expanding every report-bearing
+    // chat also fired `ensureArtefacts()` for every chat on first paint.
+    // On mobile that made the artefact drawer look stuck and could
+    // saturate the live proxy with dozens of concurrent artefact calls.
+    expect(viewsSrc, 'ArtefactsView must choose one initial branch')
+      .toContain('initialArtefactChatId(chats, conv)');
+    expect(viewsSrc, 'ArtefactsView must hydrate the chosen branch only')
+      .toContain('ensureArtefacts(target, client)');
+    expect(viewsSrc, 'sibling branches should fetch when opened by the user')
+      .toContain('if (willOpen) ensureArtefacts(chatId, client)');
+    expect(viewsSrc, 'ArtefactsView must not fan out to every chat on mount')
+      .not.toContain('for (const c of chats) ensureArtefacts(c.id, client)');
+  });
 });
 
 describe('turns.jsx — markdown + composer regressions', () => {

@@ -236,6 +236,11 @@ function ensureArtefacts(chatId, client) {
     });
 }
 
+function initialArtefactChatId(chats, conv) {
+  if (conv && chats.some(c => c.id === conv)) return conv;
+  return chats[0]?.id || null;
+}
+
 export function ArtefactsView({ conv, setConv }) {
   const client = useApi();
   const chats = useAppState(s => s.conversations).filter(c => c.hasArtefacts);
@@ -258,35 +263,30 @@ export function ArtefactsView({ conv, setConv }) {
   // reader.
   const initialPending = !!pendingArtefactId;
   const [showSide, setShowSide] = useState(!initialPending);
-  // Tree expansion state per chat.  Every chat with artefacts is
-  // pre-expanded — the Artefacts tab is a flat overview, and hiding
-  // sibling-chat reports behind a click made cross-chat browsing a
-  // chore.  Users can still collapse a branch they want to mute.
+  // Tree expansion state per chat.  Keep the current chat (or first
+  // report-bearing chat) open, then hydrate sibling branches on demand.
+  // A 30-chat workspace used to fan out 30 artefact requests on first
+  // mobile paint, which made the drawer feel broken and could starve
+  // the live proxy behind it.
+  const firstOpenChatId = initialArtefactChatId(chats, conv);
   const [expanded, setExpanded] = useState(() => {
     const init = {};
-    for (const c of chats) init[c.id] = true;
+    if (firstOpenChatId) init[firstOpenChatId] = true;
     return init;
   });
 
-  // Keep newly-arriving chats expanded too — the chats array fills in
-  // asynchronously as conversations load and as artefacts get marked,
-  // so any branch that wasn't in the initial snapshot still wants to
-  // open by default.  Also fetches artefacts for every expanded branch
-  // so the tree paints fully — otherwise pre-expanded branches sit on
-  // "No artefacts loaded." until the user clicks them.
+  // Keep one useful branch open as conversations arrive asynchronously,
+  // but do not auto-expand every report-bearing chat.  Sibling branches
+  // fetch lazily from `toggleChat`.
   useEffect(() => {
+    const target = initialArtefactChatId(chats, conv);
+    if (!target) return;
     setExpanded(e => {
-      let next = e;
-      for (const c of chats) {
-        if (!(c.id in next)) {
-          if (next === e) next = { ...e };
-          next[c.id] = true;
-        }
-      }
-      return next;
+      if (e[target]) return e;
+      return { ...e, [target]: true };
     });
-    for (const c of chats) ensureArtefacts(c.id, client);
-  }, [chats, client]);
+    ensureArtefacts(target, client);
+  }, [chats, conv, client]);
 
   useEffect(() => {
     if (!conv) return;

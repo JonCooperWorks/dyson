@@ -88,10 +88,10 @@ describe('ArtefactsView — tree sidebar', () => {
     expect(activeRow?.textContent).toContain('Alpha chat');
   });
 
-  it('every chat with artefacts is expanded by default — not just the active one', () => {
-    // Users want a flat overview of all artefacts on the Artefacts tab.
-    // The previous behavior (only the active chat pre-expanded) hid
-    // sibling-chat artefacts behind an extra click.
+  it('only one useful chat branch is expanded by default', () => {
+    // Large agents can have dozens of report-bearing chats.  Keep the
+    // active branch visible, but leave siblings collapsed so first
+    // paint does not fan out a request per chat.
     setConversations([
       { id: 'c1', title: 'Alpha chat', live: false, hasArtefacts: true, source: 'http' },
       { id: 'c2', title: 'Beta chat',  live: false, hasArtefacts: true, source: 'http' },
@@ -110,10 +110,11 @@ describe('ArtefactsView — tree sidebar', () => {
       <ArtefactsView conv="c1" setConv={() => {}}/>
     );
     const side = container.querySelector('.mind-side');
-    // All three artefacts must be visible without any click — i.e.
-    // every chat row is open at mount.
+    // The chat rows are visible, but only the active branch is open.
     const titles = [...side.querySelectorAll('.artefact-row .title')].map(el => el.textContent);
-    expect(titles).toEqual(expect.arrayContaining(['First report', 'Second report', 'Third report']));
+    expect(titles).toEqual(['First report']);
+    expect(side.textContent).toContain('Beta chat');
+    expect(side.textContent).toContain('Gamma chat');
   });
 
   it('toggling a chat row collapses then re-expands its artefacts', () => {
@@ -131,16 +132,16 @@ describe('ArtefactsView — tree sidebar', () => {
       <ArtefactsView conv="c1" setConv={() => {}}/>
     );
     const side = container.querySelector('.mind-side');
-    // Both chats are pre-expanded by default.
-    expect(side.textContent).toContain('Second report');
+    // Sibling chats start collapsed.
+    expect(side.textContent).not.toContain('Second report');
     const betaRow = [...side.querySelectorAll('.artefact-chat-row')]
       .find(r => r.textContent.includes('Beta chat'));
-    // First click collapses the branch (it started open).
-    fireEvent.click(betaRow);
-    expect(side.textContent).not.toContain('Second report');
-    // Second click re-expands.
+    // First click expands the branch.
     fireEvent.click(betaRow);
     expect(side.textContent).toContain('Second report');
+    // Second click collapses it again.
+    fireEvent.click(betaRow);
+    expect(side.textContent).not.toContain('Second report');
   });
 
   it('clicking an artefact in a sibling chat switches conv', () => {
@@ -161,7 +162,9 @@ describe('ArtefactsView — tree sidebar', () => {
       <ArtefactsView conv="c1" setConv={setConv}/>
     );
     const side = container.querySelector('.mind-side');
-    // Every chat is open by default — c2's artefact is reachable.
+    const betaRow = [...side.querySelectorAll('.artefact-chat-row')]
+      .find(r => r.textContent.includes('Beta chat'));
+    fireEvent.click(betaRow);
     const secondArtRow = [...side.querySelectorAll('.artefact-row')]
       .find(r => r.textContent.includes('Second report'));
     fireEvent.click(secondArtRow);
