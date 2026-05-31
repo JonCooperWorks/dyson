@@ -29,7 +29,7 @@ use dyson::controller::Controller;
 /// Run `dyson listen`.
 pub async fn run(
     config: Option<PathBuf>,
-    dangerous_no_sandbox: bool,
+    sandbox_bypass: Option<dyson::sandbox::SandboxBypassGuard>,
     provider: Option<String>,
     base_url: Option<String>,
     workspace: Option<String>,
@@ -39,7 +39,7 @@ pub async fn run(
     let mut settings = dyson::config::loader::load_settings(config_path.as_deref())?;
     super::apply_overrides(
         &mut settings,
-        dangerous_no_sandbox,
+        sandbox_bypass,
         provider,
         base_url,
         workspace,
@@ -220,14 +220,14 @@ fn spawn_program_hot_reload_task(
         tracing::debug!("no config path — program-level hot-reload disabled");
         return;
     }
-    let dangerous_no_sandbox = settings.dangerous_no_sandbox;
+    let preserved_sandbox_bypass = settings.sandbox_bypass.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             match reloader.check().await {
                 Ok((true, Some(mut new_settings))) => {
-                    // CLI-only flag, not in the JSON — preserve.
-                    new_settings.dangerous_no_sandbox = dangerous_no_sandbox;
+                    // CLI-only capability, not in the JSON — preserve.
+                    new_settings.sandbox_bypass = preserved_sandbox_bypass.clone();
                     registry.reload(&new_settings, None);
                     dyson::controller::publish_settings(std::sync::Arc::new(new_settings));
                     tracing::info!("dyson.json hot-reloaded — subscribed controllers notified");

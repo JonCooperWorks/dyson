@@ -152,7 +152,7 @@ impl super::Controller for TerminalController {
             match super::check_and_reload_agent(
                 &mut reloader,
                 &mut current_settings,
-                settings.dangerous_no_sandbox,
+                settings.sandbox_bypass.as_ref(),
                 &mut agent,
                 &mut current_provider,
                 &mut current_model,

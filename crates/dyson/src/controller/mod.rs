@@ -261,7 +261,7 @@ impl ClientRegistry {
             let client = crate::llm::create_client(
                 &agent_settings,
                 inner.workspace.clone(),
-                inner.settings.dangerous_no_sandbox,
+                inner.settings.sandbox_bypass.as_ref(),
             );
 
             let rate_limited = match inner.settings.agent.rate_limit.as_ref() {
@@ -311,7 +311,7 @@ impl ClientRegistry {
             let client = crate::llm::create_client(
                 &inner.settings.agent,
                 inner.workspace.clone(),
-                inner.settings.dangerous_no_sandbox,
+                inner.settings.sandbox_bypass.as_ref(),
             );
             let rate_limited = match inner.settings.agent.rate_limit.as_ref() {
                 Some(rl) => crate::agent::rate_limiter::RateLimited::new(
@@ -383,7 +383,8 @@ pub async fn build_agent(
         ws.nudge_interval()
     };
 
-    let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, settings.dangerous_no_sandbox);
+    let sandbox =
+        crate::sandbox::create_sandbox(&settings.sandbox, settings.sandbox_bypass.clone());
     let skills = {
         let ws = workspace.read().await;
         crate::skill::create_skills(
@@ -519,8 +520,8 @@ fn build_public_agent(
     let workspace: crate::workspace::WorkspaceHandle =
         std::sync::Arc::new(tokio::sync::RwLock::new(workspace));
 
-    // SECURITY: Always false — public agent sandbox is never disabled.
-    let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, false);
+    // SECURITY: Always None — public agent sandbox is never disabled.
+    let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, None);
 
     crate::agent::Agent::builder(client, sandbox)
         .skills(skills)
@@ -772,7 +773,7 @@ pub enum ReloadOutcome {
 pub async fn check_and_reload_agent(
     reloader: &mut crate::config::hot_reload::HotReloader,
     current_settings: &mut Settings,
-    original_dangerous_no_sandbox: bool,
+    original_sandbox_bypass: Option<&crate::sandbox::SandboxBypassGuard>,
     agent: &mut crate::agent::Agent,
     current_provider: &mut String,
     current_model: &mut String,
@@ -790,7 +791,7 @@ pub async fn check_and_reload_agent(
 
     if let Some(s) = new_settings {
         *current_settings = s;
-        current_settings.dangerous_no_sandbox = original_dangerous_no_sandbox;
+        current_settings.sandbox_bypass = original_sandbox_bypass.cloned();
     }
 
     // Reload the client registry so new API keys / base URLs take effect.
@@ -1796,10 +1797,13 @@ mod tests {
             crate::skill::builtin::BuiltinSkill::new_filtered(None, None, None, &filter),
         )];
 
-        let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
-            std::sync::Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+        let sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> = std::sync::Arc::new(
+            crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+                crate::sandbox::SandboxBypassGuard::for_test(),
+            ),
+        );
         let client =
-            crate::llm::create_client(&crate::config::AgentSettings::default(), None, false);
+            crate::llm::create_client(&crate::config::AgentSettings::default(), None, None);
         let client = crate::agent::rate_limiter::RateLimitedHandle::unlimited(client);
 
         let agent = crate::agent::Agent::builder(client, sandbox)

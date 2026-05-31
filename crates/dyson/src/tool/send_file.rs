@@ -78,7 +78,7 @@ impl Tool for SendFileTool {
 
         Ok(
             ToolOutput::success(format!("Attached file for the user: {display_name}"))
-                .with_file(path),
+                .with_file(path.into_path_buf()),
         )
     }
 }

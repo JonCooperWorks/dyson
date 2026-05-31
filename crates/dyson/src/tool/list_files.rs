@@ -53,7 +53,7 @@ impl Tool for ListFilesTool {
 
         let base_dir = match input["path"].as_str() {
             Some(sub) => match ctx.resolve_path(sub) {
-                Ok(p) => p,
+                Ok(p) => p.into_path_buf(),
                 Err(e) => return Ok(e),
             },
             None => ctx.working_dir.clone(),

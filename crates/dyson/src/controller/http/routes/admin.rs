@@ -122,7 +122,7 @@ pub(super) struct ConfigureBody {
     /// env swarm injects on instance create never reaches the
     /// running dyson process).
     #[serde(default)]
-    proxy_token: Option<String>,
+    proxy_token: Option<crate::tokens::ProxyToken>,
     /// Replacement value for `providers.<agent.provider>.base_url` —
     /// swarm's `/llm` URL the agent should call.  Same root cause
     /// as `proxy_token`: the boot-time value is empty / loopback
@@ -201,7 +201,7 @@ pub(super) struct ConfigureBody {
     /// Per-instance `it_<32hex>` bearer for the ingest endpoint.
     /// Mirrors `SWARM_INGEST_TOKEN`.  See `ingest_url` for posture.
     #[serde(default)]
-    ingest_token: Option<String>,
+    ingest_token: Option<crate::tokens::IngestToken>,
     /// Full URL the swarm-mode background state worker POSTs selected
     /// workspace files to. Mirrors `SWARM_STATE_SYNC_URL`; pushed here
     /// because warmup env is frozen for the running dyson process.
@@ -209,7 +209,7 @@ pub(super) struct ConfigureBody {
     state_sync_url: Option<String>,
     /// Per-instance `st_<32hex>` bearer for the state-file endpoint.
     #[serde(default)]
-    state_sync_token: Option<String>,
+    state_sync_token: Option<crate::tokens::StateSyncToken>,
     /// Token-isolated Telegram proxy settings supplied by swarm.
     /// Patches/creates the Telegram controller in webhook mode.
     #[serde(default)]
@@ -517,7 +517,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     let config_path = state.config_path();
     let has_config = config_path.is_some();
     let want_models = !body.models.is_empty();
-    let want_api_key = has_text(body.proxy_token.as_deref());
+    let want_api_key = has_text(body.proxy_token.as_ref().map(crate::tokens::ProxyToken::as_str));
     let want_base_url = has_text(body.proxy_base.as_deref());
     let provider_requested = want_models || want_api_key || want_base_url;
     let provider_applied = provider_requested && has_config;
@@ -565,7 +565,7 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
                     None
                 },
                 api_key: if want_api_key {
-                    body.proxy_token.as_deref()
+                    body.proxy_token.as_ref().map(crate::tokens::ProxyToken::as_str)
                 } else {
                     None
                 },
@@ -616,7 +616,11 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         provider_changed || image_changed || skills_changed || mcp_changed || telegram_changed;
 
     let agent_secrets_patch =
-        agent_secrets_runtime_patch(&body.proxy_base, &body.proxy_token, &body.instance_id);
+        agent_secrets_runtime_patch(
+            body.proxy_base.as_deref(),
+            body.proxy_token.as_ref().map(crate::tokens::ProxyToken::as_str),
+            body.instance_id.as_deref(),
+        );
     let agent_secrets_applied = agent_secrets_patch.is_some();
     let agent_secrets_changed = match &agent_secrets_patch {
         Some(AgentSecretsRuntimePatch::Set {
@@ -691,7 +695,10 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
     // a running `SseOutput` reading the live values without an
     // agent rebuild.  Both empty strings → clear the config (operator
     // turned ingest off explicitly).
-    let ingest_patch = runtime_patch(&body.ingest_url, &body.ingest_token);
+    let ingest_patch = runtime_patch(
+        body.ingest_url.as_deref(),
+        body.ingest_token.as_ref().map(crate::tokens::IngestToken::as_str),
+    );
     let ingest_applied = ingest_patch.is_some();
     let ingest_changed = match &ingest_patch {
         Some(RuntimePatch::Set { url, token }) => {
@@ -712,7 +719,10 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
         }
         _ => false,
     };
-    let state_sync_patch = runtime_patch(&body.state_sync_url, &body.state_sync_token);
+    let state_sync_patch = runtime_patch(
+        body.state_sync_url.as_deref(),
+        body.state_sync_token.as_ref().map(crate::tokens::StateSyncToken::as_str),
+    );
     let state_sync_applied = state_sync_patch.is_some();
     let state_sync_changed = match &state_sync_patch {
         Some(RuntimePatch::Set { url, token }) => {
@@ -753,11 +763,11 @@ pub(super) async fn post(req: Request<hyper::body::Incoming>, state: &HttpState)
 }
 
 fn preserve_runtime_only_settings(new_settings: &mut Settings, snapshot: &Settings) {
-    // `dangerous_no_sandbox` is deliberately CLI-only and never serialized
-    // into dyson.json. Eager runtime reloads must carry it forward or swarm
-    // instances inside Cube will try to build an OS sandbox and exit because
-    // bwrap is not installed there.
-    new_settings.dangerous_no_sandbox = snapshot.dangerous_no_sandbox;
+    // `sandbox_bypass` is deliberately CLI-only and never serialized
+    // into dyson.json. Eager runtime reloads must carry it forward or
+    // swarm instances inside Cube will try to build an OS sandbox and
+    // exit because bwrap is not installed there.
+    new_settings.sandbox_bypass = snapshot.sandbox_bypass.clone();
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -781,10 +791,10 @@ fn has_text(value: Option<&str>) -> bool {
 }
 
 fn runtime_patch<'a>(
-    url: &'a Option<String>,
-    token: &'a Option<String>,
+    url: Option<&'a str>,
+    token: Option<&'a str>,
 ) -> Option<RuntimePatch<'a>> {
-    match (url.as_deref(), token.as_deref()) {
+    match (url, token) {
         (Some(url), Some(token)) if !url.is_empty() && !token.is_empty() => {
             Some(RuntimePatch::Set { url, token })
         }
@@ -794,14 +804,14 @@ fn runtime_patch<'a>(
 }
 
 fn agent_secrets_runtime_patch<'a>(
-    proxy_url: &'a Option<String>,
-    proxy_token: &'a Option<String>,
-    instance_id: &'a Option<String>,
+    proxy_url: Option<&'a str>,
+    proxy_token: Option<&'a str>,
+    instance_id: Option<&'a str>,
 ) -> Option<AgentSecretsRuntimePatch<'a>> {
     match (
-        proxy_url.as_deref(),
-        proxy_token.as_deref(),
-        instance_id.as_deref(),
+        proxy_url,
+        proxy_token,
+        instance_id,
     ) {
         (Some(proxy_url), Some(proxy_token), Some(instance_id))
             if !proxy_url.is_empty() && !proxy_token.is_empty() && !instance_id.is_empty() =>
@@ -1977,7 +1987,7 @@ mod tests {
             "task": "research",
             "models": ["deepseek/deepseek-v4-pro"],
             "instance_id": "i-1",
-            "proxy_token": "pt_test",
+            "proxy_token": "pt_12345678901234567890123456789012",
             "proxy_base": "https://swarm.test/llm/openrouter",
             "image_provider_name": "image",
             "image_provider_block": {
@@ -1993,9 +2003,9 @@ mod tests {
                 "massive": { "url": "https://swarm.test/mcp/i-1/massive" }
             },
             "ingest_url": "https://swarm.test/v1/internal/ingest",
-            "ingest_token": "it_123",
+            "ingest_token": "it_12345678901234567890123456789012",
             "state_sync_url": "https://swarm.test/v1/internal/state/file",
-            "state_sync_token": "st_123"
+            "state_sync_token": "st_12345678901234567890123456789012"
         }))
         .unwrap();
 
@@ -2004,44 +2014,49 @@ mod tests {
         assert_eq!(body.tools.as_deref(), Some(&["read_file".to_string()][..]));
         assert!(body.reset_skills);
         assert!(body.mcp_servers.as_ref().unwrap().contains_key("massive"));
-        assert_eq!(body.state_sync_token.as_deref(), Some("st_123"));
+        // Token comes in as a typed StateSyncToken, parsed by serde via
+        // its validating Deserialize impl.  Reach through `.as_str()`
+        // for the wire-shape check.
+        assert_eq!(
+            body.state_sync_token
+                .as_ref()
+                .map(crate::tokens::StateSyncToken::as_str),
+            Some("st_12345678901234567890123456789012")
+        );
     }
 
     #[test]
     fn runtime_patch_requires_complete_pairs_and_supports_clear() {
         assert_eq!(
-            runtime_patch(
-                &Some("https://swarm.test/ingest".into()),
-                &Some("it_123".into())
-            ),
+            runtime_patch(Some("https://swarm.test/ingest"), Some("it_123")),
             Some(RuntimePatch::Set {
                 url: "https://swarm.test/ingest",
                 token: "it_123"
             })
         );
         assert_eq!(
-            runtime_patch(&Some(String::new()), &Some(String::new())),
+            runtime_patch(Some(""), Some("")),
             Some(RuntimePatch::Clear)
         );
         assert_eq!(
-            runtime_patch(&Some("https://swarm.test/ingest".into()), &None),
+            runtime_patch(Some("https://swarm.test/ingest"), None),
             None
         );
-        assert_eq!(runtime_patch(&None, &Some("it_123".into())), None);
+        assert_eq!(runtime_patch(None, Some("it_123")), None);
     }
 
     #[test]
     fn eager_config_reload_preserves_cli_only_sandbox_flag() {
         let snapshot = Settings {
-            dangerous_no_sandbox: true,
+            sandbox_bypass: Some(crate::sandbox::SandboxBypassGuard::for_test()),
             ..Default::default()
         };
         let mut reloaded = Settings::default();
-        assert!(!reloaded.dangerous_no_sandbox);
+        assert!(reloaded.sandbox_bypass.is_none());
 
         preserve_runtime_only_settings(&mut reloaded, &snapshot);
 
-        assert!(reloaded.dangerous_no_sandbox);
+        assert!(reloaded.sandbox_bypass.is_some());
     }
 
     #[test]

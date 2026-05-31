@@ -481,7 +481,12 @@ impl Agent {
             cancellation: CancellationToken::new(),
             workspace: None,
             depth: 0,
-            dangerous_no_sandbox: sandbox.skip_path_validation(),
+            // Inherit the bypass from the parent sandbox, if any.  This is
+            // the only out-of-CLI mint: a subagent runs against the parent
+            // sandbox's posture, which is already validated at startup.
+            sandbox_bypass: sandbox
+                .sandbox_bypass()
+                .map(|_| crate::sandbox::SandboxBypassGuard::inherited_from_parent()),
             taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             activity: None,
             tool_use_id: None,

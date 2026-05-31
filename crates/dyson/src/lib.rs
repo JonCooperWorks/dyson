@@ -61,6 +61,7 @@ pub mod secret;
 pub mod skill;
 pub mod swarm_cost;
 pub mod swarm_state_sync;
+pub mod tokens;
 pub mod tool;
 pub(crate) mod tool_hooks;
 pub(crate) mod util;

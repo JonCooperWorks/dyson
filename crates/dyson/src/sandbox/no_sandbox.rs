@@ -25,7 +25,7 @@
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::sandbox::{Sandbox, SandboxDecision};
+use crate::sandbox::{Sandbox, SandboxBypassGuard, SandboxDecision};
 use crate::tool::ToolContext;
 
 // ---------------------------------------------------------------------------
@@ -37,13 +37,25 @@ use crate::tool::ToolContext;
 /// Selected via `--dangerous-no-sandbox` CLI flag.  Does not modify
 /// inputs or outputs.  Logs every tool call for observability.
 ///
+/// The held `SandboxBypassGuard` is what tools call out for when
+/// they need to step outside the working directory — this is the
+/// only place in the codebase that hands one out to consumers.
+///
 /// ## Why this exists instead of just `Option<Box<dyn Sandbox>>`
 ///
 /// Making the sandbox mandatory (not optional) means the agent loop always
 /// has the same code path: `sandbox.check() → tool.run() → sandbox.after()`.
 /// No `if let Some(sandbox) = ...` branching.  When you add a real sandbox,
 /// you just swap the impl — zero changes to the agent loop.
-pub struct DangerousNoSandbox;
+pub struct DangerousNoSandbox {
+    bypass: SandboxBypassGuard,
+}
+
+impl DangerousNoSandbox {
+    pub fn new(bypass: SandboxBypassGuard) -> Self {
+        Self { bypass }
+    }
+}
 
 #[async_trait]
 impl Sandbox for DangerousNoSandbox {
@@ -65,8 +77,8 @@ impl Sandbox for DangerousNoSandbox {
         })
     }
 
-    fn skip_path_validation(&self) -> bool {
-        true
+    fn sandbox_bypass(&self) -> Option<&SandboxBypassGuard> {
+        Some(&self.bypass)
     }
 
     // `after()` uses the default no-op from the trait.
@@ -83,7 +95,7 @@ mod tests {
 
     #[tokio::test]
     async fn always_allows() {
-        let sandbox = DangerousNoSandbox;
+        let sandbox = DangerousNoSandbox::new(SandboxBypassGuard::for_test());
         let ctx = ToolContext::from_cwd().unwrap();
         let input = serde_json::json!({"command": "rm -rf /"});
 
@@ -115,7 +127,7 @@ mod tests {
 
     #[tokio::test]
     async fn after_is_noop() {
-        let sandbox = DangerousNoSandbox;
+        let sandbox = DangerousNoSandbox::new(SandboxBypassGuard::for_test());
         let input = serde_json::json!({});
         let mut output = ToolOutput::success("original content");
 

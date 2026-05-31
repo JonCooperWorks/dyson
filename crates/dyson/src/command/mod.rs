@@ -65,7 +65,7 @@ pub fn resolve_config_path(explicit: Option<PathBuf>) -> Option<PathBuf> {
 /// (e.g. "anthropic") for convenience.
 pub fn apply_overrides(
     settings: &mut Settings,
-    dangerous_no_sandbox: bool,
+    sandbox_bypass: Option<dyson::sandbox::SandboxBypassGuard>,
     provider: Option<String>,
     base_url: Option<String>,
     workspace: Option<String>,
@@ -97,7 +97,7 @@ pub fn apply_overrides(
     if let Some(url) = base_url {
         settings.agent.base_url = Some(url);
     }
-    settings.dangerous_no_sandbox = dangerous_no_sandbox;
+    settings.sandbox_bypass = sandbox_bypass;
     if let Some(ws) = workspace {
         settings.workspace.connection_string = dyson::auth::Credential::new(ws);
     }
@@ -168,7 +168,7 @@ mod tests {
         let mut settings = Settings::default();
         let result = apply_overrides(
             &mut settings,
-            false,
+            None,
             Some("nonexistent_provider_xyz".to_string()),
             None,
             None,

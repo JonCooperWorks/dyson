@@ -680,7 +680,7 @@ impl McpHttpServer {
             cancellation: CancellationToken::new(),
             workspace: Some(Arc::clone(&self.workspace)),
             depth: 0,
-            dangerous_no_sandbox: false,
+            sandbox_bypass: None,
             taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             activity: None,
             tool_use_id: None,

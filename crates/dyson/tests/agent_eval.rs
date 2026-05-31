@@ -193,7 +193,7 @@ fn builtin_skills() -> Vec<Box<dyn Skill>> {
 fn test_agent(llm: MockLlm) -> Agent {
     test_agent_with_sandbox(
         llm,
-        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap())),
     )
 }
 
@@ -338,7 +338,7 @@ async fn agent_stops_at_max_iterations() {
 
     let mut agent = Agent::new(
         RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap())),
         builtin_skills(),
         &settings,
         None,
@@ -847,7 +847,7 @@ async fn empty_response_sends_fallback_text() {
     };
     let mut agent = test_agent_with_settings(
         llm,
-        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap())),
         settings,
     );
     let mut output = RecordingOutput::new();
@@ -881,7 +881,7 @@ async fn empty_response_retries_then_recovers() {
     };
     let mut agent = test_agent_with_settings(
         llm,
-        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap())),
         settings,
     );
     let mut output = RecordingOutput::new();
@@ -911,7 +911,7 @@ async fn empty_response_retries_exhaust_then_fallback() {
     };
     let mut agent = test_agent_with_settings(
         llm,
-        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap())),
         settings,
     );
     let mut output = RecordingOutput::new();
@@ -952,7 +952,7 @@ async fn tool_calls_then_empty_response_sends_fallback() {
     };
     let mut agent = test_agent_with_settings(
         llm,
-        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap())),
         settings,
     );
     let mut output = RecordingOutput::new();
@@ -1014,7 +1014,7 @@ async fn text_streamed_before_empty_final_response_no_fallback() {
     };
     let mut agent = test_agent_with_settings(
         llm,
-        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(dyson::sandbox::no_sandbox::DangerousNoSandbox::new(dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap())),
         settings,
     );
     let mut output = RecordingOutput::new();

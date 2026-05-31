@@ -126,3 +126,10 @@ wiremock = "0.6"
 # tests assert on virtual time instead of sleeping for real seconds.
 # Dev-only — does not bloat the release binary.
 tokio = { version = "1", features = ["test-util"] }
+
+[features]
+# Exposes `SandboxBypassGuard::for_test()` and the test variant of
+# `SandboxBypassPurpose` to downstream integration test crates (where
+# `cfg(test)` from inside this crate is not visible).  NEVER enable
+# for production builds — it bypasses the sandbox security boundary.
+sandbox-bypass-test = []

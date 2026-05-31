@@ -378,7 +378,7 @@ fn readiness_error(state: &HttpState) -> Option<&'static str> {
         return Some("not ready: warmup-placeholder provider key is still active");
     }
 
-    match crate::sandbox::current_sandbox_backend_status(settings.dangerous_no_sandbox) {
+    match crate::sandbox::current_sandbox_backend_status(settings.sandbox_bypass.as_ref()) {
         crate::sandbox::SandboxBackendStatus::Ready
         | crate::sandbox::SandboxBackendStatus::DangerousDisabled => {}
         crate::sandbox::SandboxBackendStatus::MissingBackend("bwrap") => {

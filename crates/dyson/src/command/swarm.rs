@@ -181,7 +181,13 @@ pub async fn run() -> Result<()> {
         "dyson swarm — starting HTTP controller"
     );
 
-    super::listen::run(Some(cfg_path), true, None, None, None).await
+    // Swarm runs inside a Cube MicroVM (the VM IS the sandbox), so we
+    // mint the bypass guard for the inner dyson — it has no OS sandbox
+    // backend (bwrap / Apple Container) available.  This is the
+    // structural equivalent of the operator passing
+    // `--dangerous-no-sandbox` on the CLI.
+    let sandbox_bypass = dyson::sandbox::sandbox_bypass_from_cli_flag(true);
+    super::listen::run(Some(cfg_path), sandbox_bypass, None, None, None).await
 }
 
 fn build_identity_md(name: &str, instance_id: &str, task: &str) -> String {

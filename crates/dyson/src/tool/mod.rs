@@ -222,11 +222,16 @@ pub struct ToolContext {
     /// runtime state, not configuration — you don't set it in dyson.json.
     pub depth: u8,
 
-    /// When true, tools skip working-directory path validation.
+    /// `Some` iff `--dangerous-no-sandbox` was passed on the CLI.
+    /// Holds the typed bypass capability — tools that need to step
+    /// outside the working directory (e.g. `send_file`) read it as
+    /// proof of the explicit opt-in.
     ///
-    /// Set from `--dangerous-no-sandbox` on the CLI.  Allows tools like
-    /// `send_file` to access paths outside the working directory.
-    pub dangerous_no_sandbox: bool,
+    /// The only way to mint a `SandboxBypassGuard` in production is
+    /// through `sandbox::sandbox_bypass_from_cli_flag` at the CLI
+    /// argument boundary — propagating the bypass elsewhere requires
+    /// carrying this typed value.
+    pub sandbox_bypass: Option<crate::sandbox::SandboxBypassGuard>,
 
     /// Per-language symbol index cache for `taint_trace`.  Keyed by
     /// `LanguageConfig.display_name`.  Lazily populated on first call;
@@ -291,7 +296,7 @@ impl Clone for ToolContext {
             cancellation: self.cancellation.clone(),
             workspace: self.workspace.as_ref().map(Arc::clone),
             depth: self.depth,
-            dangerous_no_sandbox: self.dangerous_no_sandbox,
+            sandbox_bypass: self.sandbox_bypass.clone(),
             taint_indexes: Arc::clone(&self.taint_indexes),
             activity: self.activity.clone(),
             tool_use_id: self.tool_use_id.clone(),
@@ -314,7 +319,7 @@ impl ToolContext {
             cancellation: CancellationToken::new(),
             workspace: None,
             depth: 0,
-            dangerous_no_sandbox: false,
+            sandbox_bypass: None,
             taint_indexes: Arc::new(RwLock::new(HashMap::new())),
             activity: None,
             tool_use_id: None,
@@ -336,7 +341,7 @@ impl ToolContext {
             cancellation: CancellationToken::new(),
             workspace: None,
             depth: 0,
-            dangerous_no_sandbox: false,
+            sandbox_bypass: None,
             taint_indexes: Arc::new(RwLock::new(HashMap::new())),
             activity: None,
             tool_use_id: None,
@@ -359,7 +364,7 @@ impl ToolContext {
             cancellation: CancellationToken::new(),
             workspace: Some(Arc::new(RwLock::new(workspace))),
             depth: 0,
-            dangerous_no_sandbox: false,
+            sandbox_bypass: None,
             taint_indexes: Arc::new(RwLock::new(HashMap::new())),
             activity: None,
             tool_use_id: None,
@@ -385,8 +390,9 @@ impl ToolContext {
     // Boxing it would force boilerplate at every callsite, so we accept
     // the larger Err for ergonomic propagation.
     #[allow(clippy::result_large_err)]
-    pub fn resolve_path(&self, user_path: &str) -> std::result::Result<PathBuf, ToolOutput> {
-        resolve_and_validate_path(&self.working_dir, user_path, self.dangerous_no_sandbox)
+    pub fn resolve_path(&self, user_path: &str) -> std::result::Result<SandboxedPath, ToolOutput> {
+        resolve_and_validate_path(&self.working_dir, user_path, self.sandbox_bypass.as_ref())
+            .map(SandboxedPath::from_validated)
             .map_err(ToolOutput::error)
     }
 }
@@ -497,8 +503,71 @@ pub fn validate_workspace_path(path: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Resolve a user-supplied path against `working_dir` and, unless
-/// `dangerous_no_sandbox` is set, verify it stays inside the workspace.
+/// Path that has been resolved against the working directory and (in
+/// strict mode) verified to stay inside it.
+///
+/// The inner `PathBuf` is `pub(crate)` so out-of-crate code cannot
+/// construct a `SandboxedPath` via struct-literal syntax — the only
+/// way to mint one is [`SandboxedPath::from_validated`], which is
+/// called by [`ToolContext::resolve_path`] after the validation
+/// function returns Ok.
+///
+/// Tools that take their path through `ctx.resolve_path` are
+/// returning the typed value as evidence that the canonicalisation +
+/// escape check ran.  A new tool that constructs a `PathBuf` from
+/// raw LLM input — and skips `ctx.resolve_path` — won't be holding
+/// `SandboxedPath`, which is the type-level signal a reviewer can
+/// scan for.
+///
+/// `Deref<Target = Path>` lets the typed value pass through to
+/// anything that wants a `&Path` (e.g. `tokio::fs::read(&p)`), so
+/// tool implementations do not change.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SandboxedPath {
+    pub(crate) inner: PathBuf,
+}
+
+impl SandboxedPath {
+    /// Wrap a `PathBuf` that has already gone through
+    /// [`resolve_and_validate_path`].  Crate-private — production
+    /// callers go through [`ToolContext::resolve_path`].
+    pub(crate) fn from_validated(inner: PathBuf) -> Self {
+        Self { inner }
+    }
+
+    /// Borrow as `&Path`.
+    pub fn as_path(&self) -> &std::path::Path {
+        &self.inner
+    }
+
+    /// Consume and yield the inner `PathBuf`.
+    pub fn into_path_buf(self) -> PathBuf {
+        self.inner
+    }
+}
+
+impl AsRef<std::path::Path> for SandboxedPath {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.inner
+    }
+}
+
+impl std::ops::Deref for SandboxedPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::fmt::Display for SandboxedPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.display().fmt(f)
+    }
+}
+
+/// Resolve a user-supplied path against `working_dir` and, unless a
+/// `SandboxBypassGuard` is provided, verify it stays inside the
+/// workspace.
 ///
 /// Accepts relative or absolute input; `~`/`~/…` always expand to `$HOME`.
 /// Existing files are canonicalized (following symlinks); for paths that
@@ -511,7 +580,7 @@ pub fn validate_workspace_path(path: &str) -> std::result::Result<(), String> {
 pub fn resolve_and_validate_path(
     working_dir: &std::path::Path,
     user_path: &str,
-    dangerous_no_sandbox: bool,
+    sandbox_bypass: Option<&crate::sandbox::SandboxBypassGuard>,
 ) -> std::result::Result<PathBuf, String> {
     let expanded = crate::util::resolve_tilde(user_path);
     let candidate = if expanded.is_absolute() {
@@ -520,7 +589,7 @@ pub fn resolve_and_validate_path(
         working_dir.join(expanded)
     };
 
-    if dangerous_no_sandbox {
+    if sandbox_bypass.is_some() {
         return Ok(candidate.canonicalize().unwrap_or(candidate));
     }
 
@@ -751,12 +820,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let outside = std::env::temp_dir();
         let outside_str = outside.to_str().unwrap();
-        // Without the flag: escape rejected (temp_dir is not inside `tmp`).
-        let err = resolve_and_validate_path(tmp.path(), outside_str, false);
+        // Without the guard: escape rejected (temp_dir is not inside `tmp`).
+        let err = resolve_and_validate_path(tmp.path(), outside_str, None);
         assert!(err.is_err(), "escape check should fire when sandboxed");
 
-        // With the flag: returned unchanged (canonicalized if it exists).
-        let ok = resolve_and_validate_path(tmp.path(), outside_str, true);
+        // With the guard: returned unchanged (canonicalized if it exists).
+        let guard = crate::sandbox::SandboxBypassGuard::for_test();
+        let ok = resolve_and_validate_path(tmp.path(), outside_str, Some(&guard));
         assert!(ok.is_ok(), "no-sandbox should skip escape check");
     }
 
@@ -764,7 +834,8 @@ mod tests {
     fn dangerous_no_sandbox_expands_tilde() {
         let tmp = tempfile::tempdir().unwrap();
         // ~ is convenience, not sandboxing — expansion happens regardless.
-        let ok = resolve_and_validate_path(tmp.path(), "~", true).unwrap();
+        let guard = crate::sandbox::SandboxBypassGuard::for_test();
+        let ok = resolve_and_validate_path(tmp.path(), "~", Some(&guard)).unwrap();
         assert!(ok.is_absolute(), "got {ok:?}");
         assert!(!ok.to_string_lossy().contains('~'), "got {ok:?}");
     }

@@ -244,7 +244,8 @@ async fn main() -> dyson::error::Result<()> {
             base_url,
             workspace,
         } => {
-            command::listen::run(config, dangerous_no_sandbox, provider, base_url, workspace).await
+            let sandbox_bypass = dyson::sandbox::sandbox_bypass_from_cli_flag(dangerous_no_sandbox);
+            command::listen::run(config, sandbox_bypass, provider, base_url, workspace).await
         }
         Commands::HashBearer { plaintext } => command::hash_bearer::run(plaintext),
         Commands::CostBackfill {
@@ -262,10 +263,11 @@ async fn main() -> dyson::error::Result<()> {
             base_url,
             workspace,
         } => {
+            let sandbox_bypass = dyson::sandbox::sandbox_bypass_from_cli_flag(dangerous_no_sandbox);
             command::run::run(
                 prompt,
                 config,
-                dangerous_no_sandbox,
+                sandbox_bypass,
                 provider,
                 base_url,
                 workspace,

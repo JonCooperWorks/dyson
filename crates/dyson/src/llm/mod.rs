@@ -267,14 +267,14 @@ pub trait LlmClient: Send + Sync {
 pub(crate) fn create_client(
     settings: &crate::config::AgentSettings,
     workspace: Option<crate::workspace::WorkspaceHandle>,
-    dangerous_no_sandbox: bool,
+    sandbox_bypass: Option<&crate::sandbox::SandboxBypassGuard>,
 ) -> Box<dyn LlmClient> {
     let entry = registry::lookup(&settings.provider);
     let config = registry::ClientConfig {
         api_key: settings.api_key.expose(),
         base_url: settings.base_url.as_deref(),
         workspace,
-        dangerous_no_sandbox,
+        sandbox_bypass,
     };
     let inner = (entry.create_client)(&config);
     let retrying: Box<dyn LlmClient> =

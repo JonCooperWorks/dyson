@@ -264,7 +264,7 @@ async fn simple_text_response() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -325,7 +325,7 @@ async fn assistant_message_stores_swarm_cost_when_lookup_succeeds_and_keeps_turn
     ));
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let settings = AgentSettings {
         api_key: "test".into(),
         ..Default::default()
@@ -429,7 +429,7 @@ async fn retries_retryable_error_while_consuming_stream() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -506,7 +506,7 @@ async fn retries_stream_error_after_tool_start_before_tool_complete() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -563,7 +563,7 @@ async fn tool_call_loop() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -616,7 +616,7 @@ async fn internal_tools_provider_skips_tool_execution() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -654,7 +654,7 @@ async fn memory_system_prompt_contains_usage_stats_and_curation_rules() {
         cancellation: CancellationToken::new(),
         workspace: Some(std::sync::Arc::new(tokio::sync::RwLock::new(workspace))),
         depth: 0,
-        dangerous_no_sandbox: false,
+        sandbox_bypass: None,
         taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         activity: None,
         tool_use_id: None,
@@ -690,7 +690,7 @@ async fn reflection_system_prompt_lists_tools() {
         cancellation: CancellationToken::new(),
         workspace: None,
         depth: 0,
-        dangerous_no_sandbox: false,
+        sandbox_bypass: None,
         taint_indexes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         activity: None,
         tool_use_id: None,
@@ -993,7 +993,7 @@ async fn token_budget_stops_agent_loop() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -1134,7 +1134,7 @@ async fn tool_output_files_dispatched_via_send_file() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(MockFileSkill::new())];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -1196,7 +1196,7 @@ async fn admits_pending_user_message_after_tool_results_before_next_llm_call() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(MockFileSkill::new())];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -1288,7 +1288,7 @@ async fn tool_output_no_files_means_no_send_file() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -1370,7 +1370,7 @@ fn make_agent_with_history(
         ..Default::default()
     };
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -1936,7 +1936,7 @@ async fn auto_compaction_triggers_on_threshold() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -2341,7 +2341,7 @@ mod test_tool_calling_integration {
         };
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
         let mut agent = Agent::new(
             rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
             sandbox,
@@ -2368,7 +2368,7 @@ mod test_tool_calling_integration {
         };
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
         let mut agent = Agent::new(
             rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
             sandbox,
@@ -2400,7 +2400,7 @@ mod test_tool_calling_integration {
         };
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
         let mut agent = Agent::new(
             rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
             sandbox,
@@ -2424,7 +2424,7 @@ mod test_tool_calling_integration {
         };
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
         let mut agent = Agent::new(
             rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
             sandbox,
@@ -2486,7 +2486,7 @@ mod test_tool_calling_integration {
         };
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
         let mut agent = Agent::new(
             rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
             sandbox,
@@ -2829,7 +2829,7 @@ fn generic_advisor_inherits_parent_tools() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
 
     // Count the tools from skills (before advisor).
     let skill_tool_count: usize = skills.iter().map(|s| s.tools().len()).sum();
@@ -2879,7 +2879,7 @@ fn generic_advisor_inherits_parent_tools() {
 fn generic_advisor_shares_sandbox_with_parent() {
     // Verify that the generic advisor's child agent gets the exact same
     // sandbox instance (Arc identity) as the parent agent.
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let advisor_llm = MockLlm::new(vec![]);
 
     let mut advisor = crate::advisor::generic::GenericAdvisor::new(
@@ -2916,7 +2916,7 @@ fn native_anthropic_advisor_injects_api_tool() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
     let skill_tool_count: usize = skills.iter().map(|s| s.tools().len()).sum();
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
 
     let advisor_client = rate_limiter::RateLimitedHandle::unlimited(
         Box::new(MockLlm::new(vec![])) as Box<dyn LlmClient>

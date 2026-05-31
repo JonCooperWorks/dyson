@@ -105,11 +105,15 @@ pub struct Settings {
     /// When `None`, the tool is simply absent.
     pub web_search: Option<WebSearchConfig>,
 
-    /// Whether `--dangerous-no-sandbox` was passed on the CLI.
+    /// `Some` iff `--dangerous-no-sandbox` was passed on the CLI.
     ///
-    /// This is the ONLY way to disable all sandboxes.  It cannot be set
-    /// from config — only from the command line, as a conscious decision.
-    pub dangerous_no_sandbox: bool,
+    /// This is the ONLY way to disable all sandboxes.  It cannot be
+    /// set from a config file — only from the command line, as a
+    /// conscious decision.  Holding the typed
+    /// [`crate::sandbox::SandboxBypassGuard`] (rather than a bare
+    /// `bool`) means downstream code can't lose track of *why* the
+    /// bypass is active.
+    pub sandbox_bypass: Option<crate::sandbox::SandboxBypassGuard>,
 }
 
 /// Resolved named provider selection.
@@ -992,7 +996,7 @@ impl Default for Settings {
             chat_history: ChatHistoryConfig::default(),
             transcriber: None,
             web_search: None,
-            dangerous_no_sandbox: false,
+            sandbox_bypass: None,
         }
     }
 }

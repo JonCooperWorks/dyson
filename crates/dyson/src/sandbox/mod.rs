@@ -139,12 +139,16 @@ pub trait Sandbox: Send + Sync {
         ctx: &ToolContext,
     ) -> Result<SandboxDecision>;
 
-    /// Whether tools should skip working-directory path validation.
+    /// Returns the active [`SandboxBypassGuard`] iff this sandbox skips
+    /// working-directory path validation.  Only `DangerousNoSandbox`
+    /// returns `Some`; `PolicySandbox` returns `None`.
     ///
-    /// Returns `true` only for `DangerousNoSandbox`.  Tools like `send_file`
-    /// use this to allow access to paths outside the working directory.
-    fn skip_path_validation(&self) -> bool {
-        false
+    /// Tools that need to step outside the working directory
+    /// (e.g. `send_file`) take the returned guard as proof of the
+    /// bypass — there is no other way to mint one in production
+    /// code outside `main.rs`'s CLI argument boundary.
+    fn sandbox_bypass(&self) -> Option<&SandboxBypassGuard> {
+        None
     }
 
     /// Post-process a tool's output after execution.
@@ -172,13 +176,107 @@ pub enum SandboxBackendStatus {
     UnsupportedPlatform,
 }
 
+/// Unforgeable capability proving the caller has explicitly opted out
+/// of the OS sandbox.  The bypass used to be a `bool` that was
+/// plumbed through ~90 sites; an extra `bool` parameter slipping in
+/// undetected could silently disable sandboxing for a tool.  The
+/// typed guard makes the bypass impossible to fabricate accidentally:
+/// the only private field is `_seal: ()`, and the only constructors
+/// are the explicit, named ones below.
+///
+/// Pattern mirrors `dyson-swarm`'s `RawKmsAccessGuard` /
+/// `SystemBypassGuard` / `LiveSystemCipher`.
+///
+/// CLAUDE.md says it best: "The sandbox is the security boundary.
+/// Never add a bypass.  --dangerous-no-sandbox is an explicit
+/// opt-in, not a fallback."  This type enforces that with the
+/// compiler.
+#[must_use = "SandboxBypassGuard does nothing on its own; thread it into ToolContext or pass to path validation"]
+#[derive(Clone, Debug)]
+pub struct SandboxBypassGuard {
+    purpose: SandboxBypassPurpose,
+    _seal: (),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SandboxBypassPurpose {
+    /// Operator passed `--dangerous-no-sandbox` on the CLI.  This is
+    /// the only production-allowed mint.
+    CliExplicitOptIn,
+    /// In-process derivation for a subagent that inherits the
+    /// parent's bypass posture without re-parsing CLI args.
+    InheritedFromParent,
+    /// Test-only — gated behind `cfg(test)` and the
+    /// `sandbox-bypass-test` feature for downstream test crates.
+    #[cfg(any(test, feature = "sandbox-bypass-test"))]
+    Test,
+}
+
+impl SandboxBypassPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CliExplicitOptIn => "cli_explicit_opt_in",
+            Self::InheritedFromParent => "inherited_from_parent",
+            #[cfg(any(test, feature = "sandbox-bypass-test"))]
+            Self::Test => "test",
+        }
+    }
+}
+
+impl SandboxBypassGuard {
+    /// Mint a guard because the operator passed `--dangerous-no-sandbox`
+    /// on the CLI.  The only production-allowed constructor.
+    pub fn for_cli_explicit_opt_in() -> Self {
+        Self::mint(SandboxBypassPurpose::CliExplicitOptIn)
+    }
+
+    /// Mint a guard for a subagent that inherits its parent's
+    /// already-validated bypass posture.  Crate-private so this
+    /// cannot be reached from out-of-crate code.
+    pub(crate) fn inherited_from_parent() -> Self {
+        Self::mint(SandboxBypassPurpose::InheritedFromParent)
+    }
+
+    /// Test-only constructor.
+    #[cfg(any(test, feature = "sandbox-bypass-test"))]
+    pub fn for_test() -> Self {
+        Self::mint(SandboxBypassPurpose::Test)
+    }
+
+    fn mint(purpose: SandboxBypassPurpose) -> Self {
+        tracing::debug!(
+            target: "sandbox.bypass",
+            purpose = purpose.as_str(),
+            "SandboxBypassGuard minted: tool calls will skip path validation"
+        );
+        Self { purpose, _seal: () }
+    }
+
+    pub fn purpose(&self) -> SandboxBypassPurpose {
+        self.purpose
+    }
+}
+
+/// Mint a guard from the CLI flag's boolean value.  This is the
+/// type-system boundary between argument parsing (which has to
+/// accept `bool` because that's the wire format) and the rest of
+/// the codebase (which threads `Option<SandboxBypassGuard>` so the
+/// bypass carries its provenance).
+pub fn sandbox_bypass_from_cli_flag(flag: bool) -> Option<SandboxBypassGuard> {
+    if flag {
+        Some(SandboxBypassGuard::for_cli_explicit_opt_in())
+    } else {
+        None
+    }
+}
+
 pub fn sandbox_backend_status_for_target(
     target_os: &str,
-    dangerous_no_sandbox: bool,
+    sandbox_bypass: Option<&SandboxBypassGuard>,
     has_bwrap: bool,
     has_container: bool,
 ) -> SandboxBackendStatus {
-    if dangerous_no_sandbox {
+    if sandbox_bypass.is_some() {
         return SandboxBackendStatus::DangerousDisabled;
     }
     match target_os {
@@ -190,10 +288,12 @@ pub fn sandbox_backend_status_for_target(
     }
 }
 
-pub fn current_sandbox_backend_status(dangerous_no_sandbox: bool) -> SandboxBackendStatus {
+pub fn current_sandbox_backend_status(
+    sandbox_bypass: Option<&SandboxBypassGuard>,
+) -> SandboxBackendStatus {
     sandbox_backend_status_for_target(
         std::env::consts::OS,
-        dangerous_no_sandbox,
+        sandbox_bypass,
         binary_on_path("bwrap"),
         binary_on_path("container"),
     )
@@ -237,7 +337,7 @@ fn binary_on_path(name: &str) -> bool {
 /// cloning the entire sandbox tree.
 pub fn create_sandbox(
     config: &crate::config::SandboxConfig,
-    dangerous_no_sandbox: bool,
+    sandbox_bypass: Option<SandboxBypassGuard>,
 ) -> std::sync::Arc<dyn Sandbox> {
     if config.disabled.iter().any(|s| s == "os") {
         tracing::warn!(
@@ -246,10 +346,15 @@ pub fn create_sandbox(
         );
     }
 
-    match current_sandbox_backend_status(dangerous_no_sandbox) {
+    match current_sandbox_backend_status(sandbox_bypass.as_ref()) {
         SandboxBackendStatus::DangerousDisabled => {
             tracing::warn!("all sandboxes disabled via --dangerous-no-sandbox");
-            return std::sync::Arc::new(no_sandbox::DangerousNoSandbox);
+            // Unwrap: we just matched DangerousDisabled, which only
+            // fires when sandbox_bypass.is_some().
+            let guard = sandbox_bypass.expect(
+                "DangerousDisabled implies sandbox_bypass.is_some() — checked by status fn",
+            );
+            return std::sync::Arc::new(no_sandbox::DangerousNoSandbox::new(guard));
         }
         SandboxBackendStatus::Ready => {}
         SandboxBackendStatus::MissingBackend("bwrap") => {
@@ -304,14 +409,39 @@ mod tests {
     #[test]
     fn unsupported_platform_requires_dangerous_no_sandbox() {
         assert_eq!(
-            sandbox_backend_status_for_target("freebsd", false, false, false),
+            sandbox_backend_status_for_target("freebsd", None, false, false),
             SandboxBackendStatus::UnsupportedPlatform,
             "D6 unsupported targets must refuse to start unless --dangerous-no-sandbox is set"
         );
+        let bypass = SandboxBypassGuard::for_test();
         assert_eq!(
-            sandbox_backend_status_for_target("freebsd", true, false, false),
+            sandbox_backend_status_for_target("freebsd", Some(&bypass), false, false),
             SandboxBackendStatus::DangerousDisabled,
             "D6 explicit dangerous opt-out is the only unsupported-target escape hatch"
         );
+    }
+
+    #[test]
+    fn cli_flag_false_yields_none() {
+        assert!(sandbox_bypass_from_cli_flag(false).is_none());
+    }
+
+    #[test]
+    fn cli_flag_true_yields_some_with_correct_purpose() {
+        let guard = sandbox_bypass_from_cli_flag(true).unwrap();
+        assert_eq!(guard.purpose(), SandboxBypassPurpose::CliExplicitOptIn);
+    }
+
+    #[test]
+    fn guard_purposes_round_trip_as_str() {
+        assert_eq!(
+            SandboxBypassPurpose::CliExplicitOptIn.as_str(),
+            "cli_explicit_opt_in"
+        );
+        assert_eq!(
+            SandboxBypassPurpose::InheritedFromParent.as_str(),
+            "inherited_from_parent"
+        );
+        assert_eq!(SandboxBypassPurpose::Test.as_str(), "test");
     }
 }

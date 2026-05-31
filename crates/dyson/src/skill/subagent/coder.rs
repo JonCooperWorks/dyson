@@ -147,7 +147,7 @@ impl Tool for CoderTool {
             workspace: self.workspace.clone(),
             client: self.client.clone(),
             parent_depth: ctx.depth,
-            working_dir: Some(scoped_dir),
+            working_dir: Some(scoped_dir.into_path_buf()),
             user_message,
             activity: ctx.activity.clone(),
             events: ctx.subagent_events.clone(),

@@ -222,9 +222,9 @@ fn subagent_tool_name_and_description() {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         vec![],
     );
@@ -254,9 +254,9 @@ fn subagent_tool_input_schema_has_required_task() {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         vec![],
     );
@@ -357,7 +357,7 @@ async fn subagent_runs_child_and_returns_result() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(FilteredSkill { tools: vec![] })];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let mut agent = crate::agent::Agent::new(
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -424,7 +424,7 @@ async fn subagent_concatenates_text_across_max_tokens_continuation() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         vec![],
     );
@@ -468,9 +468,9 @@ async fn subagent_depth_limit_prevents_recursion() {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         vec![],
     );
@@ -482,7 +482,7 @@ async fn subagent_depth_limit_prevents_recursion() {
         cancellation: tokio_util::sync::CancellationToken::new(),
         workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
-        dangerous_no_sandbox: false,
+        sandbox_bypass: None,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
         tool_use_id: None,
@@ -519,9 +519,9 @@ async fn subagent_missing_task_returns_error() {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         vec![],
     );
@@ -582,7 +582,7 @@ fn subagent_skill_system_prompt_lists_agents() {
         injects_protocol: None,
     }];
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
@@ -617,7 +617,7 @@ fn subagent_skill_skips_unknown_provider() {
         injects_protocol: None,
     }];
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
@@ -664,7 +664,7 @@ fn name_allowlist_drops_coder_and_orchestrators_when_excluded() {
         injects_protocol: None,
     }];
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let registry = crate::controller::ClientRegistry::new(&settings, None);
 
     // Allowlist contains only the user-defined subagent and a couple
@@ -708,7 +708,7 @@ fn name_allowlist_keeps_only_listed_orchestrators() {
     // Allowlist includes coder but not security_engineer — coder
     // survives, the orchestrator gets dropped.
     let settings = crate::config::Settings::default();
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let allow: std::collections::HashSet<String> = ["coder".to_string()].into_iter().collect();
     let skill = SubagentSkill::new(&[], &settings, sandbox, None, &[], &registry, Some(&allow));
@@ -721,7 +721,7 @@ fn name_allowlist_none_preserves_default_registration() {
     // Sanity: passing None (no allowlist) keeps the pre-existing
     // behaviour — coder + every orchestrator register unconditionally.
     let settings = crate::config::Settings::default();
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&[], &settings, sandbox, None, &[], &registry, None);
     let names: Vec<&str> = skill.tools().iter().map(|t| t.name()).collect();
@@ -857,7 +857,7 @@ fn injects_protocol_fragment_appended_to_system_prompt() {
         injects_protocol: Some("\n\n## Usage Protocol\nAlways invoke me first.".into()),
     }];
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
@@ -889,7 +889,7 @@ fn verification_protocol_absent_without_verifier() {
         injects_protocol: None,
     }];
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
@@ -922,7 +922,7 @@ fn default_provider_resolves_to_agent_settings() {
         injects_protocol: None,
     }];
 
-    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox);
+    let sandbox: Arc<dyn Sandbox> = Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
     let registry = crate::controller::ClientRegistry::new(&settings, None);
     let skill = SubagentSkill::new(&configs, &settings, sandbox, None, &[], &registry, None);
 
@@ -965,7 +965,7 @@ async fn subagent_uses_parent_model_when_config_model_unset() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(), // parent's model
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         vec![],
     );
@@ -996,7 +996,7 @@ async fn coder_uses_parent_model() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
     );
@@ -1039,7 +1039,7 @@ async fn orchestrator_uses_parent_model() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
         vec![],
@@ -1066,9 +1066,9 @@ fn make_coder_tool() -> CoderTool {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
     )
@@ -1104,7 +1104,7 @@ async fn coder_depth_limit_prevents_recursion() {
         cancellation: tokio_util::sync::CancellationToken::new(),
         workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
-        dangerous_no_sandbox: false,
+        sandbox_bypass: None,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
         tool_use_id: None,
@@ -1189,9 +1189,9 @@ fn coder_filters_to_correct_tools() {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &parent_tools,
     );
@@ -1228,7 +1228,7 @@ async fn coder_runs_child_and_returns_result() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
     );
@@ -1269,9 +1269,9 @@ fn orchestrator_tool_uses_config_name_and_description() {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
         vec![],
@@ -1312,9 +1312,9 @@ fn security_engineer_resume_schema_does_not_require_task() {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
         vec![],
@@ -1795,7 +1795,7 @@ async fn security_engineer_writes_checkpoint_after_recon() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -1864,7 +1864,7 @@ async fn security_engineer_recon_generates_taxonomy_driven_tasks() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2002,7 +2002,7 @@ async fn security_engineer_resumes_checkpoint_and_does_not_rerun_completed_tasks
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2131,7 +2131,7 @@ async fn security_engineer_resumes_json_checkpoint_after_filesystem_workspace_re
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(first_llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2214,7 +2214,7 @@ async fn security_engineer_resumes_json_checkpoint_after_filesystem_workspace_re
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(resume_llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         Some(Arc::clone(&reloaded_workspace)),
         &[],
         vec![],
@@ -2348,7 +2348,7 @@ async fn security_engineer_trace_parse_failure_records_gap_and_reports() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2412,7 +2412,7 @@ async fn security_engineer_old_checkpoint_fails_safely() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -2463,9 +2463,9 @@ fn orchestrator_filters_to_config_tool_names() {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &parent_tools,
         inner_subagents,
@@ -2510,9 +2510,9 @@ async fn orchestrator_depth_limit_prevents_recursion() {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
         vec![],
@@ -2524,7 +2524,7 @@ async fn orchestrator_depth_limit_prevents_recursion() {
         cancellation: tokio_util::sync::CancellationToken::new(),
         workspace: None,
         depth: MAX_SUBAGENT_DEPTH,
-        dangerous_no_sandbox: false,
+        sandbox_bypass: None,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
         tool_use_id: None,
@@ -2566,7 +2566,7 @@ async fn orchestrator_runs_child_and_returns_result() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
         vec![],
@@ -2622,7 +2622,7 @@ async fn orchestrator_emits_artefact_for_non_report_shaped_output() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
         vec![],
@@ -2681,7 +2681,7 @@ async fn orchestrator_suppresses_artefact_when_output_is_whitespace_only() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
         vec![],
@@ -2725,9 +2725,9 @@ fn orchestrator_with_custom_config() {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &parent_tools,
         vec![],
@@ -2769,9 +2769,9 @@ async fn orchestrator_rejects_nonexistent_path() {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
         vec![],
@@ -2803,9 +2803,9 @@ async fn orchestrator_rejects_path_pointing_to_file() {
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(crate::llm::create_client(
             &crate::config::AgentSettings::default(),
             None,
-            false,
+            None,
         )),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
         vec![],
@@ -2906,7 +2906,7 @@ async fn orchestrator_propagates_path_to_child_working_dir() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         std::slice::from_ref(&spy),
         vec![],
@@ -3002,7 +3002,7 @@ async fn subagent_inherits_parents_working_dir() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         vec![spy],
     );
@@ -3015,7 +3015,7 @@ async fn subagent_inherits_parents_working_dir() {
         cancellation: tokio_util::sync::CancellationToken::new(),
         workspace: None,
         depth: 1,
-        dangerous_no_sandbox: false,
+        sandbox_bypass: None,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         activity: None,
         tool_use_id: None,
@@ -3094,7 +3094,7 @@ async fn orchestrator_without_path_keeps_process_cwd() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         std::slice::from_ref(&spy),
         vec![],
@@ -3156,7 +3156,7 @@ async fn security_engineer_injects_express_cheatsheet_for_js_repo() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -3215,7 +3215,7 @@ async fn security_engineer_injects_nothing_for_repo_without_manifests() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         Some(Arc::clone(&workspace)),
         &[],
         vec![],
@@ -3281,7 +3281,7 @@ async fn orchestrator_without_inject_cheatsheets_flag_skips_detection() {
         LlmProvider::Anthropic,
         "claude-opus-4-20250514".into(),
         crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
-        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test())),
         None,
         &[],
         vec![],

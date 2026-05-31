@@ -18,7 +18,7 @@ fn test_ctx(dir: &Path) -> ToolContext {
         cancellation: tokio_util::sync::CancellationToken::new(),
         workspace: None,
         depth: 0,
-        dangerous_no_sandbox: false,
+        sandbox_bypass: None,
         taint_indexes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         activity: None,
         tool_use_id: None,

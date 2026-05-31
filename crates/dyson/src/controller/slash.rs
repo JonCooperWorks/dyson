@@ -287,7 +287,8 @@ fn build_direct_agent_for_skill(
     };
 
     let workspace: crate::workspace::WorkspaceHandle = Arc::new(RwLock::new(workspace));
-    let sandbox = crate::sandbox::create_sandbox(&settings.sandbox, settings.dangerous_no_sandbox);
+    let sandbox =
+        crate::sandbox::create_sandbox(&settings.sandbox, settings.sandbox_bypass.clone());
     let client = RateLimitedHandle::unlimited(Box::new(DirectSlashLlm) as Box<dyn LlmClient>);
     let agent = crate::agent::Agent::builder(client, sandbox)
         .skills(vec![Box::new(skill)])
@@ -416,7 +417,7 @@ mod tests {
         .unwrap();
 
         let mut settings = Settings {
-            dangerous_no_sandbox: true,
+            sandbox_bypass: Some(crate::sandbox::SandboxBypassGuard::for_test()),
             ..Default::default()
         };
         settings.agent.model = "warmup-placeholder".into();

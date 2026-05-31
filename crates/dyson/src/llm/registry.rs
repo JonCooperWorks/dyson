@@ -150,8 +150,12 @@ pub struct ClientConfig<'a> {
     /// Shared workspace reference (used by CLI-subprocess providers).
     pub workspace: Option<WorkspaceHandle>,
 
-    /// Whether `--dangerous-no-sandbox` was passed (CLI-subprocess only).
-    pub dangerous_no_sandbox: bool,
+    /// `Some` iff `--dangerous-no-sandbox` was passed (CLI-subprocess
+    /// only).  Carries the typed
+    /// [`crate::sandbox::SandboxBypassGuard`] so the bypass posture
+    /// is impossible to lose track of as it crosses provider
+    /// boundaries.
+    pub sandbox_bypass: Option<&'a crate::sandbox::SandboxBypassGuard>,
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +226,7 @@ pub fn registry() -> &'static [ProviderEntry] {
                     Box::new(codex::CodexClient::new(
                         c.base_url,
                         c.workspace.clone(),
-                        c.dangerous_no_sandbox,
+                        c.sandbox_bypass.is_some(),
                     ))
                 },
             },

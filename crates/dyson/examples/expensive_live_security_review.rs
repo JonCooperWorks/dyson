@@ -1017,10 +1017,11 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // security_engineer only needs read + ast access.  Skip the macOS
     // container sandbox check — if the user wanted it enforced they'd
     // be driving dyson proper, not an example.
-    settings.dangerous_no_sandbox = true;
+    let example_bypass = dyson::sandbox::sandbox_bypass_from_cli_flag(true);
+    settings.sandbox_bypass = example_bypass.clone();
 
     // --- Build the same machinery `build_agent` uses ------------------------
-    let sandbox = create_sandbox(&settings.sandbox, true);
+    let sandbox = create_sandbox(&settings.sandbox, example_bypass);
     let registry = ClientRegistry::new(&settings, None);
     let skills = create_skills(&settings, None, Arc::clone(&sandbox), None, &registry).await;
 
@@ -1147,7 +1148,7 @@ async fn run_target(
     // ToolContext's working_dir is irrelevant now — the orchestrator's
     // `path` input overrides it for the child.
     let mut ctx = ToolContext::from_cwd()?;
-    ctx.dangerous_no_sandbox = true;
+    ctx.sandbox_bypass = dyson::sandbox::sandbox_bypass_from_cli_flag(true);
 
     // Build the context string.  Gated by `--hints`: the `description`
     // field on CVE-repro targets names the specific CVE and sometimes

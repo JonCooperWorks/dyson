@@ -306,7 +306,7 @@ fn settings_with_builtin_tools(tools: &[&str]) -> Settings {
     );
 
     let mut settings = Settings {
-        dangerous_no_sandbox: true,
+        sandbox_bypass: Some(dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap()),
         ..Settings::default()
     };
     settings.agent.provider = LlmProvider::OpenRouter;
@@ -338,7 +338,7 @@ async fn rig_with_auth_client_and_config_path(
     );
 
     let mut settings = Settings {
-        dangerous_no_sandbox: true,
+        sandbox_bypass: Some(dyson::sandbox::sandbox_bypass_from_cli_flag(true).unwrap()),
         ..Settings::default()
     };
     settings.agent.provider = LlmProvider::OpenRouter;
@@ -995,7 +995,7 @@ async fn admin_configure_multi_patch_replaces_config_once() {
             "task": "run once",
             "instance_id": "i-multi",
             "models": ["openai/gpt-5"],
-            "proxy_token": "pt_real",
+            "proxy_token": "pt_aaaadeadbeefcafebabe1234567890ab",
             "proxy_base": "https://swarm.test/llm/openrouter",
             "image_provider_name": "image",
             "image_provider_block": {

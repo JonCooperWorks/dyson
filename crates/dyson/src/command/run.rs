@@ -20,7 +20,7 @@ use std::path::PathBuf;
 pub async fn run(
     prompt: String,
     config: Option<PathBuf>,
-    dangerous_no_sandbox: bool,
+    sandbox_bypass: Option<dyson::sandbox::SandboxBypassGuard>,
     provider: Option<String>,
     base_url: Option<String>,
     workspace: Option<String>,
@@ -30,7 +30,7 @@ pub async fn run(
     let mut settings = dyson::config::loader::load_settings(config_path.as_deref())?;
     super::apply_overrides(
         &mut settings,
-        dangerous_no_sandbox,
+        sandbox_bypass,
         provider,
         base_url,
         workspace,
@@ -48,7 +48,8 @@ pub async fn run(
     let workspace: std::sync::Arc<tokio::sync::RwLock<Box<dyn dyson::workspace::Workspace>>> =
         std::sync::Arc::new(tokio::sync::RwLock::new(workspace));
 
-    let sandbox = dyson::sandbox::create_sandbox(&settings.sandbox, settings.dangerous_no_sandbox);
+    let sandbox =
+        dyson::sandbox::create_sandbox(&settings.sandbox, settings.sandbox_bypass.clone());
     let registry =
         dyson::controller::ClientRegistry::new(&settings, Some(std::sync::Arc::clone(&workspace)));
     let client = registry.get_default();
