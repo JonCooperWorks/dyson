@@ -75,6 +75,53 @@ pub struct HttpController {
     bind: String,
     init: AuthInit,
     tls: Option<HttpTlsConfig>,
+    /// Witness that this controller is permitted to serve plain HTTP on
+    /// a non-loopback bind.  `Some(_)` iff the operator set
+    /// `dangerous_no_tls: true` in `dyson.json` and the controller is
+    /// NOT also configured with an ACME `tls` block — i.e. we are
+    /// genuinely running plain HTTP and the operator explicitly opted
+    /// into it.  Loopback binds with no `tls` field do NOT mint this
+    /// guard; their lack of TLS is implicit and the OS isolates the
+    /// port, so there's nothing to attest.
+    ///
+    /// The guard exists so any future code path that wants to behave
+    /// differently in the plain-HTTP-on-public-bind case (cookie
+    /// flags, security-header relaxations, runtime warnings, audit
+    /// emissions) is forced to receive the unforgeable capability
+    /// rather than read a bare `bool` that anyone could flip.
+    tls_bypass: Option<TlsBypassGuard>,
+}
+
+/// Unforgeable capability that authorises serving plain HTTP on a
+/// non-loopback bind.  Without this guard, the only way for a
+/// controller to omit TLS is to bind loopback — where the OS already
+/// isolates the port to the local user.
+///
+/// Construction is gated to a single named constructor that matches
+/// the operator-facing config knob, so audits trace every public-bind
+/// plaintext path back to one site (the config gate in
+/// `HttpController::from_config`).
+///
+/// Private field, named constructor — same shape as
+/// `RawKmsAccessGuard` / `AuthBypassGuard`.
+#[must_use = "TlsBypassGuard does nothing on its own; store it in HttpController so the controller's plaintext posture is auditable"]
+#[derive(Clone, Debug)]
+pub struct TlsBypassGuard {
+    _seal: (),
+}
+
+impl TlsBypassGuard {
+    /// Mint the guard for the operator config knob
+    /// `dangerous_no_tls: true`.  Emits a debug trace so the audit
+    /// surface lines up with `AuthBypassGuard`.
+    fn for_operator_dangerous_no_tls_config() -> Self {
+        tracing::debug!(
+            target: "http.bypass",
+            purpose = "operator_dangerous_no_tls_config",
+            "TlsBypassGuard minted: http controller will serve plain HTTP on a non-loopback bind"
+        );
+        Self { _seal: () }
+    }
 }
 
 /// What `from_config` parsed out of the operator's `auth` block.
@@ -155,6 +202,15 @@ impl HttpController {
             );
             return None;
         }
+        // Mint the unforgeable bypass guard iff the operator asked
+        // for plain HTTP on a non-loopback bind.  Loopback + no-tls
+        // does NOT mint the guard: that path is implicit and the OS
+        // isolates the port, so there's nothing to attest.
+        let tls_bypass = if raw.dangerous_no_tls && !is_loopback_bind(&raw.bind) {
+            Some(TlsBypassGuard::for_operator_dangerous_no_tls_config())
+        } else {
+            None
+        };
         let init = match auth_config {
             HttpAuthConfig::DangerousNoAuth => AuthInit::Ready {
                 auth: Arc::new(DangerousNoAuth),
@@ -204,6 +260,7 @@ impl HttpController {
             bind: raw.bind,
             init,
             tls: raw.tls,
+            tls_bypass,
         })
     }
 }
@@ -370,6 +427,18 @@ impl Controller for HttpController {
             "HTTP controller listening — open http://{} in a browser",
             self.bind,
         );
+        // The bypass guard carries the audit posture.  We don't read
+        // its inner state — its mere presence on the controller means
+        // the operator-facing config asked for plain HTTP on a public
+        // bind, and that is what we shout about.
+        if let Some(_bypass) = &self.tls_bypass {
+            tracing::warn!(
+                bind = %self.bind,
+                "http controller: serving PLAIN HTTP on a non-loopback bind — `dangerous_no_tls` \
+                 is set.  Bearer / OIDC tokens travel in cleartext; only safe behind a trusted \
+                 network boundary (VPN, private LAN)."
+            );
+        }
 
         // Probe the configured auth to log which mechanism is active.
         // DangerousNoAuth is the only variant that validates an empty
