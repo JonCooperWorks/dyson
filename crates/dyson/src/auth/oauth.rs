@@ -84,6 +84,7 @@ pub async fn discover_metadata(server_url: &str, client: &reqwest::Client) -> Re
         "{}/.well-known/oauth-authorization-server",
         server_url.trim_end_matches('/')
     );
+    validate_outbound_oauth_url(&url, server_url).await?;
     let resp = client
         .get(&url)
         .send()
@@ -101,6 +102,7 @@ pub async fn register_client(
     req: &DcrRequest,
     client: &reqwest::Client,
 ) -> Result<DcrResponse> {
+    validate_outbound_oauth_url(url, "dcr").await?;
     let resp = client
         .post(url)
         .json(req)
@@ -201,6 +203,18 @@ pub fn generate_state() -> String {
     URL_SAFE_NO_PAD.encode(rand::rng().random::<[u8; 16]>())
 }
 
+/// Guard every outbound OAuth network call with the same SSRF predicates
+/// `web_fetch` uses — blocks RFC1918, loopback, link-local, multicast,
+/// CGNAT 100.64/10, and cloud metadata hosts. Operator-supplied MCP
+/// server URLs can carry typos; an unguarded discovery/token call would
+/// happily send a bearer to an internal address.
+async fn validate_outbound_oauth_url(url: &str, context: &str) -> Result<()> {
+    crate::http::validate_url_safe(url)
+        .await
+        .map(|_| ())
+        .map_err(|e| DysonError::oauth(context, format!("refusing unsafe URL: {e}")))
+}
+
 fn check_status(resp: &reqwest::Response, server: &str, context: &str) -> Result<()> {
     if resp.status().is_success() {
         return Ok(());
@@ -217,6 +231,7 @@ async fn post_token_request(
     context: &str,
     client: &reqwest::Client,
 ) -> Result<TokenResponse> {
+    validate_outbound_oauth_url(token_url, context).await?;
     let resp = client
         .post(token_url)
         .form(params)
@@ -830,5 +845,53 @@ mod tests {
             );
             let _ = std::fs::remove_file(&path);
         }
+    }
+
+    // M9: OAuth metadata discovery and token-exchange URLs come from
+    // operator config (hosted-mcp.json, dynamic registration). They
+    // must pass the same SSRF predicates as web_fetch — otherwise a
+    // misconfigured MCP server URL pointing at 127.0.0.1 or a cloud
+    // metadata host would send a token to an internal address.
+    #[tokio::test]
+    async fn discover_metadata_refuses_loopback_host() {
+        let client = reqwest::Client::new();
+        let err = discover_metadata("http://127.0.0.1:9876", &client)
+            .await
+            .expect_err("loopback must refuse");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("refusing unsafe URL"),
+            "error must come from the URL guard, not a network failure: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_metadata_refuses_metadata_host() {
+        let client = reqwest::Client::new();
+        let err = discover_metadata("http://169.254.169.254", &client)
+            .await
+            .expect_err("metadata host must refuse");
+        let msg = format!("{err}");
+        assert!(msg.contains("refusing unsafe URL"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn register_client_refuses_private_ipv4() {
+        let client = reqwest::Client::new();
+        let err = register_client(
+            "http://10.0.0.1/register",
+            &DcrRequest {
+                client_name: "x".into(),
+                redirect_uris: vec!["http://localhost/cb".into()],
+                grant_types: vec![],
+                response_types: vec![],
+                token_endpoint_auth_method: None,
+            },
+            &client,
+        )
+        .await
+        .expect_err("RFC1918 must refuse");
+        let msg = format!("{err}");
+        assert!(msg.contains("refusing unsafe URL"), "got: {msg}");
     }
 }
