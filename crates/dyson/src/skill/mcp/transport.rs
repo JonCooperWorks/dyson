@@ -226,7 +226,7 @@ impl StdioTransport {
         sandbox: bool,
         deny_network: bool,
     ) -> Result<Self> {
-        let (exec, exec_args) = Self::resolve_exec(command, args, sandbox, deny_network);
+        let (exec, exec_args) = Self::resolve_exec(command, args, sandbox, deny_network)?;
         let mut cmd = Command::new(&exec);
         cmd.args(&exec_args)
             .envs(env)
@@ -319,45 +319,53 @@ impl StdioTransport {
     /// `bwrap`.  Returns `(exec, argv)` suitable for `Command::new` +
     /// `.args()`.
     ///
-    /// Non-Linux, missing bwrap, or `sandbox == false` → direct invocation.
+    /// When `sandbox == true` and no wrapper is available (bwrap
+    /// missing on Linux, no wrapper on non-Linux), returns an error
+    /// rather than falling back to a direct unsandboxed spawn — that
+    /// fallback was a silent sandbox bypass.
     fn resolve_exec(
         command: &str,
         args: &[String],
         sandbox: bool,
         deny_network: bool,
-    ) -> (String, Vec<String>) {
-        if !sandbox {
-            return (command.to_string(), args.to_vec());
-        }
+    ) -> Result<(String, Vec<String>)> {
         #[cfg(target_os = "linux")]
-        {
-            let has_bwrap = std::process::Command::new("sh")
-                .arg("-c")
-                .arg("command -v bwrap")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if has_bwrap {
-                let argv =
-                    crate::sandbox::os::build_bwrap_argv_for_mcp_stdio(command, args, deny_network);
-                return ("bwrap".to_string(), argv);
-            }
-            tracing::warn!(
-                command = command,
-                "MCP stdio sandbox requested but bwrap not found on PATH \
-                 — falling back to UNSANDBOXED spawn"
-            );
-        }
+        let has_bwrap = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v bwrap")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
         #[cfg(not(target_os = "linux"))]
-        {
-            let _ = deny_network;
-            tracing::warn!(
-                command = command,
-                "MCP stdio sandbox requested but only supported on Linux \
-                 — falling back to UNSANDBOXED spawn"
-            );
+        let has_bwrap = false;
+
+        Self::resolve_exec_with(command, args, sandbox, has_bwrap, deny_network)
+    }
+
+    /// Pure decision function — extracted so the bwrap-missing path
+    /// is testable without depending on the host's PATH.
+    fn resolve_exec_with(
+        command: &str,
+        args: &[String],
+        sandbox: bool,
+        has_bwrap: bool,
+        deny_network: bool,
+    ) -> Result<(String, Vec<String>)> {
+        if !sandbox {
+            return Ok((command.to_string(), args.to_vec()));
         }
-        (command.to_string(), args.to_vec())
+        if has_bwrap {
+            let argv =
+                crate::sandbox::os::build_bwrap_argv_for_mcp_stdio(command, args, deny_network);
+            return Ok(("bwrap".to_string(), argv));
+        }
+        Err(DysonError::Mcp {
+            server: command.to_string(),
+            message: "sandbox requested but bwrap is unavailable on this host; \
+                      install bubblewrap or run with --dangerous-no-sandbox to \
+                      accept an unsandboxed MCP stdio process"
+                .into(),
+        })
     }
 }
 
@@ -985,5 +993,42 @@ mod tests {
         )
         .await;
         assert!(err.is_err());
+    }
+
+    // M7: when sandbox is required but the platform/PATH cannot
+    // provide a wrapper (bwrap missing on Linux, no wrapper on
+    // non-Linux), resolve_exec must refuse rather than silently
+    // falling back to a direct unsandboxed spawn.
+    #[test]
+    fn resolve_exec_refuses_silent_fallback_when_bwrap_missing() {
+        let err = StdioTransport::resolve_exec_with(
+            "uvx", &["mcp-test".to_string()], true, false, false,
+        );
+        assert!(err.is_err(), "must refuse when sandbox requested and no bwrap");
+        let msg = format!("{}", err.unwrap_err());
+        assert!(
+            msg.to_lowercase().contains("sandbox") || msg.to_lowercase().contains("bwrap"),
+            "error must explain why: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_exec_wraps_with_bwrap_when_available() {
+        let (exec, argv) = StdioTransport::resolve_exec_with(
+            "uvx", &["mcp-test".to_string()], true, true, false,
+        )
+        .expect("bwrap-available path");
+        assert_eq!(exec, "bwrap");
+        assert!(argv.iter().any(|a| a == "uvx"), "uvx must appear in argv");
+    }
+
+    #[test]
+    fn resolve_exec_passthrough_when_sandbox_disabled() {
+        let (exec, argv) = StdioTransport::resolve_exec_with(
+            "uvx", &["mcp-test".to_string()], false, false, false,
+        )
+        .expect("passthrough path");
+        assert_eq!(exec, "uvx");
+        assert_eq!(argv, vec!["mcp-test".to_string()]);
     }
 }
