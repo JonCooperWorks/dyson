@@ -209,9 +209,7 @@ impl Agent {
                             && stream_error_attempts < self.max_retries
                             && !emitted_visible_output =>
                     {
-                        let base_ms = 1000 * 2u64.pow(stream_error_attempts as u32);
-                        let jitter_ms = rand::random::<u64>() % (base_ms / 2 + 1);
-                        let delay_ms = base_ms + jitter_ms;
+                        let delay_ms = compute_backoff_ms(stream_error_attempts);
                         tracing::warn!(
                             attempt = stream_error_attempts + 1,
                             max = self.max_retries,
@@ -241,9 +239,7 @@ impl Agent {
                     && tool_calls.is_empty()
                     && tool_mode != crate::llm::ToolMode::Observe;
                 if is_empty && empty_attempts < self.max_retries {
-                    let base_ms = 1000 * 2u64.pow(empty_attempts as u32);
-                    let jitter_ms = rand::random::<u64>() % (base_ms / 2 + 1);
-                    let delay_ms = base_ms + jitter_ms;
+                    let delay_ms = compute_backoff_ms(empty_attempts);
                     tracing::warn!(
                         attempt = empty_attempts + 1,
                         max = self.max_retries,
@@ -642,4 +638,36 @@ async fn finalize_cost_metadata(mut metadata: MessageCostMetadata) -> MessageCos
         }
     }
     metadata
+}
+
+/// Exponential backoff with up-to-half jitter: 1s * 2^attempt + rand(0..base/2+1).
+/// Shared between the stream-error and empty-response retry paths so both
+/// always have the same shape and the constants live in one place.
+fn compute_backoff_ms(attempt: usize) -> u64 {
+    let base_ms = 1000u64.saturating_mul(2u64.saturating_pow(attempt as u32));
+    let jitter_ms = rand::random::<u64>() % (base_ms / 2 + 1);
+    base_ms + jitter_ms
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::compute_backoff_ms;
+
+    #[test]
+    fn backoff_first_attempt_is_at_least_one_second() {
+        let v = compute_backoff_ms(0);
+        assert!(v >= 1000, "first attempt must be ≥1s, got {v}");
+        assert!(v <= 1500, "first attempt jitter capped at +50%, got {v}");
+    }
+
+    #[test]
+    fn backoff_grows_exponentially() {
+        // Floor of the band at attempt n is 1000 * 2^n; ceiling is +50%.
+        for n in 0..5 {
+            let lo = 1000u64 * 2u64.pow(n);
+            let hi = lo + lo / 2;
+            let v = compute_backoff_ms(n as usize);
+            assert!((lo..=hi).contains(&v), "attempt {n}: {v} outside [{lo},{hi}]");
+        }
+    }
 }
