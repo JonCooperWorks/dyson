@@ -1211,7 +1211,7 @@ impl HttpState {
             Err(p) => p.into_inner().clone(),
         };
         if let Some(allowed) = allowed
-            && entry.identity != allowed
+            && !ct_eq_identity(&entry.identity, &allowed)
         {
             tracing::warn!(
                 ticket_identity = %entry.identity,
@@ -1532,5 +1532,38 @@ impl HttpState {
 impl super::super::BrowserArtefactSink for HttpState {
     fn publish_file_as_artefact(&self, chat_id: &str, path: &std::path::Path) {
         let _ = self.publish_file_as_artefact_impl(chat_id, path);
+    }
+}
+
+/// Constant-time equality for the SSE ticket identity check.
+/// OIDC `sub` is not a high-entropy bearer, but using `ct_eq` parity
+/// with the rest of the bearer/secret comparisons in this codebase
+/// keeps the door closed against a future change in identity shape
+/// introducing a timing oracle here.
+fn ct_eq_identity(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    bool::from(a.ct_eq(b))
+}
+
+#[cfg(test)]
+mod ct_eq_identity_tests {
+    use super::ct_eq_identity;
+
+    #[test]
+    fn ct_eq_identity_matches_equal_strings() {
+        assert!(ct_eq_identity("alice@example.com", "alice@example.com"));
+        assert!(ct_eq_identity("", ""));
+    }
+
+    #[test]
+    fn ct_eq_identity_rejects_mismatched_strings() {
+        assert!(!ct_eq_identity("alice", "bob"));
+        assert!(!ct_eq_identity("alice", "alic"));
+        assert!(!ct_eq_identity("alice", "alicee"));
     }
 }
