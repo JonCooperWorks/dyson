@@ -171,6 +171,16 @@ pub async fn run() -> Result<()> {
     std::fs::write(&cfg_path, cfg_bytes)
         .map_err(|e| DysonError::Config(format!("write {cfg_path:?}: {e}")))?;
 
+    // If swarm dropped a configure-secret preseed file into the dyson
+    // home via the cube filesystem API before bringing the instance up,
+    // hash it into configure_secret_hash now — before the HTTP listener
+    // is bound — so /api/admin/configure has no TOFU mint window.
+    match dyson::controller::http::preseed_configure_hash(&home_path) {
+        Ok(true) => tracing::info!("preseed: configure secret hashed at boot"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(error = %e, "preseed: failed to consume configure preseed"),
+    }
+
     dyson::swarm_state_sync::spawn_worker(workspace.clone(), chats.clone(), state_sync);
 
     tracing::info!(

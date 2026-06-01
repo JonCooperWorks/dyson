@@ -71,6 +71,7 @@ const CONFIGURE_HEADER: &str = "x-swarm-configure";
 /// format (`$argon2id$v=19$...`) so argon2's verifier can re-derive
 /// the salt.
 const CONFIGURE_HASH_FILENAME: &str = "configure_secret_hash";
+const CONFIGURE_PRESEED_FILENAME: &str = "configure.preseed";
 const CONFIGURE_VERIFY_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -1257,6 +1258,71 @@ pub(super) async fn post_cost_backfill(
 /// Resolve the directory the configure-secret hash lives in.  We
 /// keep it next to the workspace so cube template restores preserve
 /// it via the writable layer.  `connection_string` for the in-memory
+/// Consume `<dyson_home>/configure.preseed` at boot, hashing its
+/// contents into `configure_secret_hash` so the first
+/// `/api/admin/configure` POST verifies against the swarm-supplied
+/// secret instead of TOFU-minting a hash from whatever caller wins
+/// the race. Returns whether a preseed file was found.
+///
+/// Idempotent: if `configure_secret_hash` already exists, the preseed
+/// file is still removed (so a stale plaintext is not left on disk)
+/// but the existing hash is preserved.
+///
+/// Best-effort: the preseed file is removed after a successful hash
+/// write. If hashing or writing fails, the preseed file is left in
+/// place so the next boot can retry.
+pub fn preseed_configure_hash(dyson_home: &Path) -> std::io::Result<bool> {
+    let preseed_path = dyson_home.join(CONFIGURE_PRESEED_FILENAME);
+    let hash_path = dyson_home.join(CONFIGURE_HASH_FILENAME);
+
+    let secret = match std::fs::read_to_string(&preseed_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let secret = secret.trim_end_matches(['\n', '\r']).to_owned();
+
+    if hash_path.exists() {
+        // Hash already minted (warm restart). Drop the preseed plaintext
+        // and keep the existing hash so an attacker who plants a fresh
+        // preseed file cannot overwrite swarm's verified hash.
+        let _ = std::fs::remove_file(&preseed_path);
+        return Ok(false);
+    }
+
+    use argon2::Argon2;
+    use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = Argon2::default()
+        .hash_password(secret.as_bytes(), &salt)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("argon2: {e}")))?
+        .to_string();
+
+    std::fs::create_dir_all(dyson_home)?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = match opts.open(&hash_path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Lost the race against a concurrent writer. Drop the preseed.
+            let _ = std::fs::remove_file(&preseed_path);
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
+    };
+    use std::io::Write;
+    file.write_all(hash.as_bytes())?;
+    drop(file);
+
+    let _ = std::fs::remove_file(&preseed_path);
+    Ok(true)
+}
+
 /// workspace is its directory path; for the file-backed default
 /// it's the directory directly.  For unknown shapes we fall back to
 /// `/var/lib/dyson` which matches `dyson swarm`'s default home.
@@ -2471,5 +2537,63 @@ mod tests {
         assert!(clean_relative_path("c-1/../../secret").is_err());
         assert!(clean_relative_path("c-1\\transcript.json").is_err());
         assert!(clean_relative_path("").is_err());
+    }
+
+    // H4: closes the TOFU race window when swarm pre-seeds the configure
+    // secret at provisioning time via a writable-layer file. The first
+    // POST to /api/admin/configure must verify against the pre-seeded
+    // hash, not mint a fresh one — otherwise an attacker who reaches the
+    // controller before swarm can adopt admin rights.
+    #[test]
+    fn preseed_configure_hash_consumes_file_and_writes_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let preseed = dir.path().join("configure.preseed");
+        let hash_path = dir.path().join(CONFIGURE_HASH_FILENAME);
+        std::fs::write(&preseed, "swarm-supplied-secret").unwrap();
+        assert!(!hash_path.exists());
+
+        let consumed = preseed_configure_hash(dir.path()).expect("preseed consumption");
+        assert!(consumed, "consumed flag must be true when preseed present");
+        assert!(!preseed.exists(), "preseed file must be deleted after use");
+
+        let stored = std::fs::read_to_string(&hash_path).expect("hash file written");
+        assert!(stored.starts_with("$argon2id$"), "hash must be PHC argon2id");
+
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+        use argon2::Argon2;
+        let parsed = PasswordHash::new(stored.trim()).expect("parse PHC");
+        assert!(
+            Argon2::default()
+                .verify_password(b"swarm-supplied-secret", &parsed)
+                .is_ok(),
+            "stored hash must verify against the preseeded secret"
+        );
+    }
+
+    #[test]
+    fn preseed_configure_hash_noop_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let consumed = preseed_configure_hash(dir.path()).expect("noop call");
+        assert!(!consumed);
+        assert!(!dir.path().join(CONFIGURE_HASH_FILENAME).exists());
+    }
+
+    #[test]
+    fn preseed_configure_hash_refuses_to_clobber_existing_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let preseed = dir.path().join("configure.preseed");
+        let hash_path = dir.path().join(CONFIGURE_HASH_FILENAME);
+        std::fs::write(&preseed, "new-secret").unwrap();
+        std::fs::write(&hash_path, "$argon2id$v=19$existing").unwrap();
+
+        let consumed = preseed_configure_hash(dir.path()).expect("idempotent call");
+        assert!(!consumed, "must not clobber an already-minted hash");
+        // Preseed is still consumed (removed) to drop a stale plaintext.
+        assert!(!preseed.exists());
+        // Existing hash is preserved.
+        assert_eq!(
+            std::fs::read_to_string(&hash_path).unwrap(),
+            "$argon2id$v=19$existing"
+        );
     }
 }

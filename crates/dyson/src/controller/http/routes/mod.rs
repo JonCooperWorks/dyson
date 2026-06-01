@@ -25,7 +25,7 @@ use super::responses::{
 use super::state::HttpState;
 
 mod activity;
-mod admin;
+pub(super) mod admin;
 mod agent;
 mod artefacts;
 mod commands;

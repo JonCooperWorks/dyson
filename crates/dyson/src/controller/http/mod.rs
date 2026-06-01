@@ -56,6 +56,7 @@ mod subagent_events;
 mod wire;
 
 use config::{HttpAuthConfig, HttpControllerConfigRaw, HttpTlsConfig, is_loopback_bind};
+pub use routes::admin::preseed_configure_hash;
 pub use state::HttpState;
 pub use subagent_events::SubagentEventBus;
 // Re-exported so subagent tee tests in `crate::skill::subagent::tests`
