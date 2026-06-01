@@ -92,7 +92,7 @@ impl WebFetchTool {
         &self,
         verified_url: &crate::http::ValidatedSafeUrl,
     ) -> Result<reqwest::Client> {
-        if host_is_ip_literal(&verified_url.url) {
+        if !should_pin_for(&verified_url.url) {
             return Ok(self.client.clone());
         }
         crate::http::pinned_client_for_validated_url(verified_url)
@@ -100,15 +100,14 @@ impl WebFetchTool {
     }
 }
 
-fn host_is_ip_literal(url: &reqwest::Url) -> bool {
-    url.host_str()
-        .map(|host| {
-            host.trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<std::net::IpAddr>()
-                .is_ok()
-        })
-        .unwrap_or(false)
+/// Should the fetch go through the pinned-builder client?
+///
+/// Yes for every URL, so the shared client (which honors HTTP_PROXY /
+/// HTTPS_PROXY env vars) cannot route validated traffic through an
+/// attacker-controlled proxy. The carve-out for IP-literal hosts that
+/// used to live here was an SSRF hardening gap.
+fn should_pin_for(_url: &reqwest::Url) -> bool {
+    true
 }
 
 impl Default for WebFetchTool {
@@ -405,5 +404,27 @@ mod tests {
         let schema = t.input_schema();
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "url"));
+    }
+
+    // H5: the IP-literal carve-out used to return the shared client, which
+    // honors HTTP_PROXY/HTTPS_PROXY env vars and would let an attacker who
+    // controls them re-route validated traffic. Every URL — IP-literal or
+    // hostname — must go through the pinned-builder client.
+    #[test]
+    fn should_pin_for_ip_literal_v4() {
+        let url = reqwest::Url::parse("http://198.51.100.7/").unwrap();
+        assert!(should_pin_for(&url), "IPv4 literal must use the pinned client");
+    }
+
+    #[test]
+    fn should_pin_for_ip_literal_v6() {
+        let url = reqwest::Url::parse("http://[2001:db8::1]/").unwrap();
+        assert!(should_pin_for(&url), "IPv6 literal must use the pinned client");
+    }
+
+    #[test]
+    fn should_pin_for_hostname() {
+        let url = reqwest::Url::parse("https://example.com/").unwrap();
+        assert!(should_pin_for(&url), "hostnames must use the pinned client");
     }
 }
