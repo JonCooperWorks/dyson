@@ -415,7 +415,7 @@ fn build_bash_view(
     let mut lines: Vec<TermLine> = Vec::new();
     lines.push(TermLine {
         c: 'p',
-        t: format!("$ {command}"),
+        t: format!("$ {}", redact_secrets(command)),
     });
     let mut take_lines = |s: &str, c: char| {
         for (i, l) in s.lines().enumerate() {
@@ -522,5 +522,29 @@ mod tests {
         ] {
             assert!(!is_safe_env_var(v), "expected {v} to be filtered");
         }
+    }
+
+    // M10: the SSE `view` channel used to ship the raw command line. The
+    // text log already runs through redact_secrets, so the view path is
+    // a credential exfil channel by parity. The "$" prompt line must
+    // carry the redacted form for any bearer-shaped argument.
+    #[test]
+    fn bash_view_prompt_line_is_redacted() {
+        let view = build_bash_view(
+            "curl -H 'Authorization: Bearer sk-deadbeefdeadbeef' https://api.example.com",
+            "ok\n",
+            "",
+            Some(0),
+            12,
+        );
+        let crate::tool::view::ToolView::Bash { lines, .. } = view else {
+            panic!("expected Bash view");
+        };
+        let prompt = lines.iter().find(|l| l.c == 'p').expect("prompt line");
+        assert!(
+            !prompt.t.contains("sk-deadbeefdeadbeef"),
+            "bearer must not appear in view prompt: {:?}",
+            prompt.t
+        );
     }
 }
