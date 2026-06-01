@@ -178,7 +178,8 @@ fn extract_resources(call: &ToolCall) -> Vec<ResourceAccess> {
     let mut resources = Vec::new();
 
     match call.name.as_str() {
-        "file_read" => {
+        // Reads — pulls one path from the call's `path` argument.
+        "read_file" => {
             if let Some(path) = call.input.get("path").and_then(|v| v.as_str()) {
                 resources.push(ResourceAccess {
                     resource: Resource::File(path.to_string()),
@@ -186,12 +187,26 @@ fn extract_resources(call: &ToolCall) -> Vec<ResourceAccess> {
                 });
             }
         }
-        "file_write" => {
+        // Writes — every file-mutating tool. write_file/edit_file each
+        // touch one path; bulk_edit can carry many.
+        "write_file" | "edit_file" => {
             if let Some(path) = call.input.get("path").and_then(|v| v.as_str()) {
                 resources.push(ResourceAccess {
                     resource: Resource::File(path.to_string()),
                     kind: AccessKind::Write,
                 });
+            }
+        }
+        "bulk_edit" => {
+            if let Some(edits) = call.input.get("edits").and_then(|v| v.as_array()) {
+                for e in edits {
+                    if let Some(path) = e.get("path").and_then(|v| v.as_str()) {
+                        resources.push(ResourceAccess {
+                            resource: Resource::File(path.to_string()),
+                            kind: AccessKind::Write,
+                        });
+                    }
+                }
             }
         }
         "bash" => {
@@ -286,8 +301,8 @@ mod test_dependency_analyzer {
     #[test]
     fn detects_write_then_read_dependency() {
         let calls = [
-            ToolCall::new("file_write", json!({"path": "f.txt"})),
-            ToolCall::new("file_read", json!({"path": "f.txt"})),
+            ToolCall::new("write_file", json!({"path": "f.txt"})),
+            ToolCall::new("read_file", json!({"path": "f.txt"})),
         ];
         let refs: Vec<&ToolCall> = calls.iter().collect();
         assert!(DependencyAnalyzer::analyze(&refs).len() >= 2);
@@ -296,8 +311,8 @@ mod test_dependency_analyzer {
     #[test]
     fn detects_same_resource_conflict() {
         let calls = [
-            ToolCall::new("file_write", json!({"path": "x.txt"})),
-            ToolCall::new("file_write", json!({"path": "x.txt"})),
+            ToolCall::new("write_file", json!({"path": "x.txt"})),
+            ToolCall::new("write_file", json!({"path": "x.txt"})),
         ];
         let refs: Vec<&ToolCall> = calls.iter().collect();
         let phases = DependencyAnalyzer::analyze(&refs);
@@ -313,7 +328,7 @@ mod test_dependency_analyzer {
         let calls = [
             ToolCall::new("bash", json!({"command": "echo A"})),
             ToolCall::new("bash", json!({"command": "echo B"})),
-            ToolCall::new("file_read", json!({"path": "unrelated.txt"})),
+            ToolCall::new("read_file", json!({"path": "unrelated.txt"})),
         ];
         let refs: Vec<&ToolCall> = calls.iter().collect();
         assert!(!DependencyAnalyzer::analyze(&refs).is_empty());
@@ -327,5 +342,52 @@ mod test_dependency_analyzer {
         ];
         let refs: Vec<&ToolCall> = calls.iter().collect();
         assert!(DependencyAnalyzer::analyze(&refs).len() >= 2);
+    }
+
+    // QP: the analyzer's tool-name match used to read `file_read` /
+    // `file_write`, but the actual tools are `read_file` / `write_file`
+    // / `edit_file` / `bulk_edit`. The result was that file conflicts
+    // weren't detected at all in production — every file-touching tool
+    // appeared to have zero resource deps and ran fully concurrently.
+    #[test]
+    fn detects_write_file_then_read_file_dependency_under_real_tool_names() {
+        let calls = [
+            ToolCall::new("write_file", json!({"path": "f.txt"})),
+            ToolCall::new("read_file", json!({"path": "f.txt"})),
+        ];
+        let refs: Vec<&ToolCall> = calls.iter().collect();
+        assert!(
+            DependencyAnalyzer::analyze(&refs).len() >= 2,
+            "write_file -> read_file of the same path must serialise"
+        );
+    }
+
+    #[test]
+    fn edit_file_conflict_with_read_file_is_serialised() {
+        let calls = [
+            ToolCall::new("edit_file", json!({"path": "x.txt"})),
+            ToolCall::new("read_file", json!({"path": "x.txt"})),
+        ];
+        let refs: Vec<&ToolCall> = calls.iter().collect();
+        assert!(
+            DependencyAnalyzer::analyze(&refs).len() >= 2,
+            "edit_file is a write — must serialise against read_file"
+        );
+    }
+
+    #[test]
+    fn bulk_edit_conflicts_with_subsequent_read_file() {
+        let calls = [
+            ToolCall::new(
+                "bulk_edit",
+                json!({"edits": [{"path": "a.txt"}, {"path": "b.txt"}]}),
+            ),
+            ToolCall::new("read_file", json!({"path": "a.txt"})),
+        ];
+        let refs: Vec<&ToolCall> = calls.iter().collect();
+        assert!(
+            DependencyAnalyzer::analyze(&refs).len() >= 2,
+            "bulk_edit writes every listed path; subsequent read must wait"
+        );
     }
 }
