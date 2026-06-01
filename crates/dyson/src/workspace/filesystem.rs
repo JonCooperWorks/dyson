@@ -356,6 +356,13 @@ impl Workspace for FilesystemWorkspace {
     }
 
     fn set(&mut self, name: &str, content: &str) {
+        // Refuse path-traversal / absolute names at the mutation site rather
+        // than relying on every caller to validate. Defense-in-depth: save()
+        // re-checks before the disk write.
+        if workspace_child_path(&self.path, name).is_err() {
+            tracing::warn!(name = %name, "workspace.set rejected unsafe key");
+            return;
+        }
         self.files.insert(name.to_string(), content.to_string());
         self.dirty
             .lock()
@@ -367,6 +374,10 @@ impl Workspace for FilesystemWorkspace {
     }
 
     fn append(&mut self, name: &str, content: &str) {
+        if workspace_child_path(&self.path, name).is_err() {
+            tracing::warn!(name = %name, "workspace.append rejected unsafe key");
+            return;
+        }
         let entry = self.files.entry(name.to_string()).or_default();
         if !entry.is_empty() && !entry.ends_with('\n') {
             entry.push('\n');
@@ -409,7 +420,15 @@ impl Workspace for FilesystemWorkspace {
 
         for name in dirty.iter() {
             if let Some(content) = self.files.get(name) {
-                let file_path = self.path.join(name);
+                // Re-validate at the disk boundary in case a key was inserted
+                // through a path that bypassed set()/append().
+                let file_path = match workspace_child_path(&self.path, name) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        tracing::warn!(name = %name, "workspace.save skipped unsafe key");
+                        continue;
+                    }
+                };
 
                 // Ensure parent directory exists (for memory/ files).
                 if let Some(parent) = file_path.parent() {
@@ -1157,5 +1176,71 @@ mod tests {
             "system prompt should not include KB section when INDEX.md is absent"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // H1: workspace mutations must reject path-traversal names so a caller that
+    // forgets to validate cannot escape the workspace root.
+
+    #[test]
+    fn set_then_save_rejects_parent_escape() {
+        let (dir, mut ws) = temp_workspace();
+        let parent = dir.parent().unwrap().to_path_buf();
+        let sibling_name = format!("escape-sibling-{}", std::process::id());
+        let sibling = parent.join(&sibling_name);
+        let _ = std::fs::remove_file(&sibling);
+
+        // Caller forgets to validate and passes a parent-escape key.
+        ws.set(&format!("../{sibling_name}"), "evil");
+        let _ = ws.save();
+
+        assert!(
+            !sibling.exists(),
+            "save() must refuse to write outside the workspace root"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_rejects_absolute_path() {
+        let (dir, mut ws) = temp_workspace();
+        let outside = std::env::temp_dir().join(format!(
+            "dyson-escape-abs-{}-{}",
+            std::process::id(),
+            rand_suffix()
+        ));
+        let _ = std::fs::remove_file(&outside);
+
+        ws.set(outside.to_str().unwrap(), "evil");
+        let _ = ws.save();
+
+        assert!(
+            !outside.exists(),
+            "save() must refuse to write to an absolute path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_then_save_rejects_parent_escape() {
+        let (dir, mut ws) = temp_workspace();
+        let parent = dir.parent().unwrap().to_path_buf();
+        let sibling_name = format!("escape-sibling-append-{}", std::process::id());
+        let sibling = parent.join(&sibling_name);
+        let _ = std::fs::remove_file(&sibling);
+
+        ws.append(&format!("../{sibling_name}"), "evil");
+        let _ = ws.save();
+
+        assert!(
+            !sibling.exists(),
+            "save() must refuse to write outside the workspace root via append"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn rand_suffix() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SUFFIX: AtomicU64 = AtomicU64::new(0);
+        SUFFIX.fetch_add(1, Ordering::Relaxed)
     }
 }
