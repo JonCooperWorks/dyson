@@ -58,7 +58,7 @@ describe('parseHash', () => {
     });
   });
 
-  it('#/artefacts and #/artefacts/<id> stay backward-compatible', () => {
+  it('#/artefacts and #/artefacts/<id> open the artefacts list and reader', () => {
     expect(parseHash('#/artefacts')).toEqual({
       view: 'artefacts', conv: null, artefactId: null, toolRef: null, mindPath: null,
     });
