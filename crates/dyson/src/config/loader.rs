@@ -475,8 +475,40 @@ fn read_config_file(path: &Path) -> Result<String> {
             MAX_CONFIG_SIZE,
         )));
     }
+    tighten_config_perms(path);
     Ok(content)
 }
+
+/// Tighten dyson.json permissions to 0o600 on Unix when the file is
+/// group/world readable. The file may contain literal API keys or
+/// secret resolver references, so a 0o644 file is a credential-leak
+/// hazard. Best-effort: warns on failure but never aborts startup.
+#[cfg(unix)]
+fn tighten_config_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 == 0 {
+        return;
+    }
+    tracing::warn!(
+        path = %path.display(),
+        mode = format!("{mode:o}"),
+        "config file is group/world accessible; tightening to 0o600"
+    );
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "failed to tighten config permissions"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn tighten_config_perms(_path: &Path) {}
 
 /// Try to find a dyson.json in standard locations.
 ///
@@ -1986,5 +2018,38 @@ mod tests {
         assert_eq!(subagent_configs.len(), 1);
         assert_eq!(subagent_configs[0].agents[0].name, "helper");
         assert_eq!(subagent_configs[0].agents[0].model, None);
+    }
+
+    // H3: dyson.json may contain literal API keys, so a world/group readable
+    // file on disk is a credential-leak hazard. read_config_file must tighten
+    // perms to 0o600 best-effort and warn when found loose.
+    #[cfg(unix)]
+    #[test]
+    fn read_config_file_tightens_loose_perms() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "dyson-cfg-perm-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dyson.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _ = read_config_file(&path).expect("read_config_file should succeed");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "config file must not be group/world readable after load (got {mode:o})"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
