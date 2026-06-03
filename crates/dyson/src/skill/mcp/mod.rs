@@ -5,6 +5,7 @@
 // the URL (callback fires) or pastes the redirect URL (agent calls tool).
 
 pub mod protocol;
+pub mod router;
 pub mod serve;
 pub mod transport;
 
@@ -301,9 +302,33 @@ impl McpSkill {
                 "failed to parse MCP initialize result; continuing tools-only"
             ),
         }
+
+        // Install the inbound router so server-originated notifications
+        // (logging, progress, list_changed) and requests are dispatched
+        // for the rest of this connection's life.
+        transport.set_inbound_handler(Arc::new(router::NotificationRouter::new(server_name)));
+
         transport
             .send_notification("notifications/initialized", None)
             .await?;
+
+        // If the server can emit logs, opt in at `info` so its
+        // `notifications/message` traffic flows to our router.  Best
+        // effort: a server that advertised `logging` but rejects setLevel
+        // shouldn't fail the whole connection.
+        if self
+            .server_capabilities
+            .as_ref()
+            .is_some_and(|c| c.logging.is_some())
+            && let Err(e) = transport
+                .send_request(
+                    "logging/setLevel",
+                    Some(serde_json::json!({ "level": "info" })),
+                )
+                .await
+        {
+            tracing::debug!(server = server_name, error = %e, "logging/setLevel not honored");
+        }
 
         let tools_json = transport
             .send_request("tools/list", Some(serde_json::json!({})))
