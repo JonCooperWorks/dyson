@@ -70,6 +70,17 @@ export class DysonClient {
 
   listProviders() { return this._json('/api/providers'); }
   listCommands()  { return this._json('/api/commands'); }
+
+  // MCP elicitation: open prompts a connected MCP server has asked the
+  // user to answer, and the answer submission.
+  listElicitations() { return this._json('/api/mcp/elicitations'); }
+  respondElicitation(id, result) {
+    return this._json(`/api/mcp/elicitations/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(result),
+    });
+  }
   getMind()       { return this._json('/api/mind'); }
   getAgent()      { return this._json('/api/agent'); }
 

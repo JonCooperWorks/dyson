@@ -13,6 +13,7 @@ import './styles/swarm-theme.css';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './components/app.jsx';
+import { ElicitationModal } from './components/ElicitationModal.jsx';
 import { DysonClient } from './api/client.js';
 import { boot } from './api/boot.js';
 import { bootstrapAuth } from './api/auth.js';
@@ -29,6 +30,7 @@ bootstrapAuth().then(session => {
   root.render(
     <ApiProvider client={client}>
       <App/>
+      <ElicitationModal/>
     </ApiProvider>
   );
 }).catch(err => {
