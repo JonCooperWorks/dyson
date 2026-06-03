@@ -217,6 +217,61 @@ backend and MCP servers configured:
 
 ---
 
+## Bidirectional MCP (full spec surface)
+
+Beyond `tools/*`, Dyson implements the rest of the MCP primitives in both
+directions.  The load-bearing change is that the transports
+(`transport.rs`) are **bidirectional**: after `initialize`, a server may
+originate its own JSON-RPC *requests* and *notifications*, and the client
+answers them.  The background reader on each transport classifies every
+inbound line (response / request / notification) and routes server-
+originated traffic to an `InboundHandler` — the `NotificationRouter`
+(`router.rs`) the skill installs per connection.
+
+### Capability negotiation
+
+`initialize` is where each side declares what it supports, and every
+feature gates on the negotiated set so we never round-trip a `-32601`:
+
+- **Client → server** advertises `roots` always, `sampling` when the agent
+  supplied LLM context (it does outside the headless probe), and
+  `elicitation` only when a UI is present (set by the HTTP controller at
+  startup — a headless run must not strand a server on a prompt nobody can
+  answer).
+- **Server → client** (`serve/mod.rs`) advertises `tools`, `resources`,
+  `prompts`, and `completions`.
+
+### Server-originated requests the client answers (`router.rs`)
+
+| Method | Handler |
+|--------|---------|
+| `roots/list` | Returns the agent's working directory as the one filesystem root. |
+| `sampling/createMessage` | Translates the MCP messages into a dyson completion, runs a one-shot `LlmClient` (via `create_client`, mirroring the per-session pattern), and returns the assistant text. |
+| `elicitation/create` | Parks the prompt in a process-global broker (`elicitation.rs`); the web UI short-polls `GET /api/mcp/elicitations` and answers via `POST /api/mcp/elicitations/:id`. |
+
+Server-originated **notifications** (`notifications/message` logging,
+`progress`, `cancelled`, the `*/list_changed` family) are routed through
+`tracing`.
+
+### Outbound primitives the client can call
+
+When a connected server advertises the capability, the skill registers a
+tool so the agent can use it: `<server>_resources` (`resources/list` +
+`resources/read`, bytes saved through `save_mcp_resource`) and
+`<server>_prompts` (`prompts/list` + `prompts/get`).  The client also
+opts into logs with `logging/setLevel` during the handshake.
+
+### Server-side primitives Dyson exposes (`serve/mod.rs`)
+
+`resources/list` + `resources/read` expose workspace files under the
+`workspace://` scheme; `prompts/list` + `prompts/get` expose workspace
+skills (`skills/<name>/SKILL.md`); `completion/complete` backs resource-URI
+autocompletion.  This per-turn POST→response transport has **no channel to
+push** server-originated messages, so `logging` and the `*/list_changed`
+notifications are deliberately not advertised there.
+
+---
+
 ## Error Handling
 
 The MCP server uses standard JSON-RPC 2.0 error codes for protocol errors and
