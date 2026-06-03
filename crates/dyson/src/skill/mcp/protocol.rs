@@ -256,3 +256,118 @@ pub struct McpResourceContents {
 fn default_mcp_image_mime_type() -> String {
     "application/octet-stream".to_string()
 }
+
+/// Capabilities object returned by an MCP server in its `initialize`
+/// response.  Every field is optional: a missing entry means the server
+/// does not implement that primitive.  An empty object (`{}`) means the
+/// server implements the primitive but offers no sub-feature flags.
+///
+/// We currently only act on `tools`; the others are stored so future
+/// code can short-circuit calls to unimplemented primitives instead of
+/// round-tripping a `-32601 Method not found` error.  Spec reference:
+/// <https://spec.modelcontextprotocol.io/specification/basic/lifecycle/>
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct ServerCapabilities {
+    #[serde(default)]
+    pub tools: Option<ServerToolsCapability>,
+    #[serde(default)]
+    pub resources: Option<ServerResourcesCapability>,
+    #[serde(default)]
+    pub prompts: Option<ServerPromptsCapability>,
+    #[serde(default)]
+    pub logging: Option<serde_json::Value>,
+    #[serde(default)]
+    pub completions: Option<serde_json::Value>,
+    #[serde(default)]
+    pub experimental: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct ServerToolsCapability {
+    #[serde(rename = "listChanged", default)]
+    pub list_changed: bool,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct ServerResourcesCapability {
+    #[serde(rename = "listChanged", default)]
+    pub list_changed: bool,
+    #[serde(default)]
+    pub subscribe: bool,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct ServerPromptsCapability {
+    #[serde(rename = "listChanged", default)]
+    pub list_changed: bool,
+}
+
+/// Shape of the `initialize` response we parse on the client side.
+/// We pull `capabilities` for future gating; `protocolVersion` and
+/// `serverInfo` are accepted but unused today.
+#[derive(Debug, Deserialize)]
+pub struct InitializeResult {
+    #[serde(rename = "protocolVersion", default)]
+    pub protocol_version: String,
+    #[serde(default)]
+    pub capabilities: ServerCapabilities,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initialize_result_parses_full_capabilities() {
+        let raw = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": { "listChanged": true },
+                "resources": { "listChanged": true, "subscribe": true },
+                "prompts": { "listChanged": false },
+                "logging": {},
+                "completions": {},
+                "experimental": { "x": 1 }
+            },
+            "serverInfo": { "name": "everything", "version": "1.0" }
+        });
+        let parsed: InitializeResult = serde_json::from_value(raw).expect("parse");
+        assert_eq!(parsed.protocol_version, "2024-11-05");
+        let caps = &parsed.capabilities;
+        assert!(caps.tools.as_ref().unwrap().list_changed);
+        let r = caps.resources.as_ref().unwrap();
+        assert!(r.list_changed);
+        assert!(r.subscribe);
+        assert!(caps.prompts.is_some());
+        assert!(caps.logging.is_some());
+        assert!(caps.completions.is_some());
+        assert!(caps.experimental.is_some());
+    }
+
+    #[test]
+    fn initialize_result_handles_minimal_tools_only_server() {
+        let raw = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "minimal", "version": "0.1" }
+        });
+        let parsed: InitializeResult = serde_json::from_value(raw).expect("parse");
+        let caps = &parsed.capabilities;
+        assert!(caps.tools.is_some());
+        assert!(!caps.tools.as_ref().unwrap().list_changed);
+        assert!(caps.resources.is_none());
+        assert!(caps.prompts.is_none());
+        assert!(caps.logging.is_none());
+    }
+
+    #[test]
+    fn initialize_result_tolerates_empty_capabilities_object() {
+        let raw = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "serverInfo": { "name": "no-features", "version": "0.1" }
+        });
+        let parsed: InitializeResult = serde_json::from_value(raw).expect("parse");
+        assert!(parsed.capabilities.tools.is_none());
+    }
+}

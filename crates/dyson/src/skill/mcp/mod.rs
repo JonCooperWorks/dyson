@@ -135,6 +135,12 @@ pub struct McpSkill {
     transport: Option<Arc<dyn McpTransport>>,
     tools: Vec<Arc<dyn Tool>>,
     system_prompt: Option<String>,
+    // Parsed from the server's initialize response; stored so future
+    // phases can short-circuit calls to unimplemented MCP primitives
+    // instead of round-tripping a -32601 error.  Read by upcoming
+    // resources/prompts/etc. handlers; intentionally unread today.
+    #[allow(dead_code)]
+    server_capabilities: Option<crate::skill::mcp::protocol::ServerCapabilities>,
 }
 
 impl McpSkill {
@@ -144,6 +150,7 @@ impl McpSkill {
             transport: None,
             tools: Vec::new(),
             system_prompt: None,
+            server_capabilities: None,
         }
     }
 
@@ -268,6 +275,32 @@ impl McpSkill {
 
         let result = transport.send_request("initialize", Some(init)).await?;
         tracing::debug!(server = server_name, result = %result, "MCP initialize response");
+        // Parse the server's capabilities so future code can short-circuit
+        // calls to unimplemented primitives.  Parse errors are non-fatal:
+        // we fall back to "unknown" and proceed with tools-only behavior,
+        // matching how we worked before this field existed.
+        match serde_json::from_value::<crate::skill::mcp::protocol::InitializeResult>(
+            result.clone(),
+        ) {
+            Ok(parsed) => {
+                tracing::info!(
+                    server = server_name,
+                    protocol_version = %parsed.protocol_version,
+                    has_tools = parsed.capabilities.tools.is_some(),
+                    has_resources = parsed.capabilities.resources.is_some(),
+                    has_prompts = parsed.capabilities.prompts.is_some(),
+                    has_logging = parsed.capabilities.logging.is_some(),
+                    has_completions = parsed.capabilities.completions.is_some(),
+                    "MCP server capabilities discovered"
+                );
+                self.server_capabilities = Some(parsed.capabilities);
+            }
+            Err(e) => tracing::warn!(
+                server = server_name,
+                error = %e,
+                "failed to parse MCP initialize result; continuing tools-only"
+            ),
+        }
         transport
             .send_notification("notifications/initialized", None)
             .await?;
