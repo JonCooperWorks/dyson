@@ -21,7 +21,7 @@ use crate::error::{DysonError, Result};
 use crate::skill::Skill;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
-use self::protocol::{McpContent, McpToolDef, McpToolResult};
+use self::protocol::{McpContent, McpResourceContents, McpToolDef, McpToolResult};
 use self::transport::{HttpTransport, McpTransport, StdioTransport};
 
 /// Shared state for an in-progress OAuth flow.  Both the background
@@ -496,6 +496,20 @@ impl Tool for McpRemoteTool {
                     files.push(path);
                     content_parts.push(format!("[image: {mime_type}, {bytes} bytes]"));
                 }
+                McpContent::Resource { resource } => {
+                    let (path, bytes, original_name) = save_mcp_resource(
+                        &self.server_name,
+                        &self.tool_name,
+                        idx,
+                        resource,
+                    )?;
+                    files.push(path.clone());
+                    content_parts.push(format!(
+                        "[mcp-resource: {original_name}, {mime}, {bytes} bytes — saved to {path}]",
+                        mime = resource.mime_type,
+                        path = path.display(),
+                    ));
+                }
                 McpContent::Unknown => {
                     content_parts.push("[unsupported MCP content block]".to_string());
                 }
@@ -562,11 +576,98 @@ fn image_extension(mime_type: &str) -> &'static str {
     }
 }
 
+/// Maximum bytes we will decode + write from a single MCP resource
+/// block.  Matches the swarm proxy's per-file inline cap; an MCP server
+/// (or an assist) that hands us a larger blob is most likely buggy or
+/// hostile.
+const MAX_MCP_RESOURCE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Save an MCP `resource` content block as a local file and return the
+/// path, byte count, and the original (pre-sanitization) filename for
+/// the LLM-visible marker.
+///
+/// Filename derivation:
+///   * Take the path component after the last `/` in `resource.uri`.
+///   * Sanitize via [`safe_filename_part`]: ASCII alphanumerics +
+///     `._-` only, truncated to 64 chars, falling back to `mcp` when
+///     nothing survives.
+///   * Prefix with a per-call stamp + idx so two resources in the
+///     same tool call never collide on disk.
+///
+/// Refuses:
+///   * Empty `blob`.
+///   * `blob` whose decoded size exceeds [`MAX_MCP_RESOURCE_BYTES`].
+///   * Invalid base64.
+fn save_mcp_resource(
+    server_name: &str,
+    tool_name: &str,
+    idx: usize,
+    resource: &McpResourceContents,
+) -> Result<(PathBuf, usize, String)> {
+    if resource.blob.is_empty() {
+        return Err(DysonError::Mcp {
+            server: server_name.to_string(),
+            message: format!("empty resource blob from '{tool_name}'"),
+        });
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&resource.blob)
+        .map_err(|e| DysonError::Mcp {
+            server: server_name.to_string(),
+            message: format!("invalid base64 resource content from '{tool_name}': {e}"),
+        })?;
+    if bytes.len() > MAX_MCP_RESOURCE_BYTES {
+        return Err(DysonError::Mcp {
+            server: server_name.to_string(),
+            message: format!(
+                "resource blob from '{tool_name}' exceeds {MAX_MCP_RESOURCE_BYTES}-byte cap ({} bytes)",
+                bytes.len()
+            ),
+        });
+    }
+    let original_name = uri_basename(&resource.uri).unwrap_or("resource").to_string();
+    let safe_name = safe_filename_part(&original_name);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let filename = format!(
+        "dyson_mcp_{}_{}_{}_{}_{}",
+        safe_filename_part(server_name),
+        safe_filename_part(tool_name),
+        stamp,
+        idx,
+        safe_name,
+    );
+    let path = std::env::temp_dir().join(filename);
+    std::fs::write(&path, &bytes).map_err(|e| DysonError::Mcp {
+        server: server_name.to_string(),
+        message: format!("failed to save MCP resource from '{tool_name}': {e}"),
+    })?;
+    Ok((path, bytes.len(), original_name))
+}
+
+/// Trailing path component of an MCP resource URI.  Returns `None`
+/// when the uri has no `/` separator (treat as opaque) or when the
+/// path ends in `/`.  Pure string slicing — no URI parser dep — so
+/// the LLM-visible marker can always show what came in even if the
+/// uri is non-standard.
+fn uri_basename(uri: &str) -> Option<&str> {
+    let after_scheme = uri.split_once("://").map(|(_, rest)| rest).unwrap_or(uri);
+    let last = after_scheme.rsplit('/').next()?;
+    if last.is_empty() { None } else { Some(last) }
+}
+
 fn safe_filename_part(value: &str) -> String {
     let mut out: String = value
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            // `.` is allowed so the resource sanitizer can preserve
+            // extensions like `realdl.txt`.  Path-traversal is still
+            // prevented because `/` is mapped to `_` and the result is
+            // always sandwiched between a prefix and an idx — the
+            // final filename is a single component under /tmp.
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
                 c
             } else {
                 '_'
@@ -699,5 +800,339 @@ mod tests {
     fn extract_code_url_encoded() {
         let url = "http://localhost/callback?code=a%20b&state=s";
         assert_eq!(extract_code(url).as_deref(), Some("a b"));
+    }
+
+    // ===========================================================================
+    // McpContent::Resource — artefact handling + adversarial tests
+    // ===========================================================================
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[tokio::test]
+    async fn mcp_resource_block_saves_as_file_and_emits_marker() {
+        let bytes = b"hello-from-resource".to_vec();
+        let tool = remote_tool(serde_json::json!({
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "playwright-download://realdl.txt",
+                    "mimeType": "text/plain",
+                    "blob": b64(&bytes),
+                }
+            }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+
+        let output = tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+
+        // Marker mentions original name, MIME, bytes, AND the path.
+        assert!(
+            output.content.contains("realdl.txt"),
+            "marker missing original name: {:?}",
+            output.content
+        );
+        assert!(output.content.contains("text/plain"));
+        assert!(output.content.contains(&format!("{} bytes", bytes.len())));
+        assert!(output.content.contains("/tmp/"));
+        // Base64 payload MUST NOT leak into the LLM-visible content.
+        assert!(!output.content.contains(&b64(&bytes)));
+        // File present on disk and has the right bytes.
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(std::fs::read(&output.files[0]).unwrap(), bytes);
+        // Filename preserves the original "realdl.txt" suffix.
+        let basename = output.files[0]
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap();
+        assert!(
+            basename.ends_with("realdl.txt"),
+            "filename should preserve original suffix: {basename}"
+        );
+        let _ = std::fs::remove_file(&output.files[0]);
+    }
+
+    #[tokio::test]
+    async fn mcp_resource_rejects_empty_blob() {
+        let tool = remote_tool(serde_json::json!({
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "playwright-download://empty.bin",
+                    "mimeType": "application/octet-stream",
+                    "blob": ""
+                }
+            }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let err = match tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+        {
+            Ok(_) => panic!("expected resource validation to fail"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("empty resource blob"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn mcp_resource_rejects_invalid_base64() {
+        let tool = remote_tool(serde_json::json!({
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "playwright-download://bad.bin",
+                    "mimeType": "application/octet-stream",
+                    "blob": "@@@not-base64@@@"
+                }
+            }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let err = match tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+        {
+            Ok(_) => panic!("expected resource validation to fail"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("invalid base64"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn mcp_resource_rejects_oversize_blob() {
+        // 64 MiB + 1 byte, base64-encoded — fast to generate by repeating.
+        // (We compare AFTER decode in save_mcp_resource.)
+        let oversize = vec![b'A'; (64 * 1024 * 1024) + 1];
+        let tool = remote_tool(serde_json::json!({
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "playwright-download://big.bin",
+                    "mimeType": "application/octet-stream",
+                    "blob": b64(&oversize)
+                }
+            }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let err = match tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+        {
+            Ok(_) => panic!("expected resource validation to fail"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("64-byte cap") || msg.contains("byte cap"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn mcp_resource_with_path_traversal_uri_is_sanitized() {
+        let bytes = b"contents".to_vec();
+        // Malicious URI: ../../etc/shadow.  uri_basename returns "shadow";
+        // safe_filename_part keeps it; the path that lands in /tmp is
+        // /tmp/dyson_mcp_..._shadow — anchored under /tmp, NOT /etc.
+        let tool = remote_tool(serde_json::json!({
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "playwright-download://../../etc/shadow",
+                    "mimeType": "application/octet-stream",
+                    "blob": b64(&bytes)
+                }
+            }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let output = tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+        let path = &output.files[0];
+        assert!(
+            path.starts_with(std::env::temp_dir()),
+            "must land under /tmp, got {}",
+            path.display()
+        );
+        assert!(
+            !path.to_string_lossy().contains("/etc/"),
+            "no /etc/ in path, got {}",
+            path.display()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn mcp_resource_with_shell_meta_filename_is_sanitized() {
+        let bytes = b"contents".to_vec();
+        let tool = remote_tool(serde_json::json!({
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "playwright-download://evil;rm -rf /.txt",
+                    "mimeType": "application/octet-stream",
+                    "blob": b64(&bytes)
+                }
+            }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let output = tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+        let basename = output.files[0]
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+            .to_string();
+        // Shell metas replaced with underscores.
+        assert!(!basename.contains(';'));
+        assert!(!basename.contains(' '));
+        assert!(!basename.contains('/'));
+        let _ = std::fs::remove_file(&output.files[0]);
+    }
+
+    #[tokio::test]
+    async fn mcp_resource_with_missing_uri_falls_back_to_resource() {
+        let bytes = b"contents".to_vec();
+        let tool = remote_tool(serde_json::json!({
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "mimeType": "application/octet-stream",
+                    "blob": b64(&bytes)
+                }
+            }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let output = tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+        // Empty uri → "" → uri_basename returns None → fallback "resource".
+        assert!(output.content.contains("resource"));
+        assert_eq!(output.files.len(), 1);
+        let _ = std::fs::remove_file(&output.files[0]);
+    }
+
+    #[tokio::test]
+    async fn mcp_resource_with_missing_mime_defaults_to_octet_stream() {
+        let bytes = b"contents".to_vec();
+        let tool = remote_tool(serde_json::json!({
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "playwright-download://x.bin",
+                    "blob": b64(&bytes)
+                }
+            }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let output = tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+        assert!(output.content.contains("application/octet-stream"));
+        let _ = std::fs::remove_file(&output.files[0]);
+    }
+
+    #[tokio::test]
+    async fn mcp_multiple_resource_blocks_get_distinct_paths() {
+        // Two resources with the SAME name in one tool call must not
+        // overwrite each other on disk; the per-block stamp+idx prefix
+        // disambiguates.
+        let bytes_a = b"a-payload".to_vec();
+        let bytes_b = b"b-payload".to_vec();
+        let tool = remote_tool(serde_json::json!({
+            "content": [
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": "playwright-download://same.txt",
+                        "mimeType": "text/plain",
+                        "blob": b64(&bytes_a)
+                    }
+                },
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": "playwright-download://same.txt",
+                        "mimeType": "text/plain",
+                        "blob": b64(&bytes_b)
+                    }
+                }
+            ],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let output = tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+        assert_eq!(output.files.len(), 2);
+        assert_ne!(output.files[0], output.files[1], "paths must differ");
+        assert_eq!(std::fs::read(&output.files[0]).unwrap(), bytes_a);
+        assert_eq!(std::fs::read(&output.files[1]).unwrap(), bytes_b);
+        let _ = std::fs::remove_file(&output.files[0]);
+        let _ = std::fs::remove_file(&output.files[1]);
+    }
+
+    #[tokio::test]
+    async fn mcp_resource_alongside_text_preserves_both() {
+        let bytes = b"contents".to_vec();
+        let tool = remote_tool(serde_json::json!({
+            "content": [
+                { "type": "text", "text": "narration ahead of the file" },
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": "playwright-download://realdl.txt",
+                        "mimeType": "text/plain",
+                        "blob": b64(&bytes)
+                    }
+                }
+            ],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let output = tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+        assert!(output.content.contains("narration ahead of the file"));
+        assert!(output.content.contains("realdl.txt"));
+        assert_eq!(output.files.len(), 1);
+        let _ = std::fs::remove_file(&output.files[0]);
+    }
+
+    #[test]
+    fn uri_basename_extracts_last_path_component() {
+        assert_eq!(uri_basename("playwright-download://realdl.txt"), Some("realdl.txt"));
+        assert_eq!(
+            uri_basename("https://example.com/files/foo.pdf"),
+            Some("foo.pdf")
+        );
+        assert_eq!(uri_basename("opaque-no-scheme"), Some("opaque-no-scheme"));
+        // Trailing slash → empty trailing segment → None.
+        assert_eq!(uri_basename("https://example.com/files/"), None);
+        // Empty input → None.
+        assert_eq!(uri_basename(""), None);
+        // Path traversal returns "shadow"; safe_filename_part later keeps it.
+        assert_eq!(
+            uri_basename("playwright-download://../../etc/shadow"),
+            Some("shadow")
+        );
     }
 }

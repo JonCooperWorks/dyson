@@ -204,8 +204,47 @@ pub enum McpContent {
         )]
         mime_type: String,
     },
+    /// MCP-spec `resource` block — used by upstreams (and the swarm
+    /// proxy's PlaywrightAssist) to deliver arbitrary file bytes
+    /// alongside a tool response.  We treat it as an artefact: decode
+    /// the base64 `blob`, write to /tmp preserving the suggested name
+    /// where safe, surface the path through ToolOutput.files so the
+    /// controller can deliver it to the user, and tell the LLM the
+    /// name + size + MIME via a short marker.
+    #[serde(rename = "resource")]
+    Resource {
+        #[serde(default)]
+        resource: McpResourceContents,
+    },
     #[serde(other)]
     Unknown,
+}
+
+/// Inner shape of a `resource` content block.  The MCP spec puts the
+/// fields under `resource: { ... }` — we mirror that.  Either `blob`
+/// (base64) or `text` may carry the body; we accept both shapes for
+/// forward compatibility but the bytes-as-artefact path only fires
+/// when `blob` is present.
+#[derive(Debug, Default, Deserialize)]
+pub struct McpResourceContents {
+    /// URI identifying the resource.  May be a synthetic scheme like
+    /// `playwright-download://realdl.txt` or any RFC3986-shaped uri;
+    /// only the trailing path component is used as the artefact name,
+    /// and even that goes through a sanitizer.
+    #[serde(default)]
+    pub uri: String,
+    /// Optional MIME type — surfaced in the LLM-visible marker for
+    /// context.  Defaults to `application/octet-stream` if absent.
+    #[serde(
+        rename = "mimeType",
+        alias = "mime_type",
+        default = "default_mcp_image_mime_type"
+    )]
+    pub mime_type: String,
+    /// Base64-encoded body.  Empty when the resource is delivered as
+    /// `text` instead — we don't currently consume the text variant.
+    #[serde(default)]
+    pub blob: String,
 }
 
 fn default_mcp_image_mime_type() -> String {
