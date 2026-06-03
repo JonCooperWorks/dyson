@@ -53,7 +53,9 @@ use tokio::sync::{Mutex, oneshot};
 
 use crate::error::{DysonError, Result};
 
-use super::protocol::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+use super::protocol::{JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+
+use serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // MCP payload caps
@@ -174,6 +176,14 @@ async fn read_response_text_capped(
 /// Abstract transport for MCP JSON-RPC communication.
 ///
 /// Both stdio and HTTP implement this.  The McpSkill only sees this trait.
+///
+/// MCP is bidirectional: after `initialize`, the *server* may originate
+/// its own requests (`sampling/createMessage`, `roots/list`,
+/// `elicitation/create`) and notifications (`notifications/progress`,
+/// `notifications/message`, `notifications/*/list_changed`).  The
+/// transport's background reader routes that server-originated traffic to
+/// an [`InboundHandler`] installed via [`McpTransport::set_inbound_handler`];
+/// it still correlates responses to our own outbound requests by id.
 #[async_trait]
 pub trait McpTransport: Send + Sync {
     /// Send a JSON-RPC request and wait for the response.
@@ -189,6 +199,99 @@ pub trait McpTransport: Send + Sync {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<()>;
+
+    /// Install the handler for server-originated requests and
+    /// notifications.  Until one is installed the transport answers
+    /// inbound requests with `-32601 Method not found` and drops inbound
+    /// notifications — the safe default for a peer that advertised no
+    /// client capabilities.
+    ///
+    /// Default impl is a no-op so transports that cannot carry
+    /// server-originated traffic (or don't yet) compile unchanged.
+    fn set_inbound_handler(&self, _handler: Arc<dyn InboundHandler>) {}
+}
+
+/// Routes JSON-RPC messages that the MCP *server* originates (server →
+/// client).  Implemented by the skill's notification/request router and
+/// installed on the transport with [`McpTransport::set_inbound_handler`].
+#[async_trait]
+pub trait InboundHandler: Send + Sync {
+    /// Handle a server-originated request.  The returned `Value` becomes
+    /// the JSON-RPC `result`; an `Err` becomes the `error` object.
+    async fn handle_request(
+        &self,
+        method: &str,
+        params: Option<Value>,
+    ) -> std::result::Result<Value, JsonRpcError>;
+
+    /// Handle a server-originated notification (no response).
+    async fn handle_notification(&self, method: &str, params: Option<Value>);
+}
+
+/// Inbound handler installed by default — before a skill wires in its own
+/// router.  Rejects server-originated requests and ignores notifications.
+pub struct UnsupportedInboundHandler;
+
+#[async_trait]
+impl InboundHandler for UnsupportedInboundHandler {
+    async fn handle_request(
+        &self,
+        method: &str,
+        _params: Option<Value>,
+    ) -> std::result::Result<Value, JsonRpcError> {
+        Err(JsonRpcError {
+            code: -32601,
+            message: format!("Method not found: {method}"),
+            data: None,
+        })
+    }
+
+    async fn handle_notification(&self, _method: &str, _params: Option<Value>) {}
+}
+
+/// Classify an inbound JSON-RPC line as a response (to one of our
+/// outbound requests), a server-originated request, or a server-originated
+/// notification.  JSON-RPC distinguishes them structurally:
+///   * `method` present + `id` present  → request
+///   * `method` present + `id` absent    → notification
+///   * `method` absent                   → response (matched by `id`)
+///
+/// Inbound request/notification ids are kept as raw `Value` because a
+/// server may use string ids; we only need to echo the id back verbatim.
+enum Inbound {
+    Response,
+    Request { id: Value, method: String, params: Option<Value> },
+    Notification { method: String, params: Option<Value> },
+}
+
+fn classify_inbound(value: &Value) -> Inbound {
+    let Some(method) = value.get("method").and_then(Value::as_str) else {
+        return Inbound::Response;
+    };
+    let method = method.to_string();
+    let params = value.get("params").cloned();
+    match value.get("id") {
+        Some(id) if !id.is_null() => Inbound::Request {
+            id: id.clone(),
+            method,
+            params,
+        },
+        _ => Inbound::Notification { method, params },
+    }
+}
+
+/// Serialize a JSON-RPC response to a server-originated request, echoing
+/// its id verbatim (string or number).
+fn build_response_line(id: &Value, result: std::result::Result<Value, JsonRpcError>) -> String {
+    let body = match result {
+        Ok(result) => serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Err(err) => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": err.code, "message": err.message, "data": err.data },
+        }),
+    };
+    body.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +306,11 @@ pub struct StdioTransport {
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
     next_id: AtomicU64,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<PendingResponse>>>>,
+    /// Handler for server-originated requests/notifications.  Shared with
+    /// the reader task; swapped in by `set_inbound_handler`.  A `std`
+    /// mutex is fine: it is only ever held to clone the `Arc` out, never
+    /// across an `.await`.
+    inbound: Arc<std::sync::Mutex<Arc<dyn InboundHandler>>>,
     _child: Arc<Mutex<Child>>,
     /// Background task handles — aborted on drop to prevent orphaned tasks.
     _reader_handle: tokio::task::JoinHandle<()>,
@@ -252,9 +360,13 @@ impl StdioTransport {
         let stdin = Arc::new(Mutex::new(stdin));
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<PendingResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let inbound: Arc<std::sync::Mutex<Arc<dyn InboundHandler>>> =
+            Arc::new(std::sync::Mutex::new(Arc::new(UnsupportedInboundHandler)));
 
         // Background reader task.
         let pending_clone = Arc::clone(&pending);
+        let inbound_clone = Arc::clone(&inbound);
+        let stdin_clone = Arc::clone(&stdin);
         let command_name = command.to_string();
         let reader_handle = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
@@ -281,8 +393,8 @@ impl StdioTransport {
                     continue;
                 }
 
-                let response: JsonRpcResponse = match serde_json::from_str(&line) {
-                    Ok(r) => r,
+                let value: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
                     Err(e) => {
                         tracing::debug!(
                             server = command_name,
@@ -293,10 +405,51 @@ impl StdioTransport {
                     }
                 };
 
-                if let Some(id) = response.id {
-                    let mut pending = pending_clone.lock().await;
-                    if let Some(tx) = pending.remove(&id) {
-                        let _ = tx.send(Ok(response));
+                match classify_inbound(&value) {
+                    Inbound::Response => {
+                        let response: JsonRpcResponse = match serde_json::from_value(value) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                tracing::debug!(
+                                    server = command_name,
+                                    error = %e,
+                                    "failed to parse MCP response frame"
+                                );
+                                continue;
+                            }
+                        };
+                        if let Some(id) = response.id {
+                            let mut pending = pending_clone.lock().await;
+                            if let Some(tx) = pending.remove(&id) {
+                                let _ = tx.send(Ok(response));
+                            }
+                        }
+                    }
+                    // Server-originated request: dispatch to the handler on
+                    // its own task (the handler may block — e.g. an
+                    // elicitation awaiting user input — and must not stall
+                    // the reader) and write the response back over stdin.
+                    Inbound::Request { id, method, params } => {
+                        let handler = Arc::clone(&inbound_clone.lock().unwrap());
+                        let stdin = Arc::clone(&stdin_clone);
+                        let server = command_name.clone();
+                        tokio::spawn(async move {
+                            let result = handler.handle_request(&method, params).await;
+                            let line = build_response_line(&id, result);
+                            if let Err(e) = write_line(&stdin, &server, &line).await {
+                                tracing::warn!(
+                                    server = server,
+                                    error = %e,
+                                    "failed to write inbound MCP response"
+                                );
+                            }
+                        });
+                    }
+                    Inbound::Notification { method, params } => {
+                        let handler = Arc::clone(&inbound_clone.lock().unwrap());
+                        tokio::spawn(async move {
+                            handler.handle_notification(&method, params).await;
+                        });
                     }
                 }
             }
@@ -308,10 +461,37 @@ impl StdioTransport {
             stdin,
             next_id: AtomicU64::new(1),
             pending,
+            inbound,
             _child: Arc::new(Mutex::new(child)),
             _reader_handle: reader_handle,
         })
     }
+}
+
+/// Write a single newline-terminated JSON line to an MCP server's stdin.
+/// Shared by outbound requests/notifications and inbound responses.
+async fn write_line(
+    stdin: &Arc<Mutex<tokio::process::ChildStdin>>,
+    server: &str,
+    json: &str,
+) -> Result<()> {
+    let mut stdin = stdin.lock().await;
+    stdin
+        .write_all(json.as_bytes())
+        .await
+        .map_err(|e| DysonError::Mcp {
+            server: server.to_string(),
+            message: format!("stdin write failed: {e}"),
+        })?;
+    stdin.write_all(b"\n").await.map_err(|e| DysonError::Mcp {
+        server: server.to_string(),
+        message: format!("stdin write failed: {e}"),
+    })?;
+    stdin.flush().await.map_err(|e| DysonError::Mcp {
+        server: server.to_string(),
+        message: format!("stdin flush failed: {e}"),
+    })?;
+    Ok(())
 }
 
 impl StdioTransport {
@@ -393,24 +573,7 @@ impl McpTransport for StdioTransport {
 
         let json = serde_json::to_string(&request)?;
         enforce_mcp_request_cap(method, &json)?;
-        {
-            let mut stdin = self.stdin.lock().await;
-            stdin
-                .write_all(json.as_bytes())
-                .await
-                .map_err(|e| DysonError::Mcp {
-                    server: method.to_string(),
-                    message: format!("stdin write failed: {e}"),
-                })?;
-            stdin.write_all(b"\n").await.map_err(|e| DysonError::Mcp {
-                server: method.to_string(),
-                message: format!("stdin write failed: {e}"),
-            })?;
-            stdin.flush().await.map_err(|e| DysonError::Mcp {
-                server: method.to_string(),
-                message: format!("stdin flush failed: {e}"),
-            })?;
-        }
+        write_line(&self.stdin, method, &json).await?;
 
         /// Maximum time to wait for an MCP server to respond to a request.
         const MCP_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -466,25 +629,11 @@ impl McpTransport for StdioTransport {
         let notification = JsonRpcNotification::new(method, params);
         let json = serde_json::to_string(&notification)?;
         enforce_mcp_request_cap(method, &json)?;
+        write_line(&self.stdin, method, &json).await
+    }
 
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(json.as_bytes())
-            .await
-            .map_err(|e| DysonError::Mcp {
-                server: method.to_string(),
-                message: format!("stdin write failed: {e}"),
-            })?;
-        stdin.write_all(b"\n").await.map_err(|e| DysonError::Mcp {
-            server: method.to_string(),
-            message: format!("stdin write failed: {e}"),
-        })?;
-        stdin.flush().await.map_err(|e| DysonError::Mcp {
-            server: method.to_string(),
-            message: format!("stdin flush failed: {e}"),
-        })?;
-
-        Ok(())
+    fn set_inbound_handler(&self, handler: Arc<dyn InboundHandler>) {
+        *self.inbound.lock().unwrap() = handler;
     }
 }
 
@@ -528,6 +677,11 @@ pub struct HttpTransport {
     /// Some MCP HTTP servers return a session ID in the response headers
     /// that must be sent back in subsequent requests.
     session_id: Mutex<Option<String>>,
+
+    /// Handler for server-originated requests/notifications that arrive
+    /// interleaved in an SSE response body.  Defaults to
+    /// [`UnsupportedInboundHandler`] until a skill installs its router.
+    inbound: std::sync::Mutex<Arc<dyn InboundHandler>>,
 }
 
 impl HttpTransport {
@@ -542,6 +696,46 @@ impl HttpTransport {
             auth,
             next_id: AtomicU64::new(1),
             session_id: Mutex::new(None),
+            inbound: std::sync::Mutex::new(Arc::new(UnsupportedInboundHandler)),
+        }
+    }
+
+    /// POST a fire-and-forget JSON-RPC message (a notification, or our
+    /// response to a server-originated request) to the MCP endpoint.
+    /// Streamable HTTP servers accept these as ordinary POSTs and reply
+    /// 202 Accepted with no body, so we don't read the response.
+    async fn post_message(&self, json: &str) {
+        let Ok(mut req) = self.build_request(json).await else {
+            return;
+        };
+        {
+            let session = self.session_id.lock().await;
+            if let Some(ref sid) = *session {
+                req = req.header("Mcp-Session-Id", sid.as_str());
+            }
+        }
+        let _ = req.send().await;
+    }
+
+    /// Dispatch one server-originated frame seen in an SSE response body:
+    /// a request gets routed to the inbound handler and its response
+    /// POSTed back; a notification is routed and dropped.  Returns the
+    /// value verbatim for the caller to treat as the response to our
+    /// outbound request when it is neither (i.e. a `Response` frame).
+    async fn dispatch_inbound_frame(&self, value: Value) -> Option<Value> {
+        match classify_inbound(&value) {
+            Inbound::Response => Some(value),
+            Inbound::Request { id, method, params } => {
+                let handler = Arc::clone(&self.inbound.lock().unwrap());
+                let result = handler.handle_request(&method, params).await;
+                self.post_message(&build_response_line(&id, result)).await;
+                None
+            }
+            Inbound::Notification { method, params } => {
+                let handler = Arc::clone(&self.inbound.lock().unwrap());
+                handler.handle_notification(&method, params).await;
+                None
+            }
         }
     }
 
@@ -625,22 +819,45 @@ impl HttpTransport {
 
         let body = read_response_text_capped(response, &self.url).await?;
 
-        let rpc_body: std::borrow::Cow<'_, str> = if is_sse {
-            match extract_last_sse_data(&body) {
-                Some(s) => std::borrow::Cow::Owned(s),
-                None => {
-                    return Err(DysonError::Mcp {
-                        server: self.url.clone(),
-                        message: "SSE response had no `data:` frame".into(),
-                    });
-                }
-            }
-        } else {
-            std::borrow::Cow::Borrowed(body.as_str())
-        };
+        // Non-SSE: the whole body is the single JSON-RPC response.
+        if !is_sse {
+            return self.finish_rpc_value(parse_rpc_value(&body, &self.url)?);
+        }
 
+        // SSE: the body may carry server-originated requests/notifications
+        // interleaved with the response to our outbound request.  Demux
+        // every frame in order — dispatching inbound traffic to the
+        // handler — and keep the last response frame as our answer.
+        let frames = extract_all_sse_frames(&body);
+        if frames.is_empty() {
+            return Err(DysonError::Mcp {
+                server: self.url.clone(),
+                message: "SSE response had no `data:` frame".into(),
+            });
+        }
+
+        let mut answer: Option<Value> = None;
+        for frame in frames {
+            let value = parse_rpc_value(&frame, &self.url)?;
+            if let Some(resp) = self.dispatch_inbound_frame(value).await {
+                answer = Some(resp);
+            }
+        }
+
+        match answer {
+            Some(v) => self.finish_rpc_value(v),
+            None => Err(DysonError::Mcp {
+                server: self.url.clone(),
+                message: "SSE response carried no response to our request".into(),
+            }),
+        }
+    }
+
+    /// Turn a parsed JSON-RPC response value into the `result`, mapping a
+    /// JSON-RPC `error` object onto a `DysonError`.
+    fn finish_rpc_value(&self, value: Value) -> crate::error::Result<serde_json::Value> {
         let rpc_response: JsonRpcResponse =
-            serde_json::from_str(&rpc_body).map_err(|e| DysonError::Mcp {
+            serde_json::from_value(value).map_err(|e| DysonError::Mcp {
                 server: self.url.clone(),
                 message: format!("failed to parse response: {e}"),
             })?;
@@ -659,6 +876,15 @@ impl HttpTransport {
     }
 }
 
+/// Parse one JSON-RPC frame (a single `data:` payload or a non-SSE body)
+/// into a `Value`, attributing parse failures to `server`.
+fn parse_rpc_value(raw: &str, server: &str) -> crate::error::Result<Value> {
+    serde_json::from_str(raw).map_err(|e| DysonError::Mcp {
+        server: server.to_string(),
+        message: format!("failed to parse response: {e}"),
+    })
+}
+
 /// Extract the last `data:` payload from a Server-Sent Events body.
 ///
 /// Streamable HTTP MCP servers wrap the JSON-RPC response in an
@@ -667,33 +893,38 @@ impl HttpTransport {
 /// tools/call, exactly one frame is emitted — but defensively we
 /// take the LAST `data:` line so future server behavior (a status
 /// frame followed by the response, etc.) doesn't trip the parser.
+#[cfg(test)]
 fn extract_last_sse_data(body: &str) -> Option<String> {
-    let mut last: Option<String> = None;
+    extract_all_sse_frames(body).pop()
+}
+
+/// Extract every `data:` payload from a Server-Sent Events body, in
+/// order.  Streamable HTTP MCP is bidirectional: a single response body
+/// may carry server-originated requests/notifications interleaved before
+/// (or after) the response to our outbound request, so we demux all
+/// frames rather than only the last one.  Multi-line `data:` frames are
+/// joined with `\n` per the SSE spec; the final frame is emitted even
+/// when the server omits the trailing blank-line terminator.
+fn extract_all_sse_frames(body: &str) -> Vec<String> {
+    let mut frames: Vec<String> = Vec::new();
     let mut current: Option<String> = None;
     for line in body.lines() {
         if let Some(rest) = line.strip_prefix("data:") {
-            // Per the SSE spec the body starts after the colon and one
-            // optional space.  Concatenate multi-line `data:` frames
-            // with a `\n` separator (also per the spec).
             let chunk = rest.strip_prefix(' ').unwrap_or(rest);
             current = Some(match current.take() {
                 Some(prev) => format!("{prev}\n{chunk}"),
                 None => chunk.to_string(),
             });
-        } else if line.is_empty() {
-            // Blank line terminates an event.  Promote the current
-            // accumulator to `last` and reset.
-            if let Some(c) = current.take() {
-                last = Some(c);
-            }
+        } else if line.is_empty()
+            && let Some(c) = current.take()
+        {
+            frames.push(c);
         }
     }
-    // Trailing event without a blank-line terminator (some servers
-    // skip the terminator on the final frame).
     if let Some(c) = current {
-        last = Some(c);
+        frames.push(c);
     }
-    last
+    frames
 }
 
 #[async_trait]
@@ -760,6 +991,10 @@ impl McpTransport for HttpTransport {
 
         Ok(())
     }
+
+    fn set_inbound_handler(&self, handler: Arc<dyn InboundHandler>) {
+        *self.inbound.lock().unwrap() = handler;
+    }
 }
 
 // ===========================================================================
@@ -792,6 +1027,124 @@ mod tests {
         )
         .await
         .expect("failed to spawn echo server")
+    }
+
+    #[test]
+    fn classify_inbound_distinguishes_message_shapes() {
+        // Response: no method, id present.
+        let resp = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"ok":true}});
+        assert!(matches!(classify_inbound(&resp), Inbound::Response));
+
+        // Request: method + non-null id (string id is legal JSON-RPC).
+        let req = serde_json::json!({"jsonrpc":"2.0","id":"abc","method":"roots/list"});
+        match classify_inbound(&req) {
+            Inbound::Request { id, method, .. } => {
+                assert_eq!(id, serde_json::json!("abc"));
+                assert_eq!(method, "roots/list");
+            }
+            _ => panic!("expected request"),
+        }
+
+        // Notification: method, no id.
+        let note = serde_json::json!({"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}});
+        match classify_inbound(&note) {
+            Inbound::Notification { method, params } => {
+                assert_eq!(method, "notifications/message");
+                assert_eq!(params.unwrap()["level"], "info");
+            }
+            _ => panic!("expected notification"),
+        }
+
+        // Null id + method is a notification, not a request (JSON-RPC
+        // forbids null request ids).
+        let null_id = serde_json::json!({"jsonrpc":"2.0","id":null,"method":"x"});
+        assert!(matches!(classify_inbound(&null_id), Inbound::Notification { .. }));
+    }
+
+    #[test]
+    fn build_response_line_echoes_id_and_shapes_result_or_error() {
+        let ok = build_response_line(
+            &serde_json::json!("r1"),
+            Ok(serde_json::json!({"roots": []})),
+        );
+        let v: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(v["id"], "r1");
+        assert_eq!(v["result"]["roots"], serde_json::json!([]));
+        assert!(v.get("error").is_none());
+
+        let err = build_response_line(
+            &serde_json::json!(7),
+            Err(JsonRpcError { code: -32601, message: "nope".into(), data: None }),
+        );
+        let v: serde_json::Value = serde_json::from_str(&err).unwrap();
+        assert_eq!(v["id"], 7);
+        assert_eq!(v["error"]["code"], -32601);
+        assert_eq!(v["error"]["message"], "nope");
+    }
+
+    /// Records inbound dispatch for assertions and answers `roots/list`
+    /// with a sentinel so the full request round-trip is observable.
+    struct RecordingHandler {
+        notes: tokio::sync::mpsc::UnboundedSender<(String, Option<Value>)>,
+    }
+
+    #[async_trait]
+    impl InboundHandler for RecordingHandler {
+        async fn handle_request(
+            &self,
+            method: &str,
+            _params: Option<Value>,
+        ) -> std::result::Result<Value, JsonRpcError> {
+            assert_eq!(method, "roots/list");
+            Ok(serde_json::json!({ "roots": ["sentinel"] }))
+        }
+
+        async fn handle_notification(&self, method: &str, params: Option<Value>) {
+            let _ = self.notes.send((method.to_string(), params));
+        }
+    }
+
+    #[tokio::test]
+    async fn inbound_request_is_dispatched_and_response_written_back() {
+        // Server waits for a kick, emits a server-originated `roots/list`
+        // request, reads our response, then echoes it back wrapped in a
+        // notification so the test can confirm the full round-trip:
+        // dispatch -> handler -> response written to stdin -> server saw it.
+        let transport = StdioTransport::spawn(
+            "sh",
+            &[
+                "-c".to_string(),
+                r#"IFS= read -r _go
+                   echo '{"jsonrpc":"2.0","id":"r1","method":"roots/list"}'
+                   IFS= read -r resp
+                   printf '{"jsonrpc":"2.0","method":"notifications/echo","params":%s}\n' "$resp"
+                   cat >/dev/null"#
+                    .to_string(),
+            ],
+            &HashMap::new(),
+            false,
+            false,
+        )
+        .await
+        .expect("spawn inbound test server");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        transport.set_inbound_handler(Arc::new(RecordingHandler { notes: tx }));
+
+        // Kick the server (installs the handler first to avoid the race
+        // where the default handler answers before ours is in place).
+        transport.send_notification("go", None).await.unwrap();
+
+        let (method, params) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("echo notification within timeout")
+            .expect("channel open");
+
+        assert_eq!(method, "notifications/echo");
+        // params is the response object the server received from us.
+        let echoed = params.expect("echo params");
+        assert_eq!(echoed["id"], "r1");
+        assert_eq!(echoed["result"]["roots"][0], "sentinel");
     }
 
     #[tokio::test]
@@ -861,6 +1214,70 @@ mod tests {
             err.to_string().contains(MCP_RESULT_TOO_LARGE_MESSAGE),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn extract_all_sse_frames_returns_every_frame_in_order() {
+        let body = "event: message\ndata: {\"a\":1}\n\nevent: message\ndata: {\"b\":2}\n\n";
+        let frames = extract_all_sse_frames(body);
+        assert_eq!(frames, vec!["{\"a\":1}".to_string(), "{\"b\":2}".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn http_sse_demux_dispatches_inbound_and_returns_response() {
+        use std::convert::Infallible;
+
+        use http_body_util::Full;
+        use hyper::body::{Bytes, Incoming};
+        use hyper::service::service_fn;
+        use hyper::{Request, Response};
+        use hyper_util::rt::TokioIo;
+
+        // SSE body: a server-originated notification, then the response to
+        // our outbound request (id 1).  The demux must surface the
+        // notification to the handler and return {"ok":true} as the result.
+        let sse = "event: message\n\
+                   data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"info\",\"data\":\"hi\"}}\n\n\
+                   event: message\n\
+                   data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept connection");
+            let io = TokioIo::new(stream);
+            let service = service_fn(move |_req: Request<Incoming>| async move {
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .header("content-type", "text/event-stream")
+                        .body(Full::new(Bytes::from(sse)))
+                        .expect("response"),
+                )
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
+        });
+
+        let transport = HttpTransport::new(
+            &format!("http://{addr}/mcp"),
+            Box::new(crate::auth::DangerousNoAuth),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        transport.set_inbound_handler(Arc::new(RecordingHandler { notes: tx }));
+
+        let result = transport
+            .send_request("tools/call", Some(serde_json::json!({})))
+            .await
+            .expect("request should resolve to the response frame");
+        server.abort();
+
+        assert_eq!(result, serde_json::json!({ "ok": true }));
+        let (method, params) = rx.try_recv().expect("inbound notification dispatched");
+        assert_eq!(method, "notifications/message");
+        assert_eq!(params.unwrap()["data"], "hi");
     }
 
     #[test]
