@@ -524,6 +524,8 @@ impl McpHttpServer {
             "resources/list" => self.handle_resources_list(id).await,
             "resources/templates/list" => self.handle_resource_templates_list(id),
             "resources/read" => self.handle_resources_read(id, params).await,
+            "prompts/list" => self.handle_prompts_list(id).await,
+            "prompts/get" => self.handle_prompts_get(id, params).await,
             "completion/complete" => self.handle_completion_complete(id, params).await,
             _ => JsonRpcResponse::rpc_error(id, -32601, format!("Method not found: {method}")),
         }
@@ -550,6 +552,9 @@ impl McpHttpServer {
                     // We can't push notifications over this transport, so
                     // neither `subscribe` nor `listChanged` is offered.
                     "resources": { "subscribe": false, "listChanged": false },
+                    // Workspace skills (skills/*/SKILL.md) are exposed as
+                    // prompts.  listChanged is false for the same reason.
+                    "prompts": { "listChanged": false },
                     // `completion/complete` backs URI autocompletion.
                     "completions": {}
                 },
@@ -787,6 +792,67 @@ impl McpHttpServer {
         }
     }
 
+    /// Handle `prompts/list` — expose each workspace skill
+    /// (`skills/<name>/SKILL.md`) as an MCP prompt.  The skill's name is
+    /// the directory basename; the description is the SKILL.md's first
+    /// non-empty line (sans leading `#`), truncated.
+    async fn handle_prompts_list(&self, id: Option<u64>) -> JsonRpcResponse {
+        let dirs = {
+            let ws = self.workspace.read().await;
+            ws.skill_dirs()
+        };
+        let prompts: Vec<serde_json::Value> = dirs
+            .iter()
+            .filter_map(|dir| {
+                let name = dir.file_name()?.to_str()?.to_string();
+                let description = skill_description(dir);
+                Some(serde_json::json!({
+                    "name": name,
+                    "description": description,
+                    // Skills take no structured arguments via MCP — the
+                    // SKILL.md body is the whole prompt.
+                    "arguments": []
+                }))
+            })
+            .collect();
+        JsonRpcResponse::success(id, serde_json::json!({ "prompts": prompts }))
+    }
+
+    /// Handle `prompts/get` — return a skill's SKILL.md body as a single
+    /// user prompt message.  Unknown names return `-32602`.
+    async fn handle_prompts_get(
+        &self,
+        id: Option<u64>,
+        params: Option<serde_json::Value>,
+    ) -> JsonRpcResponse {
+        let Some(name) = params.as_ref().and_then(|p| p["name"].as_str()) else {
+            return JsonRpcResponse::rpc_error(id, -32602, "Missing prompt name");
+        };
+        let dirs = {
+            let ws = self.workspace.read().await;
+            ws.skill_dirs()
+        };
+        let dir = dirs
+            .iter()
+            .find(|d| d.file_name().and_then(|n| n.to_str()) == Some(name));
+        let Some(dir) = dir else {
+            return JsonRpcResponse::rpc_error(id, -32602, format!("Unknown prompt: {name}"));
+        };
+        match std::fs::read_to_string(dir.join("SKILL.md")) {
+            Ok(body) => JsonRpcResponse::success(
+                id,
+                serde_json::json!({
+                    "description": skill_description(dir),
+                    "messages": [{
+                        "role": "user",
+                        "content": { "type": "text", "text": body }
+                    }]
+                }),
+            ),
+            Err(e) => JsonRpcResponse::rpc_error(id, -32603, format!("failed to read skill: {e}")),
+        }
+    }
+
     /// Handle `completion/complete` — autocompletion for resource URIs.
     ///
     /// We complete `ref/resource` URI arguments against the workspace file
@@ -835,6 +901,37 @@ impl McpHttpServer {
             }),
         )
     }
+}
+
+/// First non-empty, non-frontmatter line of a skill's `SKILL.md`, with any
+/// leading Markdown heading markers stripped, truncated for use as a
+/// prompt description.  Returns an empty string when the file is missing
+/// or unreadable (the prompt still lists, just without a blurb).
+fn skill_description(dir: &std::path::Path) -> String {
+    let Ok(body) = std::fs::read_to_string(dir.join("SKILL.md")) else {
+        return String::new();
+    };
+    let mut in_frontmatter = false;
+    for (idx, raw) in body.lines().enumerate() {
+        let line = raw.trim();
+        // Skip a leading `---` YAML frontmatter block.
+        if idx == 0 && line == "---" {
+            in_frontmatter = true;
+            continue;
+        }
+        if in_frontmatter {
+            if line == "---" {
+                in_frontmatter = false;
+            }
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let cleaned = line.trim_start_matches('#').trim();
+        return cleaned.chars().take(200).collect();
+    }
+    String::new()
 }
 
 /// URI scheme under which the agent's workspace files are exposed as MCP

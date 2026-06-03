@@ -8,13 +8,17 @@ use tokio::sync::RwLock;
 /// Implements the full `Workspace` trait with HashMap-backed storage.
 struct MockWorkspace {
     files: std::collections::HashMap<String, String>,
+    skill_dirs: Vec<std::path::PathBuf>,
 }
 
 impl MockWorkspace {
     fn new() -> Self {
         let mut files = std::collections::HashMap::new();
         files.insert("identity".to_string(), "I am a test agent".to_string());
-        Self { files }
+        Self {
+            files,
+            skill_dirs: Vec::new(),
+        }
     }
 }
 
@@ -67,6 +71,10 @@ impl Workspace for MockWorkspace {
 
     fn journal(&mut self, entry: &str) {
         self.append("journal", entry);
+    }
+
+    fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
+        self.skill_dirs.clone()
     }
 }
 
@@ -254,6 +262,72 @@ async fn completion_complete_prompt_ref_is_empty() {
         .as_array()
         .unwrap()
         .is_empty());
+}
+
+// -----------------------------------------------------------------------
+// Prompt tests
+// -----------------------------------------------------------------------
+
+/// Build a server whose workspace exposes one skill dir at `skill_dir`.
+fn make_server_with_skill(skill_dir: std::path::PathBuf) -> Arc<McpHttpServer> {
+    let mut ws = MockWorkspace::new();
+    ws.skill_dirs = vec![skill_dir];
+    let ws: crate::workspace::WorkspaceHandle = Arc::new(RwLock::new(Box::new(ws)));
+    Arc::new(McpHttpServer::new(ws, HashMap::new()))
+}
+
+#[tokio::test]
+async fn initialize_advertises_prompts() {
+    let server = make_server();
+    let resp = server.dispatch(Some(1), "initialize", None).await;
+    assert!(resp.result.unwrap()["capabilities"]["prompts"].is_object());
+}
+
+#[tokio::test]
+async fn prompts_list_is_empty_without_skills() {
+    let server = make_server();
+    let resp = server.dispatch(Some(1), "prompts/list", None).await;
+    assert!(resp.error.is_none());
+    assert!(resp.result.unwrap()["prompts"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn prompts_list_and_get_expose_skill_md() {
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_dir = tmp.path().join("code-review");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "# Code Review\n\nReview the diff for bugs.\n",
+    )
+    .unwrap();
+    let server = make_server_with_skill(skill_dir);
+
+    // list
+    let resp = server.dispatch(Some(1), "prompts/list", None).await;
+    let prompts = resp.result.unwrap()["prompts"].as_array().unwrap().clone();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0]["name"], "code-review");
+    assert_eq!(prompts[0]["description"], "Code Review");
+
+    // get
+    let params = serde_json::json!({ "name": "code-review" });
+    let resp = server.dispatch(Some(2), "prompts/get", Some(params)).await;
+    let result = resp.result.unwrap();
+    let text = result["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("Review the diff for bugs."));
+    assert_eq!(result["messages"][0]["role"], "user");
+}
+
+#[tokio::test]
+async fn prompts_get_unknown_name_is_invalid_params() {
+    let server = make_server();
+    let params = serde_json::json!({ "name": "nope" });
+    let resp = server.dispatch(Some(3), "prompts/get", Some(params)).await;
+    assert_eq!(resp.error.unwrap().code, -32602);
 }
 
 // -----------------------------------------------------------------------
