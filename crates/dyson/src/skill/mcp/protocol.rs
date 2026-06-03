@@ -287,6 +287,52 @@ pub struct McpResourcesReadResult {
     pub contents: Vec<McpResourceContents>,
 }
 
+/// One entry in a `prompts/list` response.
+#[derive(Debug, Deserialize)]
+pub struct McpPromptInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub arguments: Vec<McpPromptArgument>,
+}
+
+/// A declared argument for a prompt template.
+#[derive(Debug, Deserialize)]
+pub struct McpPromptArgument {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// A `prompts/list` result.
+#[derive(Debug, Default, Deserialize)]
+pub struct McpPromptsListResult {
+    #[serde(default)]
+    pub prompts: Vec<McpPromptInfo>,
+}
+
+/// A `prompts/get` result — a description plus the rendered conversation
+/// messages the prompt expands to.  `content` is kept as raw JSON because
+/// a prompt message carries a single content block (text/image/resource);
+/// we render text inline and mark non-text blocks.
+#[derive(Debug, Default, Deserialize)]
+pub struct McpPromptGetResult {
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub messages: Vec<McpPromptMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpPromptMessage {
+    pub role: String,
+    #[serde(default)]
+    pub content: serde_json::Value,
+}
+
 /// Capabilities object returned by an MCP server in its `initialize`
 /// response.  Every field is optional: a missing entry means the server
 /// does not implement that primitive.  An empty object (`{}`) means the

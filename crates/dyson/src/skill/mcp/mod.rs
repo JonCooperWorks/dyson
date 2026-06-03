@@ -405,6 +405,24 @@ impl McpSkill {
             ));
         }
 
+        // Likewise expose the server's prompt templates when advertised.
+        if self
+            .server_capabilities
+            .as_ref()
+            .is_some_and(|c| c.prompts.is_some())
+        {
+            tools.push(Arc::new(McpPromptsTool {
+                tool_name: format!("{server_name}_prompts"),
+                transport: Arc::clone(transport),
+                server_name: server_name.to_string(),
+            }));
+            descs.push(format!(
+                "- **{server_name}_prompts**: List and expand prompt templates exposed by \
+                 MCP server '{server_name}' (op: \"list\" or \"get\" with a \"name\" and \
+                 optional \"arguments\")."
+            ));
+        }
+
         self.tools = tools;
         if !descs.is_empty() {
             self.system_prompt = Some(format!(
@@ -758,6 +776,151 @@ impl McpResourcesTool {
     }
 }
 
+/// Tool exposing an MCP server's `prompts/list` + `prompts/get` surface.
+/// Registered only when the server advertised the `prompts` capability.
+struct McpPromptsTool {
+    tool_name: String,
+    transport: Arc<dyn McpTransport>,
+    server_name: String,
+}
+
+#[async_trait]
+impl Tool for McpPromptsTool {
+    fn name(&self) -> &str {
+        &self.tool_name
+    }
+    fn description(&self) -> &str {
+        "List and expand prompt templates exposed by this MCP server. \
+         Use op=\"list\" to discover prompt names and their arguments, then \
+         op=\"get\" with a \"name\" (and optional \"arguments\" object) to \
+         expand a template into its messages."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "op": { "type": "string", "enum": ["list", "get"] },
+                "name": { "type": "string", "description": "Prompt name (required for op=get)" },
+                "arguments": { "type": "object", "description": "Template arguments for op=get" }
+            },
+            "required": ["op"]
+        })
+    }
+
+    async fn run(&self, input: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+        match input["op"].as_str() {
+            Some("list") => self.list().await,
+            Some("get") => match input["name"].as_str() {
+                Some(name) => self.get(name, input.get("arguments").cloned()).await,
+                None => Ok(ToolOutput::error("op=get requires a \"name\"")),
+            },
+            _ => Ok(ToolOutput::error("op must be \"list\" or \"get\"")),
+        }
+    }
+}
+
+impl McpPromptsTool {
+    async fn list(&self) -> Result<ToolOutput> {
+        let result_json = self
+            .transport
+            .send_request("prompts/list", Some(serde_json::json!({})))
+            .await
+            .map_err(|e| DysonError::Mcp {
+                server: self.server_name.clone(),
+                message: format!("prompts/list failed: {e}"),
+            })?;
+        let list: protocol::McpPromptsListResult = serde_json::from_value(result_json)
+            .map_err(|e| DysonError::Mcp {
+                server: self.server_name.clone(),
+                message: format!("failed to parse prompts/list: {e}"),
+            })?;
+        if list.prompts.is_empty() {
+            return Ok(ToolOutput::success("No prompts exposed by this server."));
+        }
+        let mut lines = Vec::with_capacity(list.prompts.len());
+        for p in &list.prompts {
+            // Prompt metadata is server-controlled — sanitize free text.
+            let desc = p
+                .description
+                .as_deref()
+                .map(sanitize_mcp_description)
+                .filter(|d| !d.is_empty());
+            let args = if p.arguments.is_empty() {
+                String::new()
+            } else {
+                let parts: Vec<String> = p
+                    .arguments
+                    .iter()
+                    .map(|a| {
+                        if a.required {
+                            format!("{}*", a.name)
+                        } else {
+                            a.name.clone()
+                        }
+                    })
+                    .collect();
+                format!("  args: {}", parts.join(", "))
+            };
+            lines.push(format!(
+                "- {name}{desc}{args}",
+                name = p.name,
+                desc = match desc {
+                    Some(d) => format!("  — {d}"),
+                    None => String::new(),
+                },
+            ));
+        }
+        Ok(ToolOutput::success(format!(
+            "Prompts exposed by '{}' (* = required arg):\n{}",
+            self.server_name,
+            lines.join("\n")
+        )))
+    }
+
+    async fn get(&self, name: &str, arguments: Option<serde_json::Value>) -> Result<ToolOutput> {
+        let mut params = serde_json::json!({ "name": name });
+        if let Some(args) = arguments {
+            params["arguments"] = args;
+        }
+        let result_json = self
+            .transport
+            .send_request("prompts/get", Some(params))
+            .await
+            .map_err(|e| DysonError::Mcp {
+                server: self.server_name.clone(),
+                message: format!("prompts/get failed for '{name}': {e}"),
+            })?;
+        let got: protocol::McpPromptGetResult = serde_json::from_value(result_json)
+            .map_err(|e| DysonError::Mcp {
+                server: self.server_name.clone(),
+                message: format!("failed to parse prompts/get: {e}"),
+            })?;
+        let mut out = String::new();
+        if let Some(desc) = got.description.as_deref().map(sanitize_mcp_description) {
+            if !desc.is_empty() {
+                out.push_str(&desc);
+                out.push_str("\n\n");
+            }
+        }
+        for msg in &got.messages {
+            // A prompt message carries a single content block.  Render
+            // text inline; mark non-text blocks rather than dumping them.
+            let rendered = match msg.content.get("type").and_then(|t| t.as_str()) {
+                Some("text") => msg
+                    .content
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                Some(other) => format!("[{other} content block]"),
+                None => "[empty content block]".to_string(),
+            };
+            out.push_str(&format!("[{}] {}\n", msg.role, rendered));
+        }
+        Ok(ToolOutput::success(out.trim_end().to_string()))
+    }
+}
+
 fn save_mcp_image(
     server_name: &str,
     tool_name: &str,
@@ -1053,6 +1216,87 @@ mod tests {
         assert_eq!(out.files.len(), 1);
         assert_eq!(std::fs::read(&out.files[0]).unwrap(), bytes);
         let _ = std::fs::remove_file(&out.files[0]);
+    }
+
+    fn prompts_tool(responses: Vec<(&str, serde_json::Value)>) -> McpPromptsTool {
+        let responses = responses
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        McpPromptsTool {
+            tool_name: "srv_prompts".to_string(),
+            transport: Arc::new(ByMethodTransport { responses }),
+            server_name: "srv".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn prompts_tool_list_shows_names_and_required_args() {
+        let tool = prompts_tool(vec![(
+            "prompts/list",
+            serde_json::json!({
+                "prompts": [
+                    { "name": "greet", "description": "say hi",
+                      "arguments": [{ "name": "who", "required": true },
+                                    { "name": "lang", "required": false }] }
+                ]
+            }),
+        )]);
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tool
+            .run(
+                &serde_json::json!({ "op": "list" }),
+                &ToolContext::for_test(tmp.path()),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("greet"));
+        assert!(out.content.contains("say hi"));
+        assert!(out.content.contains("who*")); // required marked
+        assert!(out.content.contains("lang"));
+    }
+
+    #[tokio::test]
+    async fn prompts_tool_get_renders_messages() {
+        let tool = prompts_tool(vec![(
+            "prompts/get",
+            serde_json::json!({
+                "description": "a greeting",
+                "messages": [
+                    { "role": "user", "content": { "type": "text", "text": "Hello there" } },
+                    { "role": "assistant", "content": { "type": "image", "data": "..." } }
+                ]
+            }),
+        )]);
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tool
+            .run(
+                &serde_json::json!({ "op": "get", "name": "greet" }),
+                &ToolContext::for_test(tmp.path()),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("a greeting"));
+        assert!(out.content.contains("[user] Hello there"));
+        // Non-text block is marked, not dumped.
+        assert!(out.content.contains("[image content block]"));
+    }
+
+    #[tokio::test]
+    async fn prompts_tool_get_requires_name() {
+        let tool = prompts_tool(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tool
+            .run(
+                &serde_json::json!({ "op": "get" }),
+                &ToolContext::for_test(tmp.path()),
+            )
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("name"));
     }
 
     #[tokio::test]
