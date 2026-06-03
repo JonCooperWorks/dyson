@@ -345,6 +345,28 @@ impl McpSkill {
                 server_name: server_name.to_string(),
             }));
         }
+
+        // When the server advertised the `resources` capability, give the
+        // agent a tool to list and read those resources.  Gated on the
+        // negotiated capability so we never expose a tool that would only
+        // ever round-trip a -32601.  Resource bytes land in
+        // ToolOutput.files via the shared save_mcp_resource path.
+        if self
+            .server_capabilities
+            .as_ref()
+            .is_some_and(|c| c.resources.is_some())
+        {
+            tools.push(Arc::new(McpResourcesTool {
+                tool_name: format!("{server_name}_resources"),
+                transport: Arc::clone(transport),
+                server_name: server_name.to_string(),
+            }));
+            descs.push(format!(
+                "- **{server_name}_resources**: List and read resources exposed by \
+                 MCP server '{server_name}' (op: \"list\" or \"read\" with a \"uri\")."
+            ));
+        }
+
         self.tools = tools;
         if !descs.is_empty() {
             self.system_prompt = Some(format!(
@@ -568,6 +590,136 @@ impl Tool for McpRemoteTool {
     }
 }
 
+/// Tool exposing an MCP server's `resources/list` + `resources/read`
+/// surface to the agent.  Registered only when the server advertised the
+/// `resources` capability during the handshake.
+struct McpResourcesTool {
+    tool_name: String,
+    transport: Arc<dyn McpTransport>,
+    server_name: String,
+}
+
+#[async_trait]
+impl Tool for McpResourcesTool {
+    fn name(&self) -> &str {
+        &self.tool_name
+    }
+    fn description(&self) -> &str {
+        "List and read resources exposed by this MCP server. \
+         Use op=\"list\" to discover resource URIs, then op=\"read\" with a \
+         \"uri\" to fetch one. Binary/text bodies are saved as files; their \
+         names and sizes are reported inline."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "op": { "type": "string", "enum": ["list", "read"] },
+                "uri": { "type": "string", "description": "Resource URI (required for op=read)" }
+            },
+            "required": ["op"]
+        })
+    }
+
+    async fn run(&self, input: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+        match input["op"].as_str() {
+            Some("list") => self.list().await,
+            Some("read") => match input["uri"].as_str() {
+                Some(uri) => self.read(uri).await,
+                None => Ok(ToolOutput::error("op=read requires a \"uri\"")),
+            },
+            _ => Ok(ToolOutput::error("op must be \"list\" or \"read\"")),
+        }
+    }
+}
+
+impl McpResourcesTool {
+    async fn list(&self) -> Result<ToolOutput> {
+        let result_json = self
+            .transport
+            .send_request("resources/list", Some(serde_json::json!({})))
+            .await
+            .map_err(|e| DysonError::Mcp {
+                server: self.server_name.clone(),
+                message: format!("resources/list failed: {e}"),
+            })?;
+        let list: protocol::McpResourcesListResult = serde_json::from_value(result_json)
+            .map_err(|e| DysonError::Mcp {
+                server: self.server_name.clone(),
+                message: format!("failed to parse resources/list: {e}"),
+            })?;
+        if list.resources.is_empty() {
+            return Ok(ToolOutput::success("No resources exposed by this server."));
+        }
+        let mut lines = Vec::with_capacity(list.resources.len());
+        for r in &list.resources {
+            // Resource metadata is server-controlled — sanitize the
+            // free-text fields the same way we do tool descriptions.
+            let name = r.name.as_deref().unwrap_or("");
+            let desc = r.description.as_deref().map(sanitize_mcp_description);
+            let mime = r.mime_type.as_deref().unwrap_or("");
+            lines.push(format!(
+                "- {uri}{name}{mime}{desc}",
+                uri = r.uri,
+                name = if name.is_empty() { String::new() } else { format!("  ({name})") },
+                mime = if mime.is_empty() { String::new() } else { format!("  [{mime}]") },
+                desc = match desc {
+                    Some(d) if !d.is_empty() => format!("  — {d}"),
+                    _ => String::new(),
+                },
+            ));
+        }
+        Ok(ToolOutput::success(format!(
+            "Resources exposed by '{}':\n{}",
+            self.server_name,
+            lines.join("\n")
+        )))
+    }
+
+    async fn read(&self, uri: &str) -> Result<ToolOutput> {
+        let result_json = self
+            .transport
+            .send_request("resources/read", Some(serde_json::json!({ "uri": uri })))
+            .await
+            .map_err(|e| DysonError::Mcp {
+                server: self.server_name.clone(),
+                message: format!("resources/read failed for '{uri}': {e}"),
+            })?;
+        let read: protocol::McpResourcesReadResult = serde_json::from_value(result_json)
+            .map_err(|e| DysonError::Mcp {
+                server: self.server_name.clone(),
+                message: format!("failed to parse resources/read: {e}"),
+            })?;
+        if read.contents.is_empty() {
+            return Ok(ToolOutput::error(format!("Resource '{uri}' had no contents")));
+        }
+        let mut content_parts = Vec::new();
+        let mut files = Vec::new();
+        for (idx, resource) in read.contents.iter().enumerate() {
+            let (path, bytes, original_name) =
+                save_mcp_resource(&self.server_name, &self.tool_name, idx, resource)?;
+            files.push(path);
+            content_parts.push(format!(
+                "[resource: {original_name}, {mime}, {bytes} bytes]",
+                mime = resource.mime_type,
+            ));
+        }
+        Ok(ToolOutput {
+            content: content_parts.join("\n"),
+            is_error: false,
+            view: None,
+            metadata: Some(serde_json::json!({
+                "dyson_output_kind": "mcp",
+                "mcp_server": self.server_name,
+                "mcp_resource_uri": uri,
+            })),
+            files,
+            checkpoints: vec![],
+            artefacts: vec![],
+        })
+    }
+}
+
 fn save_mcp_image(
     server_name: &str,
     tool_name: &str,
@@ -763,6 +915,121 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+    }
+
+    /// Transport that answers each method from a fixed map — lets a single
+    /// mock back both `resources/list` and `resources/read`.
+    struct ByMethodTransport {
+        responses: std::collections::HashMap<String, serde_json::Value>,
+    }
+
+    #[async_trait]
+    impl McpTransport for ByMethodTransport {
+        async fn send_request(
+            &self,
+            method: &str,
+            _params: Option<serde_json::Value>,
+        ) -> Result<serde_json::Value> {
+            self.responses
+                .get(method)
+                .cloned()
+                .ok_or_else(|| DysonError::Mcp {
+                    server: "mock".into(),
+                    message: format!("unexpected method: {method}"),
+                })
+        }
+
+        async fn send_notification(
+            &self,
+            _method: &str,
+            _params: Option<serde_json::Value>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn resources_tool(responses: Vec<(&str, serde_json::Value)>) -> McpResourcesTool {
+        let responses = responses
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        McpResourcesTool {
+            tool_name: "ctx7_resources".to_string(),
+            transport: Arc::new(ByMethodTransport { responses }),
+            server_name: "ctx7".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resources_tool_list_formats_catalogue() {
+        let tool = resources_tool(vec![(
+            "resources/list",
+            serde_json::json!({
+                "resources": [
+                    { "uri": "file:///a.txt", "name": "a", "mimeType": "text/plain" },
+                    { "uri": "file:///b.bin" }
+                ]
+            }),
+        )]);
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tool
+            .run(
+                &serde_json::json!({ "op": "list" }),
+                &ToolContext::for_test(tmp.path()),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("file:///a.txt"));
+        assert!(out.content.contains("(a)"));
+        assert!(out.content.contains("[text/plain]"));
+        assert!(out.content.contains("file:///b.bin"));
+    }
+
+    #[tokio::test]
+    async fn resources_tool_read_saves_file_and_emits_marker() {
+        let bytes = b"resource-bytes".to_vec();
+        let tool = resources_tool(vec![(
+            "resources/read",
+            serde_json::json!({
+                "contents": [{
+                    "uri": "file:///doc.txt",
+                    "mimeType": "text/plain",
+                    "blob": base64::engine::general_purpose::STANDARD.encode(&bytes)
+                }]
+            }),
+        )]);
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tool
+            .run(
+                &serde_json::json!({ "op": "read", "uri": "file:///doc.txt" }),
+                &ToolContext::for_test(tmp.path()),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("doc.txt"));
+        assert!(out.content.contains("text/plain"));
+        // Body must not leak into the LLM-visible content.
+        assert!(!out.content.contains("resource-bytes"));
+        assert_eq!(out.files.len(), 1);
+        assert_eq!(std::fs::read(&out.files[0]).unwrap(), bytes);
+        let _ = std::fs::remove_file(&out.files[0]);
+    }
+
+    #[tokio::test]
+    async fn resources_tool_read_requires_uri() {
+        let tool = resources_tool(vec![]);
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tool
+            .run(
+                &serde_json::json!({ "op": "read" }),
+                &ToolContext::for_test(tmp.path()),
+            )
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("uri"));
     }
 
     fn remote_tool(result: serde_json::Value) -> McpRemoteTool {

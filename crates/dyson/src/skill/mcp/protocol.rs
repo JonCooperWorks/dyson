@@ -257,6 +257,36 @@ fn default_mcp_image_mime_type() -> String {
     "application/octet-stream".to_string()
 }
 
+/// One entry in a `resources/list` response.  Only `uri` is spec-required;
+/// `name`/`description`/`mimeType` are advisory metadata we surface to the
+/// agent so it can decide what to read.
+#[derive(Debug, Deserialize)]
+pub struct McpResourceInfo {
+    pub uri: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(rename = "mimeType", default)]
+    pub mime_type: Option<String>,
+}
+
+/// A `resources/list` result.
+#[derive(Debug, Default, Deserialize)]
+pub struct McpResourcesListResult {
+    #[serde(default)]
+    pub resources: Vec<McpResourceInfo>,
+}
+
+/// A `resources/read` result.  Each entry reuses [`McpResourceContents`] —
+/// the same `uri`/`mimeType`/`text`/`blob` shape carried by embedded
+/// `resource` content blocks — so reads flow through `save_mcp_resource`.
+#[derive(Debug, Default, Deserialize)]
+pub struct McpResourcesReadResult {
+    #[serde(default)]
+    pub contents: Vec<McpResourceContents>,
+}
+
 /// Capabilities object returned by an MCP server in its `initialize`
 /// response.  Every field is optional: a missing entry means the server
 /// does not implement that primitive.  An empty object (`{}`) means the
