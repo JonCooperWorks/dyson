@@ -220,31 +220,37 @@ pub enum McpContent {
     Unknown,
 }
 
-/// Inner shape of a `resource` content block.  The MCP spec puts the
-/// fields under `resource: { ... }` — we mirror that.  Either `blob`
-/// (base64) or `text` may carry the body; we accept both shapes for
-/// forward compatibility but the bytes-as-artefact path only fires
-/// when `blob` is present.
+/// Inner shape of an MCP `resource` content block — the spec's
+/// `EmbeddedResource.resource`.  Implements both `BlobResourceContents`
+/// (binary) and `TextResourceContents` (text) by accepting either
+/// field; exactly one should be set per spec, but we tolerate both by
+/// preferring `blob` when present.
+///
+/// Reference: <https://spec.modelcontextprotocol.io/specification/server/tools/#tool-result>
 #[derive(Debug, Default, Deserialize)]
 pub struct McpResourceContents {
-    /// URI identifying the resource.  May be a synthetic scheme like
-    /// `playwright-download://realdl.txt` or any RFC3986-shaped uri;
-    /// only the trailing path component is used as the artefact name,
-    /// and even that goes through a sanitizer.
+    /// URI identifying the resource.  Spec-required.  We use only the
+    /// trailing path component as the suggested filename, and that
+    /// component goes through a sanitizer; any URI scheme is accepted.
     #[serde(default)]
     pub uri: String,
-    /// Optional MIME type — surfaced in the LLM-visible marker for
-    /// context.  Defaults to `application/octet-stream` if absent.
+    /// Optional MIME type.  Defaults to `application/octet-stream`
+    /// when absent (matches the dyson client's default for `image`
+    /// content too).
     #[serde(
         rename = "mimeType",
         alias = "mime_type",
         default = "default_mcp_image_mime_type"
     )]
     pub mime_type: String,
-    /// Base64-encoded body.  Empty when the resource is delivered as
-    /// `text` instead — we don't currently consume the text variant.
+    /// Spec `BlobResourceContents.blob` — base64-encoded body.  Empty
+    /// when the resource carries `text` instead.
     #[serde(default)]
     pub blob: String,
+    /// Spec `TextResourceContents.text` — UTF-8 body.  Empty when the
+    /// resource carries `blob` instead.
+    #[serde(default)]
+    pub text: String,
 }
 
 fn default_mcp_image_mime_type() -> String {

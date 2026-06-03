@@ -503,11 +503,14 @@ impl Tool for McpRemoteTool {
                         idx,
                         resource,
                     )?;
-                    files.push(path.clone());
+                    files.push(path);
+                    // Mirrors the `[image: MIME, N bytes]` marker shape
+                    // used by the Image variant — short, predictable,
+                    // and the bytes themselves live in ToolOutput.files
+                    // for the controller to deliver as an artefact.
                     content_parts.push(format!(
-                        "[mcp-resource: {original_name}, {mime}, {bytes} bytes — saved to {path}]",
+                        "[resource: {original_name}, {mime}, {bytes} bytes]",
                         mime = resource.mime_type,
-                        path = path.display(),
                     ));
                 }
                 McpContent::Unknown => {
@@ -583,48 +586,68 @@ fn image_extension(mime_type: &str) -> &'static str {
 const MAX_MCP_RESOURCE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Save an MCP `resource` content block as a local file and return the
-/// path, byte count, and the original (pre-sanitization) filename for
-/// the LLM-visible marker.
+/// path, byte count, and the original (pre-sanitization) filename.
+///
+/// Accepts both spec variants:
+///   * `BlobResourceContents` — base64-decode `resource.blob`.
+///   * `TextResourceContents` — write `resource.text` as UTF-8 bytes.
 ///
 /// Filename derivation:
 ///   * Take the path component after the last `/` in `resource.uri`.
 ///   * Sanitize via [`safe_filename_part`]: ASCII alphanumerics +
-///     `._-` only, truncated to 64 chars, falling back to `mcp` when
-///     nothing survives.
+///     `._-` only, truncated to 64 chars, falling back to `resource`
+///     when nothing survives.
 ///   * Prefix with a per-call stamp + idx so two resources in the
 ///     same tool call never collide on disk.
 ///
 /// Refuses:
-///   * Empty `blob`.
+///   * Both `blob` and `text` empty (no body).
 ///   * `blob` whose decoded size exceeds [`MAX_MCP_RESOURCE_BYTES`].
-///   * Invalid base64.
+///   * `text` whose UTF-8 size exceeds [`MAX_MCP_RESOURCE_BYTES`].
+///   * Invalid base64 in `blob`.
 fn save_mcp_resource(
     server_name: &str,
     tool_name: &str,
     idx: usize,
     resource: &McpResourceContents,
 ) -> Result<(PathBuf, usize, String)> {
-    if resource.blob.is_empty() {
-        return Err(DysonError::Mcp {
-            server: server_name.to_string(),
-            message: format!("empty resource blob from '{tool_name}'"),
-        });
-    }
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&resource.blob)
-        .map_err(|e| DysonError::Mcp {
-            server: server_name.to_string(),
-            message: format!("invalid base64 resource content from '{tool_name}': {e}"),
-        })?;
-    if bytes.len() > MAX_MCP_RESOURCE_BYTES {
+    let bytes = if !resource.blob.is_empty() {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&resource.blob)
+            .map_err(|e| DysonError::Mcp {
+                server: server_name.to_string(),
+                message: format!("invalid base64 resource content from '{tool_name}': {e}"),
+            })?;
+        if decoded.len() > MAX_MCP_RESOURCE_BYTES {
+            return Err(DysonError::Mcp {
+                server: server_name.to_string(),
+                message: format!(
+                    "resource blob from '{tool_name}' exceeds {MAX_MCP_RESOURCE_BYTES}-byte cap ({} bytes)",
+                    decoded.len()
+                ),
+            });
+        }
+        decoded
+    } else if !resource.text.is_empty() {
+        let text_bytes = resource.text.as_bytes().to_vec();
+        if text_bytes.len() > MAX_MCP_RESOURCE_BYTES {
+            return Err(DysonError::Mcp {
+                server: server_name.to_string(),
+                message: format!(
+                    "resource text from '{tool_name}' exceeds {MAX_MCP_RESOURCE_BYTES}-byte cap ({} bytes)",
+                    text_bytes.len()
+                ),
+            });
+        }
+        text_bytes
+    } else {
         return Err(DysonError::Mcp {
             server: server_name.to_string(),
             message: format!(
-                "resource blob from '{tool_name}' exceeds {MAX_MCP_RESOURCE_BYTES}-byte cap ({} bytes)",
-                bytes.len()
+                "resource from '{tool_name}' has neither blob nor text body"
             ),
         });
-    }
+    };
     let original_name = uri_basename(&resource.uri).unwrap_or("resource").to_string();
     let safe_name = safe_filename_part(&original_name);
     let stamp = std::time::SystemTime::now()
@@ -811,7 +834,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_resource_block_saves_as_file_and_emits_marker() {
+    async fn mcp_resource_blob_variant_saves_as_file_and_emits_marker() {
         let bytes = b"hello-from-resource".to_vec();
         let tool = remote_tool(serde_json::json!({
             "content": [{
@@ -831,15 +854,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Marker mentions original name, MIME, bytes, AND the path.
-        assert!(
-            output.content.contains("realdl.txt"),
-            "marker missing original name: {:?}",
-            output.content
+        // Marker: short, predictable, no path in the prompt.
+        assert_eq!(
+            output.content,
+            format!("[resource: realdl.txt, text/plain, {} bytes]", bytes.len())
         );
-        assert!(output.content.contains("text/plain"));
-        assert!(output.content.contains(&format!("{} bytes", bytes.len())));
-        assert!(output.content.contains("/tmp/"));
         // Base64 payload MUST NOT leak into the LLM-visible content.
         assert!(!output.content.contains(&b64(&bytes)));
         // File present on disk and has the right bytes.
@@ -858,14 +877,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_resource_rejects_empty_blob() {
+    async fn mcp_resource_text_variant_saves_as_file_and_emits_marker() {
+        // TextResourceContents — bytes live in `text`, not base64'd.
+        let text = "hello-from-text-resource\n";
+        let tool = remote_tool(serde_json::json!({
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "playwright-download://config.toml",
+                    "mimeType": "text/plain",
+                    "text": text,
+                }
+            }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+
+        let output = tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.content,
+            format!("[resource: config.toml, text/plain, {} bytes]", text.len())
+        );
+        // The text body MUST NOT appear in the LLM-visible content
+        // (it's an artefact, not inline prose).
+        assert!(!output.content.contains(text));
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(std::fs::read(&output.files[0]).unwrap(), text.as_bytes());
+        let _ = std::fs::remove_file(&output.files[0]);
+    }
+
+    #[tokio::test]
+    async fn mcp_resource_prefers_blob_when_both_blob_and_text_present() {
+        // Spec says exactly one should be set; tolerate both by
+        // preferring blob (the binary path).
+        let blob_bytes = b"binary-wins".to_vec();
+        let tool = remote_tool(serde_json::json!({
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "playwright-download://both.bin",
+                    "mimeType": "application/octet-stream",
+                    "blob": b64(&blob_bytes),
+                    "text": "this should be ignored",
+                }
+            }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let output = tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&output.files[0]).unwrap(), blob_bytes);
+        let _ = std::fs::remove_file(&output.files[0]);
+    }
+
+    #[tokio::test]
+    async fn mcp_resource_rejects_no_body() {
         let tool = remote_tool(serde_json::json!({
             "content": [{
                 "type": "resource",
                 "resource": {
                     "uri": "playwright-download://empty.bin",
                     "mimeType": "application/octet-stream",
-                    "blob": ""
                 }
             }],
             "isError": false
@@ -879,7 +957,36 @@ mod tests {
             Err(e) => e,
         };
         let msg = format!("{err}");
-        assert!(msg.contains("empty resource blob"), "got: {msg}");
+        assert!(
+            msg.contains("neither blob nor text"),
+            "got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_resource_text_variant_rejects_oversize() {
+        let big = "x".repeat(64 * 1024 * 1024 + 1);
+        let tool = remote_tool(serde_json::json!({
+            "content": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "playwright-download://big.txt",
+                    "mimeType": "text/plain",
+                    "text": big,
+                }
+            }],
+            "isError": false
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+        let err = match tool
+            .run(&serde_json::json!({}), &ToolContext::for_test(tmp.path()))
+            .await
+        {
+            Ok(_) => panic!("expected oversize text to fail"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("byte cap"), "got: {msg}");
     }
 
     #[tokio::test]
