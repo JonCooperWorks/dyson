@@ -4,6 +4,7 @@
 // oauth_submit tool, show auth URL in system prompt.  User either clicks
 // the URL (callback fires) or pastes the redirect URL (agent calls tool).
 
+pub mod elicitation;
 pub mod protocol;
 pub mod router;
 pub mod serve;
@@ -300,6 +301,12 @@ impl McpSkill {
         let mut capabilities = serde_json::json!({ "roots": { "listChanged": false } });
         if self.agent_settings.is_some() {
             capabilities["sampling"] = serde_json::json!({});
+        }
+        // Advertise elicitation only when a UI is present to answer it
+        // (set by the HTTP controller at startup); a headless run must not
+        // strand a server waiting on a prompt nobody can see.
+        if elicitation::ui_enabled() {
+            capabilities["elicitation"] = serde_json::json!({});
         }
         let init = serde_json::json!({
             "protocolVersion": "2024-11-05",

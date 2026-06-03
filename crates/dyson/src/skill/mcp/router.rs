@@ -200,9 +200,23 @@ impl InboundHandler for NotificationRouter {
                 Some(backend) => self.run_sampling(backend, params).await,
                 None => Err(method_not_found(method)),
             },
-            // elicitation/create lands here once the UI path exists.  Any
-            // other method (or sampling without a backend) gets the
-            // spec-correct "method not found".
+            // The server wants the user to fill in a small form.  Park it
+            // for the web UI to answer; only honored when a UI is present.
+            "elicitation/create" if super::elicitation::ui_enabled() => {
+                let params = params.unwrap_or(Value::Null);
+                let message = params
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let schema = params
+                    .get("requestedSchema")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                Ok(super::elicitation::broker().elicit(message, schema).await)
+            }
+            // Any other method (or sampling/elicitation without a backend
+            // or UI) gets the spec-correct "method not found".
             _ => Err(method_not_found(method)),
         }
     }
@@ -340,6 +354,18 @@ mod tests {
         let result = router.handle_request("roots/list", None).await.unwrap();
         assert_eq!(result["roots"][0]["uri"], "file:///work/agent");
         assert_eq!(result["roots"][0]["name"], "agent");
+    }
+
+    #[tokio::test]
+    async fn elicitation_without_ui_is_method_not_found() {
+        // enable_ui() is only called by the HTTP controller at startup, so
+        // in lib tests the UI is off and elicitation/create is refused.
+        let router = NotificationRouter::new("srv", vec![], None);
+        let err = router
+            .handle_request("elicitation/create", Some(serde_json::json!({ "message": "hi" })))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, -32601);
     }
 
     #[tokio::test]

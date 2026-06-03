@@ -357,6 +357,9 @@ impl Controller for HttpController {
             AuthInit::Ready { .. } => None,
         };
         let tls_enabled = self.tls.is_some();
+        // The web UI can answer MCP `elicitation/create` prompts, so let
+        // connected MCP servers advertise + use the elicitation capability.
+        crate::skill::mcp::elicitation::enable_ui();
         let state = Arc::new(HttpState::new(
             settings.clone(),
             Arc::clone(registry),

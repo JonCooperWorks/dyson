@@ -30,6 +30,7 @@ mod agent;
 mod artefacts;
 mod commands;
 pub(super) mod conversations;
+mod elicitation;
 mod feedback;
 mod files;
 mod mind;
@@ -269,6 +270,13 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         }
 
         // ─── providers / model / mind / activity ───────────────────────
+        // MCP elicitation: the SPA short-polls for open prompts and
+        // answers them.  Both inherit the central /api/* auth + CSRF gate.
+        (&Method::GET, ["api", "mcp", "elicitations"]) => elicitation::list().await,
+        (&Method::POST, ["api", "mcp", "elicitations", id]) => {
+            elicitation::respond(req, id).await
+        }
+
         (&Method::GET, ["api", "providers"]) => providers::list(&state),
         (&Method::GET, ["api", "commands"]) => commands::get(&state).await,
         (&Method::POST, ["api", "model"]) => model::post(req, Arc::clone(&state)).await,
