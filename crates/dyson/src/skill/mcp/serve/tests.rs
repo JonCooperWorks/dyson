@@ -149,6 +149,114 @@ async fn tools_call_unknown_tool() {
 }
 
 // -----------------------------------------------------------------------
+// Resource tests
+// -----------------------------------------------------------------------
+
+/// `initialize` advertises resources + completions alongside tools.
+#[tokio::test]
+async fn initialize_advertises_resources_and_completions() {
+    let server = make_server();
+    let resp = server.dispatch(Some(1), "initialize", None).await;
+    let caps = resp.result.unwrap()["capabilities"].clone();
+    assert!(caps["tools"].is_object());
+    assert!(caps["resources"].is_object());
+    assert_eq!(caps["resources"]["subscribe"], false);
+    assert!(caps["completions"].is_object());
+}
+
+/// `resources/list` exposes each workspace file under the workspace:// scheme.
+#[tokio::test]
+async fn resources_list_exposes_workspace_files() {
+    let server = make_server();
+    let resp = server.dispatch(Some(1), "resources/list", None).await;
+    assert!(resp.error.is_none());
+    let resources = resp.result.unwrap()["resources"].as_array().unwrap().clone();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0]["uri"], "workspace://identity");
+    assert_eq!(resources[0]["name"], "identity");
+}
+
+/// `resources/read` returns the file content as a TextResourceContents block.
+#[tokio::test]
+async fn resources_read_returns_file_content() {
+    let server = make_server();
+    let params = serde_json::json!({ "uri": "workspace://identity" });
+    let resp = server.dispatch(Some(2), "resources/read", Some(params)).await;
+    assert!(resp.error.is_none());
+    let contents = resp.result.unwrap()["contents"][0].clone();
+    assert_eq!(contents["uri"], "workspace://identity");
+    assert_eq!(contents["text"], "I am a test agent");
+}
+
+/// Reading an unknown workspace file is a -32002 "resource not found".
+#[tokio::test]
+async fn resources_read_unknown_uri_is_not_found() {
+    let server = make_server();
+    let params = serde_json::json!({ "uri": "workspace://does-not-exist" });
+    let resp = server.dispatch(Some(3), "resources/read", Some(params)).await;
+    assert_eq!(resp.error.unwrap().code, -32002);
+}
+
+/// A foreign URI scheme is rejected as invalid params (-32602).
+#[tokio::test]
+async fn resources_read_foreign_scheme_is_invalid_params() {
+    let server = make_server();
+    let params = serde_json::json!({ "uri": "file:///etc/passwd" });
+    let resp = server.dispatch(Some(4), "resources/read", Some(params)).await;
+    assert_eq!(resp.error.unwrap().code, -32602);
+}
+
+/// `resources/templates/list` exists and returns an empty list.
+#[tokio::test]
+async fn resource_templates_list_is_empty() {
+    let server = make_server();
+    let resp = server
+        .dispatch(Some(5), "resources/templates/list", None)
+        .await;
+    assert!(resp.error.is_none());
+    assert!(resp.result.unwrap()["resourceTemplates"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+/// `completion/complete` for a resource URI prefix-matches workspace files.
+#[tokio::test]
+async fn completion_complete_suggests_resource_uris() {
+    let server = make_server();
+    let params = serde_json::json!({
+        "ref": { "type": "ref/resource", "uri": "workspace://" },
+        "argument": { "name": "uri", "value": "workspace://ident" }
+    });
+    let resp = server
+        .dispatch(Some(6), "completion/complete", Some(params))
+        .await;
+    assert!(resp.error.is_none());
+    let completion = resp.result.unwrap()["completion"].clone();
+    assert_eq!(completion["values"][0], "workspace://identity");
+    assert_eq!(completion["total"], 1);
+    assert_eq!(completion["hasMore"], false);
+}
+
+/// A non-resource completion ref yields an empty (but valid) completion.
+#[tokio::test]
+async fn completion_complete_prompt_ref_is_empty() {
+    let server = make_server();
+    let params = serde_json::json!({
+        "ref": { "type": "ref/prompt", "name": "whatever" },
+        "argument": { "name": "x", "value": "" }
+    });
+    let resp = server
+        .dispatch(Some(7), "completion/complete", Some(params))
+        .await;
+    assert!(resp.error.is_none());
+    assert!(resp.result.unwrap()["completion"]["values"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+// -----------------------------------------------------------------------
 // Error handling tests
 // -----------------------------------------------------------------------
 

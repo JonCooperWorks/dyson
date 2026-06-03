@@ -503,8 +503,13 @@ impl McpHttpServer {
     /// perform the capability negotiation handshake.  `tools/list` lets the
     /// client discover available tools.  `tools/call` executes them.
     ///
-    /// We don't implement `resources/*`, `prompts/*`, or `sampling/*`
-    /// because we only expose tools, not other MCP primitives.
+    /// Beyond tools we expose the agent's workspace files as MCP
+    /// *resources* (`resources/list` + `resources/read`) and back URI
+    /// autocompletion with `completion/complete`.  We do not implement
+    /// `prompts/*` or server-originated `sampling/*` / `logging` /
+    /// `*/list_changed` notifications: this per-turn POST→response
+    /// transport has no channel to push server-originated messages, so
+    /// advertising those capabilities would be dishonest.
     async fn dispatch(
         &self,
         id: Option<u64>,
@@ -516,6 +521,10 @@ impl McpHttpServer {
             "notifications/initialized" => self.handle_notification(id),
             "tools/list" => self.handle_tools_list(id),
             "tools/call" => self.handle_tools_call(id, params).await,
+            "resources/list" => self.handle_resources_list(id).await,
+            "resources/templates/list" => self.handle_resource_templates_list(id),
+            "resources/read" => self.handle_resources_read(id, params).await,
+            "completion/complete" => self.handle_completion_complete(id, params).await,
             _ => JsonRpcResponse::rpc_error(id, -32601, format!("Method not found: {method}")),
         }
     }
@@ -536,7 +545,13 @@ impl McpHttpServer {
             serde_json::json!({
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
-                    "tools": {}
+                    "tools": {},
+                    // Workspace files are exposed as read-only resources.
+                    // We can't push notifications over this transport, so
+                    // neither `subscribe` nor `listChanged` is offered.
+                    "resources": { "subscribe": false, "listChanged": false },
+                    // `completion/complete` backs URI autocompletion.
+                    "completions": {}
                 },
                 "serverInfo": {
                     "name": "dyson-workspace",
@@ -699,7 +714,135 @@ impl McpHttpServer {
             Err(e) => JsonRpcResponse::tool_result(id, format!("Tool error: {e}"), true),
         }
     }
+
+    /// Handle `resources/list` — advertise every workspace file as an MCP
+    /// resource under the `workspace://` scheme.
+    ///
+    /// These are the same files the `workspace` tool's `view` op exposes,
+    /// so listing them adds no new read surface — it just gives MCP
+    /// clients a discoverable, addressable catalogue.  The workspace
+    /// backend already curates which files exist (identity, memory,
+    /// journals), so there is nothing extra to filter here.
+    async fn handle_resources_list(&self, id: Option<u64>) -> JsonRpcResponse {
+        let names = {
+            let ws = self.workspace.read().await;
+            ws.list_files()
+        };
+        let resources: Vec<serde_json::Value> = names
+            .into_iter()
+            .map(|name| {
+                serde_json::json!({
+                    "uri": format!("{WORKSPACE_URI_SCHEME}{name}"),
+                    "name": name,
+                    "mimeType": "text/plain"
+                })
+            })
+            .collect();
+        JsonRpcResponse::success(id, serde_json::json!({ "resources": resources }))
+    }
+
+    /// Handle `resources/templates/list`.  We address files by exact name,
+    /// not by parameterized URI template, so the list is empty — but the
+    /// method must exist for spec conformance once `resources` is advertised.
+    fn handle_resource_templates_list(&self, id: Option<u64>) -> JsonRpcResponse {
+        JsonRpcResponse::success(id, serde_json::json!({ "resourceTemplates": [] }))
+    }
+
+    /// Handle `resources/read` — return the contents of a `workspace://`
+    /// resource as a `TextResourceContents` block.
+    ///
+    /// Unknown URIs return JSON-RPC `-32002` (the MCP convention for
+    /// "resource not found"); a malformed/foreign-scheme URI is `-32602`.
+    async fn handle_resources_read(
+        &self,
+        id: Option<u64>,
+        params: Option<serde_json::Value>,
+    ) -> JsonRpcResponse {
+        let Some(uri) = params.as_ref().and_then(|p| p["uri"].as_str()) else {
+            return JsonRpcResponse::rpc_error(id, -32602, "Missing resource uri");
+        };
+        let Some(name) = uri.strip_prefix(WORKSPACE_URI_SCHEME) else {
+            return JsonRpcResponse::rpc_error(
+                id,
+                -32602,
+                format!("Unsupported resource uri scheme: {uri}"),
+            );
+        };
+        let content = {
+            let ws = self.workspace.read().await;
+            ws.get(name)
+        };
+        match content {
+            Some(text) => JsonRpcResponse::success(
+                id,
+                serde_json::json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "text/plain",
+                        "text": text
+                    }]
+                }),
+            ),
+            None => JsonRpcResponse::rpc_error(id, -32002, format!("Resource not found: {uri}")),
+        }
+    }
+
+    /// Handle `completion/complete` — autocompletion for resource URIs.
+    ///
+    /// We complete `ref/resource` URI arguments against the workspace file
+    /// list (prefix match on the `workspace://` URI).  `ref/prompt` and
+    /// anything else yield an empty completion, which is the spec-correct
+    /// "no suggestions" response.
+    async fn handle_completion_complete(
+        &self,
+        id: Option<u64>,
+        params: Option<serde_json::Value>,
+    ) -> JsonRpcResponse {
+        let ref_type = params
+            .as_ref()
+            .and_then(|p| p["ref"]["type"].as_str())
+            .unwrap_or("");
+        let partial = params
+            .as_ref()
+            .and_then(|p| p["argument"]["value"].as_str())
+            .unwrap_or("");
+
+        let values: Vec<String> = if ref_type == "ref/resource" {
+            let names = {
+                let ws = self.workspace.read().await;
+                ws.list_files()
+            };
+            names
+                .into_iter()
+                .map(|name| format!("{WORKSPACE_URI_SCHEME}{name}"))
+                .filter(|uri| uri.starts_with(partial))
+                .take(MAX_COMPLETION_VALUES)
+                .collect()
+        } else {
+            vec![]
+        };
+
+        // Spec caps `values` at 100 and reports total/hasMore separately.
+        let total = values.len();
+        JsonRpcResponse::success(
+            id,
+            serde_json::json!({
+                "completion": {
+                    "values": values,
+                    "total": total,
+                    "hasMore": false
+                }
+            }),
+        )
+    }
 }
+
+/// URI scheme under which the agent's workspace files are exposed as MCP
+/// resources.
+const WORKSPACE_URI_SCHEME: &str = "workspace://";
+
+/// MCP spec caps a single `completion/complete` response at 100 values.
+const MAX_COMPLETION_VALUES: usize = 100;
 
 // ---------------------------------------------------------------------------
 // Helpers
