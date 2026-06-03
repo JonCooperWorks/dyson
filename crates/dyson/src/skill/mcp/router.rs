@@ -20,6 +20,8 @@
 // `SseEvent::McpLog` for the web UI.
 // ===========================================================================
 
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -31,13 +33,39 @@ pub struct NotificationRouter {
     /// The MCP server this router belongs to — included in every log
     /// line so multi-server deployments stay legible.
     server_name: String,
+    /// Filesystem roots advertised to the server via `roots/list`.  These
+    /// are the directories the client is willing to let the server reason
+    /// about (the agent's working directory).  Empty means we advertise
+    /// no `roots` capability and answer `roots/list` with an empty list.
+    roots: Vec<PathBuf>,
 }
 
 impl NotificationRouter {
-    pub fn new(server_name: impl Into<String>) -> Self {
+    pub fn new(server_name: impl Into<String>, roots: Vec<PathBuf>) -> Self {
         Self {
             server_name: server_name.into(),
+            roots,
         }
+    }
+
+    /// Build the `roots/list` result from the configured root paths.
+    fn roots_result(&self) -> Value {
+        let roots: Vec<Value> = self
+            .roots
+            .iter()
+            .map(|p| {
+                let name = p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("root")
+                    .to_string();
+                serde_json::json!({
+                    "uri": format!("file://{}", p.display()),
+                    "name": name
+                })
+            })
+            .collect();
+        serde_json::json!({ "roots": roots })
     }
 
     /// Route a `notifications/message` (MCP logging) payload through
@@ -79,14 +107,19 @@ impl InboundHandler for NotificationRouter {
         method: &str,
         _params: Option<Value>,
     ) -> std::result::Result<Value, JsonRpcError> {
-        // sampling/createMessage, roots/list, elicitation/create land here
-        // as they are implemented.  Until then, and for any unknown
-        // method, the spec-correct answer is "method not found".
-        Err(JsonRpcError {
-            code: -32601,
-            message: format!("Method not found: {method}"),
-            data: None,
-        })
+        match method {
+            // The server is asking which filesystem roots we expose.  We
+            // only advertise (and answer) this when we actually have roots.
+            "roots/list" if !self.roots.is_empty() => Ok(self.roots_result()),
+            // sampling/createMessage and elicitation/create land here as
+            // they are implemented.  Until then, and for any unknown
+            // method, the spec-correct answer is "method not found".
+            _ => Err(JsonRpcError {
+                code: -32601,
+                message: format!("Method not found: {method}"),
+                data: None,
+            }),
+        }
     }
 
     async fn handle_notification(&self, method: &str, params: Option<Value>) {
@@ -147,7 +180,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_inbound_request_is_method_not_found() {
-        let router = NotificationRouter::new("srv");
+        let router = NotificationRouter::new("srv", vec![]);
         let err = router
             .handle_request("sampling/createMessage", None)
             .await
@@ -156,8 +189,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn roots_list_returns_configured_roots() {
+        let router = NotificationRouter::new("srv", vec![PathBuf::from("/work/agent")]);
+        let result = router.handle_request("roots/list", None).await.unwrap();
+        assert_eq!(result["roots"][0]["uri"], "file:///work/agent");
+        assert_eq!(result["roots"][0]["name"], "agent");
+    }
+
+    #[tokio::test]
+    async fn roots_list_is_method_not_found_when_no_roots() {
+        // With no roots we advertise no `roots` capability, so a server
+        // that asks anyway gets the spec-correct refusal.
+        let router = NotificationRouter::new("srv", vec![]);
+        let err = router.handle_request("roots/list", None).await.unwrap_err();
+        assert_eq!(err.code, -32601);
+    }
+
+    #[tokio::test]
     async fn logging_notification_is_accepted_at_every_level() {
-        let router = NotificationRouter::new("srv");
+        let router = NotificationRouter::new("srv", vec![]);
         for level in ["debug", "info", "notice", "warning", "error", "critical", "weird"] {
             // Should not panic regardless of level (including unknown).
             router
@@ -171,7 +221,7 @@ mod tests {
 
     #[tokio::test]
     async fn progress_and_list_changed_are_handled() {
-        let router = NotificationRouter::new("srv");
+        let router = NotificationRouter::new("srv", vec![]);
         router
             .handle_notification(
                 "notifications/progress",

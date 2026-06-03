@@ -269,8 +269,15 @@ impl McpSkill {
         server_name: &str,
         transport: &Arc<dyn McpTransport>,
     ) -> Result<()> {
+        // Advertise the client capabilities we actually honor.  `roots` is
+        // backed by the NotificationRouter's roots/list handler installed
+        // below; `listChanged` is false because the agent's working
+        // directory is fixed for the connection's life.  sampling and
+        // elicitation are intentionally absent until their handlers land —
+        // advertising them would invite calls we'd only answer with -32601.
         let init = serde_json::json!({
-            "protocolVersion": "2024-11-05", "capabilities": {},
+            "protocolVersion": "2024-11-05",
+            "capabilities": { "roots": { "listChanged": false } },
             "clientInfo": { "name": "dyson", "version": env!("CARGO_PKG_VERSION") }
         });
 
@@ -304,9 +311,15 @@ impl McpSkill {
         }
 
         // Install the inbound router so server-originated notifications
-        // (logging, progress, list_changed) and requests are dispatched
-        // for the rest of this connection's life.
-        transport.set_inbound_handler(Arc::new(router::NotificationRouter::new(server_name)));
+        // (logging, progress, list_changed) and requests (roots/list) are
+        // dispatched for the rest of this connection's life.  We expose the
+        // agent's working directory as the single filesystem root — the
+        // same directory MCP stdio servers are spawned in.
+        let roots: Vec<PathBuf> = std::env::current_dir().ok().into_iter().collect();
+        transport.set_inbound_handler(Arc::new(router::NotificationRouter::new(
+            server_name,
+            roots,
+        )));
 
         transport
             .send_notification("notifications/initialized", None)
