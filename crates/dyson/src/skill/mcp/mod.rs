@@ -136,12 +136,17 @@ pub struct McpSkill {
     transport: Option<Arc<dyn McpTransport>>,
     tools: Vec<Arc<dyn Tool>>,
     system_prompt: Option<String>,
-    // Parsed from the server's initialize response; stored so future
-    // phases can short-circuit calls to unimplemented MCP primitives
-    // instead of round-tripping a -32601 error.  Read by upcoming
-    // resources/prompts/etc. handlers; intentionally unread today.
-    #[allow(dead_code)]
+    // Parsed from the server's initialize response; gates which extra
+    // tools we register (resources/prompts) and which client
+    // capabilities we advertise.
     server_capabilities: Option<crate::skill::mcp::protocol::ServerCapabilities>,
+    // LLM settings + workspace, supplied by the agent at load time.  When
+    // present, the skill advertises the `sampling` capability and the
+    // router can run server-originated `sampling/createMessage` requests
+    // through a one-shot LLM client.  `None` for contexts without an LLM
+    // (e.g. the admin connectivity probe).
+    agent_settings: Option<crate::config::AgentSettings>,
+    workspace: Option<crate::workspace::WorkspaceHandle>,
 }
 
 impl McpSkill {
@@ -152,7 +157,23 @@ impl McpSkill {
             tools: Vec::new(),
             system_prompt: None,
             server_capabilities: None,
+            agent_settings: None,
+            workspace: None,
         }
+    }
+
+    /// Supply the LLM context used to satisfy server-originated
+    /// `sampling/createMessage` requests.  Called by the agent at skill
+    /// creation; skipped by the admin probe (which only checks
+    /// connectivity and never needs to sample).
+    pub fn with_sampling_context(
+        mut self,
+        settings: crate::config::AgentSettings,
+        workspace: Option<crate::workspace::WorkspaceHandle>,
+    ) -> Self {
+        self.agent_settings = Some(settings);
+        self.workspace = workspace;
+        self
     }
 
     async fn start_oauth_flow(
@@ -272,12 +293,17 @@ impl McpSkill {
         // Advertise the client capabilities we actually honor.  `roots` is
         // backed by the NotificationRouter's roots/list handler installed
         // below; `listChanged` is false because the agent's working
-        // directory is fixed for the connection's life.  sampling and
-        // elicitation are intentionally absent until their handlers land —
-        // advertising them would invite calls we'd only answer with -32601.
+        // directory is fixed for the connection's life.  `sampling` is
+        // advertised only when the agent supplied LLM context — otherwise
+        // we'd invite createMessage calls we could only answer -32601.
+        // `elicitation` stays absent until its UI path lands.
+        let mut capabilities = serde_json::json!({ "roots": { "listChanged": false } });
+        if self.agent_settings.is_some() {
+            capabilities["sampling"] = serde_json::json!({});
+        }
         let init = serde_json::json!({
             "protocolVersion": "2024-11-05",
-            "capabilities": { "roots": { "listChanged": false } },
+            "capabilities": capabilities,
             "clientInfo": { "name": "dyson", "version": env!("CARGO_PKG_VERSION") }
         });
 
@@ -316,9 +342,13 @@ impl McpSkill {
         // agent's working directory as the single filesystem root — the
         // same directory MCP stdio servers are spawned in.
         let roots: Vec<PathBuf> = std::env::current_dir().ok().into_iter().collect();
+        let sampling = self.agent_settings.clone().map(|settings| {
+            router::SamplingBackend::new(settings, self.workspace.clone())
+        });
         transport.set_inbound_handler(Arc::new(router::NotificationRouter::new(
             server_name,
             roots,
+            sampling,
         )));
 
         transport

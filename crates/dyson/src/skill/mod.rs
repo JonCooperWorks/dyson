@@ -200,7 +200,10 @@ pub async fn create_skills(
                 )));
             }
             crate::config::SkillConfig::Mcp(cfg) => {
-                let mut mcp_skill = mcp::McpSkill::new(*cfg.clone());
+                // Hand the skill the LLM context so a connected MCP server
+                // can drive sampling/createMessage through dyson's model.
+                let mut mcp_skill = mcp::McpSkill::new(*cfg.clone())
+                    .with_sampling_context(settings.agent.clone(), workspace_arc.clone());
                 match mcp_skill.on_load().await {
                     Ok(()) => {
                         tracing::info!(
