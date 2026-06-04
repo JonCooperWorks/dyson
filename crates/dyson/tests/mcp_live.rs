@@ -90,6 +90,26 @@ fn bare_ctx() -> ToolContext {
     }
 }
 
+/// When the client advertises `elicitation` (prod does, via the HTTP
+/// controller's ui_enabled), the everything server conditionally registers
+/// `trigger-elicitation-request` — the real elicitation demo (a sync
+/// server-originated `elicitation/create` during tools/call).  Confirms
+/// dyson's handshake picks it up so the agent can call it.
+#[tokio::test]
+#[ignore = "needs npx + network: npx -y @modelcontextprotocol/server-everything"]
+async fn elicitation_tool_registers_when_client_advertises_elicitation() {
+    dyson::skill::mcp::elicitation::enable_ui();
+    let mut skill = McpSkill::new(everything_config());
+    skill.on_load().await.expect("handshake");
+    let names: Vec<String> = skill.tools().iter().map(|t| t.name().to_string()).collect();
+    eprintln!("tools: {names:?}");
+    assert!(
+        names.iter().any(|n| n == "trigger-elicitation-request"),
+        "advertising elicitation should make the server register \
+         trigger-elicitation-request; got {names:?}"
+    );
+}
+
 /// End-to-end test of MCP task augmentation: `simulate-research-query` is
 /// `taskSupport: required`, so the client must invoke it via the task
 /// lifecycle (tools/call+task → poll tasks/get → tasks/result).  Runs the
