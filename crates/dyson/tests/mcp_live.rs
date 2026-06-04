@@ -90,6 +90,40 @@ fn bare_ctx() -> ToolContext {
     }
 }
 
+/// End-to-end test of MCP task augmentation: `simulate-research-query` is
+/// `taskSupport: required`, so the client must invoke it via the task
+/// lifecycle (tools/call+task → poll tasks/get → tasks/result).  Runs the
+/// non-ambiguous path (no elicitation) so it completes deterministically.
+#[tokio::test]
+#[ignore = "needs npx + network: npx -y @modelcontextprotocol/server-everything"]
+async fn task_required_tool_runs_through_task_lifecycle() {
+    let mut skill = McpSkill::new(everything_config());
+    skill.on_load().await.expect("handshake");
+
+    let tool = skill
+        .tools()
+        .iter()
+        .find(|t| t.name() == "simulate-research-query")
+        .expect("everything exposes simulate-research-query")
+        .clone();
+
+    let out = tool
+        .run(
+            &serde_json::json!({ "topic": "quantum computing" }),
+            &bare_ctx(),
+        )
+        .await
+        .expect("task tool should run");
+
+    eprintln!("task result (is_error={}):\n{}", out.is_error, out.content);
+    assert!(!out.is_error, "task should complete: {}", out.content);
+    assert!(
+        out.content.contains("Research Report") || out.content.contains("quantum"),
+        "expected the synthesized report, got: {}",
+        out.content
+    );
+}
+
 /// End-to-end test of the inbound (server → client) request path: the
 /// everything server's `get-roots-list` tool asks the *client* for its
 /// roots via a server-originated `roots/list` request.  Exercises the bidi

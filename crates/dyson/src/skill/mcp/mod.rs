@@ -308,8 +308,13 @@ impl McpSkill {
         if elicitation::ui_enabled() {
             capabilities["elicitation"] = serde_json::json!({});
         }
+        // Task augmentation: we drive `taskSupport: required` tools via the
+        // tools/call(+task) -> tasks/get -> tasks/result lifecycle.
+        capabilities["tasks"] = serde_json::json!({});
         let init = serde_json::json!({
-            "protocolVersion": "2024-11-05",
+            // 2025-06-18 is the spec revision that defines task augmentation
+            // (and elicitation); servers negotiate down to their own version.
+            "protocolVersion": "2025-06-18",
             "capabilities": capabilities,
             "clientInfo": { "name": "dyson", "version": env!("CARGO_PKG_VERSION") }
         });
@@ -401,6 +406,8 @@ impl McpSkill {
         let mut descs: Vec<String> = Vec::new();
         for def in defs {
             let desc = def.description.clone().unwrap_or_default();
+            // Capture before moving fields out of `def` below.
+            let task_required = def.requires_task();
             // Sanitize description to prevent prompt injection from MCP servers.
             // Strip control characters and limit length to prevent abuse.
             let safe_desc = sanitize_mcp_description(&desc);
@@ -418,6 +425,7 @@ impl McpSkill {
                     .unwrap_or(serde_json::json!({"type": "object"})),
                 transport: Arc::clone(transport),
                 server_name: server_name.to_string(),
+                task_required,
             }));
         }
 
@@ -604,7 +612,16 @@ struct McpRemoteTool {
     input_schema: serde_json::Value,
     transport: Arc<dyn McpTransport>,
     server_name: String,
+    /// When true, the server marked this tool `taskSupport: "required"` —
+    /// invoke it via the task lifecycle (tools/call+task → tasks/get →
+    /// tasks/result) instead of awaiting the result inline.
+    task_required: bool,
 }
+
+/// Default TTL we request for a task, and the hard ceiling on how long we
+/// poll before giving up.  The server clamps the TTL to its own bound.
+const MCP_TASK_TTL_MS: u64 = 300_000;
+const MCP_TASK_MAX_WAIT: Duration = Duration::from_secs(300);
 
 #[async_trait]
 impl Tool for McpRemoteTool {
@@ -618,7 +635,10 @@ impl Tool for McpRemoteTool {
         self.input_schema.clone()
     }
 
-    async fn run(&self, input: &serde_json::Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+    async fn run(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        if self.task_required {
+            return self.run_as_task(input, ctx).await;
+        }
         let params = serde_json::json!({ "name": self.tool_name, "arguments": input });
         let result_json = self
             .transport
@@ -633,6 +653,15 @@ impl Tool for McpRemoteTool {
                 server: self.server_name.clone(),
                 message: format!("failed to parse tools/call result: {e}"),
             })?;
+        self.decode_tool_result(&tool_result)
+    }
+}
+
+impl McpRemoteTool {
+    /// Turn a parsed `CallToolResult` into a `ToolOutput`, saving image /
+    /// resource blocks as files and emitting compact inline markers.
+    /// Shared by the inline `tools/call` path and the task path.
+    fn decode_tool_result(&self, tool_result: &McpToolResult) -> Result<ToolOutput> {
         let mut content_parts = Vec::new();
         let mut files = Vec::new();
         for (idx, block) in tool_result.content.iter().enumerate() {
@@ -645,12 +674,8 @@ impl Tool for McpRemoteTool {
                     content_parts.push(format!("[image: {mime_type}, {bytes} bytes]"));
                 }
                 McpContent::Resource { resource } => {
-                    let (path, bytes, original_name) = save_mcp_resource(
-                        &self.server_name,
-                        &self.tool_name,
-                        idx,
-                        resource,
-                    )?;
+                    let (path, bytes, original_name) =
+                        save_mcp_resource(&self.server_name, &self.tool_name, idx, resource)?;
                     files.push(path);
                     // Mirrors the `[image: MIME, N bytes]` marker shape
                     // used by the Image variant — short, predictable,
@@ -666,9 +691,8 @@ impl Tool for McpRemoteTool {
                 }
             }
         }
-        let content = content_parts.join("\n");
         Ok(ToolOutput {
-            content,
+            content: content_parts.join("\n"),
             is_error: tool_result.is_error,
             view: None,
             metadata: Some(serde_json::json!({
@@ -680,6 +704,113 @@ impl Tool for McpRemoteTool {
             checkpoints: vec![],
             artefacts: vec![],
         })
+    }
+
+    /// Run a `taskSupport: required` tool through the MCP task lifecycle:
+    /// `tools/call` with a `task` augmentation returns a task handle; we
+    /// poll `tasks/get` until the task leaves `working`/`input_required`,
+    /// then fetch the real result with `tasks/result`.  Server-originated
+    /// requests the task raises mid-flight (elicitation/sampling) are
+    /// delivered to the NotificationRouter by the transport, so an
+    /// `input_required` status resolves once the UI answers; we keep
+    /// polling through it.  Honors `ctx.cancellation` (issues `tasks/cancel`).
+    async fn run_as_task(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let mcp_err = |e: String| DysonError::Mcp {
+            server: self.server_name.clone(),
+            message: e,
+        };
+
+        let create = self
+            .transport
+            .send_request(
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": self.tool_name,
+                    "arguments": input,
+                    "task": { "ttl": MCP_TASK_TTL_MS },
+                })),
+            )
+            .await
+            .map_err(|e| mcp_err(format!("task tools/call failed for '{}': {e}", self.tool_name)))?;
+
+        let task = create.get("task").ok_or_else(|| {
+            mcp_err(format!(
+                "task-augmented call for '{}' returned no task handle",
+                self.tool_name
+            ))
+        })?;
+        let task_id = task
+            .get("taskId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| mcp_err("task handle missing taskId".into()))?
+            .to_string();
+        let mut poll_ms = task
+            .get("pollInterval")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1000)
+            .clamp(100, 5000);
+        let mut status = task
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("working")
+            .to_string();
+
+        let deadline = tokio::time::Instant::now() + MCP_TASK_MAX_WAIT;
+        while matches!(status.as_str(), "working" | "input_required") {
+            tokio::select! {
+                () = ctx.cancellation.cancelled() => {
+                    let _ = self
+                        .transport
+                        .send_request("tasks/cancel", Some(serde_json::json!({ "taskId": task_id })))
+                        .await;
+                    return Ok(ToolOutput::error(format!(
+                        "MCP task for '{}' cancelled",
+                        self.tool_name
+                    )));
+                }
+                () = tokio::time::sleep(Duration::from_millis(poll_ms)) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let _ = self
+                    .transport
+                    .send_request("tasks/cancel", Some(serde_json::json!({ "taskId": task_id })))
+                    .await;
+                return Ok(ToolOutput::error(format!(
+                    "MCP task for '{}' did not complete within {}s",
+                    self.tool_name,
+                    MCP_TASK_MAX_WAIT.as_secs()
+                )));
+            }
+            let got = self
+                .transport
+                .send_request("tasks/get", Some(serde_json::json!({ "taskId": task_id })))
+                .await
+                .map_err(|e| mcp_err(format!("tasks/get failed: {e}")))?;
+            status = got
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("working")
+                .to_string();
+            if let Some(p) = got.get("pollInterval").and_then(serde_json::Value::as_u64) {
+                poll_ms = p.clamp(100, 5000);
+            }
+        }
+
+        if status != "completed" {
+            return Ok(ToolOutput::error(format!(
+                "MCP task for '{}' ended with status '{status}'",
+                self.tool_name
+            )));
+        }
+
+        let result_json = self
+            .transport
+            .send_request("tasks/result", Some(serde_json::json!({ "taskId": task_id })))
+            .await
+            .map_err(|e| mcp_err(format!("tasks/result failed: {e}")))?;
+        let tool_result: McpToolResult = serde_json::from_value(result_json)
+            .map_err(|e| mcp_err(format!("failed to parse tasks/result: {e}")))?;
+        self.decode_tool_result(&tool_result)
     }
 }
 
@@ -1463,7 +1594,48 @@ mod tests {
             input_schema: serde_json::json!({"type": "object"}),
             transport: Arc::new(StaticTransport { result }),
             server_name: "browser".to_string(),
+            task_required: false,
         }
+    }
+
+    #[tokio::test]
+    async fn task_required_tool_drives_create_poll_result_lifecycle() {
+        // Mock the three task methods: tools/call returns a task handle,
+        // tasks/get reports completed, tasks/result returns the real
+        // CallToolResult.  Proves run_as_task() walks the lifecycle and
+        // decodes the final result rather than the task envelope.
+        let responses = vec![
+            (
+                "tools/call",
+                serde_json::json!({ "task": { "taskId": "t1", "status": "working", "pollInterval": 100 } }),
+            ),
+            ("tasks/get", serde_json::json!({ "taskId": "t1", "status": "completed" })),
+            (
+                "tasks/result",
+                serde_json::json!({ "content": [{ "type": "text", "text": "research done" }], "isError": false }),
+            ),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let tool = McpRemoteTool {
+            tool_name: "simulate-research-query".to_string(),
+            description: "task tool".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            transport: Arc::new(ByMethodTransport { responses }),
+            server_name: "everything".to_string(),
+            task_required: true,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tool
+            .run(
+                &serde_json::json!({ "topic": "x" }),
+                &ToolContext::for_test(tmp.path()),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert_eq!(out.content, "research done");
     }
 
     #[tokio::test]

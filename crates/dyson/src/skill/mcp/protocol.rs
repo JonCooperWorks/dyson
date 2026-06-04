@@ -141,6 +141,29 @@ pub struct McpToolDef {
     pub description: Option<String>,
     #[serde(rename = "inputSchema", default)]
     pub input_schema: Option<serde_json::Value>,
+    /// Optional execution metadata (MCP task augmentation).  When
+    /// `execution.taskSupport == "required"`, the tool must be invoked as
+    /// a task (`tools/call` with a `task` param, then poll `tasks/get` and
+    /// fetch `tasks/result`) rather than awaited inline.
+    #[serde(default)]
+    pub execution: Option<McpToolExecution>,
+}
+
+impl McpToolDef {
+    /// True when the server requires this tool to run as a task.
+    pub fn requires_task(&self) -> bool {
+        self.execution
+            .as_ref()
+            .and_then(|e| e.task_support.as_deref())
+            == Some("required")
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct McpToolExecution {
+    /// `"forbidden"` | `"optional"` | `"required"` (absent ⇒ forbidden).
+    #[serde(rename = "taskSupport", default)]
+    pub task_support: Option<String>,
 }
 
 /// Result of a `tools/call` invocation.
@@ -354,6 +377,11 @@ pub struct ServerCapabilities {
     pub logging: Option<serde_json::Value>,
     #[serde(default)]
     pub completions: Option<serde_json::Value>,
+    /// MCP task augmentation.  When present, the server can run
+    /// `taskSupport: required` tools as tasks; the client drives them via
+    /// `tools/call` (+ `task` param) → `tasks/get` → `tasks/result`.
+    #[serde(default)]
+    pub tasks: Option<serde_json::Value>,
     #[serde(default)]
     pub experimental: Option<serde_json::Value>,
 }

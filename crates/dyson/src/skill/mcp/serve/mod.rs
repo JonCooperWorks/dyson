@@ -595,6 +595,8 @@ impl McpHttpServer {
                 name: tool.name().to_string(),
                 description: Some(tool.description().to_string()),
                 input_schema: Some(tool.input_schema()),
+                // Dyson's exposed tools run inline, not as MCP tasks.
+                execution: None,
             })
             .collect();
 
