@@ -700,8 +700,9 @@ impl Tool for McpResourcesTool {
     fn description(&self) -> &str {
         "List and read resources exposed by this MCP server. \
          Use op=\"list\" to discover resource URIs, then op=\"read\" with a \
-         \"uri\" to fetch one. Binary/text bodies are saved as files; their \
-         names and sizes are reported inline."
+         \"uri\" to fetch one. Text bodies are inlined in the tool output \
+         (truncated if very large); binary bodies and the full body are \
+         always also saved as a workspace artefact."
     }
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
@@ -796,6 +797,21 @@ impl McpResourcesTool {
                 "[resource: {original_name}, {mime}, {bytes} bytes]",
                 mime = resource.mime_type,
             ));
+            // Text bodies are inlined so the agent can read the resource
+            // without having to open the artefact file.  Binary blobs stay
+            // file-only — round-tripping base64 through the LLM wastes
+            // tokens and almost never helps.
+            if !resource.text.is_empty() {
+                if resource.text.len() <= INLINE_TEXT_CAP {
+                    content_parts.push(resource.text.clone());
+                } else {
+                    let head_end = floor_char_boundary(&resource.text, INLINE_TEXT_CAP);
+                    content_parts.push(format!(
+                        "{head}\n[…truncated at {INLINE_TEXT_CAP} bytes; full {bytes}-byte body in artefact]",
+                        head = &resource.text[..head_end],
+                    ));
+                }
+            }
         }
         Ok(ToolOutput {
             content: content_parts.join("\n"),
@@ -1007,6 +1023,26 @@ fn image_extension(mime_type: &str) -> &'static str {
 /// (or an assist) that hands us a larger blob is most likely buggy or
 /// hostile.
 const MAX_MCP_RESOURCE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Cap for inlining a text resource body in `read()` tool output.  Larger
+/// bodies are truncated inline (with a note) but the full body still lands
+/// in the workspace artefact.  16 KiB ≈ 4-5K tokens — enough for docs and
+/// configs without bloating context on runaway logs.
+const INLINE_TEXT_CAP: usize = 16 * 1024;
+
+/// `str::floor_char_boundary` is unstable; this is the stable workalike.
+/// Walks back from `index` until the byte is at a UTF-8 char boundary so
+/// the truncated head can never split a multi-byte sequence.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
 
 /// Save an MCP `resource` content block as a local file and return the
 /// path, byte count, and the original (pre-sanitization) filename.
@@ -1248,11 +1284,80 @@ mod tests {
         assert!(!out.is_error);
         assert!(out.content.contains("doc.txt"));
         assert!(out.content.contains("text/plain"));
-        // Body must not leak into the LLM-visible content.
+        // Binary (blob) bodies stay artefact-only — base64 round-trips
+        // through the LLM waste tokens without helping.
         assert!(!out.content.contains("resource-bytes"));
         assert_eq!(out.files.len(), 1);
         assert_eq!(std::fs::read(&out.files[0]).unwrap(), bytes);
         let _ = std::fs::remove_file(&out.files[0]);
+    }
+
+    #[tokio::test]
+    async fn resources_tool_read_inlines_text_body_and_saves_file() {
+        let body = "hello, this is the body";
+        let tool = resources_tool(vec![(
+            "resources/read",
+            serde_json::json!({
+                "contents": [{
+                    "uri": "file:///doc.txt",
+                    "mimeType": "text/plain",
+                    "text": body
+                }]
+            }),
+        )]);
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tool
+            .run(
+                &serde_json::json!({ "op": "read", "uri": "file:///doc.txt" }),
+                &ToolContext::for_test(tmp.path()),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("doc.txt"));
+        assert!(out.content.contains(body));
+        assert_eq!(out.files.len(), 1);
+        assert_eq!(std::fs::read(&out.files[0]).unwrap(), body.as_bytes());
+        let _ = std::fs::remove_file(&out.files[0]);
+    }
+
+    #[tokio::test]
+    async fn resources_tool_read_truncates_oversized_text_body() {
+        let body = "x".repeat(INLINE_TEXT_CAP * 2 + 7);
+        let tool = resources_tool(vec![(
+            "resources/read",
+            serde_json::json!({
+                "contents": [{
+                    "uri": "file:///big.txt",
+                    "mimeType": "text/plain",
+                    "text": body
+                }]
+            }),
+        )]);
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tool
+            .run(
+                &serde_json::json!({ "op": "read", "uri": "file:///big.txt" }),
+                &ToolContext::for_test(tmp.path()),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("truncated"));
+        assert!(out.content.len() < body.len() + 512);
+        // Full body must still land in the artefact, untruncated.
+        assert_eq!(std::fs::read(&out.files[0]).unwrap().len(), body.len());
+        let _ = std::fs::remove_file(&out.files[0]);
+    }
+
+    #[tokio::test]
+    async fn floor_char_boundary_never_splits_multibyte() {
+        // "héllo" — the é is 2 bytes (0xC3 0xA9).
+        let s = "héllo";
+        // Asking to truncate at byte 2 lands in the middle of é (boundary
+        // is at 1 or 3); we must back off to 1.
+        assert_eq!(floor_char_boundary(s, 2), 1);
+        assert_eq!(floor_char_boundary(s, 100), s.len());
     }
 
     fn prompts_tool(responses: Vec<(&str, serde_json::Value)>) -> McpPromptsTool {
