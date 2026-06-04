@@ -33,8 +33,12 @@ const ELICITATION_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A server-originated elicitation waiting for a UI answer.
 struct Parked {
+    server: String,
     message: String,
     schema: Value,
+    /// Monotonic stamp so the UI can render oldest-first deterministically;
+    /// `HashMap` iteration order is otherwise unstable.
+    seq: u64,
     responder: oneshot::Sender<Value>,
 }
 
@@ -55,14 +59,17 @@ impl ElicitationBroker {
     /// Park a server-originated elicitation and await the UI's answer.
     /// Returns the MCP `ElicitResult` (`{ action, content? }`).  On timeout
     /// or a dropped responder we answer `cancel`, the spec-safe default.
-    pub async fn elicit(&self, message: String, schema: Value) -> Value {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
+    pub async fn elicit(&self, server: String, message: String, schema: Value) -> Value {
+        let seq = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = seq.to_string();
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(
             id.clone(),
             Parked {
+                server,
                 message,
                 schema,
+                seq,
                 responder: tx,
             },
         );
@@ -77,15 +84,17 @@ impl ElicitationBroker {
         }
     }
 
-    /// Snapshot of the open prompts, for the UI poll.
+    /// Snapshot of the open prompts, oldest first, for the UI poll.
     pub async fn list_pending(&self) -> Vec<Value> {
-        self.pending
-            .lock()
-            .await
-            .iter()
-            .map(|(id, p)| {
+        let pending = self.pending.lock().await;
+        let mut entries: Vec<&Parked> = pending.values().collect();
+        entries.sort_by_key(|p| p.seq);
+        entries
+            .into_iter()
+            .map(|p| {
                 serde_json::json!({
-                    "id": id,
+                    "id": p.seq.to_string(),
+                    "server": p.server,
                     "message": p.message,
                     "requestedSchema": p.schema,
                 })
@@ -135,7 +144,11 @@ mod tests {
         // resolve answers it.
         let elicit = async {
             broker
-                .elicit("name?".into(), serde_json::json!({ "type": "object" }))
+                .elicit(
+                    "everything".into(),
+                    "name?".into(),
+                    serde_json::json!({ "type": "object" }),
+                )
                 .await
         };
         let answer = async {
@@ -145,6 +158,7 @@ mod tests {
                 if let Some(p) = pending.first() {
                     let id = p["id"].as_str().unwrap().to_string();
                     assert_eq!(p["message"], "name?");
+                    assert_eq!(p["server"], "everything");
                     let ok = broker
                         .resolve(&id, serde_json::json!({ "action": "accept", "content": { "name": "ada" } }))
                         .await;
@@ -165,6 +179,40 @@ mod tests {
     async fn resolve_unknown_id_is_false() {
         let broker = ElicitationBroker::new();
         assert!(!broker.resolve("nope", serde_json::json!({})).await);
+    }
+
+    #[tokio::test]
+    async fn list_pending_is_oldest_first() {
+        // Two prompts park concurrently; the UI must see them in seq order
+        // so multiple-prompt queues render predictably.
+        let broker = std::sync::Arc::new(ElicitationBroker::new());
+        let b1 = broker.clone();
+        let b2 = broker.clone();
+        let _t1 = tokio::spawn(async move {
+            b1.elicit("alpha".into(), "first".into(), serde_json::json!({}))
+                .await
+        });
+        // Park strictly after the first by waiting for it to land.
+        loop {
+            if !broker.list_pending().await.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let _t2 = tokio::spawn(async move {
+            b2.elicit("beta".into(), "second".into(), serde_json::json!({}))
+                .await
+        });
+        // Wait for both.
+        loop {
+            let pending = broker.list_pending().await;
+            if pending.len() == 2 {
+                assert_eq!(pending[0]["message"], "first");
+                assert_eq!(pending[1]["message"], "second");
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
     }
 
     #[test]

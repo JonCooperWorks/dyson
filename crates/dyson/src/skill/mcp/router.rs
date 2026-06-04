@@ -213,7 +213,9 @@ impl InboundHandler for NotificationRouter {
                     .get("requestedSchema")
                     .cloned()
                     .unwrap_or(Value::Null);
-                Ok(super::elicitation::broker().elicit(message, schema).await)
+                Ok(super::elicitation::broker()
+                    .elicit(self.server_name.clone(), message, schema)
+                    .await)
             }
             // Any other method (or sampling/elicitation without a backend
             // or UI) gets the spec-correct "method not found".
