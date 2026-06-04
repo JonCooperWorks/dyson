@@ -789,6 +789,14 @@ impl HttpTransport {
     /// initial-only-JSON path was the previous behavior and silently
     /// dropped any SSE-shaped response with "expected value at line 1".
     ///
+    /// For SSE bodies the parse is *incremental*: each complete `data:`
+    /// frame is dispatched as soon as its terminating blank line
+    /// arrives, so a server-originated `elicitation/create` reaches
+    /// the inbound handler — and its answer goes out on a separate
+    /// POST — before the upstream tools/call finishes.  That's the
+    /// difference between "elicitation works" and "elicitation
+    /// deadlocks waiting on the body to close."
+    ///
     /// Shared by the normal path and the 401 retry path.
     async fn parse_rpc_response(
         &self,
@@ -817,27 +825,48 @@ impl HttpTransport {
                     .is_some_and(|m| m.trim().eq_ignore_ascii_case("text/event-stream"))
             });
 
-        let body = read_response_text_capped(response, &self.url).await?;
-
-        // Non-SSE: the whole body is the single JSON-RPC response.
         if !is_sse {
+            // Non-SSE: the whole body is the single JSON-RPC response,
+            // safe to buffer.
+            let body = read_response_text_capped(response, &self.url).await?;
             return self.finish_rpc_value(parse_rpc_value(&body, &self.url)?);
         }
 
-        // SSE: the body may carry server-originated requests/notifications
-        // interleaved with the response to our outbound request.  Demux
-        // every frame in order — dispatching inbound traffic to the
-        // handler — and keep the last response frame as our answer.
-        let frames = extract_all_sse_frames(&body);
-        if frames.is_empty() {
-            return Err(DysonError::Mcp {
-                server: self.url.clone(),
-                message: "SSE response had no `data:` frame".into(),
-            });
-        }
+        // SSE: stream the body, dispatching each complete frame as it
+        // arrives so server-originated requests can be answered while
+        // the body is still open.
+        self.stream_sse_response(response).await
+    }
 
+    /// Incrementally parse an SSE response, dispatching each frame
+    /// (response, server-originated request, notification) the moment
+    /// its terminating blank line is observed.
+    async fn stream_sse_response(
+        &self,
+        mut response: reqwest::Response,
+    ) -> crate::error::Result<serde_json::Value> {
+        let mut parser = SseStreamParser::new();
+        let mut total_bytes = 0usize;
         let mut answer: Option<Value> = None;
-        for frame in frames {
+        while let Some(chunk) = response.chunk().await.map_err(|e| DysonError::Mcp {
+            server: self.url.clone(),
+            message: format!("failed to read SSE chunk: {e}"),
+        })? {
+            total_bytes = total_bytes.saturating_add(chunk.len());
+            if total_bytes > MAX_MCP_RESULT_BYTES {
+                return Err(mcp_result_too_large(&self.url));
+            }
+            let new_frames = parser.feed(&chunk);
+            for frame in new_frames {
+                let value = parse_rpc_value(&frame, &self.url)?;
+                if let Some(resp) = self.dispatch_inbound_frame(value).await {
+                    answer = Some(resp);
+                }
+            }
+        }
+        // Flush any trailing frame the server forgot to terminate with
+        // a blank line.
+        if let Some(frame) = parser.finish() {
             let value = parse_rpc_value(&frame, &self.url)?;
             if let Some(resp) = self.dispatch_inbound_frame(value).await {
                 answer = Some(resp);
@@ -899,12 +928,10 @@ fn extract_last_sse_data(body: &str) -> Option<String> {
 }
 
 /// Extract every `data:` payload from a Server-Sent Events body, in
-/// order.  Streamable HTTP MCP is bidirectional: a single response body
-/// may carry server-originated requests/notifications interleaved before
-/// (or after) the response to our outbound request, so we demux all
-/// frames rather than only the last one.  Multi-line `data:` frames are
-/// joined with `\n` per the SSE spec; the final frame is emitted even
-/// when the server omits the trailing blank-line terminator.
+/// order.  Retained as a test helper for fixture-based tests — the
+/// production path uses [`SseStreamParser`] so dispatch happens as
+/// each frame arrives, not after the body terminates.
+#[cfg(test)]
 fn extract_all_sse_frames(body: &str) -> Vec<String> {
     let mut frames: Vec<String> = Vec::new();
     let mut current: Option<String> = None;
@@ -925,6 +952,91 @@ fn extract_all_sse_frames(body: &str) -> Vec<String> {
         frames.push(c);
     }
     frames
+}
+
+/// Incremental SSE parser.  Accumulates bytes across reqwest chunks and
+/// emits each complete `data:` event as soon as the terminating blank
+/// line arrives, so the caller can dispatch frames before the rest of
+/// the body has been read.
+///
+/// Matches [`extract_all_sse_frames`]'s semantics for buffered bodies:
+/// every `data:` payload becomes one frame; multiple `data:` lines in
+/// one event are joined with `\n`; the trailing blank line is optional
+/// (we surface the final frame via [`SseStreamParser::finish`]).
+struct SseStreamParser {
+    buf: Vec<u8>,
+    current: Option<String>,
+}
+
+impl SseStreamParser {
+    fn new() -> Self {
+        Self {
+            buf: Vec::new(),
+            current: None,
+        }
+    }
+
+    fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(chunk);
+        let mut frames = Vec::new();
+        loop {
+            let Some(newline) = self.buf.iter().position(|b| *b == b'\n') else {
+                break;
+            };
+            let raw_line: Vec<u8> = self.buf.drain(..=newline).collect();
+            // Drop the trailing `\n` and any preceding `\r`.
+            let mut len = raw_line.len() - 1;
+            if len > 0 && raw_line[len - 1] == b'\r' {
+                len -= 1;
+            }
+            let line = match std::str::from_utf8(&raw_line[..len]) {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    // Non-UTF8 line: skip it.  This matches the
+                    // buffered parser's behaviour of dropping garbage
+                    // lines silently.
+                    continue;
+                }
+            };
+            if let Some(rest) = line.strip_prefix("data:") {
+                let chunk = rest.strip_prefix(' ').unwrap_or(rest);
+                self.current = Some(match self.current.take() {
+                    Some(prev) => format!("{prev}\n{chunk}"),
+                    None => chunk.to_string(),
+                });
+            } else if line.is_empty() {
+                if let Some(frame) = self.current.take() {
+                    frames.push(frame);
+                }
+            }
+            // Other SSE lines (event:, id:, retry:, comments starting
+            // with `:`) are intentionally ignored — the wire format
+            // we accept is exactly the one Streamable HTTP MCP emits:
+            // `event: message\ndata: <json>\n\n`.
+        }
+        frames
+    }
+
+    /// Flush a trailing frame the server omitted to terminate with a
+    /// blank line.  Mirrors the lenient behaviour of
+    /// [`extract_all_sse_frames`] / [`extract_last_sse_data`].
+    fn finish(mut self) -> Option<String> {
+        // Drain any unterminated line in `buf` as a tail event.
+        if !self.buf.is_empty() {
+            let raw = std::mem::take(&mut self.buf);
+            if let Ok(line) = std::str::from_utf8(&raw) {
+                let trimmed = line.strip_suffix('\r').unwrap_or(line);
+                if let Some(rest) = trimmed.strip_prefix("data:") {
+                    let chunk = rest.strip_prefix(' ').unwrap_or(rest);
+                    self.current = Some(match self.current.take() {
+                        Some(prev) => format!("{prev}\n{chunk}"),
+                        None => chunk.to_string(),
+                    });
+                }
+            }
+        }
+        self.current.take()
+    }
 }
 
 #[async_trait]
@@ -1221,6 +1333,128 @@ mod tests {
         let body = "event: message\ndata: {\"a\":1}\n\nevent: message\ndata: {\"b\":2}\n\n";
         let frames = extract_all_sse_frames(body);
         assert_eq!(frames, vec!["{\"a\":1}".to_string(), "{\"b\":2}".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn http_sse_streams_inbound_then_unblocks_on_answer_post() {
+        // End-to-end streaming regression: the server emits an elicit
+        // frame, then *waits* for the dyson client to POST the answer
+        // on a separate request, then emits the tools/call response
+        // frame.  If `parse_rpc_response` ever buffers the SSE body
+        // before dispatching, this test deadlocks — the server is
+        // waiting on an answer that can't arrive until dispatch fires.
+        //
+        // Captures the wire-shape contract we depend on for the
+        // swarm-proxied stdio elicit flow.
+        use std::convert::Infallible;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        use http_body_util::StreamBody;
+        use http_body_util::combinators::BoxBody;
+        use hyper::body::{Bytes, Frame, Incoming};
+        use hyper::service::service_fn;
+        use hyper::{Request, Response};
+        use hyper_util::rt::TokioIo;
+
+        static ANSWER_SEEN: AtomicBool = AtomicBool::new(false);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            // Two connections expected: the streaming tools/call POST,
+            // and the inbound answer POST.  Both are loopback so they
+            // complete fast; the order is determined by the client's
+            // dispatch behaviour, which is what we're asserting.
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.expect("accept");
+                let io = TokioIo::new(stream);
+                tokio::spawn(async move {
+                    let svc = service_fn(|req: Request<Incoming>| async move {
+                        // POST body tells us which call this is.
+                        let body_bytes = http_body_util::BodyExt::collect(req.into_body())
+                            .await
+                            .unwrap()
+                            .to_bytes();
+                        let req_value: serde_json::Value =
+                            serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+                        // The inbound answer is a JSON-RPC response —
+                        // id present, no method.
+                        let is_inbound_answer = req_value.get("method").is_none()
+                            && req_value.get("id").is_some();
+                        // Single stream type for both branches so
+                        // their `Response<...>` types unify.
+                        let body_stream = async_stream::stream! {
+                            if is_inbound_answer {
+                                ANSWER_SEEN.store(true, Ordering::SeqCst);
+                            } else {
+                                yield Ok::<_, Infallible>(Frame::data(Bytes::from(
+                                    "event: message\n\
+                                     data: {\"jsonrpc\":\"2.0\",\"id\":\"e1\",\"method\":\"elicitation/create\",\"params\":{\"message\":\"go?\",\"requestedSchema\":{}}}\n\n",
+                                )));
+                                // Wait for the answer.  Polling is fine
+                                // here — the dispatch is on a different
+                                // connection so we won't deadlock.
+                                for _ in 0..200 {
+                                    if ANSWER_SEEN.load(Ordering::SeqCst) {
+                                        break;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(25)).await;
+                                }
+                                yield Ok(Frame::data(Bytes::from(
+                                    "event: message\n\
+                                     data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n",
+                                )));
+                            }
+                        };
+                        let body = BoxBody::new(StreamBody::new(body_stream));
+                        let status = if is_inbound_answer { 202 } else { 200 };
+                        let mut builder = Response::builder().status(status);
+                        if !is_inbound_answer {
+                            builder = builder.header("content-type", "text/event-stream");
+                        }
+                        Ok::<_, Infallible>(builder.body(body).expect("response"))
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(io, svc)
+                        .await;
+                });
+            }
+        });
+
+        struct ElicitHandler;
+        #[async_trait]
+        impl InboundHandler for ElicitHandler {
+            async fn handle_request(
+                &self,
+                method: &str,
+                _params: Option<Value>,
+            ) -> std::result::Result<Value, JsonRpcError> {
+                assert_eq!(method, "elicitation/create");
+                Ok(serde_json::json!({ "action": "accept", "content": {} }))
+            }
+            async fn handle_notification(&self, _method: &str, _params: Option<Value>) {}
+        }
+
+        let transport = HttpTransport::new(
+            &format!("http://{addr}/mcp"),
+            Box::new(crate::auth::DangerousNoAuth),
+        );
+        transport.set_inbound_handler(Arc::new(ElicitHandler));
+
+        let result = transport
+            .send_request("tools/call", Some(serde_json::json!({})))
+            .await
+            .expect("streaming request resolves once response frame arrives");
+        server.abort();
+
+        assert_eq!(result, serde_json::json!({ "ok": true }));
+        assert!(
+            ANSWER_SEEN.load(Ordering::SeqCst),
+            "inbound answer must have been POSTed before the body closed"
+        );
     }
 
     #[tokio::test]
