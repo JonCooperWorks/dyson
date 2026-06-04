@@ -247,7 +247,7 @@ feature gates on the negotiated set so we never round-trip a `-32601`:
 |--------|---------|
 | `roots/list` | Returns the agent's working directory as the one filesystem root. |
 | `sampling/createMessage` | Translates the MCP messages into a dyson completion, runs a one-shot `LlmClient` (via `create_client`, mirroring the per-session pattern), and returns the assistant text. |
-| `elicitation/create` | Parks the prompt in a process-global broker (`elicitation.rs`); the web UI short-polls `GET /api/mcp/elicitations` and answers via `POST /api/mcp/elicitations/:id`. |
+| `elicitation/create` | Parks the prompt in a process-global broker (`elicitation.rs`); the web UI short-polls `GET /api/mcp/elicitations` and answers via `POST /api/mcp/elicitations/:id`.  Full round-trip in [Elicitation](elicitation.md). |
 
 Server-originated **notifications** (`notifications/message` logging,
 `progress`, `cancelled`, the `*/list_changed` family) are routed through

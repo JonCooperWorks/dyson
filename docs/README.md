@@ -22,6 +22,7 @@ across turns.
 | [LLM Prompt Caching](prompt-caching.md) | Stable/ephemeral prompt segments and Anthropic cache breakpoints |
 | [Tool Forwarding over MCP](tool-forwarding-over-mcp.md) | Dyson as an MCP server for CLI-subprocess providers |
 | [MCP OAuth](mcp-oauth.md) | OAuth 2.0 Authorization Code + PKCE for MCP servers |
+| [Elicitation](elicitation.md) | Server-initiated prompts in bidirectional MCP: broker, HTTP bridge, UI form |
 | [Web UI / HTTP Controller](web.md) | Embedded frontend, JSON/SSE APIs, auth, persistence |
 | [Chat Persistence](chat-persistence.md) | `ChatHistory`, per-chat agents, clear/memory commands |
 | [Memory](memory.md) | Tiered memory, journals, nudges, FTS5 search |

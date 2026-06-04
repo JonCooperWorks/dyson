@@ -90,3 +90,7 @@ values use `Credential` (zeroize-on-drop).
 - **Config changed:** Persisted tokens loaded; 401 retry handles scope changes.
   Delete the token file and restart for a full re-auth.
 - **Server removed:** Old skill dropped cleanly.
+
+---
+
+See also: [Tool Forwarding over MCP](tool-forwarding-over-mcp.md) · [Elicitation](elicitation.md)
