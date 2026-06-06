@@ -55,6 +55,12 @@ pub const SECURITY_HARNESS_VERSION: &str = "security-harness-v1";
 /// for the canonical taxonomy.
 pub const HUNT_SPECIALIST_BACKSTOP: usize = 64;
 
+/// Max specialist hunters dispatched concurrently within one wave.  The LLM
+/// client concurrency-limits real requests underneath; this bounds how many
+/// full agent loops (each with its own tool calls) are in flight at once so a
+/// 24-class fan-out doesn't open 24 agent loops simultaneously.
+const HUNT_CONCURRENCY: usize = 6;
+
 const STAGES: &[SecurityHarnessStage] = &[
     SecurityHarnessStage::Recon,
     SecurityHarnessStage::Hunt,
@@ -2242,128 +2248,94 @@ async fn run_hunt_stage(
     // detected stack.  Everything behavior-dependent still runs.
     prune_inapplicable_class_tasks(checkpoint, &detection);
 
-    // One dedicated specialist hunter per vulnerability class: group the
-    // pending tasks by attack_class and spawn a single class-focused child for
-    // each, briefed with that class's evidence requirements, detector seeds,
-    // and tree-sitter ast_query patterns.  Follow-up tasks appended mid-run
-    // (e.g. consumer_path_review) get their own specialist on a later pass.
-    // Specialist count is work-list-driven; the backstop only guards runaway.
-    let mut spawned_specialists = 0usize;
-    while let Some(class_id) = next_pending_class(checkpoint) {
-        if spawned_specialists >= HUNT_SPECIALIST_BACKSTOP {
+    // Class specialists, dispatched in concurrency-bounded waves.  Each wave
+    // hunts every currently-pending class in parallel (one specialist per
+    // class, briefed with that class's evidence/detector/AST patterns); the
+    // follow-up tasks a wave produces (e.g. consumer_path_review) feed the
+    // next wave.  Specialist count is work-list-driven; the backstop only
+    // guards a runaway recon.
+    let mut total_spawned = 0usize;
+    loop {
+        if total_spawned >= HUNT_SPECIALIST_BACKSTOP {
             break;
         }
-        let batch = pending_tasks_for_class(checkpoint, &class_id);
-        if batch.is_empty() {
+        let mut dispatches = Vec::new();
+        for class_id in distinct_pending_classes(checkpoint) {
+            if total_spawned + dispatches.len() >= HUNT_SPECIALIST_BACKSTOP {
+                break;
+            }
+            let batch = pending_tasks_for_class(checkpoint, &class_id);
+            if batch.is_empty() {
+                continue;
+            }
+            let mut cp = checkpoint.clone();
+            cp.pending_tasks = batch.clone();
+            let stage_prompt = match class_specialist_briefing(&class_id) {
+                Some(briefing) => format!("{prompt}\n\n{briefing}"),
+                None => prompt.to_string(),
+            };
+            dispatches.push(HuntDispatch {
+                label: class_id,
+                stage_prompt,
+                checkpoint: cp,
+                batch_ids: batch.iter().map(|t| t.id.clone()).collect(),
+                is_class: true,
+            });
+        }
+        if dispatches.is_empty() {
             break;
         }
         ran_batch = true;
-        spawned_specialists += 1;
-        let mut checkpoint_for_prompt = checkpoint.clone();
-        checkpoint_for_prompt.pending_tasks = batch.clone();
-        let stage_prompt = match class_specialist_briefing(&class_id) {
-            Some(briefing) => format!("{prompt}\n\n{briefing}"),
-            None => prompt.to_string(),
-        };
-        let (raw, stage_out) = spawn_stage_with_checkpoint(
-            rt,
-            SecurityHarnessStage::Hunt,
-            &stage_prompt,
-            &checkpoint_for_prompt,
-            28,
-        )
-        .await?;
-        merge_stage_tool_output(&mut aggregate, stage_out);
-        let hunt: HuntStageOutput = parse_stage_json(&raw)?;
-        let completed_ids: BTreeSet<String> = if hunt.completed_task_ids.is_empty() {
-            batch.iter().map(|t| t.id.clone()).collect()
-        } else {
-            hunt.completed_task_ids.into_iter().collect()
-        };
-        complete_tasks(checkpoint, &completed_ids);
-        let mut findings = hunt
-            .findings
-            .into_iter()
-            .filter(|finding| !finding.id.trim().is_empty())
-            .collect::<Vec<_>>();
-        canonicalize_findings(&mut findings);
-        checkpoint.findings_so_far.extend(findings);
-        checkpoint.coverage_gaps.extend(hunt.gaps);
-        let mut followups = hunt.follow_up_tasks;
-        canonicalize_tasks(&mut followups);
-        normalize_task_ids(&mut followups, "gap");
-        update_class_coverage_task_ids(&mut checkpoint.class_coverage, &followups);
-        checkpoint.gapfill_tasks.extend(followups.clone());
-        checkpoint.pending_tasks.extend(followups);
-        mark_hunted_class_coverage(
-            &mut checkpoint.class_coverage,
-            &checkpoint.completed_tasks,
-            &checkpoint.findings_so_far,
+        total_spawned += dispatches.len();
+        let first_err = fold_hunt_wave(
+            checkpoint,
+            &mut aggregate,
+            dispatch_hunts(rt, dispatches).await,
         );
         checkpoint.updated_at = unix_seconds(std::time::SystemTime::now());
         store.save(checkpoint).await?;
-        aggregate.checkpoints.push(CheckpointEvent {
-            message: format!(
-                "security_engineer: hunt specialist `{}` complete ({} completed, {} pending)",
-                class_id,
-                checkpoint.completed_tasks.len(),
-                checkpoint
-                    .pending_tasks
-                    .iter()
-                    .filter(|task| task.status == TaskStatus::Pending)
-                    .count()
-            ),
-            progress: Some(0.25 + (spawned_specialists as f32 * 0.01)),
-        });
+        if let Some(e) = first_err {
+            return Err(e);
+        }
     }
 
     // Framework/language specialists: each stack briefing matched by
-    // deterministic detection, spawned as its own hunter briefed with its own reference
-    // material.  Augments the class specialists with idiomatic-sink coverage
-    // without bloating any shared prompt.
-    for spec in stack_specialists(&detection) {
+    // deterministic detection, spawned as its own hunter briefed with only its
+    // own reference material.  Augments the class specialists with
+    // idiomatic-sink coverage without bloating any shared prompt.  One wave.
+    let stack = stack_specialists(&detection);
+    if !stack.is_empty() {
         ran_batch = true;
-        let mut checkpoint_for_prompt = checkpoint.clone();
-        checkpoint_for_prompt.pending_tasks = vec![SecurityTask {
-            id: spec.task_id.clone(),
-            attack_class: spec.label.clone(),
-            scope_hint: spec.scope_hint.clone(),
-            status: TaskStatus::Pending,
-            rationale: String::new(),
-        }];
-        let stage_prompt = format!("{prompt}\n\n{}", spec.briefing);
-        let (raw, stage_out) = spawn_stage_with_checkpoint(
-            rt,
-            SecurityHarnessStage::Hunt,
-            &stage_prompt,
-            &checkpoint_for_prompt,
-            28,
-        )
-        .await?;
-        merge_stage_tool_output(&mut aggregate, stage_out);
-        let hunt: HuntStageOutput = parse_stage_json(&raw)?;
-        let mut findings = hunt
-            .findings
+        let dispatches = stack
             .into_iter()
-            .filter(|finding| !finding.id.trim().is_empty())
+            .map(|spec| {
+                let mut cp = checkpoint.clone();
+                cp.pending_tasks = vec![SecurityTask {
+                    id: spec.task_id,
+                    attack_class: spec.label.clone(),
+                    scope_hint: spec.scope_hint,
+                    status: TaskStatus::Pending,
+                    rationale: String::new(),
+                }];
+                HuntDispatch {
+                    label: spec.label,
+                    stage_prompt: format!("{prompt}\n\n{}", spec.briefing),
+                    checkpoint: cp,
+                    batch_ids: Vec::new(),
+                    is_class: false,
+                }
+            })
             .collect::<Vec<_>>();
-        canonicalize_findings(&mut findings);
-        checkpoint.findings_so_far.extend(findings);
-        checkpoint.coverage_gaps.extend(hunt.gaps);
-        let mut followups = hunt.follow_up_tasks;
-        canonicalize_tasks(&mut followups);
-        normalize_task_ids(&mut followups, "gap");
-        checkpoint.gapfill_tasks.extend(followups.clone());
-        checkpoint.pending_tasks.extend(followups);
+        let first_err = fold_hunt_wave(
+            checkpoint,
+            &mut aggregate,
+            dispatch_hunts(rt, dispatches).await,
+        );
         checkpoint.updated_at = unix_seconds(std::time::SystemTime::now());
         store.save(checkpoint).await?;
-        aggregate.checkpoints.push(CheckpointEvent {
-            message: format!(
-                "security_engineer: stack specialist `{}` complete",
-                spec.label
-            ),
-            progress: Some(0.42),
-        });
+        if let Some(e) = first_err {
+            return Err(e);
+        }
     }
 
     if ran_batch {
@@ -2371,6 +2343,151 @@ async fn run_hunt_stage(
     } else {
         Ok(None)
     }
+}
+
+/// One specialist hunter to dispatch: a fully-prepared child prompt plus the
+/// checkpoint snapshot it sees.  `batch_ids` are the pending task ids a class
+/// specialist owns (empty for stack specialists, which hunt a synthetic task).
+struct HuntDispatch {
+    label: String,
+    stage_prompt: String,
+    checkpoint: SecurityCheckpoint,
+    batch_ids: Vec<String>,
+    is_class: bool,
+}
+
+/// One dispatched specialist paired with its child result (`(raw_json,
+/// tool_output)` on success, error string on failure).
+type HuntOutcome = (
+    HuntDispatch,
+    std::result::Result<(String, ToolOutput), String>,
+);
+
+/// Distinct attack classes among the still-pending tasks, in first-seen order.
+fn distinct_pending_classes(checkpoint: &SecurityCheckpoint) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for task in &checkpoint.pending_tasks {
+        if task.status == TaskStatus::Pending && seen.insert(task.attack_class.clone()) {
+            out.push(task.attack_class.clone());
+        }
+    }
+    out
+}
+
+/// Run a wave of specialist hunters concurrently, bounded by
+/// [`HUNT_CONCURRENCY`].  Each child is independent (its own checkpoint
+/// snapshot), so they fan out without shared mutable state; results are folded
+/// sequentially afterward.  buffer_unordered polls all futures on this task —
+/// real LLM concurrency is bounded by the client's own limiter underneath.
+async fn dispatch_hunts(
+    rt: &SecurityHarnessRuntime,
+    dispatches: Vec<HuntDispatch>,
+) -> Vec<HuntOutcome> {
+    use futures_util::stream::StreamExt;
+    futures_util::stream::iter(dispatches.into_iter().map(|d| async move {
+        let res = spawn_stage_with_checkpoint(
+            rt,
+            SecurityHarnessStage::Hunt,
+            &d.stage_prompt,
+            &d.checkpoint,
+            28,
+        )
+        .await;
+        (d, res)
+    }))
+    .buffer_unordered(HUNT_CONCURRENCY)
+    .collect()
+    .await
+}
+
+/// Fold a completed wave's results into the checkpoint.  Returns the first
+/// child error (if any) after folding every success, so partial progress is
+/// still checkpointed before the stage fails.
+fn fold_hunt_wave(
+    checkpoint: &mut SecurityCheckpoint,
+    aggregate: &mut ToolOutput,
+    results: Vec<HuntOutcome>,
+) -> Option<String> {
+    let mut first_err = None;
+    for (d, res) in results {
+        match res {
+            Ok((raw, stage_out)) => {
+                if let Err(e) = fold_hunt_result(checkpoint, aggregate, &d, raw, stage_out) {
+                    first_err.get_or_insert(e);
+                }
+            }
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    first_err
+}
+
+/// Merge one specialist's output into the checkpoint: findings, coverage gaps,
+/// follow-up tasks, and (for class specialists) task completion + class
+/// coverage bookkeeping.
+fn fold_hunt_result(
+    checkpoint: &mut SecurityCheckpoint,
+    aggregate: &mut ToolOutput,
+    d: &HuntDispatch,
+    raw: String,
+    stage_out: ToolOutput,
+) -> std::result::Result<(), String> {
+    merge_stage_tool_output(aggregate, stage_out);
+    let hunt: HuntStageOutput = parse_stage_json(&raw)?;
+    if d.is_class {
+        let completed_ids: BTreeSet<String> = if hunt.completed_task_ids.is_empty() {
+            d.batch_ids.iter().cloned().collect()
+        } else {
+            hunt.completed_task_ids.iter().cloned().collect()
+        };
+        complete_tasks(checkpoint, &completed_ids);
+    }
+    let mut findings = hunt
+        .findings
+        .into_iter()
+        .filter(|finding| !finding.id.trim().is_empty())
+        .collect::<Vec<_>>();
+    canonicalize_findings(&mut findings);
+    checkpoint.findings_so_far.extend(findings);
+    checkpoint.coverage_gaps.extend(hunt.gaps);
+    let mut followups = hunt.follow_up_tasks;
+    canonicalize_tasks(&mut followups);
+    normalize_task_ids(&mut followups, "gap");
+    if d.is_class {
+        update_class_coverage_task_ids(&mut checkpoint.class_coverage, &followups);
+    }
+    checkpoint.gapfill_tasks.extend(followups.clone());
+    checkpoint.pending_tasks.extend(followups);
+    if d.is_class {
+        mark_hunted_class_coverage(
+            &mut checkpoint.class_coverage,
+            &checkpoint.completed_tasks,
+            &checkpoint.findings_so_far,
+        );
+    }
+    let pending_count = checkpoint
+        .pending_tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Pending)
+        .count();
+    let kind = if d.is_class {
+        "hunt specialist"
+    } else {
+        "stack specialist"
+    };
+    aggregate.checkpoints.push(CheckpointEvent {
+        message: format!(
+            "security_engineer: {kind} `{}` complete ({} completed, {} pending)",
+            d.label,
+            checkpoint.completed_tasks.len(),
+            pending_count
+        ),
+        progress: Some(0.35),
+    });
+    Ok(())
 }
 
 /// A framework/language briefing turned into its own specialist hunter.
@@ -2935,16 +3052,6 @@ fn extract_json(raw: &str) -> Option<&str> {
     (end > start).then(|| trimmed[start..=end].trim())
 }
 
-/// The attack_class of the next pending hunt task, or `None` when no pending
-/// tasks remain.  Drives one-specialist-per-class fan-out in the Hunt stage.
-fn next_pending_class(checkpoint: &SecurityCheckpoint) -> Option<String> {
-    checkpoint
-        .pending_tasks
-        .iter()
-        .find(|t| t.status == TaskStatus::Pending)
-        .map(|t| t.attack_class.clone())
-}
-
 /// All still-pending tasks sharing `class_id` — the work for one specialist.
 fn pending_tasks_for_class(checkpoint: &SecurityCheckpoint, class_id: &str) -> Vec<SecurityTask> {
     checkpoint
@@ -3427,6 +3534,47 @@ mod specialist_tests {
                 "{id} must never be pruned"
             );
         }
+    }
+
+    #[test]
+    fn distinct_pending_classes_dedupes_in_order() {
+        let mut cp = SecurityCheckpoint::new(
+            "run".into(),
+            TargetRef {
+                repo_path: ".".into(),
+                git_ref: None,
+            },
+            "scope".into(),
+            ModelMetadata {
+                provider: "p".into(),
+                model: "m".into(),
+            },
+            0,
+        );
+        for (id, class) in [
+            ("t1", "auth_authorization"),
+            ("t2", "auth_authorization"),
+            ("t3", "injection_unsafe_execution"),
+            ("t4", "auth_authorization"),
+        ] {
+            cp.pending_tasks.push(SecurityTask {
+                id: id.into(),
+                attack_class: class.into(),
+                scope_hint: "s".into(),
+                status: TaskStatus::Pending,
+                rationale: String::new(),
+            });
+        }
+        // One wave dispatches one specialist per distinct class, first-seen
+        // order — so auth (t1,t2,t4) is a single specialist, not three.
+        assert_eq!(
+            distinct_pending_classes(&cp),
+            vec![
+                "auth_authorization".to_string(),
+                "injection_unsafe_execution".to_string()
+            ]
+        );
+        assert_eq!(pending_tasks_for_class(&cp, "auth_authorization").len(), 3);
     }
 
     #[test]
