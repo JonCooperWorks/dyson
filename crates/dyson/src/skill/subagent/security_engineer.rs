@@ -3033,23 +3033,72 @@ fn parse_stage_json<T: for<'de> Deserialize<'de>>(raw: &str) -> std::result::Res
 fn parse_json_value(raw: &str) -> std::result::Result<serde_json::Value, String> {
     let candidate =
         extract_json(raw).ok_or_else(|| "no JSON object found in stage output".to_string())?;
-    serde_json::from_str(candidate).map_err(|e| format!("invalid JSON: {e}"))
+    serde_json::from_str(candidate).map_err(|e| {
+        let preview: String = candidate.chars().take(120).collect();
+        format!("invalid JSON: {e} (extracted prefix: {preview:?})")
+    })
 }
 
+// Scan `raw` for top-level balanced `{...}` substrings and return the LAST
+// one that parses as a JSON object. The stage subagents are instructed to
+// emit a single JSON object, but their prompt already contains a fenced
+// checkpoint JSON, and weaker models surround their real output with prose,
+// echo prompt fragments, or wrap braces in markdown. A greedy first-`{` to
+// last-`}` scan blends those into garbage that fails at the first unquoted
+// "key", so we walk forward with brace-depth + string-escape awareness and
+// validate each candidate before accepting it.
 fn extract_json(raw: &str) -> Option<&str> {
-    let trimmed = raw.trim();
-    if trimmed.starts_with('{') && trimmed.ends_with('}') {
-        return Some(trimmed);
+    let bytes = raw.as_bytes();
+    let mut last_valid: Option<&str> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if let Some(end) = scan_balanced_brace(bytes, i) {
+                let candidate = raw[i..=end].trim();
+                if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                    last_valid = Some(candidate);
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        i += 1;
     }
-    if let Some(start) = trimmed.find("```json") {
-        let after = &trimmed[start + "```json".len()..];
-        if let Some(end) = after.find("```") {
-            return Some(after[..end].trim());
+    last_valid
+}
+
+// From `start` (index of `{`) walk forward and return the index of the
+// matching closing `}`, respecting JSON string boundaries and `\\`/`\"`
+// escapes. Returns None if the input is unbalanced. Operates on bytes; safe
+// for UTF-8 input because every delimiter we care about is single-byte ASCII.
+fn scan_balanced_brace(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
         }
     }
-    let start = trimmed.find('{')?;
-    let end = trimmed.rfind('}')?;
-    (end > start).then(|| trimmed[start..=end].trim())
+    None
 }
 
 /// All still-pending tasks sharing `class_id` — the work for one specialist.
@@ -3432,6 +3481,116 @@ async fn load_checkpoint_for_resume(
                 "multiple incomplete security_engineer checkpoints found; rerun with run_id:\n{list}"
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod extract_json_tests {
+    use super::*;
+
+    #[test]
+    fn picks_last_balanced_object_when_preamble_has_braces() {
+        // Regression: a TARS run on vllm failed with
+        //   "recon failed: invalid JSON: key must be a string at line 1 column 2"
+        // because the recon subagent's preamble described code like
+        //   "data["shape"] = {...}" and the greedy first-`{` to last-`}` scan
+        // glommed that into the real JSON output.
+        let raw = "Looking at the request, the writer sees `{shape: [...], dtype: torch.float32}` \
+                   and then I will emit:\n\
+                   ```json\n\
+                   {\"architecture_context\": \"vllm distributed\", \"tasks\": []}\n\
+                   ```\n";
+        let candidate = extract_json(raw).expect("balanced object should be found");
+        let parsed: serde_json::Value = serde_json::from_str(candidate).unwrap();
+        assert_eq!(parsed["architecture_context"], "vllm distributed");
+    }
+
+    #[test]
+    fn picks_last_balanced_object_when_prompt_checkpoint_is_echoed() {
+        // The recon subagent's stage_message contains the checkpoint JSON
+        // already; weaker models echo it before adding their own object.
+        // The extractor must return the LAST valid object, not the first.
+        let raw = "Here is the parent checkpoint:\n\
+                   ```json\n\
+                   {\"schema_version\": 1, \"current_stage\": \"recon\"}\n\
+                   ```\n\
+                   And my recon output:\n\
+                   ```json\n\
+                   {\"architecture_context\": \"x\", \"tasks\": [{\"id\": \"hunt-001\"}]}\n\
+                   ```\n";
+        let candidate = extract_json(raw).expect("object should be found");
+        let parsed: serde_json::Value = serde_json::from_str(candidate).unwrap();
+        assert_eq!(parsed["tasks"][0]["id"], "hunt-001");
+    }
+
+    #[test]
+    fn handles_braces_inside_json_strings() {
+        // A scope/context field can legitimately contain `{` and `}` (e.g.
+        // a code snippet copied into the user's task). Brace-counting must
+        // ignore those when inside a JSON string.
+        let raw = r#"{"scope": "context=Target: foo {bar} baz", "tasks": []}"#;
+        let candidate = extract_json(raw).expect("object should be found");
+        assert_eq!(candidate, raw);
+    }
+
+    #[test]
+    fn handles_escaped_quotes_inside_strings() {
+        let raw = r#"{"note": "he said \"hi\" and {}"}"#;
+        let candidate = extract_json(raw).expect("object should be found");
+        let parsed: serde_json::Value = serde_json::from_str(candidate).unwrap();
+        assert_eq!(parsed["note"], "he said \"hi\" and {}");
+    }
+
+    #[test]
+    fn skips_invalid_candidates_and_keeps_last_valid() {
+        // JS-style unquoted keys must not be returned even if they look
+        // balanced. The first object here is the kind of broken thing
+        // weaker models emit when they slip into JavaScript mode.
+        let raw = "{architecture_context: \"x\"}\n\n\
+                   ```json\n\
+                   {\"architecture_context\": \"y\", \"tasks\": []}\n\
+                   ```\n";
+        let candidate = extract_json(raw).expect("object should be found");
+        let parsed: serde_json::Value = serde_json::from_str(candidate).unwrap();
+        assert_eq!(parsed["architecture_context"], "y");
+    }
+
+    #[test]
+    fn returns_none_when_no_balanced_object_parses() {
+        assert!(extract_json("no json here").is_none());
+        assert!(extract_json("{architecture: still no quotes}").is_none());
+        // Unbalanced — opens but never closes.
+        assert!(extract_json("{ \"x\": 1 ").is_none());
+    }
+
+    #[test]
+    fn accepts_plain_object_without_fences() {
+        let raw = r#"{"x": 1, "y": [1, 2, 3]}"#;
+        let candidate = extract_json(raw).expect("object should be found");
+        assert_eq!(candidate, raw);
+    }
+
+    #[test]
+    fn parse_stage_json_error_includes_extracted_prefix() {
+        // When the extractor returns something that is "valid JSON" (so it
+        // passes the validation gate) but doesn't deserialize to the target
+        // type, the error should surface what we actually parsed so future
+        // debugging doesn't require turning on raw-output logging.
+        // Use a small synthetic type to drive the error path.
+        #[derive(serde::Deserialize, Debug)]
+        #[allow(dead_code)]
+        struct Need {
+            required_field: String,
+        }
+        let raw = r#"{"other_field": 1}"#;
+        let err = parse_stage_json::<Need>(raw).unwrap_err();
+        // Error message format comes from serde_json::from_value, which is
+        // structurally different from from_str — make sure SOMETHING from
+        // the original payload is mentioned so we can diagnose.
+        assert!(
+            err.contains("required_field") || err.contains("missing field"),
+            "error should describe the missing field, got: {err}"
+        );
     }
 }
 
