@@ -1034,10 +1034,18 @@ pub enum TaskStatus {
     Completed,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+// LLM output is best-effort. Every Deserialize field carries
+// `#[serde(default)]` so a model that omits, mis-types, or merely renames a
+// field cannot poison the harness — downstream code already tolerates empty
+// ids/strings (normalize_task_ids backfills, dedupe falls back to title,
+// etc.). The strictness lived in the recon prompt, not the schema.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SecurityTask {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub attack_class: String,
+    #[serde(default)]
     pub scope_hint: String,
     #[serde(default)]
     pub status: TaskStatus,
@@ -1047,8 +1055,11 @@ pub struct SecurityTask {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SecurityFinding {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
     pub severity: String,
     #[serde(default)]
     pub vulnerability_class: String,
@@ -1074,19 +1085,26 @@ pub struct SecurityFinding {
     pub fix_recommendation: String,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationDecisionKind {
     Confirmed,
     Rejected,
+    // Conservative default: an LLM that omits or mistypes the decision
+    // field should NOT be treated as having confirmed or rejected anything
+    // — surface it as a request for more evidence.
+    #[default]
     NeedsMoreEvidence,
     Downgrade,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ValidationDecision {
+    #[serde(default)]
     pub finding_id: String,
+    #[serde(default)]
     pub decision: ValidationDecisionKind,
+    #[serde(default)]
     pub evidence: String,
     #[serde(default)]
     pub severity: Option<String>,
@@ -1094,7 +1112,9 @@ pub struct ValidationDecision {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct CoverageGap {
+    #[serde(default)]
     pub area: String,
+    #[serde(default)]
     pub reason: String,
     #[serde(default)]
     pub risk: String,
@@ -1102,10 +1122,15 @@ pub struct CoverageGap {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct VulnerabilityClassCoverage {
+    #[serde(default)]
     pub class_id: String,
+    #[serde(default)]
     pub class_name: String,
+    #[serde(default)]
     pub considered: bool,
+    #[serde(default)]
     pub applicable: bool,
+    #[serde(default)]
     pub hunted: bool,
     #[serde(default)]
     pub skipped_reason: String,
@@ -1121,9 +1146,11 @@ pub struct VulnerabilityClassCoverage {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DedupeGroup {
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub root_cause: String,
+    #[serde(default)]
     pub primary_finding_id: String,
     #[serde(default)]
     pub finding_ids: Vec<String>,
@@ -1133,15 +1160,19 @@ pub struct DedupeGroup {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TraceResult {
+    #[serde(default)]
     pub finding_id: String,
+    #[serde(default)]
     pub reachable: bool,
+    #[serde(default)]
     pub severity_effect: String,
     #[serde(default)]
     pub evidence: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct TargetRef {
+    #[serde(default)]
     pub repo_path: String,
     #[serde(default)]
     pub git_ref: Option<String>,
@@ -1284,14 +1315,12 @@ pub struct SecurityHarnessReport {
     pub class_coverage: Vec<VulnerabilityClassCoverage>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 struct ReconStageOutput {
     architecture_context: String,
-    #[serde(default)]
     tasks: Vec<SecurityTask>,
-    #[serde(default)]
     coverage_gaps: Vec<CoverageGap>,
-    #[serde(default)]
     class_coverage: Vec<VulnerabilityClassCoverage>,
 }
 
@@ -1968,11 +1997,10 @@ fn taxonomy_class(class_id: &str) -> Option<&'static VulnerabilityClassDefinitio
 }
 
 fn build_class_coverage(
-    scope: &str,
-    architecture_context: &str,
+    _scope: &str,
+    _architecture_context: &str,
     provided: Vec<VulnerabilityClassCoverage>,
 ) -> Vec<VulnerabilityClassCoverage> {
-    let context = format!("{scope}\n{architecture_context}").to_ascii_lowercase();
     let mut provided_by_id: BTreeMap<String, VulnerabilityClassCoverage> = BTreeMap::new();
     for mut item in provided {
         let Some(id) = canonical_vulnerability_class(&item.class_id) else {
@@ -1985,22 +2013,16 @@ fn build_class_coverage(
     VULNERABILITY_TAXONOMY
         .iter()
         .map(|class| {
-            let had_provided = provided_by_id.contains_key(class.id);
             let mut item = provided_by_id.remove(class.id).unwrap_or_default();
-            let heuristic_applicable = class
-                .detector_keywords
-                .iter()
-                .any(|keyword| context.contains(&keyword.to_ascii_lowercase()));
             item.class_id = class.id.into();
             item.class_name = class.name.into();
             item.considered = true;
-            if !had_provided {
-                item.applicable = heuristic_applicable;
-            }
-            if !item.applicable && item.skipped_reason.trim().is_empty() {
-                item.skipped_reason =
-                    "recon did not identify this class as applicable to the current scope".into();
-            }
+            // Every class is hunted unconditionally (see
+            // ensure_taxonomy_hunt_tasks). Clear any stale skipped_reason
+            // so the report doesn't claim a class was skipped when in fact
+            // a specialist is going to look at it.
+            item.applicable = true;
+            item.skipped_reason.clear();
             item
         })
         .collect()
@@ -2022,19 +2044,29 @@ fn canonicalize_findings(findings: &mut [SecurityFinding]) {
     }
 }
 
+// Queue a hunt task for EVERY class in the taxonomy, regardless of what
+// the recon stage said. Rationale:
+//
+// 1. Weaker / non-Claude models drop the `class_coverage` field, mark
+//    everything as `applicable=false`, or hallucinate reasons to skip.
+//    The old "only queue applicable" gating let the orchestrator silently
+//    skip entire vulnerability classes that the user asked for.
+// 2. Per-class hunt specialists are cheap when there's nothing to find:
+//    they grep the scope, emit empty findings, and exit. Letting the
+//    specialist decide "no work here" is more reliable than letting the
+//    recon model decide "no need to spawn this specialist."
+// 3. The user explicitly asked for "just run every agent on it."
+//
+// Recon-supplied tasks still take precedence for their class — they
+// carry the model's narrower scope_hint and rationale. Only classes the
+// recon model did NOT cover get the generic taxonomy-driven task.
 fn ensure_taxonomy_hunt_tasks(checkpoint: &SecurityCheckpoint, tasks: &mut Vec<SecurityTask>) {
     let mut covered_classes: BTreeSet<&str> = tasks
         .iter()
         .filter_map(|task| canonical_vulnerability_class(&task.attack_class))
         .collect();
     let mut next = tasks.len() + 1;
-    for coverage in &checkpoint.class_coverage {
-        if !coverage.applicable || !coverage.skipped_reason.trim().is_empty() {
-            continue;
-        }
-        let Some(class) = taxonomy_class(&coverage.class_id) else {
-            continue;
-        };
+    for class in VULNERABILITY_TAXONOMY {
         if !covered_classes.insert(class.id) {
             continue;
         }
@@ -3568,6 +3600,30 @@ mod extract_json_tests {
         let raw = r#"{"x": 1, "y": [1, 2, 3]}"#;
         let candidate = extract_json(raw).expect("object should be found");
         assert_eq!(candidate, raw);
+    }
+
+    #[test]
+    fn recon_stage_output_tolerates_missing_required_fields() {
+        // Live-fire failure on deepseek-v4-pro: the recon subagent emits
+        // valid JSON but omits `architecture_context`. The old struct
+        // required every field; the new struct uses `#[serde(default)]`
+        // at the container level so any field can be missing.
+        let raw = r#"{"tasks": [{"id":"hunt-001","attack_class":"ssrf"}], "coverage_gaps": []}"#;
+        let recon: ReconStageOutput = parse_stage_json(raw).expect("recon should parse");
+        assert!(recon.architecture_context.is_empty());
+        assert_eq!(recon.tasks.len(), 1);
+    }
+
+    #[test]
+    fn recon_stage_output_tolerates_empty_object() {
+        // The minimum case: a model returns `{}` and the harness should
+        // still continue. The taxonomy fan-out will populate hunt tasks
+        // for every class regardless of what recon said.
+        let recon: ReconStageOutput = parse_stage_json("{}").expect("empty object should parse");
+        assert!(recon.architecture_context.is_empty());
+        assert!(recon.tasks.is_empty());
+        assert!(recon.coverage_gaps.is_empty());
+        assert!(recon.class_coverage.is_empty());
     }
 
     #[test]
