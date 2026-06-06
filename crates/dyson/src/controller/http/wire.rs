@@ -263,6 +263,14 @@ pub enum SseEvent {
     LlmError {
         message: String,
     },
+    /// The agent is auto-compacting its context because the estimated
+    /// token count crossed the compaction threshold.  Surfaces a
+    /// previously-silent latency stall as a transient UI notice
+    /// ("compacting context…") that the next `text` event clears.
+    Compacting {
+        estimated_tokens: usize,
+        threshold: usize,
+    },
     Title {
         title: String,
     },

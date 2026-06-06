@@ -852,6 +852,11 @@ function streamCallbacks(conv) {
       if (ref) appendToolText(ref, text + '\n');
     },
 
+    // Server announces it's about to auto-compact context. Show a
+    // transient "compacting context…" status; the next text/tool
+    // event flips phase back to its normal value and clears it.
+    onCompacting: () => updateSession(conv, s => ({ ...s, phase: 'compacting' })),
+
     onTitle: ({ title }) => {
       if (title) upsertConversation({ id: conv, title });
     },

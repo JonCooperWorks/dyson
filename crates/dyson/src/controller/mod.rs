@@ -1450,6 +1450,22 @@ pub trait Output: Send {
         Ok(())
     }
 
+    /// The agent is about to auto-compact its context.  Compaction makes
+    /// a full summarisation LLM call that typically adds 5-15 s of
+    /// latency the user can otherwise neither see nor predict.  Surface
+    /// it so the UI can render a transient notice ("compacting
+    /// context…") that the next text fragment naturally clears.
+    ///
+    /// Default no-op: terminal / telegram / capture controllers don't
+    /// need to render compaction state.
+    fn compacting_started(
+        &mut self,
+        _estimated_tokens: usize,
+        _threshold: usize,
+    ) -> std::result::Result<(), DysonError> {
+        Ok(())
+    }
+
     /// Flush any buffered output.
     fn flush(&mut self) -> std::result::Result<(), DysonError>;
 }

@@ -49,6 +49,7 @@ export function dispatchStreamEvent(msg, callbacks) {
     case 'artefact':    callbacks.onArtefact && callbacks.onArtefact(msg); return true;
     case 'title':       callbacks.onTitle && callbacks.onTitle(msg); return true;
     case 'llm_error':   callbacks.onError && callbacks.onError(msg.message); return true;
+    case 'compacting':  callbacks.onCompacting && callbacks.onCompacting(msg); return true;
     case 'done':        callbacks.onDone && callbacks.onDone(); return true;
     default:            return false;
   }

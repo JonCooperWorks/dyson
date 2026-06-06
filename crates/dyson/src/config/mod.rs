@@ -248,10 +248,16 @@ pub struct AgentSettings {
     /// Maximum retries on transient LLM failures: HTTP 429/529, network
     /// errors, and empty responses (no text and no tool calls).  Each
     /// retry uses exponential backoff with jitter and does not advance
-    /// the per-turn iteration counter.  Defaults to 6 — upstream rate
-    /// limits on budget providers (OpenRouter → DeepSeek) often take
-    /// ~30-60s to clear, so a longer total backoff window (~63s at
-    /// defaults) prevents premature give-ups.
+    /// the per-turn iteration counter.
+    ///
+    /// Defaults to 3.  The retry budget is spent TWICE per LLM call:
+    /// once inside `RetryingLlmClient` (covers pre-stream errors and
+    /// honours server `Retry-After` hints up to 90 s), then again in
+    /// the agent loop (covers mid-stream errors + empty responses).
+    /// 3 each means the worst-case backoff tail is ~15 s + ~15 s per
+    /// call instead of the previous ~63 s + ~63 s — still plenty for
+    /// transient 429s, dramatically less wait when the upstream is
+    /// sticky-flaky.
     pub max_retries: usize,
 
     /// Maximum LLM requests in flight at once for this provider.
@@ -261,7 +267,13 @@ pub struct AgentSettings {
     /// client.  Without a cap they fan out concurrently and trip per-minute
     /// rate limits.  The semaphore wraps the retry decorator, so permits
     /// are held across backoff sleeps — sticky 429s serialise instead of
-    /// thundering.  Defaults to 4; set to 0 to disable the cap.
+    /// thundering.
+    ///
+    /// Defaults to 8.  Was 4 historically; raised because parallel
+    /// subagents and dream tasks were serialising at the semaphore even
+    /// on healthy upstreams.  8 in-flight at ~2 req/s each = ~16 RPS,
+    /// well inside Anthropic Tier 4 (4000 RPM).  Lower if you're on a
+    /// budget tier or seeing per-minute 429s; set to 0 to disable.
     pub max_concurrent_llm_calls: usize,
 
     /// Maximum tokens the LLM can generate per turn.
@@ -937,10 +949,10 @@ impl Default for AgentSettings {
             // configure their model explicitly so Dyson never silently bills
             // a model they didn't choose.
             model: String::new(),
-            max_iterations: 40,
-            max_retries: 6,
-            max_concurrent_llm_calls: 4,
-            max_tokens: 8192,
+            max_iterations: 80,
+            max_retries: 3,
+            max_concurrent_llm_calls: 8,
+            max_tokens: 16384,
             system_prompt: "You are Dyson, a capable AI assistant.  You can use \
                             tools to help answer questions and complete tasks.\n\n\
                             ## Grounding\n\n\

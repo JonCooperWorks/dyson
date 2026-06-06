@@ -515,6 +515,18 @@ impl Output for SseOutput {
         Ok(())
     }
 
+    fn compacting_started(
+        &mut self,
+        estimated_tokens: usize,
+        threshold: usize,
+    ) -> std::result::Result<(), DysonError> {
+        self.send(SseEvent::Compacting {
+            estimated_tokens,
+            threshold,
+        });
+        Ok(())
+    }
+
     fn flush(&mut self) -> std::result::Result<(), DysonError> {
         // End of turn — the next turn's `tool_use_start` will set a
         // new id; until then there's no "current" tool.

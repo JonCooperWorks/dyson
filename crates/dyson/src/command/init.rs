@@ -67,8 +67,8 @@ pub fn run(
             },
             "agent": {
                 "provider": "default",
-                "max_iterations": 40,
-                "max_tokens": 8192
+                "max_iterations": 80,
+                "max_tokens": 16384
             },
             "workspace": {
                 "path": workspace_dir.to_string_lossy()

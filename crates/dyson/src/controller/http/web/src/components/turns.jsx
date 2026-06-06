@@ -693,6 +693,7 @@ function RunStatusStrip({ phase, tname, startedAt, onCancel, onJump, onCollapseA
   const elapsed = startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0;
   const phaseLabel = phase === 'tool' ? 'running tool'
     : phase === 'streaming' ? 'streaming'
+    : phase === 'compacting' ? 'compacting context'
     : 'thinking';
   const mm = Math.floor(elapsed / 60).toString();
   const ss = (elapsed % 60).toString().padStart(2, '0');

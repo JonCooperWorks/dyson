@@ -480,6 +480,12 @@ impl Agent {
                 messages = self.conversation.messages.len(),
                 "estimated context tokens exceed compaction threshold — compacting"
             );
+            // Surface to the controller so the UI can show a transient
+            // "compacting context…" notice instead of a silent stall
+            // while the summarisation LLM call runs.
+            if let Err(e) = output.compacting_started(estimated_tokens, threshold) {
+                tracing::warn!(error = %e, "failed to emit compacting_started event");
+            }
             if let Err(e) = self.compact(output).await {
                 tracing::warn!(
                     error = %e,
