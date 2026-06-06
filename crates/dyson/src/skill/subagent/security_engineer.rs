@@ -47,8 +47,10 @@ const DIRECT_TOOLS: &[&str] = &[
 const CHECKPOINT_PREFIX: &str = "kb/security-harness/checkpoints";
 pub const SECURITY_HARNESS_SCHEMA_VERSION: u32 = 1;
 pub const SECURITY_HARNESS_VERSION: &str = "security-harness-v1";
-pub const DEFAULT_HUNT_BATCH_SIZE: usize = 4;
-pub const DEFAULT_MAX_HUNT_BATCHES: usize = 4;
+/// Upper bound on class-specialist hunters spawned in one Hunt stage.  There
+/// are 20 canonical classes plus follow-up classes generated mid-run; this
+/// bounds fan-out so a pathological recon can't spawn unbounded children.
+pub const MAX_HUNT_CLASS_SPECIALISTS: usize = 24;
 
 const STAGES: &[SecurityHarnessStage] = &[
     SecurityHarnessStage::Recon,
@@ -696,6 +698,112 @@ pub struct VulnerabilityClassDefinition {
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn vulnerability_taxonomy() -> &'static [VulnerabilityClassDefinition] {
     VULNERABILITY_TAXONOMY
+}
+
+/// Tree-sitter `ast_query` patterns tuned for a single vulnerability class.
+///
+/// Hunters are told to "prefer AST and taint evidence over grep" but were
+/// never shown the query shapes for their class — a weaker model writes one
+/// bad S-expression, eats the error, and silently falls back to grep.  These
+/// give each class specialist a concrete starting point to run and narrow.
+/// Patterns are intentionally broad (capture the sink family, then inspect),
+/// and span the common languages so the specialist can pick the one matching
+/// the target.  Classes without high AST leverage return an empty slice; the
+/// briefing still carries their evidence requirements and detector seeds.
+fn class_ast_hints(class_id: &str) -> &'static [&'static str] {
+    match class_id {
+        "auth_authorization" => &[
+            "Locate authorization checks, then find handlers that never call one. Rust: `(call_expression function: (field_expression field: (field_identifier) @m) (#match? @m \"authorize|is_admin|owner|tenant|require_|verify_\"))`.",
+            "A handler that takes an attacker-controlled id and reaches a store lookup with no preceding owner/tenant predicate is the candidate — confirm with `taint_trace` from the id to the lookup.",
+        ],
+        "session_oauth_csrf" => &[
+            "Redirect sinks: `(call_expression function: (_) @f (#match? @f \"redirect|Redirect|Location|set_location\"))` — check the target is not attacker-controlled.",
+            "Find `state`/`nonce`/`pkce` handling and flag missing checks or non-constant-time `==` comparisons on them.",
+        ],
+        "ssrf_outbound_network" => &[
+            "Outbound clients taking a URL var. Rust: `(call_expression function: (field_expression field: (field_identifier) @m (#match? @m \"get|post|request|send\")))`; then `taint_trace` the URL back to request input.",
+            "Look for redirect-follow defaults and the absence of private/link-local/metadata (169.254.x) address rejection before the request fires.",
+        ],
+        "proxy_http_boundary" => &[
+            "Header forwarding: find where inbound headers are copied to an upstream request; flag hop-by-hop or `authorization`/`x-forwarded-*` passed across a trust boundary.",
+        ],
+        "container_sandbox_runtime" => &[
+            "Process/container launch sinks. Rust: `(call_expression function: (scoped_identifier) @f (#match? @f \"Command::new|process::Command\"))`; inspect args/env/mounts for injection or host exposure.",
+        ],
+        "secrets_credentials" => &[
+            "Secrets reaching logs: `(macro_invocation macro: (identifier) @m (#match? @m \"info|warn|error|debug|trace|println|eprintln\"))`, then inspect args for token/secret/key/password identifiers.",
+        ],
+        "file_archive_path" => &[
+            "File sinks taking a path var: open/read/write/`File::`/`fs::`; `taint_trace` the path to request input and check for canonicalization / `..` rejection in between.",
+            "Archive extraction loops that write entry names without validating the destination stays under the target dir.",
+        ],
+        "injection_unsafe_execution" => &[
+            "Command exec — Python: `(call function: (attribute attribute: (identifier) @m (#match? @m \"system|popen|exec\")))`; JS/TS: `(call_expression function: (member_expression property: (property_identifier) @m (#match? @m \"exec|execSync|spawn\")))`; Rust: `Command::new`.",
+            "SQL/template/eval: find query/render/eval sinks fed by string concatenation of attacker input rather than parameterization.",
+        ],
+        "crypto_randomness" => &[
+            "Non-CSPRNG for security values: `(call_expression function: (_) @f (#match? @f \"thread_rng|rand::random|Math.random|random\\\\.\"))` feeding tokens/ids/nonces.",
+            "Secret/MAC comparison with `==` instead of a constant-time compare.",
+        ],
+        "multi_tenant_isolation" => &[
+            "Store lookups by id missing an owner_id/tenant_id/instance_id predicate — ast_query the query-builder calls and inspect their filters; list endpoints that select without a tenant scope.",
+        ],
+        "webhooks_inbound_integrations" => &[
+            "Signature verification calls (hmac/verify/`==` on a signature); flag handlers that read/act on the body before or without verifying, and missing timestamp/replay windows.",
+        ],
+        "resource_exhaustion_dos" => &[
+            "Unbounded reads: `(call_expression function: (field_expression field: (field_identifier) @m (#match? @m \"read_to_end|read_to_string|bytes|body|collect\")))` with no size/element cap on an attacker-triggered path.",
+        ],
+        "agent_tool_boundary" => &[
+            "Find where tool/MCP allowlists are checked, then paths that dispatch a tool without the check; untrusted content (web/file/tool output) that can steer a privileged tool call.",
+        ],
+        "api_contract_input_validation" => &[
+            "Deserialization with permissive defaults / enum fallthrough: `(call_expression function: (_) @f (#match? @f \"from_str|from_slice|deserialize|parse\"))`; check default branches that permit on invalid input.",
+        ],
+        _ => &[],
+    }
+}
+
+/// Build the class-specialist briefing appended to the Hunt stage prompt so
+/// the spawned child is a dedicated hunter for exactly one vulnerability
+/// class — briefed with that class's evidence requirements, detector seeds,
+/// and the tree-sitter `ast_query` patterns to run instead of falling back to
+/// grep.  Returns `None` for follow-up classes not in the taxonomy (e.g.
+/// `consumer_path_review`), which fall back to the generic hunt prompt.
+fn class_specialist_briefing(class_id: &str) -> Option<String> {
+    let class = VULNERABILITY_TAXONOMY.iter().find(|c| c.id == class_id)?;
+    let mut b = String::new();
+    b.push_str("## Your specialization\n\n");
+    b.push_str(&format!(
+        "You are the dedicated **{}** (`{}`) hunter for this run. Hunt this class only; \
+         do not chase other classes — separate specialists cover them.\n\n",
+        class.name, class.id
+    ));
+    b.push_str(&format!("Focus: {}\n\n", class.description));
+    b.push_str("Evidence you must collect before reporting a candidate:\n");
+    for req in class.evidence_requirements {
+        b.push_str(&format!("- {req}\n"));
+    }
+    b.push_str("\nSearch seeds (detector keywords — starting points, not an allowlist): ");
+    b.push_str(&format!("`{}`.\n\n", class.detector_keywords.join("`, `")));
+    let hints = class_ast_hints(class.id);
+    if !hints.is_empty() {
+        b.push_str(
+            "AST query patterns for this class. Run these with `ast_query` (pass `language` \
+             or an `include` glob), then narrow from the matches — prefer this over grep:\n",
+        );
+        for hint in hints {
+            b.push_str(&format!("- {hint}\n"));
+        }
+        b.push('\n');
+    }
+    b.push_str(
+        "Workflow: enumerate entry points with `attack_surface_analyzer`, locate the \
+         sink/decision with the AST patterns above, then prove the connection with \
+         `taint_trace`. Report a candidate only with a source, a sink/decision, and a \
+         reachability claim backed by a real tool call.\n",
+    );
+    Some(b)
 }
 
 /// Build the OrchestratorConfig for the security_engineer role.
@@ -1988,18 +2096,30 @@ async fn run_hunt_stage(
     let mut aggregate = ToolOutput::success(String::new());
     let mut ran_batch = false;
 
-    for batch_index in 0..DEFAULT_MAX_HUNT_BATCHES {
-        let batch = next_hunt_batch(checkpoint, DEFAULT_HUNT_BATCH_SIZE);
+    // One dedicated specialist hunter per vulnerability class: group the
+    // pending tasks by attack_class and spawn a single class-focused child for
+    // each, briefed with that class's evidence requirements, detector seeds,
+    // and tree-sitter ast_query patterns.  Follow-up tasks appended mid-run
+    // (e.g. consumer_path_review) get their own specialist on a later pass.
+    for spawn_index in 0..MAX_HUNT_CLASS_SPECIALISTS {
+        let Some(class_id) = next_pending_class(checkpoint) else {
+            break;
+        };
+        let batch = pending_tasks_for_class(checkpoint, &class_id);
         if batch.is_empty() {
             break;
         }
         ran_batch = true;
         let mut checkpoint_for_prompt = checkpoint.clone();
         checkpoint_for_prompt.pending_tasks = batch.clone();
+        let stage_prompt = match class_specialist_briefing(&class_id) {
+            Some(briefing) => format!("{prompt}\n\n{briefing}"),
+            None => prompt.to_string(),
+        };
         let (raw, stage_out) = spawn_stage_with_checkpoint(
             rt,
             SecurityHarnessStage::Hunt,
-            prompt,
+            &stage_prompt,
             &checkpoint_for_prompt,
             28,
         )
@@ -2035,8 +2155,8 @@ async fn run_hunt_stage(
         store.save(checkpoint).await?;
         aggregate.checkpoints.push(CheckpointEvent {
             message: format!(
-                "security_engineer: hunt batch {} complete ({} completed, {} pending)",
-                batch_index + 1,
+                "security_engineer: hunt specialist `{}` complete ({} completed, {} pending)",
+                class_id,
                 checkpoint.completed_tasks.len(),
                 checkpoint
                     .pending_tasks
@@ -2044,7 +2164,7 @@ async fn run_hunt_stage(
                     .filter(|task| task.status == TaskStatus::Pending)
                     .count()
             ),
-            progress: Some(0.25 + (batch_index as f32 * 0.04)),
+            progress: Some(0.25 + (spawn_index as f32 * 0.02)),
         });
     }
 
@@ -2546,12 +2666,22 @@ fn extract_json(raw: &str) -> Option<&str> {
     (end > start).then(|| trimmed[start..=end].trim())
 }
 
-fn next_hunt_batch(checkpoint: &SecurityCheckpoint, batch_size: usize) -> Vec<SecurityTask> {
+/// The attack_class of the next pending hunt task, or `None` when no pending
+/// tasks remain.  Drives one-specialist-per-class fan-out in the Hunt stage.
+fn next_pending_class(checkpoint: &SecurityCheckpoint) -> Option<String> {
     checkpoint
         .pending_tasks
         .iter()
-        .filter(|t| t.status == TaskStatus::Pending)
-        .take(batch_size)
+        .find(|t| t.status == TaskStatus::Pending)
+        .map(|t| t.attack_class.clone())
+}
+
+/// All still-pending tasks sharing `class_id` — the work for one specialist.
+fn pending_tasks_for_class(checkpoint: &SecurityCheckpoint, class_id: &str) -> Vec<SecurityTask> {
+    checkpoint
+        .pending_tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Pending && t.attack_class == class_id)
         .cloned()
         .collect()
 }
@@ -2925,6 +3055,56 @@ async fn load_checkpoint_for_resume(
             Err(format!(
                 "multiple incomplete security_engineer checkpoints found; rerun with run_id:\n{list}"
             ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod specialist_tests {
+    use super::*;
+
+    #[test]
+    fn every_taxonomy_class_has_a_specialist_briefing() {
+        for class in VULNERABILITY_TAXONOMY {
+            let briefing = class_specialist_briefing(class.id)
+                .unwrap_or_else(|| panic!("no briefing for class {}", class.id));
+            assert!(
+                briefing.contains(class.name),
+                "briefing for {} missing class name",
+                class.id
+            );
+            // Evidence requirements must be carried into the briefing so the
+            // specialist knows what to collect before reporting.
+            assert!(
+                briefing.contains(class.evidence_requirements[0]),
+                "briefing for {} missing evidence requirements",
+                class.id
+            );
+        }
+    }
+
+    #[test]
+    fn follow_up_classes_fall_back_to_generic_prompt() {
+        // Tasks generated mid-run (e.g. consumer_path_review) are not in the
+        // taxonomy and must not produce a specialist briefing.
+        assert!(class_specialist_briefing("consumer_path_review").is_none());
+        assert!(class_specialist_briefing("").is_none());
+    }
+
+    #[test]
+    fn high_leverage_classes_carry_ast_patterns() {
+        // Classes where AST querying is the primary technique must ship
+        // concrete patterns so hunters do not silently fall back to grep.
+        for id in [
+            "auth_authorization",
+            "injection_unsafe_execution",
+            "ssrf_outbound_network",
+            "file_archive_path",
+        ] {
+            assert!(
+                !class_ast_hints(id).is_empty(),
+                "expected AST hints for {id}"
+            );
         }
     }
 }
