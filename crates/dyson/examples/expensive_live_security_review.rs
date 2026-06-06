@@ -88,21 +88,6 @@ struct Args {
     #[arg(long = "ref")]
     git_ref: Option<String>,
 
-    /// Toggle the security_engineer's language / framework cheatsheet
-    /// injection.  Default `on` — the orchestrator detects manifests in
-    /// the review root and appends matching sheets (lang/framework)
-    /// onto the child agent's system prompt before the first turn.
-    /// Pass `off` to disable injection for a run; pairs with
-    /// `--report-suffix` so A/B diffs are straightforward.
-    ///
-    /// Implemented by setting `DYSON_SECURITY_ENGINEER_CHEATSHEETS` in
-    /// the example process's environment — `OrchestratorTool` checks
-    /// that variable at `run()` time.  Env-gating keeps the example
-    /// from having to rebuild the OrchestratorConfig, which is shipped
-    /// as an `Arc<dyn Tool>` via `create_skills`.
-    #[arg(long, value_enum, default_value_t = CheatsheetMode::On)]
-    cheatsheets: CheatsheetMode,
-
     /// Pass the target's `description` string (which for CVE-repro
     /// targets names the specific CVE and sometimes the vulnerable API)
     /// into the orchestrator's `context` input.  Default `off` — the
@@ -115,12 +100,6 @@ struct Args {
     /// rather than from scratch.
     #[arg(long, value_enum, default_value_t = HintsMode::Off)]
     hints: HintsMode,
-}
-
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-enum CheatsheetMode {
-    On,
-    Off,
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum, PartialEq, Eq)]
@@ -271,7 +250,7 @@ const TARGETS: &[Target] = &[
                       into the generated function source without escaping.  An attacker who \
                       controls that option writes arbitrary JavaScript executed at render \
                       time.  Expected finding: the option-to-source concatenation in \
-                      `lib/ejs.js`; the prompt's JS cheatsheet covers `new Function`-family \
+                      `lib/ejs.js`; the JS specialist covers `new Function`-family \
                       RCE primitives which this maps onto.",
         summary: "EJS — embedded JavaScript template engine.",
         git_ref: Some("v3.1.6"),
@@ -589,7 +568,7 @@ const TARGETS: &[Target] = &[
         description: "Plausible Analytics v2.0.0 - web-application review scoped to \
                       the Phoenix controllers + views layer (`PlausibleWeb`).  No \
                       single published CVE pinned — the target exercises the \
-                      Phoenix cheatsheet against a real production Elixir app.  \
+                      Phoenix specialist against a real production Elixir app.  \
                       Expected-finding class: controller authorization gaps, \
                       session-token handling, untemplated user input reaching \
                       `raw/.html.heex` rendering, unsafe `String.to_atom` / \
@@ -713,7 +692,7 @@ const TARGETS: &[Target] = &[
     // planted bug (missing signer check, missing owner check, PDA bump
     // canonicalization, account-type confusion, etc.) while leaving the
     // `recommended` programs in `Checked and Cleared`.  Stress-tests
-    // whether the Solana cheatsheet actually fires the constraint-audit
+    // whether the Solana specialist actually fires the constraint-audit
     // posture the sheet prescribes.
     Target {
         name: "sealevel-attacks",
@@ -761,7 +740,7 @@ const TARGETS: &[Target] = &[
     // `saber_swap.arrow` account wasn't validated — attacker crafted
     // a fake arrow account pointing at a worthless token and minted
     // 2B CASH against it.  Classic missing-owner-check / account-
-    // spoofing primitive, textbook case for the Solana cheatsheet.
+    // spoofing primitive, textbook case for the Solana specialist.
     // Fix commit (2022-03-23, `7df6581`) patched `print_cash`/
     // `burn_cash` to bail — by then the funds were gone.  Pinned to
     // the commit immediately before the patch to keep the vulnerable
@@ -793,7 +772,7 @@ const TARGETS: &[Target] = &[
     // 2026-04, the largest in Solana DeFi.  Anchor-based lending
     // program with collateral accounts, oracle integration, vault
     // PDAs, and CPIs into both klend itself and SPL Token — the full
-    // constraint-audit surface that the `solana.md` cheatsheet
+    // constraint-audit surface that the Solana specialist briefing
     // (incl. the post-Cashio "unanchored validation chain" rule)
     // is built to attack.  Run against HEAD because it's a live
     // target, not a pinned-CVE rediscovery.
@@ -999,20 +978,6 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         settings.agent.model = m;
     }
 
-    // Propagate the --cheatsheets flag into the env so the orchestrator
-    // picks it up.  Must happen BEFORE any OrchestratorTool runs.
-    match args.cheatsheets {
-        CheatsheetMode::On => {
-            // SAFETY: single-threaded startup; no concurrent env reads.
-            // The reqwest/tokio machinery hasn't spun up background
-            // threads that read env yet.
-            unsafe { std::env::set_var("DYSON_SECURITY_ENGINEER_CHEATSHEETS", "on") };
-        }
-        CheatsheetMode::Off => {
-            unsafe { std::env::set_var("DYSON_SECURITY_ENGINEER_CHEATSHEETS", "off") };
-        }
-    }
-    println!("cheatsheets: {:?}", args.cheatsheets);
     // The example clones read-only source trees into $TMPDIR and the
     // security_engineer only needs read + ast access.  Skip the macOS
     // container sandbox check — if the user wanted it enforced they'd

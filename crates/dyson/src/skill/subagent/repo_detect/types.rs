@@ -1,6 +1,6 @@
-/// Languages for which a cheatsheet ships.  Covers every tree-sitter
+/// Languages for which a security briefing ships.  Covers every tree-sitter
 /// grammar dyson's `ast_query` supports, plus PHP + Lua (no in-tree
-/// grammar but the sheets still guide `read_file` / `search_files`
+/// grammar but the briefings still guide `read_file` / `search_files`
 /// work).
 ///
 /// Derives `Ord` so `BTreeMap<Language, usize>` can key directly on
@@ -31,9 +31,9 @@ pub enum Language {
     Lua,
 }
 
-/// Frameworks for which a cheatsheet ships.  Each binds to one language
-/// for detection purposes — the cap logic drops a framework if its
-/// language isn't in the top-2 selected.
+/// Frameworks for which a security briefing ships.  Detection scopes
+/// detected frameworks to the selected languages, and the hunt stage
+/// spawns one specialist hunter per detected framework.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Framework {
     Django,
@@ -95,63 +95,6 @@ pub enum Framework {
     Meteor,
     Nuxt,
     OpenResty,
-}
-
-impl Framework {
-    /// The language whose manifest advertises this framework.  Used by
-    /// the cap logic — a framework can only be kept while its language
-    /// is still in the selection.
-    pub(super) const fn language(self) -> Language {
-        match self {
-            Self::Django
-            | Self::Flask
-            | Self::FastApi
-            | Self::Aiohttp
-            | Self::Tornado
-            | Self::Sanic
-            | Self::Celery
-            | Self::Starlette
-            | Self::Pyramid
-            | Self::Falcon
-            | Self::Bottle => Language::Python,
-            Self::Express
-            | Self::NextJs
-            | Self::Fastify
-            | Self::NestJs
-            | Self::Trpc
-            | Self::Koa
-            | Self::Hono
-            | Self::SvelteKit
-            | Self::Remix
-            | Self::GraphQL
-            | Self::Hapi
-            | Self::Adonis
-            | Self::Meteor
-            | Self::Nuxt => Language::JavaScript,
-            Self::Actix | Self::Axum | Self::Rocket | Self::Warp | Self::Tonic | Self::Solana => {
-                Language::Rust
-            }
-            Self::Rails | Self::Sinatra => Language::Ruby,
-            Self::Spring
-            | Self::Quarkus
-            | Self::Micronaut
-            | Self::Javalin
-            | Self::Play
-            | Self::Dropwizard
-            | Self::Helidon
-            | Self::Vertx => Language::Java,
-            Self::Ktor => Language::Kotlin,
-            Self::AspNet => Language::CSharp,
-            Self::Laravel | Self::Symfony | Self::Slim | Self::CodeIgniter => Language::Php,
-            Self::Phoenix => Language::Elixir,
-            Self::Gin | Self::Echo | Self::Chi | Self::Fiber | Self::GorillaMux => Language::Go,
-            Self::Vapor | Self::Hummingbird => Language::Swift,
-            Self::Servant => Language::Haskell,
-            Self::Dream => Language::Ocaml,
-            Self::Cowboy => Language::Erlang,
-            Self::OpenResty => Language::Lua,
-        }
-    }
 }
 
 #[derive(Debug, Default)]

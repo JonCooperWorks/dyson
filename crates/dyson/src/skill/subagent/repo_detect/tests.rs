@@ -199,14 +199,14 @@ fn enum_lists_are_exhaustive() {
     }
 }
 
-/// For every variant: `lang_sheet` returns a non-empty name and a
+/// For every variant: `language_briefing` returns a non-empty name and a
 /// non-empty body that begins with the documented "Starting points"
 /// opener.  Catches a forgotten `include_str!` wiring (missing
 /// match arm would be a compile error — this asserts the content).
 #[test]
 fn every_language_has_a_nonempty_sheet() {
     for &lang in ALL_LANGUAGES {
-        let (name, body) = lang_sheet(lang);
+        let (name, body) = language_briefing(lang);
         assert!(
             name.starts_with("lang/"),
             "language name should be under lang/: got {name:?}"
@@ -225,7 +225,7 @@ fn every_language_has_a_nonempty_sheet() {
 #[test]
 fn every_framework_has_a_nonempty_sheet() {
     for &fw in ALL_FRAMEWORKS {
-        let (name, body) = framework_sheet(fw);
+        let (name, body) = framework_briefing(fw);
         assert!(
             name.starts_with("framework/"),
             "framework name should be under framework/: got {name:?}"
@@ -239,83 +239,10 @@ fn every_framework_has_a_nonempty_sheet() {
     }
 }
 
-/// Every framework's `language()` maps to a real Language variant
-/// — guards against dangling language references after an enum
-/// refactor.
-#[test]
-fn every_framework_binds_to_a_known_language() {
-    for &fw in ALL_FRAMEWORKS {
-        let lang = fw.language();
-        assert!(
-            ALL_LANGUAGES.contains(&lang),
-            "framework {fw:?} binds to language {lang:?} which isn't in ALL_LANGUAGES"
-        );
-    }
-}
-
 /// For every Language variant: a synthetic detection containing
 /// just that language composes a prompt whose included-sheet list
 /// names that language's sheet.  Exercises the full detection →
 /// compose pipeline per variant.
-#[test]
-fn compose_emits_sheet_name_for_every_language() {
-    for &lang in ALL_LANGUAGES {
-        let det = Detection {
-            languages: vec![lang],
-            frameworks: vec![],
-        };
-        let (_body, names) = compose_cheatsheets(&det);
-        let expected = lang_sheet(lang).0;
-        assert!(
-            names.contains(&expected),
-            "composing {lang:?} should emit {expected:?} in the sheet list, got {names:?}"
-        );
-    }
-}
-
-/// For every Framework variant: detection with the binding
-/// language + the framework emits BOTH sheet names.
-#[test]
-fn compose_emits_sheet_name_for_every_framework() {
-    for &fw in ALL_FRAMEWORKS {
-        let det = Detection {
-            languages: vec![fw.language()],
-            frameworks: vec![fw],
-        };
-        let (_body, names) = compose_cheatsheets(&det);
-        let expected_lang = lang_sheet(fw.language()).0;
-        let expected_fw = framework_sheet(fw).0;
-        assert!(
-            names.contains(&expected_lang),
-            "composing {fw:?} on {:?} should include {expected_lang:?}, got {names:?}",
-            fw.language()
-        );
-        assert!(
-            names.contains(&expected_fw),
-            "composing {fw:?} should include {expected_fw:?}, got {names:?}"
-        );
-    }
-}
-
-/// Every individual lang sheet fits solo under the cap (one lang's
-/// worth of content always ships, per the `compose_cheatsheets`
-/// policy).  Protects against an out-of-bound sheet being silently
-/// swallowed by the cap.
-#[test]
-fn every_language_sheet_fits_the_line_cap_solo() {
-    for &lang in ALL_LANGUAGES {
-        let det = Detection {
-            languages: vec![lang],
-            frameworks: vec![],
-        };
-        let (body, _names) = compose_cheatsheets(&det);
-        assert!(
-            line_count(&body) <= MAX_CHEATSHEET_LINES,
-            "single-language composition for {lang:?} exceeded the cap ({} lines)",
-            line_count(&body)
-        );
-    }
-}
 
 #[test]
 fn detects_rust_via_cargo_toml() {
@@ -389,41 +316,6 @@ fn detects_pinocchio_program() {
     );
     let det = detect_repo(tmp.path());
     assert_eq!(det.frameworks, vec![Framework::Solana]);
-}
-
-/// End-to-end: an Anchor program's Cargo.toml triggers detection
-/// AND the composed prompt carries the Solana cheatsheet body
-/// (not just the sheet name).  A missing `framework_sheet` arm,
-/// a typo'd `include_str!` path, or a wrong sheet opener would
-/// all slip past the per-framework structural guards — this
-/// walks the full detect → compose path end-to-end.
-#[test]
-fn solana_program_composes_solana_cheatsheet_into_prompt() {
-    let tmp = TempDir::new().unwrap();
-    write(
-        tmp.path(),
-        "Cargo.toml",
-        "[package]\nname = \"my-anchor-program\"\n[dependencies]\nanchor-lang = \"0.30\"\n",
-    );
-    let (body, names) = detect_and_compose(tmp.path());
-    assert!(
-        names.contains(&"framework/solana"),
-        "composed sheet list missing framework/solana: {names:?}"
-    );
-    // Unique-enough strings from framework/solana.md — a generic
-    // Rust-lang sheet wouldn't contain any of these.
-    assert!(
-        body.contains("Starting points for Solana programs"),
-        "solana sheet opener missing from composed body"
-    );
-    assert!(
-        body.contains("#[derive(Accounts)]"),
-        "Anchor constraint-audit section missing from composed body"
-    );
-    assert!(
-        body.contains("Missing signer check"),
-        "signer-check vuln class missing from composed body"
-    );
 }
 
 #[test]
@@ -528,7 +420,7 @@ fn build_gradle_kts_with_spring_detects_kotlin_plus_spring() {
     // After the build.gradle.kts → Kotlin split, a Kotlin-DSL
     // build file with a Spring Boot plugin should register as
     // Kotlin (because .kts) but still include Spring (since the
-    // framework cheatsheet binds to Java — but the language
+    // framework briefing binds to Java — but the language
     // doesn't surface; the framework stays through language()).
     // In practice: language is Kotlin, framework list still
     // contains Spring (bound to Java), so in composition Spring
@@ -1396,77 +1288,4 @@ fn missing_directory_yields_empty_detection() {
     let det = detect_repo(Path::new("/nonexistent/path/for/unit/test"));
     assert!(det.languages.is_empty());
     assert!(det.frameworks.is_empty());
-}
-
-#[test]
-fn compose_empty_detection_returns_empty() {
-    let det = Detection::default();
-    let (body, names) = compose_cheatsheets(&det);
-    assert!(body.is_empty());
-    assert!(names.is_empty());
-}
-
-#[test]
-fn compose_includes_lang_and_framework() {
-    let det = Detection {
-        languages: vec![Language::JavaScript],
-        frameworks: vec![Framework::Express],
-    };
-    let (body, names) = compose_cheatsheets(&det);
-    assert!(body.contains("lang/javascript"));
-    assert!(body.contains("framework/express"));
-    assert_eq!(names, vec!["lang/javascript", "framework/express"]);
-    // Line cap is generous enough to fit one lang + one framework.
-    assert!(line_count(&body) <= MAX_CHEATSHEET_LINES);
-}
-
-#[test]
-fn compose_respects_top_two_languages() {
-    let det = Detection {
-        languages: vec![
-            Language::JavaScript,
-            Language::Python,
-            Language::Go, // should be dropped — only top 2
-        ],
-        frameworks: vec![],
-    };
-    let (_body, names) = compose_cheatsheets(&det);
-    assert!(names.contains(&"lang/javascript"));
-    assert!(names.contains(&"lang/python"));
-    assert!(!names.contains(&"lang/go"));
-}
-
-#[test]
-fn compose_drops_frameworks_bound_to_excluded_language() {
-    let det = Detection {
-        languages: vec![Language::JavaScript, Language::Python],
-        // Actix belongs to Rust — Rust is not in the primary 2.
-        frameworks: vec![Framework::Actix, Framework::Express],
-    };
-    let (_body, names) = compose_cheatsheets(&det);
-    assert!(names.contains(&"framework/express"));
-    assert!(!names.contains(&"framework/actix"));
-}
-
-#[test]
-fn compose_cap_drops_frameworks_first() {
-    // Build a detection whose natural composition would blow past
-    // the cap: four languages is impossible (we take 2), so we
-    // instead force it by shrinking the cap for the test via a
-    // direct call.  The public `compose_cheatsheets` respects the
-    // constant — covered by the "respects cap" invariant below.
-    let det = Detection {
-        languages: vec![Language::JavaScript, Language::Python],
-        frameworks: vec![Framework::Express, Framework::Django, Framework::Flask],
-    };
-    let (body, names) = compose_cheatsheets(&det);
-    // Either all four sheets fit (cap not hit) or frameworks were
-    // dropped.  Either way the result respects the cap.
-    assert!(
-        line_count(&body) <= MAX_CHEATSHEET_LINES,
-        "composed body exceeded line cap"
-    );
-    // Sheets always include the two languages.
-    assert!(names.contains(&"lang/javascript"));
-    assert!(names.contains(&"lang/python"));
 }

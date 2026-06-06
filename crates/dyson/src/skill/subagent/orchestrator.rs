@@ -58,13 +58,6 @@ pub struct OrchestratorConfig {
     /// Optional protocol fragment injected into the parent's system prompt.
     /// Tells the parent when and how to invoke this orchestrator.
     pub injects_protocol: Option<&'static str>,
-    /// When true, detect languages/frameworks in the scoped review
-    /// directory at call time and append matching cheatsheets to the
-    /// child's system prompt.  Only `security_engineer` sets this —
-    /// other orchestrators (future devops, architect, ...) don't want
-    /// vuln cheatsheets.  Detection cost: one shallow directory walk
-    /// and 1–3 `toml` / `json` parses per invocation.
-    pub inject_cheatsheets: bool,
     /// When set, the child's final text is wrapped as an `Artefact` of
     /// this kind and attached to the returned `ToolOutput` — the HTTP
     /// controller renders it in the Artefacts tab.  The full text is
@@ -280,47 +273,13 @@ impl Tool for OrchestratorTool {
             });
         }
 
-        // Compose the child's system prompt.  Cheatsheets attach only
-        // for orchestrators that opt in (security_engineer today).
-        // Detection runs against the effective review root — the
-        // scoped `path` if provided, else the parent's working dir.
-        let mut system_prompt = self.config.system_prompt.to_string();
-        let mut active_sheets: Vec<String> = Vec::new();
-        if self.config.inject_cheatsheets && cheatsheets_enabled_via_env() {
-            let detect_root: &std::path::Path =
-                scoped_dir.as_deref().unwrap_or(ctx.working_dir.as_path());
-            let (body, sheets) = super::repo_detect::detect_and_compose(detect_root);
-            if !sheets.is_empty() {
-                tracing::info!(
-                    tool = self.config.name,
-                    sheets = ?sheets,
-                    "cheatsheets injected into security_engineer system prompt"
-                );
-                system_prompt.push_str("\n\n");
-                system_prompt.push_str(&body);
-                active_sheets = sheets.iter().map(|s| s.to_string()).collect();
-            } else {
-                tracing::info!(
-                    tool = self.config.name,
-                    "no cheatsheets matched — injecting none"
-                );
-            }
-        }
+        // The child's system prompt is the role prompt as-is.  Framework /
+        // language references are no longer injected into the shared prompt:
+        // the hunt stage detects the stack and spawns a dedicated specialist
+        // hunter per framework/language, each briefed with its own reference.
+        let system_prompt = self.config.system_prompt.to_string();
 
         if emits_progress {
-            let msg = if active_sheets.is_empty() {
-                format!("{}: no language cheatsheets matched", self.config.name)
-            } else {
-                format!(
-                    "{}: cheatsheets loaded ({})",
-                    self.config.name,
-                    active_sheets.join(", "),
-                )
-            };
-            phase_checkpoints.push(CheckpointEvent {
-                message: msg,
-                progress: Some(0.05),
-            });
             phase_checkpoints.push(CheckpointEvent {
                 message: format!(
                     "{}: subagent analysing — this may take several minutes",
@@ -350,7 +309,6 @@ impl Tool for OrchestratorTool {
                     events: ctx.subagent_events.clone(),
                     parent_tool_id: ctx.tool_use_id.clone(),
                     emit_artefact: self.config.emit_artefact,
-                    active_sheets,
                     max_tokens: self.config.max_tokens,
                 },
             )
@@ -592,25 +550,6 @@ fn provider_label(provider: &LlmProvider) -> String {
     // Debug print gives us "Anthropic", "OpenAi", etc. for the enum —
     // good enough for a metadata string without a new Display impl.
     format!("{provider:?}")
-}
-
-/// Environment-level kill switch for cheatsheet injection.  The
-/// `expensive_live_security_review` example sets this from its
-/// `--cheatsheets {on,off}` flag so A/B runs against the same target
-/// can measure the effect of the sheets.  Values that read as "off":
-/// `off`, `false`, `0`, `no`.  Anything else (including unset) = on.
-///
-/// Env-var gating keeps the example from having to rebuild or mutate
-/// the baked-in `OrchestratorConfig` — the tool is handed back through
-/// `create_skills` as an `Arc<dyn Tool>` with no outward config handle.
-fn cheatsheets_enabled_via_env() -> bool {
-    match std::env::var("DYSON_SECURITY_ENGINEER_CHEATSHEETS") {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "off" | "false" | "0" | "no"
-        ),
-        Err(_) => true,
-    }
 }
 
 /// Parsed input for `OrchestratorTool`.

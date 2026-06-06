@@ -42,7 +42,7 @@ const CAP_PER_CHAT: usize = 64;
 /// Running entries older than this at load time are reconciled to
 /// `Err` — assume the controller crashed mid-run and the terminal
 /// line never got written.  Longer than `security_engineer`'s 80-turn
-/// cap runs in practice (~30 min with cheatsheet injection).
+/// cap runs in practice (~30 min with full specialist fan-out).
 const STALE_RUNNING_SECS: u64 = 60 * 60;
 
 /// Lane classifier.  Today only "subagent" is populated by this

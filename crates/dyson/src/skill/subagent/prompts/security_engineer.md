@@ -51,5 +51,9 @@ Canonical vulnerability classes:
 - `audit_observability_forensics` — missing audit for sensitive actions, audit identity spoofing, log integrity gaps, cross-tenant log disclosure, insufficient failure telemetry, alert gaps.
 - `ci_cd_release_integrity` — CI secret exposure, overbroad deploy tokens, unpinned build actions/images, unsigned artifacts, provenance gaps, branch protection bypass, release drift.
 - `data_retention_privacy` — PII exposure, retention/deletion mismatch, backup/export privacy leaks, stale shares after deletion, analytics overcapture, privacy drift across live state/snapshots/logs.
+- `race_condition_toctou` — time-of-check/time-of-use gaps, non-atomic check-then-act, double-submit/double-spend, concurrent balance/quota/credit updates without locking, idempotency gaps under concurrency.
+- `business_logic_abuse` — negative/oversized quantities, price/discount/coupon tampering, multi-step flow or state-machine step skipping, one-time-action replay, limit/threshold bypass.
+- `mass_assignment_overposting` — binding attacker-controlled request fields onto models/records without an allowlist, letting attackers set privileged fields (role, owner, is_admin, price, tenant).
+- `denial_of_wallet_cost_abuse` — attacker-triggered unbounded spend on paid downstreams (LLM tokens, cloud APIs, egress) via missing per-actor quotas, unmetered loops, amplification, or uncapped retries.
 
 Return exactly the JSON shape requested by the stage prompt. No Markdown unless that stage explicitly asks for it.

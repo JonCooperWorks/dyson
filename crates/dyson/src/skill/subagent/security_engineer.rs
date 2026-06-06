@@ -21,6 +21,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::orchestrator::{OrchestratorConfig, OrchestratorHarness, OrchestratorInput};
+use super::repo_detect::{self, Detection};
 use super::{ChildSpawn, spawn_child};
 use crate::agent::rate_limiter::RateLimitedHandle;
 use crate::config::{AgentSettings, LlmProvider};
@@ -47,10 +48,12 @@ const DIRECT_TOOLS: &[&str] = &[
 const CHECKPOINT_PREFIX: &str = "kb/security-harness/checkpoints";
 pub const SECURITY_HARNESS_SCHEMA_VERSION: u32 = 1;
 pub const SECURITY_HARNESS_VERSION: &str = "security-harness-v1";
-/// Upper bound on class-specialist hunters spawned in one Hunt stage.  There
-/// are 20 canonical classes plus follow-up classes generated mid-run; this
-/// bounds fan-out so a pathological recon can't spawn unbounded children.
-pub const MAX_HUNT_CLASS_SPECIALISTS: usize = 24;
+/// Pure runaway backstop on class-specialist hunters spawned in one Hunt
+/// stage.  Specialist count is driven by the work list (one per applicable
+/// class), not by this number — it only stops a pathological recon that
+/// emits unbounded follow-up tasks from spawning forever.  It does not bind
+/// for the canonical taxonomy.
+pub const HUNT_SPECIALIST_BACKSTOP: usize = 64;
 
 const STAGES: &[SecurityHarnessStage] = &[
     SecurityHarnessStage::Recon,
@@ -683,6 +686,126 @@ const VULNERABILITY_TAXONOMY: &[VulnerabilityClassDefinition] = &[
             "analytics",
         ],
     },
+    VulnerabilityClassDefinition {
+        id: "race_condition_toctou",
+        name: "Race conditions and TOCTOU",
+        description: "Time-of-check/time-of-use gaps, non-atomic check-then-act, double-submit/double-spend, concurrent balance/quota/credit updates without locking or atomic operations, and idempotency gaps that only appear under concurrency.",
+        examples: &[
+            "TOCTOU",
+            "check-then-act",
+            "double-submit",
+            "double-spend",
+            "non-atomic balance update",
+            "missing row lock",
+            "idempotency gap under concurrency",
+        ],
+        evidence_requirements: &[
+            "concurrently reachable entry point",
+            "shared mutable state or resource",
+            "check and use separated without a lock or atomic step",
+            "observable effect of interleaving",
+        ],
+        detector_keywords: &[
+            "lock",
+            "mutex",
+            "atomic",
+            "transaction",
+            "for update",
+            "balance",
+            "quota",
+            "credit",
+            "idempotency",
+            "race",
+        ],
+    },
+    VulnerabilityClassDefinition {
+        id: "business_logic_abuse",
+        name: "Business logic abuse",
+        description: "Abuse of intended workflows that needs no technical exploit: negative or oversized quantities, price/discount/coupon tampering, multi-step flow or state-machine step skipping, replay of one-time actions, and limit/threshold bypass.",
+        examples: &[
+            "negative quantity",
+            "price tampering",
+            "coupon/discount abuse",
+            "step skipping",
+            "state machine bypass",
+            "one-time action replay",
+            "limit bypass",
+        ],
+        evidence_requirements: &[
+            "business operation entry point",
+            "intended workflow or invariant",
+            "attacker-controllable parameter or sequence",
+            "violated invariant or value effect",
+        ],
+        detector_keywords: &[
+            "price", "amount", "quantity", "discount", "coupon", "balance", "status", "workflow",
+            "step", "state", "limit",
+        ],
+    },
+    VulnerabilityClassDefinition {
+        id: "mass_assignment_overposting",
+        name: "Mass assignment and overposting",
+        description: "Binding attacker-controlled request fields directly onto models/records/structs without an allowlist, letting an attacker set privileged fields (role, owner, is_admin, price, tenant) that were never meant to be client-settable.",
+        examples: &[
+            "mass assignment",
+            "overposting",
+            "model binding without allowlist",
+            "settable role/owner/is_admin",
+            "serde flatten of request body into model",
+            "update_attributes without strong params",
+        ],
+        evidence_requirements: &[
+            "request body deserialization",
+            "target model/record/struct",
+            "absence of a field allowlist or guarded attributes",
+            "privileged field reachable from input",
+        ],
+        detector_keywords: &[
+            "deserialize",
+            "from_json",
+            "bind",
+            "update_attributes",
+            "permit",
+            "strong params",
+            "flatten",
+            "model",
+            "role",
+            "owner",
+        ],
+    },
+    VulnerabilityClassDefinition {
+        id: "denial_of_wallet_cost_abuse",
+        name: "Denial-of-wallet and cost abuse",
+        description: "Attacker-triggered unbounded spend on paid downstreams — LLM/model tokens, cloud APIs, egress, storage — via missing per-user/per-instance quotas, unmetered loops, amplification, or retries without caps.",
+        examples: &[
+            "unbounded LLM/token spend",
+            "unmetered paid API calls",
+            "missing per-user quota",
+            "retry without cap",
+            "amplification",
+            "egress cost abuse",
+        ],
+        evidence_requirements: &[
+            "attacker-reachable trigger",
+            "paid downstream call",
+            "per-actor quota/budget/rate enforcement point",
+            "amplification or loop factor",
+        ],
+        detector_keywords: &[
+            "openrouter",
+            "llm",
+            "token",
+            "quota",
+            "budget",
+            "rate",
+            "limit",
+            "retry",
+            "spend",
+            "cost",
+            "billing",
+            "egress",
+        ],
+    },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -760,6 +883,22 @@ fn class_ast_hints(class_id: &str) -> &'static [&'static str] {
         "api_contract_input_validation" => &[
             "Deserialization with permissive defaults / enum fallthrough: `(call_expression function: (_) @f (#match? @f \"from_str|from_slice|deserialize|parse\"))`; check default branches that permit on invalid input.",
         ],
+        "race_condition_toctou" => &[
+            "Find check-then-act: a read/exists/get followed by a write/update on the same resource with no lock or transaction between them.",
+            "Balance/quota/credit mutations that read-modify-write without an atomic op or `SELECT ... FOR UPDATE` — `ast_query` the update call, then inspect the surrounding read.",
+        ],
+        "business_logic_abuse" => &[
+            "Handlers that read numeric amount/quantity/price/status fields from the request and use them without range or invariant validation.",
+            "Multi-step flows where a later step does not verify the prior step completed — locate the step handler and check it re-validates state.",
+        ],
+        "mass_assignment_overposting" => &[
+            "Request-body deserialization into a model/struct: Rust `(call_expression function: (_) @f (#match? @f \"from_str|from_slice|deserialize\"))`; then inspect the target type for privileged fields with no allowlist.",
+            "`serde(flatten)` or wholesale `update(body)` / `update_attributes(params)` that copy every request field onto a record.",
+        ],
+        "denial_of_wallet_cost_abuse" => &[
+            "Paid-downstream calls (LLM/model/provider/cloud client) on an attacker-reachable path — `ast_query` the client call, then check for a per-actor quota/budget gate before it.",
+            "Loops or retries that issue paid calls without a cap or bounded backoff.",
+        ],
         _ => &[],
     }
 }
@@ -823,7 +962,6 @@ pub fn security_engineer_config() -> OrchestratorConfig {
         max_iterations: 80,
         max_tokens: 8192,
         injects_protocol: Some(include_str!("prompts/security_engineer_protocol.md")),
-        inject_cheatsheets: true,
         emit_artefact: Some(ArtefactKind::SecurityReview),
         harness: Some(OrchestratorHarness::SecurityResearch),
     }
@@ -1007,8 +1145,6 @@ pub struct TargetRef {
 pub struct ModelMetadata {
     pub provider: String,
     pub model: String,
-    #[serde(default)]
-    pub active_cheatsheets: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1195,7 +1331,6 @@ pub(crate) struct SecurityHarnessRuntime {
     pub events: Option<crate::controller::http::SubagentEventBus>,
     pub parent_tool_id: Option<String>,
     pub emit_artefact: Option<ArtefactKind>,
-    pub active_sheets: Vec<String>,
     pub max_tokens: u32,
 }
 
@@ -1244,7 +1379,6 @@ async fn run_security_harness_inner(
     let model = ModelMetadata {
         provider: provider_label(&rt.provider),
         model: rt.model.clone(),
-        active_cheatsheets: rt.active_sheets.clone(),
     };
 
     let resume_requested = rt.parsed.resume
@@ -2096,20 +2230,35 @@ async fn run_hunt_stage(
     let mut aggregate = ToolOutput::success(String::new());
     let mut ran_batch = false;
 
+    // Deterministic stack detection drives specialist selection.  Detection
+    // runs against the effective review root (scoped path if provided).
+    let target_root = rt
+        .scoped_dir
+        .as_deref()
+        .unwrap_or(rt.parent_working_dir.as_path());
+    let detection = repo_detect::detect_repo(target_root);
+
+    // Conservative pruning: drop only classes that are provably moot for the
+    // detected stack.  Everything behavior-dependent still runs.
+    prune_inapplicable_class_tasks(checkpoint, &detection);
+
     // One dedicated specialist hunter per vulnerability class: group the
     // pending tasks by attack_class and spawn a single class-focused child for
     // each, briefed with that class's evidence requirements, detector seeds,
     // and tree-sitter ast_query patterns.  Follow-up tasks appended mid-run
     // (e.g. consumer_path_review) get their own specialist on a later pass.
-    for spawn_index in 0..MAX_HUNT_CLASS_SPECIALISTS {
-        let Some(class_id) = next_pending_class(checkpoint) else {
+    // Specialist count is work-list-driven; the backstop only guards runaway.
+    let mut spawned_specialists = 0usize;
+    while let Some(class_id) = next_pending_class(checkpoint) {
+        if spawned_specialists >= HUNT_SPECIALIST_BACKSTOP {
             break;
-        };
+        }
         let batch = pending_tasks_for_class(checkpoint, &class_id);
         if batch.is_empty() {
             break;
         }
         ran_batch = true;
+        spawned_specialists += 1;
         let mut checkpoint_for_prompt = checkpoint.clone();
         checkpoint_for_prompt.pending_tasks = batch.clone();
         let stage_prompt = match class_specialist_briefing(&class_id) {
@@ -2164,7 +2313,56 @@ async fn run_hunt_stage(
                     .filter(|task| task.status == TaskStatus::Pending)
                     .count()
             ),
-            progress: Some(0.25 + (spawn_index as f32 * 0.02)),
+            progress: Some(0.25 + (spawned_specialists as f32 * 0.01)),
+        });
+    }
+
+    // Framework/language specialists: each stack briefing matched by
+    // deterministic detection, spawned as its own hunter briefed with its own reference
+    // material.  Augments the class specialists with idiomatic-sink coverage
+    // without bloating any shared prompt.
+    for spec in stack_specialists(&detection) {
+        ran_batch = true;
+        let mut checkpoint_for_prompt = checkpoint.clone();
+        checkpoint_for_prompt.pending_tasks = vec![SecurityTask {
+            id: spec.task_id.clone(),
+            attack_class: spec.label.clone(),
+            scope_hint: spec.scope_hint.clone(),
+            status: TaskStatus::Pending,
+            rationale: String::new(),
+        }];
+        let stage_prompt = format!("{prompt}\n\n{}", spec.briefing);
+        let (raw, stage_out) = spawn_stage_with_checkpoint(
+            rt,
+            SecurityHarnessStage::Hunt,
+            &stage_prompt,
+            &checkpoint_for_prompt,
+            28,
+        )
+        .await?;
+        merge_stage_tool_output(&mut aggregate, stage_out);
+        let hunt: HuntStageOutput = parse_stage_json(&raw)?;
+        let mut findings = hunt
+            .findings
+            .into_iter()
+            .filter(|finding| !finding.id.trim().is_empty())
+            .collect::<Vec<_>>();
+        canonicalize_findings(&mut findings);
+        checkpoint.findings_so_far.extend(findings);
+        checkpoint.coverage_gaps.extend(hunt.gaps);
+        let mut followups = hunt.follow_up_tasks;
+        canonicalize_tasks(&mut followups);
+        normalize_task_ids(&mut followups, "gap");
+        checkpoint.gapfill_tasks.extend(followups.clone());
+        checkpoint.pending_tasks.extend(followups);
+        checkpoint.updated_at = unix_seconds(std::time::SystemTime::now());
+        store.save(checkpoint).await?;
+        aggregate.checkpoints.push(CheckpointEvent {
+            message: format!(
+                "security_engineer: stack specialist `{}` complete",
+                spec.label
+            ),
+            progress: Some(0.42),
         });
     }
 
@@ -2172,6 +2370,77 @@ async fn run_hunt_stage(
         Ok(Some(aggregate))
     } else {
         Ok(None)
+    }
+}
+
+/// A framework/language briefing turned into its own specialist hunter.
+/// Carries only its own reference material, so detection-driven coverage no
+/// longer bloats (or gets truncated out of) any shared prompt.
+struct StackSpecialist {
+    task_id: String,
+    label: String,
+    scope_hint: String,
+    briefing: String,
+}
+
+/// Build the framework/language specialists for a detected stack: the top two
+/// languages plus every framework detection found (already scoped to selected
+/// languages by `detect_repo`).
+fn stack_specialists(detection: &Detection) -> Vec<StackSpecialist> {
+    let mut out = Vec::new();
+    for lang in detection.languages.iter().take(2) {
+        let (name, content) = repo_detect::language_briefing(*lang);
+        out.push(make_stack_specialist(name, content));
+    }
+    for fw in &detection.frameworks {
+        let (name, content) = repo_detect::framework_briefing(*fw);
+        out.push(make_stack_specialist(name, content));
+    }
+    out
+}
+
+fn make_stack_specialist(name: &str, content: &str) -> StackSpecialist {
+    StackSpecialist {
+        task_id: format!("sheet-{}", name.replace('/', "-")),
+        label: name.to_string(),
+        scope_hint: format!("{name} idiomatic security sinks and footguns"),
+        briefing: format!(
+            "## Your specialization\n\nYou are the dedicated **{name}** specialist hunter for this \
+             run. Hunt this stack's idiomatic security sinks, footguns, and misuse patterns; the \
+             cross-cutting vulnerability-class specialists cover the rest. Confirm with `ast_query` / \
+             `taint_trace` / `attack_surface_analyzer`; report a candidate only with a source, a \
+             sink/decision, and a reachability claim backed by a real tool call.\n\nReference for \
+             {name}:\n\n{content}\n"
+        ),
+    }
+}
+
+/// Conservative deterministic pruning: only classes that are unambiguously
+/// moot for the detected stack are dropped.  Everything behavior-dependent
+/// (auth, injection, crypto, ssrf, ...) always runs, so a detection miss can
+/// never create a coverage blind spot.
+fn class_provably_inapplicable(class_id: &str, detection: &Detection) -> bool {
+    // No recognized manifests/lockfiles anywhere → nothing to scan for known
+    // CVEs or supply-chain risk.  This is the one fully safe signal; expand
+    // here (CI, container, frontend) once detection grows recursive presence
+    // checks that won't false-prune nested artifacts.
+    class_id == "dependency_supply_chain" && detection.languages.is_empty()
+}
+
+fn prune_inapplicable_class_tasks(checkpoint: &mut SecurityCheckpoint, detection: &Detection) {
+    let pending = std::mem::take(&mut checkpoint.pending_tasks);
+    for mut task in pending {
+        if task.status == TaskStatus::Pending
+            && class_provably_inapplicable(&task.attack_class, detection)
+        {
+            task.status = TaskStatus::Completed;
+            if task.rationale.trim().is_empty() {
+                task.rationale = "skipped: provably inapplicable to detected stack".to_string();
+            }
+            checkpoint.completed_tasks.push(task);
+        } else {
+            checkpoint.pending_tasks.push(task);
+        }
     }
 }
 
@@ -3106,5 +3375,96 @@ mod specialist_tests {
                 "expected AST hints for {id}"
             );
         }
+    }
+
+    #[test]
+    fn stack_specialists_cover_detected_stack() {
+        let detection = Detection {
+            languages: vec![repo_detect::Language::Rust],
+            frameworks: vec![repo_detect::Framework::Axum],
+        };
+        let specs = stack_specialists(&detection);
+        let labels: Vec<&str> = specs.iter().map(|s| s.label.as_str()).collect();
+        assert!(labels.contains(&"lang/rust"), "labels: {labels:?}");
+        assert!(labels.contains(&"framework/axum"), "labels: {labels:?}");
+        // Each specialist's briefing embeds its own reference content, so the
+        // knowledge rides in that agent's own context — not a shared prompt.
+        let axum = specs.iter().find(|s| s.label == "framework/axum").unwrap();
+        assert!(axum.briefing.contains("framework/axum"));
+        assert!(
+            axum.briefing.len() > 200,
+            "briefing should embed the reference content"
+        );
+    }
+
+    #[test]
+    fn stack_specialists_empty_for_unknown_stack() {
+        assert!(stack_specialists(&Detection::default()).is_empty());
+    }
+
+    #[test]
+    fn supply_chain_pruned_only_when_no_manifests() {
+        assert!(class_provably_inapplicable(
+            "dependency_supply_chain",
+            &Detection::default()
+        ));
+        let with_lang = Detection {
+            languages: vec![repo_detect::Language::Rust],
+            frameworks: vec![],
+        };
+        assert!(!class_provably_inapplicable(
+            "dependency_supply_chain",
+            &with_lang
+        ));
+        // Behavior-dependent classes are never pruned, even on an empty stack.
+        for id in [
+            "auth_authorization",
+            "injection_unsafe_execution",
+            "crypto_randomness",
+        ] {
+            assert!(
+                !class_provably_inapplicable(id, &Detection::default()),
+                "{id} must never be pruned"
+            );
+        }
+    }
+
+    #[test]
+    fn prune_moves_inapplicable_task_to_completed() {
+        let mut cp = SecurityCheckpoint::new(
+            "run".into(),
+            TargetRef {
+                repo_path: ".".into(),
+                git_ref: None,
+            },
+            "scope".into(),
+            ModelMetadata {
+                provider: "p".into(),
+                model: "m".into(),
+            },
+            0,
+        );
+        cp.pending_tasks.push(SecurityTask {
+            id: "t1".into(),
+            attack_class: "dependency_supply_chain".into(),
+            scope_hint: "deps".into(),
+            status: TaskStatus::Pending,
+            rationale: String::new(),
+        });
+        cp.pending_tasks.push(SecurityTask {
+            id: "t2".into(),
+            attack_class: "auth_authorization".into(),
+            scope_hint: "auth".into(),
+            status: TaskStatus::Pending,
+            rationale: String::new(),
+        });
+        prune_inapplicable_class_tasks(&mut cp, &Detection::default());
+        assert_eq!(cp.pending_tasks.len(), 1);
+        assert_eq!(cp.pending_tasks[0].attack_class, "auth_authorization");
+        assert_eq!(cp.completed_tasks.len(), 1);
+        assert_eq!(
+            cp.completed_tasks[0].attack_class,
+            "dependency_supply_chain"
+        );
     }
 }
