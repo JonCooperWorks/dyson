@@ -11,6 +11,7 @@ import {
   setMind,
   setAgentInfo,
   setSkills,
+  mergeMcpProbes,
   setActivity,
   setTool,
   updateTool,
@@ -143,7 +144,19 @@ describe('app store — live / mind / activity / UI nonces', () => {
     });
     const snapshot = app.getSnapshot();
     expect(snapshot.agentName).toBe('axelrod');
-    expect(snapshot.skills.mcp).toEqual([{ name: 'mcp_massive', transport: 'http' }]);
+    // Each mcp entry carries placeholder probe fields so the chip
+    // rail UI shape is stable from first render — the live values
+    // arrive later via /api/mcp/servers (mergeMcpProbes).
+    expect(snapshot.skills.mcp).toEqual([{
+      name: 'mcp_massive',
+      transport: 'http',
+      title: '',
+      version: '',
+      instructions: '',
+      tools: 0,
+      loaded: null,
+      error: '',
+    }]);
     expect(snapshot.stateSync.configured).toBe(true);
     expect(snapshot.stateSync.last_success_at).toBe(1778100000);
   });
@@ -152,9 +165,68 @@ describe('app store — live / mind / activity / UI nonces', () => {
     setSkills({ mcp: [{ name: 'brave-search' }] });
     expect(app.getSnapshot().skills).toEqual({
       builtin: [],
-      mcp: [{ name: 'brave-search', transport: '' }],
+      mcp: [{
+        name: 'brave-search',
+        transport: '',
+        title: '',
+        version: '',
+        instructions: '',
+        tools: 0,
+        loaded: null,
+        error: '',
+      }],
       denials: [],
     });
+  });
+
+  it('mergeMcpProbes enriches matching mcp entries by name', () => {
+    setSkills({ mcp: [
+      { name: 'brave-search' },
+      { name: 'agentmail' },
+    ]});
+    mergeMcpProbes([
+      {
+        name: 'brave-search',
+        loaded: true,
+        title: 'Brave Search',
+        version: '1.2.3',
+        instructions: 'Use brave_web_search for general questions.',
+        tools: 5,
+      },
+      // Untouched name stays as-is so a probe miss doesn't clear the chip.
+      { name: 'never-configured', loaded: true, title: 'Ghost' },
+    ]);
+    const mcp = app.getSnapshot().skills.mcp;
+    expect(mcp).toHaveLength(2);
+    expect(mcp[0]).toEqual({
+      name: 'brave-search',
+      transport: '',
+      title: 'Brave Search',
+      version: '1.2.3',
+      instructions: 'Use brave_web_search for general questions.',
+      tools: 5,
+      loaded: true,
+      error: '',
+    });
+    expect(mcp[1]).toEqual({
+      name: 'agentmail',
+      transport: '',
+      title: '',
+      version: '',
+      instructions: '',
+      tools: 0,
+      loaded: null,
+      error: '',
+    });
+  });
+
+  it('mergeMcpProbes preserves prior entries when probe is empty or junk', () => {
+    setSkills({ mcp: [{ name: 'brave-search' }] });
+    const before = app.getSnapshot().skills.mcp;
+    mergeMcpProbes(null);
+    mergeMcpProbes([]);
+    mergeMcpProbes([{ name: '' }, { /* no name */ loaded: true }]);
+    expect(app.getSnapshot().skills.mcp).toEqual(before);
   });
 
   it('setActivity replaces lanes', () => {

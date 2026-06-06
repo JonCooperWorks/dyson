@@ -33,6 +33,7 @@ pub(super) mod conversations;
 mod elicitation;
 mod feedback;
 mod files;
+mod mcp;
 mod mind;
 mod model;
 mod providers;
@@ -276,6 +277,12 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&Method::POST, ["api", "mcp", "elicitations", id]) => {
             elicitation::respond(req, id).await
         }
+        // Live probe of every configured MCP server — surfaces the
+        // server-advertised title + instructions so the SPA can
+        // render meaningful chip tooltips and a description panel.
+        // Same /api/* auth as siblings; admin-only endpoints stay
+        // under /api/admin/.
+        (&Method::GET, ["api", "mcp", "servers"]) => mcp::list_servers(&state).await,
 
         (&Method::GET, ["api", "providers"]) => providers::list(&state),
         (&Method::GET, ["api", "commands"]) => commands::get(&state).await,

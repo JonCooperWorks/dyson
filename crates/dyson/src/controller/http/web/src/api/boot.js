@@ -9,6 +9,7 @@
 
 import {
   setLive, setConversations, setProviders, setMind, setActivity, setAgentInfo, setCommands,
+  mergeMcpProbes,
 } from '../store/app.js';
 
 const toConvRow = (c) => ({
@@ -64,6 +65,13 @@ export function boot(client, { pollMs = 10_000, doc = (typeof document !== 'unde
     Promise.resolve().then(() => client.getAgent()).then(a => {
       if (disposed) return;
       setAgentInfo(a || {});
+      // Once the static MCP list is in the store, probe each server's
+      // initialize for title/instructions and merge.  Backgrounded so
+      // a slow MCP server can't hold up the rest of the boot.
+      Promise.resolve().then(() => client.listMcpServers()).then(r => {
+        if (disposed) return;
+        mergeMcpProbes(r?.servers);
+      }).catch(() => {});
     }).catch(() => {});
 
     client.getActivity().then(act => {

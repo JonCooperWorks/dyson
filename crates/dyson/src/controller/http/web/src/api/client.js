@@ -83,6 +83,12 @@ export class DysonClient {
   }
   getMind()       { return this._json('/api/mind'); }
   getAgent()      { return this._json('/api/agent'); }
+  // Probe each configured MCP server's initialize response so the UI
+  // can render the server-supplied title + instructions instead of
+  // just the operator alias.  Slower than /api/agent (per-server
+  // timeout bounded by the backend route); call once at boot, not on
+  // every nav.
+  listMcpServers() { return this._json('/api/mcp/servers'); }
 
   getActivity(chatId) {
     const qs = chatId ? `?chat=${encodeURIComponent(chatId)}` : '';

@@ -127,12 +127,52 @@ function normalizeSkills(skills) {
         .map(s => ({
           name: String(s?.name || '').trim(),
           transport: String(s?.transport || '').trim(),
+          // Populated later from /api/mcp/servers (mergeMcpProbes).
+          // Kept here so the UI shape is stable from first render.
+          title: '',
+          version: '',
+          instructions: '',
+          tools: 0,
+          loaded: null,
+          error: '',
         }))
         .filter(s => s.name)
     : [];
   const builtin = Array.isArray(skills?.builtin) ? skills.builtin : [];
   const denials = Array.isArray(skills?.denials) ? skills.denials : [];
   return { builtin, mcp, denials };
+}
+
+/// Merge results from /api/mcp/servers into the existing mcp array.
+/// We match on `name` (the operator alias is shared between
+/// /api/agent's static config and /api/mcp/servers' live probe).
+/// Servers that aren't in the probe response are left untouched so
+/// a transient probe failure doesn't blank out the chip rail.
+export function mergeMcpProbes(probes) {
+  const list = Array.isArray(probes) ? probes : [];
+  if (!list.length) return;
+  const byName = new Map(
+    list
+      .filter(p => p && typeof p.name === 'string' && p.name)
+      .map(p => [p.name, p])
+  );
+  app.dispatch(s => {
+    const existing = Array.isArray(s.skills?.mcp) ? s.skills.mcp : [];
+    const nextMcp = existing.map(entry => {
+      const p = byName.get(entry.name);
+      if (!p) return entry;
+      return {
+        ...entry,
+        title: typeof p.title === 'string' ? p.title : '',
+        version: typeof p.version === 'string' ? p.version : '',
+        instructions: typeof p.instructions === 'string' ? p.instructions : '',
+        tools: Number.isFinite(p.tools) ? p.tools : 0,
+        loaded: typeof p.loaded === 'boolean' ? p.loaded : null,
+        error: typeof p.error === 'string' ? p.error : '',
+      };
+    });
+    return { ...s, skills: { ...s.skills, mcp: nextMcp } };
+  });
 }
 
 export function setSkills(skills) {

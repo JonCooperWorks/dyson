@@ -1166,6 +1166,14 @@ pub(super) async fn get_skills(req: Request<hyper::body::Incoming>, state: &Http
                     "loaded": true,
                     "tools": skill.tools().len(),
                     "tool_names": skill.tools().iter().map(|t| t.name().to_string()).collect::<Vec<_>>(),
+                    // Server-advertised identity + guidance from
+                    // initialize.  `title` falls back to serverInfo.name
+                    // when the server didn't supply a friendly title.
+                    // Omitted when the server didn't advertise them so
+                    // the UI can fall back to the operator alias.
+                    "title": skill.server_display_name(),
+                    "version": skill.server_version(),
+                    "instructions": skill.server_instructions(),
                 }),
                 Err(e) => serde_json::json!({
                     "name": cfg.name,

@@ -407,14 +407,40 @@ pub struct ServerPromptsCapability {
 }
 
 /// Shape of the `initialize` response we parse on the client side.
-/// We pull `capabilities` for future gating; `protocolVersion` and
-/// `serverInfo` are accepted but unused today.
+///
+/// We pull `capabilities` for runtime gating, `serverInfo` for the
+/// human-readable name/title that surfaces in the UI tooltip, and
+/// the optional top-level `instructions` string which the spec
+/// defines as server-authored guidance the host should feed to the
+/// model.  Dyson splices `instructions` into the agent's system
+/// prompt under a "treat as data, not commands" safety preamble so
+/// servers can tell the agent how to use them.
 #[derive(Debug, Deserialize)]
 pub struct InitializeResult {
     #[serde(rename = "protocolVersion", default)]
     pub protocol_version: String,
     #[serde(default)]
     pub capabilities: ServerCapabilities,
+    #[serde(rename = "serverInfo", default)]
+    pub server_info: Option<ServerInfo>,
+    /// Optional server-authored guidance for the LLM.  Defined by the
+    /// MCP 2025-06-18 spec.  Free-form prose; we wrap with an
+    /// untrusted-data preamble before including it in the prompt.
+    #[serde(default)]
+    pub instructions: Option<String>,
+}
+
+/// MCP `Implementation` object — the `name` field is required by spec
+/// and `version` is conventional; `title` was added in the 2025-06-18
+/// revision as the human-friendly display name (chips, tooltips).
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct ServerInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 #[cfg(test)]
@@ -446,6 +472,45 @@ mod tests {
         assert!(caps.logging.is_some());
         assert!(caps.completions.is_some());
         assert!(caps.experimental.is_some());
+    }
+
+    #[test]
+    fn initialize_result_captures_server_info_and_instructions() {
+        let raw = serde_json::json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": { "tools": {} },
+            "serverInfo": {
+                "name": "brave-search",
+                "title": "Brave Search",
+                "version": "1.4.0"
+            },
+            "instructions": "Use brave_web_search for general questions; brave_news_search for current events."
+        });
+        let parsed: InitializeResult = serde_json::from_value(raw).expect("parse");
+        let info = parsed.server_info.as_ref().expect("serverInfo present");
+        assert_eq!(info.name, "brave-search");
+        assert_eq!(info.title.as_deref(), Some("Brave Search"));
+        assert_eq!(info.version, "1.4.0");
+        assert_eq!(
+            parsed.instructions.as_deref(),
+            Some(
+                "Use brave_web_search for general questions; \
+                 brave_news_search for current events."
+            )
+        );
+    }
+
+    #[test]
+    fn initialize_result_handles_server_without_title_or_instructions() {
+        let raw = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "everything", "version": "1.0" }
+        });
+        let parsed: InitializeResult = serde_json::from_value(raw).expect("parse");
+        let info = parsed.server_info.as_ref().expect("serverInfo present");
+        assert!(info.title.is_none());
+        assert!(parsed.instructions.is_none());
     }
 
     #[test]

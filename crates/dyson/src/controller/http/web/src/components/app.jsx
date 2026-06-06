@@ -627,19 +627,61 @@ function ConversationView({ conv, toolRef, setToolRef }) {
 
 const noop = () => {};
 
+/// Render a per-chip tooltip line — server-supplied title (if it
+/// differs from the alias) on the first line, then either the
+/// truncated `instructions` block (the MCP server's charter) or the
+/// connection error if it failed to load.  Falls back to just the
+/// alias before the probe completes.
+function mcpChipTooltip(server) {
+  const alias = String(server?.name || '').trim();
+  if (!alias) return '';
+  const title = String(server?.title || '').trim();
+  const heading = title && title !== alias ? `${alias} — ${title}` : alias;
+  if (server?.loaded === false) {
+    const err = String(server?.error || 'failed to load').trim();
+    return `${heading}\n\n(${err})`;
+  }
+  const instr = String(server?.instructions || '').trim();
+  const tools = Number.isFinite(server?.tools) ? server.tools : 0;
+  const toolsLine = tools ? `${tools} tool${tools === 1 ? '' : 's'}` : '';
+  if (!instr && !toolsLine) return heading;
+  // Cap instructions at ~280 chars so the native tooltip stays
+  // readable; full text lives in the Mind > MCP detail panel.
+  const cap = 280;
+  const snippet = instr.length > cap ? `${instr.slice(0, cap).trimEnd()}…` : instr;
+  const lines = [heading];
+  if (toolsLine) lines.push(toolsLine);
+  if (snippet) lines.push('', snippet);
+  return lines.join('\n');
+}
+
 function McpSummary({ servers }) {
-  const names = (Array.isArray(servers) ? servers : [])
-    .map(s => String(s?.name || '').trim())
-    .filter(Boolean);
-  if (!names.length) return null;
-  const shown = names.slice(0, 3);
-  const remaining = names.length - shown.length;
-  const title = `MCP: ${names.join(', ')}`;
+  const list = (Array.isArray(servers) ? servers : [])
+    .filter(s => s && String(s.name || '').trim());
+  if (!list.length) return null;
+  const shown = list.slice(0, 3);
+  const remaining = list.length - shown.length;
+  const railTitle = `MCP: ${list.map(s => s.name).join(', ')}`;
   return (
-    <div className="mcp-summary" title={title} aria-label={title}>
-      <span className="mcp-summary-label">MCP</span>
-      {shown.map(name => <span className="mcp-summary-chip mono" key={name}>{name}</span>)}
-      {remaining > 0 && <span className="mcp-summary-more mono">+{remaining}</span>}
+    <div className="mcp-summary" aria-label={railTitle}>
+      <span className="mcp-summary-label" title={railTitle}>MCP</span>
+      {shown.map(srv => (
+        <span
+          className="mcp-summary-chip mono"
+          key={srv.name}
+          title={mcpChipTooltip(srv)}
+        >
+          {srv.name}
+        </span>
+      ))}
+      {remaining > 0 && (
+        <span
+          className="mcp-summary-more mono"
+          title={list.slice(3).map(mcpChipTooltip).join('\n\n— — —\n\n')}
+        >
+          +{remaining}
+        </span>
+      )}
     </div>
   );
 }
