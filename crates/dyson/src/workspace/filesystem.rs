@@ -620,6 +620,24 @@ fn workspace_child_path(root: &Path, name: &str) -> Result<PathBuf> {
 /// with keys prefixed by `prefix` (e.g., `kb/raw/article.md`).
 ///
 /// Skips symlinks to avoid cycles.  Silently ignores unreadable entries.
+// Files we surface from the kb/ subtree on workspace load.
+//
+// Historically this was `.md` only — kb/ is "wiki / long-term notes" by
+// convention, and skipping every other extension kept cold-load cost
+// bounded.  But that filter has become a footgun: the security_engineer
+// harness writes checkpoints to `kb/security-harness/checkpoints/<run_id>.json`
+// expecting them to survive a workspace round-trip (write via set+save,
+// read back via get).  Pre-fix, those JSON files made it to disk but
+// the next workspace instance silently ignored them — GET returned
+// 404, and the harness's resume path fell through to the filesystem
+// fallback, which only works inside the same container.
+//
+// Solution: allow .json alongside .md.  Both formats are bounded text
+// and there's no other workspace subtree that would suddenly become
+// enormous as a result.  Add explicit extensions here if a new
+// workspace-bound format shows up.
+const KB_LOADABLE_EXTS: &[&str] = &[".md", ".json"];
+
 fn read_dir_recursive(dir: &Path, prefix: &str, files: &mut HashMap<String, String>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -639,7 +657,7 @@ fn read_dir_recursive(dir: &Path, prefix: &str, files: &mut HashMap<String, Stri
         if path.is_dir() {
             read_dir_recursive(&path, &format!("{prefix}/{name}"), files);
         } else if path.is_file()
-            && name.ends_with(".md")
+            && KB_LOADABLE_EXTS.iter().any(|ext| name.ends_with(ext))
             && let Ok(content) = std::fs::read_to_string(&path)
         {
             files.insert(format!("{prefix}/{name}"), content);
@@ -1242,5 +1260,67 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SUFFIX: AtomicU64 = AtomicU64::new(0);
         SUFFIX.fetch_add(1, Ordering::Relaxed)
+    }
+
+    // ---- kb/ subtree loads .json alongside .md ---------------------------
+
+    #[test]
+    fn kb_subtree_loads_json_files_after_set_and_reload() {
+        // The security_engineer harness writes checkpoint JSON to
+        // kb/security-harness/checkpoints/<run_id>.json via set+save
+        // and expects to read it back via get on the next workspace
+        // instance.  Pre-fix the recursive loader filtered to .md only,
+        // so the JSON survived to disk but was invisible to every
+        // subsequent open — GET returned 404 and the harness's resume
+        // path silently fell through to the in-container fallback.
+        let dir = std::env::temp_dir().join(format!("dyson-kb-json-{}", rand_suffix()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Write a checkpoint-shaped JSON into the kb subtree, simulating
+        // what CheckpointStore::save does.
+        {
+            let mut ws =
+                FilesystemWorkspace::load(&dir, MemoryConfig::default()).expect("fresh workspace");
+            ws.set(
+                "kb/security-harness/checkpoints/sec-fake-1.json",
+                r#"{"schema_version":1,"run_id":"sec-fake-1"}"#,
+            );
+            ws.save().expect("save");
+        }
+
+        // Re-open: the JSON should round-trip.
+        let ws2 = FilesystemWorkspace::load(&dir, MemoryConfig::default()).expect("reload");
+        let got = ws2.get("kb/security-harness/checkpoints/sec-fake-1.json");
+        assert!(
+            got.is_some(),
+            "kb/*.json should survive a workspace round-trip — \
+             before this fix the recursive loader was .md-only"
+        );
+        let body = got.unwrap();
+        assert!(body.contains("\"run_id\":\"sec-fake-1\""));
+
+        // .md files in kb/ should still load (regression guard for the
+        // unrelated path).
+        {
+            let mut ws3 =
+                FilesystemWorkspace::load(&dir, MemoryConfig::default()).expect("reopen");
+            ws3.set("kb/notes/idea.md", "# idea");
+            ws3.save().expect("save md");
+        }
+        let ws4 = FilesystemWorkspace::load(&dir, MemoryConfig::default()).expect("reload md");
+        assert_eq!(ws4.get("kb/notes/idea.md").as_deref(), Some("# idea"));
+
+        // Other extensions still ignored (no .txt, .bin, etc. — we did
+        // NOT broaden the filter to "all files", only .md + .json).
+        let bin_path = dir.join("kb").join("blob.bin");
+        std::fs::create_dir_all(bin_path.parent().unwrap()).unwrap();
+        std::fs::write(&bin_path, b"binary").unwrap();
+        let ws5 = FilesystemWorkspace::load(&dir, MemoryConfig::default()).expect("reload bin");
+        assert!(
+            ws5.get("kb/blob.bin").is_none(),
+            "non-allowlisted extensions should still be ignored"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

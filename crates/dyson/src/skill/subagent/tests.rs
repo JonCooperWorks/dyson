@@ -2391,9 +2391,17 @@ async fn security_engineer_resumes_json_checkpoint_after_filesystem_workspace_re
     ));
     {
         let guard = reloaded_workspace.read().await;
+        // Post-fix: the filesystem workspace's recursive loader now picks
+        // up .json alongside .md (KB_LOADABLE_EXTS in filesystem.rs).
+        // The old assertion documented the broken behavior — checkpoint
+        // JSON was on disk but invisible to every subsequent open, which
+        // is what the composer-upload demo on TARS unearthed.  Now the
+        // round-trip works.
         assert!(
-            guard.get(&checkpoint_rel).is_none(),
-            "filesystem workspace indexes markdown kb files, not checkpoint JSON"
+            guard.get(&checkpoint_rel).is_some(),
+            "kb/security-harness/checkpoints/<run_id>.json must round-trip \
+             through a fresh filesystem workspace — the .md-only filter \
+             was the root cause of the composer-upload regression"
         );
     }
 
