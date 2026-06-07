@@ -620,23 +620,18 @@ fn workspace_child_path(root: &Path, name: &str) -> Result<PathBuf> {
 /// with keys prefixed by `prefix` (e.g., `kb/raw/article.md`).
 ///
 /// Skips symlinks to avoid cycles.  Silently ignores unreadable entries.
-// Files we surface from the kb/ subtree on workspace load.
+// Per-file size cap on what we hydrate from the kb/ subtree at workspace
+// load.  The in-memory file map is a `HashMap<String, String>` — every
+// loaded file's bytes sit in RSS until the process restarts.  A 10 MB
+// cap is generous enough for every JSON checkpoint / Markdown note /
+// YAML config we've seen and small enough that an accidental kb/log/
+// dump doesn't OOM the controller.
 //
-// Historically this was `.md` only — kb/ is "wiki / long-term notes" by
-// convention, and skipping every other extension kept cold-load cost
-// bounded.  But that filter has become a footgun: the security_engineer
-// harness writes checkpoints to `kb/security-harness/checkpoints/<run_id>.json`
-// expecting them to survive a workspace round-trip (write via set+save,
-// read back via get).  Pre-fix, those JSON files made it to disk but
-// the next workspace instance silently ignored them — GET returned
-// 404, and the harness's resume path fell through to the filesystem
-// fallback, which only works inside the same container.
-//
-// Solution: allow .json alongside .md.  Both formats are bounded text
-// and there's no other workspace subtree that would suddenly become
-// enormous as a result.  Add explicit extensions here if a new
-// workspace-bound format shows up.
-const KB_LOADABLE_EXTS: &[&str] = &[".md", ".json"];
+// Files over the cap are skipped at load with a `tracing::warn!`.  They
+// remain readable via the in-tree `bash` / `read_file` tools and via
+// the agent's direct filesystem access — only the workspace hashmap
+// representation (and therefore /api/mind, ws.get, ws.search) is gated.
+const KB_LOAD_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 fn read_dir_recursive(dir: &Path, prefix: &str, files: &mut HashMap<String, String>) {
     let entries = match std::fs::read_dir(dir) {
@@ -656,10 +651,32 @@ fn read_dir_recursive(dir: &Path, prefix: &str, files: &mut HashMap<String, Stri
 
         if path.is_dir() {
             read_dir_recursive(&path, &format!("{prefix}/{name}"), files);
-        } else if path.is_file()
-            && KB_LOADABLE_EXTS.iter().any(|ext| name.ends_with(ext))
-            && let Ok(content) = std::fs::read_to_string(&path)
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+
+        // Size gate — silently skip oversize files (with a warn so the
+        // operator can find out why a particular path isn't surfacing).
+        if let Ok(meta) = std::fs::metadata(&path)
+            && meta.len() > KB_LOAD_FILE_MAX_BYTES
         {
+            tracing::warn!(
+                path = %path.display(),
+                size_bytes = meta.len(),
+                cap_bytes = KB_LOAD_FILE_MAX_BYTES,
+                "skipped kb/ file over per-file load cap"
+            );
+            continue;
+        }
+
+        // Try to read as UTF-8 text.  Binary files (PDFs, images,
+        // compiled blobs) fail here and are silently skipped — they
+        // remain on disk and reachable through the agent's direct
+        // filesystem tools, just not through the workspace map.  This
+        // is the deliberate behavior: workspace lookup is text-only.
+        if let Ok(content) = std::fs::read_to_string(&path) {
             files.insert(format!("{prefix}/{name}"), content);
         }
     }
@@ -1265,60 +1282,82 @@ mod tests {
     // ---- kb/ subtree loads .json alongside .md ---------------------------
 
     #[test]
-    fn kb_subtree_loads_json_files_after_set_and_reload() {
-        // The security_engineer harness writes checkpoint JSON to
-        // kb/security-harness/checkpoints/<run_id>.json via set+save
-        // and expects to read it back via get on the next workspace
-        // instance.  Pre-fix the recursive loader filtered to .md only,
-        // so the JSON survived to disk but was invisible to every
-        // subsequent open — GET returned 404 and the harness's resume
-        // path silently fell through to the in-container fallback.
-        let dir = std::env::temp_dir().join(format!("dyson-kb-json-{}", rand_suffix()));
+    fn kb_subtree_round_trips_arbitrary_text_files() {
+        // The composer-upload flow + security_engineer resume path
+        // surfaced the original bug (.md-only filter dropped checkpoint
+        // JSON on workspace reload).  The fix went further: any text
+        // file in kb/ round-trips now, with binaries naturally skipped
+        // by the read-as-UTF-8 attempt and oversize files skipped by
+        // KB_LOAD_FILE_MAX_BYTES.
+        let dir = std::env::temp_dir().join(format!("dyson-kb-any-{}", rand_suffix()));
         let _ = std::fs::create_dir_all(&dir);
 
-        // Write a checkpoint-shaped JSON into the kb subtree, simulating
-        // what CheckpointStore::save does.
+        // Drop a variety of text formats across the kb/ tree.
+        let cases: &[(&str, &str)] = &[
+            ("kb/notes/idea.md", "# idea"),
+            (
+                "kb/security-harness/checkpoints/sec-fake-1.json",
+                r#"{"schema_version":1,"run_id":"sec-fake-1"}"#,
+            ),
+            ("kb/config/sample.yaml", "key: value\n"),
+            ("kb/data/list.txt", "one\ntwo\nthree\n"),
+            ("kb/queries.sql", "select 1;"),
+            ("kb/notes/no-extension", "still text"),
+        ];
         {
             let mut ws =
                 FilesystemWorkspace::load(&dir, MemoryConfig::default()).expect("fresh workspace");
-            ws.set(
-                "kb/security-harness/checkpoints/sec-fake-1.json",
-                r#"{"schema_version":1,"run_id":"sec-fake-1"}"#,
-            );
+            for (name, body) in cases {
+                ws.set(name, body);
+            }
             ws.save().expect("save");
         }
 
-        // Re-open: the JSON should round-trip.
         let ws2 = FilesystemWorkspace::load(&dir, MemoryConfig::default()).expect("reload");
-        let got = ws2.get("kb/security-harness/checkpoints/sec-fake-1.json");
-        assert!(
-            got.is_some(),
-            "kb/*.json should survive a workspace round-trip — \
-             before this fix the recursive loader was .md-only"
-        );
-        let body = got.unwrap();
-        assert!(body.contains("\"run_id\":\"sec-fake-1\""));
-
-        // .md files in kb/ should still load (regression guard for the
-        // unrelated path).
-        {
-            let mut ws3 =
-                FilesystemWorkspace::load(&dir, MemoryConfig::default()).expect("reopen");
-            ws3.set("kb/notes/idea.md", "# idea");
-            ws3.save().expect("save md");
+        for (name, expected) in cases {
+            assert_eq!(
+                ws2.get(name).as_deref(),
+                Some(*expected),
+                "kb/ round-trip lost {name} — workspace loader should accept any text file"
+            );
         }
-        let ws4 = FilesystemWorkspace::load(&dir, MemoryConfig::default()).expect("reload md");
-        assert_eq!(ws4.get("kb/notes/idea.md").as_deref(), Some("# idea"));
 
-        // Other extensions still ignored (no .txt, .bin, etc. — we did
-        // NOT broaden the filter to "all files", only .md + .json).
+        // Binary file in kb/ — read_to_string returns Err on invalid
+        // UTF-8, so the file is silently skipped and `get` returns None.
+        // The file remains on disk and reachable through the agent's
+        // direct filesystem tools.
         let bin_path = dir.join("kb").join("blob.bin");
         std::fs::create_dir_all(bin_path.parent().unwrap()).unwrap();
-        std::fs::write(&bin_path, b"binary").unwrap();
-        let ws5 = FilesystemWorkspace::load(&dir, MemoryConfig::default()).expect("reload bin");
+        std::fs::write(&bin_path, [0u8, 159, 146, 150]).unwrap(); // invalid UTF-8
+        let ws3 = FilesystemWorkspace::load(&dir, MemoryConfig::default()).expect("reload bin");
         assert!(
-            ws5.get("kb/blob.bin").is_none(),
-            "non-allowlisted extensions should still be ignored"
+            ws3.get("kb/blob.bin").is_none(),
+            "binary files should be skipped by the UTF-8 decode boundary"
+        );
+        assert!(
+            bin_path.exists(),
+            "the binary itself must still be on disk — workspace skip is a load-time gate, not a delete"
+        );
+
+        // Oversize text file — over KB_LOAD_FILE_MAX_BYTES, gets
+        // skipped at load with a warn.  We don't actually allocate
+        // 10 MB here; we just verify the gate by writing a small
+        // sentinel file that exceeds a deliberately tiny cap in the
+        // assertion path (this test pins the gate's existence, not
+        // the exact limit — KB_LOAD_FILE_MAX_BYTES is the
+        // production value).
+        let large_path = dir.join("kb").join("oversize.txt");
+        // Write 16 MB to exceed the 10 MB cap.
+        let chunk = "x".repeat(1024 * 1024); // 1 MB
+        let mut content = String::with_capacity(16 * 1024 * 1024);
+        for _ in 0..16 {
+            content.push_str(&chunk);
+        }
+        std::fs::write(&large_path, &content).unwrap();
+        let ws4 = FilesystemWorkspace::load(&dir, MemoryConfig::default()).expect("reload large");
+        assert!(
+            ws4.get("kb/oversize.txt").is_none(),
+            "files larger than KB_LOAD_FILE_MAX_BYTES should be skipped"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
