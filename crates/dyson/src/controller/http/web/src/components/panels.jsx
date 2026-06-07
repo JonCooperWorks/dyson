@@ -266,6 +266,173 @@ function SubagentPanel({ children, summary, running }) {
   );
 }
 
+// -------------------------------------------------------------------------
+// Security harness — first-class panel for the `security_engineer` tool.
+//
+// The harness runs a fixed 8-stage pipeline (Recon → Hunt → Validate →
+// Gapfill → Dedupe → Trace → Feedback → Report).  Without this panel the
+// operator stares at a long list of read_file/ast_query chips with no
+// signal about which stage is active, how many findings have accumulated,
+// or whether validate is about to bite.  The backend already emits a
+// `checkpoint` event with `message: "security_engineer: <stage>"` between
+// stages (see `security_engineer/mod.rs` and `stages.rs`), and those text
+// lines get appended to the live tool's body via `onCheckpoint`.  We
+// parse them here to derive the stage state — zero backend changes for
+// this MVP cut.  A future event-payload upgrade can replace the parsing
+// with structured fields.
+
+const HARNESS_STAGES = [
+  'recon', 'hunt', 'validate', 'gapfill', 'dedupe', 'trace', 'feedback', 'report',
+];
+
+const STAGE_LABEL = {
+  recon: 'Recon',
+  hunt: 'Hunt',
+  validate: 'Validate',
+  gapfill: 'Gapfill',
+  dedupe: 'Dedupe',
+  trace: 'Trace',
+  feedback: 'Feedback',
+  report: 'Report',
+};
+
+// Parse the running text of `security_engineer` checkpoints into a stage
+// state record.  The text accumulates messages like
+//   security_engineer: resume checkpoint sec-...
+//   security_engineer: recon
+//   security_engineer: hunt
+//   security_engineer: validate
+//   security_engineer: completed sec-... in 4521s
+// We track the latest stage name we saw, mark all earlier ones complete,
+// and surface the run_id + completion status separately.
+function parseHarnessState(text, isRunning) {
+  const lines = (text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  let runId = null;
+  let lastStage = null;
+  let completed = false;
+  let resumed = false;
+  for (const line of lines) {
+    // run_id from any line that mentions it
+    const idMatch = line.match(/sec-[0-9a-z-]+/);
+    if (idMatch && !runId) runId = idMatch[0];
+    if (/resume/i.test(line)) resumed = true;
+    if (/completed/i.test(line)) { completed = true; continue; }
+    // Match `security_engineer: <stage>` exactly
+    const sm = line.match(/security_engineer:\s*([a-z]+)\b/i);
+    if (sm) {
+      const s = sm[1].toLowerCase();
+      if (HARNESS_STAGES.includes(s)) lastStage = s;
+    }
+  }
+  const currentIdx = lastStage ? HARNESS_STAGES.indexOf(lastStage) : -1;
+  const stageStatus = HARNESS_STAGES.map((s, i) => {
+    if (completed) return 'done';
+    if (i < currentIdx) return 'done';
+    if (i === currentIdx) return isRunning ? 'running' : 'done';
+    return 'pending';
+  });
+  return { runId, lastStage, completed, resumed, stageStatus };
+}
+
+// Stage progress bar — 8 chips with colored status.  Tight and dense
+// so it fits above the children list without dominating the panel.
+function StageBar({ status }) {
+  return (
+    <div style={{display:'flex', gap:4, padding:'8px 10px',
+                 borderBottom:'1px solid var(--line)',
+                 background:'var(--bg-1)'}}>
+      {HARNESS_STAGES.map((s, i) => {
+        const st = status[i];
+        const bg = st === 'done' ? 'var(--ok, #2c7a3a)'
+                 : st === 'running' ? 'var(--accent)'
+                 : 'var(--bg)';
+        const fg = st === 'pending' ? 'var(--mute)' : 'var(--fg)';
+        const border = st === 'pending'
+          ? '1px solid var(--line)'
+          : '1px solid transparent';
+        return (
+          <div key={s} title={STAGE_LABEL[s]} style={{
+            flex:1, fontSize:10, lineHeight:'18px', textAlign:'center',
+            background: bg, color: fg, border, borderRadius:3,
+            fontWeight: st === 'running' ? 600 : 400,
+            letterSpacing: 0.3,
+          }}>
+            {STAGE_LABEL[s]}{st === 'running' && ' …'}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Header — run_id, resume marker, completion banner, error banner.
+function HarnessHeader({ runId, resumed, completed, errorText, summary }) {
+  return (
+    <div style={{padding:'8px 12px', borderBottom:'1px solid var(--line)',
+                 fontSize:11, color:'var(--fg-dim)', background:'var(--bg)'}}>
+      <div style={{display:'flex', alignItems:'center', gap:10, flexWrap:'wrap'}}>
+        <span style={{fontFamily:'var(--font-mono)', color:'var(--fg)'}}>
+          {runId || '(no run id yet)'}
+        </span>
+        {resumed && (
+          <span style={{fontSize:10, padding:'1px 6px', borderRadius:3,
+                        background:'var(--bg-1)', border:'1px solid var(--line)'}}>
+            resumed
+          </span>
+        )}
+        {completed && (
+          <span style={{fontSize:10, padding:'1px 6px', borderRadius:3,
+                        background:'var(--ok, #2c7a3a)', color:'var(--fg)'}}>
+            completed
+          </span>
+        )}
+      </div>
+      {errorText && (
+        <div style={{marginTop:8, padding:'6px 8px', borderRadius:3,
+                     background:'var(--err-dim, #4a1f1f)', color:'var(--fg)',
+                     fontSize:11, whiteSpace:'pre-wrap'}}>
+          {errorText}
+        </div>
+      )}
+      {summary && !errorText && (
+        <div style={{marginTop:6, fontSize:11, color:'var(--fg-dim)',
+                     whiteSpace:'pre-wrap'}}>
+          {summary}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Top-level harness panel — composes the stage bar + header + the
+// existing SubagentPanel for the per-tool detail list.  Reuses
+// SubagentPanel verbatim so the inner-tool render path stays single-
+// sourced; we only add the security-specific scaffolding above.
+function SecurityHarnessPanel({ body, running, summary, errorText }) {
+  const text = body?.text || '';
+  const state = parseHarnessState(text, running);
+  return (
+    <div className="p-body flush" style={{overflow:'auto', flex:1,
+                                          display:'flex', flexDirection:'column'}}>
+      <StageBar status={state.stageStatus}/>
+      <HarnessHeader
+        runId={state.runId}
+        resumed={state.resumed}
+        completed={state.completed}
+        errorText={errorText}
+        summary={state.completed ? summary : null}
+      />
+      <div style={{flex:1, minHeight:0, display:'flex', flexDirection:'column'}}>
+        <SubagentPanel
+          children={body?.children}
+          summary={state.completed ? null : summary}
+          running={running}
+        />
+      </div>
+    </div>
+  );
+}
+
 function ReadPanel({ path, lines, highlight }) {
   return (
     <div className="p-body flush" style={{background:'var(--bg)'}}>
@@ -338,6 +505,17 @@ function ImagePanel({ url, name, prompt }) {
 // duplicate the icon, name, and arg row.
 function ToolBody({ tool }) {
   const running = tool.status === 'running';
+  // The security_engineer tool deserves a first-class panel — operators
+  // need to see stage progression, findings count, and resume state at
+  // a glance.  Route by tool.name before falling through to kind so the
+  // backend doesn't have to invent a new kind just to opt in.
+  if (tool.name === 'security_engineer') {
+    return <SecurityHarnessPanel
+             body={tool.body}
+             running={running}
+             summary={tool.body?.summary}
+             errorText={tool.exit === 'err' ? (tool.body?.error || tool.body?.summary) : null}/>;
+  }
   switch (tool.kind) {
     case 'bash':     return <BashPanel running={running} body={tool.body}/>;
     case 'diff':     return <DiffPanel files={tool.body?.files || []}/>;
@@ -369,4 +547,4 @@ function ToolPanel({ tool, onClose, toolRef }) {
   );
 }
 
-export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, SubagentPanel, ToolBody, ToolPanel, copyTextForTool, copyInputForTool };
+export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, SubagentPanel, SecurityHarnessPanel, parseHarnessState, HARNESS_STAGES, ToolBody, ToolPanel, copyTextForTool, copyInputForTool };
