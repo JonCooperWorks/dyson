@@ -299,10 +299,26 @@ async fn run_security_harness_inner(
                 };
                 checkpoint.updated_at = unix_seconds(std::time::SystemTime::now());
                 let _ = store.save(&checkpoint).await;
-                return Ok(ToolOutput::error(format!(
+                // Emit a final CheckpointEvent carrying the per-stage failure
+                // message so the frontend's SecurityHarnessPanel can render an
+                // "errored at <stage>" badge + error banner.  Before this push,
+                // the failure was only visible on the outer tool chip's
+                // is_error flag — the panel itself had no signal to read.
+                out.checkpoints.push(CheckpointEvent {
+                    message: format!("security_engineer: {stage} failed: {e}"),
+                    progress: progress_for(*stage),
+                });
+                let mut err_out = ToolOutput::error(format!(
                     "security_engineer {stage} failed: {e}. checkpoint={}",
                     checkpoint.run_id
-                )));
+                ));
+                // Carry the accumulated stream + child metadata onto the
+                // error output so the frontend sees the same history it
+                // would have seen for a successful return.
+                err_out.checkpoints = out.checkpoints;
+                err_out.artefacts = out.artefacts;
+                err_out.metadata = out.metadata;
+                return Ok(err_out);
             }
         }
 

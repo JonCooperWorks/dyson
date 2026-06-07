@@ -136,4 +136,126 @@ describe('SecurityHarnessPanel rendering', () => {
     const { container } = render(<SecurityHarnessPanel body={body} running={true}/>);
     expect(container.textContent).toContain('no run id yet');
   });
+
+  // ---- Phase 2 behaviors --------------------------------------------------
+
+  it('auto-derives error banner from body.text when exit=err', () => {
+    const body = {
+      text: 'security_engineer: validate failed: no JSON object found in stage output',
+      children: [],
+    };
+    const { container } = render(<SecurityHarnessPanel body={body} exit="err" running={false}/>);
+    expect(container.textContent).toContain('no JSON object found');
+    expect(container.textContent).toContain('failed at Validate');
+  });
+
+  it('falls back to a generic message when exit=err but no failure line was captured', () => {
+    const body = { text: 'security_engineer: starting checkpoint sec-x', children: [] };
+    const { container } = render(<SecurityHarnessPanel body={body} exit="err" running={false}/>);
+    expect(container.textContent).toContain('Harness returned an error');
+  });
+
+  it('renders the findings counter when a findings line is in the stream', () => {
+    const body = {
+      text: [
+        'security_engineer: hunt',
+        'security_engineer: findings critical=1 high=20 medium=48 low=47',
+      ].join('\n'),
+      children: [],
+    };
+    const { container } = render(<SecurityHarnessPanel body={body} running={true}/>);
+    expect(container.textContent).toMatch(/116 findings/);
+    expect(container.textContent).toContain('critical');
+    expect(container.textContent).toContain('high');
+  });
+
+  it('hides the findings counter when total is zero', () => {
+    const body = { text: 'security_engineer: recon', children: [] };
+    const { container } = render(<SecurityHarnessPanel body={body} running={true}/>);
+    expect(container.textContent).not.toMatch(/\d+ findings?/);
+  });
+
+  it('renders the class coverage grid when class hunt outcomes appear', () => {
+    const body = {
+      text: [
+        'security_engineer: hunt',
+        'security_engineer: hunt: class auth_authorization hunted (3 findings)',
+        'security_engineer: hunt: class session_oauth_csrf cleared',
+        'security_engineer: hunt: class frontend_security_ux inapplicable',
+      ].join('\n'),
+      children: [],
+    };
+    const { container } = render(<SecurityHarnessPanel body={body} running={true}/>);
+    expect(container.textContent).toContain('Class coverage (3/24 reported)');
+    expect(container.textContent).toContain('auth_authorization');
+    expect(container.textContent).toContain('session_oauth_csrf');
+    expect(container.textContent).toContain('frontend_security_ux');
+  });
+
+  it('shows the "failed at <stage>" badge with the right stage label', () => {
+    const body = {
+      text: [
+        'security_engineer: hunt',
+        'security_engineer: validate',
+        'security_engineer: validate failed: parse error',
+      ].join('\n'),
+      children: [],
+    };
+    const { container } = render(<SecurityHarnessPanel body={body} exit="err" running={false}/>);
+    expect(container.textContent).toContain('failed at Validate');
+  });
+});
+
+describe('parseHarnessState — Phase 2 fields', () => {
+  it('extracts a per-class findings count from a hunt summary line', () => {
+    const text = 'security_engineer: hunt: class auth_authorization hunted (5 findings)';
+    const s = parseHarnessState(text, true);
+    expect(s.classStatus.auth_authorization).toEqual({ status: 'hunted', count: 5 });
+  });
+
+  it('extracts cleared and inapplicable status without a count', () => {
+    const text = [
+      'security_engineer: hunt: class session_oauth_csrf cleared',
+      'security_engineer: hunt: class frontend_security_ux inapplicable',
+    ].join('\n');
+    const s = parseHarnessState(text, true);
+    expect(s.classStatus.session_oauth_csrf).toEqual({ status: 'cleared', count: 0 });
+    expect(s.classStatus.frontend_security_ux).toEqual({ status: 'inapplicable', count: 0 });
+  });
+
+  it('sums up findings_by_severity from the `findings` summary line', () => {
+    const text = 'security_engineer: findings critical=1 high=20 medium=48 low=47';
+    const s = parseHarnessState(text, true);
+    expect(s.findings).toEqual({ critical: 1, high: 20, medium: 48, low: 47 });
+    expect(s.totalFindings).toBe(116);
+  });
+
+  it('marks failedAtStage from a `<stage> failed:` line', () => {
+    const text = 'security_engineer: validate failed: no JSON object found';
+    const s = parseHarnessState(text, false, true);
+    expect(s.failedAtStage).toBe('validate');
+    expect(s.failureMessage).toContain('no JSON object');
+    expect(s.errored).toBe(true);
+  });
+
+  it('marks the failed stage as "errored", not "done"', () => {
+    const text = [
+      'security_engineer: recon',
+      'security_engineer: hunt',
+      'security_engineer: validate',
+      'security_engineer: validate failed: parse error',
+    ].join('\n');
+    const s = parseHarnessState(text, false, true);
+    const idx = HARNESS_STAGES.indexOf('validate');
+    expect(s.stageStatus[idx]).toBe('errored');
+    expect(s.stageStatus[0]).toBe('done'); // recon
+    expect(s.stageStatus[1]).toBe('done'); // hunt
+  });
+
+  it('captures a bare `error` line as failureMessage when no stage-failed line is present', () => {
+    const text = 'security_engineer: error (4072940ms)';
+    const s = parseHarnessState(text, false, true);
+    expect(s.failureMessage).toContain('4072940');
+    expect(s.errored).toBe(true);
+  });
 });

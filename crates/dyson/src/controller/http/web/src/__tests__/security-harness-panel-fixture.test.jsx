@@ -87,4 +87,74 @@ describe('SecurityHarnessPanel — rendered structure', () => {
     const { container } = render(<SecurityHarnessPanel body={body} running={true}/>);
     dump('4. empty / just started', container.innerHTML);
   });
+
+  // ---- Phase 2 shapes -----------------------------------------------------
+
+  it('5. mid-hunt with live class coverage + findings counter', () => {
+    const body = {
+      text: [
+        'security_engineer: starting checkpoint sec-1780830172-2',
+        'security_engineer: recon',
+        'security_engineer: hunt',
+        'security_engineer: hunt: class auth_authorization hunted (3 findings)',
+        'security_engineer: hunt: class ssrf_outbound_network hunted (2 findings)',
+        'security_engineer: hunt: class session_oauth_csrf cleared',
+        'security_engineer: hunt: class frontend_security_ux inapplicable',
+        'security_engineer: hunt: class container_sandbox_runtime hunted (1 findings)',
+        'security_engineer: hunt: class injection_unsafe_execution hunted (4 findings)',
+        'security_engineer: findings critical=1 high=4 medium=5 low=0',
+      ].join('\n'),
+      children: [
+        { id: '1', name: 'read_file', status: 'done', exit: 'ok', dur: '12ms' },
+        { id: '2', name: 'ast_query', status: 'done', exit: 'ok', dur: '4ms' },
+      ],
+    };
+    const { container } = render(<SecurityHarnessPanel body={body} running={true}/>);
+    dump('5. mid-hunt + class grid + findings', container.innerHTML);
+  });
+
+  it('6. failed at validate (the c-0051 shape, now with auto-derived error banner)', () => {
+    const body = {
+      text: [
+        'security_engineer: resume checkpoint sec-1780830172-2',
+        'security_engineer: recon',
+        'security_engineer: hunt',
+        'security_engineer: hunt: class auth_authorization hunted (5 findings)',
+        'security_engineer: hunt: class ssrf_outbound_network hunted (8 findings)',
+        'security_engineer: findings critical=1 high=20 medium=48 low=47',
+        'security_engineer: validate',
+        'security_engineer: validate failed: no JSON object found in stage output',
+      ].join('\n'),
+      children: [],
+    };
+    const { container } = render(<SecurityHarnessPanel body={body} exit="err" running={false}/>);
+    dump('6. validate failed — full state + auto error banner', container.innerHTML);
+  });
+
+  it('7. completed with full findings + class coverage', () => {
+    const body = {
+      text: [
+        'security_engineer: starting checkpoint sec-z',
+        'security_engineer: recon',
+        'security_engineer: hunt',
+        'security_engineer: hunt: class auth_authorization hunted (3 findings)',
+        'security_engineer: hunt: class ssrf_outbound_network cleared',
+        'security_engineer: findings critical=1 high=3 medium=5 low=3',
+        'security_engineer: validate',
+        'security_engineer: gapfill',
+        'security_engineer: dedupe',
+        'security_engineer: trace',
+        'security_engineer: feedback',
+        'security_engineer: report',
+        'security_engineer: completed sec-z in 312s',
+      ].join('\n'),
+      children: [],
+      summary: 'Security review complete: 12 confirmed findings (1 CRITICAL, 3 HIGH, 5 MEDIUM, 3 LOW)',
+    };
+    const { container } = render(<SecurityHarnessPanel
+      body={body}
+      running={false}
+      summary={body.summary}/>);
+    dump('7. clean completion + findings + classes', container.innerHTML);
+  });
 });

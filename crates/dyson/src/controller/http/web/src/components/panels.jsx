@@ -296,66 +296,139 @@ const STAGE_LABEL = {
   report: 'Report',
 };
 
-// Parse the running text of `security_engineer` checkpoints into a stage
-// state record.  The text accumulates messages like
-//   security_engineer: resume checkpoint sec-...
+const SEVERITY_LABELS = ['critical', 'high', 'medium', 'low'];
+const SEVERITY_COLOR = {
+  critical: '#cf2a2a',
+  high: '#d97706',
+  medium: '#ca8a04',
+  low: '#6b7280',
+};
+
+// Parse the running text of `security_engineer` checkpoints into a state
+// record.  The text accumulates messages like
+//   security_engineer: starting checkpoint sec-...
 //   security_engineer: recon
 //   security_engineer: hunt
+//   security_engineer: hunt: class auth_authorization hunted (3 findings)
+//   security_engineer: hunt: class session_oauth_csrf cleared
+//   security_engineer: findings critical=1 high=20 medium=48 low=47
 //   security_engineer: validate
+//   security_engineer: validate failed: no JSON object found in stage output
 //   security_engineer: completed sec-... in 4521s
-// We track the latest stage name we saw, mark all earlier ones complete,
-// and surface the run_id + completion status separately.
-function parseHarnessState(text, isRunning) {
+//
+// Every UI signal the panel surfaces is derived from this stream — zero
+// backend changes required beyond emitting the right strings.
+function parseHarnessState(text, isRunning, exitErr = false) {
   const lines = (text || '').split('\n').map(l => l.trim()).filter(Boolean);
   let runId = null;
   let lastStage = null;
   let completed = false;
   let resumed = false;
+  let failedAtStage = null;
+  let failureMessage = null;
+  const findings = { critical: 0, high: 0, medium: 0, low: 0 };
+  const classStatus = {}; // class_id -> {status, count}
+
   for (const line of lines) {
-    // run_id from any line that mentions it
     const idMatch = line.match(/sec-[0-9a-z-]+/);
     if (idMatch && !runId) runId = idMatch[0];
-    if (/resume/i.test(line)) resumed = true;
-    if (/completed/i.test(line)) { completed = true; continue; }
-    // Match `security_engineer: <stage>` exactly
+    if (/\bresume\b/i.test(line)) resumed = true;
+    if (/\bcompleted\b/i.test(line)) { completed = true; continue; }
+
+    // class hunt outcome: `hunt: class <id> hunted (N findings)` / `cleared` / `inapplicable`
+    const classMatch = line.match(/hunt:\s*class\s+([a-z_]+)\s+(hunted|cleared|inapplicable)(?:\s*\((\d+)\s+findings?\))?/i);
+    if (classMatch) {
+      const [, cls, status, countStr] = classMatch;
+      classStatus[cls] = { status: status.toLowerCase(), count: countStr ? parseInt(countStr, 10) : 0 };
+      continue;
+    }
+
+    // findings counter line: `findings critical=N high=N medium=N low=N`
+    const findingsMatch = line.match(/findings\s+critical=(\d+)\s+high=(\d+)\s+medium=(\d+)\s+low=(\d+)/i);
+    if (findingsMatch) {
+      findings.critical = parseInt(findingsMatch[1], 10);
+      findings.high = parseInt(findingsMatch[2], 10);
+      findings.medium = parseInt(findingsMatch[3], 10);
+      findings.low = parseInt(findingsMatch[4], 10);
+      continue;
+    }
+
+    // stage failure: `<stage> failed: <message>` or `<stage> error: <message>`
+    const failMatch = line.match(/(recon|hunt|validate|gapfill|dedupe|trace|feedback|report)\s+(failed|error):\s*(.+)/i);
+    if (failMatch) {
+      failedAtStage = failMatch[1].toLowerCase();
+      failureMessage = failMatch[3].trim();
+      continue;
+    }
+
+    // bare error line — captured for the panel error banner even without
+    // a stage label, so an early-aborted run still surfaces SOMETHING.
+    const bareErrMatch = line.match(/^security_engineer:\s+error\b\s*(.*)/i);
+    if (bareErrMatch && !failureMessage) {
+      failureMessage = bareErrMatch[1].trim() || line;
+      continue;
+    }
+
+    // `security_engineer: <stage>` exactly
     const sm = line.match(/security_engineer:\s*([a-z]+)\b/i);
     if (sm) {
       const s = sm[1].toLowerCase();
       if (HARNESS_STAGES.includes(s)) lastStage = s;
     }
   }
+
   const currentIdx = lastStage ? HARNESS_STAGES.indexOf(lastStage) : -1;
+  const errored = exitErr || !!failedAtStage;
+  // For a failed run, the failed stage renders as "errored", not "done".
+  // For a pending-but-running stage that errored unexpectedly, the same.
   const stageStatus = HARNESS_STAGES.map((s, i) => {
     if (completed) return 'done';
+    if (errored && failedAtStage === s) return 'errored';
+    if (errored && lastStage === s && !failedAtStage) return 'errored';
     if (i < currentIdx) return 'done';
-    if (i === currentIdx) return isRunning ? 'running' : 'done';
+    if (i === currentIdx) {
+      if (errored) return 'errored';
+      return isRunning ? 'running' : 'done';
+    }
     return 'pending';
   });
-  return { runId, lastStage, completed, resumed, stageStatus };
+
+  const totalFindings = findings.critical + findings.high + findings.medium + findings.low;
+  return {
+    runId, lastStage, completed, resumed,
+    failedAtStage, failureMessage, errored,
+    stageStatus, findings, totalFindings, classStatus,
+  };
 }
 
-// Stage progress bar — 8 chips with colored status.  Tight and dense
-// so it fits above the children list without dominating the panel.
+// Stage progress bar — 8 cells with status-coded background.  Larger
+// labels than the MVP (12px vs 10px) since live evaluation showed the
+// old size was squinty against deepseek-v4-pro's real outputs.  Errored
+// cells get a distinct red background + strikethrough so a validate
+// fail is unmistakable next to a clean recon→hunt completion.
 function StageBar({ status }) {
   return (
-    <div style={{display:'flex', gap:4, padding:'8px 10px',
+    <div style={{display:'flex', gap:4, padding:'10px 12px',
                  borderBottom:'1px solid var(--line)',
                  background:'var(--bg-1)'}}>
       {HARNESS_STAGES.map((s, i) => {
         const st = status[i];
         const bg = st === 'done' ? 'var(--ok, #2c7a3a)'
                  : st === 'running' ? 'var(--accent)'
+                 : st === 'errored' ? 'var(--err, #b91c1c)'
                  : 'var(--bg)';
         const fg = st === 'pending' ? 'var(--mute)' : 'var(--fg)';
         const border = st === 'pending'
           ? '1px solid var(--line)'
           : '1px solid transparent';
+        const decoration = st === 'errored' ? 'line-through' : 'none';
         return (
           <div key={s} title={STAGE_LABEL[s]} style={{
-            flex:1, fontSize:10, lineHeight:'18px', textAlign:'center',
-            background: bg, color: fg, border, borderRadius:3,
-            fontWeight: st === 'running' ? 600 : 400,
+            flex:1, fontSize:12, lineHeight:'22px', textAlign:'center',
+            background: bg, color: fg, border, borderRadius:4,
+            fontWeight: st === 'running' || st === 'errored' ? 600 : 400,
             letterSpacing: 0.3,
+            textDecoration: decoration,
           }}>
             {STAGE_LABEL[s]}{st === 'running' && ' …'}
           </div>
@@ -365,32 +438,126 @@ function StageBar({ status }) {
   );
 }
 
-// Header — run_id, resume marker, completion banner, error banner.
-function HarnessHeader({ runId, resumed, completed, errorText, summary }) {
+// Live findings counter — color-coded counts by severity. Hides when
+// there are zero findings (typical for runs that died before hunt).
+function FindingsCounter({ findings, total }) {
+  if (!total) return null;
+  return (
+    <div style={{display:'flex', gap:14, padding:'8px 12px',
+                 borderBottom:'1px solid var(--line)',
+                 background:'var(--bg)',
+                 fontSize:12, color:'var(--fg-dim)',
+                 alignItems:'baseline'}}>
+      <span style={{fontWeight:600, color:'var(--fg)'}}>
+        {total} {total === 1 ? 'finding' : 'findings'}
+      </span>
+      {SEVERITY_LABELS.map(sev => {
+        const n = findings[sev] || 0;
+        if (!n) return null;
+        return (
+          <span key={sev} style={{display:'inline-flex', alignItems:'center', gap:4}}>
+            <span style={{
+              display:'inline-block', width:7, height:7, borderRadius:'50%',
+              background: SEVERITY_COLOR[sev],
+            }}/>
+            <span style={{color:'var(--fg)'}}>{n}</span>
+            <span style={{fontVariant:'small-caps', letterSpacing:0.5}}>{sev}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+// Per-class hunt status grid — one cell per taxonomy class, colored
+// by whether the class was hunted (and with findings), cleared
+// (hunted, none found), inapplicable (skipped via stack pruning), or
+// still pending.  Cells are clickable-shaped but click handling is a
+// Phase 3 follow-up (drill-into-findings-for-this-class).
+function ClassGrid({ classStatus }) {
+  const entries = Object.entries(classStatus || {});
+  if (entries.length === 0) return null;
+  // Sort by status priority (cells with findings first → easier eye scan)
+  const priority = { hunted: 0, cleared: 1, inapplicable: 2 };
+  entries.sort(([, a], [, b]) =>
+    (priority[a.status] ?? 9) - (priority[b.status] ?? 9));
   return (
     <div style={{padding:'8px 12px', borderBottom:'1px solid var(--line)',
+                 background:'var(--bg)'}}>
+      <div style={{fontSize:10, letterSpacing:0.5, color:'var(--mute)',
+                   textTransform:'uppercase', marginBottom:6}}>
+        Class coverage ({entries.length}/24 reported)
+      </div>
+      <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(140px, 1fr))', gap:4}}>
+        {entries.map(([cls, info]) => {
+          const bg = info.status === 'hunted' ? 'var(--ok-dim, #1f4a2a)'
+                   : info.status === 'cleared' ? 'var(--bg-1)'
+                   : info.status === 'inapplicable' ? 'transparent'
+                   : 'var(--bg-1)';
+          const opacity = info.status === 'inapplicable' ? 0.45 : 1;
+          return (
+            <div key={cls} title={`${cls} — ${info.status}${info.count ? ` (${info.count})` : ''}`}
+                 style={{
+                   padding:'4px 8px', borderRadius:3, fontSize:10,
+                   background: bg,
+                   color:'var(--fg-dim)',
+                   border:'1px solid var(--line)',
+                   opacity,
+                   display:'flex', justifyContent:'space-between', alignItems:'center',
+                   fontFamily:'var(--font-mono)',
+                 }}>
+              <span style={{overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+                {cls}
+              </span>
+              {info.count > 0 && (
+                <span style={{color:'var(--fg)', fontWeight:600, marginLeft:6}}>
+                  {info.count}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Header — run_id, resume / completed / failed badges, error banner.
+function HarnessHeader({ runId, resumed, completed, errored, errorText, summary, failedAtStage }) {
+  return (
+    <div style={{padding:'10px 12px', borderBottom:'1px solid var(--line)',
                  fontSize:11, color:'var(--fg-dim)', background:'var(--bg)'}}>
       <div style={{display:'flex', alignItems:'center', gap:10, flexWrap:'wrap'}}>
-        <span style={{fontFamily:'var(--font-mono)', color:'var(--fg)'}}>
+        <span style={{fontFamily:'var(--font-mono)', color:'var(--fg)', fontSize:12}}>
           {runId || '(no run id yet)'}
         </span>
         {resumed && (
-          <span style={{fontSize:10, padding:'1px 6px', borderRadius:3,
-                        background:'var(--bg-1)', border:'1px solid var(--line)'}}>
+          <span style={{fontSize:10, padding:'2px 7px', borderRadius:3,
+                        background:'var(--bg-1)', border:'1px solid var(--line)',
+                        color:'var(--fg-dim)', letterSpacing:0.3}}>
             resumed
           </span>
         )}
         {completed && (
-          <span style={{fontSize:10, padding:'1px 6px', borderRadius:3,
-                        background:'var(--ok, #2c7a3a)', color:'var(--fg)'}}>
+          <span style={{fontSize:10, padding:'2px 7px', borderRadius:3,
+                        background:'var(--ok, #2c7a3a)', color:'var(--fg)',
+                        fontWeight:600, letterSpacing:0.3}}>
             completed
+          </span>
+        )}
+        {errored && (
+          <span style={{fontSize:10, padding:'2px 7px', borderRadius:3,
+                        background:'var(--err, #b91c1c)', color:'var(--fg)',
+                        fontWeight:600, letterSpacing:0.3}}>
+            {failedAtStage ? `failed at ${STAGE_LABEL[failedAtStage]}` : 'failed'}
           </span>
         )}
       </div>
       {errorText && (
-        <div style={{marginTop:8, padding:'6px 8px', borderRadius:3,
+        <div style={{marginTop:8, padding:'8px 10px', borderRadius:4,
                      background:'var(--err-dim, #4a1f1f)', color:'var(--fg)',
-                     fontSize:11, whiteSpace:'pre-wrap'}}>
+                     fontSize:11, lineHeight:1.5, whiteSpace:'pre-wrap',
+                     borderLeft:'3px solid var(--err, #b91c1c)'}}>
           {errorText}
         </div>
       )}
@@ -404,13 +571,22 @@ function HarnessHeader({ runId, resumed, completed, errorText, summary }) {
   );
 }
 
-// Top-level harness panel — composes the stage bar + header + the
-// existing SubagentPanel for the per-tool detail list.  Reuses
-// SubagentPanel verbatim so the inner-tool render path stays single-
-// sourced; we only add the security-specific scaffolding above.
-function SecurityHarnessPanel({ body, running, summary, errorText }) {
+// Top-level harness panel.  Stack order:
+//   [stage bar]
+//   [run header w/ run_id, resumed/completed/failed badges, error banner]
+//   [findings counter]   (hidden when 0 findings)
+//   [class coverage grid] (hidden when no class events seen)
+//   [inner tool list — existing SubagentPanel]
+function SecurityHarnessPanel({ body, exit, running, summary, errorText }) {
   const text = body?.text || '';
-  const state = parseHarnessState(text, running);
+  const exitErr = exit === 'err';
+  const state = parseHarnessState(text, running, exitErr);
+  // Derive the error banner from the parsed failureMessage when an
+  // explicit errorText wasn't supplied (the typical case for live runs:
+  // tool.exit === 'err' but the caller doesn't pre-extract a message).
+  const effectiveErrorText = errorText || state.failureMessage
+    || (exitErr ? 'Harness returned an error — no message captured.' : null);
+
   return (
     <div className="p-body flush" style={{overflow:'auto', flex:1,
                                           display:'flex', flexDirection:'column'}}>
@@ -419,9 +595,13 @@ function SecurityHarnessPanel({ body, running, summary, errorText }) {
         runId={state.runId}
         resumed={state.resumed}
         completed={state.completed}
-        errorText={errorText}
+        errored={state.errored}
+        failedAtStage={state.failedAtStage}
+        errorText={effectiveErrorText}
         summary={state.completed ? summary : null}
       />
+      <FindingsCounter findings={state.findings} total={state.totalFindings}/>
+      <ClassGrid classStatus={state.classStatus}/>
       <div style={{flex:1, minHeight:0, display:'flex', flexDirection:'column'}}>
         <SubagentPanel
           children={body?.children}
@@ -510,11 +690,15 @@ function ToolBody({ tool }) {
   // a glance.  Route by tool.name before falling through to kind so the
   // backend doesn't have to invent a new kind just to opt in.
   if (tool.name === 'security_engineer') {
+    // Pass tool.exit through so the panel can auto-derive an error
+    // banner from body.text when the run failed.  Don't pre-extract
+    // errorText — the panel's parser does it better (last failure
+    // line in the checkpoint stream, with stage attribution).
     return <SecurityHarnessPanel
              body={tool.body}
+             exit={tool.exit}
              running={running}
-             summary={tool.body?.summary}
-             errorText={tool.exit === 'err' ? (tool.body?.error || tool.body?.summary) : null}/>;
+             summary={tool.body?.summary}/>;
   }
   switch (tool.kind) {
     case 'bash':     return <BashPanel running={running} body={tool.body}/>;
@@ -547,4 +731,4 @@ function ToolPanel({ tool, onClose, toolRef }) {
   );
 }
 
-export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, SubagentPanel, SecurityHarnessPanel, parseHarnessState, HARNESS_STAGES, ToolBody, ToolPanel, copyTextForTool, copyInputForTool };
+export { PanelChrome, BashPanel, DiffPanel, SbomPanel, TaintPanel, ThinkingPanel, ImagePanel, FallbackPanel, ReadPanel, SubagentPanel, SecurityHarnessPanel, FindingsCounter, ClassGrid, parseHarnessState, HARNESS_STAGES, SEVERITY_LABELS, ToolBody, ToolPanel, copyTextForTool, copyInputForTool };

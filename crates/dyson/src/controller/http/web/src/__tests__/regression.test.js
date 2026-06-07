@@ -55,7 +55,7 @@ describe('module exports', () => {
   });
 
   it('panels.jsx exports the tool panels', () => {
-    for (const name of ['PanelChrome', 'BashPanel', 'DiffPanel', 'SbomPanel', 'TaintPanel', 'ThinkingPanel', 'ImagePanel', 'FallbackPanel', 'ReadPanel', 'SubagentPanel', 'SecurityHarnessPanel', 'parseHarnessState', 'HARNESS_STAGES', 'ToolBody', 'ToolPanel', 'copyTextForTool']) {
+    for (const name of ['PanelChrome', 'BashPanel', 'DiffPanel', 'SbomPanel', 'TaintPanel', 'ThinkingPanel', 'ImagePanel', 'FallbackPanel', 'ReadPanel', 'SubagentPanel', 'SecurityHarnessPanel', 'FindingsCounter', 'ClassGrid', 'parseHarnessState', 'HARNESS_STAGES', 'SEVERITY_LABELS', 'ToolBody', 'ToolPanel', 'copyTextForTool']) {
       expect(panels[name], `panels.jsx must export ${name}`).toBeDefined();
     }
   });

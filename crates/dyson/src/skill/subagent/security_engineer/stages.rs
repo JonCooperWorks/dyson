@@ -195,6 +195,25 @@ pub(super) async fn run_hunt_stage(
     }
 
     if ran_batch {
+        // Rollup findings-by-severity for the SecurityHarnessPanel
+        // counter.  Matches the regex in panels.jsx's parseHarnessState:
+        //   `security_engineer: findings critical=N high=N medium=N low=N`
+        let (mut c, mut h, mut m, mut l) = (0usize, 0usize, 0usize, 0usize);
+        for f in &checkpoint.findings_so_far {
+            match f.severity.to_ascii_lowercase().as_str() {
+                "critical" => c += 1,
+                "high" => h += 1,
+                "medium" => m += 1,
+                "low" | "info" | "informational" => l += 1,
+                _ => {}
+            }
+        }
+        aggregate.checkpoints.push(CheckpointEvent {
+            message: format!(
+                "security_engineer: findings critical={c} high={h} medium={m} low={l}"
+            ),
+            progress: Some(0.45),
+        });
         Ok(Some(aggregate))
     } else {
         Ok(None)
@@ -357,6 +376,39 @@ pub(super) fn fold_hunt_result(
         ),
         progress: Some(0.35),
     });
+    // Parseable per-class outcome line for the SecurityHarnessPanel.
+    // Format matches the regex in panels.jsx's parseHarnessState:
+    //   `hunt: class <class_id> hunted (N findings)`
+    //   `hunt: class <class_id> cleared`
+    // Stack specialists are NOT class-scoped, so they don't emit here.
+    if d.is_class {
+        // Count findings from this specialist's run.  fold_hunt_result has
+        // already pushed the findings into checkpoint.findings_so_far above,
+        // but we don't have a quick way to attribute "which finding came
+        // from which class" without scanning vulnerability_class.  Count
+        // findings whose vulnerability_class matches this specialist's
+        // label (canonicalized to the class id).
+        let class_id = &d.label;
+        let class_finding_count = checkpoint
+            .findings_so_far
+            .iter()
+            .filter(|f| f.vulnerability_class == *class_id)
+            .count();
+        let status_word = if class_finding_count > 0 {
+            "hunted"
+        } else {
+            "cleared"
+        };
+        let suffix = if class_finding_count > 0 {
+            format!(" ({class_finding_count} findings)")
+        } else {
+            String::new()
+        };
+        aggregate.checkpoints.push(CheckpointEvent {
+            message: format!("security_engineer: hunt: class {class_id} {status_word}{suffix}"),
+            progress: Some(0.35),
+        });
+    }
     Ok(())
 }
 
@@ -1012,5 +1064,127 @@ mod tests {
         fold_hunt_result(&mut c, &mut aggregate, &dispatch, raw, stage_out).unwrap();
         assert_eq!(c.findings_so_far.len(), 1);
         assert!(c.completed_tasks.iter().any(|t| t.id == "t1"));
+    }
+
+    // ---- Phase 2 backend signals -----------------------------------------
+
+    #[test]
+    fn fold_hunt_result_emits_class_hunted_event_with_finding_count() {
+        // When a class specialist finds N findings, the CheckpointEvent
+        // stream gets a parseable `hunt: class X hunted (N findings)`
+        // line — the SecurityHarnessPanel reads it to populate the class
+        // coverage grid.
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "auth_authorization"));
+        let dispatch = HuntDispatch {
+            label: "auth_authorization".into(),
+            stage_prompt: String::new(),
+            checkpoint: c.clone(),
+            batch_ids: vec!["t1".into()],
+            is_class: true,
+        };
+        let mut aggregate = ToolOutput::success("");
+        let raw = String::from(
+            r#"{"completed_task_ids":["t1"],"findings":[
+                {"id":"f-1","title":"a","vulnerability_class":"auth_authorization"},
+                {"id":"f-2","title":"b","vulnerability_class":"auth_authorization"}
+            ],"gaps":[],"follow_up_tasks":[]}"#,
+        );
+        fold_hunt_result(
+            &mut c,
+            &mut aggregate,
+            &dispatch,
+            raw,
+            ToolOutput::success(""),
+        )
+        .unwrap();
+        let class_line = aggregate
+            .checkpoints
+            .iter()
+            .find(|cp| cp.message.contains("hunt: class auth_authorization"))
+            .expect("per-class checkpoint event should be emitted");
+        assert!(
+            class_line.message.contains("hunted"),
+            "should mark class hunted when findings > 0: {}",
+            class_line.message
+        );
+        assert!(
+            class_line.message.contains("(2 findings)"),
+            "should include the finding count: {}",
+            class_line.message
+        );
+    }
+
+    #[test]
+    fn fold_hunt_result_emits_class_cleared_event_when_no_findings() {
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "session_oauth_csrf"));
+        let dispatch = HuntDispatch {
+            label: "session_oauth_csrf".into(),
+            stage_prompt: String::new(),
+            checkpoint: c.clone(),
+            batch_ids: vec!["t1".into()],
+            is_class: true,
+        };
+        let mut aggregate = ToolOutput::success("");
+        let raw = String::from(
+            r#"{"completed_task_ids":["t1"],"findings":[],"gaps":[],"follow_up_tasks":[]}"#,
+        );
+        fold_hunt_result(
+            &mut c,
+            &mut aggregate,
+            &dispatch,
+            raw,
+            ToolOutput::success(""),
+        )
+        .unwrap();
+        let class_line = aggregate
+            .checkpoints
+            .iter()
+            .find(|cp| cp.message.contains("hunt: class session_oauth_csrf"))
+            .expect("per-class checkpoint event should be emitted");
+        assert!(
+            class_line.message.contains("cleared"),
+            "no findings → cleared: {}",
+            class_line.message
+        );
+        assert!(
+            !class_line.message.contains("findings)"),
+            "cleared shouldn't carry a (N findings) tail: {}",
+            class_line.message
+        );
+    }
+
+    #[test]
+    fn fold_hunt_result_does_not_emit_class_event_for_stack_specialists() {
+        // Stack specialists hunt synthetic tasks not bound to a single
+        // taxonomy class.  They should NOT emit a class-coverage line.
+        let mut c = cp();
+        let dispatch = HuntDispatch {
+            label: "express-framework".into(),
+            stage_prompt: String::new(),
+            checkpoint: c.clone(),
+            batch_ids: Vec::new(),
+            is_class: false,
+        };
+        let mut aggregate = ToolOutput::success("");
+        let raw = String::from(
+            r#"{"completed_task_ids":[],"findings":[],"gaps":[],"follow_up_tasks":[]}"#,
+        );
+        fold_hunt_result(
+            &mut c,
+            &mut aggregate,
+            &dispatch,
+            raw,
+            ToolOutput::success(""),
+        )
+        .unwrap();
+        assert!(
+            !aggregate
+                .checkpoints
+                .iter()
+                .any(|cp| cp.message.contains("hunt: class")),
+            "stack specialists shouldn't emit per-class outcome lines"
+        );
     }
 }
