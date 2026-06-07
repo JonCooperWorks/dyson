@@ -415,7 +415,33 @@ Signals on a live report:
 
 ## The tuning loop
 
-Per [docs/testing.md](testing.md), `expensive_live_security_review` supports a **run → grade → tune → run** loop.  Signals to track:
+### Stage-isolated probes
+
+Before paying $10–$30 for a full pipeline run, you can probe individual stages against a real LLM via [`security_engineer_stage_smoke`](../crates/dyson/examples/security_engineer_stage_smoke.rs).  The harness already supports `stop_after_stage` + `resume` + `run_id` as first-class inputs — this example wires them into a small CLI so each stage reads + writes the same `SecurityCheckpoint` JSON, and you only pay for the stage you're iterating on.
+
+```bash
+# 1. Fresh recon — costs ~$1–$3 on a ~100-file scope
+cargo run -p dyson --release --example security_engineer_stage_smoke -- \
+    --config dyson.json \
+    --target /path/to/repo \
+    --task "review distributed/" \
+    --stage recon
+# ↳ prints run_id=sec-…; saves output to stage-smoke-output/recon-<run_id>.md
+
+# 2. Run just hunt against that recon — ~$3–$8, fans out per-class specialists
+cargo run -p dyson --release --example security_engineer_stage_smoke -- \
+    --target /path/to/repo --stage hunt --run-id sec-…
+
+# 3. Validate / Trace / Report — pennies each
+cargo run -p dyson --release --example security_engineer_stage_smoke -- \
+    --target /path/to/repo --stage validate --run-id sec-…
+```
+
+`--model claude-haiku` vs `--model deepseek/deepseek-v4-pro` against the same recon checkpoint A/B-tests "is this stage's prompt working on this model" separately from "is the recon any good."  Use it to debug per-stage prompt regressions or to confirm a fix on a single stage without re-running the rest.
+
+### Full-pipeline tuning
+
+Per [docs/testing.md](testing.md), `expensive_live_security_review` supports a **run → grade → tune → run** loop on the full pipeline.  Signals to track:
 
 - Tool usage mix (grep `tool call started` out of the log; count by tool name)
 - Fabricated output (structural + scale tells; cross-check against transcript)
