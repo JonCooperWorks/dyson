@@ -14,7 +14,9 @@ use std::collections::BTreeSet;
 use crate::tool::{CheckpointEvent, ToolOutput};
 
 use super::checkpoint::{CheckpointStore, unix_seconds};
-use super::parse::{parse_report_output, parse_stage_json, parse_validate_output};
+use super::parse::{
+    parse_report_output, parse_stage_json, parse_validate_output_shape, validate_decisions_semantic,
+};
 use super::report::{report_checkpoint_for_prompt, report_from_checkpoint};
 use super::runtime::{
     SecurityHarnessRuntime, merge_stage_tool_output, spawn_stage, spawn_stage_with_checkpoint,
@@ -290,7 +292,21 @@ pub(super) fn fold_hunt_result(
     stage_out: ToolOutput,
 ) -> std::result::Result<(), String> {
     merge_stage_tool_output(aggregate, stage_out);
-    let hunt: HuntStageOutput = parse_stage_json(&raw)?;
+    // Loose at the shape boundary: a specialist that returns prose instead
+    // of JSON drops ITS findings, not the whole wave.  The class still gets
+    // marked complete below (the specialist had its turn), and the next
+    // stage proceeds with what other specialists returned.  Mirrors recon's
+    // non-fatal pattern — every previous catastrophic failure we debugged
+    // was a stage-boundary parse killing the run.
+    let hunt: HuntStageOutput = parse_stage_json(&raw).unwrap_or_else(|e| {
+        tracing::warn!(
+            error = %e,
+            specialist = %d.label,
+            "hunt specialist output did not parse as JSON; dropping its findings, \
+             marking its batch complete"
+        );
+        HuntStageOutput::default()
+    });
     if d.is_class {
         let completed_ids: BTreeSet<String> = if hunt.completed_task_ids.is_empty() {
             d.batch_ids.iter().cloned().collect()
@@ -397,7 +413,24 @@ pub(super) async fn run_validate_stage(
         VALIDATE_MAX_ITERATIONS,
     )
     .await?;
-    let validate = parse_validate_output(&raw, &checkpoint.findings_so_far)?;
+    // Shape loose: if the validator returned prose or a wrong-shaped JSON,
+    // we'd rather carry forward zero new decisions than kill the run.
+    // Semantic strict: if the shape is fine but the validator hallucinated
+    // a finding_id, confirmed a finding missing required evidence, or
+    // confirmed a no-vulnerability note, fail loudly — that's a quality-
+    // floor violation, and letting it through would put junk in the report.
+    let validate = match parse_validate_output_shape(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "validate stage output did not parse as JSON; carrying \
+                 existing decisions, no new decisions added"
+            );
+            super::types::ValidateStageOutput::default()
+        }
+    };
+    validate_decisions_semantic(&validate, &checkpoint.findings_so_far)?;
     checkpoint
         .validation_decisions_so_far
         .extend(validate.decisions);
@@ -922,5 +955,62 @@ mod tests {
                 "progress_for({stage})={progress} should be in [0,1]"
             );
         }
+    }
+
+    // ---- Loose-at-shape regressions for hunt + validate -------------------
+
+    #[test]
+    fn fold_hunt_result_with_prose_drops_findings_marks_class_complete() {
+        // The specialist returned prose instead of JSON.  Before: that
+        // bubbled up as Err and killed the whole hunt wave.  Now: the
+        // specialist's batch_ids get marked complete (it had its turn,
+        // produced nothing) and the harness moves on.  This is the single
+        // most important loosening — one bad specialist no longer takes
+        // down the run.
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "auth_authorization"));
+        c.pending_tasks.push(pending("t2", "ssrf_outbound_network"));
+        let dispatch = HuntDispatch {
+            label: "auth_authorization".into(),
+            stage_prompt: String::new(),
+            checkpoint: c.clone(),
+            batch_ids: vec!["t1".into()],
+            is_class: true,
+        };
+        let mut aggregate = ToolOutput::success("");
+        let stage_out = ToolOutput::success("");
+        let prose = String::from("I will now write the report.\nNo JSON forthcoming.");
+        let result = fold_hunt_result(&mut c, &mut aggregate, &dispatch, prose, stage_out);
+        assert!(
+            result.is_ok(),
+            "loose-shape fold should not return Err on prose"
+        );
+        assert_eq!(c.findings_so_far.len(), 0);
+        // t1 should be in completed_tasks (its specialist had its turn).
+        // t2 (different class) should still be pending.
+        assert!(c.completed_tasks.iter().any(|t| t.id == "t1"));
+        assert!(c.pending_tasks.iter().any(|t| t.id == "t2"));
+    }
+
+    #[test]
+    fn fold_hunt_result_with_valid_json_still_works() {
+        // Make sure the loose path didn't break the success path.
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "auth_authorization"));
+        let dispatch = HuntDispatch {
+            label: "auth_authorization".into(),
+            stage_prompt: String::new(),
+            checkpoint: c.clone(),
+            batch_ids: vec!["t1".into()],
+            is_class: true,
+        };
+        let mut aggregate = ToolOutput::success("");
+        let stage_out = ToolOutput::success("");
+        let raw = String::from(
+            r#"{"completed_task_ids":["t1"],"findings":[{"id":"f-1","title":"hi","vulnerability_class":"auth_authorization"}],"gaps":[],"follow_up_tasks":[]}"#,
+        );
+        fold_hunt_result(&mut c, &mut aggregate, &dispatch, raw, stage_out).unwrap();
+        assert_eq!(c.findings_so_far.len(), 1);
+        assert!(c.completed_tasks.iter().any(|t| t.id == "t1"));
     }
 }

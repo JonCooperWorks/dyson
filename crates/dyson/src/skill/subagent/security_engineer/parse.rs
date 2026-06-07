@@ -100,15 +100,33 @@ pub(crate) fn parse_report_output(raw: &str) -> std::result::Result<SecurityHarn
     validate_report_json(&value)
 }
 
-pub(crate) fn parse_validate_output(
+/// Parse the validator's output into a [`ValidateStageOutput`] WITHOUT running
+/// the semantic gate.
+///
+/// "Shape" failures (no JSON at all, or `{"findings": [...]}` which violates
+/// the validator's "decide only, don't emit new findings" contract) are not
+/// the same as "semantic" failures (finding_id refs, missing evidence,
+/// confirming a no-vulnerability note).  The caller decides whether to be
+/// strict about each — production code is loose at shape, strict at semantic.
+pub(crate) fn parse_validate_output_shape(
     raw: &str,
-    findings: &[SecurityFinding],
 ) -> std::result::Result<ValidateStageOutput, String> {
     let value = parse_json_value(raw)?;
     if value.get("findings").is_some() {
         return Err("validator output must not include new findings".into());
     }
-    let parsed: ValidateStageOutput = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    serde_json::from_value(value).map_err(|e| e.to_string())
+}
+
+/// Apply the semantic gate to a parsed validator output.  Catches the
+/// hallucination class: the model invents a finding_id that doesn't exist,
+/// confirms a finding missing required evidence fields, or tries to confirm
+/// a "no vulnerability" note as if it were a real finding.  Always strict —
+/// these are quality-floor checks, not parse-fragility.
+pub(crate) fn validate_decisions_semantic(
+    parsed: &ValidateStageOutput,
+    findings: &[SecurityFinding],
+) -> std::result::Result<(), String> {
     let known: BTreeSet<&str> = findings.iter().map(|f| f.id.as_str()).collect();
     for decision in &parsed.decisions {
         if !known.contains(decision.finding_id.as_str()) {
@@ -142,6 +160,19 @@ pub(crate) fn parse_validate_output(
             }
         }
     }
+    Ok(())
+}
+
+/// Parse + semantic-validate in one shot.  Convenience for tests and direct
+/// callers; stage runners split the two so they can be loose at shape and
+/// strict at semantic.
+#[allow(dead_code)] // used by tests/tests.rs which cargo check --lib can't see
+pub(crate) fn parse_validate_output(
+    raw: &str,
+    findings: &[SecurityFinding],
+) -> std::result::Result<ValidateStageOutput, String> {
+    let parsed = parse_validate_output_shape(raw)?;
+    validate_decisions_semantic(&parsed, findings)?;
     Ok(parsed)
 }
 
@@ -315,7 +346,9 @@ pub(super) fn is_no_vulnerability_note(finding: &SecurityFinding) -> bool {
 
 #[cfg(test)]
 mod extract_json_tests {
-    use super::super::types::ReconStageOutput;
+    use super::super::types::{
+        ReconStageOutput, ValidateStageOutput, ValidationDecision, ValidationDecisionKind,
+    };
     use super::*;
 
     #[test]
@@ -690,5 +723,101 @@ mod extract_json_tests {
             err.contains("required_field") || err.contains("missing field"),
             "error should describe the missing field, got: {err}"
         );
+    }
+
+    // ---- Loose-shape / strict-semantic split for validate -----------------
+
+    #[test]
+    fn shape_only_parser_accepts_empty_decisions_block() {
+        // No semantic gate runs here — empty decisions is a valid shape,
+        // and the stage runner uses default() on shape failure anyway.
+        let parsed = parse_validate_output_shape(r#"{"decisions": []}"#).unwrap();
+        assert!(parsed.decisions.is_empty());
+    }
+
+    #[test]
+    fn shape_only_parser_rejects_findings_field() {
+        // The validator is contractually "decide on existing findings only" —
+        // a model that tries to emit new findings here is misbehaving in a
+        // way the next stage can't recover from cleanly.
+        let raw = r#"{"findings": [{"id": "f-1"}], "decisions": []}"#;
+        let err = parse_validate_output_shape(raw).unwrap_err();
+        assert!(err.contains("must not include new findings"));
+    }
+
+    #[test]
+    fn shape_only_parser_returns_err_on_non_json() {
+        // The stage runner's job is to turn THIS into warn-and-default, not
+        // to crash.  Pinning that the function itself returns Err so the
+        // runner can decide.
+        let err = parse_validate_output_shape("I will not be writing JSON today.").unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn semantic_gate_rejects_unknown_finding_id() {
+        // Hallucination guard — the only thing the strict gate is for.
+        let parsed = ValidateStageOutput {
+            decisions: vec![ValidationDecision {
+                finding_id: "ghost".into(),
+                decision: ValidationDecisionKind::Confirmed,
+                evidence: "real".into(),
+                ..Default::default()
+            }],
+        };
+        let err = validate_decisions_semantic(&parsed, &[]).unwrap_err();
+        assert!(err.contains("unknown finding_id"));
+    }
+
+    #[test]
+    fn semantic_gate_rejects_confirm_without_evidence() {
+        let findings = vec![SecurityFinding {
+            id: "f-1".into(),
+            title: "thing".into(),
+            severity: "HIGH".into(),
+            vulnerability_class: "auth_authorization".into(),
+            trust_boundary: "http".into(),
+            entry_point: "POST /admin".into(),
+            sink_or_decision: "auth check".into(),
+            root_cause: "missing guard".into(),
+            ..Default::default()
+        }];
+        let parsed = ValidateStageOutput {
+            decisions: vec![ValidationDecision {
+                finding_id: "f-1".into(),
+                decision: ValidationDecisionKind::Confirmed,
+                evidence: "   ".into(), // whitespace-only
+                ..Default::default()
+            }],
+        };
+        let err = validate_decisions_semantic(&parsed, &findings).unwrap_err();
+        assert!(err.contains("requires evidence"));
+    }
+
+    #[test]
+    fn semantic_gate_accepts_clean_confirm() {
+        let findings = vec![SecurityFinding {
+            id: "f-1".into(),
+            title: "auth bypass on /admin".into(),
+            severity: "HIGH".into(),
+            vulnerability_class: "auth_authorization".into(),
+            trust_boundary: "http".into(),
+            entry_point: "POST /admin".into(),
+            sink_or_decision: "permission check missing".into(),
+            root_cause: "no guard before write".into(),
+            evidence: vec!["src/handler.rs:42".into()],
+            severity_rationale: "any unauthenticated user can hit it".into(),
+            fix_recommendation: "add require_role(admin) to the handler".into(),
+            ..Default::default()
+        }];
+        let parsed = ValidateStageOutput {
+            decisions: vec![ValidationDecision {
+                finding_id: "f-1".into(),
+                decision: ValidationDecisionKind::Confirmed,
+                evidence: "src/handler.rs:42 — checked, no guard".into(),
+                ..Default::default()
+            }],
+        };
+        validate_decisions_semantic(&parsed, &findings).unwrap();
     }
 }

@@ -356,7 +356,7 @@ pub(super) struct ReconStageOutput {
     pub class_coverage: Vec<VulnerabilityClassCoverage>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub(super) struct HuntStageOutput {
     #[serde(default)]
     pub completed_task_ids: Vec<String>,
@@ -368,13 +368,13 @@ pub(super) struct HuntStageOutput {
     pub follow_up_tasks: Vec<SecurityTask>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub(crate) struct ValidateStageOutput {
     #[serde(default)]
     pub decisions: Vec<ValidationDecision>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub(super) struct TraceStageOutput {
     #[serde(default)]
     pub traces: Vec<TraceResult>,
