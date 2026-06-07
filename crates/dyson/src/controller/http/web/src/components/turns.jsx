@@ -8,6 +8,7 @@ import { ShareMenu } from './share-menu.jsx';
 // across panels.jsx / views-secondary.jsx.  One implementation now.
 import { copyToClipboard } from '../lib/clipboard.js';
 import { useAppState } from '../hooks/useAppState.js';
+import { useApiOptional } from '../hooks/useApi.js';
 import { requestOpenArtefact } from '../store/app.js';
 import { FALLBACK_SLASH_COMMANDS } from '../store/constants.js';
 import { ToolBody, copyTextForTool, copyInputForTool } from './panels.jsx';
@@ -730,6 +731,26 @@ function TypingIndicator({ phase, tname, onJump }) {
   );
 }
 
+// Detect whether an uploaded JSON file is a security_engineer harness
+// checkpoint.  The trio of `schema_version`, `harness_version`, and a
+// `run_id` matching `sec-*` is decisive — no other workspace JSON we
+// emit has all three.  Returns the parsed object or null.
+function parseSecurityCheckpoint(text) {
+  try {
+    const j = JSON.parse(text);
+    if (
+      j && typeof j === 'object'
+      && typeof j.schema_version === 'number'
+      && typeof j.harness_version === 'string'
+      && typeof j.run_id === 'string'
+      && /^sec-[a-z0-9-]+$/i.test(j.run_id)
+    ) {
+      return j;
+    }
+  } catch { /* not JSON or malformed — fall through */ }
+  return null;
+}
+
 function Composer({
   onSend,
   onCancel,
@@ -750,6 +771,12 @@ function Composer({
   // base64 attachments through DysonClient.send → /api/.../turn → agent
   // run_with_attachments (same path Telegram takes for media).
   const [localAtts, setLocalAtts] = useState([]);
+  // Transient toast for the "checkpoint uploaded" affordance — shows
+  // briefly under the composer when an upload landed at
+  // kb/security-harness/checkpoints/<run_id>.json so the operator can
+  // see WHICH run_id was just made resumable.
+  const [checkpointToast, setCheckpointToast] = useState('');
+  const apiClient = useApiOptional();
   const taRef = useRef();
   const fileRef = useRef();
   const activeModel = useAppState(s => s.activeModel);
@@ -808,10 +835,55 @@ function Composer({
     setSlash(false);
   };
 
-  const onPickFiles = (e) => {
+  // When the operator attaches a file that looks like a
+  // security_engineer SecurityCheckpoint JSON, take a special path:
+  //   1. POST it to /api/mind/file at the canonical resume path
+  //      kb/security-harness/checkpoints/<run_id>.json
+  //   2. Prepend a "resume from this checkpoint" prompt to the draft
+  //      so the next send fires security_engineer with resume=true
+  //   3. Show a transient toast carrying the run_id
+  // Everything else falls through to the normal attachment flow
+  // (base64 → run_with_attachments).
+  const handleSecurityCheckpointUpload = async (file) => {
+    let text;
+    try { text = await file.text(); }
+    catch { return false; }
+    const cp = parseSecurityCheckpoint(text);
+    if (!cp) return false;
+    // No API client in test contexts — fall through to attachment flow.
+    if (!apiClient) return false;
+    const path = `kb/security-harness/checkpoints/${cp.run_id}.json`;
+    try {
+      await apiClient.postMindFile(path, text);
+    } catch (e) {
+      setCheckpointToast(`upload failed: ${(e && e.message) || e}`);
+      setTimeout(() => setCheckpointToast(''), 4000);
+      return true; // we handled it; don't fall through to attachments
+    }
+    const stagePart = cp.current_stage ? ` (stage: ${cp.current_stage})` : '';
+    const promptLine = `Please resume the security_engineer review from checkpoint \`${cp.run_id}\`${stagePart}. The checkpoint has been written to \`${path}\`.`;
+    const prefix = val.trim() ? `${val.trimEnd()}\n\n` : '';
+    setDraft(`${prefix}${promptLine}`);
+    setCheckpointToast(`uploaded ${cp.run_id} → ${path}`);
+    setTimeout(() => setCheckpointToast(''), 6000);
+    return true;
+  };
+
+  const onPickFiles = async (e) => {
     const list = Array.from(e.target.files || []);
-    if (list.length) setAttachments(a => [...a, ...list]);
-    e.target.value = '';  // allow re-picking the same file
+    e.target.value = '';  // allow re-picking the same file (must reset early)
+    // Partition: checkpoints get routed to the workspace; everything
+    // else goes into the attachment list as before.
+    const remaining = [];
+    for (const f of list) {
+      if (/\.json$/i.test(f.name)) {
+        // Only inspect .json files — saves a file.text() round-trip on PNGs.
+        const handled = await handleSecurityCheckpointUpload(f);
+        if (handled) continue;
+      }
+      remaining.push(f);
+    }
+    if (remaining.length) setAttachments(a => [...a, ...remaining]);
   };
 
   const onPaste = (e) => {
@@ -832,6 +904,16 @@ function Composer({
               <span className="src">{c.src}</span>
             </div>
           ))}
+        </div>
+      )}
+      {checkpointToast && (
+        <div data-testid="checkpoint-toast"
+             style={{padding:'6px 12px', fontSize:11,
+                     background: /failed|error/i.test(checkpointToast) ? 'var(--err-dim, #4a1f1f)' : 'var(--ok-dim, #1f4a2a)',
+                     color:'var(--fg)',
+                     borderTop:'1px solid var(--line)',
+                     fontFamily:'var(--font-mono)'}}>
+          {checkpointToast}
         </div>
       )}
       <div className="composer">

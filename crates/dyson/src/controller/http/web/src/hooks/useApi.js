@@ -19,3 +19,13 @@ export function useApi() {
   if (!c) throw new Error('useApi: no ApiContext provider (wrap in <ApiProvider>)');
   return c;
 }
+
+// Non-throwing variant — returns null if no provider is mounted.
+// Use when a component should degrade gracefully (e.g. Composer's
+// checkpoint-upload affordance is a nice-to-have, not load-bearing
+// for the composer's core text-entry behavior).  Tests can mount the
+// component without an ApiProvider when they only exercise unrelated
+// branches.
+export function useApiOptional() {
+  return useContext(ApiContext);
+}
