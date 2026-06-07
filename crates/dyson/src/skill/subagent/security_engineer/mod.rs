@@ -165,7 +165,32 @@ pub(crate) async fn run_security_harness(rt: SecurityHarnessRuntime) -> Result<T
         )
     });
 
-    let result = run_security_harness_inner(&rt, started_epoch).await;
+    let mut result = run_security_harness_inner(&rt, started_epoch).await;
+
+    // Persist the CheckpointEvent stream into out.content so the
+    // SecurityHarnessPanel can rebuild stage state on rehydrate.
+    //
+    // During a live run, CheckpointEvents flow as SSE events; the
+    // frontend's onCheckpoint callback appends each message to the
+    // live tool's body.text in React state.  When the conversation is
+    // persisted, only the ToolResult `content` field survives — the
+    // CheckpointEvent stream is dropped.  Page refresh rehydrates
+    // body.text from `content`, which (pre-fix) was empty of stage
+    // events, so the panel rendered "(no run id yet)" even for a
+    // completed run.
+    //
+    // Fix: prepend an HTML comment block carrying every event message
+    // to the content.  HTML comments are stripped by Markdown
+    // renderers, so the visible report stays clean.  The panel's
+    // parser splits body.text on '\n' and matches `security_engineer:`
+    // lines regardless of position, so finds them inside the comment.
+    //
+    // Applies to both success and error returns — failure runs still
+    // benefit from the panel surfacing the failure-stage badge after
+    // refresh.
+    if let Ok(out) = &mut result {
+        bake_checkpoint_events_into_content(out);
+    }
 
     if let Some(tok) = activity_token.take() {
         let elapsed = unix_seconds(std::time::SystemTime::now()).saturating_sub(started_epoch);
@@ -178,6 +203,27 @@ pub(crate) async fn run_security_harness(rt: SecurityHarnessRuntime) -> Result<T
     }
 
     result
+}
+
+/// Prepend an HTML-comment-wrapped dump of `out.checkpoints` to
+/// `out.content`.  No-op when there are zero CheckpointEvents (early
+/// pre-`load_for_resume` errors).  The comment markers anchor the
+/// block so the panel parser can find it on rehydrate even after
+/// future content rewrites.
+fn bake_checkpoint_events_into_content(out: &mut ToolOutput) {
+    if out.checkpoints.is_empty() {
+        return;
+    }
+    let mut header = String::from("<!-- security-harness-events\n");
+    for cp in &out.checkpoints {
+        header.push_str(&cp.message);
+        header.push('\n');
+    }
+    header.push_str("-->\n");
+    // Combine without dropping content — the prefix lives at the top
+    // of the rendered Markdown but is invisible after HTML-comment
+    // stripping.
+    out.content = format!("{header}{}", out.content);
 }
 
 async fn run_security_harness_inner(
@@ -573,6 +619,89 @@ mod specialist_tests {
         assert_eq!(
             cp.completed_tasks[0].attack_class,
             "dependency_supply_chain"
+        );
+    }
+
+    // ---- Phase 4: rehydrate fix ------------------------------------------
+
+    #[test]
+    fn bake_checkpoint_events_prepends_html_comment_block_to_content() {
+        use crate::tool::CheckpointEvent;
+        let mut out = ToolOutput::success("# Security review\n\n## CRITICAL\n");
+        out.checkpoints.push(CheckpointEvent {
+            message: "security_engineer: resuming checkpoint sec-aaa".into(),
+            progress: Some(0.02),
+        });
+        out.checkpoints.push(CheckpointEvent {
+            message: "security_engineer: validate".into(),
+            progress: Some(0.55),
+        });
+        out.checkpoints.push(CheckpointEvent {
+            message: "security_engineer: completed sec-aaa in 99s".into(),
+            progress: Some(1.0),
+        });
+
+        super::bake_checkpoint_events_into_content(&mut out);
+
+        // HTML comment block is at the top
+        assert!(
+            out.content.starts_with("<!-- security-harness-events\n"),
+            "comment block should be at the top: {:?}",
+            &out.content[..80]
+        );
+        // Every event message is preserved
+        for msg in &[
+            "security_engineer: resuming checkpoint sec-aaa",
+            "security_engineer: validate",
+            "security_engineer: completed sec-aaa in 99s",
+        ] {
+            assert!(
+                out.content.contains(msg),
+                "content should preserve `{msg}`"
+            );
+        }
+        // Original content survives
+        assert!(out.content.contains("# Security review"));
+        assert!(out.content.contains("## CRITICAL"));
+        // Comment is well-formed
+        assert!(out.content.contains("-->\n"));
+    }
+
+    #[test]
+    fn bake_checkpoint_events_is_noop_when_stream_is_empty() {
+        let mut out = ToolOutput::success("plain content");
+        assert!(out.checkpoints.is_empty());
+        super::bake_checkpoint_events_into_content(&mut out);
+        assert_eq!(out.content, "plain content");
+    }
+
+    #[test]
+    fn bake_checkpoint_events_also_applies_to_error_outputs() {
+        // The failure path in run_security_harness_inner carries the
+        // accumulated checkpoint stream onto the error output before
+        // returning.  We bake on both Ok-success and Ok-error so the
+        // panel can rehydrate `failed at <stage>` state on a refresh
+        // of a failed run.
+        use crate::tool::CheckpointEvent;
+        let mut out = ToolOutput::error("validate failed: no JSON object found in stage output");
+        out.checkpoints.push(CheckpointEvent {
+            message: "security_engineer: resuming checkpoint sec-bbb".into(),
+            progress: Some(0.02),
+        });
+        out.checkpoints.push(CheckpointEvent {
+            message: "security_engineer: validate failed: no JSON object found in stage output"
+                .into(),
+            progress: Some(0.55),
+        });
+
+        super::bake_checkpoint_events_into_content(&mut out);
+        assert!(out.is_error);
+        assert!(out.content.contains("security_engineer: resuming checkpoint sec-bbb"));
+        assert!(out.content.contains("validate failed: no JSON object found"));
+        // Original error string preserved
+        assert!(
+            out.content
+                .ends_with("validate failed: no JSON object found in stage output")
         );
     }
 }

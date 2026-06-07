@@ -332,7 +332,9 @@ function parseHarnessState(text, isRunning, exitErr = false) {
   for (const line of lines) {
     const idMatch = line.match(/sec-[0-9a-z-]+/);
     if (idMatch && !runId) runId = idMatch[0];
-    if (/\bresume\b/i.test(line)) resumed = true;
+    // Matches `resume` (the verb) and `resuming` (the gerund the
+    // harness uses in `security_engineer: resuming checkpoint sec-...`).
+    if (/\bresum(?:e|ing)\b/i.test(line)) resumed = true;
     if (/\bcompleted\b/i.test(line)) { completed = true; continue; }
 
     // class hunt outcome: `hunt: class <id> hunted (N findings)` / `cleared` / `inapplicable`

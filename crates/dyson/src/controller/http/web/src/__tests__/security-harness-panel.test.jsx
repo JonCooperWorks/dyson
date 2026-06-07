@@ -258,4 +258,56 @@ describe('parseHarnessState — Phase 2 fields', () => {
     expect(s.failureMessage).toContain('4072940');
     expect(s.errored).toBe(true);
   });
+
+  // ---- Phase 4: HTML-comment-wrapped event block survives rehydrate ------
+
+  it('parses checkpoint events out of the HTML-comment block baked into tool content', () => {
+    // The backend wraps the CheckpointEvent stream in
+    //   <!-- security-harness-events
+    //   security_engineer: <line>
+    //   security_engineer: <line>
+    //   -->
+    // and prepends it to the tool's content.  On rehydrate from the
+    // conversation API, body.text gets set to this content — the
+    // parser must find the event lines inside the comment.
+    const text = [
+      '<!-- security-harness-events',
+      'security_engineer: resuming checkpoint sec-1780830172-2',
+      'security_engineer: validate',
+      'security_engineer: validate failed: no JSON object found',
+      'security_engineer: completed sec-1780830172-2 in 134s',
+      '-->',
+      '',
+      '# Security Review: vllm/distributed',
+      '',
+      '## CRITICAL',
+      'No findings.',
+    ].join('\n');
+    const s = parseHarnessState(text, false, false);
+    expect(s.runId).toBe('sec-1780830172-2');
+    expect(s.resumed).toBe(true);
+    expect(s.completed).toBe(true);
+    expect(s.failedAtStage).toBe('validate');
+    expect(s.failureMessage).toContain('no JSON object found');
+  });
+
+  it('still handles the live (uncommented) stream the same way after rehydrate baking', () => {
+    // Belt-and-braces: a live run's body.text uses bare lines (no
+    // comment wrapper because onCheckpoint just appends each message
+    // verbatim).  Verify the same parser handles both shapes.
+    const live = [
+      'security_engineer: starting checkpoint sec-aaa',
+      'security_engineer: recon',
+      'security_engineer: hunt',
+    ].join('\n');
+    const liveState = parseHarnessState(live, true);
+    expect(liveState.runId).toBe('sec-aaa');
+    expect(liveState.lastStage).toBe('hunt');
+
+    // Same events, comment-wrapped (rehydrate-shaped)
+    const wrapped = ['<!-- security-harness-events', ...live.split('\n'), '-->'].join('\n');
+    const wrappedState = parseHarnessState(wrapped, true);
+    expect(wrappedState.runId).toBe('sec-aaa');
+    expect(wrappedState.lastStage).toBe('hunt');
+  });
 });
