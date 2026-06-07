@@ -48,6 +48,48 @@
 //! `--model claude-haiku` vs `--model deepseek/deepseek-v4-pro` against the
 //! same recon checkpoint isolates "is this stage's prompt working on this
 //! model" from "is my recon any good."
+//!
+//! ## Artifacts + failure detection
+//!
+//! Each invocation persists two files under `--output-dir` (default
+//! `stage-smoke-output/`):
+//!
+//! - `<stage>-<run_id>.md`              — the raw tool output (rendered
+//!                                         Markdown if it's the report stage)
+//! - `<stage>-<run_id>-checkpoint.json` — a copy of the durable
+//!                                         `SecurityCheckpoint`, copied
+//!                                         from the harness's canonical
+//!                                         location `.dyson/security-harness/
+//!                                         checkpoints/<run_id>.json`
+//!
+//! The checkpoint copy is the audit trail.  You can post-mortem a run
+//! without grepping the workspace, and the copy survives a `cargo clean`
+//! or `.dyson` cleanup.
+//!
+//! Failure detection is strict — three signals fail the run with a
+//! non-zero exit code, so a wrapper script driving the full pipeline
+//! under `set -e` stops at the first real regression:
+//!
+//! 1. `output.is_error == true`              — the tool returned an error
+//! 2. The canonical checkpoint file is missing — harness returned success
+//!                                                 but didn't write a
+//!                                                 checkpoint (silent fail)
+//! 3. `current_stage` in the saved checkpoint is BEFORE the stage we asked
+//!    for — stage didn't advance (e.g. recon parse failed AND the
+//!    non-fatal fallback didn't update `current_stage`)
+//!
+//! Drive multiple stages from a wrapper:
+//!
+//! ```bash
+//! set -e
+//! out=$(cargo run --release --example security_engineer_stage_smoke -- \
+//!         --target /path --task "review distributed/" --stage recon)
+//! run_id=$(echo "$out" | grep -oE 'run_id=sec-[a-z0-9-]+' | head -1 | cut -d= -f2)
+//! for stage in hunt validate gapfill dedupe trace feedback report; do
+//!     cargo run --release --example security_engineer_stage_smoke -- \
+//!         --target /path --stage "$stage" --run-id "$run_id"
+//! done
+//! ```
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -225,8 +267,17 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let resolved_run_id = extract_run_id(&output.content)
         .or_else(|| args.run_id.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    let filename = format!("{}-{}.md", args.stage.as_str(), resolved_run_id);
-    let outfile = args.output_dir.join(&filename);
+
+    // Persist the tool output Markdown next to the checkpoint copy so a
+    // post-mortem has both human-readable and machine-readable artifacts
+    // in one place.  The harness writes the canonical checkpoint into the
+    // workspace fallback path (`.dyson/security-harness/checkpoints/`);
+    // the smoke example copies it out so per-run artifacts live under
+    // `--output-dir` and don't get accidentally cleaned by a future
+    // `.dyson` cleanup.
+    let outfile = args
+        .output_dir
+        .join(format!("{}-{}.md", args.stage.as_str(), resolved_run_id));
     let header = format!(
         "<!-- stage={} run_id={} target={} model={} elapsed={:.1}s is_error={} -->\n\n",
         args.stage.as_str(),
@@ -241,6 +292,44 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         [header.as_bytes(), output.content.as_bytes()].concat(),
     )?;
 
+    // Locate the canonical checkpoint, copy it next to the .md output.
+    // From here on the checkpoint is treated as the source of truth — the
+    // is_error flag tells us the harness returned an error, but a stage
+    // can also fail "softly" (model emitted prose, parse failed but
+    // recon-non-fatal kicked in, current_stage didn't advance).  Reading
+    // the saved checkpoint gives us a deterministic verdict.
+    let canonical_checkpoint = canonical_checkpoint_path(&ctx.working_dir, &resolved_run_id);
+    let persisted_checkpoint = args.output_dir.join(format!(
+        "{}-{}-checkpoint.json",
+        args.stage.as_str(),
+        resolved_run_id
+    ));
+    let mut persisted = false;
+    let mut saved_stage: Option<String> = None;
+    let mut saved_completed = false;
+    if canonical_checkpoint.exists() {
+        std::fs::copy(&canonical_checkpoint, &persisted_checkpoint).map_err(|e| {
+            format!(
+                "copy checkpoint {} -> {}: {e}",
+                canonical_checkpoint.display(),
+                persisted_checkpoint.display()
+            )
+        })?;
+        persisted = true;
+        if let Ok(body) = std::fs::read_to_string(&persisted_checkpoint) {
+            if let Ok(json) = serde_json::from_str::<Value>(&body) {
+                saved_stage = json
+                    .get("current_stage")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                saved_completed = json
+                    .get("completed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            }
+        }
+    }
+
     println!(
         "{} stage `{}` in {:.1}s | {} bytes | {} artefacts | run_id={} | output -> {}",
         if output.is_error { "✗" } else { "✓" },
@@ -251,6 +340,17 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         resolved_run_id,
         outfile.display(),
     );
+    if persisted {
+        println!("checkpoint -> {}", persisted_checkpoint.display());
+        if let Some(stage) = &saved_stage {
+            println!("saved checkpoint: current_stage={stage} completed={saved_completed}");
+        }
+    } else {
+        println!(
+            "checkpoint NOT persisted — canonical path missing: {}",
+            canonical_checkpoint.display()
+        );
+    }
 
     if let Some(meta) = output.metadata.as_ref() {
         let in_tok = meta
@@ -265,8 +365,30 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         println!("tokens:  input={in_tok} output={out_tok} llm_calls={calls}");
     }
 
+    // Failure detection — strict, fail loudly so a wrapper script driving
+    // multiple stages with `set -e` can stop at the first regression.
     if output.is_error {
         return Err(format!("stage `{}` returned a tool error", args.stage.as_str()).into());
+    }
+    if !persisted {
+        return Err(format!(
+            "stage `{}` did not produce a checkpoint at {} — the harness returned \
+             success but no checkpoint was written; treating as a silent failure",
+            args.stage.as_str(),
+            canonical_checkpoint.display()
+        )
+        .into());
+    }
+    if let Some(stage) = saved_stage.as_deref() {
+        if !stage_at_or_past(args.stage, stage) {
+            return Err(format!(
+                "stage `{}` ran but saved checkpoint's current_stage is `{}` — the \
+                 stage did not advance, treating as a silent failure",
+                args.stage.as_str(),
+                stage
+            )
+            .into());
+        }
     }
 
     // Hint the user about the next command.  The next stage in the canonical
@@ -333,6 +455,42 @@ fn next_stage(stage: Stage) -> Option<Stage> {
     })
 }
 
+/// Where the harness puts the checkpoint when no Workspace is wired up
+/// (the default for this CLI — `ToolContext::from_cwd()` carries no
+/// workspace).  Mirrors `CheckpointStore::fallback_dir` in
+/// `security_engineer/checkpoint.rs`.
+fn canonical_checkpoint_path(working_dir: &Path, run_id: &str) -> PathBuf {
+    working_dir
+        .join(".dyson")
+        .join("security-harness")
+        .join("checkpoints")
+        .join(format!("{run_id}.json"))
+}
+
+/// True when the saved checkpoint's `current_stage` is at or after the
+/// stage we just asked the harness to run — i.e. the stage actually
+/// advanced.  The canonical order is:
+/// recon → hunt → validate → gapfill → dedupe → trace → feedback → report.
+fn stage_at_or_past(requested: Stage, saved: &str) -> bool {
+    fn rank(stage: &str) -> Option<u32> {
+        Some(match stage {
+            "recon" => 0,
+            "hunt" => 1,
+            "validate" => 2,
+            "gapfill" => 3,
+            "dedupe" => 4,
+            "trace" => 5,
+            "feedback" => 6,
+            "report" => 7,
+            _ => return None,
+        })
+    }
+    match (rank(requested.as_str()), rank(saved)) {
+        (Some(r), Some(s)) => s >= r,
+        _ => true, // unknown saved stage — don't false-positive on an enum mismatch
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +518,34 @@ mod tests {
         assert!(Stage::Recon.is_fresh());
         assert!(!Stage::Hunt.is_fresh());
         assert!(!Stage::Report.is_fresh());
+    }
+
+    #[test]
+    fn canonical_checkpoint_path_lands_under_dot_dyson() {
+        let p = canonical_checkpoint_path(Path::new("/tmp/work"), "sec-1-2");
+        assert_eq!(
+            p,
+            PathBuf::from("/tmp/work/.dyson/security-harness/checkpoints/sec-1-2.json")
+        );
+    }
+
+    #[test]
+    fn stage_at_or_past_accepts_same_or_later() {
+        // recon ran, saved stage is hunt — the harness already advanced
+        assert!(stage_at_or_past(Stage::Recon, "hunt"));
+        // recon ran, saved stage is recon — exactly at the requested stage
+        assert!(stage_at_or_past(Stage::Recon, "recon"));
+        // hunt was requested but the saved stage is still recon — soft failure
+        assert!(!stage_at_or_past(Stage::Hunt, "recon"));
+        // report ran, saved stage is report — exactly at the requested stage
+        assert!(stage_at_or_past(Stage::Report, "report"));
+    }
+
+    #[test]
+    fn stage_at_or_past_does_not_false_positive_on_unknown_saved() {
+        // If the checkpoint format added a new stage name we don't recognise,
+        // assume the harness knows what it's doing — don't fail the run on
+        // an enum mismatch.
+        assert!(stage_at_or_past(Stage::Recon, "future_stage_name"));
     }
 }

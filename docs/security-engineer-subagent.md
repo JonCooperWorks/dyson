@@ -439,6 +439,10 @@ cargo run -p dyson --release --example security_engineer_stage_smoke -- \
 
 `--model claude-haiku` vs `--model deepseek/deepseek-v4-pro` against the same recon checkpoint A/B-tests "is this stage's prompt working on this model" separately from "is the recon any good."  Use it to debug per-stage prompt regressions or to confirm a fix on a single stage without re-running the rest.
 
+Each invocation persists both the rendered output (`<stage>-<run_id>.md`) and a copy of the durable checkpoint (`<stage>-<run_id>-checkpoint.json`) under `--output-dir`, so a post-mortem has the audit trail in one place — independent of the harness's canonical `.dyson/security-harness/checkpoints/` location that a future cleanup could wipe.
+
+Failure detection is strict: the smoke example exits non-zero if (a) the tool returned an error, (b) no checkpoint was written, or (c) the saved `current_stage` did not advance to or past the requested stage.  Use the wrapper-script pattern in the example's module header to drive recon → report under `set -e` and stop at the first regression.
+
 ### Full-pipeline tuning
 
 Per [docs/testing.md](testing.md), `expensive_live_security_review` supports a **run → grade → tune → run** loop on the full pipeline.  Signals to track:
