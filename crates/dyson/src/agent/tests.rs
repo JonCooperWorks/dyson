@@ -264,7 +264,9 @@ async fn simple_text_response() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -325,7 +327,9 @@ async fn assistant_message_stores_swarm_cost_when_lookup_succeeds_and_keeps_turn
     ));
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let settings = AgentSettings {
         api_key: "test".into(),
         ..Default::default()
@@ -429,7 +433,9 @@ async fn retries_retryable_error_while_consuming_stream() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -506,7 +512,9 @@ async fn retries_stream_error_after_tool_start_before_tool_complete() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -524,6 +532,78 @@ async fn retries_stream_error_after_tool_start_before_tool_complete() {
     assert_eq!(result, "Done.");
     assert_eq!(std::fs::read_to_string(report).unwrap(), "ok\n");
     assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn retries_transport_error_after_partial_text_stream() {
+    // The c-0050 failure mode: a recon stage streams several seconds of
+    // text, then the OpenRouter byte stream errors out with "error
+    // decoding response body" (reqwest wraps the chunk error as
+    // DysonError::Http).  Before this fix, emitted_visible_output was
+    // set on the first text_delta and blocked any retry — a $5+ stage
+    // aborted on a flaky transport.  Now: transport-class errors retry
+    // even after partial text, as long as no tool_use callback has
+    // fired (those are side-effectful and must not duplicate).
+    crate::http::ensure_crypto_provider();
+    let err = reqwest::Client::new()
+        .get("http://127.0.0.1:1")
+        .send()
+        .await
+        .unwrap_err();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let llm = FallibleMockLlm::new(
+        vec![
+            vec![
+                Ok(StreamEvent::TextDelta("Let me look at the".into())),
+                Ok(StreamEvent::TextDelta(" codebase fir".into())),
+                Err(DysonError::Http(err)),
+            ],
+            vec![
+                Ok(StreamEvent::TextDelta("Recovered.".into())),
+                Ok(StreamEvent::MessageComplete {
+                    stop_reason: StopReason::EndTurn,
+                    output_tokens: None,
+                }),
+            ],
+        ],
+        Arc::clone(&calls),
+    );
+
+    let settings = AgentSettings {
+        api_key: "test".into(),
+        max_retries: 1,
+        ..Default::default()
+    };
+
+    let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
+    let mut agent = Agent::new(
+        rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        sandbox,
+        skills,
+        &settings,
+        None,
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+    let mut output = RecordingOutput::new();
+
+    let result = agent.run("hi", &mut output).await.unwrap();
+    // Partial text + recovered text are both in the output — the
+    // duplicate is the explicit trade-off for not killing the stage.
+    assert!(
+        result.contains("Recovered."),
+        "second-attempt text should be present: {result:?}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "transport error after partial text should trigger one retry"
+    );
 }
 
 #[tokio::test]
@@ -563,7 +643,9 @@ async fn tool_call_loop() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -616,7 +698,9 @@ async fn internal_tools_provider_skips_tool_execution() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -993,7 +1077,9 @@ async fn token_budget_stops_agent_loop() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -1134,7 +1220,9 @@ async fn tool_output_files_dispatched_via_send_file() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(MockFileSkill::new())];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -1196,7 +1284,9 @@ async fn admits_pending_user_message_after_tool_results_before_next_llm_call() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(MockFileSkill::new())];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -1288,7 +1378,9 @@ async fn tool_output_no_files_means_no_send_file() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -1370,7 +1462,9 @@ fn make_agent_with_history(
         ..Default::default()
     };
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -1936,7 +2030,9 @@ async fn auto_compaction_triggers_on_threshold() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let mut agent = Agent::new(
         rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
         sandbox,
@@ -2341,7 +2437,9 @@ mod test_tool_calling_integration {
         };
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        ));
         let mut agent = Agent::new(
             rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
             sandbox,
@@ -2368,7 +2466,9 @@ mod test_tool_calling_integration {
         };
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        ));
         let mut agent = Agent::new(
             rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
             sandbox,
@@ -2400,7 +2500,9 @@ mod test_tool_calling_integration {
         };
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        ));
         let mut agent = Agent::new(
             rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
             sandbox,
@@ -2424,7 +2526,9 @@ mod test_tool_calling_integration {
         };
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        ));
         let mut agent = Agent::new(
             rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
             sandbox,
@@ -2486,7 +2590,9 @@ mod test_tool_calling_integration {
         };
         let llm = MockLlm::new(vec![]);
         let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+        let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        ));
         let mut agent = Agent::new(
             rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
             sandbox,
@@ -2829,7 +2935,9 @@ fn generic_advisor_inherits_parent_tools() {
     };
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
 
     // Count the tools from skills (before advisor).
     let skill_tool_count: usize = skills.iter().map(|s| s.tools().len()).sum();
@@ -2879,7 +2987,9 @@ fn generic_advisor_inherits_parent_tools() {
 fn generic_advisor_shares_sandbox_with_parent() {
     // Verify that the generic advisor's child agent gets the exact same
     // sandbox instance (Arc identity) as the parent agent.
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
     let advisor_llm = MockLlm::new(vec![]);
 
     let mut advisor = crate::advisor::generic::GenericAdvisor::new(
@@ -2916,7 +3026,9 @@ fn native_anthropic_advisor_injects_api_tool() {
 
     let skills: Vec<Box<dyn Skill>> = vec![Box::new(BuiltinSkill::new(None, None, None))];
     let skill_tool_count: usize = skills.iter().map(|s| s.tools().len()).sum();
-    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(crate::sandbox::SandboxBypassGuard::for_test()));
+    let sandbox: Arc<dyn Sandbox> = Arc::new(DangerousNoSandbox::new(
+        crate::sandbox::SandboxBypassGuard::for_test(),
+    ));
 
     let advisor_client = rate_limiter::RateLimitedHandle::unlimited(
         Box::new(MockLlm::new(vec![])) as Box<dyn LlmClient>

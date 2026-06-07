@@ -14,6 +14,14 @@ use super::{Agent, result_formatter};
 struct StreamRetryOutput<'a> {
     inner: &'a mut dyn Output,
     emitted_visible_output: bool,
+    // Tracks whether a tool_use START or COMPLETE event has been
+    // forwarded.  Once a tool call has been emitted to the parent, we
+    // must NOT retry — retrying could double-execute side effects (a
+    // bash, a write_file, a send_message).  Plain text deltas, by
+    // contrast, are safe to "duplicate" on retry: weaker subagent
+    // streams that error after partial text are now retryable, and the
+    // duplicate text just reads as the model restating itself.
+    emitted_tool_use: bool,
 }
 
 impl<'a> StreamRetryOutput<'a> {
@@ -21,11 +29,16 @@ impl<'a> StreamRetryOutput<'a> {
         Self {
             inner,
             emitted_visible_output: false,
+            emitted_tool_use: false,
         }
     }
 
     fn emitted_visible_output(&self) -> bool {
         self.emitted_visible_output
+    }
+
+    fn emitted_tool_use(&self) -> bool {
+        self.emitted_tool_use
     }
 }
 
@@ -47,11 +60,13 @@ impl Output for StreamRetryOutput<'_> {
         name: &str,
     ) -> std::result::Result<(), crate::error::DysonError> {
         self.emitted_visible_output = true;
+        self.emitted_tool_use = true;
         self.inner.tool_use_start(id, name)
     }
 
     fn tool_use_complete(&mut self) -> std::result::Result<(), crate::error::DysonError> {
         self.emitted_visible_output = true;
+        self.emitted_tool_use = true;
         self.inner.tool_use_complete()
     }
 
@@ -195,19 +210,48 @@ impl Agent {
                     "streaming response"
                 );
 
-                let (stream_result, emitted_visible_output) = {
+                let (stream_result, emitted_visible_output, emitted_tool_use) = {
                     let mut retry_output = StreamRetryOutput::new(output);
                     let stream_result =
                         stream_handler::process_stream(response.stream, &mut retry_output).await;
-                    (stream_result, retry_output.emitted_visible_output())
+                    (
+                        stream_result,
+                        retry_output.emitted_visible_output(),
+                        retry_output.emitted_tool_use(),
+                    )
                 };
+
+                // Two-tier retry gate after a stream error:
+                //
+                //   1. Pre-output failures (no text, no tool calls yet): always
+                //      retry on a retryable error.  Cheap, no duplication risk.
+                //
+                //   2. Mid-stream transport errors (Http: connection reset,
+                //      "error decoding response body", h2 frame errors) AFTER
+                //      some text has streamed but BEFORE any tool_use was
+                //      emitted: retry.  The duplicate text on the next attempt
+                //      reads as the model restating itself — annoying but
+                //      cheap.  The trade-off here was load-bearing for the
+                //      security_engineer harness: a flaky OpenRouter byte
+                //      decode in mid-recon used to abort a 60-minute, $5+
+                //      stage outright.
+                //
+                //   3. Once a tool_use START/COMPLETE has been emitted, we
+                //      MUST NOT retry — retrying could double-execute side
+                //      effects (bash, write_file, message sends).
+                //
+                // Rate-limit / overload errors still respect the pre-output
+                // gate (they normally land before the stream produces text);
+                // only Http transport errors get the relaxed treatment.
+                let transport_retryable_mid_stream = matches!(&stream_result, Err(e) if matches!(e, crate::error::DysonError::Http(_)));
 
                 let (assistant_msg, tool_calls, output_tokens, stop_reason) = match stream_result {
                     Ok(result) => result,
                     Err(e)
                         if crate::llm::is_retryable(&e)
                             && stream_error_attempts < self.max_retries
-                            && !emitted_visible_output =>
+                            && !emitted_tool_use
+                            && (!emitted_visible_output || transport_retryable_mid_stream) =>
                     {
                         let delay_ms = compute_backoff_ms(stream_error_attempts);
                         tracing::warn!(
@@ -215,7 +259,8 @@ impl Agent {
                             max = self.max_retries,
                             delay_ms,
                             error = %e,
-                            "LLM stream failed before visible output — retrying"
+                            mid_stream = emitted_visible_output,
+                            "LLM stream failed — retrying"
                         );
                         tokio::select! {
                             _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
@@ -673,7 +718,10 @@ mod backoff_tests {
             let lo = 1000u64 * 2u64.pow(n);
             let hi = lo + lo / 2;
             let v = compute_backoff_ms(n as usize);
-            assert!((lo..=hi).contains(&v), "attempt {n}: {v} outside [{lo},{hi}]");
+            assert!(
+                (lo..=hi).contains(&v),
+                "attempt {n}: {v} outside [{lo},{hi}]"
+            );
         }
     }
 }
