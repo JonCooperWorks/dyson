@@ -61,6 +61,19 @@ pub const HUNT_SPECIALIST_BACKSTOP: usize = 64;
 /// 24-class fan-out doesn't open 24 agent loops simultaneously.
 const HUNT_CONCURRENCY: usize = 6;
 
+/// Per-stage iteration caps on the child agent loop.  Recon was originally
+/// 12, which a thorough non-Claude model (deepseek-v4-pro in practice) blew
+/// through doing ~50 tool calls per turn — the loop fell into the
+/// `summarize_on_max_iterations` path and returned prose instead of JSON,
+/// killing the recon→hunt transition.  Hunt is already 28; recon needs at
+/// least as much because it explores the WHOLE scope before the hunters
+/// even start.  Validate/trace operate on a bounded checkpoint and stay
+/// where they were.
+const RECON_MAX_ITERATIONS: usize = 60;
+const HUNT_MAX_ITERATIONS: usize = 28;
+const VALIDATE_MAX_ITERATIONS: usize = 16;
+const TRACE_MAX_ITERATIONS: usize = 16;
+
 const STAGES: &[SecurityHarnessStage] = &[
     SecurityHarnessStage::Recon,
     SecurityHarnessStage::Hunt,
@@ -2231,9 +2244,29 @@ async fn run_recon_stage(
     checkpoint: &mut SecurityCheckpoint,
 ) -> std::result::Result<Option<ToolOutput>, String> {
     let prompt = include_str!("prompts/security_engineer_recon.md");
-    let (raw, stage_out) =
-        spawn_stage(rt, SecurityHarnessStage::Recon, prompt, checkpoint, 12).await?;
-    let recon: ReconStageOutput = parse_stage_json(&raw)?;
+    let (raw, stage_out) = spawn_stage(
+        rt,
+        SecurityHarnessStage::Recon,
+        prompt,
+        checkpoint,
+        RECON_MAX_ITERATIONS,
+    )
+    .await?;
+    // Parse failure is non-fatal. If a thorough model exhausts its
+    // iteration cap, the agent loop's summarize-on-cap path returns prose
+    // instead of JSON; if a weaker model emits malformed structure, the
+    // permissive ReconStageOutput defaults already absorb most damage.
+    // Either way, ensure_taxonomy_hunt_tasks queues every class
+    // unconditionally below, so the recon→hunt transition cannot be
+    // blocked by a single bad stage output.
+    let recon: ReconStageOutput = parse_stage_json(&raw).unwrap_or_else(|e| {
+        tracing::warn!(
+            error = %e,
+            "recon stage output did not parse as JSON; using empty recon — \
+             hunt will still fan out via taxonomy fallback"
+        );
+        ReconStageOutput::default()
+    });
     checkpoint.architecture_context = recon.architecture_context;
     checkpoint.class_coverage = build_class_coverage(
         &checkpoint.scope,
@@ -2243,15 +2276,6 @@ async fn run_recon_stage(
     let mut tasks = recon.tasks;
     canonicalize_tasks(&mut tasks);
     ensure_taxonomy_hunt_tasks(checkpoint, &mut tasks);
-    if tasks.is_empty() {
-        tasks.push(SecurityTask {
-            id: "hunt-001".into(),
-            attack_class: "auth_authorization".into(),
-            scope_hint: checkpoint.scope.clone(),
-            status: TaskStatus::Pending,
-            rationale: "fallback task because recon returned no tasks".into(),
-        });
-    }
     normalize_task_ids(&mut tasks, "hunt");
     update_class_coverage_task_ids(&mut checkpoint.class_coverage, &tasks);
     checkpoint.pending_tasks.extend(tasks);
@@ -2423,7 +2447,7 @@ async fn dispatch_hunts(
             SecurityHarnessStage::Hunt,
             &d.stage_prompt,
             &d.checkpoint,
-            28,
+            HUNT_MAX_ITERATIONS,
         )
         .await;
         (d, res)
@@ -2601,8 +2625,14 @@ async fn run_validate_stage(
         return Ok(None);
     }
     let prompt = include_str!("prompts/security_engineer_validate.md");
-    let (raw, stage_out) =
-        spawn_stage(rt, SecurityHarnessStage::Validate, prompt, checkpoint, 16).await?;
+    let (raw, stage_out) = spawn_stage(
+        rt,
+        SecurityHarnessStage::Validate,
+        prompt,
+        checkpoint,
+        VALIDATE_MAX_ITERATIONS,
+    )
+    .await?;
     let validate = parse_validate_output(&raw, &checkpoint.findings_so_far)?;
     checkpoint
         .validation_decisions_so_far
@@ -2665,8 +2695,14 @@ async fn run_trace_stage(
         return Ok(None);
     }
     let prompt = include_str!("prompts/security_engineer_trace.md");
-    let (raw, stage_out) =
-        spawn_stage(rt, SecurityHarnessStage::Trace, prompt, checkpoint, 16).await?;
+    let (raw, stage_out) = spawn_stage(
+        rt,
+        SecurityHarnessStage::Trace,
+        prompt,
+        checkpoint,
+        TRACE_MAX_ITERATIONS,
+    )
+    .await?;
     match parse_stage_json::<TraceStageOutput>(&raw) {
         Ok(traces) => {
             checkpoint.trace_results_so_far.extend(traces.traces);

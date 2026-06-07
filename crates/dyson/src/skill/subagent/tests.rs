@@ -1937,6 +1937,76 @@ async fn security_engineer_writes_checkpoint_after_recon() {
 }
 
 #[tokio::test]
+async fn security_engineer_recon_proceeds_when_subagent_returns_prose() {
+    // Live failure on deepseek-v4-pro c-0050: the recon child blew through
+    // its 12-iteration cap, the agent loop's summarize-on-cap path returned
+    // a prose summary, and parse_stage_json failed. The whole harness
+    // returned Err to TARS, who fell back to manual review and produced a
+    // report titled "security_engineer subagent unavailable" — silently
+    // killing the recon→hunt transition.
+    //
+    // After the fix, recon parse failure is non-fatal: the taxonomy fan-out
+    // still queues every class, the checkpoint is still written, and a
+    // resume will pick it up at the hunt stage.
+    let llm = MockLlm::new(vec![mock_text_response(
+        "I have reached the maximum number of iterations. Here is what I found: \
+         the codebase has an HTTP server, some auth code, and a few config files. \
+         I did not have time to enumerate every entry point.",
+    )]);
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(crate::workspace::InMemoryWorkspace::new())
+            as Box<dyn crate::workspace::Workspace>,
+    ));
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ToolContext::for_test(dir.path());
+    ctx.workspace = Some(Arc::clone(&workspace));
+    let result = tool
+        .run(
+            &serde_json::json!({
+                "task": "review iteration-cap regression",
+                "stop_after_stage": "recon"
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !result.is_error,
+        "recon should succeed even when the subagent returns prose, got: {}",
+        result.content
+    );
+
+    let guard = workspace.read().await;
+    let path = guard
+        .list_files()
+        .into_iter()
+        .find(|name| name.starts_with("kb/security-harness/checkpoints/"))
+        .expect("checkpoint file not written on prose-output recon");
+    let body = guard.get(&path).unwrap();
+    let checkpoint: security_engineer::SecurityCheckpoint = serde_json::from_str(&body).unwrap();
+    // architecture_context stayed empty (recon defaulted), but hunt tasks
+    // for every taxonomy class are still queued.
+    assert!(checkpoint.architecture_context.is_empty());
+    assert_eq!(
+        checkpoint.pending_tasks.len(),
+        security_engineer::vulnerability_taxonomy().len(),
+        "every taxonomy class should be queued even after recon parse failure"
+    );
+}
+
+#[tokio::test]
 async fn security_engineer_recon_generates_taxonomy_driven_tasks() {
     let llm = MockLlm::new(vec![mock_text_response(
         r#"{
