@@ -311,3 +311,68 @@ describe('parseHarnessState — Phase 2 fields', () => {
     expect(wrappedState.lastStage).toBe('hunt');
   });
 });
+
+describe('SecurityHarnessPanel — UX visual states', () => {
+  it('shows the initializing strip when the tool is running but no event has landed', () => {
+    // The c-0055 screenshot case: 9 minutes in, harness alive, no
+    // CheckpointEvent emitted yet (they batch at tool return).  The
+    // operator was staring at all-identical stage cells with no signal
+    // about whether the harness was working or stuck.  The strip
+    // gives them an "alive" signal even before the first event.
+    const body = { text: '', children: [] };
+    const { container } = render(<SecurityHarnessPanel body={body} running={true}/>);
+    expect(container.textContent).toContain('harness initializing');
+    expect(container.textContent).toContain('loading checkpoint');
+  });
+
+  it('hides the initializing strip once any stage event has landed', () => {
+    const body = { text: 'security_engineer: recon', children: [] };
+    const { container } = render(<SecurityHarnessPanel body={body} running={true}/>);
+    expect(container.textContent).not.toContain('harness initializing');
+  });
+
+  it('hides the initializing strip when the tool finished (no point telling the operator it is "initializing" after exit)', () => {
+    const body = { text: '', children: [] };
+    const { container } = render(<SecurityHarnessPanel body={body} running={false}/>);
+    expect(container.textContent).not.toContain('harness initializing');
+  });
+
+  it('hides the initializing strip when the tool errored (errored badge owns the signal)', () => {
+    const body = { text: '', children: [] };
+    const { container } = render(<SecurityHarnessPanel
+      body={body}
+      running={false}
+      exit="err"/>);
+    expect(container.textContent).not.toContain('harness initializing');
+  });
+
+  it('prefixes each stage label with a state glyph (▸/✓/✕) so the active cell is unmistakable at a glance', () => {
+    // recon done, hunt running, validate failed, rest pending.
+    const body = {
+      text: [
+        'security_engineer: recon',
+        'security_engineer: hunt',
+        'security_engineer: validate',
+        'security_engineer: validate failed: parse error',
+      ].join('\n'),
+      children: [],
+    };
+    const { container } = render(<SecurityHarnessPanel body={body} exit="err" running={false}/>);
+    const t = container.textContent || '';
+    // Done cells get a checkmark; errored cells get an x.
+    expect(t).toContain('✓ Recon');
+    expect(t).toContain('✓ Hunt');
+    expect(t).toContain('✕ Validate');
+    // Pending cells have no prefix.
+    expect(t).toMatch(/(?:^|[^▸✓✕ ])Gapfill/);
+  });
+
+  it('prefixes the currently-running stage with ▸', () => {
+    const body = {
+      text: ['security_engineer: recon', 'security_engineer: hunt'].join('\n'),
+      children: [],
+    };
+    const { container } = render(<SecurityHarnessPanel body={body} running={true}/>);
+    expect(container.textContent).toContain('▸ Hunt');
+  });
+});

@@ -403,12 +403,60 @@ function parseHarnessState(text, isRunning, exitErr = false) {
   };
 }
 
-// Stage progress bar — 8 cells with status-coded background.  Larger
-// labels than the MVP (12px vs 10px) since live evaluation showed the
-// old size was squinty against deepseek-v4-pro's real outputs.  Errored
-// cells get a distinct red background + strikethrough so a validate
-// fail is unmistakable next to a clean recon→hunt completion.
+// Keyframes for the running-cell pulse + initializing-bar shimmer.
+// Injected lazily on first render so other panels don't carry the
+// cost.  Uses a guard variable so multiple harness panels don't
+// stack copies of the rule.
+let HARNESS_STYLES_INJECTED = false;
+function ensureHarnessStyles() {
+  if (HARNESS_STYLES_INJECTED) return;
+  if (typeof document === 'undefined') return;
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes dyson-harness-pulse {
+      0%,100% { box-shadow: 0 0 0 0 var(--accent, #4a9eff); }
+      50%     { box-shadow: 0 0 0 4px transparent; }
+    }
+    @keyframes dyson-harness-shimmer {
+      0%   { background-position: -200% 0; }
+      100% { background-position:  200% 0; }
+    }
+    .dyson-harness-cell-running {
+      animation: dyson-harness-pulse 1.6s ease-in-out infinite;
+    }
+    .dyson-harness-init-row {
+      background: linear-gradient(
+        90deg,
+        var(--bg, #0a0a0a) 0%,
+        var(--bg-1, #141414) 50%,
+        var(--bg, #0a0a0a) 100%
+      );
+      background-size: 200% 100%;
+      animation: dyson-harness-shimmer 2.5s linear infinite;
+    }
+  `;
+  document.head.appendChild(style);
+  HARNESS_STYLES_INJECTED = true;
+}
+
+// Stage progress bar — 8 cells with status-coded background, prefix
+// icon, and (for the running stage) a pulse outline.
+//
+// State visuals:
+//   pending  — dashed border, dim text, no prefix
+//   running  — accent fill, ▸ prefix, pulsing outline, bold
+//   done     — green fill, ✓ prefix
+//   errored  — red fill, ✕ prefix, strikethrough, bold
+//
+// The dashed border on pending makes "not started yet" visually
+// distinct from the styled active/done/errored states — the prior
+// version used a solid hairline border, which read as "no state"
+// rather than "queued."  Live evaluation against c-0055 (the user's
+// screenshot) showed the gray-on-gray rendering made it impossible to
+// tell what stage the harness was in.
 function StageBar({ status }) {
+  ensureHarnessStyles();
+  const PREFIX = { running: '▸ ', done: '✓ ', errored: '✕ ', pending: '' };
   return (
     <div style={{display:'flex', gap:4, padding:'10px 12px',
                  borderBottom:'1px solid var(--line)',
@@ -416,26 +464,53 @@ function StageBar({ status }) {
       {HARNESS_STAGES.map((s, i) => {
         const st = status[i];
         const bg = st === 'done' ? 'var(--ok, #2c7a3a)'
-                 : st === 'running' ? 'var(--accent)'
+                 : st === 'running' ? 'var(--accent, #4a9eff)'
                  : st === 'errored' ? 'var(--err, #b91c1c)'
-                 : 'var(--bg)';
+                 : 'transparent';
         const fg = st === 'pending' ? 'var(--mute)' : 'var(--fg)';
         const border = st === 'pending'
-          ? '1px solid var(--line)'
+          ? '1px dashed var(--line)'
           : '1px solid transparent';
         const decoration = st === 'errored' ? 'line-through' : 'none';
+        const cellClass = st === 'running' ? 'dyson-harness-cell-running' : '';
+        const titleSuffix = st === 'running' ? ' — running'
+                          : st === 'done' ? ' — done'
+                          : st === 'errored' ? ' — failed'
+                          : ' — pending';
         return (
-          <div key={s} title={STAGE_LABEL[s]} style={{
-            flex:1, fontSize:12, lineHeight:'22px', textAlign:'center',
-            background: bg, color: fg, border, borderRadius:4,
-            fontWeight: st === 'running' || st === 'errored' ? 600 : 400,
-            letterSpacing: 0.3,
-            textDecoration: decoration,
-          }}>
-            {STAGE_LABEL[s]}{st === 'running' && ' …'}
+          <div key={s}
+               className={cellClass}
+               title={STAGE_LABEL[s] + titleSuffix}
+               style={{
+                 flex:1, fontSize:12, lineHeight:'22px', textAlign:'center',
+                 background: bg, color: fg, border, borderRadius:4,
+                 fontWeight: st === 'running' || st === 'errored' ? 600 : 400,
+                 letterSpacing: 0.3,
+                 textDecoration: decoration,
+               }}>
+            {PREFIX[st]}{STAGE_LABEL[s]}
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Initializing strip — shown when the tool is RUNNING but no
+// CheckpointEvent has landed yet.  CheckpointEvents only forward at
+// tool return (per agent/execution.rs:170), so a fresh harness
+// invocation can spend its first few minutes with the panel showing
+// "(no run id yet)" and all-pending cells — visually identical to
+// "the harness died on launch."  The shimmer bar makes the running
+// state legible.
+function InitializingStrip() {
+  ensureHarnessStyles();
+  return (
+    <div className="dyson-harness-init-row"
+         style={{padding:'6px 12px', fontSize:11,
+                 color:'var(--fg-dim)', borderBottom:'1px solid var(--line)',
+                 letterSpacing:0.3, fontFamily:'var(--font-mono)'}}>
+      harness initializing — loading checkpoint, choosing first stage…
     </div>
   );
 }
@@ -593,6 +668,7 @@ function SecurityHarnessPanel({ body, exit, running, summary, errorText }) {
     <div className="p-body flush" style={{overflow:'auto', flex:1,
                                           display:'flex', flexDirection:'column'}}>
       <StageBar status={state.stageStatus}/>
+      {running && !state.lastStage && !state.errored && <InitializingStrip/>}
       <HarnessHeader
         runId={state.runId}
         resumed={state.resumed}
