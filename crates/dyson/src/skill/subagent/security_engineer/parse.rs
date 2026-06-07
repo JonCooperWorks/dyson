@@ -1,11 +1,9 @@
-// ===========================================================================
-// JSON extraction + per-stage parsers, plus the report schema validators.
-//
-// LLM stage outputs are wrapped in prose, code fences, and echoes of the
-// prompt's checkpoint JSON.  `extract_json` walks brace-balanced candidates
-// and returns the LAST one that parses — this avoids blending the prompt's
-// own embedded JSON with the model's real output.
-// ===========================================================================
+//! JSON extraction + per-stage parsers, plus the report schema validators.
+//!
+//! LLM stage outputs are wrapped in prose, code fences, and echoes of the
+//! prompt's checkpoint JSON.  `extract_json` walks brace-balanced candidates
+//! and returns the LAST one that parses — this avoids blending the prompt's
+//! own embedded JSON with the model's real output.
 
 use std::collections::BTreeSet;
 
@@ -424,6 +422,251 @@ mod extract_json_tests {
         assert!(recon.tasks.is_empty());
         assert!(recon.coverage_gaps.is_empty());
         assert!(recon.class_coverage.is_empty());
+    }
+
+    fn finding_complete(id: &str) -> SecurityFinding {
+        SecurityFinding {
+            id: id.into(),
+            title: "title".into(),
+            severity: "medium".into(),
+            vulnerability_class: "auth_authorization".into(),
+            trust_boundary: "boundary".into(),
+            entry_point: "src/lib.rs:1".into(),
+            sink_or_decision: "decision".into(),
+            root_cause: "cause".into(),
+            affected_paths: vec!["src/lib.rs".into()],
+            evidence: vec!["evidence".into()],
+            reachability: "reachable".into(),
+            tenant_or_instance_impact: "impact".into(),
+            severity_rationale: "rationale".into(),
+            fix_recommendation: "fix".into(),
+        }
+    }
+
+    #[test]
+    fn parse_validate_output_succeeds_with_valid_confirmed_decision() {
+        let findings = vec![finding_complete("finding-001")];
+        let raw = r#"{"decisions":[{"finding_id":"finding-001","decision":"confirmed","evidence":"reproduced via taint trace"}]}"#;
+        let out = parse_validate_output(raw, &findings).expect("should parse");
+        assert_eq!(out.decisions.len(), 1);
+        assert_eq!(out.decisions[0].finding_id, "finding-001");
+    }
+
+    #[test]
+    fn parse_validate_output_rejects_decision_for_unknown_finding() {
+        let findings = vec![finding_complete("finding-001")];
+        let raw = r#"{"decisions":[{"finding_id":"finding-999","decision":"confirmed","evidence":"ok"}]}"#;
+        let err = parse_validate_output(raw, &findings).unwrap_err();
+        assert!(
+            err.contains("unknown finding_id"),
+            "expected 'unknown finding_id' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_validate_output_rejects_confirmed_finding_missing_vulnerability_class() {
+        let mut f = finding_complete("finding-001");
+        f.vulnerability_class.clear();
+        let findings = vec![f];
+        let raw = r#"{"decisions":[{"finding_id":"finding-001","decision":"confirmed","evidence":"ok"}]}"#;
+        let err = parse_validate_output(raw, &findings).unwrap_err();
+        assert!(
+            err.contains("vulnerability_class"),
+            "error should mention vulnerability_class, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_validate_output_rejects_confirmed_finding_missing_trust_boundary() {
+        let mut f = finding_complete("finding-001");
+        f.trust_boundary.clear();
+        let findings = vec![f];
+        let raw = r#"{"decisions":[{"finding_id":"finding-001","decision":"confirmed","evidence":"ok"}]}"#;
+        let err = parse_validate_output(raw, &findings).unwrap_err();
+        assert!(
+            err.contains("trust_boundary"),
+            "error should mention trust_boundary, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_validate_output_rejects_output_with_new_findings_field() {
+        let findings = vec![finding_complete("finding-001")];
+        let raw = r#"{"findings":[{"id":"x"}],"decisions":[]}"#;
+        let err = parse_validate_output(raw, &findings).unwrap_err();
+        assert!(
+            err.contains("must not include new findings"),
+            "expected new-findings rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_validate_output_rejects_no_vulnerability_finding_being_confirmed() {
+        let mut f = finding_complete("finding-001");
+        f.title = "no vulnerability found here".into();
+        f.root_cause = "no vulnerability found in the tested boundary".into();
+        let findings = vec![f];
+        let raw = r#"{"decisions":[{"finding_id":"finding-001","decision":"confirmed","evidence":"ok"}]}"#;
+        let err = parse_validate_output(raw, &findings).unwrap_err();
+        assert!(
+            err.contains("no-vulnerability verification note"),
+            "expected no-vulnerability rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_report_struct_rejects_dedupe_referencing_unknown_finding() {
+        // Note: validate_report_struct itself doesn't cross-check
+        // dedupe finding_ids vs report.findings.ids — it just enforces
+        // structural completeness. Pin that contract here: an unknown
+        // finding_id in a dedupe group is NOT rejected today.
+        let report = SecurityHarnessReport {
+            schema_version: SECURITY_HARNESS_SCHEMA_VERSION,
+            run_id: "run-1".into(),
+            target: super::super::types::TargetRef {
+                repo_path: "/repo".into(),
+                git_ref: None,
+            },
+            scope: "scope".into(),
+            findings: vec![],
+            rejected_candidates: vec![],
+            coverage: vec![],
+            gaps: vec![],
+            dedupe_groups: vec![DedupeGroup {
+                id: "dedupe-001".into(),
+                root_cause: "rc".into(),
+                primary_finding_id: "finding-unknown".into(),
+                finding_ids: vec!["finding-unknown".into()],
+                affected_paths: vec![],
+            }],
+            trace_evidence: vec![],
+            stage_history: vec![],
+            class_coverage: vec![super::super::types::VulnerabilityClassCoverage {
+                class_id: "auth_authorization".into(),
+                ..Default::default()
+            }],
+        };
+        // Today this passes — pin the behavior so a future tightening
+        // surfaces here.
+        validate_report_struct(report).expect(
+            "validate_report_struct does not cross-check dedupe_groups.finding_ids; \
+             if you tightened it, update this test",
+        );
+    }
+
+    #[test]
+    fn validate_report_struct_rejects_dedupe_with_empty_primary_finding_id() {
+        let report = SecurityHarnessReport {
+            schema_version: SECURITY_HARNESS_SCHEMA_VERSION,
+            run_id: "run-1".into(),
+            target: super::super::types::TargetRef {
+                repo_path: "/repo".into(),
+                git_ref: None,
+            },
+            scope: "scope".into(),
+            findings: vec![],
+            rejected_candidates: vec![],
+            coverage: vec![],
+            gaps: vec![],
+            dedupe_groups: vec![DedupeGroup {
+                id: "dedupe-001".into(),
+                root_cause: "rc".into(),
+                primary_finding_id: String::new(),
+                finding_ids: vec!["finding-001".into()],
+                affected_paths: vec![],
+            }],
+            trace_evidence: vec![],
+            stage_history: vec![],
+            class_coverage: vec![super::super::types::VulnerabilityClassCoverage {
+                class_id: "auth_authorization".into(),
+                ..Default::default()
+            }],
+        };
+        let err = validate_report_struct(report).unwrap_err();
+        assert!(
+            err.contains("dedupe_groups"),
+            "error should mention dedupe_groups, got: {err}"
+        );
+        assert!(
+            err.contains("primary_finding_id"),
+            "error should mention primary_finding_id, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_report_struct_does_not_flag_duplicate_finding_ids() {
+        // Pin behavior: validate_report_struct does NOT cross-check that
+        // finding ids are unique within findings[]. If that's tightened
+        // later, update this test.
+        let f = finding_complete("finding-001");
+        let report = SecurityHarnessReport {
+            schema_version: SECURITY_HARNESS_SCHEMA_VERSION,
+            run_id: "run-1".into(),
+            target: super::super::types::TargetRef {
+                repo_path: "/repo".into(),
+                git_ref: None,
+            },
+            scope: "scope".into(),
+            findings: vec![f.clone(), f],
+            rejected_candidates: vec![],
+            coverage: vec![],
+            gaps: vec![],
+            dedupe_groups: vec![],
+            trace_evidence: vec![],
+            stage_history: vec![],
+            class_coverage: vec![super::super::types::VulnerabilityClassCoverage {
+                class_id: "auth_authorization".into(),
+                ..Default::default()
+            }],
+        };
+        validate_report_struct(report).expect(
+            "validate_report_struct does not de-duplicate finding ids today; \
+             if you tightened it, update this test",
+        );
+    }
+
+    #[test]
+    fn validate_report_struct_rejects_finding_missing_vulnerability_class() {
+        let mut f = finding_complete("finding-001");
+        f.vulnerability_class.clear();
+        let report = SecurityHarnessReport {
+            schema_version: SECURITY_HARNESS_SCHEMA_VERSION,
+            run_id: "run-1".into(),
+            target: super::super::types::TargetRef {
+                repo_path: "/repo".into(),
+                git_ref: None,
+            },
+            scope: "scope".into(),
+            findings: vec![f],
+            rejected_candidates: vec![],
+            coverage: vec![],
+            gaps: vec![],
+            dedupe_groups: vec![],
+            trace_evidence: vec![],
+            stage_history: vec![],
+            class_coverage: vec![super::super::types::VulnerabilityClassCoverage {
+                class_id: "auth_authorization".into(),
+                ..Default::default()
+            }],
+        };
+        let err = validate_report_struct(report).unwrap_err();
+        assert!(
+            err.contains("vulnerability_class"),
+            "error should mention vulnerability_class, got: {err}"
+        );
+    }
+
+    #[test]
+    fn prevalidate_report_value_does_not_check_target_repo_path() {
+        // Pin behavior: prevalidate_report_value only walks findings[]
+        // and dedupe_groups[] looking for missing root_cause. A missing
+        // target.repo_path is caught later by validate_report_struct.
+        let value = serde_json::json!({
+            "findings": [],
+            "dedupe_groups": []
+        });
+        prevalidate_report_value(&value)
+            .expect("prevalidate_report_value does not inspect target today");
     }
 
     #[test]

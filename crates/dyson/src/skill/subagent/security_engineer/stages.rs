@@ -1,15 +1,13 @@
-// ===========================================================================
-// Stage runners for the security_engineer harness.
-//
-// One async (or sync, for the bookkeeping-only stages) function per stage:
-//
-//   Recon -> Hunt -> Validate -> Gapfill -> Dedupe -> Trace -> Feedback -> Report
-//
-// Each stage reads/writes the shared SecurityCheckpoint; the harness loop in
-// mod.rs persists the checkpoint between stages.  Stage runners return
-// `Option<ToolOutput>` so bookkeeping-only stages (Gapfill/Dedupe/Feedback)
-// can avoid emitting empty stage outputs.
-// ===========================================================================
+//! Stage runners for the security_engineer harness.
+//!
+//! One async (or sync, for the bookkeeping-only stages) function per stage:
+//!
+//!   Recon -> Hunt -> Validate -> Gapfill -> Dedupe -> Trace -> Feedback -> Report
+//!
+//! Each stage reads/writes the shared SecurityCheckpoint; the harness loop in
+//! mod.rs persists the checkpoint between stages.  Stage runners return
+//! `Option<ToolOutput>` so bookkeeping-only stages (Gapfill/Dedupe/Feedback)
+//! can avoid emitting empty stage outputs.
 
 use std::collections::BTreeSet;
 
@@ -676,4 +674,253 @@ pub(super) fn progress_for(stage: SecurityHarnessStage) -> Option<f32> {
         SecurityHarnessStage::Feedback => 0.86,
         SecurityHarnessStage::Report => 0.94,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::{ModelMetadata, StageHistoryEntry, TargetRef};
+    use super::*;
+
+    fn cp() -> SecurityCheckpoint {
+        SecurityCheckpoint::new(
+            "run".into(),
+            TargetRef {
+                repo_path: "/repo".into(),
+                git_ref: None,
+            },
+            "scope".into(),
+            ModelMetadata {
+                provider: "p".into(),
+                model: "m".into(),
+            },
+            0,
+        )
+    }
+
+    fn pending(id: &str, class: &str) -> SecurityTask {
+        SecurityTask {
+            id: id.into(),
+            attack_class: class.into(),
+            scope_hint: "scope".into(),
+            status: TaskStatus::Pending,
+            rationale: String::new(),
+        }
+    }
+
+    #[test]
+    fn distinct_pending_classes_dedupes_and_preserves_first_seen_order() {
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "auth_authorization"));
+        c.pending_tasks
+            .push(pending("t2", "injection_unsafe_execution"));
+        c.pending_tasks.push(pending("t3", "auth_authorization"));
+        c.pending_tasks.push(pending("t4", "ssrf_outbound_network"));
+        assert_eq!(
+            distinct_pending_classes(&c),
+            vec![
+                "auth_authorization".to_string(),
+                "injection_unsafe_execution".to_string(),
+                "ssrf_outbound_network".to_string(),
+            ],
+            "distinct classes must dedupe and preserve first-seen order"
+        );
+    }
+
+    #[test]
+    fn distinct_pending_classes_skips_completed_tasks() {
+        let mut c = cp();
+        let mut done = pending("t-done", "auth_authorization");
+        done.status = TaskStatus::Completed;
+        c.pending_tasks.push(done);
+        c.pending_tasks
+            .push(pending("t-pending", "ssrf_outbound_network"));
+        assert_eq!(
+            distinct_pending_classes(&c),
+            vec!["ssrf_outbound_network".to_string()],
+            "completed tasks should be skipped"
+        );
+    }
+
+    #[test]
+    fn pending_tasks_for_class_returns_pending_of_that_class() {
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "auth_authorization"));
+        c.pending_tasks
+            .push(pending("t2", "injection_unsafe_execution"));
+        c.pending_tasks.push(pending("t3", "auth_authorization"));
+        let pending_auth = pending_tasks_for_class(&c, "auth_authorization");
+        let ids: Vec<&str> = pending_auth.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["t1", "t3"],
+            "should return only pending auth_authorization tasks in order"
+        );
+    }
+
+    #[test]
+    fn pending_tasks_for_class_returns_empty_for_missing_class() {
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "auth_authorization"));
+        assert!(
+            pending_tasks_for_class(&c, "missing_class").is_empty(),
+            "missing class should return empty list"
+        );
+    }
+
+    #[test]
+    fn complete_tasks_moves_matching_ids_and_flips_status() {
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "auth_authorization"));
+        c.pending_tasks
+            .push(pending("t2", "injection_unsafe_execution"));
+        let ids: BTreeSet<String> = ["t1".to_string()].into_iter().collect();
+        complete_tasks(&mut c, &ids);
+        assert_eq!(
+            c.pending_tasks.len(),
+            1,
+            "t1 should have been removed from pending"
+        );
+        assert_eq!(
+            c.pending_tasks[0].id, "t2",
+            "remaining pending task should be t2"
+        );
+        assert_eq!(
+            c.completed_tasks.len(),
+            1,
+            "t1 should have been added to completed"
+        );
+        assert_eq!(c.completed_tasks[0].id, "t1");
+        assert_eq!(
+            c.completed_tasks[0].status,
+            TaskStatus::Completed,
+            "completed task status must be flipped to Completed"
+        );
+    }
+
+    #[test]
+    fn complete_tasks_with_empty_set_is_a_no_op() {
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "auth_authorization"));
+        let ids: BTreeSet<String> = BTreeSet::new();
+        complete_tasks(&mut c, &ids);
+        assert_eq!(c.pending_tasks.len(), 1);
+        assert!(c.completed_tasks.is_empty());
+    }
+
+    #[test]
+    fn complete_tasks_with_unknown_ids_is_a_no_op() {
+        let mut c = cp();
+        c.pending_tasks.push(pending("t1", "auth_authorization"));
+        let ids: BTreeSet<String> = ["unknown".to_string()].into_iter().collect();
+        complete_tasks(&mut c, &ids);
+        assert_eq!(c.pending_tasks.len(), 1);
+        assert!(c.completed_tasks.is_empty());
+    }
+
+    #[test]
+    fn normalize_task_ids_backfills_empty_ids_with_prefix_and_index() {
+        let mut tasks = vec![
+            SecurityTask {
+                id: String::new(),
+                ..Default::default()
+            },
+            SecurityTask {
+                id: String::new(),
+                ..Default::default()
+            },
+        ];
+        normalize_task_ids(&mut tasks, "gap");
+        assert_eq!(tasks[0].id, "gap-001");
+        assert_eq!(tasks[1].id, "gap-002");
+    }
+
+    #[test]
+    fn normalize_task_ids_leaves_non_empty_ids_unchanged() {
+        let mut tasks = vec![
+            SecurityTask {
+                id: "given".into(),
+                ..Default::default()
+            },
+            SecurityTask {
+                id: String::new(),
+                ..Default::default()
+            },
+        ];
+        normalize_task_ids(&mut tasks, "gap");
+        assert_eq!(tasks[0].id, "given", "existing id should not be changed");
+        // The index-based backfill still uses the original index — even
+        // when an earlier slot was non-empty.
+        assert_eq!(
+            tasks[1].id, "gap-002",
+            "backfill uses index in the input slice"
+        );
+    }
+
+    #[test]
+    fn stage_completed_flips_when_stage_history_records_completion() {
+        let mut c = cp();
+        assert!(
+            !stage_completed(&c, SecurityHarnessStage::Recon),
+            "fresh checkpoint must not report any stage completed"
+        );
+        c.stage_history.push(StageHistoryEntry {
+            stage: SecurityHarnessStage::Recon,
+            status: "completed".into(),
+            started_at: 0,
+            finished_at: 0,
+            summary: String::new(),
+        });
+        assert!(
+            stage_completed(&c, SecurityHarnessStage::Recon),
+            "checkpoint must report Recon completed after history entry"
+        );
+        assert!(
+            !stage_completed(&c, SecurityHarnessStage::Hunt),
+            "Hunt should still be incomplete"
+        );
+    }
+
+    #[test]
+    fn stage_summary_returns_non_empty_for_every_stage() {
+        let c = cp();
+        for stage in [
+            SecurityHarnessStage::Recon,
+            SecurityHarnessStage::Hunt,
+            SecurityHarnessStage::Validate,
+            SecurityHarnessStage::Gapfill,
+            SecurityHarnessStage::Dedupe,
+            SecurityHarnessStage::Trace,
+            SecurityHarnessStage::Feedback,
+            SecurityHarnessStage::Report,
+        ] {
+            let summary = stage_summary(&c, stage);
+            // Report defers to checkpoint.report_validation_state.status,
+            // which defaults to "not_started" on a fresh checkpoint, so
+            // every stage summary should be non-empty.
+            assert!(
+                !summary.is_empty(),
+                "stage_summary({stage}) returned empty string"
+            );
+        }
+    }
+
+    #[test]
+    fn progress_for_returns_value_in_unit_interval_for_every_stage() {
+        for stage in [
+            SecurityHarnessStage::Recon,
+            SecurityHarnessStage::Hunt,
+            SecurityHarnessStage::Validate,
+            SecurityHarnessStage::Gapfill,
+            SecurityHarnessStage::Dedupe,
+            SecurityHarnessStage::Trace,
+            SecurityHarnessStage::Feedback,
+            SecurityHarnessStage::Report,
+        ] {
+            let progress = progress_for(stage).expect("progress should always be Some");
+            assert!(
+                (0.0..=1.0).contains(&progress),
+                "progress_for({stage})={progress} should be in [0,1]"
+            );
+        }
+    }
 }

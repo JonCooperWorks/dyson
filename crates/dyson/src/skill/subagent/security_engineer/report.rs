@@ -1,11 +1,9 @@
-// ===========================================================================
-// Markdown rendering for the final report + the deterministic fallback that
-// reconstructs a report from the checkpoint when the LLM repair path fails.
-//
-// Also holds the small inline helpers that classify which findings should be
-// reported (confirmed + complete + not a no-vulnerability note) and the
-// dedupe-by-root-cause grouping the LLM is allowed to skip.
-// ===========================================================================
+//! Markdown rendering for the final report + the deterministic fallback that
+//! reconstructs a report from the checkpoint when the LLM repair path fails.
+//!
+//! Also holds the small inline helpers that classify which findings should be
+//! reported (confirmed + complete + not a no-vulnerability note) and the
+//! dedupe-by-root-cause grouping the LLM is allowed to skip.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -407,6 +405,233 @@ pub fn dedupe_findings(findings: &[SecurityFinding]) -> Vec<DedupeGroup> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::{
+        ModelMetadata, TargetRef, ValidationDecision, VulnerabilityClassCoverage,
+    };
+    use super::*;
+
+    fn cp_with_target(repo: &str) -> SecurityCheckpoint {
+        SecurityCheckpoint::new(
+            "run-r".into(),
+            TargetRef {
+                repo_path: repo.into(),
+                git_ref: None,
+            },
+            "scope text".into(),
+            ModelMetadata {
+                provider: "p".into(),
+                model: "m".into(),
+            },
+            0,
+        )
+    }
+
+    fn finding(id: &str, root_cause: &str) -> SecurityFinding {
+        SecurityFinding {
+            id: id.into(),
+            title: format!("title for {id}"),
+            severity: "medium".into(),
+            vulnerability_class: "auth_authorization".into(),
+            trust_boundary: "boundary".into(),
+            entry_point: "src/lib.rs:1".into(),
+            sink_or_decision: "decision".into(),
+            root_cause: root_cause.into(),
+            affected_paths: vec!["src/lib.rs:1".into()],
+            evidence: vec!["evidence".into()],
+            reachability: "reachable".into(),
+            tenant_or_instance_impact: "impact".into(),
+            severity_rationale: "rationale".into(),
+            fix_recommendation: "fix".into(),
+        }
+    }
+
+    fn report_with(
+        checkpoint: &SecurityCheckpoint,
+        findings: Vec<SecurityFinding>,
+    ) -> SecurityHarnessReport {
+        SecurityHarnessReport {
+            schema_version: SECURITY_HARNESS_SCHEMA_VERSION,
+            run_id: checkpoint.run_id.clone(),
+            target: checkpoint.target.clone(),
+            scope: checkpoint.scope.clone(),
+            findings,
+            rejected_candidates: vec![],
+            coverage: vec![],
+            gaps: vec![],
+            dedupe_groups: vec![],
+            trace_evidence: vec![],
+            stage_history: vec![],
+            class_coverage: vec![VulnerabilityClassCoverage {
+                class_id: "auth_authorization".into(),
+                class_name: "Authentication and authorization".into(),
+                considered: true,
+                applicable: true,
+                hunted: true,
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn render_report_markdown_includes_title_run_id_target_and_scope() {
+        let cp = cp_with_target("/repo");
+        let report = report_with(&cp, vec![finding("finding-001", "rc")]);
+        let md = render_report_markdown(&report, &cp);
+        assert!(md.contains("# Security Harness Report"), "missing title");
+        assert!(md.contains(&cp.run_id), "missing run_id");
+        assert!(md.contains("/repo"), "missing target repo_path");
+        assert!(md.contains("scope text"), "missing scope content");
+    }
+
+    #[test]
+    fn render_report_markdown_with_no_findings_emits_no_confirmed_findings_section() {
+        let cp = cp_with_target("/repo");
+        let report = report_with(&cp, vec![]);
+        let md = render_report_markdown(&report, &cp);
+        assert!(!md.is_empty(), "markdown should never be empty");
+        assert!(
+            md.contains("No confirmed findings were reported."),
+            "zero-findings report should include the empty-findings sentinel"
+        );
+    }
+
+    #[test]
+    fn render_finding_markdown_emits_non_empty_output_for_minimal_finding() {
+        // All optional fields empty: ensure no panic / no unreachable!.
+        let cp = cp_with_target("/repo");
+        let report = report_with(&cp, vec![]);
+        let f = SecurityFinding {
+            id: "finding-min".into(),
+            title: "minimal".into(),
+            severity: String::new(),
+            vulnerability_class: String::new(),
+            trust_boundary: String::new(),
+            entry_point: String::new(),
+            sink_or_decision: String::new(),
+            root_cause: String::new(),
+            affected_paths: vec![],
+            evidence: vec![],
+            reachability: String::new(),
+            tenant_or_instance_impact: String::new(),
+            severity_rationale: String::new(),
+            fix_recommendation: String::new(),
+        };
+        let mut buf = String::new();
+        render_finding_markdown(&mut buf, &report, &cp, &f);
+        assert!(
+            !buf.is_empty(),
+            "render_finding_markdown must produce output even for a stripped-down finding"
+        );
+        assert!(
+            buf.contains("finding-min"),
+            "rendered output should mention the finding id"
+        );
+    }
+
+    #[test]
+    fn dedupe_findings_groups_by_root_cause() {
+        let findings = vec![finding("a", "X"), finding("b", "X"), finding("c", "Y")];
+        let groups = dedupe_findings(&findings);
+        assert_eq!(
+            groups.len(),
+            2,
+            "two distinct root causes should produce two dedupe groups"
+        );
+        let by_root: std::collections::BTreeMap<&str, &DedupeGroup> =
+            groups.iter().map(|g| (g.root_cause.as_str(), g)).collect();
+        assert_eq!(by_root["X"].finding_ids.len(), 2);
+        assert_eq!(by_root["Y"].finding_ids.len(), 1);
+    }
+
+    #[test]
+    fn dedupe_findings_falls_back_to_title_when_root_cause_empty() {
+        let f = finding("only", "");
+        let groups = dedupe_findings(std::slice::from_ref(&f));
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].root_cause, f.title,
+            "empty root_cause should fall back to the title"
+        );
+    }
+
+    #[test]
+    fn dedupe_findings_produces_stable_group_ids() {
+        let findings = vec![finding("a", "X"), finding("b", "Y")];
+        let first = dedupe_findings(&findings);
+        let second = dedupe_findings(&findings);
+        let first_ids: Vec<&str> = first.iter().map(|g| g.id.as_str()).collect();
+        let second_ids: Vec<&str> = second.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(
+            first_ids, second_ids,
+            "same input should produce identical dedupe group ids"
+        );
+    }
+
+    #[test]
+    fn reportable_confirmed_findings_includes_confirmed_complete_findings() {
+        let mut cp = cp_with_target("/repo");
+        cp.findings_so_far.push(finding("finding-001", "rc"));
+        cp.validation_decisions_so_far.push(ValidationDecision {
+            finding_id: "finding-001".into(),
+            decision: ValidationDecisionKind::Confirmed,
+            evidence: "ok".into(),
+            severity: None,
+        });
+        let result = reportable_confirmed_findings(&cp);
+        assert_eq!(
+            result.len(),
+            1,
+            "a confirmed and complete finding should appear in reportable list"
+        );
+        assert_eq!(result[0].id, "finding-001");
+    }
+
+    #[test]
+    fn reportable_confirmed_findings_excludes_rejected_findings() {
+        let mut cp = cp_with_target("/repo");
+        cp.findings_so_far.push(finding("finding-001", "rc"));
+        cp.validation_decisions_so_far.push(ValidationDecision {
+            finding_id: "finding-001".into(),
+            decision: ValidationDecisionKind::Rejected,
+            evidence: "rejected".into(),
+            severity: None,
+        });
+        assert!(
+            reportable_confirmed_findings(&cp).is_empty(),
+            "rejected findings should not be reportable"
+        );
+    }
+
+    #[test]
+    fn reportable_confirmed_findings_excludes_needs_more_evidence_decisions() {
+        let mut cp = cp_with_target("/repo");
+        cp.findings_so_far.push(finding("finding-001", "rc"));
+        cp.validation_decisions_so_far.push(ValidationDecision {
+            finding_id: "finding-001".into(),
+            decision: ValidationDecisionKind::NeedsMoreEvidence,
+            evidence: "tbd".into(),
+            severity: None,
+        });
+        assert!(
+            reportable_confirmed_findings(&cp).is_empty(),
+            "NeedsMoreEvidence decisions should not graduate to reportable"
+        );
+    }
+
+    #[test]
+    fn reportable_confirmed_findings_excludes_findings_with_no_decision() {
+        let mut cp = cp_with_target("/repo");
+        cp.findings_so_far.push(finding("finding-001", "rc"));
+        // No decision recorded.
+        assert!(
+            reportable_confirmed_findings(&cp).is_empty(),
+            "findings with no validation decision should not be reportable"
+        );
+    }
 }
 
 pub(crate) fn report_from_checkpoint(checkpoint: &SecurityCheckpoint) -> SecurityHarnessReport {

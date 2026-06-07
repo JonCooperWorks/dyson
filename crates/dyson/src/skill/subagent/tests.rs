@@ -3348,3 +3348,879 @@ async fn orchestrator_without_path_keeps_process_cwd() {
     let process_cwd = std::env::current_dir().unwrap();
     assert_eq!(captured_dir, process_cwd);
 }
+
+// -----------------------------------------------------------------------
+// security_engineer end-to-end simulated runs.
+//
+// Each test below mocks one or more stage outputs with realistic JSON
+// payloads, drives the harness through one or more stages (sometimes via
+// `stop_after_stage`, sometimes via a pre-seeded checkpoint), and asserts
+// about the resulting tool output + the durable checkpoint.
+//
+// MockLlm uses `.with_fallback(...)` for the unconditional hunt fan-out:
+// the harness spawns one specialist per taxonomy class, and we only
+// enumerate the responses for the specialists that matter to the test.
+// -----------------------------------------------------------------------
+
+/// Realistic recon-stage output emitting one finding-worthy task.
+fn e2e_recon_response_for_auth() -> Vec<crate::llm::stream::StreamEvent> {
+    mock_text_response(
+        r#"{
+              "architecture_context": "HTTP proxy with bearer tokens",
+              "tasks": [
+                {"id":"hunt-auth-001","attack_class":"auth_authorization","scope_hint":"src/proxy.rs","rationale":"bearer token boundary"}
+              ],
+              "coverage_gaps": [],
+              "class_coverage": [
+                {"class_id":"auth_authorization","class_name":"Authentication and authorization","considered":true,"applicable":true,"hunted":false,"task_ids":["hunt-auth-001"]}
+              ]
+            }"#,
+    )
+}
+
+/// Realistic hunt-stage output reporting one complete finding.
+fn e2e_hunt_finding_response() -> Vec<crate::llm::stream::StreamEvent> {
+    mock_text_response(
+        r#"{
+              "completed_task_ids": ["hunt-auth-001"],
+              "findings": [
+                {
+                  "id":"finding-001",
+                  "title":"missing owner predicate on /api/items",
+                  "severity":"high",
+                  "vulnerability_class":"auth_authorization",
+                  "trust_boundary":"HTTP request boundary",
+                  "entry_point":"src/proxy.rs:42",
+                  "sink_or_decision":"store.fetch_by_id authorization gate",
+                  "root_cause":"owner predicate missing from id-based fetch",
+                  "affected_paths":["src/proxy.rs:42"],
+                  "evidence":["read_file src/proxy.rs:42 — no owner predicate visible","taint_trace req.params.id -> store.fetch_by_id"],
+                  "reachability":"unauthenticated GET",
+                  "tenant_or_instance_impact":"cross-tenant data access",
+                  "severity_rationale":"high because reachable without auth",
+                  "fix_recommendation":"add owner_id predicate to fetch_by_id"
+                }
+              ],
+              "gaps": [],
+              "follow_up_tasks": []
+            }"#,
+    )
+}
+
+fn e2e_hunt_empty_fallback() -> &'static str {
+    r#"{"completed_task_ids": [], "findings": [], "gaps": [], "follow_up_tasks": []}"#
+}
+
+fn e2e_validate_confirm_response() -> Vec<crate::llm::stream::StreamEvent> {
+    mock_text_response(
+        r#"{"decisions":[{"finding_id":"finding-001","decision":"confirmed","evidence":"validator reproduced the bypass","severity":"high"}]}"#,
+    )
+}
+
+fn e2e_validate_reject_response() -> Vec<crate::llm::stream::StreamEvent> {
+    mock_text_response(
+        r#"{"decisions":[{"finding_id":"finding-001","decision":"rejected","evidence":"validator found an upstream auth check that hunters missed","severity":"info"}]}"#,
+    )
+}
+
+fn e2e_trace_reachable_response() -> Vec<crate::llm::stream::StreamEvent> {
+    mock_text_response(
+        r#"{"traces":[{"finding_id":"finding-001","reachable":true,"severity_effect":"keeps","evidence":["taint_trace req -> sink"]}]}"#,
+    )
+}
+
+fn e2e_full_report_json() -> &'static str {
+    r#"{
+      "schema_version": 1,
+      "run_id": "placeholder",
+      "target": {"repo_path": "placeholder", "git_ref": null},
+      "scope": "placeholder",
+      "findings": [
+        {
+          "id":"finding-001",
+          "title":"missing owner predicate on /api/items",
+          "severity":"high",
+          "vulnerability_class":"auth_authorization",
+          "trust_boundary":"HTTP request boundary",
+          "entry_point":"src/proxy.rs:42",
+          "sink_or_decision":"store.fetch_by_id authorization gate",
+          "root_cause":"owner predicate missing from id-based fetch",
+          "affected_paths":["src/proxy.rs:42"],
+          "evidence":["read_file src/proxy.rs:42 — no owner predicate visible","taint_trace req.params.id -> store.fetch_by_id"],
+          "reachability":"unauthenticated GET",
+          "tenant_or_instance_impact":"cross-tenant data access",
+          "severity_rationale":"high because reachable without auth",
+          "fix_recommendation":"add owner_id predicate to fetch_by_id"
+        }
+      ],
+      "rejected_candidates": [],
+      "coverage": [],
+      "gaps": [],
+      "dedupe_groups": [
+        {"id":"dedupe-001","root_cause":"owner predicate missing from id-based fetch","primary_finding_id":"finding-001","finding_ids":["finding-001"],"affected_paths":["src/proxy.rs:42"]}
+      ],
+      "trace_evidence": [{"finding_id":"finding-001","reachable":true,"severity_effect":"keeps","evidence":["taint_trace req -> sink"]}],
+      "stage_history": [],
+      "class_coverage": [
+        {"class_id":"auth_authorization","class_name":"Authentication and authorization","considered":true,"applicable":true,"hunted":true,"checked_and_cleared":false,"task_ids":["hunt-auth-001"]}
+      ]
+    }"#
+}
+
+fn e2e_empty_report_json() -> &'static str {
+    r#"{
+      "schema_version": 1,
+      "run_id": "placeholder",
+      "target": {"repo_path": "placeholder", "git_ref": null},
+      "scope": "placeholder",
+      "findings": [],
+      "rejected_candidates": [],
+      "coverage": [],
+      "gaps": [],
+      "dedupe_groups": [],
+      "trace_evidence": [],
+      "stage_history": [],
+      "class_coverage": [
+        {"class_id":"auth_authorization","class_name":"Authentication and authorization","considered":true,"applicable":true,"hunted":true,"checked_and_cleared":true}
+      ]
+    }"#
+}
+
+fn e2e_rejected_report_json() -> &'static str {
+    r#"{
+      "schema_version": 1,
+      "run_id": "placeholder",
+      "target": {"repo_path": "placeholder", "git_ref": null},
+      "scope": "placeholder",
+      "findings": [],
+      "rejected_candidates": [
+        {"finding_id":"finding-001","decision":"rejected","evidence":"upstream auth check exists","severity":"info"}
+      ],
+      "coverage": [],
+      "gaps": [],
+      "dedupe_groups": [],
+      "trace_evidence": [],
+      "stage_history": [],
+      "class_coverage": [
+        {"class_id":"auth_authorization","class_name":"Authentication and authorization","considered":true,"applicable":true,"hunted":true,"checked_and_cleared":true}
+      ]
+    }"#
+}
+
+/// Run the harness one stage at a time using `stop_after_stage`,
+/// rebuilding the tool each time with a fresh MockLlm. This keeps each
+/// stage's mocks isolated from the unconditional hunt fan-out — driving
+/// the whole pipeline via a single MockLlm queue produces non-determinism
+/// because `buffer_unordered` can deliver the validate/trace/report
+/// responses to random hunt specialists.
+async fn run_stage(
+    workspace: &crate::workspace::WorkspaceHandle,
+    dir: &std::path::Path,
+    run_id: Option<&str>,
+    stop_after: &str,
+    llm: MockLlm,
+) -> ToolOutput {
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        Some(Arc::clone(workspace)),
+        &[],
+        vec![],
+    );
+    let mut ctx = ToolContext::for_test(dir);
+    ctx.workspace = Some(Arc::clone(workspace));
+    let mut input = serde_json::json!({
+        "task": "drive harness one stage",
+        "stop_after_stage": stop_after,
+    });
+    if let Some(id) = run_id {
+        input["resume"] = serde_json::Value::Bool(true);
+        input["run_id"] = serde_json::Value::String(id.into());
+        input["task"] = serde_json::Value::String("resume".into());
+    }
+    tool.run(&input, &ctx).await.unwrap()
+}
+
+async fn load_checkpoint(
+    workspace: &crate::workspace::WorkspaceHandle,
+) -> security_engineer::SecurityCheckpoint {
+    let guard = workspace.read().await;
+    let path = guard
+        .list_files()
+        .into_iter()
+        .find(|name| name.starts_with("kb/security-harness/checkpoints/"))
+        .expect("checkpoint should be written");
+    serde_json::from_str(&guard.get(&path).unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn security_engineer_e2e_happy_path_one_finding() {
+    // Full 8-stage run, but driven stage-by-stage to keep the
+    // unconditional hunt fan-out from eating later stages' mocks. We
+    // verify the FINAL stage_history records every stage.
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(crate::workspace::InMemoryWorkspace::new())
+            as Box<dyn crate::workspace::Workspace>,
+    ));
+    let dir = tempfile::tempdir().unwrap();
+
+    // Recon stage.
+    let recon_llm = MockLlm::new(vec![e2e_recon_response_for_auth()]);
+    let out = run_stage(&workspace, dir.path(), None, "recon", recon_llm).await;
+    assert!(!out.is_error, "recon stage error: {}", out.content);
+    let run_id = load_checkpoint(&workspace).await.run_id;
+
+    // Hunt stage: every taxonomy class fans out as its own specialist.
+    // We only care about the auth_authorization specialist; the
+    // fallback covers every other class with an empty-findings reply.
+    let hunt_llm =
+        MockLlm::new(vec![e2e_hunt_finding_response()]).with_fallback(e2e_hunt_empty_fallback());
+    let out = run_stage(&workspace, dir.path(), Some(&run_id), "hunt", hunt_llm).await;
+    assert!(!out.is_error, "hunt stage error: {}", out.content);
+
+    // Validate stage.
+    let validate_llm = MockLlm::new(vec![e2e_validate_confirm_response()]);
+    let out = run_stage(
+        &workspace,
+        dir.path(),
+        Some(&run_id),
+        "validate",
+        validate_llm,
+    )
+    .await;
+    assert!(!out.is_error, "validate stage error: {}", out.content);
+
+    // Gapfill + dedupe are bookkeeping-only (no LLM calls).
+    let llm = MockLlm::new(vec![]);
+    let out = run_stage(&workspace, dir.path(), Some(&run_id), "gapfill", llm).await;
+    assert!(!out.is_error, "gapfill error: {}", out.content);
+    let llm = MockLlm::new(vec![]);
+    let out = run_stage(&workspace, dir.path(), Some(&run_id), "dedupe", llm).await;
+    assert!(!out.is_error, "dedupe error: {}", out.content);
+
+    // Trace stage.
+    let trace_llm = MockLlm::new(vec![e2e_trace_reachable_response()]);
+    let out = run_stage(&workspace, dir.path(), Some(&run_id), "trace", trace_llm).await;
+    assert!(!out.is_error, "trace stage error: {}", out.content);
+
+    // Feedback is bookkeeping-only.
+    let llm = MockLlm::new(vec![]);
+    let out = run_stage(&workspace, dir.path(), Some(&run_id), "feedback", llm).await;
+    assert!(!out.is_error, "feedback error: {}", out.content);
+
+    // Report stage — the final run, no stop_after_stage so the harness
+    // completes and emits the rendered report.
+    let report_llm = MockLlm::new(vec![mock_text_response(e2e_full_report_json())]);
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(report_llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let mut ctx = ToolContext::for_test(dir.path());
+    ctx.workspace = Some(Arc::clone(&workspace));
+    let result = tool
+        .run(
+            &serde_json::json!({"task": "resume", "resume": true, "run_id": &run_id}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error, "report stage error: {}", result.content);
+    assert!(
+        result.content.contains("# Security Harness Report"),
+        "tool output should include the rendered markdown report"
+    );
+    assert!(
+        result.content.contains("finding-001"),
+        "rendered report should mention the confirmed finding"
+    );
+
+    let checkpoint = load_checkpoint(&workspace).await;
+    assert!(checkpoint.completed, "completed flag should be set");
+    let stages: std::collections::BTreeSet<_> = checkpoint
+        .stage_history
+        .iter()
+        .map(|entry| entry.stage)
+        .collect();
+    for stage in [
+        security_engineer::SecurityHarnessStage::Recon,
+        security_engineer::SecurityHarnessStage::Hunt,
+        security_engineer::SecurityHarnessStage::Validate,
+        security_engineer::SecurityHarnessStage::Gapfill,
+        security_engineer::SecurityHarnessStage::Dedupe,
+        security_engineer::SecurityHarnessStage::Trace,
+        security_engineer::SecurityHarnessStage::Feedback,
+        security_engineer::SecurityHarnessStage::Report,
+    ] {
+        assert!(
+            stages.contains(&stage),
+            "stage_history should record completion for {stage}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn security_engineer_e2e_recon_prose_still_produces_report() {
+    // Recon returns prose (iteration-cap regression path), hunt finds
+    // nothing across every taxonomy specialist, but the harness still
+    // completes through report with zero findings — no panics, no Err.
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(crate::workspace::InMemoryWorkspace::new())
+            as Box<dyn crate::workspace::Workspace>,
+    ));
+    let dir = tempfile::tempdir().unwrap();
+
+    let recon_llm = MockLlm::new(vec![mock_text_response(
+        "I exhausted my iteration cap and could not enumerate every entry point.",
+    )]);
+    let out = run_stage(&workspace, dir.path(), None, "recon", recon_llm).await;
+    assert!(
+        !out.is_error,
+        "recon prose should not be fatal, got: {}",
+        out.content
+    );
+    let run_id = load_checkpoint(&workspace).await.run_id;
+
+    // Hunt: every specialist gets the empty fallback.
+    let hunt_llm = MockLlm::new(vec![]).with_fallback(e2e_hunt_empty_fallback());
+    let out = run_stage(&workspace, dir.path(), Some(&run_id), "hunt", hunt_llm).await;
+    assert!(!out.is_error, "hunt stage error: {}", out.content);
+
+    // Validate isn't reached when there are zero findings — but the
+    // harness still records the stage as completed and continues.
+    // Just drive through the remaining stages.
+    let empty_llm = MockLlm::new(vec![]);
+    let _ = run_stage(&workspace, dir.path(), Some(&run_id), "validate", empty_llm).await;
+    let empty_llm = MockLlm::new(vec![]);
+    let _ = run_stage(&workspace, dir.path(), Some(&run_id), "gapfill", empty_llm).await;
+    let empty_llm = MockLlm::new(vec![]);
+    let _ = run_stage(&workspace, dir.path(), Some(&run_id), "dedupe", empty_llm).await;
+    // Trace is also skipped because there are no confirmed findings.
+    let empty_llm = MockLlm::new(vec![]);
+    let _ = run_stage(&workspace, dir.path(), Some(&run_id), "trace", empty_llm).await;
+    let empty_llm = MockLlm::new(vec![]);
+    let _ = run_stage(&workspace, dir.path(), Some(&run_id), "feedback", empty_llm).await;
+
+    // Final report stage.
+    let report_llm = MockLlm::new(vec![mock_text_response(e2e_empty_report_json())]);
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(report_llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let mut ctx = ToolContext::for_test(dir.path());
+    ctx.workspace = Some(Arc::clone(&workspace));
+    let result = tool
+        .run(
+            &serde_json::json!({"task": "resume", "resume": true, "run_id": &run_id}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error, "report stage error: {}", result.content);
+    assert!(
+        result.content.contains("# Security Harness Report"),
+        "tool output should include the rendered report"
+    );
+
+    let checkpoint = load_checkpoint(&workspace).await;
+    assert!(checkpoint.completed, "completed flag should be set");
+    assert!(
+        checkpoint.findings_so_far.is_empty(),
+        "zero hunt findings means findings_so_far should be empty"
+    );
+}
+
+#[tokio::test]
+async fn security_engineer_e2e_hunt_finding_then_rejected_by_validator() {
+    // Hunt produces a finding, validate rejects it, the final report
+    // has zero confirmed findings, and the rejected one appears in
+    // rejected_candidates.
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(crate::workspace::InMemoryWorkspace::new())
+            as Box<dyn crate::workspace::Workspace>,
+    ));
+    let dir = tempfile::tempdir().unwrap();
+
+    let recon_llm = MockLlm::new(vec![e2e_recon_response_for_auth()]);
+    let _ = run_stage(&workspace, dir.path(), None, "recon", recon_llm).await;
+    let run_id = load_checkpoint(&workspace).await.run_id;
+
+    let hunt_llm =
+        MockLlm::new(vec![e2e_hunt_finding_response()]).with_fallback(e2e_hunt_empty_fallback());
+    let _ = run_stage(&workspace, dir.path(), Some(&run_id), "hunt", hunt_llm).await;
+
+    let validate_llm = MockLlm::new(vec![e2e_validate_reject_response()]);
+    let _ = run_stage(
+        &workspace,
+        dir.path(),
+        Some(&run_id),
+        "validate",
+        validate_llm,
+    )
+    .await;
+
+    let empty_llm = MockLlm::new(vec![]);
+    let _ = run_stage(&workspace, dir.path(), Some(&run_id), "gapfill", empty_llm).await;
+    let empty_llm = MockLlm::new(vec![]);
+    let _ = run_stage(&workspace, dir.path(), Some(&run_id), "dedupe", empty_llm).await;
+    // Trace is skipped (no confirmed decisions).
+    let empty_llm = MockLlm::new(vec![]);
+    let _ = run_stage(&workspace, dir.path(), Some(&run_id), "trace", empty_llm).await;
+    let empty_llm = MockLlm::new(vec![]);
+    let _ = run_stage(&workspace, dir.path(), Some(&run_id), "feedback", empty_llm).await;
+
+    // Final report stage.
+    let report_llm = MockLlm::new(vec![mock_text_response(e2e_rejected_report_json())]);
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(report_llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let mut ctx = ToolContext::for_test(dir.path());
+    ctx.workspace = Some(Arc::clone(&workspace));
+    let result = tool
+        .run(
+            &serde_json::json!({"task": "resume", "resume": true, "run_id": &run_id}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !result.is_error,
+        "rejected finding should still complete, got: {}",
+        result.content
+    );
+
+    let checkpoint = load_checkpoint(&workspace).await;
+    assert!(checkpoint.completed, "completed flag should be set");
+    let report = checkpoint
+        .report_draft
+        .as_ref()
+        .expect("report_draft should be set after report stage");
+    assert!(
+        report.findings.is_empty(),
+        "rejected finding should not appear in confirmed findings"
+    );
+    assert_eq!(
+        report.rejected_candidates.len(),
+        1,
+        "rejected candidate should appear in rejected_candidates"
+    );
+    assert_eq!(report.rejected_candidates[0].finding_id, "finding-001");
+}
+
+#[tokio::test]
+async fn security_engineer_e2e_report_repair_path() {
+    // Pre-seed a checkpoint at the Report stage so we don't have to
+    // burn LLM responses on recon/hunt/validate/trace. The report stage
+    // first returns malformed JSON, then the repair prompt returns a
+    // valid report.
+    let dir = tempfile::tempdir().unwrap();
+    let mut checkpoint = security_engineer::SecurityCheckpoint::new(
+        "e2e-repair".into(),
+        security_engineer::TargetRef {
+            repo_path: dir.path().display().to_string(),
+            git_ref: None,
+        },
+        "scope".into(),
+        security_engineer::ModelMetadata {
+            provider: "test".into(),
+            model: "test-model".into(),
+        },
+        1,
+    );
+    checkpoint.current_stage = security_engineer::SecurityHarnessStage::Report;
+    checkpoint
+        .findings_so_far
+        .push(security_engineer::SecurityFinding {
+            id: "finding-001".into(),
+            title: "missing owner predicate".into(),
+            severity: "high".into(),
+            vulnerability_class: "auth_authorization".into(),
+            trust_boundary: "HTTP request boundary".into(),
+            entry_point: "src/proxy.rs:42".into(),
+            sink_or_decision: "store.fetch_by_id".into(),
+            root_cause: "owner predicate missing".into(),
+            affected_paths: vec!["src/proxy.rs:42".into()],
+            evidence: vec!["read_file evidence".into()],
+            reachability: "reachable".into(),
+            tenant_or_instance_impact: "cross-tenant access".into(),
+            severity_rationale: "high because reachable".into(),
+            fix_recommendation: "add owner predicate".into(),
+        });
+    checkpoint
+        .validation_decisions_so_far
+        .push(security_engineer::ValidationDecision {
+            finding_id: "finding-001".into(),
+            decision: security_engineer::ValidationDecisionKind::Confirmed,
+            evidence: "ok".into(),
+            severity: Some("high".into()),
+        });
+    checkpoint
+        .class_coverage
+        .push(security_engineer::VulnerabilityClassCoverage {
+            class_id: "auth_authorization".into(),
+            class_name: "Authentication and authorization".into(),
+            considered: true,
+            applicable: true,
+            hunted: true,
+            ..Default::default()
+        });
+    for stage in [
+        security_engineer::SecurityHarnessStage::Recon,
+        security_engineer::SecurityHarnessStage::Hunt,
+        security_engineer::SecurityHarnessStage::Validate,
+        security_engineer::SecurityHarnessStage::Gapfill,
+        security_engineer::SecurityHarnessStage::Dedupe,
+        security_engineer::SecurityHarnessStage::Trace,
+        security_engineer::SecurityHarnessStage::Feedback,
+    ] {
+        checkpoint
+            .stage_history
+            .push(security_engineer::StageHistoryEntry {
+                stage,
+                status: "completed".into(),
+                started_at: 1,
+                finished_at: 2,
+                summary: "done".into(),
+            });
+    }
+
+    let body = serde_json::to_string_pretty(&checkpoint).unwrap();
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(
+            crate::workspace::InMemoryWorkspace::new()
+                .with_file("kb/security-harness/checkpoints/e2e-repair.json", &body),
+        ) as Box<dyn crate::workspace::Workspace>,
+    ));
+    let llm = MockLlm::new(vec![
+        // First report attempt: malformed JSON.
+        mock_text_response("This is not JSON, I forgot."),
+        // Repair attempt: valid report.
+        mock_text_response(e2e_full_report_json()),
+    ]);
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let mut ctx = ToolContext::for_test(dir.path());
+    ctx.workspace = Some(Arc::clone(&workspace));
+    let result = tool
+        .run(
+            &serde_json::json!({"resume": true, "run_id": "e2e-repair"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !result.is_error,
+        "repair path should succeed, got: {}",
+        result.content
+    );
+
+    let guard = workspace.read().await;
+    let body = guard
+        .get("kb/security-harness/checkpoints/e2e-repair.json")
+        .unwrap();
+    let checkpoint: security_engineer::SecurityCheckpoint = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        checkpoint.report_validation_state.status, "valid",
+        "after a successful repair, report_validation_state.status should be 'valid', got {:?}",
+        checkpoint.report_validation_state.status
+    );
+    let report = checkpoint
+        .report_draft
+        .as_ref()
+        .expect("report_draft should be set");
+    assert!(
+        report.findings.iter().any(|f| f.id == "finding-001"),
+        "repaired report should contain finding-001"
+    );
+}
+
+#[tokio::test]
+async fn security_engineer_e2e_resume_at_validate() {
+    // Pre-seed a checkpoint with Recon and Hunt already recorded as
+    // completed and one finding in findings_so_far. Resume should pick
+    // up at Validate. Recon + Hunt must NOT re-run.
+    let dir = tempfile::tempdir().unwrap();
+    let mut checkpoint = security_engineer::SecurityCheckpoint::new(
+        "e2e-resume-validate".into(),
+        security_engineer::TargetRef {
+            repo_path: dir.path().display().to_string(),
+            git_ref: None,
+        },
+        "scope".into(),
+        security_engineer::ModelMetadata {
+            provider: "test".into(),
+            model: "test-model".into(),
+        },
+        1,
+    );
+    checkpoint.current_stage = security_engineer::SecurityHarnessStage::Validate;
+    checkpoint
+        .findings_so_far
+        .push(security_engineer::SecurityFinding {
+            id: "finding-001".into(),
+            title: "missing owner predicate".into(),
+            severity: "high".into(),
+            vulnerability_class: "auth_authorization".into(),
+            trust_boundary: "HTTP request boundary".into(),
+            entry_point: "src/proxy.rs:42".into(),
+            sink_or_decision: "store.fetch_by_id".into(),
+            root_cause: "owner predicate missing".into(),
+            affected_paths: vec!["src/proxy.rs:42".into()],
+            evidence: vec!["read_file evidence".into()],
+            reachability: "reachable".into(),
+            tenant_or_instance_impact: "cross-tenant access".into(),
+            severity_rationale: "high because reachable".into(),
+            fix_recommendation: "add owner predicate".into(),
+        });
+    checkpoint
+        .class_coverage
+        .push(security_engineer::VulnerabilityClassCoverage {
+            class_id: "auth_authorization".into(),
+            class_name: "Authentication and authorization".into(),
+            considered: true,
+            applicable: true,
+            hunted: true,
+            ..Default::default()
+        });
+    for stage in [
+        security_engineer::SecurityHarnessStage::Recon,
+        security_engineer::SecurityHarnessStage::Hunt,
+    ] {
+        checkpoint
+            .stage_history
+            .push(security_engineer::StageHistoryEntry {
+                stage,
+                status: "completed".into(),
+                started_at: 1,
+                finished_at: 2,
+                summary: "done".into(),
+            });
+    }
+
+    let body = serde_json::to_string_pretty(&checkpoint).unwrap();
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(crate::workspace::InMemoryWorkspace::new().with_file(
+            "kb/security-harness/checkpoints/e2e-resume-validate.json",
+            &body,
+        )) as Box<dyn crate::workspace::Workspace>,
+    ));
+    // A fresh MockLlm with NO fallback keeps the test honest — if resume
+    // erroneously re-runs recon or hunt, those stages will fan out
+    // dozens of specialists and exhaust the explicit queue, failing the
+    // test loudly. We only enumerate validate + trace + report.
+    let llm = MockLlm::new(vec![
+        e2e_validate_confirm_response(),
+        e2e_trace_reachable_response(),
+        mock_text_response(e2e_full_report_json()),
+    ]);
+    let models_seen = llm.models_seen_handle();
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let mut ctx = ToolContext::for_test(dir.path());
+    ctx.workspace = Some(Arc::clone(&workspace));
+    let result = tool
+        .run(
+            &serde_json::json!({"resume": true, "run_id": "e2e-resume-validate"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !result.is_error,
+        "resume at validate should succeed, got: {}",
+        result.content
+    );
+
+    let seen = models_seen.lock().unwrap().clone();
+    // Three calls total: one each for validate, trace, report. Hunt
+    // would have added ~24 (one per taxonomy class).
+    assert_eq!(
+        seen.len(),
+        3,
+        "resume at validate should invoke the LLM exactly 3 times (validate, trace, report), got {} calls: {:?}",
+        seen.len(),
+        seen
+    );
+}
+
+#[tokio::test]
+async fn security_engineer_e2e_resume_at_report() {
+    // Pre-seed a checkpoint with Recon..Feedback already in stage_history
+    // and the full evidence chain in place. Resume should only run the
+    // report stage.
+    let dir = tempfile::tempdir().unwrap();
+    let mut checkpoint = security_engineer::SecurityCheckpoint::new(
+        "e2e-resume-report".into(),
+        security_engineer::TargetRef {
+            repo_path: dir.path().display().to_string(),
+            git_ref: None,
+        },
+        "scope".into(),
+        security_engineer::ModelMetadata {
+            provider: "test".into(),
+            model: "test-model".into(),
+        },
+        1,
+    );
+    checkpoint.current_stage = security_engineer::SecurityHarnessStage::Report;
+    checkpoint
+        .findings_so_far
+        .push(security_engineer::SecurityFinding {
+            id: "finding-001".into(),
+            title: "missing owner predicate".into(),
+            severity: "high".into(),
+            vulnerability_class: "auth_authorization".into(),
+            trust_boundary: "HTTP request boundary".into(),
+            entry_point: "src/proxy.rs:42".into(),
+            sink_or_decision: "store.fetch_by_id".into(),
+            root_cause: "owner predicate missing".into(),
+            affected_paths: vec!["src/proxy.rs:42".into()],
+            evidence: vec!["read_file evidence".into()],
+            reachability: "reachable".into(),
+            tenant_or_instance_impact: "cross-tenant access".into(),
+            severity_rationale: "high because reachable".into(),
+            fix_recommendation: "add owner predicate".into(),
+        });
+    checkpoint
+        .validation_decisions_so_far
+        .push(security_engineer::ValidationDecision {
+            finding_id: "finding-001".into(),
+            decision: security_engineer::ValidationDecisionKind::Confirmed,
+            evidence: "ok".into(),
+            severity: Some("high".into()),
+        });
+    checkpoint
+        .trace_results_so_far
+        .push(security_engineer::TraceResult {
+            finding_id: "finding-001".into(),
+            reachable: true,
+            severity_effect: "keeps".into(),
+            evidence: vec!["trace ev".into()],
+        });
+    checkpoint
+        .class_coverage
+        .push(security_engineer::VulnerabilityClassCoverage {
+            class_id: "auth_authorization".into(),
+            class_name: "Authentication and authorization".into(),
+            considered: true,
+            applicable: true,
+            hunted: true,
+            ..Default::default()
+        });
+    for stage in [
+        security_engineer::SecurityHarnessStage::Recon,
+        security_engineer::SecurityHarnessStage::Hunt,
+        security_engineer::SecurityHarnessStage::Validate,
+        security_engineer::SecurityHarnessStage::Gapfill,
+        security_engineer::SecurityHarnessStage::Dedupe,
+        security_engineer::SecurityHarnessStage::Trace,
+        security_engineer::SecurityHarnessStage::Feedback,
+    ] {
+        checkpoint
+            .stage_history
+            .push(security_engineer::StageHistoryEntry {
+                stage,
+                status: "completed".into(),
+                started_at: 1,
+                finished_at: 2,
+                summary: "done".into(),
+            });
+    }
+
+    let body = serde_json::to_string_pretty(&checkpoint).unwrap();
+    let workspace: crate::workspace::WorkspaceHandle = Arc::new(tokio::sync::RwLock::new(
+        Box::new(crate::workspace::InMemoryWorkspace::new().with_file(
+            "kb/security-harness/checkpoints/e2e-resume-report.json",
+            &body,
+        )) as Box<dyn crate::workspace::Workspace>,
+    ));
+    // A fresh MockLlm with NO fallback: only the report LLM call may
+    // fire. If recon, hunt, validate, or trace re-runs, the queue runs
+    // out and the test panics — exactly what we want.
+    let llm = MockLlm::new(vec![mock_text_response(e2e_full_report_json())]);
+    let models_seen = llm.models_seen_handle();
+    let tool = OrchestratorTool::new(
+        security_engineer_config(),
+        LlmProvider::Anthropic,
+        "claude-opus-4-20250514".into(),
+        crate::agent::rate_limiter::RateLimitedHandle::unlimited(Box::new(llm)),
+        Arc::new(crate::sandbox::no_sandbox::DangerousNoSandbox::new(
+            crate::sandbox::SandboxBypassGuard::for_test(),
+        )),
+        Some(Arc::clone(&workspace)),
+        &[],
+        vec![],
+    );
+    let mut ctx = ToolContext::for_test(dir.path());
+    ctx.workspace = Some(Arc::clone(&workspace));
+    let result = tool
+        .run(
+            &serde_json::json!({"resume": true, "run_id": "e2e-resume-report"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !result.is_error,
+        "resume at report should succeed, got: {}",
+        result.content
+    );
+
+    let seen = models_seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        1,
+        "resume at report should invoke the LLM exactly once (the report stage), got {} calls: {:?}",
+        seen.len(),
+        seen
+    );
+}

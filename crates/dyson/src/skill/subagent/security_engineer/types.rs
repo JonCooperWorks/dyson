@@ -1,15 +1,13 @@
-// ===========================================================================
-// Data types for the security_engineer staged harness.
-//
-// Everything here is plain data: stage enum, task/finding/decision structs,
-// coverage tracking, the durable SecurityCheckpoint shape, the four stage
-// output structs the LLM emits, and the report struct rendered into Markdown.
-//
-// LLM output is best-effort. Every Deserialize field carries
-// `#[serde(default)]` so a model that omits, mis-types, or merely renames a
-// field cannot poison the harness — downstream code already tolerates empty
-// ids/strings (normalize_task_ids backfills, dedupe falls back to title, etc.).
-// ===========================================================================
+//! Data types for the security_engineer staged harness.
+//!
+//! Everything here is plain data: stage enum, task/finding/decision structs,
+//! coverage tracking, the durable SecurityCheckpoint shape, the four stage
+//! output structs the LLM emits, and the report struct rendered into Markdown.
+//!
+//! LLM output is best-effort. Every Deserialize field carries
+//! `#[serde(default)]` so a model that omits, mis-types, or merely renames a
+//! field cannot poison the harness — downstream code already tolerates empty
+//! ids/strings (normalize_task_ids backfills, dedupe falls back to title, etc.).
 
 use std::fmt;
 
@@ -380,4 +378,373 @@ pub(crate) struct ValidateStageOutput {
 pub(super) struct TraceStageOutput {
     #[serde(default)]
     pub traces: Vec<TraceResult>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_parse_round_trips_as_str_for_every_variant() {
+        for stage in [
+            SecurityHarnessStage::Recon,
+            SecurityHarnessStage::Hunt,
+            SecurityHarnessStage::Validate,
+            SecurityHarnessStage::Gapfill,
+            SecurityHarnessStage::Dedupe,
+            SecurityHarnessStage::Trace,
+            SecurityHarnessStage::Feedback,
+            SecurityHarnessStage::Report,
+        ] {
+            assert_eq!(
+                SecurityHarnessStage::parse(stage.as_str()),
+                Some(stage),
+                "stage {stage} should round-trip through as_str/parse"
+            );
+        }
+    }
+
+    #[test]
+    fn stage_parse_is_case_insensitive_and_trims_whitespace() {
+        assert_eq!(
+            SecurityHarnessStage::parse("  RECON  "),
+            Some(SecurityHarnessStage::Recon),
+            "parse should trim whitespace and normalize case"
+        );
+        assert_eq!(
+            SecurityHarnessStage::parse("Hunt"),
+            Some(SecurityHarnessStage::Hunt),
+            "parse should be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn stage_parse_returns_none_for_unknown_string() {
+        assert_eq!(
+            SecurityHarnessStage::parse("not_a_stage"),
+            None,
+            "parse should return None for unknown stage names"
+        );
+    }
+
+    #[test]
+    fn stage_display_matches_as_str() {
+        for stage in [
+            SecurityHarnessStage::Recon,
+            SecurityHarnessStage::Hunt,
+            SecurityHarnessStage::Validate,
+            SecurityHarnessStage::Gapfill,
+            SecurityHarnessStage::Dedupe,
+            SecurityHarnessStage::Trace,
+            SecurityHarnessStage::Feedback,
+            SecurityHarnessStage::Report,
+        ] {
+            assert_eq!(
+                format!("{stage}"),
+                stage.as_str(),
+                "Display for {stage:?} should match as_str"
+            );
+        }
+    }
+
+    #[test]
+    fn stage_canonical_ordering_matches_pipeline_sequence() {
+        // SecurityHarnessStage derives Ord; the implicit derive order must
+        // match the canonical pipeline order so BTreeMap<Stage, _> iterates
+        // in run order.
+        let ordered = [
+            SecurityHarnessStage::Recon,
+            SecurityHarnessStage::Hunt,
+            SecurityHarnessStage::Validate,
+            SecurityHarnessStage::Gapfill,
+            SecurityHarnessStage::Dedupe,
+            SecurityHarnessStage::Trace,
+            SecurityHarnessStage::Feedback,
+            SecurityHarnessStage::Report,
+        ];
+        for pair in ordered.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "expected {:?} < {:?} in canonical order",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn report_validation_state_default_is_not_started() {
+        let state = ReportValidationState::default();
+        assert_eq!(
+            state.status, "not_started",
+            "default status should be not_started"
+        );
+        assert!(
+            state.errors.is_empty(),
+            "default errors should be empty, got {:?}",
+            state.errors
+        );
+    }
+
+    #[test]
+    fn security_checkpoint_new_sets_default_fields() {
+        let cp = SecurityCheckpoint::new(
+            "run-x".into(),
+            TargetRef {
+                repo_path: "/repo".into(),
+                git_ref: None,
+            },
+            "scope".into(),
+            ModelMetadata {
+                provider: "p".into(),
+                model: "m".into(),
+            },
+            42,
+        );
+        assert_eq!(
+            cp.schema_version, SECURITY_HARNESS_SCHEMA_VERSION,
+            "schema_version should match SECURITY_HARNESS_SCHEMA_VERSION"
+        );
+        assert_eq!(
+            cp.harness_version, SECURITY_HARNESS_VERSION,
+            "harness_version should match SECURITY_HARNESS_VERSION"
+        );
+        assert_eq!(
+            cp.current_stage,
+            SecurityHarnessStage::Recon,
+            "new checkpoint should start at Recon stage"
+        );
+        assert_eq!(
+            cp.created_at, cp.updated_at,
+            "created_at and updated_at should match on construction"
+        );
+        assert_eq!(cp.created_at, 42, "created_at should be the supplied now");
+        assert!(!cp.completed, "new checkpoint should not be completed");
+        assert!(
+            cp.completed_tasks.is_empty(),
+            "completed_tasks should be empty"
+        );
+        assert!(cp.pending_tasks.is_empty(), "pending_tasks should be empty");
+        assert!(
+            cp.findings_so_far.is_empty(),
+            "findings_so_far should be empty"
+        );
+        assert!(
+            cp.validation_decisions_so_far.is_empty(),
+            "validation_decisions_so_far should be empty"
+        );
+        assert!(
+            cp.dedupe_groups_so_far.is_empty(),
+            "dedupe_groups_so_far should be empty"
+        );
+        assert!(
+            cp.trace_results_so_far.is_empty(),
+            "trace_results_so_far should be empty"
+        );
+        assert!(cp.gapfill_tasks.is_empty(), "gapfill_tasks should be empty");
+        assert!(cp.coverage_gaps.is_empty(), "coverage_gaps should be empty");
+        assert!(
+            cp.class_coverage.is_empty(),
+            "class_coverage should be empty"
+        );
+        assert!(cp.stage_history.is_empty(), "stage_history should be empty");
+    }
+
+    #[test]
+    fn security_checkpoint_path_uses_run_id_under_kb_prefix() {
+        let cp = SecurityCheckpoint::new(
+            "sec-12345-7".into(),
+            TargetRef::default(),
+            "scope".into(),
+            ModelMetadata {
+                provider: "p".into(),
+                model: "m".into(),
+            },
+            0,
+        );
+        assert_eq!(
+            cp.checkpoint_path(),
+            "kb/security-harness/checkpoints/sec-12345-7.json",
+            "checkpoint_path should embed the run_id under the kb prefix"
+        );
+    }
+
+    #[test]
+    fn validation_decision_kind_default_is_needs_more_evidence() {
+        assert_eq!(
+            ValidationDecisionKind::default(),
+            ValidationDecisionKind::NeedsMoreEvidence,
+            "default ValidationDecisionKind must be NeedsMoreEvidence so a \
+             missing/mistyped field does not silently confirm a finding"
+        );
+    }
+
+    #[test]
+    fn recon_stage_output_deserializes_from_empty_object() {
+        let recon: ReconStageOutput = serde_json::from_str("{}").expect("{{}} should parse");
+        assert!(recon.architecture_context.is_empty());
+        assert!(recon.tasks.is_empty());
+        assert!(recon.coverage_gaps.is_empty());
+        assert!(recon.class_coverage.is_empty());
+    }
+
+    #[test]
+    fn hunt_stage_output_deserializes_from_empty_object() {
+        let hunt: HuntStageOutput = serde_json::from_str("{}").expect("{{}} should parse");
+        assert!(hunt.completed_task_ids.is_empty());
+        assert!(hunt.findings.is_empty());
+        assert!(hunt.gaps.is_empty());
+        assert!(hunt.follow_up_tasks.is_empty());
+    }
+
+    #[test]
+    fn validate_stage_output_deserializes_from_empty_object() {
+        let v: ValidateStageOutput = serde_json::from_str("{}").expect("{{}} should parse");
+        assert!(v.decisions.is_empty());
+    }
+
+    #[test]
+    fn trace_stage_output_deserializes_from_empty_object() {
+        let t: TraceStageOutput = serde_json::from_str("{}").expect("{{}} should parse");
+        assert!(t.traces.is_empty());
+    }
+
+    #[test]
+    fn security_checkpoint_round_trips_through_json() {
+        let mut cp = SecurityCheckpoint::new(
+            "round-trip".into(),
+            TargetRef {
+                repo_path: "/repo".into(),
+                git_ref: Some("deadbeef".into()),
+            },
+            "scope".into(),
+            ModelMetadata {
+                provider: "Anthropic".into(),
+                model: "claude".into(),
+            },
+            100,
+        );
+        cp.architecture_context = "context".into();
+        cp.pending_tasks.push(SecurityTask {
+            id: "t1".into(),
+            attack_class: "auth_authorization".into(),
+            scope_hint: "scope".into(),
+            status: TaskStatus::Pending,
+            rationale: "r".into(),
+        });
+        cp.findings_so_far.push(SecurityFinding {
+            id: "f1".into(),
+            title: "title".into(),
+            severity: "high".into(),
+            vulnerability_class: "auth_authorization".into(),
+            trust_boundary: "boundary".into(),
+            entry_point: "src/lib.rs:1".into(),
+            sink_or_decision: "decision".into(),
+            root_cause: "cause".into(),
+            affected_paths: vec!["src/lib.rs".into()],
+            evidence: vec!["evidence".into()],
+            reachability: "reachable".into(),
+            tenant_or_instance_impact: "impact".into(),
+            severity_rationale: "rationale".into(),
+            fix_recommendation: "fix".into(),
+        });
+        cp.stage_history.push(StageHistoryEntry {
+            stage: SecurityHarnessStage::Recon,
+            status: "completed".into(),
+            started_at: 1,
+            finished_at: 2,
+            summary: "done".into(),
+        });
+        let json = serde_json::to_string(&cp).expect("checkpoint should serialize");
+        let back: SecurityCheckpoint =
+            serde_json::from_str(&json).expect("checkpoint should deserialize");
+        assert_eq!(
+            cp, back,
+            "round-trip through JSON should preserve the checkpoint exactly"
+        );
+    }
+
+    #[test]
+    fn security_harness_report_round_trips_through_json() {
+        let report = SecurityHarnessReport {
+            schema_version: SECURITY_HARNESS_SCHEMA_VERSION,
+            run_id: "run-1".into(),
+            target: TargetRef {
+                repo_path: "/repo".into(),
+                git_ref: None,
+            },
+            scope: "scope".into(),
+            findings: vec![SecurityFinding {
+                id: "f1".into(),
+                title: "t".into(),
+                severity: "high".into(),
+                vulnerability_class: "auth_authorization".into(),
+                trust_boundary: "b".into(),
+                entry_point: "e".into(),
+                sink_or_decision: "s".into(),
+                root_cause: "c".into(),
+                affected_paths: vec!["p".into()],
+                evidence: vec!["ev".into()],
+                reachability: "r".into(),
+                tenant_or_instance_impact: "i".into(),
+                severity_rationale: "sr".into(),
+                fix_recommendation: "fix".into(),
+            }],
+            rejected_candidates: vec![ValidationDecision {
+                finding_id: "f2".into(),
+                decision: ValidationDecisionKind::Rejected,
+                evidence: "ev".into(),
+                severity: Some("low".into()),
+            }],
+            coverage: vec![CoverageGap {
+                area: "a".into(),
+                reason: "r".into(),
+                risk: "high".into(),
+            }],
+            gaps: vec![CoverageGap {
+                area: "a".into(),
+                reason: "r".into(),
+                risk: "high".into(),
+            }],
+            dedupe_groups: vec![DedupeGroup {
+                id: "dedupe-001".into(),
+                root_cause: "rc".into(),
+                primary_finding_id: "f1".into(),
+                finding_ids: vec!["f1".into()],
+                affected_paths: vec!["p".into()],
+            }],
+            trace_evidence: vec![TraceResult {
+                finding_id: "f1".into(),
+                reachable: true,
+                severity_effect: "keeps".into(),
+                evidence: vec!["te".into()],
+            }],
+            stage_history: vec![StageHistoryEntry {
+                stage: SecurityHarnessStage::Report,
+                status: "completed".into(),
+                started_at: 10,
+                finished_at: 20,
+                summary: "ok".into(),
+            }],
+            class_coverage: vec![VulnerabilityClassCoverage {
+                class_id: "auth_authorization".into(),
+                class_name: "Authentication and authorization".into(),
+                considered: true,
+                applicable: true,
+                hunted: true,
+                skipped_reason: String::new(),
+                high_risk_follow_up: false,
+                checked_and_cleared: false,
+                task_ids: vec!["t1".into()],
+                evidence: vec!["ev".into()],
+            }],
+        };
+        let json = serde_json::to_string(&report).expect("report should serialize");
+        let back: SecurityHarnessReport =
+            serde_json::from_str(&json).expect("report should deserialize");
+        assert_eq!(
+            report, back,
+            "round-trip should preserve the report exactly"
+        );
+    }
 }

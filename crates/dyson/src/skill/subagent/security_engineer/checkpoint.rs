@@ -1,10 +1,8 @@
-// ===========================================================================
-// Durable checkpoint persistence + small helpers for run identity, target
-// metadata, and stop-after-stage routing.
-//
-// CheckpointStore writes JSON under either the Dyson workspace (preferred —
-// Swarm sync mirrors it) or a local fallback under `.dyson/security-harness/`.
-// ===========================================================================
+//! Durable checkpoint persistence + small helpers for run identity, target
+//! metadata, and stop-after-stage routing.
+//!
+//! CheckpointStore writes JSON under either the Dyson workspace (preferred —
+//! Swarm sync mirrors it) or a local fallback under `.dyson/security-harness/`.
 
 use std::path::{Path, PathBuf};
 
@@ -249,4 +247,310 @@ pub(super) fn should_stop_after(parsed: &OrchestratorInput, stage: SecurityHarne
         .as_deref()
         .and_then(SecurityHarnessStage::parse)
         == Some(stage)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::{ModelMetadata, SecurityHarnessStage, TargetRef};
+    use super::*;
+    use crate::config::LlmProvider;
+    use crate::workspace::InMemoryWorkspace;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    fn parsed_with_stop(stop: Option<&str>) -> OrchestratorInput {
+        OrchestratorInput {
+            task: String::new(),
+            context: String::new(),
+            path: String::new(),
+            resume: false,
+            run_id: None,
+            stop_after_stage: stop.map(str::to_string),
+        }
+    }
+
+    fn fresh_checkpoint(run_id: &str, target_path: &str, updated_at: u64) -> SecurityCheckpoint {
+        let mut cp = SecurityCheckpoint::new(
+            run_id.into(),
+            TargetRef {
+                repo_path: target_path.into(),
+                git_ref: None,
+            },
+            "scope".into(),
+            ModelMetadata {
+                provider: "p".into(),
+                model: "m".into(),
+            },
+            0,
+        );
+        cp.updated_at = updated_at;
+        cp
+    }
+
+    fn make_workspace() -> crate::workspace::WorkspaceHandle {
+        Arc::new(tokio::sync::RwLock::new(
+            Box::new(InMemoryWorkspace::new()) as Box<dyn crate::workspace::Workspace>
+        ))
+    }
+
+    #[test]
+    fn make_run_id_remains_stable_within_a_second_for_the_same_process() {
+        // Pin actual behavior: make_run_id is `sec-<unix_seconds>-<pid>`,
+        // NOT a counter — so within the same second from the same process
+        // it repeats. Resume disambiguation relies on the workspace path
+        // (one save = one file) rather than a per-call counter, plus the
+        // caller's own time advancing. If we ever switch to a counter,
+        // update this test (and the path is no longer load-bearing).
+        let ids: HashSet<String> = (0..32).map(|_| make_run_id()).collect();
+        assert!(
+            ids.len() >= 1 && ids.len() <= 2,
+            "make_run_id is time+pid based; 32 same-second calls collapse to 1-2 ids, got {}",
+            ids.len()
+        );
+    }
+
+    #[test]
+    fn make_run_id_matches_sec_unix_pid_shape() {
+        let id = make_run_id();
+        assert!(id.starts_with("sec-"), "run id should start with sec-");
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.len(), 3, "expected sec-<unix>-<pid>, got {id}");
+        assert_eq!(parts[0], "sec");
+        assert!(
+            parts[1].chars().all(|c| c.is_ascii_digit()),
+            "unix portion should be digits, got {}",
+            parts[1]
+        );
+        assert!(
+            parts[2].chars().all(|c| c.is_ascii_digit()),
+            "pid portion should be digits, got {}",
+            parts[2]
+        );
+    }
+
+    #[test]
+    fn checkpoint_path_puts_run_id_under_prefix_with_json_suffix() {
+        let path = checkpoint_path("sec-1-2");
+        assert!(
+            path.starts_with(CHECKPOINT_PREFIX),
+            "path should be under CHECKPOINT_PREFIX, got {path}"
+        );
+        assert!(
+            path.ends_with(".json"),
+            "path should end with .json, got {path}"
+        );
+        assert_eq!(path, "kb/security-harness/checkpoints/sec-1-2.json");
+    }
+
+    #[test]
+    fn git_ref_for_returns_none_for_fresh_non_git_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            git_ref_for(dir.path()),
+            None,
+            "git_ref_for should return None for a non-git directory"
+        );
+    }
+
+    #[test]
+    fn target_name_for_empty_returns_fallback_placeholder() {
+        // Pin the current behavior: an empty path can't yield a file name,
+        // so Path::file_name returns None and we fall back to "target".
+        assert_eq!(
+            target_name_for(""),
+            "target",
+            "empty path falls back to literal target name"
+        );
+    }
+
+    #[test]
+    fn target_name_for_full_path_returns_last_segment() {
+        assert_eq!(target_name_for("/foo/bar/baz"), "baz");
+    }
+
+    #[test]
+    fn target_name_for_trailing_slash_returns_last_segment() {
+        assert_eq!(target_name_for("/foo/bar/baz/"), "baz");
+    }
+
+    #[test]
+    fn target_name_for_single_segment_returns_input() {
+        assert_eq!(target_name_for("single"), "single");
+    }
+
+    #[test]
+    fn provider_label_is_stable_for_every_variant() {
+        // The label is just the Debug representation today; if that ever
+        // changes, this test pins the contract so downstream consumers
+        // (artefact metadata, checkpoints, telemetry) update with us.
+        assert_eq!(provider_label(&LlmProvider::Anthropic), "Anthropic");
+        assert_eq!(provider_label(&LlmProvider::OpenAi), "OpenAi");
+        assert_eq!(provider_label(&LlmProvider::OpenRouter), "OpenRouter");
+        assert_eq!(provider_label(&LlmProvider::ClaudeCode), "ClaudeCode");
+        assert_eq!(provider_label(&LlmProvider::Codex), "Codex");
+        assert_eq!(provider_label(&LlmProvider::OllamaCloud), "OllamaCloud");
+        assert_eq!(provider_label(&LlmProvider::Gemini), "Gemini");
+    }
+
+    #[test]
+    fn scope_for_formats_path_context_task_block() {
+        let parsed = OrchestratorInput {
+            task: " review auth ".into(),
+            context: " mcp runtime ".into(),
+            path: " /repo/src ".into(),
+            resume: false,
+            run_id: None,
+            stop_after_stage: None,
+        };
+        let scope = scope_for(&parsed);
+        assert_eq!(
+            scope, "path=/repo/src\ncontext=mcp runtime\ntask=review auth",
+            "scope_for should trim each field and format path/context/task lines"
+        );
+    }
+
+    #[test]
+    fn scope_for_omits_empty_path_and_context() {
+        let parsed = OrchestratorInput {
+            task: "review".into(),
+            context: String::new(),
+            path: String::new(),
+            resume: false,
+            run_id: None,
+            stop_after_stage: None,
+        };
+        assert_eq!(
+            scope_for(&parsed),
+            "task=review",
+            "empty path/context should be omitted entirely"
+        );
+    }
+
+    #[test]
+    fn should_stop_after_matches_stage_string() {
+        let parsed = parsed_with_stop(Some("hunt"));
+        assert!(
+            should_stop_after(&parsed, SecurityHarnessStage::Hunt),
+            "stop_after_stage=hunt should match SecurityHarnessStage::Hunt"
+        );
+        assert!(
+            !should_stop_after(&parsed, SecurityHarnessStage::Recon),
+            "stop_after_stage=hunt should NOT match SecurityHarnessStage::Recon"
+        );
+    }
+
+    #[test]
+    fn should_stop_after_returns_false_when_none() {
+        let parsed = parsed_with_stop(None);
+        for stage in [
+            SecurityHarnessStage::Recon,
+            SecurityHarnessStage::Hunt,
+            SecurityHarnessStage::Validate,
+            SecurityHarnessStage::Gapfill,
+            SecurityHarnessStage::Dedupe,
+            SecurityHarnessStage::Trace,
+            SecurityHarnessStage::Feedback,
+            SecurityHarnessStage::Report,
+        ] {
+            assert!(
+                !should_stop_after(&parsed, stage),
+                "stop_after_stage=None should not stop at {stage}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_save_then_load_exact_round_trip() {
+        let workspace = make_workspace();
+        let store = CheckpointStore::new(Some(workspace.clone()), PathBuf::from("/tmp"));
+        let mut cp = fresh_checkpoint("sec-rt-1", "/repo", 100);
+        cp.architecture_context = "context".into();
+        cp.pending_tasks.push(super::super::types::SecurityTask {
+            id: "t1".into(),
+            attack_class: "auth_authorization".into(),
+            scope_hint: "scope".into(),
+            status: super::super::types::TaskStatus::Pending,
+            rationale: "r".into(),
+        });
+        store.save(&cp).await.expect("save");
+        let loaded = store.load_exact("sec-rt-1").await.expect("load");
+        assert_eq!(
+            cp, loaded,
+            "save+load_exact should round-trip the checkpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_store_list_returns_multiple_saved_checkpoints() {
+        let workspace = make_workspace();
+        let store = CheckpointStore::new(Some(workspace.clone()), PathBuf::from("/tmp"));
+        for (run_id, updated_at) in [
+            ("sec-list-1", 100u64),
+            ("sec-list-2", 200),
+            ("sec-list-3", 300),
+        ] {
+            let cp = fresh_checkpoint(run_id, "/repo", updated_at);
+            store.save(&cp).await.expect("save");
+        }
+        let listed = store.list().await;
+        // The store's list() sorts ascending by run_id for in-memory
+        // dedupe with the disk overlay; downstream
+        // load_checkpoint_for_resume re-sorts by updated_at descending.
+        assert_eq!(
+            listed.len(),
+            3,
+            "list should return every saved checkpoint, got {}",
+            listed.len()
+        );
+        let ids: HashSet<_> = listed.iter().map(|cp| cp.run_id.clone()).collect();
+        for expected in ["sec-list-1", "sec-list-2", "sec-list-3"] {
+            assert!(ids.contains(expected), "missing {expected} in list");
+        }
+    }
+
+    #[tokio::test]
+    async fn load_for_resume_with_run_id_ignores_target_path_filter() {
+        let workspace = make_workspace();
+        let store = CheckpointStore::new(Some(workspace.clone()), PathBuf::from("/tmp"));
+        let cp = fresh_checkpoint("sec-resume-id", "/other/path", 100);
+        store.save(&cp).await.expect("save");
+        let loaded = load_checkpoint_for_resume(&store, Some("sec-resume-id"), "/unrelated")
+            .await
+            .expect("load_checkpoint_for_resume with run_id should succeed");
+        assert_eq!(loaded.run_id, "sec-resume-id");
+    }
+
+    #[tokio::test]
+    async fn load_for_resume_without_run_id_and_no_matches_errors() {
+        let workspace = make_workspace();
+        let store = CheckpointStore::new(Some(workspace.clone()), PathBuf::from("/tmp"));
+        let err = load_checkpoint_for_resume(&store, None, "/missing")
+            .await
+            .expect_err("no matches should be an error");
+        assert!(
+            err.contains("no incomplete security_engineer checkpoint"),
+            "expected 'no incomplete security_engineer checkpoint' in error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_for_resume_without_run_id_and_many_matches_lists_run_ids() {
+        let workspace = make_workspace();
+        let store = CheckpointStore::new(Some(workspace.clone()), PathBuf::from("/tmp"));
+        for (run_id, updated_at) in [("sec-multi-1", 100u64), ("sec-multi-2", 200)] {
+            let cp = fresh_checkpoint(run_id, "/repo", updated_at);
+            store.save(&cp).await.expect("save");
+        }
+        let err = load_checkpoint_for_resume(&store, None, "/repo")
+            .await
+            .expect_err("multiple matches should be an error");
+        assert!(
+            err.contains("sec-multi-1"),
+            "error should list sec-multi-1, got: {err}"
+        );
+        assert!(
+            err.contains("sec-multi-2"),
+            "error should list sec-multi-2, got: {err}"
+        );
+    }
 }

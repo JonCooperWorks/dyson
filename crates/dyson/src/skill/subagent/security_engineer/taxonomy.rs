@@ -1,11 +1,9 @@
-// ===========================================================================
-// Vulnerability taxonomy + class normalization, specialist briefings, and the
-// taxonomy-driven hunt task fan-out / coverage tracking.
-//
-// The taxonomy is a static table of vulnerability classes the harness covers.
-// Recon-supplied tasks are canonicalized against it; gaps are filled with a
-// generic per-class hunt task so the harness can never silently skip a class.
-// ===========================================================================
+//! Vulnerability taxonomy + class normalization, specialist briefings, and the
+//! taxonomy-driven hunt task fan-out / coverage tracking.
+//!
+//! The taxonomy is a static table of vulnerability classes the harness covers.
+//! Recon-supplied tasks are canonicalized against it; gaps are filled with a
+//! generic per-class hunt task so the harness can never silently skip a class.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -978,11 +976,6 @@ pub(super) fn normalize_class_id(value: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
-pub(super) fn taxonomy_class(class_id: &str) -> Option<&'static VulnerabilityClassDefinition> {
-    canonical_vulnerability_class(class_id)
-        .and_then(|id| VULNERABILITY_TAXONOMY.iter().find(|class| class.id == id))
-}
-
 pub(super) fn build_class_coverage(
     _scope: &str,
     _architecture_context: &str,
@@ -1124,5 +1117,314 @@ pub(super) fn mark_hunted_class_coverage(
             item.hunted = true;
             item.checked_and_cleared = !finding_classes.contains(item.class_id.as_str());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::{ModelMetadata, TargetRef};
+    use super::*;
+
+    fn fresh_checkpoint() -> SecurityCheckpoint {
+        SecurityCheckpoint::new(
+            "run".into(),
+            TargetRef {
+                repo_path: "/repo".into(),
+                git_ref: None,
+            },
+            "scope".into(),
+            ModelMetadata {
+                provider: "p".into(),
+                model: "m".into(),
+            },
+            0,
+        )
+    }
+
+    #[test]
+    fn canonical_vulnerability_class_maps_auth_bypass() {
+        assert_eq!(
+            canonical_vulnerability_class("auth_bypass"),
+            Some("auth_authorization"),
+            "auth_bypass alias should map to auth_authorization"
+        );
+    }
+
+    #[test]
+    fn canonical_vulnerability_class_maps_ssrf() {
+        assert_eq!(
+            canonical_vulnerability_class("ssrf"),
+            Some("ssrf_outbound_network")
+        );
+    }
+
+    #[test]
+    fn canonical_vulnerability_class_maps_csrf() {
+        assert_eq!(
+            canonical_vulnerability_class("csrf"),
+            Some("session_oauth_csrf")
+        );
+    }
+
+    #[test]
+    fn canonical_vulnerability_class_maps_docker_stdio() {
+        assert_eq!(
+            canonical_vulnerability_class("docker_stdio"),
+            Some("container_sandbox_runtime")
+        );
+    }
+
+    #[test]
+    fn canonical_vulnerability_class_normalizes_class_name() {
+        assert_eq!(
+            canonical_vulnerability_class("Authentication and authorization"),
+            Some("auth_authorization"),
+            "normalized class name should match the canonical id"
+        );
+    }
+
+    #[test]
+    fn canonical_vulnerability_class_returns_none_for_unknown() {
+        assert_eq!(canonical_vulnerability_class("unknown_thing"), None);
+    }
+
+    #[test]
+    fn normalize_class_id_handles_mixed_separators() {
+        assert_eq!(normalize_class_id("Foo Bar/Baz"), "foo_bar_baz");
+    }
+
+    #[test]
+    fn normalize_class_id_collapses_dash_to_underscore() {
+        assert_eq!(normalize_class_id("auth-bypass"), "auth_bypass");
+    }
+
+    #[test]
+    fn build_class_coverage_returns_one_entry_per_taxonomy_class() {
+        let coverage = build_class_coverage("", "", vec![]);
+        assert_eq!(
+            coverage.len(),
+            VULNERABILITY_TAXONOMY.len(),
+            "build_class_coverage should return one entry per taxonomy class"
+        );
+    }
+
+    #[test]
+    fn build_class_coverage_forces_applicable_and_considered_true() {
+        // Provide an entry that says applicable=false with a skipped_reason
+        // — the function must override it. Every taxonomy class is hunted
+        // unconditionally now, so the report can't claim a class was
+        // skipped when in fact a specialist is going to look at it.
+        let provided = vec![VulnerabilityClassCoverage {
+            class_id: "auth_authorization".into(),
+            class_name: "Authentication and authorization".into(),
+            considered: false,
+            applicable: false,
+            hunted: false,
+            skipped_reason: "model said skip".into(),
+            high_risk_follow_up: false,
+            checked_and_cleared: false,
+            task_ids: vec![],
+            evidence: vec![],
+        }];
+        let coverage = build_class_coverage("", "", provided);
+        for entry in &coverage {
+            assert!(
+                entry.considered,
+                "every coverage entry must have considered=true"
+            );
+            assert!(
+                entry.applicable,
+                "every coverage entry must have applicable=true"
+            );
+            assert!(
+                entry.skipped_reason.is_empty(),
+                "every coverage entry must clear skipped_reason, got {:?} for {}",
+                entry.skipped_reason,
+                entry.class_id
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_taxonomy_hunt_tasks_with_empty_input_queues_every_class() {
+        let cp = fresh_checkpoint();
+        let mut tasks = Vec::new();
+        ensure_taxonomy_hunt_tasks(&cp, &mut tasks);
+        assert_eq!(
+            tasks.len(),
+            VULNERABILITY_TAXONOMY.len(),
+            "every taxonomy class should be queued exactly once"
+        );
+        let ids: BTreeSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            tasks.len(),
+            "every queued task should have a unique id"
+        );
+        for t in &tasks {
+            assert!(
+                t.id.starts_with("hunt-"),
+                "queued task id should start with hunt-, got {}",
+                t.id
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_taxonomy_hunt_tasks_keeps_recon_supplied_task_for_its_class() {
+        let cp = fresh_checkpoint();
+        let mut tasks = vec![SecurityTask {
+            id: "hunt-recon-auth".into(),
+            attack_class: "auth_authorization".into(),
+            scope_hint: "auth scope".into(),
+            status: TaskStatus::Pending,
+            rationale: "recon-provided".into(),
+        }];
+        ensure_taxonomy_hunt_tasks(&cp, &mut tasks);
+        assert_eq!(
+            tasks.len(),
+            VULNERABILITY_TAXONOMY.len(),
+            "recon's auth task counts; remaining classes get generic tasks"
+        );
+        assert!(
+            tasks
+                .iter()
+                .any(|t| t.id == "hunt-recon-auth" && t.attack_class == "auth_authorization"),
+            "recon-supplied task must survive verbatim"
+        );
+    }
+
+    #[test]
+    fn class_specialist_briefing_returns_some_for_every_taxonomy_class() {
+        for class in VULNERABILITY_TAXONOMY {
+            assert!(
+                class_specialist_briefing(class.id).is_some(),
+                "class {} should have a specialist briefing",
+                class.id
+            );
+        }
+    }
+
+    #[test]
+    fn class_specialist_briefing_embeds_class_name_evidence_and_detector() {
+        let class = VULNERABILITY_TAXONOMY
+            .iter()
+            .find(|c| c.id == "auth_authorization")
+            .expect("auth_authorization in taxonomy");
+        let briefing = class_specialist_briefing(class.id).expect("briefing");
+        assert!(
+            briefing.contains(class.name),
+            "briefing must include the class name"
+        );
+        assert!(
+            briefing.contains(class.evidence_requirements[0]),
+            "briefing must include the first evidence requirement"
+        );
+        assert!(
+            briefing.contains(class.detector_keywords[0]),
+            "briefing must include the first detector keyword"
+        );
+    }
+
+    #[test]
+    fn class_specialist_briefing_returns_none_for_unknown_class() {
+        assert_eq!(class_specialist_briefing("not_a_class"), None);
+    }
+
+    #[test]
+    fn canonicalize_tasks_rewrites_aliases_to_canonical_id() {
+        let mut tasks = vec![SecurityTask {
+            id: "t1".into(),
+            attack_class: "auth_bypass".into(),
+            scope_hint: "scope".into(),
+            status: TaskStatus::Pending,
+            rationale: String::new(),
+        }];
+        canonicalize_tasks(&mut tasks);
+        assert_eq!(
+            tasks[0].attack_class, "auth_authorization",
+            "auth_bypass alias should be rewritten to auth_authorization"
+        );
+    }
+
+    #[test]
+    fn canonicalize_findings_rewrites_aliases_to_canonical_id() {
+        let mut findings = vec![SecurityFinding {
+            id: "f1".into(),
+            vulnerability_class: "ssrf".into(),
+            ..SecurityFinding::default()
+        }];
+        canonicalize_findings(&mut findings);
+        assert_eq!(
+            findings[0].vulnerability_class, "ssrf_outbound_network",
+            "ssrf alias should be rewritten to ssrf_outbound_network"
+        );
+    }
+
+    #[test]
+    fn update_class_coverage_task_ids_adds_task_id_to_its_class() {
+        let mut coverage = vec![
+            VulnerabilityClassCoverage {
+                class_id: "auth_authorization".into(),
+                ..Default::default()
+            },
+            VulnerabilityClassCoverage {
+                class_id: "ssrf_outbound_network".into(),
+                ..Default::default()
+            },
+        ];
+        let tasks = vec![SecurityTask {
+            id: "hunt-001".into(),
+            attack_class: "auth_authorization".into(),
+            ..Default::default()
+        }];
+        update_class_coverage_task_ids(&mut coverage, &tasks);
+        assert_eq!(
+            coverage[0].task_ids,
+            vec!["hunt-001".to_string()],
+            "auth_authorization entry should record hunt-001"
+        );
+        assert!(
+            coverage[1].task_ids.is_empty(),
+            "unrelated class entry should remain empty"
+        );
+    }
+
+    #[test]
+    fn mark_hunted_class_coverage_sets_hunted_only_for_completed_classes() {
+        let mut coverage = vec![
+            VulnerabilityClassCoverage {
+                class_id: "auth_authorization".into(),
+                ..Default::default()
+            },
+            VulnerabilityClassCoverage {
+                class_id: "ssrf_outbound_network".into(),
+                ..Default::default()
+            },
+        ];
+        let completed = vec![SecurityTask {
+            id: "t1".into(),
+            attack_class: "auth_authorization".into(),
+            status: TaskStatus::Completed,
+            ..Default::default()
+        }];
+        let findings = vec![SecurityFinding {
+            id: "f1".into(),
+            vulnerability_class: "auth_authorization".into(),
+            ..SecurityFinding::default()
+        }];
+        mark_hunted_class_coverage(&mut coverage, &completed, &findings);
+        assert!(
+            coverage[0].hunted,
+            "auth_authorization should be marked hunted"
+        );
+        assert!(
+            !coverage[0].checked_and_cleared,
+            "auth_authorization had a finding so it is not cleared"
+        );
+        assert!(
+            !coverage[1].hunted,
+            "ssrf_outbound_network was not completed; must not be hunted"
+        );
     }
 }

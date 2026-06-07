@@ -1,17 +1,34 @@
-// ===========================================================================
-// Security engineer staged research harness.
-//
-// The parent-facing tool remains `security_engineer`, but the implementation is
-// no longer a single broad "review this repo" child agent. The orchestrator
-// drives a staged harness:
-//
-//   Recon -> Hunt -> Validate -> Gapfill -> Dedupe -> Trace -> Feedback -> Report
-//
-// Each stage writes a durable JSON checkpoint under the Dyson workspace's kb/
-// tree. In Swarm mode that path is mirrored by the existing state-file sync
-// worker, so checkpoints survive instance recreate/rollout without adding a
-// security-specific Swarm API.
-// ===========================================================================
+//! Security engineer staged research harness.
+//!
+//! The parent-facing tool remains `security_engineer`, but the implementation
+//! is no longer a single broad "review this repo" child agent. The
+//! orchestrator drives a staged harness:
+//!
+//!   Recon → Hunt → Validate → Gapfill → Dedupe → Trace → Feedback → Report
+//!
+//! Each stage writes a durable JSON checkpoint under the Dyson workspace's
+//! `kb/` tree. In Swarm mode that path is mirrored by the existing
+//! state-file sync worker, so checkpoints survive instance
+//! recreate/rollout without adding a security-specific Swarm API.
+//!
+//! ## Module map
+//!
+//! - [`types`]     — all data types (Checkpoint, Finding, Task, etc.)
+//! - [`checkpoint`] — `CheckpointStore`, resume logic, time/scope/git helpers
+//! - [`taxonomy`]   — vulnerability class table + class lookup/normalization
+//! - [`runtime`]    — `SecurityHarnessRuntime` + `spawn_stage`
+//! - [`stages`]     — eight stage runners + hunt fan-out helpers
+//! - [`stack`]      — language/framework specialists + provably-moot pruning
+//! - [`parse`]      — JSON extraction + stage/report schema validation
+//! - [`report`]     — Markdown rendering + dedupe + reportable filtering
+//!
+//! ## Iteration caps
+//!
+//! Stage iteration caps are constants in this file (not magic numbers at
+//! call sites): `RECON_MAX_ITERATIONS`, `HUNT_MAX_ITERATIONS`,
+//! `VALIDATE_MAX_ITERATIONS`, `TRACE_MAX_ITERATIONS`. Recon is by far the
+//! largest because it explores the whole scope before any specialist
+//! hunters run.
 
 mod checkpoint;
 mod parse;
@@ -37,32 +54,29 @@ use self::stages::{
     run_report_stage, run_trace_stage, run_validate_stage, stage_completed, stage_summary,
 };
 
-// External callers (the subagent tests + orchestrator.rs) reach these via
-// `crate::skill::subagent::security_engineer::<Name>`.  Lib-only `cargo check`
-// can't see the test/orchestrator consumers, so silence the spurious
-// "unused import" lint on the re-exports.
+// Re-export the module's public + crate-private API at the directory root so
+// external callers continue to resolve `security_engineer::Name` as before.
+// `cargo check --lib` doesn't see the test/orchestrator consumers and would
+// fire `unused_imports` on every line here, so silence the whole block.
 #[allow(unused_imports)]
-pub use self::parse::validate_report_json;
+pub use self::{
+    parse::validate_report_json,
+    report::dedupe_findings,
+    taxonomy::{VulnerabilityClassDefinition, vulnerability_taxonomy},
+    types::{
+        CoverageGap, DedupeGroup, ModelMetadata, ReportValidationState, SecurityCheckpoint,
+        SecurityFinding, SecurityHarnessReport, SecurityHarnessStage, SecurityTask,
+        StageHistoryEntry, TargetRef, TaskStatus, TraceResult, ValidationDecision,
+        ValidationDecisionKind, VulnerabilityClassCoverage,
+    },
+};
 #[allow(unused_imports)]
-pub(crate) use self::parse::{parse_report_output, parse_validate_output};
-#[allow(unused_imports)]
-pub use self::report::dedupe_findings;
-#[allow(unused_imports)]
-pub(crate) use self::report::{report_from_checkpoint, reportable_confirmed_findings};
-#[allow(unused_imports)]
-pub(crate) use self::runtime::SecurityHarnessRuntime;
-#[allow(unused_imports)]
-pub(crate) use self::stages::{resolve_repaired_or_fallback_report, run_dedupe_stage};
-#[allow(unused_imports)]
-pub use self::taxonomy::{VulnerabilityClassDefinition, vulnerability_taxonomy};
-#[allow(unused_imports)]
-pub(crate) use self::types::ValidateStageOutput;
-#[allow(unused_imports)]
-pub use self::types::{
-    CoverageGap, DedupeGroup, ModelMetadata, ReportValidationState, SecurityCheckpoint,
-    SecurityFinding, SecurityHarnessReport, SecurityHarnessStage, SecurityTask, StageHistoryEntry,
-    TargetRef, TaskStatus, TraceResult, ValidationDecision, ValidationDecisionKind,
-    VulnerabilityClassCoverage,
+pub(crate) use self::{
+    parse::{parse_report_output, parse_validate_output},
+    report::{report_from_checkpoint, reportable_confirmed_findings},
+    runtime::SecurityHarnessRuntime,
+    stages::{resolve_repaired_or_fallback_report, run_dedupe_stage},
+    types::ValidateStageOutput,
 };
 
 use crate::error::Result;

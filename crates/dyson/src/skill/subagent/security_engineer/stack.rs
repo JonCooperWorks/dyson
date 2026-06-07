@@ -1,16 +1,14 @@
-// ===========================================================================
-// Framework/language stack specialists for the Hunt stage.
-//
-// `stack_specialists` turns the deterministic stack detection into one
-// specialist hunter per (top-2) language + one per detected framework, each
-// briefed with only its own reference material so detection-driven coverage
-// no longer bloats (or gets truncated out of) the shared hunt prompt.
-//
-// `class_provably_inapplicable` is the conservative pruning gate that drops
-// only classes that are unambiguously moot for the detected stack —
-// everything behavior-dependent (auth, injection, crypto, ssrf, ...) always
-// runs, so a detection miss can never create a coverage blind spot.
-// ===========================================================================
+//! Framework/language stack specialists for the Hunt stage.
+//!
+//! `stack_specialists` turns the deterministic stack detection into one
+//! specialist hunter per (top-2) language + one per detected framework, each
+//! briefed with only its own reference material so detection-driven coverage
+//! no longer bloats (or gets truncated out of) the shared hunt prompt.
+//!
+//! `class_provably_inapplicable` is the conservative pruning gate that drops
+//! only classes that are unambiguously moot for the detected stack —
+//! everything behavior-dependent (auth, injection, crypto, ssrf, ...) always
+//! runs, so a detection miss can never create a coverage blind spot.
 
 use super::types::{SecurityCheckpoint, TaskStatus};
 use crate::skill::subagent::repo_detect::{self, Detection};
@@ -86,5 +84,120 @@ pub(super) fn prune_inapplicable_class_tasks(
         } else {
             checkpoint.pending_tasks.push(task);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::types::{ModelMetadata, SecurityTask, TargetRef};
+    use super::*;
+    use crate::skill::subagent::repo_detect::Language;
+
+    fn cp_with_pending(tasks: Vec<SecurityTask>) -> SecurityCheckpoint {
+        let mut cp = SecurityCheckpoint::new(
+            "run".into(),
+            TargetRef {
+                repo_path: "/repo".into(),
+                git_ref: None,
+            },
+            "scope".into(),
+            ModelMetadata {
+                provider: "p".into(),
+                model: "m".into(),
+            },
+            0,
+        );
+        cp.pending_tasks = tasks;
+        cp
+    }
+
+    #[test]
+    fn supply_chain_is_inapplicable_when_no_languages_detected() {
+        assert!(
+            class_provably_inapplicable("dependency_supply_chain", &Detection::default()),
+            "no detected languages means no manifests to scan"
+        );
+    }
+
+    #[test]
+    fn supply_chain_is_applicable_when_a_language_is_detected() {
+        let detection = Detection {
+            languages: vec![Language::Rust],
+            frameworks: vec![],
+        };
+        assert!(
+            !class_provably_inapplicable("dependency_supply_chain", &detection),
+            "Rust detection means cargo manifests are present; never prune"
+        );
+    }
+
+    #[test]
+    fn behavior_dependent_class_never_pruned() {
+        // auth_authorization is intrinsically behavior-dependent; even an
+        // empty detection must never prune it — that would create a
+        // silent coverage blind spot.
+        assert!(!class_provably_inapplicable(
+            "auth_authorization",
+            &Detection::default()
+        ));
+    }
+
+    #[test]
+    fn prune_moves_provably_inapplicable_pending_to_completed_with_rationale() {
+        let mut cp = cp_with_pending(vec![SecurityTask {
+            id: "t1".into(),
+            attack_class: "dependency_supply_chain".into(),
+            scope_hint: "deps".into(),
+            status: TaskStatus::Pending,
+            rationale: String::new(),
+        }]);
+        prune_inapplicable_class_tasks(&mut cp, &Detection::default());
+        assert!(
+            cp.pending_tasks.is_empty(),
+            "provably inapplicable task should leave pending"
+        );
+        assert_eq!(cp.completed_tasks.len(), 1);
+        let done = &cp.completed_tasks[0];
+        assert_eq!(done.status, TaskStatus::Completed);
+        assert!(
+            done.rationale.contains("provably inapplicable"),
+            "rationale should mention 'provably inapplicable', got {:?}",
+            done.rationale
+        );
+    }
+
+    #[test]
+    fn prune_leaves_behavior_dependent_classes_in_pending() {
+        let mut cp = cp_with_pending(vec![
+            SecurityTask {
+                id: "t1".into(),
+                attack_class: "auth_authorization".into(),
+                status: TaskStatus::Pending,
+                ..Default::default()
+            },
+            SecurityTask {
+                id: "t2".into(),
+                attack_class: "injection_unsafe_execution".into(),
+                status: TaskStatus::Pending,
+                ..Default::default()
+            },
+            SecurityTask {
+                id: "t3".into(),
+                attack_class: "crypto_randomness".into(),
+                status: TaskStatus::Pending,
+                ..Default::default()
+            },
+        ]);
+        prune_inapplicable_class_tasks(&mut cp, &Detection::default());
+        assert_eq!(
+            cp.pending_tasks.len(),
+            3,
+            "behavior-dependent classes must remain pending; got {:?}",
+            cp.pending_tasks
+        );
+        assert!(
+            cp.completed_tasks.is_empty(),
+            "no behavior-dependent task should be marked completed"
+        );
     }
 }
