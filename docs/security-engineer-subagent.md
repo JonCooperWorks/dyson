@@ -8,16 +8,40 @@ The harness writes durable checkpoint JSON under `kb/security-harness/checkpoint
 
 The harness follows a Project Glasswing-style security research loop. It does not ask one model to audit the whole repo in one pass. Recon builds the architecture and trust-boundary map, maps the canonical vulnerability taxonomy to the detected app shape, Hunt runs scoped class-specific hypotheses, Validate tries to disprove only existing candidates, Gapfill converts uncovered high-risk areas into more hunts, Dedupe collapses shared root causes, Trace establishes reachability from real entry points, Feedback turns reachable traces into consumer-path hunts, and Report emits the evidence-backed result.
 
-The canonical taxonomy is first-class in `security_engineer.rs` and covers auth/authorization, session/OAuth/CSRF, SSRF/outbound policy, proxy/HTTP boundaries, container/sandbox/runtime escape, secrets, lifecycle/restore/clone, webhooks/inbound integrations, file/archive/path handling, injection/unsafe execution, dependency/supply chain, crypto/randomness, multi-tenant isolation, resource exhaustion/DoS, frontend/security UX, agent/MCP/tool boundaries, API contract/input validation, audit/observability/forensics, CI/CD release integrity, and data retention/privacy. Checkpoints and reports track which classes were considered, applicable, hunted, skipped, checked and cleared, or left for follow-up.
+The canonical taxonomy lives in [`taxonomy.rs`](../crates/dyson/src/skill/subagent/security_engineer/taxonomy.rs) and currently covers 24 classes: auth/authorization, session/OAuth/CSRF, SSRF/outbound policy, proxy/HTTP boundaries, container/sandbox/runtime escape, secrets, persistence/restore/clone, webhooks/inbound integrations, file/archive/path handling, injection/unsafe execution, dependency/supply chain, crypto/randomness, multi-tenant isolation, resource exhaustion/DoS, frontend/security UX, agent/MCP/tool boundaries, API contract/input validation, audit/observability/forensics, CI/CD release integrity, data retention/privacy, race conditions/TOCTOU, business-logic abuse, mass-assignment/overposting, and denial-of-wallet/cost abuse. Checkpoints and reports track which classes were considered, applicable, hunted, skipped, checked and cleared, or left for follow-up.
+
+**Every taxonomy class is hunted unconditionally.** [`ensure_taxonomy_hunt_tasks`](../crates/dyson/src/skill/subagent/security_engineer/taxonomy.rs) queues one hunt task per class regardless of what recon said — weaker models tend to drop the `class_coverage` field, mark everything inapplicable, or hallucinate skip reasons; letting the per-class specialist decide "no work here" is more reliable than letting recon decide "no specialist needed." A class specialist that finds nothing returns empty findings cheaply (greps, exits); the harness then marks the class hunted-and-cleared in the report.
 
 Code pointers:
 
-- [security_engineer.rs](../crates/dyson/src/skill/subagent/security_engineer.rs) — staged harness structs, checkpoint store, resume, and `security_engineer_config()`
+- [`security_engineer/`](../crates/dyson/src/skill/subagent/security_engineer/) — the 9-file staged harness module:
+  - `mod.rs` — public API, `security_engineer_config()`, the `STAGES` const, the harness inner loop
+  - `types.rs` — `SecurityCheckpoint`, `SecurityFinding`, `SecurityTask`, etc. (all Deserialize fields default-tolerant)
+  - `checkpoint.rs` — `CheckpointStore`, resume logic, time/scope/git helpers
+  - `taxonomy.rs` — the vulnerability class table + class lookup + coverage tracking + per-class fan-out
+  - `runtime.rs` — `SecurityHarnessRuntime`, `spawn_stage`, child-output merging
+  - `stages.rs` — the 8 stage runners (Recon, Hunt, Validate, Gapfill, Dedupe, Trace, Feedback, Report) + hunt fan-out helpers
+  - `stack.rs` — language/framework stack specialists + provably-moot class pruning
+  - `parse.rs` — JSON extraction + per-stage parsers + report schema validation
+  - `report.rs` — Markdown rendering + dedupe + reportable-finding filtering
 - [security_engineer.md](../crates/dyson/src/skill/subagent/prompts/security_engineer.md) — shared harness guardrails
 - [security_engineer_recon.md](../crates/dyson/src/skill/subagent/prompts/security_engineer_recon.md), `*_hunt.md`, `*_validate.md`, `*_trace.md`, `*_report.md` — stage-specific prompts and JSON contracts
 - [security_engineer_protocol.md](../crates/dyson/src/skill/subagent/prompts/security_engineer_protocol.md) — the fragment injected into the parent's prompt (when-to-invoke guidance)
 - [repo_detect.rs](../crates/dyson/src/skill/subagent/repo_detect.rs) — runtime cheatsheet detection
 - [prompts/cheatsheets/](../crates/dyson/src/skill/subagent/prompts/cheatsheets/) — language + framework sheets
+
+### Per-stage iteration caps
+
+Each stage's child agent loop has its own cap, named in [`security_engineer/mod.rs`](../crates/dyson/src/skill/subagent/security_engineer/mod.rs) so future drift is obvious:
+
+| Stage | Constant | Value | Why |
+|---|---|---|---|
+| Recon | `RECON_MAX_ITERATIONS` | 60 | Recon explores the WHOLE scope before any specialist runs. Was originally 12 — a deepseek-v4-pro recon doing ~50 tool calls per turn blew through it, the agent loop's summarize-on-cap path returned prose instead of JSON, and the recon→hunt transition died silently. 60 gives a thorough model room to converge. |
+| Hunt | `HUNT_MAX_ITERATIONS` | 28 | Each class specialist is briefed with one class's evidence requirements + AST patterns and runs in parallel with the others; 28 turns is plenty for "find sinks → trace → emit findings or empty." |
+| Validate | `VALIDATE_MAX_ITERATIONS` | 16 | Operates on a bounded findings list; just decides per-finding. |
+| Trace | `TRACE_MAX_ITERATIONS` | 16 | Same shape — reachability decisions per finding. |
+
+**Recon parse failure is non-fatal.** If the recon subagent returns prose (iteration cap hit), malformed JSON (weaker model), or anything else that doesn't extract to a `ReconStageOutput`, [`run_recon_stage`](../crates/dyson/src/skill/subagent/security_engineer/stages.rs) treats it as `ReconStageOutput::default()` and logs a `tracing::warn`. The taxonomy fan-out still queues every class, so hunt runs productively even with zero recon signal. Earlier versions returned Err on parse failure, killing the whole run; that fail-closed path was the bug behind every "Reviewer: TARS (manual AST+taint analysis; security_engineer subagent unavailable)" report header we saw in live runs.
 
 Related:
 
@@ -534,7 +558,7 @@ The first two case studies tuned against a narrow target set with hints-on (targ
 ### Infrastructure changes
 
 - **`--hints off` as default** ([expensive_live_security_review.rs](../crates/dyson/examples/expensive_live_security_review.rs)).  Target now carries two fields: a spoiler-laden `description` (the CVE number + vulnerable API — used when `--hints on`) and a neutral `summary` ("Apache Log4j — Java logging library").  Default sends only the summary.  Every sample report in [docs/sample-seceng-reports/](sample-seceng-reports/) was produced under this regime — findings are independent rediscoveries.
-- **Iteration budget 40 → 150** ([security_engineer.rs](../crates/dyson/src/skill/subagent/security_engineer.rs)).  iter5 jackson-databind budgeted out in preamble at 40; iter6 spring-beans hit Spring4Shell analytically but ran out during the write phase and bailed into a progress-memo.  Budget cap was the bottleneck, not analysis.
+- **Iteration budget 40 → 150** ([security_engineer/mod.rs](../crates/dyson/src/skill/subagent/security_engineer/mod.rs); historical — see "Per-stage iteration caps" above for the current per-stage caps).  iter5 jackson-databind budgeted out in preamble at 40; iter6 spring-beans hit Spring4Shell analytically but ran out during the write phase and bailed into a progress-memo.  Budget cap was the bottleneck, not analysis.
 - **`SubagentTool` scoped-path propagation fix** ([mod.rs](../crates/dyson/src/skill/subagent/mod.rs)).  Previously `SubagentTool::run` passed `working_dir: None` to `spawn_child` regardless of the caller's context, so every inner subagent (`dependency_review`, `researcher`, `verifier`) fell back to the process cwd.  Visible failure: iter1 next.js review produced a Dependencies section listing juice-shop findings because a stale juice-shop clone was the only lockfile the dep scanner could reach.  Regression test `subagent_inherits_parents_working_dir` pins the fix.
 - **`--output-dir` flag** for reports, defaulting to `test-output/` (gitignored).  Previous hardcoded `/tmp` made iteration artifacts hard to organise across runs.
 

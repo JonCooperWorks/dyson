@@ -17,7 +17,7 @@ There are three kinds of subagent:
 - `src/skill/subagent/mod.rs` — `SubagentTool`, `SubagentSkill`, `CaptureOutput`, `FilteredSkill`, `spawn_child`
 - `src/skill/subagent/orchestrator.rs` — `OrchestratorTool`, `OrchestratorConfig`
 - `src/skill/subagent/coder.rs` — `CoderTool`
-- `src/skill/subagent/security_engineer.rs` — `security_engineer_config()`
+- `src/skill/subagent/security_engineer/` — `security_engineer_config()` (mod.rs) plus the staged harness split across types/checkpoint/taxonomy/runtime/stages/stack/parse/report
 - `src/skill/subagent/prompts/` — System prompts and protocol injections
 - `src/config/mod.rs` — `SubagentAgentConfig`
 - `src/tool/security/` — Security tools (`ast_query`, `attack_surface_analyzer`, `exploit_builder`, `taint_trace`)
