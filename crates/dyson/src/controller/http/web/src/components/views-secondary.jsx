@@ -208,6 +208,192 @@ export function ActivityView() {
 }
 
 // ---------------------------------------------------------------------------
+// AuditView — per-Dyson LLM request audit.  Lists every proxied call
+// (swarm is the source of truth) with cost, tokens, latency, and output
+// throughput (tok/s).  Lives at view === 'audit'.  Polls /api/audit,
+// which forwards to swarm's per-instance internal endpoint.
+// ---------------------------------------------------------------------------
+
+const AUDIT_RANGES = [
+  { id: 'today', label: 'Today' },
+  { id: '7d',    label: '7d' },
+  { id: '30d',   label: '30d' },
+  { id: 'all',   label: 'All' },
+];
+
+function fmtUsd(v) {
+  if (v == null || !Number.isFinite(v)) return '—';
+  if (v === 0) return '$0';
+  if (v < 0.01) return `$${v.toFixed(v < 0.0001 ? 6 : 4).replace(/0+$/u, '').replace(/\.$/u, '')}`;
+  return `$${v.toFixed(2)}`;
+}
+function fmtNum(v) {
+  const n = Number(v || 0);
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1).replace(/\.0$/u, '')}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1).replace(/\.0$/u, '')}k`;
+  return String(Math.max(0, Math.round(n)));
+}
+function fmtToks(v) {
+  if (v == null || !Number.isFinite(v)) return '—';
+  return `${v >= 100 ? Math.round(v) : v.toFixed(1)} tok/s`;
+}
+function fmtMs(v) {
+  if (v == null) return '—';
+  if (v < 1000) return `${v}ms`;
+  return `${(v / 1000).toFixed(v < 10000 ? 2 : 1)}s`;
+}
+function fmtAgo(secs) {
+  if (!secs) return '';
+  const d = Math.max(0, Math.floor(Date.now() / 1000) - secs);
+  if (d < 60) return `${d}s ago`;
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+}
+
+function AuditRow({ r }) {
+  const [open, setOpen] = useState(false);
+  const live = r.cost_source === 'missing' && (r.output_tokens == null);
+  const statusOk = r.status_code >= 200 && r.status_code < 300;
+  const reconciled = r.reconciled_at != null;
+  const costBadge = reconciled ? 'reconciled'
+                  : r.cost_source === 'provider_reported' ? 'provider'
+                  : r.cost_source === 'pricing_table' ? 'estimated'
+                  : 'unpriced';
+  const badgeColor = costBadge === 'reconciled' ? 'var(--accent)'
+                   : costBadge === 'provider' ? 'var(--ok)'
+                   : costBadge === 'estimated' ? 'var(--warn, #c08a2a)'
+                   : 'var(--mute-2)';
+  return (
+    <div style={{border:'1px solid var(--line)', borderRadius:6, background:'var(--bg)', overflow:'hidden'}}>
+      <div onClick={() => setOpen(o => !o)}
+           style={{display:'flex', alignItems:'center', gap:12, padding:'9px 12px', cursor:'pointer'}}>
+        <span style={{width:6, height:6, borderRadius:'50%', flexShrink:0,
+                      background: statusOk ? 'var(--ok)' : 'var(--err)',
+                      animation: live ? 'pulse 1.4s infinite' : ''}}/>
+        <span className="mono" style={{fontSize:12, color:'var(--fg)', minWidth:170, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+          {r.model || r.provider}
+        </span>
+        <span style={{fontSize:11, color:'var(--mute-2)', minWidth:78}}>{r.provider}</span>
+        <span className="mono" style={{fontSize:11.5, color:'var(--fg-dim)', minWidth:96}}>
+          {fmtNum(r.input_tokens)}→{fmtNum(r.output_tokens)}
+        </span>
+        <span className="mono" style={{fontSize:11.5, color: r.tok_per_sec != null ? 'var(--fg)' : 'var(--mute-2)', minWidth:78}}>
+          {fmtToks(r.tok_per_sec)}
+        </span>
+        <span className="mono" style={{fontSize:11, color:'var(--mute-2)', minWidth:54}} title="time to first token">
+          {fmtMs(r.ttft_ms)}
+        </span>
+        <span style={{flex:1}}/>
+        <span style={{fontSize:10, padding:'1px 6px', borderRadius:4, color:badgeColor, border:`1px solid ${badgeColor}`, opacity:0.9}}>
+          {costBadge}
+        </span>
+        <span className="mono" style={{fontSize:12, color:'var(--fg)', minWidth:62, textAlign:'right'}}>
+          {fmtUsd(r.cost_usd)}
+        </span>
+        {!statusOk && <span className="mono" style={{fontSize:10.5, color:'var(--err)'}}>{r.status_code}</span>}
+        <span className="mono" style={{fontSize:10.5, color:'var(--mute-2)', minWidth:62, textAlign:'right'}}>{fmtAgo(r.occurred_at)}</span>
+      </div>
+      {open && (
+        <div style={{padding:'4px 12px 11px 24px', display:'grid', gridTemplateColumns:'auto 1fr', columnGap:14, rowGap:3, fontSize:11.5, color:'var(--fg-dim)', borderTop:'1px solid var(--line)'}}>
+          <span style={{color:'var(--mute-2)'}}>key source</span><span className="mono">{r.key_source}</span>
+          <span style={{color:'var(--mute-2)'}}>status</span><span className="mono">{r.status_code}</span>
+          <span style={{color:'var(--mute-2)'}}>tokens</span><span className="mono">in {fmtNum(r.input_tokens)} · out {fmtNum(r.output_tokens)}{r.native_output_tokens != null ? ` · native ${fmtNum(r.native_output_tokens)}` : ''}</span>
+          <span style={{color:'var(--mute-2)'}}>latency</span><span className="mono">ttft {fmtMs(r.ttft_ms)} · stream {fmtMs(r.stream_ms)}{r.gen_time_ms != null ? ` · gen ${fmtMs(r.gen_time_ms)}` : ''}</span>
+          <span style={{color:'var(--mute-2)'}}>throughput</span><span className="mono">{fmtToks(r.tok_per_sec)}{reconciled ? ' (reconciled)' : r.stream_ms != null ? ' (local)' : ''}</span>
+          <span style={{color:'var(--mute-2)'}}>cost source</span><span className="mono">{r.cost_source}{reconciled ? ` · reconciled ${fmtAgo(r.reconciled_at)}` : ''}</span>
+          {r.upstream_generation_id && (<><span style={{color:'var(--mute-2)'}}>generation</span><span className="mono" style={{wordBreak:'break-all'}}>{r.upstream_generation_id}</span></>)}
+          <span style={{color:'var(--mute-2)'}}>audit id</span><span className="mono">{r.audit_id}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function AuditView() {
+  const client = useApi();
+  const [range, setRange] = useState('7d');
+  const [rows, setRows] = useState([]);
+  const [source, setSource] = useState('swarm');
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const refresh = () => {
+      client.getAudit({ range, limit: 300 }).then(res => {
+        if (!alive) return;
+        setRows(Array.isArray(res?.requests) ? res.requests : []);
+        setSource(res?.source || 'swarm');
+        setLoaded(true);
+      }).catch(() => { if (alive) setLoaded(true); });
+    };
+    refresh();
+    const id = setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+    return () => { alive = false; clearInterval(id); };
+  }, [client, range]);
+
+  const totals = rows.reduce((acc, r) => {
+    acc.cost += Number(r.cost_usd || 0);
+    acc.tokens += Number(r.total_tokens || (Number(r.input_tokens || 0) + Number(r.output_tokens || 0)));
+    if (r.tok_per_sec != null) { acc.tpsSum += r.tok_per_sec; acc.tpsN += 1; }
+    if (!(r.status_code >= 200 && r.status_code < 300)) acc.errors += 1;
+    return acc;
+  }, { cost: 0, tokens: 0, tpsSum: 0, tpsN: 0, errors: 0 });
+  const avgTps = totals.tpsN > 0 ? totals.tpsSum / totals.tpsN : null;
+
+  const stat = (label, value, color) => (
+    <div style={{display:'flex', flexDirection:'column', gap:2}}>
+      <span className="eyebrow" style={{fontSize:10, color:'var(--mute-2)'}}>{label}</span>
+      <span className="mono" style={{fontSize:15, color: color || 'var(--fg)'}}>{value}</span>
+    </div>
+  );
+
+  return (
+    <div style={{flex:1, overflowY:'auto', padding:'22px 32px', background:'var(--bg-1)'}}>
+      <div style={{maxWidth: 1080, margin:'0 auto'}}>
+        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14, flexWrap:'wrap', gap:10}}>
+          <div className="eyebrow">LLM Audit · {rows.length} request{rows.length === 1 ? '' : 's'}</div>
+          <div style={{display:'flex', gap:4}}>
+            {AUDIT_RANGES.map(r => (
+              <button key={r.id} onClick={() => setRange(r.id)}
+                      style={{fontSize:11.5, padding:'3px 10px', borderRadius:5, cursor:'pointer',
+                              border:'1px solid var(--line)',
+                              background: range === r.id ? 'var(--accent)' : 'transparent',
+                              color: range === r.id ? '#fff' : 'var(--fg-dim)'}}>
+                {r.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{display:'flex', gap:30, padding:'14px 16px', marginBottom:16, border:'1px solid var(--line)', borderRadius:8, background:'var(--bg)', flexWrap:'wrap'}}>
+          {stat('Requests', String(rows.length))}
+          {stat('Spend', fmtUsd(totals.cost))}
+          {stat('Tokens', fmtNum(totals.tokens))}
+          {stat('Avg throughput', avgTps != null ? fmtToks(avgTps) : '—')}
+          {stat('Errors', String(totals.errors), totals.errors > 0 ? 'var(--err)' : 'var(--fg)')}
+        </div>
+
+        {source !== 'swarm' && (
+          <div style={{color:'var(--mute)', fontSize:12.5, padding:'10px 0 16px'}}>
+            {source === 'unavailable'
+              ? 'Per-request audit is served by Swarm. This Dyson is running standalone, so no rows are available.'
+              : 'Could not reach Swarm for audit data. Showing nothing rather than stale numbers.'}
+          </div>
+        )}
+
+        {loaded && rows.length === 0 && source === 'swarm' && (
+          <div style={{color:'var(--mute)', fontSize:13, padding:'18px 0'}}>No LLM requests in this range yet.</div>
+        )}
+
+        <div style={{display:'flex', flexDirection:'column', gap:5}}>
+          {rows.map(r => <AuditRow key={r.audit_id} r={r}/>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // ArtefactsView — lists artefacts for the active chat; clicking opens a
 // full-screen markdown reader.  Lives at view === 'artefacts'.  The
 // per-chat list is hydrated lazily from /api/conversations/:id/artefacts

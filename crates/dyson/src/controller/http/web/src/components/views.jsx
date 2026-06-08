@@ -18,6 +18,7 @@ const NAVS = [
   { id: 'mind',      name: 'Mind',          k: '2', icon: 'brain' },
   { id: 'artefacts', name: 'Artefacts',     k: '3', icon: 'file' },
   { id: 'activity',  name: 'Activity',      k: '4', icon: 'activity' },
+  { id: 'audit',     name: 'Audit',         k: '5', icon: 'gauge' },
 ];
 
 // Brand label + initial pulled from the swarm-set agent name (lives in

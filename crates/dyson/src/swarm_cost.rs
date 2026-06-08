@@ -55,6 +55,15 @@ impl CostLookupConfig {
             self.api_base.trim_end_matches('/')
         )
     }
+
+    fn audit_list_url(&self, query: &str) -> String {
+        let base = self.api_base.trim_end_matches('/');
+        if query.is_empty() {
+            format!("{base}/audit/calls")
+        } else {
+            format!("{base}/audit/calls?{query}")
+        }
+    }
 }
 
 static RUNTIME_CONFIG: OnceLock<RwLock<Option<CostLookupConfig>>> = OnceLock::new();
@@ -125,6 +134,61 @@ pub async fn fetch_cost_call(
     }
     let resp = resp.error_for_status()?;
     Ok(Some(resp.json::<SwarmCostCall>().await?))
+}
+
+/// One per-request audit row as served by swarm's
+/// `/v1/internal/audit/calls`.  Mirrors `RecentCostCall`; re-serialized
+/// verbatim to the agent's `/api/audit` so the web UI sees swarm's
+/// canonical fields (tok/s, latency, generation id, reconciliation).
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+pub struct SwarmAuditCall {
+    pub audit_id: i64,
+    pub provider: String,
+    pub model: Option<String>,
+    pub key_source: String,
+    pub status_code: i64,
+    pub occurred_at: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
+    pub cost_source: String,
+    #[serde(default)]
+    pub ttft_ms: Option<i64>,
+    #[serde(default)]
+    pub stream_ms: Option<i64>,
+    #[serde(default)]
+    pub tok_per_sec: Option<f64>,
+    #[serde(default)]
+    pub upstream_generation_id: Option<String>,
+    #[serde(default)]
+    pub gen_time_ms: Option<i64>,
+    #[serde(default)]
+    pub native_output_tokens: Option<i64>,
+    #[serde(default)]
+    pub reconciled_at: Option<i64>,
+}
+
+/// Fetch this instance's recent audit rows from swarm.  `query` is the
+/// already-encoded query string (e.g. `range=7d&limit=100`).  Returns an
+/// empty vec when no swarm config is wired (standalone dyson).
+pub async fn fetch_audit_calls(
+    client: &reqwest::Client,
+    config: &CostLookupConfig,
+    query: &str,
+) -> crate::Result<Vec<SwarmAuditCall>> {
+    let mut req = client
+        .get(config.audit_list_url(query))
+        .header("accept", "application/json");
+    if let Some(token) = config.bearer.as_deref() {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(Vec::new());
+    }
+    let resp = resp.error_for_status()?;
+    Ok(resp.json::<Vec<SwarmAuditCall>>().await?)
 }
 
 pub fn metadata_from_cost_call(

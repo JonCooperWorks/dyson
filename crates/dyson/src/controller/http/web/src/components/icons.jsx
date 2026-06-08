@@ -36,6 +36,7 @@ function Icon({ name, size = 14, style, className }) {
     case 'rate':      return <svg {...common}><path d="M3 9l2.5 2.5L13 4"/></svg>;
     case 'play':      return <svg {...common}><path d="M5 3.5 12 8l-7 4.5v-9z" fill="currentColor"/></svg>;
     case 'menu':      return <svg {...common}><path d="M2 4h12M2 8h12M2 12h12"/></svg>;
+    case 'gauge':     return <svg {...common}><path d="M2.5 12a6 6 0 1 1 11 0"/><path d="M8 8.5 11 6"/><circle cx="8" cy="11.5" r="0.8" fill="currentColor"/></svg>;
     default: return null;
   }
 }

@@ -95,6 +95,11 @@ export class DysonClient {
     return this._json(`/api/activity${qs}`);
   }
 
+  getAudit({ range = '7d', limit = 200 } = {}) {
+    const qs = new URLSearchParams({ range, limit: String(limit) });
+    return this._json(`/api/audit?${qs.toString()}`);
+  }
+
   // Rotate the prior chat's transcript (archive it) when minting a new
   // one.  Used by /clear and the "+ New Conversation" button when the
   // user wants the walk-away to be preserved.

@@ -28,6 +28,7 @@ mod activity;
 pub(super) mod admin;
 mod agent;
 mod artefacts;
+mod audit;
 mod commands;
 pub(super) mod conversations;
 mod elicitation;
@@ -274,9 +275,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         // MCP elicitation: the SPA short-polls for open prompts and
         // answers them.  Both inherit the central /api/* auth + CSRF gate.
         (&Method::GET, ["api", "mcp", "elicitations"]) => elicitation::list().await,
-        (&Method::POST, ["api", "mcp", "elicitations", id]) => {
-            elicitation::respond(req, id).await
-        }
+        (&Method::POST, ["api", "mcp", "elicitations", id]) => elicitation::respond(req, id).await,
         // Live probe of every configured MCP server — surfaces the
         // server-advertised title + instructions so the SPA can
         // render meaningful chip tooltips and a description panel.
@@ -296,6 +295,7 @@ async fn dispatch_inner(req: Request<hyper::body::Incoming>, state: Arc<HttpStat
         (&Method::GET, ["api", "activity"]) => {
             activity::get(&state, req.uri().query().unwrap_or(""))
         }
+        (&Method::GET, ["api", "audit"]) => audit::get(req.uri().query().unwrap_or("")).await,
 
         // ─── admin (swarm runtime reconfigure) ────────────────────────
         // Lets dyson-orchestrator push the real SWARM_MODEL/TASK
