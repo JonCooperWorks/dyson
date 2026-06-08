@@ -1,6 +1,6 @@
 import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { ElicitationModal } from '../components/ElicitationModal.jsx';
 import { ApiProvider } from '../hooks/useApi.js';
@@ -203,11 +203,18 @@ describe('ElicitationModal', () => {
     renderWith(client);
 
     await waitFor(() => screen.getByText('Hit ESC'));
-    act(() => {
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
-    });
-
-    await waitFor(() => expect(client.respondElicitation).toHaveBeenCalled());
+    // Re-dispatch Escape on each poll rather than once: the keydown listener
+    // attaches in an effect a tick after the prompt text renders, and under
+    // full-suite load the async cancel can resolve just past the default
+    // 1s waitFor budget (observed 1028ms). Both made this flaky in CI/build;
+    // retrying the dispatch with a wider window is deterministic.
+    await waitFor(
+      () => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+        expect(client.respondElicitation).toHaveBeenCalled();
+      },
+      { timeout: 3000 },
+    );
     expect(client.respondElicitation).toHaveBeenCalledWith('6', { action: 'cancel' });
   });
 
