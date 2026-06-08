@@ -42,7 +42,7 @@ mod types;
 use crate::message::{Artefact, ArtefactKind};
 use crate::tool::{CheckpointEvent, ToolOutput};
 
-use super::orchestrator::{OrchestratorConfig, OrchestratorHarness};
+use super::orchestrator::{OrchestratorConfig, OrchestratorHarness, OrchestratorInput};
 
 use self::checkpoint::{
     CheckpointStore, git_ref_for, load_checkpoint_for_resume, make_run_id, provider_label,
@@ -226,6 +226,18 @@ fn bake_checkpoint_events_into_content(out: &mut ToolOutput) {
     out.content = format!("{header}{}", out.content);
 }
 
+/// Whether a run should resume an existing durable checkpoint.
+///
+/// Resume intent comes *only* from the explicit `resume` flag or a non-empty
+/// `run_id` — never from the free-form `task` text.  A fresh run can
+/// legitimately describe itself as "NOT a resume from any checkpoint", and a
+/// prior bare-substring match on the task ("resume") forced those fresh runs
+/// into the resume path, which then hard-errored with "no incomplete
+/// checkpoint found".  Every real resume caller already sets the flag/run_id.
+fn should_resume(parsed: &OrchestratorInput) -> bool {
+    parsed.resume || parsed.run_id.as_ref().is_some_and(|s| !s.trim().is_empty())
+}
+
 async fn run_security_harness_inner(
     rt: &SecurityHarnessRuntime,
     started_epoch: u64,
@@ -247,15 +259,8 @@ async fn run_security_harness_inner(
         model: rt.model.clone(),
     };
 
-    let resume_requested = rt.parsed.resume
-        || rt
-            .parsed
-            .run_id
-            .as_ref()
-            .is_some_and(|s| !s.trim().is_empty())
-        || rt.parsed.task.to_ascii_lowercase().contains("resume");
-
-    let mut checkpoint = if resume_requested {
+    let resumed = should_resume(&rt.parsed);
+    let mut checkpoint = if resumed {
         match load_checkpoint_for_resume(&store, rt.parsed.run_id.as_deref(), &target.repo_path)
             .await
         {
@@ -288,11 +293,7 @@ async fn run_security_harness_inner(
     out.checkpoints.push(CheckpointEvent {
         message: format!(
             "security_engineer: {} checkpoint {}",
-            if resume_requested {
-                "resuming"
-            } else {
-                "created"
-            },
+            if resumed { "resuming" } else { "created" },
             checkpoint.run_id
         ),
         progress: Some(0.02),
@@ -471,6 +472,32 @@ mod specialist_tests {
         // taxonomy and must not produce a specialist briefing.
         assert!(class_specialist_briefing("consumer_path_review").is_none());
         assert!(class_specialist_briefing("").is_none());
+    }
+
+    #[test]
+    fn resume_decision_ignores_task_text() {
+        use serde_json::json;
+        let parse = |v| serde_json::from_value::<OrchestratorInput>(v).unwrap();
+
+        // Regression for the c-0056 fresh-run failure: a fresh review whose
+        // task merely mentions the word "resume" (even a negation) must NOT be
+        // routed into the resume path, which hard-errors when no checkpoint
+        // exists with "no incomplete checkpoint found".
+        assert!(!should_resume(&parse(json!({
+            "task": "Run a FRESH security review, NOT a resume from any checkpoint"
+        }))));
+        assert!(!should_resume(&parse(
+            json!({"task": "resume security review"})
+        )));
+
+        // Resume intent comes only from the explicit flag or a real run_id.
+        assert!(should_resume(&parse(json!({"resume": true}))));
+        assert!(should_resume(&parse(json!({"run_id": "sec-123-4"}))));
+
+        // An empty / whitespace run_id is not a resume request.
+        assert!(!should_resume(&parse(json!({"run_id": ""}))));
+        assert!(!should_resume(&parse(json!({"run_id": "   "}))));
+        assert!(!should_resume(&parse(json!({}))));
     }
 
     #[test]
@@ -655,10 +682,7 @@ mod specialist_tests {
             "security_engineer: validate",
             "security_engineer: completed sec-aaa in 99s",
         ] {
-            assert!(
-                out.content.contains(msg),
-                "content should preserve `{msg}`"
-            );
+            assert!(out.content.contains(msg), "content should preserve `{msg}`");
         }
         // Original content survives
         assert!(out.content.contains("# Security review"));
@@ -696,8 +720,14 @@ mod specialist_tests {
 
         super::bake_checkpoint_events_into_content(&mut out);
         assert!(out.is_error);
-        assert!(out.content.contains("security_engineer: resuming checkpoint sec-bbb"));
-        assert!(out.content.contains("validate failed: no JSON object found"));
+        assert!(
+            out.content
+                .contains("security_engineer: resuming checkpoint sec-bbb")
+        );
+        assert!(
+            out.content
+                .contains("validate failed: no JSON object found")
+        );
         // Original error string preserved
         assert!(
             out.content
