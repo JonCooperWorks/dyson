@@ -70,6 +70,21 @@ impl SubagentEventBus {
             tool_use_id: child_id.map(str::to_string),
         });
     }
+
+    /// Stream a `checkpoint` progress line into the conversation SSE feed
+    /// during a long-running tool.  Unlike `tool_start`/`tool_result`,
+    /// `checkpoint` carries no tool id — the frontend appends it to the
+    /// live tool's body text, which stays pinned to the parent subagent
+    /// panel for the whole run (nested child tool_starts carry a
+    /// `parent_tool_id` and never steal `liveToolRef`).  Without this, a
+    /// staged harness's stage/run_id events only reach the panel when the
+    /// tool finally returns, so its StageBar sits on "initializing" for the
+    /// entire run.
+    pub fn checkpoint(&self, text: &str) {
+        let _ = self.tx.send(SseEvent::Checkpoint {
+            text: text.to_string(),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +141,25 @@ mod tests {
                 assert!(view.is_some());
                 assert_eq!(parent_tool_id.as_deref(), Some("parent_42"));
                 assert_eq!(tool_use_id.as_deref(), Some("child_7"));
+            }
+            other => panic!(
+                "unexpected event: {}",
+                serde_json::to_string(&other).unwrap()
+            ),
+        }
+    }
+
+    #[test]
+    fn checkpoint_emits_text_event() {
+        // The staged harness streams stage/run_id lines through this so the
+        // SecurityHarnessPanel's StageBar advances live instead of only on
+        // completion.  The text must reach the SSE feed verbatim so the
+        // panel parser can pull `sec-...` / `security_engineer: <stage>`.
+        let (bus, mut rx) = fixture();
+        bus.checkpoint("security_engineer: created checkpoint sec-123-4");
+        match rx.try_recv().unwrap() {
+            SseEvent::Checkpoint { text } => {
+                assert_eq!(text, "security_engineer: created checkpoint sec-123-4");
             }
             other => panic!(
                 "unexpected event: {}",

@@ -39,6 +39,7 @@ mod stages;
 mod taxonomy;
 mod types;
 
+use crate::controller::http::SubagentEventBus;
 use crate::message::{Artefact, ArtefactKind};
 use crate::tool::{CheckpointEvent, ToolOutput};
 
@@ -238,6 +239,26 @@ fn should_resume(parsed: &OrchestratorInput) -> bool {
     parsed.resume || parsed.run_id.as_ref().is_some_and(|s| !s.trim().is_empty())
 }
 
+/// Push a harness checkpoint onto the aggregate output AND stream it to the
+/// live subagent panel via the event bus.
+///
+/// `out.checkpoints` alone only reaches the frontend when the tool returns
+/// (and on rehydrate via the baked content block), so without the live emit
+/// the SecurityHarnessPanel's StageBar sits on "initializing — (no run id
+/// yet)" for the entire run instead of advancing through run_id, stage, and
+/// findings in real time.  The frontend appends `checkpoint` events to the
+/// live tool's body text, which stays pinned to this panel for the run.
+fn emit_checkpoint(
+    out: &mut ToolOutput,
+    events: Option<&SubagentEventBus>,
+    event: CheckpointEvent,
+) {
+    if let Some(bus) = events {
+        bus.checkpoint(&event.message);
+    }
+    out.checkpoints.push(event);
+}
+
 async fn run_security_harness_inner(
     rt: &SecurityHarnessRuntime,
     started_epoch: u64,
@@ -290,14 +311,18 @@ async fn run_security_harness_inner(
     }
 
     let mut out = ToolOutput::success(String::new());
-    out.checkpoints.push(CheckpointEvent {
-        message: format!(
-            "security_engineer: {} checkpoint {}",
-            if resumed { "resuming" } else { "created" },
-            checkpoint.run_id
-        ),
-        progress: Some(0.02),
-    });
+    emit_checkpoint(
+        &mut out,
+        rt.events.as_ref(),
+        CheckpointEvent {
+            message: format!(
+                "security_engineer: {} checkpoint {}",
+                if resumed { "resuming" } else { "created" },
+                checkpoint.run_id
+            ),
+            progress: Some(0.02),
+        },
+    );
 
     for stage in STAGES {
         if stage_completed(&checkpoint, *stage) {
@@ -308,10 +333,14 @@ async fn run_security_harness_inner(
         if let Err(e) = store.save(&checkpoint).await {
             return Ok(ToolOutput::error(e));
         }
-        out.checkpoints.push(CheckpointEvent {
-            message: format!("security_engineer: {stage}"),
-            progress: progress_for(*stage),
-        });
+        emit_checkpoint(
+            &mut out,
+            rt.events.as_ref(),
+            CheckpointEvent {
+                message: format!("security_engineer: {stage}"),
+                progress: progress_for(*stage),
+            },
+        );
 
         let stage_started = unix_seconds(std::time::SystemTime::now());
         let stage_result = match stage {
@@ -336,7 +365,17 @@ async fn run_security_harness_inner(
 
         match stage_result {
             Ok(Some(stage_output)) => {
-                self::runtime::merge_stage_tool_output(&mut out, stage_output)
+                // Stream the stage's own checkpoints (findings counts,
+                // per-class hunt outcomes) live as the stage lands, so the
+                // FindingsCounter / ClassGrid advance during the run rather
+                // than only at completion.
+                let before = out.checkpoints.len();
+                self::runtime::merge_stage_tool_output(&mut out, stage_output);
+                if let Some(bus) = rt.events.as_ref() {
+                    for cp in &out.checkpoints[before..] {
+                        bus.checkpoint(&cp.message);
+                    }
+                }
             }
             Ok(None) => {}
             Err(e) => {
@@ -351,10 +390,14 @@ async fn run_security_harness_inner(
                 // "errored at <stage>" badge + error banner.  Before this push,
                 // the failure was only visible on the outer tool chip's
                 // is_error flag — the panel itself had no signal to read.
-                out.checkpoints.push(CheckpointEvent {
-                    message: format!("security_engineer: {stage} failed: {e}"),
-                    progress: progress_for(*stage),
-                });
+                emit_checkpoint(
+                    &mut out,
+                    rt.events.as_ref(),
+                    CheckpointEvent {
+                        message: format!("security_engineer: {stage} failed: {e}"),
+                        progress: progress_for(*stage),
+                    },
+                );
                 let mut err_out = ToolOutput::error(format!(
                     "security_engineer {stage} failed: {e}. checkpoint={}",
                     checkpoint.run_id
@@ -406,13 +449,17 @@ async fn run_security_harness_inner(
         .unwrap_or_else(|| report_from_checkpoint(&checkpoint));
     let elapsed = checkpoint.updated_at.saturating_sub(started_epoch);
     out.content = render_report_markdown(&report, &checkpoint);
-    out.checkpoints.push(CheckpointEvent {
-        message: format!(
-            "security_engineer: completed {} in {}s",
-            checkpoint.run_id, elapsed
-        ),
-        progress: Some(1.0),
-    });
+    emit_checkpoint(
+        &mut out,
+        rt.events.as_ref(),
+        CheckpointEvent {
+            message: format!(
+                "security_engineer: completed {} in {}s",
+                checkpoint.run_id, elapsed
+            ),
+            progress: Some(1.0),
+        },
+    );
 
     if let Some(kind) = rt.emit_artefact {
         let title = format!(
