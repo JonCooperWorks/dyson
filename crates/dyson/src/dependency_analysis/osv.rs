@@ -111,8 +111,6 @@ struct VulnDetail {
 
 #[derive(Deserialize)]
 struct VulnSeverity {
-    #[serde(rename = "type")]
-    ty: String,
     score: String,
 }
 
@@ -270,7 +268,7 @@ fn detail_to_vuln(d: VulnDetail) -> Vulnerability {
     let severity = d
         .severity
         .iter()
-        .find_map(|s| parse_cvss(&s.ty, &s.score))
+        .find_map(|s| parse_cvss(&s.score))
         .unwrap_or(Severity::Unknown);
 
     let mut affected_ranges = Vec::new();
@@ -319,9 +317,10 @@ fn detail_to_vuln(d: VulnDetail) -> Vulnerability {
 }
 
 /// OSV `severity[]` carries either a plain numeric base score or a
-/// CVSS vector.  We only handle the numeric path — CVSS entries
-/// recently ship with both, so this is rarely lossy.
-fn parse_cvss(_ty: &str, score: &str) -> Option<Severity> {
+/// CVSS vector string.  We only handle the numeric path; vector strings
+/// fail the `f64` parse and are skipped by the caller's `find_map`, which
+/// falls through to a numeric entry (OSV usually ships both) or `Unknown`.
+fn parse_cvss(score: &str) -> Option<Severity> {
     score.parse::<f64>().ok().map(Severity::from_cvss_score)
 }
 
@@ -364,7 +363,7 @@ mod tests {
 
     #[test]
     fn parse_cvss_numeric() {
-        assert_eq!(parse_cvss("CVSS_V3", "9.8"), Some(Severity::Critical));
-        assert_eq!(parse_cvss("CVSS_V3", "notanum"), None);
+        assert_eq!(parse_cvss("9.8"), Some(Severity::Critical));
+        assert_eq!(parse_cvss("notanum"), None);
     }
 }

@@ -87,8 +87,9 @@ impl ResultFormatter {
     ) -> FormattedResult {
         let summary = match call.name.as_str() {
             "bash" => bash_summary(call, output, duration),
-            "file_read" => file_read_summary(call, output, duration),
-            "file_write" => file_write_summary(call, output, duration),
+            "read_file" => read_file_summary(call, output, duration),
+            "write_file" => write_file_summary(call, output, duration),
+            "edit_file" => edit_file_summary(call, output, duration),
             _ => generic_summary(call, output, duration),
         };
         self.build(summary, &output.content, !is_mcp_output(output))
@@ -140,28 +141,41 @@ fn bash_summary(call: &ToolCall, output: &ToolOutput, duration: Duration) -> Str
     )
 }
 
-fn file_read_summary(call: &ToolCall, output: &ToolOutput, duration: Duration) -> String {
+fn read_file_summary(call: &ToolCall, output: &ToolOutput, duration: Duration) -> String {
     let path = call
         .input
-        .get("path")
+        .get("file_path")
         .and_then(|v| v.as_str())
         .unwrap_or("<unknown>");
     let len = output.content.len();
     let ms = duration.as_millis();
-    format!("file_read: {} ({} bytes, {}ms)", path, len, ms)
+    format!("read_file: {} ({} bytes, {}ms)", path, len, ms)
 }
 
-fn file_write_summary(call: &ToolCall, output: &ToolOutput, duration: Duration) -> String {
+fn write_file_summary(call: &ToolCall, output: &ToolOutput, duration: Duration) -> String {
     let path = call
         .input
-        .get("path")
+        .get("file_path")
         .and_then(|v| v.as_str())
         .unwrap_or("<unknown>");
     let ms = duration.as_millis();
     // Sanitize the interpolated content too — every path where tool-authored
     // bytes reach the LLM must go through the sanitizer.
     let sanitized_content = sanitize_tool_output(&output.content);
-    format!("file_write: {} — {} ({}ms)", path, sanitized_content, ms)
+    format!("write_file: {} — {} ({}ms)", path, sanitized_content, ms)
+}
+
+fn edit_file_summary(call: &ToolCall, output: &ToolOutput, duration: Duration) -> String {
+    let path = call
+        .input
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<unknown>");
+    let ms = duration.as_millis();
+    // Like write_file, the confirmation message is tool-authored — sanitize it
+    // before it reaches the LLM.
+    let sanitized_content = sanitize_tool_output(&output.content);
+    format!("edit_file: {} — {} ({}ms)", path, sanitized_content, ms)
 }
 
 fn generic_summary(call: &ToolCall, output: &ToolOutput, duration: Duration) -> String {
@@ -363,14 +377,15 @@ mod test_result_formatter {
     }
 
     #[test]
-    fn formats_file_read_with_length() {
+    fn formats_read_file_with_length() {
         let f = ResultFormatter::default();
         let output = ToolOutput::success("x".repeat(1000));
         let fmt = f.format(
-            &ToolCall::new("file_read", json!({"path": "main.rs"})),
+            &ToolCall::new("read_file", json!({"file_path": "main.rs"})),
             &output,
             Duration::from_millis(5),
         );
+        assert!(fmt.summary.contains("read_file"));
         assert!(fmt.summary.contains("main.rs"));
         assert!(fmt.summary.contains("1000"));
     }
@@ -420,16 +435,30 @@ mod test_result_formatter {
     }
 
     #[test]
-    fn formats_file_write_confirmation() {
+    fn formats_write_file_confirmation() {
         let f = ResultFormatter::default();
         let output = ToolOutput::success("written");
         let fmt = f.format(
-            &ToolCall::new("file_write", json!({"path": "config.json"})),
+            &ToolCall::new("write_file", json!({"file_path": "config.json"})),
             &output,
             Duration::from_millis(15),
         );
+        assert!(fmt.summary.contains("write_file"));
         assert!(fmt.summary.contains("config.json"));
         assert!(fmt.summary.contains("written"));
+    }
+
+    #[test]
+    fn formats_edit_file_confirmation() {
+        let f = ResultFormatter::default();
+        let output = ToolOutput::success("Applied edit to config.json");
+        let fmt = f.format(
+            &ToolCall::new("edit_file", json!({"file_path": "config.json"})),
+            &output,
+            Duration::from_millis(15),
+        );
+        assert!(fmt.summary.contains("edit_file"));
+        assert!(fmt.summary.contains("config.json"));
     }
 
     #[test]

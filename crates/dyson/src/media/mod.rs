@@ -14,15 +14,9 @@
 // defaults to a local Whisper installation.  The `Transcriber` trait allows
 // plugging in alternative backends (cloud APIs, whisper.cpp, etc.).
 //
-// Two public APIs:
-//
-//   resolve_attachment(Attachment, Option<transcriber>)
-//       High-level: takes raw bytes + MIME type, dispatches by MIME prefix.
-//       This is the primary API for the agent layer.
-//
-//   resolve(MediaInput, transcriber)
-//       Lower-level: takes a typed MediaInput enum.  Used internally and
-//       by controllers that want explicit type routing.
+// The public entry point is `resolve_attachment(Attachment, Option<transcriber>)`:
+// it takes raw bytes + MIME type and dispatches by MIME prefix.  Controllers
+// download media from their protocol and hand it here before the LLM call.
 // ===========================================================================
 
 pub mod audio;
@@ -249,54 +243,3 @@ pub fn is_text_extension(ext: &str) -> bool {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Lower-level typed API (used internally and by resolve_attachment).
-// ---------------------------------------------------------------------------
-
-/// Raw media input from a controller.
-pub enum MediaInput {
-    /// A raw image (JPEG, PNG, WebP).
-    Image { data: Vec<u8>, mime_type: String },
-    /// A raw audio file (OGG/Opus voice messages, MP3, WAV, etc.).
-    Audio { data: Vec<u8>, mime_type: String },
-    /// A PDF document.
-    Pdf { data: Vec<u8> },
-}
-
-/// Resolved media ready for the message pipeline.
-pub enum ResolvedMedia {
-    /// One or more image content blocks.
-    Images(Vec<ContentBlock>),
-    /// A text transcription of audio.
-    Transcription(String),
-    /// A processed PDF document (base64 + extracted text).
-    Document(ContentBlock),
-}
-
-/// Resolve raw media into ContentBlocks.
-///
-/// Images are resized and base64-encoded.  Audio is transcribed via the
-/// provided `Transcriber` implementation.
-pub async fn resolve(
-    input: MediaInput,
-    transcriber: &Arc<dyn audio::Transcriber>,
-) -> crate::Result<ResolvedMedia> {
-    match input {
-        MediaInput::Image { data, .. } => {
-            let block = tokio::task::spawn_blocking(move || image::process_image(&data))
-                .await
-                .map_err(|e| crate::DysonError::Config(format!("image task panicked: {e}")))??;
-            Ok(ResolvedMedia::Images(vec![block]))
-        }
-        MediaInput::Audio { data, mime_type } => {
-            let text = transcriber.transcribe(&data, &mime_type).await?;
-            Ok(ResolvedMedia::Transcription(text))
-        }
-        MediaInput::Pdf { data } => {
-            let block = tokio::task::spawn_blocking(move || pdf::process_pdf(&data))
-                .await
-                .map_err(|e| crate::DysonError::Config(format!("PDF task panicked: {e}")))??;
-            Ok(ResolvedMedia::Document(block))
-        }
-    }
-}

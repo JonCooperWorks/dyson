@@ -73,10 +73,7 @@ impl Auth for BearerTokenAuth {
     }
 
     async fn validate_request(&self, headers: &hyper::HeaderMap) -> Result<AuthInfo> {
-        let valid = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
+        let valid = super::extract_bearer(headers)
             .map(|t| self.token.ct_eq(t.as_bytes()))
             .unwrap_or(false);
 

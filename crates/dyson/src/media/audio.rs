@@ -2,7 +2,7 @@
 // Audio transcription — pluggable speech-to-text via the Transcriber trait.
 //
 // Architecture:
-//   media::resolve()
+//   media::resolve_attachment()
 //     └── Arc<dyn Transcriber> (trait)
 //           ├── WhisperCliTranscriber  (local `whisper` CLI)
 //           └── (future: cloud APIs, whisper.cpp, etc.)
@@ -29,8 +29,8 @@ use tokio::process::Command;
 /// A pluggable speech-to-text backend.
 ///
 /// Implementations handle transcription for a specific engine or API.
-/// The `media::resolve()` function delegates to this trait and handles
-/// input/output formatting.
+/// The `media::resolve_attachment()` function delegates to this trait and
+/// handles input/output formatting.
 #[async_trait]
 pub trait Transcriber: Send + Sync {
     /// Transcribe raw audio bytes to text.

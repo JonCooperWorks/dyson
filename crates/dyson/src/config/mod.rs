@@ -180,8 +180,9 @@ pub struct SandboxConfig {
 
     /// OS sandbox profile: "default", "strict", or "permissive".
     ///
-    /// Only used as a backward-compatibility fallback when `tool_policies`
-    /// is empty.  When `tool_policies` is set, policies control everything.
+    /// NOT YET IMPLEMENTED: `create_sandbox` does not read this field —
+    /// `tool_policies` control sandbox behaviour.  Parsed (and warned about
+    /// when set) for forward compatibility until OS profiles land.
     pub os_profile: Option<String>,
 
     /// Per-tool sandbox policies.

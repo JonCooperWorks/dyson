@@ -117,10 +117,6 @@ impl SecretResolver for InsecureEnvironmentVariable {
             ))),
         }
     }
-
-    fn scheme(&self) -> &str {
-        "insecure_env"
-    }
 }
 
 // ===========================================================================
@@ -159,11 +155,5 @@ mod tests {
         let err = resolver.resolve("DYSON_INSECURE_TEST_2").unwrap_err();
         assert!(err.to_string().contains("empty"));
         unsafe { std::env::remove_var("DYSON_INSECURE_TEST_2") };
-    }
-
-    #[test]
-    fn scheme_is_insecure_env() {
-        let resolver = InsecureEnvironmentVariable;
-        assert_eq!(resolver.scheme(), "insecure_env");
     }
 }

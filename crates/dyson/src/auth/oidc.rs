@@ -279,10 +279,7 @@ impl OidcAuth {
 #[async_trait]
 impl Auth for OidcAuth {
     async fn validate_request(&self, headers: &hyper::HeaderMap) -> Result<AuthInfo> {
-        let token = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
+        let token = super::extract_bearer(headers)
             .ok_or_else(|| DysonError::Config("unauthorized".into()))?;
 
         let header = jsonwebtoken::decode_header(token)

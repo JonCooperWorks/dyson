@@ -1334,10 +1334,7 @@ fn reject_http_with_api_key(base_url: &Option<String>, api_key: &str, label: &st
     // 100.64/10 carrier-grade NAT range.  Plain HTTP on these
     // addresses can't leave the host's local network, so the api_key
     // never crosses an untrusted hop.  Public IPs still get rejected.
-    let after_scheme = &url["http://".len()..];
-    let host = after_scheme.split('/').next().unwrap_or("");
-    let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host); // strip port
-    if is_local_network_host(host) {
+    if crate::http::host_from_url(url).is_some_and(is_local_network_host) {
         return Ok(());
     }
     Err(DysonError::Config(format!(
@@ -1346,37 +1343,20 @@ fn reject_http_with_api_key(base_url: &Option<String>, api_key: &str, label: &st
     )))
 }
 
-/// True for hosts whose traffic stays on the local network: loopback,
-/// RFC1918 private (10/8, 172.16/12, 192.168/16), link-local
-/// (169.254/16), and Tailscale's 100.64/10 carrier-grade NAT range.
-/// Used by `reject_http_with_api_key` to decide whether plain HTTP +
-/// api_key is acceptable.
+/// True for hosts whose traffic stays on the local network (loopback,
+/// RFC1918 private, link-local, CGNAT, etc).  Used by
+/// `reject_http_with_api_key` to decide whether plain HTTP + api_key is
+/// acceptable.  Routes IP literals through the shared SSRF predicates in
+/// [`crate::http`] so "what counts as internal" has one definition; plain
+/// DNS names default to "remote" (the safe direction).
 fn is_local_network_host(host: &str) -> bool {
     if host == "localhost" || host == "[::1]" || host == "::1" {
         return true;
     }
-    // IPv4 dotted-decimal: only treat as local-network when every
-    // octet parses cleanly.  Anything else (DNS name, IPv6 literal
-    // we don't recognise) defaults to "remote" — the safe direction.
-    let octets: Vec<&str> = host.split('.').collect();
-    if octets.len() != 4 {
-        return false;
-    }
-    let parsed: Option<[u8; 4]> = (|| {
-        let mut out = [0u8; 4];
-        for (i, o) in octets.iter().enumerate() {
-            out[i] = o.parse::<u8>().ok()?;
-        }
-        Some(out)
-    })();
-    match parsed {
-        Some([127, _, _, _]) => true,
-        Some([10, _, _, _]) => true,
-        Some([172, b, _, _]) if (16..=31).contains(&b) => true,
-        Some([192, 168, _, _]) => true,
-        Some([169, 254, _, _]) => true,
-        Some([100, b, _, _]) if (64..=127).contains(&b) => true,
-        _ => false,
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => crate::http::is_private_v4(ip),
+        Ok(std::net::IpAddr::V6(ip)) => crate::http::is_private_v6(ip),
+        Err(_) => false,
     }
 }
 

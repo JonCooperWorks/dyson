@@ -72,10 +72,7 @@ impl HashedBearerAuth {
 #[async_trait]
 impl Auth for HashedBearerAuth {
     async fn validate_request(&self, headers: &hyper::HeaderMap) -> Result<AuthInfo> {
-        let token = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
+        let token = super::extract_bearer(headers)
             .ok_or_else(|| DysonError::Config("unauthorized".into()))?;
 
         // Re-parse the PHC every time.  Argon2id's verify dwarfs the

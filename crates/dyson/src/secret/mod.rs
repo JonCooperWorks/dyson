@@ -92,7 +92,6 @@ use crate::error::{DysonError, Result};
 ///         self.client.read_secret(key)
 ///             .map_err(|e| DysonError::Config(format!("vault: {e}")))
 ///     }
-///     fn scheme(&self) -> &str { "vault" }
 /// }
 /// ```
 ///
@@ -107,9 +106,6 @@ pub trait SecretResolver: Send + Sync {
     /// no prefix stripping.  For insecure_env, this is an environment
     /// variable name like `"ANTHROPIC_API_KEY"`.
     fn resolve(&self, key: &str) -> Result<String>;
-
-    /// The name this resolver is registered under (e.g., "insecure_env").
-    fn scheme(&self) -> &str;
 }
 
 // ---------------------------------------------------------------------------
@@ -378,9 +374,6 @@ mod tests {
         impl SecretResolver for MockResolver {
             fn resolve(&self, key: &str) -> Result<String> {
                 Ok(format!("mock:{key}"))
-            }
-            fn scheme(&self) -> &str {
-                "mock"
             }
         }
 

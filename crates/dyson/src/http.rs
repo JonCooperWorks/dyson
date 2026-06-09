@@ -152,6 +152,35 @@ pub fn is_private_v6(ip: std::net::Ipv6Addr) -> bool {
         || matches!(ip.to_ipv4_mapped(), Some(v4) if is_private_v4(v4))
 }
 
+/// Extract the host from a URL string, stripping scheme, userinfo, path,
+/// query, fragment, and port.  Handles IPv6 bracket notation
+/// (`[::1]:8080` → `::1`).  Returns `None` if the URL has no `://` scheme
+/// or the host is empty.
+///
+/// Exposed so every SSRF / internal-host check parses URL→host the same
+/// way, rather than each call site re-rolling its own splitter.
+pub fn host_from_url(url: &str) -> Option<&str> {
+    let after_scheme = &url[url.find("://")? + 3..];
+    // Strip path / query / fragment, then userinfo (`user:pass@host`).
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if host_port.starts_with('[') {
+        // IPv6 in brackets: `[::1]:8080` → `::1`.
+        host_port
+            .find(']')
+            .map(|i| &host_port[1..i])
+            .unwrap_or(host_port)
+    } else {
+        // IPv4 or hostname: `host:port` → `host`.
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
 /// Whether a hostname matches a well-known cloud metadata service.
 pub fn is_metadata_host(host: &str) -> bool {
     let h = host.trim_end_matches('.').to_ascii_lowercase();

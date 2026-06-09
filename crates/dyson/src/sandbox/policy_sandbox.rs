@@ -370,33 +370,13 @@ fn check_network_only(
 /// checked, and DNS failures fall through (reqwest will surface the
 /// underlying error later).
 fn check_url_not_internal(url: &str) -> std::result::Result<(), String> {
-    // Parse the URL to extract the host.
-    // We do minimal parsing: split on "://" to get scheme+authority,
-    // then extract the host portion.
-    let after_scheme = url
-        .find("://")
-        .map(|i| &url[i + 3..])
-        .ok_or_else(|| "web_fetch blocked: URL has no scheme".to_string())?;
-
-    // Strip path, query, fragment.
-    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
-    // Strip userinfo (user:pass@host).
-    let host_port = authority.rsplit('@').next().unwrap_or(authority);
-    // Strip port — careful with IPv6 bracket notation [::1]:8080.
-    let host = if host_port.starts_with('[') {
-        // IPv6 in brackets: [::1]:8080 → ::1
-        host_port
-            .find(']')
-            .map(|i| &host_port[1..i])
-            .unwrap_or(host_port)
-    } else {
-        // IPv4 or hostname: host:port → host
-        host_port.split(':').next().unwrap_or(host_port)
-    };
-
-    if host.is_empty() {
-        return Err("web_fetch blocked: empty host in URL".into());
+    if !url.contains("://") {
+        return Err("web_fetch blocked: URL has no scheme".to_string());
     }
+    // Shared URL→host parser: strips scheme/userinfo/path/port and unwraps
+    // IPv6 brackets so the sandbox and config loader agree on the host.
+    let host = crate::http::host_from_url(url)
+        .ok_or_else(|| "web_fetch blocked: empty host in URL".to_string())?;
 
     let host_lower = host.to_lowercase();
     if crate::http::is_metadata_host(host)

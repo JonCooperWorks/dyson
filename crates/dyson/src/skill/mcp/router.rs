@@ -255,9 +255,11 @@ impl InboundHandler for NotificationRouter {
             | "notifications/resources/list_changed"
             | "notifications/resources/updated"
             | "notifications/prompts/list_changed" => {
-                // Cache invalidation / re-listing is wired up with the
-                // subscription registry; for now record that the peer's
-                // catalogue changed so the signal is observable in logs.
+                // NOT YET IMPLEMENTED: we don't invalidate or re-list the
+                // peer's catalogue here, so a stale catalogue may be served
+                // until the next natural refresh.  Record the change so the
+                // signal is observable in logs; wire up invalidation +
+                // re-listing via the subscription registry when that lands.
                 tracing::info!(
                     server = %self.server_name,
                     method,

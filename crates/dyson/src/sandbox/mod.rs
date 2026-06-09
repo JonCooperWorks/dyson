@@ -346,6 +346,13 @@ pub fn create_sandbox(
         );
     }
 
+    if config.os_profile.is_some() {
+        tracing::warn!(
+            "ignoring sandbox.os_profile config — OS sandbox profiles are not \
+             yet implemented; tool_policies control sandbox behaviour"
+        );
+    }
+
     match current_sandbox_backend_status(sandbox_bypass.as_ref()) {
         SandboxBackendStatus::DangerousDisabled => {
             tracing::warn!("all sandboxes disabled via --dangerous-no-sandbox");

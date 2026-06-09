@@ -168,6 +168,19 @@ pub trait Auth: Send + Sync {
     }
 }
 
+/// Extract the token from an `Authorization: Bearer <token>` header.
+///
+/// Returns `None` if the header is absent, not valid ASCII, or lacks the
+/// `Bearer ` prefix (single space, case-sensitive).  Every server-side
+/// `validate_request` that accepts bearer tokens routes through this so the
+/// parsing semantics stay identical across schemes.
+pub fn extract_bearer(headers: &hyper::HeaderMap) -> Option<&str> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
